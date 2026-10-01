@@ -106,11 +106,11 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: An author provides only a `world.wit`; entering the Nix shell automatically generates TypeScript declarations (`.d.ts`), configures `tsconfig.json`, and enables instant IDE type-checking.*
 
-- [ ] **5.1. WIT to TypeScript Declaration & Config Generator (`src/sdk/codegen.rs` & `perry-wit gen-types`)**
-  - [ ] Implement pure-Rust AST/type generator translating `wit_parser::Resolve` types into idiomatic TypeScript declarations (`.perry/types/world.d.ts`).
-  - [ ] Map WIT primitive types, records to TS interfaces, variants to discriminated unions, lists/options to TS arrays/nullables, and exported functions to function signatures.
-  - [ ] Implement `perry-wit gen-types` CLI subcommand with `--wit`, `--world`, and `--out` options.
-  - [ ] Generate default `tsconfig.json` pointing to generated definitions with strict type checking enabled.
+- [x] **5.1. WIT to TypeScript Declaration & Config Generator (`src/sdk/codegen.rs` & `perry-wit gen-types`)**
+  - [x] Implement pure-Rust AST/type generator translating `wit_parser::Resolve` types into idiomatic TypeScript declarations (`.perry/types/world.d.ts`).
+  - [x] Map WIT primitive types, records to TS interfaces, variants to discriminated unions, lists/options to TS arrays/nullables, and exported functions to function signatures.
+  - [x] Implement `perry-wit gen-types` CLI subcommand with `--wit`, `--world`, and `--out` options.
+  - [x] Generate default `tsconfig.json` pointing to generated definitions with strict type checking enabled.
 - [ ] **5.2. Consumer Component Author Template (`template/`) & Flake Template Export**
   - [ ] Create `template/` with `world.wit`, `src/index.ts`, `tsconfig.json`, and consumer `flake.nix`.
   - [ ] Export `templates.default` in root `flake.nix` for `nix flake init -t github:<ORG-TBD>/perry-wit`.

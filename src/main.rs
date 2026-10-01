@@ -19,6 +19,10 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("gen-types") {
+        return run_gen_types(&args[2..]);
+    }
+
     let mut ts_file_path: Option<String> = None;
     let mut out_file_path: Option<String> = None;
     let mut runtime_wasm_path: Option<String> = None;
@@ -55,6 +59,12 @@ fn run() -> Result<()> {
             }
             "-h" | "--help" => {
                 println!("Usage: perry-wit [OPTIONS] <input.ts>");
+                println!("       perry-wit gen-types [OPTIONS]");
+                println!();
+                println!("Commands:");
+                println!(
+                    "  gen-types             Generate TypeScript declarations (.d.ts) and tsconfig.json from WIT"
+                );
                 println!();
                 println!("Options:");
                 println!("  -o, --out <PATH>      Output WebAssembly file path");
@@ -135,5 +145,62 @@ fn run() -> Result<()> {
         .validate_all(stripped_bytes)
         .context("Validating stripped component")?;
 
+    Ok(())
+}
+
+fn run_gen_types(args: &[String]) -> Result<()> {
+    let mut wit_dir_path = "wit".to_string();
+    let mut world_name = None;
+    let mut out_dir_path = ".perry/types".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--out" if i + 1 < args.len() => {
+                out_dir_path = args[i + 1].clone();
+                i += 2;
+            }
+            "--wit" if i + 1 < args.len() => {
+                wit_dir_path = args[i + 1].clone();
+                i += 2;
+            }
+            "--world" if i + 1 < args.len() => {
+                world_name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "-h" | "--help" => {
+                println!("Usage: perry-wit gen-types [OPTIONS]");
+                println!();
+                println!(
+                    "Generates TypeScript declarations (.d.ts) and tsconfig.json from WIT definitions."
+                );
+                println!();
+                println!("Options:");
+                println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
+                println!(
+                    "      --world <NAME>    WIT world name to target (default: first world found)"
+                );
+                println!(
+                    "  -o, --out <DIR>       Output directory for generated types (default: '.perry/types')"
+                );
+                println!("  -h, --help            Print help information");
+                return Ok(());
+            }
+            other => {
+                bail!(
+                    "Unknown argument to gen-types: {other}\nTry 'perry-wit gen-types --help' for usage."
+                );
+            }
+        }
+    }
+
+    let options = perry_wit::SdkOptions {
+        wit_dir: PathBuf::from(wit_dir_path),
+        world: world_name,
+        out_dir: PathBuf::from(out_dir_path),
+    };
+
+    let path = perry_wit::generate_sdk_files(&options)?;
+    println!("Generated TypeScript declarations in {}", path.display());
     Ok(())
 }

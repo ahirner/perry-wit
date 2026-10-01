@@ -7,6 +7,8 @@ pub mod component;
 pub mod conformance;
 pub mod linker;
 pub mod runtime;
+pub mod sdk;
 pub mod strip;
 
 pub use compiler::{CompileOptions, Compiled, compile_file, compile_typescript};
+pub use sdk::{SdkOptions, generate_sdk_files};
