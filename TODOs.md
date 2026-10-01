@@ -111,14 +111,14 @@ This checklist prioritizes immediate functional deliverables and eliminates code
   - [x] Map WIT primitive types, records to TS interfaces, variants to discriminated unions, lists/options to TS arrays/nullables, and exported functions to function signatures.
   - [x] Implement `perry-wit gen-types` CLI subcommand with `--wit`, `--world`, and `--out` options.
   - [x] Generate default `tsconfig.json` pointing to generated definitions with strict type checking enabled.
-- [ ] **5.2. Consumer Component Author Template (`template/`) & Flake Template Export**
-  - [ ] Create `template/` with `world.wit`, `src/index.ts`, `tsconfig.json`, and consumer `flake.nix`.
-  - [ ] Export `templates.default` in root `flake.nix` for `nix flake init -t github:<ORG-TBD>/perry-wit`.
-  - [ ] Export `lib.buildComponent` in root `flake.nix` for declarative component packaging in consumer flakes.
-- [ ] **5.3. Wire DevShell Automation & Flake Sync Check**
-  - [ ] In `flake.nix`, configure `shellHook` to detect `world.wit`, run `perry-wit gen-types`, link `tsconfig.json`, and expose tooling in `$PATH`.
-  - [ ] Add `pkgs.typescript` to `devShells.default` for instant `tsc` verification.
-  - [ ] Provide pre-commit / flake check (`checks.perry-wit-sdk-sync`) validating that generated TypeScript definitions remain in sync with WIT definitions.
+- [x] **5.2. Consumer Component Author Template (`template/`) & Flake Template Export**
+  - [x] Create `template/` with `world.wit`, `src/index.ts`, `tsconfig.json`, and consumer `flake.nix`.
+  - [x] Export `templates.default` in root `flake.nix` for `nix flake init -t github:<ORG-TBD>/perry-wit`.
+  - [x] Export `lib.buildComponent` in root `flake.nix` for declarative component packaging in consumer flakes.
+- [x] **5.3. Wire DevShell Automation & Flake Sync Check**
+  - [x] In `flake.nix`, configure `shellHook` to detect `world.wit`, run `perry-wit gen-types`, link `tsconfig.json`, and expose tooling in `$PATH`.
+  - [x] Add `pkgs.typescript` to `devShells.default` for instant `tsc` verification.
+  - [x] Provide pre-commit / flake check (`checks.sdkSyncCheck` and `checks.checkTemplate`) validating generated TypeScript definitions and template component execution.
 - [ ] **5.4. Validate Builtin Examples & SDK Integration Test Suite (`tests/sdk_test.rs`)**
   - [ ] Author `tests/sdk_test.rs` running SDK generation on `wit/world.wit` and verifying emitted declarations.
   - [ ] Run `tsc --noEmit` on all examples inside the Nix shell to prove zero-error static typing against generated WIT contracts.

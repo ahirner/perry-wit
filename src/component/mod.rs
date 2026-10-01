@@ -1,6 +1,6 @@
 //! In-process WIT embedding and WebAssembly component encoding.
 
-pub(crate) mod wit;
+pub mod wit;
 
 use std::path::Path;
 

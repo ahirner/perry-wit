@@ -3,7 +3,7 @@
 //! Generates idiomatic, strongly-typed TypeScript definitions for WIT worlds,
 //! exported functions, records, variants, enums, and imported interfaces.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashSet;
 use std::path::Path;
 use wit_parser::{
@@ -346,11 +346,7 @@ pub fn generate_declarations_from_wit_dir(
     wit_dir: &Path,
     world_name: Option<&str>,
 ) -> Result<(String, String)> {
-    let mut resolve = Resolve::new();
-    let (pkg_id, _) = resolve
-        .push_path(wit_dir)
-        .with_context(|| format!("Failed to parse WIT at {}", wit_dir.display()))?;
-
+    let (resolve, pkg_id) = crate::component::wit::resolve_wit(wit_dir)?;
     let pkg = &resolve.packages[pkg_id];
 
     let target_world_id = if let Some(wname) = world_name {

@@ -16,7 +16,7 @@ fn has_wit_files(dir: &Path) -> bool {
     false
 }
 
-pub(crate) fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
+pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
     let mut resolve = Resolve::new();
 
     // If wit_dir/deps does not exist, check for WASI_WIT_PATH environment variable

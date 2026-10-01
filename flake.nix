@@ -16,12 +16,13 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, wasi }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ (import rust-overlay) ];
-        };
+    let
+      systemOutputs = flake-utils.lib.eachDefaultSystem (system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (import rust-overlay) ];
+          };
 
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
@@ -140,6 +141,67 @@
           '';
         };
 
+        # Consumer helper to build components declaratively
+        buildComponent = {
+          name ? "component",
+          src,
+          entry ? "src/index.ts",
+          wit ? "wit",
+          world ? null,
+        }: pkgs.stdenv.mkDerivation {
+          pname = name;
+          version = "0.1.0";
+          inherit src;
+          nativeBuildInputs = [ perryWitBin pkgs.wasm-tools ];
+          buildPhase = ''
+            export HOME="$TMPDIR"
+            export WASI_WIT_PATH="${wasiWit}"
+            mkdir -p dist
+            perry-wit ${entry} \
+              --wit "${wit}" \
+              ${if world != null then "--world " + world else ""} \
+              -o "dist/${name}.wasm"
+          '';
+          installPhase = ''
+            mkdir -p "$out/lib"
+            cp "dist/${name}.wasm" "$out/lib/"
+          '';
+        };
+
+        # Consumer starter template component compiled with buildComponent
+        templateComponent = buildComponent {
+          name = "template-task";
+          src = ./template;
+          entry = "src/index.ts";
+          wit = "wit";
+          world = "task";
+        };
+
+        # Check: Verify template component builds and can be invoked directly
+        checkTemplate = pkgs.runCommand "check-template-component" {
+          nativeBuildInputs = [ pkgs.wasmtime ];
+        } ''
+          export HOME="$TMPDIR"
+          export WASMTIME_CACHE_ENABLED=false
+          wasmtime run -C cache=n -S http=y -S inherit-network=y --invoke 'run-task("template-hello")' "${templateComponent}/lib/template-task.wasm"
+          touch "$out"
+        '';
+
+        # Check: Pre-commit / CI verification that generated TypeScript SDK definitions are valid and up to date
+        sdkSyncCheck = pkgs.runCommand "check-sdk-sync" {
+          nativeBuildInputs = [ perryWitBin pkgs.typescript ];
+        } ''
+          export HOME="$TMPDIR"
+          export WASI_WIT_PATH="${wasiWit}"
+          mkdir -p work/src work/wit work/.perry/types
+          cp -r ${./wit}/* work/wit/
+          cp ${./examples/merge_task.ts} work/src/merge_task.ts
+          cd work
+          perry-wit gen-types --wit wit --world merge-task
+          tsc --noEmit
+          touch "$out"
+        '';
+
       in {
         packages = {
           default = perryWitBin;
@@ -147,22 +209,29 @@
           guest-runtime = guestRuntime;
           example-merge-docs = exampleMergeDocs;
           example-merge-task = exampleMergeTask;
+          template-component = templateComponent;
           wasi-wit = wasiWit;
+        };
+
+        lib = {
+          inherit buildComponent;
         };
 
         checks = {
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
-          inherit exampleMergeDocs exampleMergeTask guestRuntime perryWitBin;
+          inherit exampleMergeDocs exampleMergeTask guestRuntime perryWitBin templateComponent checkTemplate sdkSyncCheck;
         };
 
         devShells.default = pkgs.mkShell {
           packages = [
             toolchain
+            perryWitBin
             pkgs.wasmtime
             pkgs.wasm-tools
             pkgs.nodejs
+            pkgs.typescript
             pkgs.wkg
             pkgs.pkg-config
             pkgs.cacert
@@ -175,9 +244,14 @@
               mkdir -p wit
               ln -sfn "${wasiWit}" wit/deps
             fi
+            if [ -d wit ]; then
+              ${perryWitBin}/bin/perry-wit gen-types --wit wit >/dev/null 2>&1 || true
+            fi
             echo "=== Perry-WIT Hermetic Environment ==="
+            echo "perry-wit:  $(${perryWitBin}/bin/perry-wit --help | head -n 1)"
             echo "wasmtime:   $(${pkgs.wasmtime}/bin/wasmtime --version)"
             echo "node:       $(${pkgs.nodejs}/bin/node --version)"
+            echo "tsc:        $(${pkgs.typescript}/bin/tsc --version)"
             echo "rustc:      $(${toolchain}/bin/rustc --version)"
             echo "WASI WIT:   $WASI_WIT_PATH"
             echo "RT Build:   $GUEST_RUNTIME_PATH"
@@ -186,4 +260,10 @@
         };
       }
     );
+  in systemOutputs // {
+    templates.default = {
+      path = ./template;
+      description = "A WASI Preview 2 TypeScript component built with Perry-WIT";
+    };
+  };
 }
