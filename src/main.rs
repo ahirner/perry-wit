@@ -44,6 +44,18 @@ fn main() -> Result<()> {
                 ts_file_path = arg.to_string();
                 i += 1;
             }
+            "-h" | "--help" => {
+                println!("Usage: perry-wit [OPTIONS] <input.ts>");
+                println!();
+                println!("Options:");
+                println!("  -o, --out <PATH>      Output WebAssembly file path");
+                println!("      --runtime <PATH>  Guest runtime WASM module path");
+                println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
+                println!("      --world <NAME>    WIT world name to target (default: 'merge-docs')");
+                println!("      --core-only       Output linked Core WebAssembly without component encoding");
+                println!("  -h, --help            Print help information");
+                return Ok(());
+            }
             other => {
                 eprintln!("Unknown argument: {other}");
                 i += 1;
