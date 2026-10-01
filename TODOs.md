@@ -42,28 +42,32 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 ## Phase 3: The Conformance Evaluation Loop (Node.js vs. WASIp2)
 
-*Goal: Quantifiably measure how well the compiled component matches promised Node.js APIs and WASI host invariants.*
+*Goal: Formally measure and enforce behavioral conformance of promised APIs against native Node.js oracle and WASI Preview 2 host invariants.*
 
-- [ ] **3.1. Tiered Capability Catalog (`catalog/capabilities.json`)**
-  - [ ] Document initial active surface:
-    - **Tier 1 (Web Primaries):** `global.fetch` (HTTP GET/POST, headers, streaming body), `Promise.all` (concurrent dispatch, fail-fast), `response.json()` (UTF-8 parsing into typed object), `console.log` / `console.error` (stdout/stderr routing), Object splatting `{ ...a, ...b }`.
-    - **Tier 2 (Node Core):** `process.exit`, `process.env`.
-  - [ ] Define explicit domain boundaries (e.g. local socket binding constraints, redirect policies).
-- [ ] **3.2. Author Initial Conformance Test Suite (`tests/conformance/`)**
-  - [ ] `01_fetch_success.ts`: Concurrent `Promise.all` fetching multiple JSON endpoints and merging.
-  - [ ] `02_fetch_connection_refused.ts`: Verify connection failure rejects promise with descriptive error.
-  - [ ] `03_fetch_404_error.ts`: Non-2xx HTTP status handling in `.json()` and error inspection.
-  - [ ] `04_console_routing.ts`: Verify `console.log` writes to stdout and `console.error` writes to stderr.
-  - [ ] `05_json_syntax_error.ts`: Parsing invalid JSON string; assert fail-safe rejection.
-- [ ] **3.3. Differential Equivalence Test Runner (`scripts/test_conformance.sh` or `tests/conformance.rs`)**
-  - [ ] Execute each test against native Node.js (`node`) and against compiled WASIp2 component (`wasmtime`).
-  - [ ] Assert matching execution vectors: stdout, stderr, exit code, and structured JSON output.
-  - [ ] Generate structured conformance report table with pass/fail metrics.
-- [ ] **3.4. Host Invariant & Resource Leak Verification**
-  - [ ] Verify that all WASI resources (`future-incoming-response`, `incoming-response`, `input-stream`) are closed and dropped after execution (0 leaked descriptors).
-  - [ ] Verify layered error handling:
-    - Component boundary: Rejections surface as catchable errors without instance memory corruption.
-    - Command boundary: Uncaught errors terminate via `wasi:cli/exit@0.2.x` with exit status 1.
+- [ ] **3.1. Machine-Readable Capability Catalog (`catalog/capabilities.json` & `src/conformance/catalog.rs`)**
+  - [ ] Specify formal capability schema:
+    - Unique capability IDs, names, tiers (Tier 1 Web Primaries, Tier 2 Node Core, Non-Goals).
+    - Support status: `full`, `partial`, `unsupported`.
+    - Explicit compatibility domain boundaries, constraints, and invariants.
+    - Test case mapping linking each capability to formal conformance evidence.
+  - [ ] Implement Rust catalog parser and validator in `src/conformance/catalog.rs` enforcing contract integrity.
+- [ ] **3.2. Formal Behavioral Conformance Cases (`tests/conformance/cases/`)**
+  - [ ] Implement isolated capability-level conformance cases (distinct from application-level examples):
+    - `01_object_spread.ts`: Object spread `{ ...a, ...b }` precedence, property overrides, key enumeration.
+    - `02_console_streams.ts`: Distinct standard stream routing (`console.log` -> stdout, `console.error` -> stderr).
+    - `03_promise_all.ts`: Concurrent promise resolution ordering and value aggregation.
+    - `04_fetch_json.ts`: HTTP GET response streaming, status check, and `.json()` structured object decoding.
+    - `05_fetch_failure.ts`: Network connection failure rejection and diagnostic reporting.
+    - `06_json_syntax.ts`: Parse error boundary and malformed payload rejection.
+- [ ] **3.3. Pure-Rust Differential Equivalence Harness (`src/conformance/runner.rs`)**
+  - [ ] Execute each conformance case under reference oracle (`node`) and under Perry (`perry-wit` -> `wasmtime`).
+  - [ ] Compare execution vectors: exit code, stdout stream, stderr stream, and structured JSON output.
+  - [ ] Run automated hermetic mock server for HTTP conformance cases.
+- [ ] **3.4. Host Invariants & Conformance Reporting (`src/conformance/report.rs` & `tests/conformance_test.rs`)**
+  - [ ] Verify WASI Preview 2 host invariants:
+    - Zero resource leaks on completion (clean drop of all streams and pollables).
+    - Layered exit code translation: uncaught exceptions map to `wasi:cli/exit` status 1 without host memory corruption.
+  - [ ] Generate structured conformance report mapping catalog declarations to executed evidence.
 
 ---
 
