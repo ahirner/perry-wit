@@ -21,9 +21,7 @@ cargo rustc --release --package guest-runtime --target wasm32-unknown-unknown --
   -C link-arg=--import-memory \
   -C link-arg=--global-base=1048576 \
   -C link-arg=--no-entry
-mkdir -p "$ROOT_DIR/artifacts"
-ln -sfn "$ROOT_DIR/target/wasm32-unknown-unknown/release/guest_runtime.wasm" "$ROOT_DIR/artifacts/guest_runtime.wasm"
-
+export GUEST_RUNTIME_PATH="$ROOT_DIR/target/wasm32-unknown-unknown/release/guest_runtime.wasm"
 
 echo "==> [2/2] Building WASIp2 component via perry-wit pure-Rust pipeline..."
 mkdir -p "$DIST_DIR"

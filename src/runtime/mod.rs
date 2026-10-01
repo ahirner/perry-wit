@@ -1,71 +1,38 @@
-//! Guest runtime discovery and artifact resolution.
+//! Guest runtime embedding and resolution.
 //!
-//! Provides pure, deterministic resolution of the precompiled `guest_runtime.wasm`
-//! artifact across CLI flags, environment variables, Nix wrapper locations,
-//! and standard artifact paths with zero impure runtime compilation side-effects.
+//! Statically embeds `guest_runtime.wasm` built via `build.rs` so that `perry-wit`
+//! is a single self-contained binary capable of running without external runtime files
+//! or being compiled into a standalone Wasm component itself.
+//!
+//! An optional runtime path can be explicitly provided at runtime via `--runtime <path>`.
 
-use std::path::{Path, PathBuf};
+use std::borrow::Cow;
+use std::fs;
+use std::path::Path;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
-/// Environment variable used to specify the guest runtime WebAssembly module path.
-pub const ENV_PERRY_GUEST_RUNTIME: &str = "PERRY_GUEST_RUNTIME";
+/// Statically embedded guest runtime WebAssembly module bytes compiled by `build.rs`.
+pub const EMBEDDED_GUEST_RUNTIME: &[u8] = include_bytes!(env!("GUEST_RUNTIME_WASM"));
 
-/// Resolves the guest runtime WebAssembly module path without any impure runtime build steps.
-pub fn ensure_guest_runtime(explicit_path: Option<&Path>) -> Result<PathBuf> {
+/// Resolves the guest runtime WebAssembly module bytes.
+///
+/// Priority:
+/// 1. Explicit path passed via CLI flag `--runtime <path>`
+/// 2. Statically embedded guest runtime bytes
+pub fn resolve_guest_runtime_bytes(explicit_path: Option<&Path>) -> Result<Cow<'static, [u8]>> {
     if let Some(path) = explicit_path {
         ensure!(
             path.exists(),
             "Specified guest runtime does not exist: {}",
             path.display()
         );
-        return Ok(path.to_path_buf());
+        let bytes = fs::read(path)
+            .with_context(|| format!("Reading specified guest runtime from {}", path.display()))?;
+        return Ok(Cow::Owned(bytes));
     }
 
-    // 1. Check PERRY_GUEST_RUNTIME environment variable
-    if let Ok(env_val) = std::env::var(ENV_PERRY_GUEST_RUNTIME) {
-        let env_path = PathBuf::from(&env_val);
-        if env_path.exists() {
-            return Ok(env_path);
-        }
-    }
-
-    // 2. Check relative to current executable ($ORIGIN/../lib/guest_runtime.wasm or $ORIGIN/guest_runtime.wasm)
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(bin_dir) = current_exe.parent()
-    {
-        let exe_rel = bin_dir.join("../lib/guest_runtime.wasm");
-        if exe_rel.exists() {
-            return Ok(exe_rel);
-        }
-        let same_dir = bin_dir.join("guest_runtime.wasm");
-        if same_dir.exists() {
-            return Ok(same_dir);
-        }
-    }
-
-    // 3. Check well-known workspace / repository artifact paths
-    let candidate_paths = [
-        "artifacts/guest_runtime.wasm",
-        "target/wasm32-unknown-unknown/release/guest_runtime.wasm",
-        "target/wasm32-unknown-unknown/debug/guest_runtime.wasm",
-    ];
-
-    for candidate in candidate_paths {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-
-    bail!(
-        "Guest runtime WebAssembly module ('guest_runtime.wasm') not found.\n\
-         Please provide it using one of the following methods:\n\
-           1. Pass '--runtime <path>' on the command line\n\
-           2. Set the 'PERRY_GUEST_RUNTIME' environment variable\n\
-           3. Symlink the artifact into 'artifacts/guest_runtime.wasm'\n\
-           4. Build it using 'nix build .#guest-runtime' or 'scripts/build.sh'"
-    );
+    Ok(Cow::Borrowed(EMBEDDED_GUEST_RUNTIME))
 }
 
 #[cfg(test)]
@@ -73,22 +40,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_explicit_nonexistent_path_fails() {
-        let res = ensure_guest_runtime(Some(Path::new("nonexistent/guest_runtime.wasm")));
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .contains("Specified guest runtime does not exist")
-        );
+    fn test_embedded_guest_runtime_is_valid_wasm() {
+        assert!(EMBEDDED_GUEST_RUNTIME.len() > 4);
+        assert_eq!(&EMBEDDED_GUEST_RUNTIME[0..4], b"\0asm");
     }
 
     #[test]
-    fn test_resolves_existing_candidate() {
-        // In local development or nix develop, at least one candidate exists
-        let res = ensure_guest_runtime(None);
-        if let Ok(path) = res {
-            assert!(path.exists());
-        }
+    fn test_explicit_nonexistent_runtime_fails() {
+        let res = resolve_guest_runtime_bytes(Some(Path::new("nonexistent.wasm")));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_default_resolves_embedded() {
+        let bytes = resolve_guest_runtime_bytes(None).expect("embedded runtime should resolve");
+        assert_eq!(bytes.as_ref(), EMBEDDED_GUEST_RUNTIME);
     }
 }

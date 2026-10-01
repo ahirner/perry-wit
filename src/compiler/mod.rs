@@ -84,9 +84,7 @@ pub fn compile_typescript(
         });
     }
 
-    let rt_path = runtime::ensure_guest_runtime(options.runtime_path.as_deref())?;
-    let rt_bytes = fs::read(&rt_path)
-        .with_context(|| format!("Reading guest runtime from {}", rt_path.display()))?;
+    let rt_bytes = runtime::resolve_guest_runtime_bytes(options.runtime_path.as_deref())?;
 
     let merged_core = linker::merge_core_modules(&core_wasm, &rt_bytes)
         .context("Linking TypeScript core wasm with guest runtime")?;

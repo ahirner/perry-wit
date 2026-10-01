@@ -86,21 +86,15 @@
           '';
         };
 
-        # Perry-WIT CLI binary build
+        # Perry-WIT CLI binary build (statically embeds guest_runtime.wasm)
         perryWitBin = craneLib.buildPackage {
           inherit src cargoArtifacts;
           pname = "perry-wit";
           version = "0.1.0";
           strictDeps = true;
           doCheck = false;
-          nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
-          postInstall = ''
-            mkdir -p "$out/lib"
-            ln -sfn "${guestRuntime}/lib/guest_runtime.wasm" "$out/lib/guest_runtime.wasm"
-            wrapProgram $out/bin/perry-wit \
-              --set-default PERRY_GUEST_RUNTIME "${guestRuntime}/lib/guest_runtime.wasm" \
-              --set-default WASI_WIT_PATH "${wasiWit}"
-          '';
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          GUEST_RUNTIME_PATH = "${guestRuntime}/lib/guest_runtime.wasm";
         };
 
         # Example WASIp2 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
@@ -152,9 +146,7 @@
 
           shellHook = ''
             export WASI_WIT_PATH="${wasiWit}"
-            export PERRY_GUEST_RUNTIME="${guestRuntime}/lib/guest_runtime.wasm"
-            mkdir -p artifacts
-            ln -sfn "${guestRuntime}/lib/guest_runtime.wasm" artifacts/guest_runtime.wasm
+            export GUEST_RUNTIME_PATH="${guestRuntime}/lib/guest_runtime.wasm"
             if [ ! -e wit/deps ]; then
               mkdir -p wit
               ln -sfn "${wasiWit}" wit/deps
@@ -164,7 +156,7 @@
             echo "node:       $(${pkgs.nodejs}/bin/node --version)"
             echo "rustc:      $(${toolchain}/bin/rustc --version)"
             echo "WASI WIT:   $WASI_WIT_PATH"
-            echo "Runtime:    $PERRY_GUEST_RUNTIME"
+            echo "RT Build:   $GUEST_RUNTIME_PATH"
             echo "======================================"
           '';
         };
