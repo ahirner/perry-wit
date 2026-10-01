@@ -11,7 +11,9 @@ use bindings::wasi::cli::exit::exit;
 use bindings::wasi::cli::stderr::get_stderr;
 use bindings::wasi::cli::stdout::get_stdout;
 use bindings::wasi::http::outgoing_handler::handle;
-use bindings::wasi::http::types::{Fields, FutureIncomingResponse, Method, OutgoingBody, OutgoingRequest, Scheme};
+use bindings::wasi::http::types::{
+    Fields, FutureIncomingResponse, Method, OutgoingBody, OutgoingRequest, Scheme,
+};
 
 const STRING_TAG: u64 = 0x7FFF;
 const POINTER_TAG: u64 = 0x7FFD;
@@ -133,8 +135,8 @@ impl ResponseEntry {
                     }
                 }
 
-                let body_str =
-                    String::from_utf8(content).map_err(|e| format!("Response from {url} was not UTF-8: {e}"))?;
+                let body_str = String::from_utf8(content)
+                    .map_err(|e| format!("Response from {url} was not UTF-8: {e}"))?;
                 drop(stream);
                 drop(body);
                 drop(response);
@@ -155,8 +157,12 @@ fn start_http_get(url: &str) -> Result<FutureIncomingResponse, String> {
 
     let headers = Fields::new();
     let request = OutgoingRequest::new(headers);
-    request.set_method(&Method::Get).map_err(|_| "Failed to set method")?;
-    request.set_scheme(Some(&scheme)).map_err(|_| "Failed to set scheme")?;
+    request
+        .set_method(&Method::Get)
+        .map_err(|_| "Failed to set method")?;
+    request
+        .set_scheme(Some(&scheme))
+        .map_err(|_| "Failed to set scheme")?;
     request
         .set_authority(Some(&authority))
         .map_err(|_| "Failed to set authority")?;
@@ -235,7 +241,8 @@ impl RuntimeState {
             match self.handles.get(id) {
                 Some(JsHandle::Json(v)) => v.clone(),
                 Some(JsHandle::Array(arr)) => {
-                    let items: Vec<serde_json::Value> = arr.iter().map(|&elem| self.to_js_value(elem)).collect();
+                    let items: Vec<serde_json::Value> =
+                        arr.iter().map(|&elem| self.to_js_value(elem)).collect();
                     serde_json::Value::Array(items)
                 }
                 _ => serde_json::Value::Null,
@@ -272,7 +279,10 @@ impl RuntimeState {
                 nanbox_string(id)
             }
             serde_json::Value::Array(arr) => {
-                let items: Vec<i64> = arr.into_iter().map(|item| self.from_js_value(item)).collect();
+                let items: Vec<i64> = arr
+                    .into_iter()
+                    .map(|item| self.from_js_value(item))
+                    .collect();
                 let id = self.alloc_handle(JsHandle::Array(items));
                 nanbox_pointer(id)
             }
@@ -377,7 +387,10 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             match start_http_get(&url) {
                 Ok(fut) => {
                     let id = state.responses.len();
-                    state.responses.push(ResponseEntry::InFlight { url, future_resp: fut });
+                    state.responses.push(ResponseEntry::InFlight {
+                        url,
+                        future_resp: fut,
+                    });
                     let h_id = state.alloc_handle(JsHandle::Response(id));
                     result_i64 = nanbox_pointer(h_id);
                 }
@@ -513,14 +526,18 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             result_i64 = (len as f64).to_bits() as i64;
         }
     } else if name == "object_new" {
-        let h_id = state.alloc_handle(JsHandle::Json(serde_json::Value::Object(serde_json::Map::new())));
+        let h_id = state.alloc_handle(JsHandle::Json(serde_json::Value::Object(
+            serde_json::Map::new(),
+        )));
         result_i64 = nanbox_pointer(h_id);
     } else if name == "object_set" {
         if raw_args.len() >= 3 {
             let target_handle = raw_args[0];
             let key_str = state.get_string(raw_args[1]);
             let val_json = state.to_js_value(raw_args[2]);
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle_mut(target_handle) {
+            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
+                state.get_handle_mut(target_handle)
+            {
                 map.insert(key_str, val_json);
             }
             result_i64 = target_handle;
@@ -530,7 +547,9 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             let target_handle = raw_args[0];
             let source_handle = raw_args[1];
             let source_json = state.to_js_value(source_handle);
-            if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) = state.get_handle_mut(target_handle) {
+            if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) =
+                state.get_handle_mut(target_handle)
+            {
                 if let serde_json::Value::Object(src_map) = source_json {
                     for (k, v) in src_map {
                         target_map.insert(k, v);
@@ -543,7 +562,9 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         if raw_args.len() >= 2 {
             let target_handle = raw_args[0];
             let key_str = state.get_string(raw_args[1]);
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target_handle) {
+            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
+                state.get_handle(target_handle)
+            {
                 if let Some(v) = map.get(&key_str) {
                     let v_clone = v.clone();
                     result_i64 = state.from_js_value(v_clone);
@@ -560,7 +581,8 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
     } else if name == "json_parse" {
         let arg = raw_args.first().copied().unwrap_or(0);
         let s = state.get_string(arg);
-        let val_json: serde_json::Value = serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
+        let val_json: serde_json::Value =
+            serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
         result_i64 = state.from_js_value(val_json);
     } else if name == "console_log" || name == "log" {
         let arg = raw_args.last().copied().unwrap_or(0);
@@ -598,7 +620,11 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
 pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32) -> i32 {
     let state = get_state();
     let name_idx = func_name_id as usize;
-    let name = state.strings.get(name_idx).map(|s| s.as_str()).unwrap_or("");
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let count = arg_count as usize;
 
     let mut raw_args = Vec::with_capacity(count);

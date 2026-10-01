@@ -14,9 +14,15 @@ fn main() {
                 if let Ok(n) = stream.read(&mut buf) {
                     let req = String::from_utf8_lossy(&buf[..n]);
                     let (path, content) = if req.contains("GET /doc1.json") {
-                        ("/doc1.json", fs::read_to_string("examples/doc1.json").unwrap())
+                        (
+                            "/doc1.json",
+                            fs::read_to_string("examples/doc1.json").unwrap(),
+                        )
                     } else if req.contains("GET /doc2.json") {
-                        ("/doc2.json", fs::read_to_string("examples/doc2.json").unwrap())
+                        (
+                            "/doc2.json",
+                            fs::read_to_string("examples/doc2.json").unwrap(),
+                        )
                     } else {
                         ("/", "Not Found".to_string())
                     };
@@ -44,7 +50,10 @@ fn main() {
 
                     let _ = stream.write_all(response.as_bytes());
                     let _ = stream.flush();
-                    println!("[mock_server] FINISH request: {path} (elapsed: {:?})", start.elapsed());
+                    println!(
+                        "[mock_server] FINISH request: {path} (elapsed: {:?})",
+                        start.elapsed()
+                    );
                 }
             });
         }

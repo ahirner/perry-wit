@@ -18,7 +18,11 @@ fn has_wit_files(dir: &Path) -> bool {
 }
 
 /// Embeds WIT contract metadata into a core WebAssembly module and encodes it into a component.
-pub fn embed_and_encode(core_wasm: &[u8], wit_dir: &Path, world_name: Option<&str>) -> Result<Vec<u8>> {
+pub fn embed_and_encode(
+    core_wasm: &[u8],
+    wit_dir: &Path,
+    world_name: Option<&str>,
+) -> Result<Vec<u8>> {
     let mut resolve = Resolve::new();
 
     // If wit_dir/deps does not exist, check for WASI_WIT_PATH environment variable
@@ -27,13 +31,24 @@ pub fn embed_and_encode(core_wasm: &[u8], wit_dir: &Path, world_name: Option<&st
             let wasi_path = Path::new(&wasi_wit_path);
             if wasi_path.is_dir() {
                 // Topological dependency order for WASI Preview 2 packages
-                let ordered_pkgs = ["io", "random", "clocks", "filesystem", "sockets", "cli", "http"];
+                let ordered_pkgs = [
+                    "io",
+                    "random",
+                    "clocks",
+                    "filesystem",
+                    "sockets",
+                    "cli",
+                    "http",
+                ];
                 for pkg in ordered_pkgs {
                     let pkg_dir = wasi_path.join(pkg);
                     if pkg_dir.is_dir() && has_wit_files(&pkg_dir) {
-                        resolve
-                            .push_dir(&pkg_dir)
-                            .with_context(|| format!("loading dynamic WASI WIT package from {}", pkg_dir.display()))?;
+                        resolve.push_dir(&pkg_dir).with_context(|| {
+                            format!(
+                                "loading dynamic WASI WIT package from {}",
+                                pkg_dir.display()
+                            )
+                        })?;
                     }
                 }
             }

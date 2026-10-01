@@ -125,6 +125,13 @@
           wasi-wit = wasiWit;
         };
 
+        checks = {
+          perry-wit-fmt = craneLib.cargoFmt {
+            inherit src;
+          };
+          inherit exampleMergeDocs guestRuntime perryWitBin;
+        };
+
         devShells.default = pkgs.mkShell {
           packages = [
             toolchain

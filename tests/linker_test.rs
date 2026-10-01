@@ -22,7 +22,9 @@ fn test_merge_core_modules() {
 
     // 1. Validate merged module
     let mut validator = Validator::new_with_features(WasmFeatures::all());
-    validator.validate_all(&merged).expect("validate merged wasm");
+    validator
+        .validate_all(&merged)
+        .expect("validate merged wasm");
 
     // 2. Check imports
     let mut import_modules = Vec::new();
@@ -53,8 +55,14 @@ fn test_merge_core_modules() {
     }
 
     // Ensure required exports are present
-    assert!(export_names.contains(&"_start".to_string()), "missing _start");
-    assert!(export_names.contains(&"memory".to_string()), "missing memory");
+    assert!(
+        export_names.contains(&"_start".to_string()),
+        "missing _start"
+    );
+    assert!(
+        export_names.contains(&"memory".to_string()),
+        "missing memory"
+    );
     assert!(
         export_names.contains(&"wasi:cli/run@0.2.6#run".to_string()),
         "missing run export"
@@ -65,8 +73,8 @@ fn test_merge_core_modules() {
     );
 
     // 3. Test componentization and stripping
-    let component_bytes =
-        embed_and_encode(&merged, Path::new("wit"), Some("merge-docs")).expect("embed and encode component");
+    let component_bytes = embed_and_encode(&merged, Path::new("wit"), Some("merge-docs"))
+        .expect("embed and encode component");
     assert!(!component_bytes.is_empty());
 
     let stripped_bytes = strip::component(&component_bytes).expect("strip component");
@@ -75,7 +83,8 @@ fn test_merge_core_modules() {
 
     // Write to dist/perry_merge_docs.stripped.wasm to test with wasmtime
     fs::create_dir_all("dist").expect("create dist");
-    fs::write("dist/perry_merge_docs.stripped.wasm", &stripped_bytes).expect("write stripped component");
+    fs::write("dist/perry_merge_docs.stripped.wasm", &stripped_bytes)
+        .expect("write stripped component");
 
     // Validate component
     let mut comp_validator = Validator::new_with_features(WasmFeatures::all());

@@ -50,8 +50,12 @@ fn main() -> Result<()> {
                 println!("  -o, --out <PATH>      Output WebAssembly file path");
                 println!("      --runtime <PATH>  Guest runtime WASM module path");
                 println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
-                println!("      --world <NAME>    WIT world name to target (default: 'merge-docs')");
-                println!("      --core-only       Output linked Core WebAssembly without component encoding");
+                println!(
+                    "      --world <NAME>    WIT world name to target (default: 'merge-docs')"
+                );
+                println!(
+                    "      --core-only       Output linked Core WebAssembly without component encoding"
+                );
                 println!("  -h, --help            Print help information");
                 return Ok(());
             }
@@ -82,9 +86,16 @@ fn main() -> Result<()> {
     let ts_file = Path::new(&ts_file_path);
     let ts_content = fs::read_to_string(ts_file)
         .with_context(|| format!("Failed to read TypeScript source {}", ts_file.display()))?;
-    println!("Compiling {} ({} bytes)...", ts_file.display(), ts_content.len());
+    println!(
+        "Compiling {} ({} bytes)...",
+        ts_file.display(),
+        ts_content.len()
+    );
 
-    let file_name = ts_file.file_name().and_then(|s| s.to_str()).unwrap_or("module.ts");
+    let file_name = ts_file
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module.ts");
     let ast = parse_typescript(&ts_content, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {e:?}", ts_file.display()))?;
 
@@ -104,7 +115,10 @@ fn main() -> Result<()> {
             return;
         }
         if let perry_hir::ir::Expr::Call { callee, args, .. } = expr {
-            if let perry_hir::ir::Expr::PropertyGet { object, property, .. } = callee.as_ref() {
+            if let perry_hir::ir::Expr::PropertyGet {
+                object, property, ..
+            } = callee.as_ref()
+            {
                 if property == "json" {
                     *expr = perry_hir::ir::Expr::NativeMethodCall {
                         module: "fetch".to_string(),
@@ -126,7 +140,9 @@ fn main() -> Result<()> {
                             args: inner_args,
                             ..
                         }) => {
-                            if let perry_hir::ir::Expr::ExternFuncRef { name, .. } = inner_callee.as_ref() {
+                            if let perry_hir::ir::Expr::ExternFuncRef { name, .. } =
+                                inner_callee.as_ref()
+                            {
                                 if name == "js_object_assign_one" && inner_args.len() >= 2 {
                                     sources.push(inner_args[1].clone());
                                     continue;
@@ -157,7 +173,9 @@ fn main() -> Result<()> {
 
     fn rewrite_stmt(stmt: &mut perry_hir::ir::Stmt) {
         match stmt {
-            perry_hir::ir::Stmt::Expr(e) | perry_hir::ir::Stmt::Return(Some(e)) | perry_hir::ir::Stmt::Throw(e) => {
+            perry_hir::ir::Stmt::Expr(e)
+            | perry_hir::ir::Stmt::Return(Some(e))
+            | perry_hir::ir::Stmt::Throw(e) => {
                 rewrite_expr(e);
             }
             perry_hir::ir::Stmt::Let { init, .. } => {
@@ -188,7 +206,11 @@ fn main() -> Result<()> {
     }
 
     if core_only {
-        println!("Writing Core Wasm ({} bytes) -> {}", wasm_bytes.len(), out_file_path);
+        println!(
+            "Writing Core Wasm ({} bytes) -> {}",
+            wasm_bytes.len(),
+            out_file_path
+        );
         fs::write(&out_file_path, &wasm_bytes)?;
         return Ok(());
     }
@@ -200,7 +222,8 @@ fn main() -> Result<()> {
     };
 
     println!("Linking with guest runtime: {}...", rt_path.display());
-    let rt_bytes = fs::read(&rt_path).with_context(|| format!("Reading guest runtime from {}", rt_path.display()))?;
+    let rt_bytes = fs::read(&rt_path)
+        .with_context(|| format!("Reading guest runtime from {}", rt_path.display()))?;
 
     let merged_core = perry_wit::linker::merge_core_modules(&wasm_bytes, &rt_bytes)
         .context("Linking TypeScript core wasm with guest runtime")?;
@@ -210,11 +233,14 @@ fn main() -> Result<()> {
         "Embedding WIT ({}) and encoding component (world: {:?})...",
         wit_dir_path, world_name
     );
-    let component_bytes =
-        perry_wit::component::embed_and_encode(&merged_core, Path::new(&wit_dir_path), world_name.as_deref())?;
+    let component_bytes = perry_wit::component::embed_and_encode(
+        &merged_core,
+        Path::new(&wit_dir_path),
+        world_name.as_deref(),
+    )?;
 
-    let stripped_bytes =
-        perry_wit::strip::component(&component_bytes).context("Stripping custom sections from component")?;
+    let stripped_bytes = perry_wit::strip::component(&component_bytes)
+        .context("Stripping custom sections from component")?;
 
     println!(
         "Component built: raw = {} bytes, stripped = {} bytes -> {}",
@@ -271,7 +297,8 @@ fn ensure_guest_runtime_compiled() -> Result<PathBuf> {
 }
 
 fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
-    let wat = wasmprinter::print_bytes(wasm_bytes).map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
+    let wat = wasmprinter::print_bytes(wasm_bytes)
+        .map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
 
     // Ensure memory has enough pages for guest runtime (at least 32 pages = 2MB)
     let mut wat = wat.replace("(memory (;0;) 2)", "(memory (;0;) 32)");
@@ -297,5 +324,6 @@ fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
 
     wat.insert_str(last_paren, &wrapper);
 
-    wat::parse_str(&wat).map_err(|e| anyhow::anyhow!("Failed to re-parse wat with wasi:cli/run wrapper: {e}"))
+    wat::parse_str(&wat)
+        .map_err(|e| anyhow::anyhow!("Failed to re-parse wat with wasi:cli/run wrapper: {e}"))
 }

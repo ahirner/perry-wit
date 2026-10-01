@@ -11,11 +11,12 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail, ensure};
 use wasm_encoder::reencode::{self, Reencode, RoundtripReencoder};
 use wasm_encoder::{
-    ConstExpr, DataSegment, DataSegmentMode, ElementMode, ElementSegment, Elements, ExportKind, Instruction, Module,
-    ValType,
+    ConstExpr, DataSegment, DataSegmentMode, ElementMode, ElementSegment, Elements, ExportKind,
+    Instruction, Module, ValType,
 };
 use wasmparser::{
-    DataKind, ElementItems, ElementKind, ExternalKind, FunctionBody, Global, Operator, Parser, Payload, TableType,
+    DataKind, ElementItems, ElementKind, ExternalKind, FunctionBody, Global, Operator, Parser,
+    Payload, TableType,
 };
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -66,7 +67,9 @@ fn parse_module_a<'a>(bytes: &'a [u8]) -> Result<ParsedModuleA<'a>> {
     for payload in Parser::new(0).parse_all(bytes) {
         match payload? {
             Payload::TypeSection(reader) => {
-                types = reader.into_iter_err_on_gc_types().collect::<Result<_, _>>()?;
+                types = reader
+                    .into_iter_err_on_gc_types()
+                    .collect::<Result<_, _>>()?;
             }
             Payload::ImportSection(reader) => {
                 for imp in reader.into_imports() {
@@ -75,7 +78,9 @@ fn parse_module_a<'a>(bytes: &'a [u8]) -> Result<ParsedModuleA<'a>> {
                         wasmparser::TypeRef::Func(type_idx) => {
                             imports.push((imp.module, imp.name, type_idx));
                         }
-                        other => bail!("TypeScript module contains unexpected non-function import: {other:?}"),
+                        other => bail!(
+                            "TypeScript module contains unexpected non-function import: {other:?}"
+                        ),
                     }
                 }
             }
@@ -151,7 +156,9 @@ fn parse_module_b<'a>(bytes: &'a [u8]) -> Result<ParsedModuleB<'a>> {
     for payload in Parser::new(0).parse_all(bytes) {
         match payload? {
             Payload::TypeSection(reader) => {
-                types = reader.into_iter_err_on_gc_types().collect::<Result<_, _>>()?;
+                types = reader
+                    .into_iter_err_on_gc_types()
+                    .collect::<Result<_, _>>()?;
             }
             Payload::ImportSection(reader) => {
                 for imp in reader.into_imports() {
@@ -160,7 +167,9 @@ fn parse_module_b<'a>(bytes: &'a [u8]) -> Result<ParsedModuleB<'a>> {
                         wasmparser::TypeRef::Func(type_idx) => {
                             wasi_imports.push((imp.module, imp.name, type_idx));
                         }
-                        wasmparser::TypeRef::Memory(_) if imp.module == "env" && imp.name == "memory" => {
+                        wasmparser::TypeRef::Memory(_)
+                            if imp.module == "env" && imp.name == "memory" =>
+                        {
                             // Borrowed application memory; unified in merged module
                         }
                         other => bail!("Guest runtime contains unexpected import: {other:?}"),
@@ -254,14 +263,24 @@ pub fn reencode_const_expr(
         match reader.read()? {
             Operator::I32Const { value } => instrs.push(Instruction::I32Const(value)),
             Operator::I64Const { value } => instrs.push(Instruction::I64Const(value)),
-            Operator::F32Const { value } => instrs.push(Instruction::F32Const(f32::from_bits(value.bits()).into())),
-            Operator::F64Const { value } => instrs.push(Instruction::F64Const(f64::from_bits(value.bits()).into())),
-            Operator::GlobalGet { global_index } => instrs.push(Instruction::GlobalGet(global_map(global_index))),
-            Operator::RefFunc { function_index } => instrs.push(Instruction::RefFunc(func_map(function_index))),
-            Operator::RefNull { .. } => instrs.push(Instruction::RefNull(wasm_encoder::HeapType::Abstract {
-                shared: false,
-                ty: wasm_encoder::AbstractHeapType::Func,
-            })),
+            Operator::F32Const { value } => {
+                instrs.push(Instruction::F32Const(f32::from_bits(value.bits()).into()))
+            }
+            Operator::F64Const { value } => {
+                instrs.push(Instruction::F64Const(f64::from_bits(value.bits()).into()))
+            }
+            Operator::GlobalGet { global_index } => {
+                instrs.push(Instruction::GlobalGet(global_map(global_index)))
+            }
+            Operator::RefFunc { function_index } => {
+                instrs.push(Instruction::RefFunc(func_map(function_index)))
+            }
+            Operator::RefNull { .. } => {
+                instrs.push(Instruction::RefNull(wasm_encoder::HeapType::Abstract {
+                    shared: false,
+                    ty: wasm_encoder::AbstractHeapType::Func,
+                }))
+            }
             Operator::End => break,
             other => bail!("Unsupported operator in const expr: {other:?}"),
         }
@@ -288,17 +307,15 @@ impl Reencode for ReencodeA<'_> {
     type Error = String;
 
     fn function_index(&mut self, index: u32) -> Result<u32, reencode::Error<Self::Error>> {
-        self.func_map
-            .get(index as usize)
-            .copied()
-            .ok_or_else(|| reencode::Error::UserError(format!("Module A function index out of range: {index}")))
+        self.func_map.get(index as usize).copied().ok_or_else(|| {
+            reencode::Error::UserError(format!("Module A function index out of range: {index}"))
+        })
     }
 
     fn type_index(&mut self, index: u32) -> Result<u32, reencode::Error<Self::Error>> {
-        self.type_map
-            .get(index as usize)
-            .copied()
-            .ok_or_else(|| reencode::Error::UserError(format!("Module A type index out of range: {index}")))
+        self.type_map.get(index as usize).copied().ok_or_else(|| {
+            reencode::Error::UserError(format!("Module A type index out of range: {index}"))
+        })
     }
 
     fn table_index(&mut self, index: u32) -> Result<u32, reencode::Error<Self::Error>> {
@@ -325,7 +342,10 @@ impl Reencode for ReencodeA<'_> {
         }
     }
 
-    fn instruction<'a>(&mut self, operator: Operator<'a>) -> Result<Instruction<'a>, reencode::Error<Self::Error>> {
+    fn instruction<'a>(
+        &mut self,
+        operator: Operator<'a>,
+    ) -> Result<Instruction<'a>, reencode::Error<Self::Error>> {
         reencode::utils::instruction(self, operator)
     }
 }
@@ -340,17 +360,15 @@ impl Reencode for ReencodeB<'_> {
     type Error = String;
 
     fn function_index(&mut self, index: u32) -> Result<u32, reencode::Error<Self::Error>> {
-        self.func_map
-            .get(index as usize)
-            .copied()
-            .ok_or_else(|| reencode::Error::UserError(format!("Module B function index out of range: {index}")))
+        self.func_map.get(index as usize).copied().ok_or_else(|| {
+            reencode::Error::UserError(format!("Module B function index out of range: {index}"))
+        })
     }
 
     fn type_index(&mut self, index: u32) -> Result<u32, reencode::Error<Self::Error>> {
-        self.type_map
-            .get(index as usize)
-            .copied()
-            .ok_or_else(|| reencode::Error::UserError(format!("Module B type index out of range: {index}")))
+        self.type_map.get(index as usize).copied().ok_or_else(|| {
+            reencode::Error::UserError(format!("Module B type index out of range: {index}"))
+        })
     }
 
     fn table_index(&mut self, index: u32) -> Result<u32, reencode::Error<Self::Error>> {
@@ -372,7 +390,10 @@ impl Reencode for ReencodeB<'_> {
         }
     }
 
-    fn instruction<'a>(&mut self, operator: Operator<'a>) -> Result<Instruction<'a>, reencode::Error<Self::Error>> {
+    fn instruction<'a>(
+        &mut self,
+        operator: Operator<'a>,
+    ) -> Result<Instruction<'a>, reencode::Error<Self::Error>> {
         reencode::utils::instruction(self, operator)
     }
 }
@@ -435,15 +456,15 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
             mod_name == "rt",
             "Module A contains unexpected import module '{mod_name}' (expected 'rt')"
         );
-        let b_func_idx = b
-            .export_funcs
-            .get(name)
-            .copied()
-            .with_context(|| format!("Runtime import 'rt:{name}' not found in guest-runtime exports"))?;
+        let b_func_idx = b.export_funcs.get(name).copied().with_context(|| {
+            format!("Runtime import 'rt:{name}' not found in guest-runtime exports")
+        })?;
         let merged_idx = func_map_b
             .get(b_func_idx as usize)
             .copied()
-            .with_context(|| format!("Exported function {b_func_idx} for '{name}' out of range in Module B"))?;
+            .with_context(|| {
+                format!("Exported function {b_func_idx} for '{name}' out of range in Module B")
+            })?;
         func_map_a.push(merged_idx);
     }
     // Module A's defined functions come immediately after WASI imports
@@ -460,7 +481,9 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     // Type Section
     let mut type_sec = wasm_encoder::TypeSection::new();
     for sig in &merged_sigs {
-        type_sec.ty().function(sig.params.clone(), sig.results.clone());
+        type_sec
+            .ty()
+            .function(sig.params.clone(), sig.results.clone());
     }
     module.section(&type_sec);
 
@@ -489,11 +512,19 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     let mut roundtrip = RoundtripReencoder;
     // Table 0: Module A
     for t in &a.tables {
-        table_sec.table(roundtrip.table_type(*t).map_err(|e| anyhow::anyhow!("{e:?}"))?);
+        table_sec.table(
+            roundtrip
+                .table_type(*t)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        );
     }
     // Table 1: Module B
     for t in &b.tables {
-        table_sec.table(roundtrip.table_type(*t).map_err(|e| anyhow::anyhow!("{e:?}"))?);
+        table_sec.table(
+            roundtrip
+                .table_type(*t)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        );
     }
     module.section(&table_sec);
 
@@ -513,14 +544,22 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     let mut global_sec = wasm_encoder::GlobalSection::new();
     // Module A's globals
     for g in &a.globals {
-        let gt = roundtrip.global_type(g.ty).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let gt = roundtrip
+            .global_type(g.ty)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let init = reencode_const_expr(&g.init_expr, |idx| idx, |f| func_map_a[f as usize])?;
         global_sec.global(gt, &init);
     }
     // Module B's globals
     for g in &b.globals {
-        let gt = roundtrip.global_type(g.ty).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        let init = reencode_const_expr(&g.init_expr, |idx| idx + num_a_globals, |f| func_map_b[f as usize])?;
+        let gt = roundtrip
+            .global_type(g.ty)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let init = reencode_const_expr(
+            &g.init_expr,
+            |idx| idx + num_a_globals,
+            |f| func_map_b[f as usize],
+        )?;
         global_sec.global(gt, &init);
     }
     module.section(&global_sec);
@@ -598,10 +637,17 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     }
     // Elements from Module B (Table 1)
     for el in &b.elements {
-        let ElementKind::Active { ref offset_expr, .. } = el.kind else {
+        let ElementKind::Active {
+            ref offset_expr, ..
+        } = el.kind
+        else {
             bail!("Module B requires active elements");
         };
-        let offset = reencode_const_expr(offset_expr, |idx| idx + num_a_globals, |f| func_map_b[f as usize])?;
+        let offset = reencode_const_expr(
+            offset_expr,
+            |idx| idx + num_a_globals,
+            |f| func_map_b[f as usize],
+        )?;
         let ElementItems::Functions(ref funcs) = el.items else {
             bail!("Module B elements must be function indices");
         };
@@ -689,7 +735,11 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         else {
             bail!("Module B data segment must be active on memory 0");
         };
-        let offset = reencode_const_expr(offset_expr, |idx| idx + num_a_globals, |f| func_map_b[f as usize])?;
+        let offset = reencode_const_expr(
+            offset_expr,
+            |idx| idx + num_a_globals,
+            |f| func_map_b[f as usize],
+        )?;
         data_sec.segment(DataSegment {
             mode: DataSegmentMode::Active {
                 memory_index: 0,
