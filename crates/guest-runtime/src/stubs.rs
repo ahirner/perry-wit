@@ -4,8 +4,6 @@
 #[no_mangle]
 pub(crate) extern "C" fn console_warn(_a: i64) {}
 #[no_mangle]
-pub(crate) extern "C" fn console_error(_a: i64) {}
-#[no_mangle]
 pub(crate) extern "C" fn string_concat(_a: i64, _b: i64) -> i64 {
     0
 }

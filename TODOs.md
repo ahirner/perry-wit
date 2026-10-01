@@ -44,13 +44,13 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: Formally measure and enforce behavioral conformance of promised APIs against native Node.js oracle and WASI Preview 2 host invariants.*
 
-- [ ] **3.1. Machine-Readable Capability Catalog (`catalog/capabilities.json` & `src/conformance/catalog.rs`)**
-  - [ ] Specify formal capability schema:
+- [x] **3.1. Machine-Readable Capability Catalog (`catalog/capabilities.json` & `src/conformance/catalog.rs`)**
+  - [x] Specify formal capability schema:
     - Unique capability IDs, names, tiers (Tier 1 Web Primaries, Tier 2 Node Core, Non-Goals).
     - Support status: `full`, `partial`, `unsupported`.
     - Explicit compatibility domain boundaries, constraints, and invariants.
     - Test case mapping linking each capability to formal conformance evidence.
-  - [ ] Implement Rust catalog parser and validator in `src/conformance/catalog.rs` enforcing contract integrity.
+  - [x] Implement Rust catalog parser and validator in `src/conformance/catalog.rs` enforcing contract integrity.
 - [ ] **3.2. Formal Behavioral Conformance Cases (`tests/conformance/cases/`)**
   - [ ] Implement isolated capability-level conformance cases (distinct from application-level examples):
     - `01_object_spread.ts`: Object spread `{ ...a, ...b }` precedence, property overrides, key enumeration.

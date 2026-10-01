@@ -17,4 +17,4 @@ mod nanbox;
 mod state;
 mod stubs;
 
-pub use dispatch::{console_log, mem_call, mem_call_i32, string_new};
+pub use dispatch::{console_error, console_log, mem_call, mem_call_i32, string_new};

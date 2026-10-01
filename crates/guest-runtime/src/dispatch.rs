@@ -24,6 +24,13 @@ pub extern "C" fn console_log(val: i64) {
 }
 
 #[no_mangle]
+pub extern "C" fn console_error(val: i64) {
+    let state = get_state();
+    let msg = state.get_string(val);
+    crate::io::print_stderr(&format!("{msg}\n"));
+}
+
+#[no_mangle]
 pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
     let state = get_state();
     let name_idx = func_name_id as usize;
@@ -249,6 +256,10 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         let arg = raw_args.last().copied().unwrap_or(0);
         let msg = state.get_string(arg);
         print_stdout(&format!("{msg}\n"));
+    } else if name == "console_error" || name == "error" {
+        let arg = raw_args.last().copied().unwrap_or(0);
+        let msg = state.get_string(arg);
+        crate::io::print_stderr(&format!("{msg}\n"));
     } else if name == "string_concat" || name == "js_add" {
         if raw_args.len() >= 2 {
             let s_a = state.get_string(raw_args[0]);
