@@ -93,7 +93,14 @@
           version = "0.1.0";
           strictDeps = true;
           doCheck = false;
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
+          postInstall = ''
+            mkdir -p "$out/lib"
+            ln -sfn "${guestRuntime}/lib/guest_runtime.wasm" "$out/lib/guest_runtime.wasm"
+            wrapProgram $out/bin/perry-wit \
+              --set-default PERRY_GUEST_RUNTIME "${guestRuntime}/lib/guest_runtime.wasm" \
+              --set-default WASI_WIT_PATH "${wasiWit}"
+          '';
         };
 
         # Example WASIp2 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
@@ -106,7 +113,6 @@
             export WASI_WIT_PATH="${wasiWit}"
             mkdir -p dist
             perry-wit examples/merge_docs.ts \
-              --runtime "${guestRuntime}/lib/guest_runtime.wasm" \
               --wit wit \
               --world merge-docs \
               -o dist/perry_merge_docs.stripped.wasm
@@ -146,6 +152,9 @@
 
           shellHook = ''
             export WASI_WIT_PATH="${wasiWit}"
+            export PERRY_GUEST_RUNTIME="${guestRuntime}/lib/guest_runtime.wasm"
+            mkdir -p artifacts
+            ln -sfn "${guestRuntime}/lib/guest_runtime.wasm" artifacts/guest_runtime.wasm
             if [ ! -e wit/deps ]; then
               mkdir -p wit
               ln -sfn "${wasiWit}" wit/deps
@@ -155,6 +164,7 @@
             echo "node:       $(${pkgs.nodejs}/bin/node --version)"
             echo "rustc:      $(${toolchain}/bin/rustc --version)"
             echo "WASI WIT:   $WASI_WIT_PATH"
+            echo "Runtime:    $PERRY_GUEST_RUNTIME"
             echo "======================================"
           '';
         };

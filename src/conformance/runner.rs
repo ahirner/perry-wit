@@ -318,17 +318,22 @@ fn filter_nix_banner(s: &str) -> String {
     let mut out = Vec::new();
     let mut in_banner = false;
     for line in s.lines() {
-        if line.contains("=== Perry-WIT Hermetic Environment ===") {
+        let trimmed = line.trim();
+        if trimmed.contains("=== Perry-WIT Hermetic Environment ===") {
             in_banner = true;
             continue;
         }
         if in_banner {
-            if line.contains("======================================") {
+            if trimmed.contains("======================================") {
                 in_banner = false;
             }
             continue;
         }
-        if line.contains("warning: Git tree") {
+        if trimmed.starts_with("warning:")
+            || trimmed.starts_with("building '/nix/store")
+            || trimmed.starts_with("evaluating flake")
+            || trimmed.starts_with("copying path '/nix/store")
+        {
             continue;
         }
         out.push(line);

@@ -1,5 +1,6 @@
 /target
 /dist
+/artifacts
 result
 
 # Resolved WASI Preview 2 WIT definitions dynamically sourced from flake

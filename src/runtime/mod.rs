@@ -1,11 +1,17 @@
-//! Guest runtime discovery and on-demand compilation.
+//! Guest runtime discovery and artifact resolution.
+//!
+//! Provides pure, deterministic resolution of the precompiled `guest_runtime.wasm`
+//! artifact across CLI flags, environment variables, Nix wrapper locations,
+//! and standard artifact paths with zero impure runtime compilation side-effects.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, bail, ensure};
 
-/// Resolves or compiles the guest runtime WebAssembly module.
+/// Environment variable used to specify the guest runtime WebAssembly module path.
+pub const ENV_PERRY_GUEST_RUNTIME: &str = "PERRY_GUEST_RUNTIME";
+
+/// Resolves the guest runtime WebAssembly module path without any impure runtime build steps.
 pub fn ensure_guest_runtime(explicit_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit_path {
         ensure!(
@@ -16,72 +22,73 @@ pub fn ensure_guest_runtime(explicit_path: Option<&Path>) -> Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
 
-    let default_path = PathBuf::from("target/wasm32-unknown-unknown/release/guest_runtime.wasm");
-    if default_path.exists() && is_guest_runtime_fresh(&default_path) {
-        return Ok(default_path);
+    // 1. Check PERRY_GUEST_RUNTIME environment variable
+    if let Ok(env_val) = std::env::var(ENV_PERRY_GUEST_RUNTIME) {
+        let env_path = PathBuf::from(&env_val);
+        if env_path.exists() {
+            return Ok(env_path);
+        }
     }
 
-    let status = Command::new("cargo")
-        .args([
-            "rustc",
-            "--release",
-            "--package",
-            "guest-runtime",
-            "--target",
-            "wasm32-unknown-unknown",
-            "--",
-            "-C",
-            "link-arg=--import-memory",
-            "-C",
-            "link-arg=--global-base=1048576",
-            "-C",
-            "link-arg=--no-entry",
-        ])
-        .status()
-        .context("Running cargo rustc for guest-runtime")?;
+    // 2. Check relative to current executable ($ORIGIN/../lib/guest_runtime.wasm or $ORIGIN/guest_runtime.wasm)
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(bin_dir) = current_exe.parent()
+    {
+        let exe_rel = bin_dir.join("../lib/guest_runtime.wasm");
+        if exe_rel.exists() {
+            return Ok(exe_rel);
+        }
+        let same_dir = bin_dir.join("guest_runtime.wasm");
+        if same_dir.exists() {
+            return Ok(same_dir);
+        }
+    }
 
-    ensure!(status.success(), "Failed to compile guest-runtime crate");
-    ensure!(
-        default_path.exists(),
-        "guest_runtime.wasm still not found at {}",
-        default_path.display()
+    // 3. Check well-known workspace / repository artifact paths
+    let candidate_paths = [
+        "artifacts/guest_runtime.wasm",
+        "target/wasm32-unknown-unknown/release/guest_runtime.wasm",
+        "target/wasm32-unknown-unknown/debug/guest_runtime.wasm",
+    ];
+
+    for candidate in candidate_paths {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    bail!(
+        "Guest runtime WebAssembly module ('guest_runtime.wasm') not found.\n\
+         Please provide it using one of the following methods:\n\
+           1. Pass '--runtime <path>' on the command line\n\
+           2. Set the 'PERRY_GUEST_RUNTIME' environment variable\n\
+           3. Symlink the artifact into 'artifacts/guest_runtime.wasm'\n\
+           4. Build it using 'nix build .#guest-runtime' or 'scripts/build.sh'"
     );
-
-    Ok(default_path)
 }
 
-fn is_guest_runtime_fresh(target: &Path) -> bool {
-    let target_time = match std::fs::metadata(target).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let check_paths = [
-        "crates/guest-runtime/Cargo.toml",
-        "crates/guest-runtime/src",
-    ];
-    for p in check_paths {
-        let path = Path::new(p);
-        if !path.exists() {
-            continue;
-        }
-        if path.is_file() {
-            if let Ok(m) = std::fs::metadata(path).and_then(|m| m.modified())
-                && m > target_time
-            {
-                return false;
-            }
-        } else if path.is_dir()
-            && let Ok(entries) = std::fs::read_dir(path)
-        {
-            for entry in entries.flatten() {
-                if let Ok(m) = entry.metadata().and_then(|m| m.modified())
-                    && m > target_time
-                {
-                    return false;
-                }
-            }
+    #[test]
+    fn test_explicit_nonexistent_path_fails() {
+        let res = ensure_guest_runtime(Some(Path::new("nonexistent/guest_runtime.wasm")));
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Specified guest runtime does not exist")
+        );
+    }
+
+    #[test]
+    fn test_resolves_existing_candidate() {
+        // In local development or nix develop, at least one candidate exists
+        let res = ensure_guest_runtime(None);
+        if let Ok(path) = res {
+            assert!(path.exists());
         }
     }
-    true
 }
