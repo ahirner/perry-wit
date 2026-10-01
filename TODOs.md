@@ -40,19 +40,19 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 ---
 
-## Phase 3: The Conformance Evaluation Loop (Node.js vs. WASIp2)
+## Phase 3: CLI Example Component Differential Validation (Node.js vs. WASIp2 CLI)
 
-*Goal: Formally measure and enforce behavioral conformance of promised APIs against native Node.js oracle and WASI Preview 2 host invariants.*
+*Goal: Formally measure and validate end-to-end command execution behaviors and stream outputs of example components compiled to `wasi:cli/command` against native Node.js oracle and WASI Preview 2 host invariants.*
 
 - [x] **3.1. Machine-Readable Capability Catalog (`catalog/capabilities.json` & `src/conformance/catalog.rs`)**
   - [x] Specify formal capability schema:
     - Unique capability IDs, names, tiers (Tier 1 Web Primaries, Tier 2 Node Core, Non-Goals).
     - Support status: `full`, `partial`, `unsupported`.
     - Explicit compatibility domain boundaries, constraints, and invariants.
-    - Test case mapping linking each capability to formal conformance evidence.
+    - Test case mapping linking each capability to formal validation evidence.
   - [x] Implement Rust catalog parser and validator in `src/conformance/catalog.rs` enforcing contract integrity.
-- [x] **3.2. Formal Behavioral Conformance Cases (`tests/conformance/cases/`)**
-  - [x] Implement isolated capability-level conformance cases (distinct from application-level examples):
+- [x] **3.2. Example Component CLI Validation Cases (`tests/conformance/cases/`)**
+  - [x] Implement isolated capability-level validation cases (distinct from application-level examples):
     - `01_object_spread.ts`: Object spread `{ ...a, ...b }` precedence, property overrides, key enumeration.
     - `02_console_streams.ts`: Distinct standard stream routing (`console.log` -> stdout, `console.error` -> stderr).
     - `03_promise_all.ts`: Concurrent promise resolution ordering and value aggregation.
@@ -60,33 +60,45 @@ This checklist prioritizes immediate functional deliverables and eliminates code
     - `05_fetch_failure.ts`: Network connection failure rejection and diagnostic reporting.
     - `06_json_syntax.ts`: Parse error boundary and malformed payload rejection.
 - [x] **3.3. Pure-Rust Differential Equivalence Harness (`src/conformance/runner.rs`)**
-  - [x] Execute each conformance case under reference oracle (`node`) and under Perry (`perry-wit` -> `wasmtime`).
+  - [x] Execute each validation case under reference oracle (`node`) and under Perry (`perry-wit` -> `wasmtime`).
   - [x] Compare execution vectors: exit code, stdout stream, stderr stream, and structured JSON output.
-  - [x] Run automated hermetic mock server for HTTP conformance cases.
-- [x] **3.4. Host Invariants & Conformance Reporting (`src/conformance/report.rs` & `tests/conformance_test.rs`)**
+  - [x] Run automated hermetic mock server for HTTP validation cases.
+- [x] **3.4. Host Invariants & Validation Reporting (`src/conformance/report.rs` & `tests/conformance_test.rs`)**
   - [x] Verify WASI Preview 2 host invariants:
     - Zero resource leaks on completion (clean drop of all streams and pollables).
     - Layered exit code translation: uncaught exceptions map to `wasi:cli/exit` status 1 without host memory corruption.
-  - [x] Generate structured conformance report mapping catalog declarations to executed evidence.
+  - [x] Generate structured validation report mapping catalog declarations to executed evidence.
 
 ---
 
 ## Phase 4: Component Tasks (Exported Functions & Canonical ABI)
 
-*Goal: Support standard TypeScript function exports (`export function runTask(...)`) directly as Component Model exports with typed inputs and outputs according to WIT specifications.*
+*Goal: Support standard TypeScript function exports (`export function runTask(...)`) directly as Component Model exports with typed inputs and outputs according to WIT specifications, enabling direct host task invocation (`wasmtime --invoke`).*
 
-- [ ] **4.1. Export Function Identification & Lowering**
-  - [ ] Detect `ExportNamedDeclaration` in Perry's AST/HIR.
-  - [ ] Map exported TS functions to corresponding exported functions in `world.wit`.
-  - [ ] Emit typed internal wrapper functions converting between JS nanboxed representations and Canonical ABI layouts.
-- [ ] **4.2. Canonical ABI Trampolines & Memory Allocation**
-  - [ ] Synthesize `$cabi_*` entrypoints unpacking typed arguments (strings, records, variants) from linear memory.
-  - [ ] Implement and export `cabi_realloc` for guest memory allocation requested by host callers.
-  - [ ] Lower return values into Canonical ABI result memory and emit `$cabi_post_*` cleanup hooks.
-- [ ] **4.3. Author Example Task Component & Conformance Testing**
-  - [ ] Add `examples/merge_task.ts` taking a structured `MergeInput` record and returning a structured `MergedDoc`.
-  - [ ] Author formal conformance test cases for task invocation with typed argument passing and error returns.
-  - [ ] Verify end-to-end execution directly via Wasmtime component invocation (`wasmtime run --invoke 'run-task(...)'`).
+- [ ] **4.1. Guest Runtime Canonical ABI Memory & String Primitives (`crates/guest-runtime/src/cabi.rs`)**
+  - [ ] Implement `cabi_import_string(ptr: i32, len: i32) -> i64` unpacking UTF-8 slices to nanboxed JS string handles.
+  - [ ] Implement `cabi_export_string(val: i64) -> i32` allocating Canonical ABI 8-byte ret areas `[ptr, len]` and UTF-8 bytes.
+  - [ ] Implement `cabi_export_result_string(val: i64, is_err: i32) -> i32` for `result<string, string>` / variant returns.
+  - [ ] Implement `cabi_import_json(ptr: i32, len: i32) -> i64` and `cabi_export_json(val: i64) -> i32` for structured records.
+  - [ ] Export `cabi_realloc` for guest memory allocation requested by external host callers.
+- [ ] **4.2. WIT Export Inspection & Function Mapping (`src/abi/wit_meta.rs`)**
+  - [ ] Inspect WIT world exports via `wit_parser` to extract exported function signatures (names, params, results).
+  - [ ] Map TypeScript AST/HIR `exported_functions` to corresponding WIT world export functions (handling exact matches and camelCase <-> kebab-case).
+  - [ ] Verify contract compatibility between TypeScript function parameters and WIT function signatures.
+- [ ] **4.3. Canonical ABI Trampoline Synthesizer (`src/abi/trampoline.rs` & `src/compiler/wasi.rs`)**
+  - [ ] Synthesize typed `$cabi_*` entrypoints in core WebAssembly for each matched exported function.
+  - [ ] Unpack parameters from Canonical ABI to nanboxed JS representations.
+  - [ ] Invoke Perry's compiled function index (`__wasm_func_<idx>`).
+  - [ ] Serialize result value into Canonical ABI return area.
+  - [ ] Preserve backwards compatibility for `wasi:cli/run` when `wasi:cli/command` is present.
+- [ ] **4.4. Component Task Examples & Direct Invocation Test Suite (`tests/task_invocation_test.rs`)**
+  - [ ] Author task component `examples/merge_task.ts` taking structured `MergeInput` record / string and returning merged document.
+  - [ ] Add `world task-runner` and `world merge-task` to `wit/world.wit`.
+  - [ ] Author integration test suite testing direct invocation via `wasmtime run --invoke 'run-task'` and typed component execution.
+  - [ ] Verify clean resource drops and error boundary semantics on direct task invocation.
+- [ ] **4.5. Flake & Build Integration**
+  - [ ] Add `exampleMergeTask` package and check to `flake.nix`.
+  - [ ] Update `scripts/build.sh` to compile and verify task components end-to-end.
 
 ---
 
