@@ -2,5 +2,6 @@
 /dist
 result
 
-# Resolved WIT packages are restored from wkg.lock.
+# Resolved WASI Preview 2 WIT definitions dynamically sourced from flake
+wit/deps
 wit/deps/
