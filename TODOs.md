@@ -28,15 +28,15 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: Provide a reproducible, idiomatic Nix environment supplying pinned WASI WIT definitions from Nix store inputs without committing them to git, with `wasmtime >= 48` and `nodejs`.*
 
-- [ ] **2.1. Root `flake.nix` with Modern Toolchain**
-  - [ ] Use `nixpkgs-unstable` to guarantee `wasmtime >= 48.0` and latest `nodejs`.
-  - [ ] Provide devShell with: `rust-bin` (pinned Rust), `wasmtime`, `wasm-tools`, `nodejs`.
-- [ ] **2.2. Dynamic WASI Preview 2 WIT Sourcing**
-  - [ ] Source official WASI Preview 2 WIT definitions as a flake input (e.g. `github:WebAssembly/WASI/v0.2.4` or `v0.2.6`).
-  - [ ] In `shellHook` and build derivations, expose the WIT package directory via an environment variable (`WASI_WIT_PATH`) or standard path mapping.
-  - [ ] Untrack and remove committed `wit/deps/` from the repository; keep git history clean and idiomatic.
-- [ ] **2.3. Single-Command Hermetic Build**
-  - [ ] Verify `nix build` successfully builds the CLI and example components from cold in seconds.
+- [x] **2.1. Root `flake.nix` with Modern Toolchain**
+  - [x] Use `nixpkgs-unstable` to guarantee `wasmtime >= 48.0` (48.0.1) and latest `nodejs` (24.21.0).
+  - [x] Provide devShell with: `rust-bin` (pinned Rust), `wasmtime`, `wasm-tools`, `nodejs`, `wkg`.
+- [x] **2.2. Dynamic WASI Preview 2 WIT Sourcing**
+  - [x] Source official WASI Preview 2 WIT definitions as a flake input (`github:WebAssembly/WASI/v0.2.6`).
+  - [x] In `shellHook` and build derivations, expose the WIT package directory via `WASI_WIT_PATH` with consolidated `package.wit`.
+  - [x] Untrack and git-ignore `wit/deps/` from the repository; dynamically resolve packages in strict topological dependency order.
+- [x] **2.3. Single-Command Hermetic Build**
+  - [x] Verify `nix build` successfully builds the CLI (`.#perry-wit`), guest runtime (`.#guest-runtime`), and example component (`.#example-merge-docs`) hermetically from cold in seconds.
 
 ---
 
