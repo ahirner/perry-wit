@@ -1,179 +1,111 @@
 # perry-wit
 
-`perry-wit` compiles TypeScript directly to native **WebAssembly WASI Preview 2** components using
-[Perry](https://github.com/PerryTS/perry), a pure-Rust in-process module linker, and dynamic WIT contracts.
+`perry-wit` compiles TypeScript ahead-of-time directly into native WebAssembly (WASI Preview 2) components. Rather than bundling dynamic JavaScript interpreters (such as QuickJS or SpiderMonkey), it lowers TypeScript through Perry's compiler pipeline and fuses the resulting module with an in-process static linker.
 
----
-
-## Architecture
-
-Unlike JS-on-Wasm runtimes that embed dynamic bytecode interpreters (QuickJS, SpiderMonkey, or Wasmi) at a cost of large runtime overhead, **perry-wit compiles TypeScript directly to WebAssembly bytecode**.
-Compilation operates with **zero external binary dependencies**.
-
-```
-                       ┌────────────────────────────┐
-                       │          input.ts          │
-                       └─────────────┬──────────────┘
-                                     │
-                perry-parser / perry-hir / perry-codegen-wasm
-                                     │
-                                     ▼
-                       ┌────────────────────────────┐
-                       │   Core WebAssembly Module  │
-                       │   (Perry NaN-boxed ABI)    │
-                       └─────────────┬──────────────┘
-                                     │
-                perry_wit::linker::merge_core_modules
-                (pure-Rust static linker, remapping & resolving
-                 runtime imports to shared linear memory)
-                                     │
-                                     ▼
-       ┌──────────────────────────────────────────────────────────────┐
-       │             WASI Preview 2 Component (Zero Interpreters)     │
-       │                                                              │
-       │   Canonical ABI entry: wasi:cli/run                          │
-       │   Execution: Native Cranelift JIT (No Wasmi / No QuickJS)    │
-       │                                                              │
-       │   Runtime Bridge:                                            │
-       │     - Promise.all([fetch, fetch]) ──► concurrent wasi:http   │
-       │     - Array destructuring         ──► NaN-box index access   │
-       │     - Response.json()             ──► serde_json stream      │
-       │     - Object splatting ({...a})   ──► native object_assign   │
-       │     - console.log                 ──► wasi:cli/stdout        │
-       │     - ...                         ──► wasi:...               │
-       └──────────────────────────────┬───────────────────────────────┘
-                                      │
-                               wasmtime wasip2
-                                      │
-                                      ▼
-                    WIT exports or output via WASIp2 stdout
-```
-
-### Components
-
-1. **Host Compiler CLI (`perry-wit`)**:
-   - `perry-parser`: Parses TypeScript source code into an AST.
-   - `perry-hir`: Lowers AST to Perry High-Level Intermediate Representation.
-   - `perry-codegen-wasm`: Compiles HIR into a Core WebAssembly binary with Perry's NaN-boxed ABI (`string_new`, `mem_call`, `fetch_with_options`, etc.).
-   - Applies HIR rewrites for IIFEs, `NativeMethodCall`, etc.
-   - Optional: Synthesizes `wasi:cli/run` entry point and aligns linear memory.
-2. **Rust In-Process Linker (`perry_wit::linker`)**:
-   - Statically fuses the compiled TypeScript module (`env`) and the guest runtime module (`rt`) in memory.
-   - Eliminates all external linker and Binaryen dependencies.
-   - Remaps function, type, and global indices, binds linear memory, and resolves runtime function calls into direct internal calls.
-3. **Rust Componentization & Stripping (`perry_wit::component`)**:
-   - Embeds WIT interfaces and world declarations into the linked Core Wasm module using `wit-component`.
-   - Dynamically resolves WASI Preview 2 WIT packages in topological order (`io` $\rightarrow$ `random` $\rightarrow$ `clocks` $\rightarrow$ `filesystem` $\rightarrow$ `sockets` $\rightarrow$ `cli` $\rightarrow$ `http`).
-   - Strips debug and producer custom sections via `wasm-encoder`.
-4. **Guest Runtime (`crates/guest-runtime`)**:
-   - Minimal C-ABI runtime module targeting `wasm32-unknown-unknown` with imported linear memory.
-   - Unified handle storage (`JsHandle`) avoiding ID collisions across JSON values, arrays, and in-flight HTTP streams.
-   - Non-blocking `wasi:http/outgoing-handler` dispatch allowing multiple outgoing HTTP requests to run concurrently on the host event loop.
-   - Strict WASI resource drop ordering satisfying Component Model lifetime invariants.
-
----
-
-## Footprint
-
-| Architecture | Approach | Overhead / Runtime Engines |
-| :--- | :--- | :--- |
-| **Componentize-JS** | SpiderMonkey | Heavy JS engine |
-| **Javy** | QuickJS | In-wasm JS interpreter |
-| **perry-wit (if interpreted)** | Wasmi | In-wasm WebAssembly interpreter |
-| **perry-wit (current)** | **Native Ahead-of-Time** | **Zero interpreters, direct native code** |
+For runtime boundaries, compilation pipeline details, and conformance specifications, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
 ## Environment
 
-A hermetic devShell is defined in `flake.nix`. Run:
+A development environment is defined in `flake.nix`:
 
 ```bash
 nix develop
 ```
 
-This supplies all required dependencies in your shell:
-- `wasmtime`
-- `node`
-- `rustc` with `wasm32-unknown-unknown` and `wasm32-wasip2` targets
-- `wasm-tools`
-- WASI Preview 2 WIT definitions dynamically sourced via flake input and exposed via `$WASI_WIT_PATH` without vendored files.
-
-All build and test commands below can be executed directly within `nix develop` (or locally if the tools are already installed).
+This supplies `wasmtime`, `node`, `rustc` (with `wasm32-unknown-unknown`), `wasm-tools`, and dynamically resolved WASI Preview 2 WIT definitions via `$WASI_WIT_PATH`.
 
 ---
 
 ## Usage
 
-### Single-Command Hermetic Build
+### Build
 
-Build the CLI, guest runtime, or example component via Crane and Nix without setup:
+Build components and tools using Nix:
 
 ```bash
-# Build the perry-wit CLI binary
+# Build the perry-wit CLI
 nix build .#perry-wit
 
-# Build the precompiled guest runtime
+# Build the guest runtime
 nix build .#guest-runtime
 
-# Build the example WASIp2 component hermetically
+# Build the example component
 nix build .#example-merge-docs
 ```
 
-The compiled component is written to `result/lib/perry_merge_docs.stripped.wasm`.
-
-### Integration Tests
-
-Run the end-to-end integration test (starts the mock HTTP server, tests network failure handling, and verifies concurrent HTTP fetching and merging):
+Or build locally with Cargo:
 
 ```bash
-./scripts/test_e2e.sh
+cargo build --release
 ```
 
-### Unit Tests
+### Compile
 
-Run the pure-Rust linker and componentization tests:
+Compile a TypeScript script to a WASI Preview 2 component:
 
 ```bash
+perry-wit examples/merge_docs.ts -o dist/my_component.wasm
+```
+
+Pass `--core-only` to output unlinked Core WebAssembly without component wrapping, or `--wit <PATH>` and `--world <NAME>` to specify custom WIT contracts.
+
+### Run
+
+Execute the generated component with Wasmtime:
+
+```bash
+wasmtime run -S http=y -S inherit-network=y dist/my_component.wasm
+```
+
+### Test
+
+Run unit tests, end-to-end integration tests, and flake validation:
+
+```bash
+# Unit and linker tests
 cargo test
-```
 
-### Flake Checks
+# End-to-end HTTP and splatting test
+./scripts/test_e2e.sh
 
-Verify all derivations, formatting, and flake contracts:
-
-```bash
+# Flake build and format checks
 nix flake check
 ```
 
-### CLI
+---
 
-View CLI options:
+## Authoring
 
-```bash
-cargo run --bin perry-wit -- --help
-# or:
-perry-wit --help
+The authoring workflow for custom components provides instant type safety and tooling:
+
+```
+perry-wit/
+├── flake.nix             # Toolchain & devShell definition
+├── nix/
+│   └── wasi.nix          # Pinned WASI Preview 2 WIT derivation
+├── sdk/
+│   ├── default.nix       # SDK packaging derivation
+│   ├── package.json      # @perry/sdk npm package
+│   ├── lib/
+│   │   ├── generator.ts  # Generates .d.ts directly from world.wit
+│   │   ├── shims.ts      # Node.js shims for local testing
+│   │   └── harness.ts    # Dual-conformance test runner
+│   └── templates/
+│       ├── tsconfig.json # Base TypeScript configuration
+│       └── task.ts       # Starter template
 ```
 
-```text
-Usage: perry-wit [OPTIONS] <input.ts>
+1. Define or import a `world.wit`.
+2. Run `nix develop`:
+   - Automatically parses `world.wit` and generates exact TypeScript definition files in `.perry/types/`.
+   - Links `@perry/sdk` shims for local Node.js testing.
+   - Provides `perry-wit`, `wasm-tools`, `wasmtime`, `nodejs`, and `tsc` directly in `$PATH`.
+3. Run `tsc --noEmit` to validate types against the WIT contract.
+4. Run `perry-wit <task.ts> -o dist/<task>.wasm` to compile the code to a verified WASIp2 component.
+5. Builtin [examples](./examples) follow this contract.
 
-Options:
-  -o, --out <PATH>      Output WebAssembly file path
-      --runtime <PATH>  Guest runtime WASM module path
-      --wit <PATH>      WIT definition directory (default: 'wit')
-      --world <NAME>    WIT world name to target (default: 'merge-docs')
-      --core-only       Output linked Core WebAssembly without component encoding
-  -h, --help            Print help information
-```
+## Contributing
 
-Compile and run a TypeScript file:
-
-```bash
-# Compile to a WASIp2 component
-perry-wit examples/merge_docs.ts -o dist/my_component.wasm
-
-# Execute component with wasmtime
-wasmtime run -S http=y -S inherit-network=y dist/my_component.wasm
-```
+Develop inside `nix develop` to ensure matching toolchain versions across dependencies. Format all code with `cargo fmt --all` and ensure both `cargo test` and `nix flake check` pass cleanly before submitting changes.

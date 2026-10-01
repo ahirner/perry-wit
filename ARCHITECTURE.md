@@ -213,7 +213,7 @@ When compiling this module, `perry-wit`:
 4. Lowers the returned JavaScript object into the Canonical ABI memory layout (`result<fetch-response, string>`) and returns it to the host caller.
 5. Emits the corresponding `$cabi_post_handle_request` cleanup hook to release temporary arena memory once the host has consumed the result.
 
-This enables any standard TypeScript function to be orchestrated as an isolated, typed task within host engines such as `example-host`.
+This enables any standard TypeScript function to be orchestrated as an isolated, typed task within host engines.
 
 ---
 
@@ -231,36 +231,3 @@ This enables any standard TypeScript function to be orchestrated as an isolated,
 At runtime in `example-host`, modular components link dynamically:
 - Either via native Rust host providers satisfying the `perry:runtime` WIT world directly in host memory.
 - Or via `wac plug task.wasm --plug guest-runtime.wasm` during deployment.
-
----
-
-## 6. The Perry SDK & Zero-Config Nix Developer Experience
-
-The authoring workflow provides instant type safety and tooling without requiring manual environment setup:
-
-```
-perry-wit/
-├── flake.nix             # Hermetic toolchain & devShell definition
-├── nix/
-│   └── wasi.nix          # Pinned WASI Preview 2 WIT derivation
-├── sdk/
-│   ├── default.nix       # SDK packaging derivation
-│   ├── package.json      # @perry/sdk npm package
-│   ├── lib/
-│   │   ├── generator.ts  # Generates .d.ts directly from world.wit
-│   │   ├── shims.ts      # Node.js shims for local testing
-│   │   └── harness.ts    # Dual-conformance test runner
-│   └── templates/
-│       ├── tsconfig.json # Base TypeScript configuration
-│       └── task.ts       # Starter template
-```
-
-### The Developer Workflow
-1. An author defines or imports a `world.wit`.
-2. Running `nix develop` (or `nix-shell`):
-   - Automatically parses `world.wit` and generates exact TypeScript definition files in `.perry/types/`.
-   - Links `@perry/sdk` shims for local Node.js testing.
-   - Provides `perry-wit`, `wasm-tools`, `wasmtime` (>= 48), `nodejs`, and `tsc` directly in `$PATH`.
-3. Running `tsc --noEmit` validates type safety against the WIT contract inside VSCode / Neovim.
-4. Running `perry-wit build` compiles the code to a verified WASIp2 component.
-5. All builtin examples (`examples/merge_docs`, `examples/task_record`) are built and verified strictly through this SDK pipeline.
