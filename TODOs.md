@@ -106,14 +106,24 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: An author provides only a `world.wit`; entering the Nix shell automatically generates TypeScript declarations (`.d.ts`), configures `tsconfig.json`, and enables instant IDE type-checking.*
 
-- [ ] **5.1. WIT to TypeScript Declaration Generator (`src/sdk/codegen.rs` & `perry-wit gen-types`)**
+- [ ] **5.1. WIT to TypeScript Declaration & Config Generator (`src/sdk/codegen.rs` & `perry-wit gen-types`)**
   - [ ] Implement pure-Rust AST/type generator translating `wit_parser::Resolve` types into idiomatic TypeScript declarations (`.perry/types/world.d.ts`).
   - [ ] Map WIT primitive types, records to TS interfaces, variants to discriminated unions, lists/options to TS arrays/nullables, and exported functions to function signatures.
+  - [ ] Implement `perry-wit gen-types` CLI subcommand with `--wit`, `--world`, and `--out` options.
   - [ ] Generate default `tsconfig.json` pointing to generated definitions with strict type checking enabled.
-- [ ] **5.2. Wire DevShell Automation & Flake Sync Check**
+- [ ] **5.2. Consumer Component Author Template (`template/`) & Flake Template Export**
+  - [ ] Create `template/` with `world.wit`, `src/index.ts`, `tsconfig.json`, and consumer `flake.nix`.
+  - [ ] Export `templates.default` in root `flake.nix` for `nix flake init -t github:<ORG-TBD>/perry-wit`.
+  - [ ] Export `lib.buildComponent` in root `flake.nix` for declarative component packaging in consumer flakes.
+- [ ] **5.3. Wire DevShell Automation & Flake Sync Check**
   - [ ] In `flake.nix`, configure `shellHook` to detect `world.wit`, run `perry-wit gen-types`, link `tsconfig.json`, and expose tooling in `$PATH`.
+  - [ ] Add `pkgs.typescript` to `devShells.default` for instant `tsc` verification.
   - [ ] Provide pre-commit / flake check (`checks.perry-wit-sdk-sync`) validating that generated TypeScript definitions remain in sync with WIT definitions.
-- [ ] **5.3. Validate Builtin Examples & SDK Integration Test Suite (`tests/sdk_test.rs`)**
+- [ ] **5.4. Validate Builtin Examples & SDK Integration Test Suite (`tests/sdk_test.rs`)**
   - [ ] Author `tests/sdk_test.rs` running SDK generation on `wit/world.wit` and verifying emitted declarations.
   - [ ] Run `tsc --noEmit` on all examples inside the Nix shell to prove zero-error static typing against generated WIT contracts.
+- [ ] **5.5. Architecture & Documentation for Consumer Developers**
+  - [ ] Document zero-config development workflow in `README.md` and `ARCHITECTURE.md`.
+  - [ ] Suggest reusable concepts and future capability expansions.
+
 
