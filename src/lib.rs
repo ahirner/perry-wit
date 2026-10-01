@@ -3,6 +3,7 @@
 
 pub mod compiler;
 pub mod component;
+pub mod conformance;
 pub mod linker;
 pub mod runtime;
 pub mod strip;

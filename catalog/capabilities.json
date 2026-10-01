@@ -1,0 +1,158 @@
+{
+  "$schema": "./schema.json",
+  "version": "0.1.0",
+  "description": "Formal capability catalog for perry-wit AOT TypeScript compiler targeting WASI Preview 2",
+  "tiers": [
+    {
+      "id": "tier-1-web-primaries",
+      "name": "Tier 1: Web Standard Primaries",
+      "description": "Universal web and ECMAScript primitives available without environment-specific imports"
+    },
+    {
+      "id": "tier-2-node-core",
+      "name": "Tier 2: Node Core Builtins",
+      "description": "Node.js platform primitives mapped to WASI Preview 2 host capabilities"
+    },
+    {
+      "id": "non-goals",
+      "name": "Non-Goals",
+      "description": "Features explicitly excluded from AOT WebAssembly compilation"
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "web.object_spread",
+      "name": "Object Spread Operator",
+      "tier": "tier-1-web-primaries",
+      "support": "full",
+      "domain": "Shallow object property merging ({ ...a, ...b }) with right-to-left property override semantics",
+      "invariants": [
+        "Evaluates object operands left-to-right",
+        "Produces a new distinct object identity",
+        "Overwrites keys present in earlier objects with keys from later objects",
+        "Preserves string, numeric, boolean, array, and nested object property values"
+      ],
+      "differences": [
+        "Executed natively via guest runtime handle table and NaN-boxing rather than prototype lookups"
+      ],
+      "conformance": [
+        "tests/conformance/cases/01_object_spread.ts"
+      ]
+    },
+    {
+      "id": "web.console",
+      "name": "Console Stream Routing",
+      "tier": "tier-1-web-primaries",
+      "support": "full",
+      "domain": "Writing formatted text to standard I/O streams",
+      "invariants": [
+        "console.log writes UTF-8 text to WASI stdout descriptor with a trailing newline",
+        "console.error writes UTF-8 text to WASI stderr descriptor with a trailing newline",
+        "Writes are immediately flushed to the host stream"
+      ],
+      "differences": [
+        "Supports string primitives directly; object inspection formats via JSON representation"
+      ],
+      "conformance": [
+        "tests/conformance/cases/02_console_streams.ts"
+      ]
+    },
+    {
+      "id": "web.promise_all",
+      "name": "Promise.all Concurrency",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "Concurrent dispatch and collection of multiple asynchronous operations",
+      "invariants": [
+        "Dispatches all operand promises concurrently without sequential blocking",
+        "Resolves with an array of resolved values preserving the original input order",
+        "Fails fast upon the first rejected promise"
+      ],
+      "differences": [
+        "Cooperative polling on WASIp2 event loop via wasi:io/poll rather than a JS microtask queue"
+      ],
+      "conformance": [
+        "tests/conformance/cases/03_promise_all.ts"
+      ]
+    },
+    {
+      "id": "web.fetch",
+      "name": "global.fetch",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "Asynchronous HTTP network requests using wasi:http/outgoing-handler",
+      "invariants": [
+        "Dispatches HTTP GET and POST requests to valid absolute URLs",
+        "Returns a Promise resolving to a Response handle",
+        "Rejects on connection refusal, DNS failure, or network timeout without crashing host"
+      ],
+      "differences": [
+        "Does not support loopback redirects, custom CA stores, or WebSocket upgrades"
+      ],
+      "conformance": [
+        "tests/conformance/cases/04_fetch_json.ts",
+        "tests/conformance/cases/05_fetch_failure.ts"
+      ]
+    },
+    {
+      "id": "web.response_json",
+      "name": "Response.prototype.json",
+      "tier": "tier-1-web-primaries",
+      "support": "full",
+      "domain": "Consuming HTTP response body stream and parsing UTF-8 JSON into typed structures",
+      "invariants": [
+        "Streams incoming body chunks from wasi:http input-stream",
+        "Parses valid JSON objects, arrays, strings, numbers, and booleans",
+        "Rejects the returned Promise with a SyntaxError when body is malformed JSON"
+      ],
+      "differences": [
+        "Parsed structures are held in guest runtime handles and can be directly splatted or serialized"
+      ],
+      "conformance": [
+        "tests/conformance/cases/04_fetch_json.ts",
+        "tests/conformance/cases/06_json_syntax.ts"
+      ]
+    },
+    {
+      "id": "node.process_exit",
+      "name": "process.exit",
+      "tier": "tier-2-node-core",
+      "support": "full",
+      "domain": "Process termination with an explicit numeric exit code",
+      "invariants": [
+        "Immediately halts execution and propagates code to wasi:cli/exit@0.2.x",
+        "Code 0 denotes success; non-zero codes denote failure"
+      ],
+      "differences": [
+        "Does not invoke Node beforeExit or exit listener hooks"
+      ],
+      "conformance": [
+        "tests/conformance/cases/05_fetch_failure.ts"
+      ]
+    },
+    {
+      "id": "lang.eval",
+      "name": "Dynamic Code Evaluation (eval / new Function)",
+      "tier": "non-goals",
+      "support": "unsupported",
+      "domain": "Runtime evaluation of dynamic JavaScript strings",
+      "invariants": [],
+      "differences": [
+        "Incompatible with AOT compilation directly to WebAssembly bytecode without embedded interpreter"
+      ],
+      "conformance": []
+    },
+    {
+      "id": "node.child_process",
+      "name": "Child Process Spawning",
+      "tier": "non-goals",
+      "support": "unsupported",
+      "domain": "Spawning arbitrary OS processes via fork / exec",
+      "invariants": [],
+      "differences": [
+        "WASI Preview 2 does not permit unconstrained host process spawning inside the sandbox"
+      ],
+      "conformance": []
+    }
+  ]
+}

@@ -44,6 +44,7 @@
         commonFilter = path: type:
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
+          (pkgs.lib.hasSuffix ".json" path) ||
           (pkgs.lib.hasSuffix ".toml" path) ||
           (pkgs.lib.hasSuffix ".lock" path) ||
           (craneLib.filterCargoSources path type);
