@@ -1,0 +1,8 @@
+{
+  "id": "doc-alpha",
+  "name": "Component Document",
+  "category": "wasm-preview2",
+  "version": 1,
+  "draft": true,
+  "description": "Initial draft compiled with Perry TypeScript"
+}

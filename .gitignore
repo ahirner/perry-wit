@@ -1,0 +1,6 @@
+/target
+/dist
+result
+
+# Resolved WIT packages are restored from wkg.lock.
+wit/deps/

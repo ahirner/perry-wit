@@ -1,0 +1,12 @@
+{
+  "id": "doc-alpha",
+  "version": 2,
+  "draft": false,
+  "author": "WebAssembly Community Group",
+  "tags": [
+    "perry",
+    "wasip2",
+    "wit"
+  ],
+  "verified": true
+}
