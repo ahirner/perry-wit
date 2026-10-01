@@ -7,7 +7,7 @@ DIST_DIR="$ROOT_DIR/dist"
 
 cd "$ROOT_DIR"
 
-if [[ ! -d "$ROOT_DIR/wit/deps" ]]; then
+if [[ ! -e "$ROOT_DIR/wit/deps" && -z "${WASI_WIT_PATH:-}" ]]; then
   echo "==> Restoring WIT dependencies from wkg.lock via wkg..."
   if command -v wkg >/dev/null 2>&1; then
     wkg wit fetch --config "$ROOT_DIR/wkg-config.toml"
