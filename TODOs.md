@@ -81,10 +81,10 @@ This checklist prioritizes immediate functional deliverables and eliminates code
   - [x] Implement `cabi_export_result_string(val: i64, is_err: i32) -> i32` for `result<string, string>` / variant returns.
   - [x] Implement `cabi_import_json(ptr: i32, len: i32) -> i64` and `cabi_export_json(val: i64) -> i32` for structured records.
   - [x] Export `cabi_realloc` for guest memory allocation requested by external host callers.
-- [ ] **4.2. WIT Export Inspection & Function Mapping (`src/abi/wit_meta.rs`)**
-  - [ ] Inspect WIT world exports via `wit_parser` to extract exported function signatures (names, params, results).
-  - [ ] Map TypeScript AST/HIR `exported_functions` to corresponding WIT world export functions (handling exact matches and camelCase <-> kebab-case).
-  - [ ] Verify contract compatibility between TypeScript function parameters and WIT function signatures.
+- [x] **4.2. WIT Export Inspection & Function Mapping (`src/abi/wit_meta.rs`)**
+  - [x] Inspect WIT world exports via `wit_parser` to extract exported function signatures (names, params, results).
+  - [x] Map TypeScript AST/HIR `exported_functions` to corresponding WIT world export functions (handling exact matches and camelCase <-> kebab-case).
+  - [x] Verify contract compatibility between TypeScript function parameters and WIT function signatures.
 - [ ] **4.3. Canonical ABI Trampoline Synthesizer (`src/abi/trampoline.rs` & `src/compiler/wasi.rs`)**
   - [ ] Synthesize typed `$cabi_*` entrypoints in core WebAssembly for each matched exported function.
   - [ ] Unpack parameters from Canonical ABI to nanboxed JS representations.
