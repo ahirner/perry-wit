@@ -91,11 +91,11 @@ This checklist prioritizes immediate functional deliverables and eliminates code
   - [x] Invoke Perry's compiled function index (`__wasm_func_<idx>`).
   - [x] Serialize result value into Canonical ABI return area.
   - [x] Preserve backwards compatibility for `wasi:cli/run` when `wasi:cli/command` is present.
-- [ ] **4.4. Component Task Examples & Direct Invocation Test Suite (`tests/task_invocation_test.rs`)**
-  - [ ] Author task component `examples/merge_task.ts` taking structured `MergeInput` record / string and returning merged document.
-  - [ ] Add `world task-runner` and `world merge-task` to `wit/world.wit`.
-  - [ ] Author integration test suite testing direct invocation via `wasmtime run --invoke 'run-task'` and typed component execution.
-  - [ ] Verify clean resource drops and error boundary semantics on direct task invocation.
+- [x] **4.4. Component Task Examples & Direct Invocation Test Suite (`tests/task_invocation_test.rs`)**
+  - [x] Author task component `examples/merge_task.ts` taking structured `MergeInput` record / string and returning merged document.
+  - [x] Add `world task-runner` and `world merge-task` to `wit/world.wit`.
+  - [x] Author integration test suite testing direct invocation via `wasmtime run --invoke 'run-task'` and typed component execution.
+  - [x] Verify clean resource drops and error boundary semantics on direct task invocation.
 - [ ] **4.5. Flake & Build Integration**
   - [ ] Add `exampleMergeTask` package and check to `flake.nix`.
   - [ ] Update `scripts/build.sh` to compile and verify task components end-to-end.

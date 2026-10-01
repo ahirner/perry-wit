@@ -204,4 +204,18 @@ mod tests {
         assert!(exports.has_cli_command);
         assert!(exports.functions.is_empty());
     }
+
+    #[test]
+    fn test_extract_world_exports_job_runner() {
+        let exports = extract_world_exports(Path::new("wit"), Some("task-runner")).unwrap();
+        assert_eq!(exports.world_name, "task-runner");
+        assert!(!exports.has_cli_command);
+        assert_eq!(exports.functions.len(), 1);
+        let func = &exports.functions[0];
+        assert_eq!(func.name, "run-task");
+        assert_eq!(func.kebab_name, "run-task");
+        assert_eq!(func.params.len(), 1);
+        assert_eq!(func.params[0].1, AbiType::String);
+        assert_eq!(func.result, AbiType::String);
+    }
 }

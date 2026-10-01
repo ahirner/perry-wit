@@ -69,18 +69,19 @@ pub fn synthesize_trampolines(
     let discovered =
         discover_module_exports(wasm_bytes).context("discovering exports from merged core wasm")?;
 
-    // Determine the minimum user func index from __wasm_func_<idx>
-    let mut user_func_indices: Vec<u32> = discovered
+    // In Perry's compiled wasm, user functions are exported as __wasm_func_{raw_id}.
+    // The first __wasm_func_ is __init_strings (pos 0).
+    // Subsequent __wasm_func_ are user functions in hir.functions order (pos 1 + i).
+    let mut perry_raw_ids: Vec<u32> = discovered
         .user_functions
         .keys()
         .filter_map(|k| k.strip_prefix("__wasm_func_")?.parse::<u32>().ok())
         .collect();
-    user_func_indices.sort_unstable();
+    perry_raw_ids.sort_unstable();
 
     let mut mapped_functions = Vec::new();
 
     for (ts_name, fid) in hir_exported_functions {
-        // Find matching WIT export
         if let Some(wit_fn) = wit_exports
             .functions
             .iter()
@@ -89,7 +90,10 @@ pub fn synthesize_trampolines(
                 .iter()
                 .filter(|f| !f.is_async)
                 .position(|f| f.id == *fid)
-            && let Some(&wasm_func_idx) = user_func_indices.get(pos)
+            && let Some(&raw_id) = perry_raw_ids.get(1 + pos)
+            && let Some(&wasm_func_idx) = discovered
+                .user_functions
+                .get(&format!("__wasm_func_{raw_id}"))
         {
             mapped_functions.push(MappedExportFunction {
                 ts_name: ts_name.clone(),
@@ -102,7 +106,6 @@ pub fn synthesize_trampolines(
     let wat = wasmprinter::print_bytes(wasm_bytes)
         .map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
 
-    // Ensure memory has enough pages for guest runtime (at least 32 pages = 2MB)
     let mut wat = wat.replace("(memory (;0;) 2)", "(memory (;0;) 32)");
 
     let last_paren = wat
