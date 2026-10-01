@@ -231,3 +231,78 @@ This enables any standard TypeScript function to be orchestrated as an isolated,
 At runtime in `example-host`, modular components link dynamically:
 - Either via native Rust host providers satisfying the `perry:runtime` WIT world directly in host memory.
 - Or via `wac plug task.wasm --plug guest-runtime.wasm` during deployment.
+
+---
+
+## 6. Zero-Config Consumer Authoring Architecture & Type Synchronization
+
+To give component authors an ergonomic workflow where they can simply run `nix develop` and immediately start writing type-safe code, `perry-wit` implements an AST-based type generator and automated Nix integration:
+
+```
+  ┌────────────────────────────────────────────────────────┐
+  │                 WIT World Definition                   │
+  │                  (wit/world.wit)                       │
+  └───────────────────────────┬────────────────────────────┘
+                              │
+                    [1. Pure Rust AST Parser]
+                    (wit-parser / resolve_wit)
+                              │
+  ┌───────────────────────────▼────────────────────────────┐
+  │                SDK Code Generator (AST)                │
+  │                 (src/sdk/codegen.rs)                   │
+  └───────────────────────────┬────────────────────────────┘
+                              │
+               [2. TypeScript Declarations (.d.ts)]
+                              │
+  ┌───────────────────────────▼────────────────────────────┐
+  │              .perry/types/world.d.ts                   │
+  │   - Interface definitions for WIT records              │
+  │   - Discriminated unions for WIT variants/enums        │
+  │   - Strongly-typed exported function declarations      │
+  │   - Namespaced imported host interfaces                │
+  └───────────────────────────┬────────────────────────────┘
+                              │
+               [3. DevShell / CI Synchronization]
+                              │
+  ┌───────────────────────────▼────────────────────────────┐
+  │       IDE Type Checking (tsc) & Hermetic Sandbox       │
+  │   - tsconfig.json automatically maps typeRoots         │
+  │   - nix flake check runs sdkSyncCheck                  │
+  │   - lib.buildComponent compiles hermetically           │
+  └────────────────────────────────────────────────────────┘
+```
+
+### Type Lowering Rules
+
+The pure Rust AST generator lowers WIT types into TypeScript according to strict semantic mapping:
+- **Primitives:** `string`, `bool`, `u8`..`u32`, `s8`..`s32`, `f32`, `f64` map directly to `string`, `boolean`, and `number`. Large integers `u64` and `s64` map to `bigint`.
+- **Records:** Lower to `export interface <Name> { ... }`.
+- **Variants:** Lower to discriminated unions `export type <Name> = { tag: "foo", value: ... } | ...`.
+- **Enums:** Lower to string union literals `export type <Name> = "foo" | "bar"`.
+- **Options and Lists:** Lower to `T | null | undefined` and `Array<T>` (or `Uint8Array` for `list<u8>`).
+- **Exported Functions:** Generate top-level function declarations (`export declare function foo(...): ...`) and companion type aliases (`export type FooFn = (...) => ...`).
+
+### Hermetic CI Verification
+
+To guarantee that component implementations never desynchronize from their declared WIT contracts:
+- `checks.sdkSyncCheck`: Regenerates `.perry/types/world.d.ts` in an isolated Nix sandbox and executes `tsc --noEmit`. Any mismatch or missing export fails CI immediately.
+- `lib.buildComponent`: Provides a declarative Nix builder that automatically coordinates WIT resolution, TypeScript compilation, and component wrapping in consumer flakes.
+
+---
+
+## 7. Reusable Concepts & Future Capability Expansions
+
+To expand the capabilities of `perry-wit` while maximizing code reuse across the stack:
+
+1. **Unified Dual-Sided Host/Guest Bindings:**
+   - *Current State:* Guest declarations are generated via `perry-wit gen-types`, while host runners manually bind components or use `wasmtime::component::bindgen!`.
+   - *Expansion:* Provide a unified CLI and library module that emits both the TypeScript guest contract (`.d.ts`) and the Rust host adapter structs from the same WIT package. This eliminates contract divergence between host runtimes (like `example-host`) and guest components.
+
+2. **Async Component Model (`cm-async`) & Stream Lowering:**
+   - *Current State:* Task functions are synchronous or block synchronously on WASI HTTP polling.
+   - *Expansion:* Lower JavaScript `Promise<T>` and `AsyncIterable<T>` into native Component Model `future<T>` and `stream<T>`. This allows component tasks to pipe I/O streams directly between components without buffering large payloads in guest memory.
+
+3. **Modular Capability Slices:**
+   - *Current State:* The guest runtime adapter bundles standard I/O and HTTP into `guest_runtime.wasm`.
+   - *Expansion:* Split runtime capabilities into composable feature slices (`perry:http`, `perry:kv`, `perry:blob`). Consumer components declare only the capability slices they need in their `world.wit`, and `buildComponent` links only the required runtime slices, reducing component size to 5–15 KB.
+

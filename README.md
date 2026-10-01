@@ -76,36 +76,47 @@ nix flake check
 
 ---
 
-## Authoring
+## Authoring Components
 
-The authoring workflow for custom components provides instant type safety and tooling:
+Create a new TypeScript WebAssembly component project from the template:
 
-```
-perry-wit/
-├── flake.nix             # Toolchain & devShell definition
-├── nix/
-│   └── wasi.nix          # Pinned WASI Preview 2 WIT derivation
-├── sdk/
-│   ├── default.nix       # SDK packaging derivation
-│   ├── package.json      # @perry/sdk npm package
-│   ├── lib/
-│   │   ├── generator.ts  # Generates .d.ts directly from world.wit
-│   │   ├── shims.ts      # Node.js shims for local testing
-│   │   └── harness.ts    # Dual-conformance test runner
-│   └── templates/
-│       ├── tsconfig.json # Base TypeScript configuration
-│       └── task.ts       # Starter template
+```bash
+nix flake init -t github:<ORG-TBD>/perry-wit
 ```
 
-1. Define or import a `world.wit`.
-2. Run `nix develop`:
-   - Automatically parses `world.wit` and generates exact TypeScript definition files in `.perry/types/`.
-   - Links `@perry/sdk` shims for local Node.js testing.
-   - Provides `perry-wit`, `wasm-tools`, `wasmtime`, `nodejs`, and `tsc` directly in `$PATH`.
-3. Run `tsc --noEmit` to validate types against the WIT contract.
-4. Run `perry-wit <task.ts> -o dist/<task>.wasm` to compile the code to a verified WASIp2 component.
-5. Builtin [examples](./examples) follow this contract.
+Or explore the zero-config development shell in any component repository:
+
+```bash
+nix develop
+```
+
+When entering `nix develop`:
+- `perry-wit gen-types` runs automatically if a `wit/` directory is present, emitting `.perry/types/world.d.ts`.
+- `tsconfig.json` links `.perry/types/` for immediate IDE autocompletion and type safety.
+- `perry-wit`, `tsc`, `wasmtime`, and `wasm-tools` are placed directly in `$PATH`.
+
+### Type Checking & Building
+
+Validate static types and build the component:
+
+```bash
+# Validate TypeScript implementation matches the WIT contract
+tsc --noEmit
+
+# Compile directly with the CLI
+perry-wit src/index.ts --wit wit --world task -o dist/my_task.wasm
+
+# Or package hermetically inside Nix via lib.buildComponent
+nix build
+```
+
+You can also run type generation standalone:
+
+```bash
+perry-wit gen-types --wit wit --world task -o .perry/types
+```
 
 ## Contributing
 
 Develop inside `nix develop` to ensure matching toolchain versions across dependencies. Format all code with `cargo fmt --all` and ensure both `cargo test` and `nix flake check` pass cleanly before submitting changes.
+

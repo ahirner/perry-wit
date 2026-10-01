@@ -122,8 +122,8 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 - [x] **5.4. Validate Builtin Examples & SDK Integration Test Suite (`tests/sdk_test.rs`)**
   - [x] Author `tests/sdk_test.rs` running SDK generation on `wit/world.wit` and verifying emitted declarations.
   - [x] Run `tsc --noEmit` on all examples inside the Nix shell to prove zero-error static typing against generated WIT contracts.
-- [ ] **5.5. Architecture & Documentation for Consumer Developers**
-  - [ ] Document zero-config development workflow in `README.md` and `ARCHITECTURE.md`.
-  - [ ] Suggest reusable concepts and future capability expansions.
+- [x] **5.5. Architecture & Documentation for Consumer Developers**
+  - [x] Document zero-config development workflow in `README.md` and `ARCHITECTURE.md`.
+  - [x] Suggest reusable concepts and future capability expansions.
 
 
