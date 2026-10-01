@@ -22,6 +22,8 @@ fn main() {
                         "/doc2.json",
                         fs::read_to_string("examples/doc2.json").unwrap(),
                     )
+                } else if req.contains("GET /invalid.json") {
+                    ("/invalid.json", "{ this is malformed json".to_string())
                 } else {
                     ("/", "Not Found".to_string())
                 };

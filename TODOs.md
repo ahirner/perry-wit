@@ -51,39 +51,42 @@ This checklist prioritizes immediate functional deliverables and eliminates code
     - Explicit compatibility domain boundaries, constraints, and invariants.
     - Test case mapping linking each capability to formal conformance evidence.
   - [x] Implement Rust catalog parser and validator in `src/conformance/catalog.rs` enforcing contract integrity.
-- [ ] **3.2. Formal Behavioral Conformance Cases (`tests/conformance/cases/`)**
-  - [ ] Implement isolated capability-level conformance cases (distinct from application-level examples):
+- [x] **3.2. Formal Behavioral Conformance Cases (`tests/conformance/cases/`)**
+  - [x] Implement isolated capability-level conformance cases (distinct from application-level examples):
     - `01_object_spread.ts`: Object spread `{ ...a, ...b }` precedence, property overrides, key enumeration.
     - `02_console_streams.ts`: Distinct standard stream routing (`console.log` -> stdout, `console.error` -> stderr).
     - `03_promise_all.ts`: Concurrent promise resolution ordering and value aggregation.
     - `04_fetch_json.ts`: HTTP GET response streaming, status check, and `.json()` structured object decoding.
     - `05_fetch_failure.ts`: Network connection failure rejection and diagnostic reporting.
     - `06_json_syntax.ts`: Parse error boundary and malformed payload rejection.
-- [ ] **3.3. Pure-Rust Differential Equivalence Harness (`src/conformance/runner.rs`)**
-  - [ ] Execute each conformance case under reference oracle (`node`) and under Perry (`perry-wit` -> `wasmtime`).
-  - [ ] Compare execution vectors: exit code, stdout stream, stderr stream, and structured JSON output.
-  - [ ] Run automated hermetic mock server for HTTP conformance cases.
-- [ ] **3.4. Host Invariants & Conformance Reporting (`src/conformance/report.rs` & `tests/conformance_test.rs`)**
-  - [ ] Verify WASI Preview 2 host invariants:
+- [x] **3.3. Pure-Rust Differential Equivalence Harness (`src/conformance/runner.rs`)**
+  - [x] Execute each conformance case under reference oracle (`node`) and under Perry (`perry-wit` -> `wasmtime`).
+  - [x] Compare execution vectors: exit code, stdout stream, stderr stream, and structured JSON output.
+  - [x] Run automated hermetic mock server for HTTP conformance cases.
+- [x] **3.4. Host Invariants & Conformance Reporting (`src/conformance/report.rs` & `tests/conformance_test.rs`)**
+  - [x] Verify WASI Preview 2 host invariants:
     - Zero resource leaks on completion (clean drop of all streams and pollables).
     - Layered exit code translation: uncaught exceptions map to `wasi:cli/exit` status 1 without host memory corruption.
-  - [ ] Generate structured conformance report mapping catalog declarations to executed evidence.
+  - [x] Generate structured conformance report mapping catalog declarations to executed evidence.
 
 ---
 
 ## Phase 4: Component Tasks (Exported Functions & Canonical ABI)
 
-*Goal: Support standard TypeScript function exports (`export function runTask(...)`) directly as Component Model exports with typed inputs and outputs.*
+*Goal: Support standard TypeScript function exports (`export function runTask(...)`) directly as Component Model exports with typed inputs and outputs according to WIT specifications.*
 
 - [ ] **4.1. Export Function Identification & Lowering**
   - [ ] Detect `ExportNamedDeclaration` in Perry's AST/HIR.
   - [ ] Map exported TS functions to corresponding exported functions in `world.wit`.
-- [ ] **4.2. Canonical ABI Trampolines**
-  - [ ] Synthesize `$cabi_*` entrypoints unpacking typed arguments (records, strings, numbers) from linear memory.
+  - [ ] Emit typed internal wrapper functions converting between JS nanboxed representations and Canonical ABI layouts.
+- [ ] **4.2. Canonical ABI Trampolines & Memory Allocation**
+  - [ ] Synthesize `$cabi_*` entrypoints unpacking typed arguments (strings, records, variants) from linear memory.
+  - [ ] Implement and export `cabi_realloc` for guest memory allocation requested by host callers.
   - [ ] Lower return values into Canonical ABI result memory and emit `$cabi_post_*` cleanup hooks.
-- [ ] **4.3. Author Example Task Component**
+- [ ] **4.3. Author Example Task Component & Conformance Testing**
   - [ ] Add `examples/merge_task.ts` taking a structured `MergeInput` record and returning a structured `MergedDoc`.
-  - [ ] Verify end-to-end execution directly via Wasmtime component invocation (`wasmtime run --invoke 'merge-docs(...)'`).
+  - [ ] Author formal conformance test cases for task invocation with typed argument passing and error returns.
+  - [ ] Verify end-to-end execution directly via Wasmtime component invocation (`wasmtime run --invoke 'run-task(...)'`).
 
 ---
 
@@ -91,10 +94,11 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: An author provides only a `world.wit`; entering the Nix shell automatically generates TypeScript declarations (`.d.ts`), configures `tsconfig.json`, and enables instant IDE type-checking.*
 
-- [ ] **5.1. WIT to TypeScript Declaration Generator**
-  - [ ] Implement automatic generation of `.perry/types/world.d.ts` from any given `world.wit`.
-  - [ ] Map WIT records to TS interfaces, variants to discriminated unions, and exported functions to typed declarations.
+- [ ] **5.1. WIT to TypeScript Declaration Generator (`perry-wit gen-types`)**
+  - [ ] Implement CLI subcommand and generator module creating `.perry/types/world.d.ts` from any given `world.wit`.
+  - [ ] Map WIT records to TS interfaces, variants to discriminated unions, lists/options to TS arrays/nullables, and exported functions to typed declarations.
 - [ ] **5.2. Wire DevShell Automation**
   - [ ] In `flake.nix`, configure `shellHook` to detect `world.wit`, run the type generator, link `tsconfig.json`, and expose tooling in `$PATH`.
+  - [ ] Provide pre-commit / flake check validating that generated TypeScript definitions remain in sync with WIT definitions.
 - [ ] **5.3. Validate Builtin Examples Against SDK**
   - [ ] Run `tsc --noEmit` on all examples inside the Nix shell to prove zero-error static typing against generated WIT contracts.
