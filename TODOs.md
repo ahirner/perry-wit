@@ -106,11 +106,14 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: An author provides only a `world.wit`; entering the Nix shell automatically generates TypeScript declarations (`.d.ts`), configures `tsconfig.json`, and enables instant IDE type-checking.*
 
-- [ ] **5.1. WIT to TypeScript Declaration Generator (`perry-wit gen-types`)**
-  - [ ] Implement CLI subcommand and generator module creating `.perry/types/world.d.ts` from any given `world.wit`.
-  - [ ] Map WIT records to TS interfaces, variants to discriminated unions, lists/options to TS arrays/nullables, and exported functions to typed declarations.
-- [ ] **5.2. Wire DevShell Automation**
-  - [ ] In `flake.nix`, configure `shellHook` to detect `world.wit`, run the type generator, link `tsconfig.json`, and expose tooling in `$PATH`.
-  - [ ] Provide pre-commit / flake check validating that generated TypeScript definitions remain in sync with WIT definitions.
-- [ ] **5.3. Validate Builtin Examples Against SDK**
+- [ ] **5.1. WIT to TypeScript Declaration Generator (`src/sdk/codegen.rs` & `perry-wit gen-types`)**
+  - [ ] Implement pure-Rust AST/type generator translating `wit_parser::Resolve` types into idiomatic TypeScript declarations (`.perry/types/world.d.ts`).
+  - [ ] Map WIT primitive types, records to TS interfaces, variants to discriminated unions, lists/options to TS arrays/nullables, and exported functions to function signatures.
+  - [ ] Generate default `tsconfig.json` pointing to generated definitions with strict type checking enabled.
+- [ ] **5.2. Wire DevShell Automation & Flake Sync Check**
+  - [ ] In `flake.nix`, configure `shellHook` to detect `world.wit`, run `perry-wit gen-types`, link `tsconfig.json`, and expose tooling in `$PATH`.
+  - [ ] Provide pre-commit / flake check (`checks.perry-wit-sdk-sync`) validating that generated TypeScript definitions remain in sync with WIT definitions.
+- [ ] **5.3. Validate Builtin Examples & SDK Integration Test Suite (`tests/sdk_test.rs`)**
+  - [ ] Author `tests/sdk_test.rs` running SDK generation on `wit/world.wit` and verifying emitted declarations.
   - [ ] Run `tsc --noEmit` on all examples inside the Nix shell to prove zero-error static typing against generated WIT contracts.
+
