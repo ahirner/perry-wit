@@ -1,7 +1,7 @@
 //! In-process component custom section stripping.
 
-use std::convert::Infallible;
 use anyhow::Result;
+use std::convert::Infallible;
 use wasm_encoder::{
     Component, Module,
     reencode::{Error, Reencode, ReencodeComponent},

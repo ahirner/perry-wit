@@ -11,12 +11,11 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail, ensure};
 use wasm_encoder::reencode::{self, Reencode, RoundtripReencoder};
 use wasm_encoder::{
-    ConstExpr, DataSegment, DataSegmentMode, ElementMode, ElementSegment, Elements, ExportKind,
-    Instruction, Module, ValType,
+    ConstExpr, DataSegment, DataSegmentMode, ElementMode, ElementSegment, Elements, ExportKind, Instruction, Module,
+    ValType,
 };
 use wasmparser::{
-    DataKind, ElementItems, ElementKind, ExternalKind, FunctionBody, Global, Operator, Parser,
-    Payload, TableType,
+    DataKind, ElementItems, ElementKind, ExternalKind, FunctionBody, Global, Operator, Parser, Payload, TableType,
 };
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -255,18 +254,10 @@ pub fn reencode_const_expr(
         match reader.read()? {
             Operator::I32Const { value } => instrs.push(Instruction::I32Const(value)),
             Operator::I64Const { value } => instrs.push(Instruction::I64Const(value)),
-            Operator::F32Const { value } => {
-                instrs.push(Instruction::F32Const(f32::from_bits(value.bits()).into()))
-            }
-            Operator::F64Const { value } => {
-                instrs.push(Instruction::F64Const(f64::from_bits(value.bits()).into()))
-            }
-            Operator::GlobalGet { global_index } => {
-                instrs.push(Instruction::GlobalGet(global_map(global_index)))
-            }
-            Operator::RefFunc { function_index } => {
-                instrs.push(Instruction::RefFunc(func_map(function_index)))
-            }
+            Operator::F32Const { value } => instrs.push(Instruction::F32Const(f32::from_bits(value.bits()).into())),
+            Operator::F64Const { value } => instrs.push(Instruction::F64Const(f64::from_bits(value.bits()).into())),
+            Operator::GlobalGet { global_index } => instrs.push(Instruction::GlobalGet(global_map(global_index))),
+            Operator::RefFunc { function_index } => instrs.push(Instruction::RefFunc(func_map(function_index))),
             Operator::RefNull { .. } => instrs.push(Instruction::RefNull(wasm_encoder::HeapType::Abstract {
                 shared: false,
                 ty: wasm_encoder::AbstractHeapType::Func,
@@ -314,7 +305,9 @@ impl Reencode for ReencodeA<'_> {
         if index == 0 {
             Ok(0)
         } else {
-            Err(reencode::Error::UserError(format!("Module A unexpected table index: {index}")))
+            Err(reencode::Error::UserError(format!(
+                "Module A unexpected table index: {index}"
+            )))
         }
     }
 
@@ -326,7 +319,9 @@ impl Reencode for ReencodeA<'_> {
         if index == 0 {
             Ok(0)
         } else {
-            Err(reencode::Error::UserError(format!("Module A unexpected memory index: {index}")))
+            Err(reencode::Error::UserError(format!(
+                "Module A unexpected memory index: {index}"
+            )))
         }
     }
 
@@ -371,7 +366,9 @@ impl Reencode for ReencodeB<'_> {
         if index == 0 {
             Ok(0)
         } else {
-            Err(reencode::Error::UserError(format!("Module B unexpected memory index: {index}")))
+            Err(reencode::Error::UserError(format!(
+                "Module B unexpected memory index: {index}"
+            )))
         }
     }
 
@@ -492,19 +489,11 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     let mut roundtrip = RoundtripReencoder;
     // Table 0: Module A
     for t in &a.tables {
-        table_sec.table(
-            roundtrip
-                .table_type(*t)
-                .map_err(|e| anyhow::anyhow!("{e:?}"))?,
-        );
+        table_sec.table(roundtrip.table_type(*t).map_err(|e| anyhow::anyhow!("{e:?}"))?);
     }
     // Table 1: Module B
     for t in &b.tables {
-        table_sec.table(
-            roundtrip
-                .table_type(*t)
-                .map_err(|e| anyhow::anyhow!("{e:?}"))?,
-        );
+        table_sec.table(roundtrip.table_type(*t).map_err(|e| anyhow::anyhow!("{e:?}"))?);
     }
     module.section(&table_sec);
 
@@ -524,22 +513,14 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     let mut global_sec = wasm_encoder::GlobalSection::new();
     // Module A's globals
     for g in &a.globals {
-        let gt = roundtrip
-            .global_type(g.ty)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let gt = roundtrip.global_type(g.ty).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let init = reencode_const_expr(&g.init_expr, |idx| idx, |f| func_map_a[f as usize])?;
         global_sec.global(gt, &init);
     }
     // Module B's globals
     for g in &b.globals {
-        let gt = roundtrip
-            .global_type(g.ty)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        let init = reencode_const_expr(
-            &g.init_expr,
-            |idx| idx + num_a_globals,
-            |f| func_map_b[f as usize],
-        )?;
+        let gt = roundtrip.global_type(g.ty).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let init = reencode_const_expr(&g.init_expr, |idx| idx + num_a_globals, |f| func_map_b[f as usize])?;
         global_sec.global(gt, &init);
     }
     module.section(&global_sec);
@@ -620,11 +601,7 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         let ElementKind::Active { ref offset_expr, .. } = el.kind else {
             bail!("Module B requires active elements");
         };
-        let offset = reencode_const_expr(
-            offset_expr,
-            |idx| idx + num_a_globals,
-            |f| func_map_b[f as usize],
-        )?;
+        let offset = reencode_const_expr(offset_expr, |idx| idx + num_a_globals, |f| func_map_b[f as usize])?;
         let ElementItems::Functions(ref funcs) = el.items else {
             bail!("Module B elements must be function indices");
         };
@@ -712,11 +689,7 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         else {
             bail!("Module B data segment must be active on memory 0");
         };
-        let offset = reencode_const_expr(
-            offset_expr,
-            |idx| idx + num_a_globals,
-            |f| func_map_b[f as usize],
-        )?;
+        let offset = reencode_const_expr(offset_expr, |idx| idx + num_a_globals, |f| func_map_b[f as usize])?;
         data_sec.segment(DataSegment {
             mode: DataSegmentMode::Active {
                 memory_index: 0,

@@ -18,11 +18,7 @@ fn has_wit_files(dir: &Path) -> bool {
 }
 
 /// Embeds WIT contract metadata into a core WebAssembly module and encodes it into a component.
-pub fn embed_and_encode(
-    core_wasm: &[u8],
-    wit_dir: &Path,
-    world_name: Option<&str>,
-) -> Result<Vec<u8>> {
+pub fn embed_and_encode(core_wasm: &[u8], wit_dir: &Path, world_name: Option<&str>) -> Result<Vec<u8>> {
     let mut resolve = Resolve::new();
 
     // If wit_dir/deps does not exist, check for WASI_WIT_PATH environment variable
@@ -35,18 +31,20 @@ pub fn embed_and_encode(
                 for pkg in ordered_pkgs {
                     let pkg_dir = wasi_path.join(pkg);
                     if pkg_dir.is_dir() && has_wit_files(&pkg_dir) {
-                        resolve.push_dir(&pkg_dir).with_context(|| {
-                            format!("loading dynamic WASI WIT package from {}", pkg_dir.display())
-                        })?;
+                        resolve
+                            .push_dir(&pkg_dir)
+                            .with_context(|| format!("loading dynamic WASI WIT package from {}", pkg_dir.display()))?;
                     }
                 }
             }
         }
     }
 
-    let (pkg_id, _files) = resolve.push_dir(wit_dir)
+    let (pkg_id, _files) = resolve
+        .push_dir(wit_dir)
         .with_context(|| format!("loading WIT package from {}", wit_dir.display()))?;
-    let world_id = resolve.select_world(&[pkg_id], world_name)
+    let world_id = resolve
+        .select_world(&[pkg_id], world_name)
         .with_context(|| format!("selecting world {:?}", world_name))?;
 
     let mut core = core_wasm.to_vec();

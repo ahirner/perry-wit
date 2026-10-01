@@ -7,7 +7,6 @@ use perry_codegen_wasm::compile_modules_to_wasm;
 use perry_hir::lower_module;
 use perry_parser::parse_typescript;
 
-
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut ts_file_path = "examples/merge_docs.ts".to_string();
@@ -79,7 +78,11 @@ fn main() -> Result<()> {
     let mut hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {}: {e:?}", ts_file.display()))?;
 
-    println!("Lowered AST to HIR. Functions: {}, Inits: {}", hir.functions.len(), hir.init.len());
+    println!(
+        "Lowered AST to HIR. Functions: {}, Inits: {}",
+        hir.functions.len(),
+        hir.init.len()
+    );
 
     // Rewrite object spread IIFEs into native Expr::ObjectAssign
     fn rewrite_expr(expr: &mut perry_hir::ir::Expr) {
@@ -184,22 +187,21 @@ fn main() -> Result<()> {
     };
 
     println!("Linking with guest runtime: {}...", rt_path.display());
-    let rt_bytes = fs::read(&rt_path)
-        .with_context(|| format!("Reading guest runtime from {}", rt_path.display()))?;
+    let rt_bytes = fs::read(&rt_path).with_context(|| format!("Reading guest runtime from {}", rt_path.display()))?;
 
     let merged_core = perry_wit::linker::merge_core_modules(&wasm_bytes, &rt_bytes)
         .context("Linking TypeScript core wasm with guest runtime")?;
     println!("Linked into unified Core Wasm: {} bytes", merged_core.len());
 
-    println!("Embedding WIT ({}) and encoding component (world: {:?})...", wit_dir_path, world_name);
-    let component_bytes = perry_wit::component::embed_and_encode(
-        &merged_core,
-        Path::new(&wit_dir_path),
-        world_name.as_deref(),
-    )?;
+    println!(
+        "Embedding WIT ({}) and encoding component (world: {:?})...",
+        wit_dir_path, world_name
+    );
+    let component_bytes =
+        perry_wit::component::embed_and_encode(&merged_core, Path::new(&wit_dir_path), world_name.as_deref())?;
 
-    let stripped_bytes = perry_wit::strip::component(&component_bytes)
-        .context("Stripping custom sections from component")?;
+    let stripped_bytes =
+        perry_wit::strip::component(&component_bytes).context("Stripping custom sections from component")?;
 
     println!(
         "Component built: raw = {} bytes, stripped = {} bytes -> {}",
@@ -211,7 +213,9 @@ fn main() -> Result<()> {
 
     println!("Validating component with wasmparser...");
     let mut validator = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
-    validator.validate_all(&stripped_bytes).context("Validating stripped component")?;
+    validator
+        .validate_all(&stripped_bytes)
+        .context("Validating stripped component")?;
     println!("Component validated successfully!");
 
     Ok(())
@@ -254,21 +258,23 @@ fn ensure_guest_runtime_compiled() -> Result<PathBuf> {
 }
 
 fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
-    let wat = wasmprinter::print_bytes(wasm_bytes)
-        .map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
+    let wat = wasmprinter::print_bytes(wasm_bytes).map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
 
     // Ensure memory has enough pages for guest runtime (at least 32 pages = 2MB)
     let mut wat = wat.replace("(memory (;0;) 2)", "(memory (;0;) 32)");
     let pattern = "(export \"_start\" (func ";
-    let idx = wat.find(pattern)
+    let idx = wat
+        .find(pattern)
         .ok_or_else(|| anyhow::anyhow!("Could not find _start export in wat"))?;
     let rest = &wat[idx + pattern.len()..];
-    let close = rest.find(')')
+    let close = rest
+        .find(')')
         .ok_or_else(|| anyhow::anyhow!("Malformed _start export in wat"))?;
     let start_func_ref = rest[..close].trim();
     let clean_func_ref = start_func_ref.trim_matches(|c| c == '(' || c == ';' || c == ')');
 
-    let last_paren = wat.rfind(')')
+    let last_paren = wat
+        .rfind(')')
         .ok_or_else(|| anyhow::anyhow!("No closing paren in wat"))?;
 
     let wrapper = format!(
@@ -278,6 +284,5 @@ fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
 
     wat.insert_str(last_paren, &wrapper);
 
-    wat::parse_str(&wat)
-        .map_err(|e| anyhow::anyhow!("Failed to re-parse wat with wasi:cli/run wrapper: {e}"))
+    wat::parse_str(&wat).map_err(|e| anyhow::anyhow!("Failed to re-parse wat with wasi:cli/run wrapper: {e}"))
 }

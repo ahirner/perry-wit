@@ -1,8 +1,8 @@
-use std::fs;
-use std::path::Path;
 use perry_wit::component::embed_and_encode;
 use perry_wit::linker::merge_core_modules;
 use perry_wit::strip;
+use std::fs;
+use std::path::Path;
 use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 
 #[test]
@@ -55,12 +55,18 @@ fn test_merge_core_modules() {
     // Ensure required exports are present
     assert!(export_names.contains(&"_start".to_string()), "missing _start");
     assert!(export_names.contains(&"memory".to_string()), "missing memory");
-    assert!(export_names.contains(&"wasi:cli/run@0.2.6#run".to_string()), "missing run export");
-    assert!(export_names.contains(&"cabi_realloc".to_string()), "missing cabi_realloc");
+    assert!(
+        export_names.contains(&"wasi:cli/run@0.2.6#run".to_string()),
+        "missing run export"
+    );
+    assert!(
+        export_names.contains(&"cabi_realloc".to_string()),
+        "missing cabi_realloc"
+    );
 
     // 3. Test componentization and stripping
-    let component_bytes = embed_and_encode(&merged, Path::new("wit"), Some("merge-docs"))
-        .expect("embed and encode component");
+    let component_bytes =
+        embed_and_encode(&merged, Path::new("wit"), Some("merge-docs")).expect("embed and encode component");
     assert!(!component_bytes.is_empty());
 
     let stripped_bytes = strip::component(&component_bytes).expect("strip component");
@@ -73,5 +79,7 @@ fn test_merge_core_modules() {
 
     // Validate component
     let mut comp_validator = Validator::new_with_features(WasmFeatures::all());
-    comp_validator.validate_all(&stripped_bytes).expect("validate stripped component");
+    comp_validator
+        .validate_all(&stripped_bytes)
+        .expect("validate stripped component");
 }
