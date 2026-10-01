@@ -8,19 +8,19 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: Make `perry-wit` a self-contained Rust toolchain that compiles TypeScript and links the guest runtime directly in-process without external C++ tools (`wasm-merge`).*
 
-- [ ] **1.1. In-Process Core Module Merger (`src/linker/` or `crates/perry-linker/`)**
-  - [ ] Implement an in-process Rust linker using `wasmparser` and `wasm-encoder`:
+- [x] **1.1. In-Process Core Module Merger (`src/linker/` or `crates/perry-linker/`)**
+  - [x] Implement an in-process Rust linker using `wasmparser` and `wasm-encoder`:
     - Merge linear memory declarations (assigning shared memory with unified page limits).
     - Remap function, type, and global indices between the TypeScript core wasm and `guest-runtime.wasm`.
     - Offset and combine data segments.
     - Resolve and link `(import "rt" ...)` calls to runtime export functions directly.
-- [ ] **1.2. Integrate Linker into `perry-wit` CLI**
-  - [ ] Embed or dynamically link `guest-runtime.wasm` directly within the `perry-wit` build pipeline.
-  - [ ] Run `wasm-tools component new` natively via its Rust API (`wit-component`) rather than external CLI invocations.
-  - [ ] Validate that `cargo run -- examples/merge_docs.ts -o dist/perry_merge_docs.stripped.wasm` builds the component end-to-end with zero external tool dependencies.
-- [ ] **1.3. Retire `wasm-merge` and Update Scripts**
-  - [ ] Remove `wasm-merge` from `scripts/build.sh`.
-  - [ ] Remove Binaryen dependencies from Nix expressions.
+- [x] **1.2. Integrate Linker into `perry-wit` CLI**
+  - [x] Embed or dynamically link `guest-runtime.wasm` directly within the `perry-wit` build pipeline.
+  - [x] Run `wasm-tools component new` natively via its Rust API (`wit-component`) rather than external CLI invocations.
+  - [x] Validate that `cargo run -- examples/merge_docs.ts -o dist/perry_merge_docs.stripped.wasm` builds the component end-to-end with zero external tool dependencies.
+- [x] **1.3. Retire `wasm-merge` and Update Scripts**
+  - [x] Remove `wasm-merge` from `scripts/build.sh`.
+  - [x] Remove Binaryen dependencies from Nix expressions.
 
 ---
 
