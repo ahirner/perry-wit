@@ -75,12 +75,12 @@ This checklist prioritizes immediate functional deliverables and eliminates code
 
 *Goal: Support standard TypeScript function exports (`export function runTask(...)`) directly as Component Model exports with typed inputs and outputs according to WIT specifications, enabling direct host task invocation (`wasmtime --invoke`).*
 
-- [ ] **4.1. Guest Runtime Canonical ABI Memory & String Primitives (`crates/guest-runtime/src/cabi.rs`)**
-  - [ ] Implement `cabi_import_string(ptr: i32, len: i32) -> i64` unpacking UTF-8 slices to nanboxed JS string handles.
-  - [ ] Implement `cabi_export_string(val: i64) -> i32` allocating Canonical ABI 8-byte ret areas `[ptr, len]` and UTF-8 bytes.
-  - [ ] Implement `cabi_export_result_string(val: i64, is_err: i32) -> i32` for `result<string, string>` / variant returns.
-  - [ ] Implement `cabi_import_json(ptr: i32, len: i32) -> i64` and `cabi_export_json(val: i64) -> i32` for structured records.
-  - [ ] Export `cabi_realloc` for guest memory allocation requested by external host callers.
+- [x] **4.1. Guest Runtime Canonical ABI Memory & String Primitives (`crates/guest-runtime/src/cabi.rs`)**
+  - [x] Implement `cabi_import_string(ptr: i32, len: i32) -> i64` unpacking UTF-8 slices to nanboxed JS string handles.
+  - [x] Implement `cabi_export_string(val: i64) -> i32` allocating Canonical ABI 8-byte ret areas `[ptr, len]` and UTF-8 bytes.
+  - [x] Implement `cabi_export_result_string(val: i64, is_err: i32) -> i32` for `result<string, string>` / variant returns.
+  - [x] Implement `cabi_import_json(ptr: i32, len: i32) -> i64` and `cabi_export_json(val: i64) -> i32` for structured records.
+  - [x] Export `cabi_realloc` for guest memory allocation requested by external host callers.
 - [ ] **4.2. WIT Export Inspection & Function Mapping (`src/abi/wit_meta.rs`)**
   - [ ] Inspect WIT world exports via `wit_parser` to extract exported function signatures (names, params, results).
   - [ ] Map TypeScript AST/HIR `exported_functions` to corresponding WIT world export functions (handling exact matches and camelCase <-> kebab-case).
