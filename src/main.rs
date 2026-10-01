@@ -151,7 +151,7 @@ fn main() -> Result<()> {
 }
 
 fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut wat = wasmprinter::print_bytes(wasm_bytes)
+    let wat = wasmprinter::print_bytes(wasm_bytes)
         .map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
 
     // Ensure memory has enough pages for guest runtime (at least 32 pages = 2MB)

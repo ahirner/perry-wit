@@ -34,6 +34,14 @@ trap cleanup EXIT
 
 # Check if port 8080 is reachable
 if ! nc -z 127.0.0.1 8080 2>/dev/null; then
+  echo "==> Verifying component fails with error when server is not running..."
+  if run_wasmtime run -S http=y -S inherit-network=y "$COMPONENT" 2>/dev/null; then
+    echo "==> ERROR: Component unexpectedly succeeded without server running!"
+    exit 1
+  else
+    echo "==> Verified: Component exits with error when server is down as expected."
+  fi
+
   echo "==> Starting mock HTTP server on 127.0.0.1:8080..."
   cargo build --bin mock_server --quiet
   cargo run --bin mock_server &

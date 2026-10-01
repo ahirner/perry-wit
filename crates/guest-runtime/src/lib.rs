@@ -7,6 +7,8 @@ mod bindings {
     });
 }
 
+use bindings::wasi::cli::exit::exit;
+use bindings::wasi::cli::stderr::get_stderr;
 use bindings::wasi::cli::stdout::get_stdout;
 use bindings::wasi::http::outgoing_handler::handle;
 use bindings::wasi::http::types::{
@@ -53,6 +55,17 @@ fn print_stdout(text: &str) {
     let _ = stdout.blocking_write_and_flush(text.as_bytes());
 }
 
+fn print_stderr(text: &str) {
+    let stderr = get_stderr();
+    let _ = stderr.blocking_write_and_flush(text.as_bytes());
+}
+
+fn fail_with_error(msg: &str) -> ! {
+    print_stderr(&format!("Error: {msg}\n"));
+    exit(Err(()));
+    core::arch::wasm32::unreachable();
+}
+
 fn split_url(url: &str) -> Result<(Scheme, String, String), String> {
     let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
         (Scheme::Https, rest)
@@ -71,7 +84,10 @@ fn split_url(url: &str) -> Result<(Scheme, String, String), String> {
 }
 
 pub enum ResponseEntry {
-    InFlight(FutureIncomingResponse),
+    InFlight {
+        url: String,
+        future_resp: FutureIncomingResponse,
+    },
     Ready(String),
 }
 
@@ -79,23 +95,27 @@ impl ResponseEntry {
     pub fn resolve(&mut self) -> Result<&str, String> {
         match self {
             ResponseEntry::Ready(s) => Ok(s.as_str()),
-            ResponseEntry::InFlight(future_resp) => {
+            ResponseEntry::InFlight { url, future_resp } => {
                 let pollable = future_resp.subscribe();
                 pollable.block();
 
                 let response = future_resp
                     .get()
-                    .ok_or_else(|| "Response not available".to_string())?
-                    .map_err(|_| "Response already consumed".to_string())?
-                    .map_err(|e| format!("HTTP request error: {e:?}"))?;
+                    .ok_or_else(|| format!("Response for {url} not available"))?
+                    .map_err(|_| format!("Response for {url} already consumed"))?
+                    .map_err(|e| format!("HTTP request to '{url}' failed: {e:?}"))?;
 
                 let status = response.status();
                 if status < 200 || status >= 300 {
-                    return Err(format!("HTTP status {status}"));
+                    return Err(format!("HTTP request to '{url}' returned status {status}"));
                 }
 
-                let body = response.consume().map_err(|_| "Failed to consume response body")?;
-                let stream = body.stream().map_err(|_| "Failed to get response stream")?;
+                let body = response
+                    .consume()
+                    .map_err(|_| format!("Failed to consume response body for {url}"))?;
+                let stream = body
+                    .stream()
+                    .map_err(|_| format!("Failed to get response stream for {url}"))?;
 
                 let mut content = Vec::new();
                 loop {
@@ -110,12 +130,13 @@ impl ResponseEntry {
                             break;
                         }
                         Err(e) => {
-                            return Err(format!("Stream error reading response: {e:?}"));
+                            return Err(format!("Stream error reading response from {url}: {e:?}"));
                         }
                     }
                 }
 
-                let body_str = String::from_utf8(content).map_err(|e| format!("Response was not UTF-8: {e}"))?;
+                let body_str = String::from_utf8(content)
+                    .map_err(|e| format!("Response from {url} was not UTF-8: {e}"))?;
                 drop(stream);
                 drop(body);
                 drop(response);
@@ -349,12 +370,15 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             match start_http_get(&url) {
                 Ok(fut) => {
                     let id = state.responses.len();
-                    state.responses.push(ResponseEntry::InFlight(fut));
+                    state.responses.push(ResponseEntry::InFlight {
+                        url,
+                        future_resp: fut,
+                    });
                     let h_id = state.alloc_handle(JsHandle::Response(id));
                     result_i64 = nanbox_pointer(h_id);
                 }
                 Err(e) => {
-                    print_stdout(&format!("HTTP Error: {e}\n"));
+                    fail_with_error(&format!("HTTP fetch initialization error for {url}: {e}"));
                 }
             }
         }
@@ -369,7 +393,9 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             for &item in &items {
                 if let Some(JsHandle::Response(resp_id)) = state.get_handle(item) {
                     let resp_id = *resp_id;
-                    let _ = state.get_response_body(resp_id);
+                    if let Err(e) = state.get_response_body(resp_id) {
+                        fail_with_error(&e);
+                    }
                 }
             }
             let res_arr_id = state.alloc_handle(JsHandle::Array(items));
@@ -384,15 +410,22 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         if let Some(id) = resp_id {
             match state.get_response_body(id) {
                 Ok(body) => {
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-                    let h_id = state.alloc_handle(JsHandle::Json(parsed));
-                    result_i64 = nanbox_pointer(h_id);
+                    match serde_json::from_str::<serde_json::Value>(&body) {
+                        Ok(parsed) => {
+                            let h_id = state.alloc_handle(JsHandle::Json(parsed));
+                            result_i64 = nanbox_pointer(h_id);
+                        }
+                        Err(e) => {
+                            fail_with_error(&format!("JSON parse error: {e}"));
+                        }
+                    }
                 }
                 Err(e) => {
-                    print_stdout(&format!("Response JSON error: {e}\n"));
+                    fail_with_error(&e);
                 }
             }
+        } else {
+            fail_with_error("Invalid response handle passed to .json()");
         }
     } else if name == "response_text" || name == "text" {
         let handle = raw_args.first().copied().unwrap_or(0);
@@ -408,9 +441,11 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
                     result_i64 = nanbox_string(str_id);
                 }
                 Err(e) => {
-                    print_stdout(&format!("Response text error: {e}\n"));
+                    fail_with_error(&e);
                 }
             }
+        } else {
+            fail_with_error("Invalid response handle passed to .text()");
         }
     } else if name == "array_new" {
         let h_id = state.alloc_handle(JsHandle::Array(Vec::new()));
@@ -544,9 +579,9 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         let arg = raw_args.first().copied().unwrap_or(0);
         if let Some(JsHandle::Response(resp_id)) = state.get_handle(arg) {
             let resp_id = *resp_id;
-            let _ = state.get_response_body(resp_id);
-        } else if let Some(id) = get_pointer_id(arg) {
-            let _ = state.get_response_body(id);
+            if let Err(e) = state.get_response_body(resp_id) {
+                fail_with_error(&e);
+            }
         }
         result_i64 = arg;
     }
