@@ -85,12 +85,12 @@ This checklist prioritizes immediate functional deliverables and eliminates code
   - [x] Inspect WIT world exports via `wit_parser` to extract exported function signatures (names, params, results).
   - [x] Map TypeScript AST/HIR `exported_functions` to corresponding WIT world export functions (handling exact matches and camelCase <-> kebab-case).
   - [x] Verify contract compatibility between TypeScript function parameters and WIT function signatures.
-- [ ] **4.3. Canonical ABI Trampoline Synthesizer (`src/abi/trampoline.rs` & `src/compiler/wasi.rs`)**
-  - [ ] Synthesize typed `$cabi_*` entrypoints in core WebAssembly for each matched exported function.
-  - [ ] Unpack parameters from Canonical ABI to nanboxed JS representations.
-  - [ ] Invoke Perry's compiled function index (`__wasm_func_<idx>`).
-  - [ ] Serialize result value into Canonical ABI return area.
-  - [ ] Preserve backwards compatibility for `wasi:cli/run` when `wasi:cli/command` is present.
+- [x] **4.3. Canonical ABI Trampoline Synthesizer (`src/abi/trampoline.rs` & `src/compiler/wasi.rs`)**
+  - [x] Synthesize typed `$cabi_*` entrypoints in core WebAssembly for each matched exported function.
+  - [x] Unpack parameters from Canonical ABI to nanboxed JS representations.
+  - [x] Invoke Perry's compiled function index (`__wasm_func_<idx>`).
+  - [x] Serialize result value into Canonical ABI return area.
+  - [x] Preserve backwards compatibility for `wasi:cli/run` when `wasi:cli/command` is present.
 - [ ] **4.4. Component Task Examples & Direct Invocation Test Suite (`tests/task_invocation_test.rs`)**
   - [ ] Author task component `examples/merge_task.ts` taking structured `MergeInput` record / string and returning merged document.
   - [ ] Add `world task-runner` and `world merge-task` to `wit/world.wit`.

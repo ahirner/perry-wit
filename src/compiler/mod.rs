@@ -1,7 +1,6 @@
 //! TypeScript compilation pipeline, HIR rewrites, linking, and component packaging.
 
 mod rewrites;
-mod wasi;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,32 +70,50 @@ pub fn compile_typescript(
 
     rewrites::rewrite_program(&mut hir);
 
+    let exported_functions = hir.exported_functions.clone();
+    let functions = hir.functions.clone();
+
     let raw_wasm = compile_modules_to_wasm(&[("main".to_string(), hir)])
         .map_err(|e| anyhow::anyhow!("Compilation failed: {e:?}"))?;
 
-    let core_wasm = wasi::synthesize_wasi_cli_entry(&raw_wasm)?;
+    // Ensure initial memory has enough pages for guest runtime
+    let wat = wasmprinter::print_bytes(&raw_wasm)
+        .map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
+    let wat = wat.replace("(memory (;0;) 2)", "(memory (;0;) 32)");
+    let raw_wasm = wat::parse_str(&wat)
+        .map_err(|e| anyhow::anyhow!("re-parsing raw wasm with adjusted memory failed: {e}"))?;
+
+    let rt_bytes = runtime::resolve_guest_runtime_bytes(options.runtime_path.as_deref())?;
+
+    let merged_core = linker::merge_core_modules(&raw_wasm, &rt_bytes)
+        .context("Linking TypeScript core wasm with guest runtime")?;
+
+    let wit_exports =
+        crate::abi::extract_world_exports(&options.wit_dir, options.world.as_deref())?;
+
+    let ready_core = crate::abi::synthesize_trampolines(
+        &merged_core,
+        &wit_exports,
+        &exported_functions,
+        &functions,
+    )?;
 
     if options.core_only {
         return Ok(Compiled {
-            core: core_wasm,
+            core: ready_core,
             component: None,
             stripped: None,
         });
     }
 
-    let rt_bytes = runtime::resolve_guest_runtime_bytes(options.runtime_path.as_deref())?;
-
-    let merged_core = linker::merge_core_modules(&core_wasm, &rt_bytes)
-        .context("Linking TypeScript core wasm with guest runtime")?;
-
     let component_bytes =
-        component::embed_and_encode(&merged_core, &options.wit_dir, options.world.as_deref())?;
+        component::embed_and_encode(&ready_core, &options.wit_dir, options.world.as_deref())?;
 
     let stripped_bytes =
         strip::component(&component_bytes).context("Stripping custom sections from component")?;
 
     Ok(Compiled {
-        core: merged_core,
+        core: ready_core,
         component: Some(component_bytes),
         stripped: Some(stripped_bytes),
     })
