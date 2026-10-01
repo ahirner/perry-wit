@@ -96,9 +96,9 @@ This checklist prioritizes immediate functional deliverables and eliminates code
   - [x] Add `world task-runner` and `world merge-task` to `wit/world.wit`.
   - [x] Author integration test suite testing direct invocation via `wasmtime run --invoke 'run-task'` and typed component execution.
   - [x] Verify clean resource drops and error boundary semantics on direct task invocation.
-- [ ] **4.5. Flake & Build Integration**
-  - [ ] Add `exampleMergeTask` package and check to `flake.nix`.
-  - [ ] Update `scripts/build.sh` to compile and verify task components end-to-end.
+- [x] **4.5. Flake & Build Integration**
+  - [x] Add `exampleMergeTask` package and check to `flake.nix`.
+  - [x] Update `scripts/build.sh` to compile and verify task components end-to-end.
 
 ---
 

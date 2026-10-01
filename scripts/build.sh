@@ -23,9 +23,19 @@ cargo rustc --release --package guest-runtime --target wasm32-unknown-unknown --
   -C link-arg=--no-entry
 export GUEST_RUNTIME_PATH="$ROOT_DIR/target/wasm32-unknown-unknown/release/guest_runtime.wasm"
 
-echo "==> [2/2] Building WASIp2 component via perry-wit pure-Rust pipeline..."
+echo "==> [2/3] Building WASIp2 CLI component via perry-wit pure-Rust pipeline..."
 mkdir -p "$DIST_DIR"
 cargo run --release --bin perry-wit -- examples/merge_docs.ts -o "$DIST_DIR/perry_merge_docs.stripped.wasm"
 
 STRIP_SZ=$(stat -f%z "$DIST_DIR/perry_merge_docs.stripped.wasm" 2>/dev/null || stat -c%s "$DIST_DIR/perry_merge_docs.stripped.wasm")
-echo "==> Build complete. Stripped component: ${STRIP_SZ} bytes -> $DIST_DIR/perry_merge_docs.stripped.wasm"
+echo "==> CLI component complete: ${STRIP_SZ} bytes -> $DIST_DIR/perry_merge_docs.stripped.wasm"
+
+echo "==> [3/3] Building WASIp2 task component (merge_task.ts -> task-runner world)..."
+cargo run --release --bin perry-wit -- examples/merge_task.ts \
+  --wit wit \
+  --world task-runner \
+  -o "$DIST_DIR/perry_merge_task.wasm"
+
+TASK_SZ=$(stat -f%z "$DIST_DIR/perry_merge_task.wasm" 2>/dev/null || stat -c%s "$DIST_DIR/perry_merge_task.wasm")
+echo "==> Task component complete: ${TASK_SZ} bytes -> $DIST_DIR/perry_merge_task.wasm"
+

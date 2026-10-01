@@ -117,12 +117,36 @@
           '';
         };
 
+        # Example WASIp2 task component with Canonical ABI export trampolines
+        exampleMergeTask = pkgs.stdenv.mkDerivation {
+          pname = "example-merge-task";
+          version = "0.1.0";
+          inherit src;
+          nativeBuildInputs = [ perryWitBin pkgs.wasmtime ];
+          buildPhase = ''
+            export HOME="$TMPDIR"
+            export WASMTIME_CACHE_ENABLED=false
+            export WASI_WIT_PATH="${wasiWit}"
+            mkdir -p dist
+            perry-wit examples/merge_task.ts \
+              --wit wit \
+              --world task-runner \
+              -o dist/perry_merge_task.wasm
+            wasmtime run -C cache=n -S http=y -S inherit-network=y --invoke 'run-task("hermetic-build")' dist/perry_merge_task.wasm
+          '';
+          installPhase = ''
+            mkdir -p "$out/lib"
+            cp dist/perry_merge_task.wasm "$out/lib/"
+          '';
+        };
+
       in {
         packages = {
           default = perryWitBin;
           perry-wit = perryWitBin;
           guest-runtime = guestRuntime;
           example-merge-docs = exampleMergeDocs;
+          example-merge-task = exampleMergeTask;
           wasi-wit = wasiWit;
         };
 
@@ -130,7 +154,7 @@
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
-          inherit exampleMergeDocs guestRuntime perryWitBin;
+          inherit exampleMergeDocs exampleMergeTask guestRuntime perryWitBin;
         };
 
         devShells.default = pkgs.mkShell {
