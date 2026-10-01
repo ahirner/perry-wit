@@ -11,4 +11,4 @@ pub mod sdk;
 pub mod strip;
 
 pub use compiler::{CompileOptions, Compiled, compile_file, compile_typescript};
-pub use sdk::{SdkOptions, generate_sdk_files};
+pub use sdk::{SdkOptions, SdkResult, generate_sdk_files};

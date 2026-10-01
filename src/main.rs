@@ -198,9 +198,13 @@ fn run_gen_types(args: &[String]) -> Result<()> {
         wit_dir: PathBuf::from(wit_dir_path),
         world: world_name,
         out_dir: PathBuf::from(out_dir_path),
+        project_root: None,
     };
 
-    let path = perry_wit::generate_sdk_files(&options)?;
-    println!("Generated TypeScript declarations in {}", path.display());
+    let result = perry_wit::generate_sdk_files(&options)?;
+    println!(
+        "Generated TypeScript declarations in {}",
+        result.types_path.display()
+    );
     Ok(())
 }

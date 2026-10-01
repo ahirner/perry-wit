@@ -119,9 +119,9 @@ This checklist prioritizes immediate functional deliverables and eliminates code
   - [x] In `flake.nix`, configure `shellHook` to detect `world.wit`, run `perry-wit gen-types`, link `tsconfig.json`, and expose tooling in `$PATH`.
   - [x] Add `pkgs.typescript` to `devShells.default` for instant `tsc` verification.
   - [x] Provide pre-commit / flake check (`checks.sdkSyncCheck` and `checks.checkTemplate`) validating generated TypeScript definitions and template component execution.
-- [ ] **5.4. Validate Builtin Examples & SDK Integration Test Suite (`tests/sdk_test.rs`)**
-  - [ ] Author `tests/sdk_test.rs` running SDK generation on `wit/world.wit` and verifying emitted declarations.
-  - [ ] Run `tsc --noEmit` on all examples inside the Nix shell to prove zero-error static typing against generated WIT contracts.
+- [x] **5.4. Validate Builtin Examples & SDK Integration Test Suite (`tests/sdk_test.rs`)**
+  - [x] Author `tests/sdk_test.rs` running SDK generation on `wit/world.wit` and verifying emitted declarations.
+  - [x] Run `tsc --noEmit` on all examples inside the Nix shell to prove zero-error static typing against generated WIT contracts.
 - [ ] **5.5. Architecture & Documentation for Consumer Developers**
   - [ ] Document zero-config development workflow in `README.md` and `ARCHITECTURE.md`.
   - [ ] Suggest reusable concepts and future capability expansions.

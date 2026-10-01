@@ -127,8 +127,8 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
 
     let mut emitted_types = HashSet::new();
 
-    // 1. Collect and emit named types referenced in world or interfaces
-    for (_, item) in &world.exports {
+    // 1. Collect and emit named types referenced in world or interfaces (imports & exports)
+    for (_, item) in world.imports.iter().chain(world.exports.iter()) {
         match item {
             WorldItem::Interface { id, .. } => {
                 let iface = &resolve.interfaces[*id];

@@ -13,6 +13,7 @@ pub struct SdkOptions {
     pub wit_dir: PathBuf,
     pub world: Option<String>,
     pub out_dir: PathBuf,
+    pub project_root: Option<PathBuf>,
 }
 
 impl Default for SdkOptions {
@@ -21,12 +22,20 @@ impl Default for SdkOptions {
             wit_dir: PathBuf::from("wit"),
             world: None,
             out_dir: PathBuf::from(".perry/types"),
+            project_root: None,
         }
     }
 }
 
+/// Result of SDK generation containing created file paths.
+#[derive(Debug, Clone)]
+pub struct SdkResult {
+    pub types_path: PathBuf,
+    pub tsconfig_path: Option<PathBuf>,
+}
+
 /// Generates `.perry/types/world.d.ts` and default `tsconfig.json` if not present.
-pub fn generate_sdk_files(options: &SdkOptions) -> Result<PathBuf> {
+pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     fs::create_dir_all(&options.out_dir).with_context(|| {
         format!(
             "Failed to create SDK output directory at {}",
@@ -41,12 +50,36 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<PathBuf> {
     fs::write(&dts_path, dts)
         .with_context(|| format!("Failed to write declaration file at {}", dts_path.display()))?;
 
-    // Also check if tsconfig.json exists in root
-    let tsconfig_path = Path::new("tsconfig.json");
-    if !tsconfig_path.exists() {
-        let tsconfig_content = tsconfig::generate_default_tsconfig();
-        let _ = fs::write(tsconfig_path, tsconfig_content);
-    }
+    // Determine project root for tsconfig.json
+    let project_root = options.project_root.clone().unwrap_or_else(|| {
+        if options.out_dir.ends_with(".perry/types") {
+            options
+                .out_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .unwrap_or(Path::new("."))
+                .to_path_buf()
+        } else {
+            PathBuf::from(".")
+        }
+    });
 
-    Ok(dts_path)
+    let tsconfig_path = project_root.join("tsconfig.json");
+    let generated_tsconfig = if !tsconfig_path.exists() {
+        let tsconfig_content = tsconfig::generate_default_tsconfig();
+        fs::write(&tsconfig_path, tsconfig_content).with_context(|| {
+            format!(
+                "Failed to write tsconfig.json at {}",
+                tsconfig_path.display()
+            )
+        })?;
+        Some(tsconfig_path)
+    } else {
+        Some(tsconfig_path)
+    };
+
+    Ok(SdkResult {
+        types_path: dts_path,
+        tsconfig_path: generated_tsconfig,
+    })
 }
