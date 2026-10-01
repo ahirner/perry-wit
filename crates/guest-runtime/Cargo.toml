@@ -9,5 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
-wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate"] }
 wit-bindgen = { version = "0.61.1", default-features = false, features = ["macros"] }

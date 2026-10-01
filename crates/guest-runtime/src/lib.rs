@@ -2,19 +2,16 @@
 mod bindings {
     wit_bindgen::generate!({
         path: "../../wit",
-        world: "merge-docs",
+        world: "runtime-adapter",
         generate_all,
     });
 }
 
-use bindings::exports::wasi::cli::run::Guest;
 use bindings::wasi::cli::stdout::get_stdout;
 use bindings::wasi::http::outgoing_handler::handle;
 use bindings::wasi::http::types::{
     Fields, FutureIncomingResponse, Method, OutgoingBody, OutgoingRequest, Scheme,
 };
-
-use wasmi::{Caller, Engine, ExternType, Func, Linker, Memory, Module, Store, Val, ValType};
 
 const STRING_TAG: u64 = 0x7FFF;
 const POINTER_TAG: u64 = 0x7FFD;
@@ -48,129 +45,6 @@ fn get_pointer_id(val: i64) -> Option<usize> {
         Some((bits & 0xFFFF_FFFF) as usize)
     } else {
         None
-    }
-}
-
-pub struct RuntimeState {
-    memory: Option<Memory>,
-    strings: Vec<String>,
-    responses: Vec<ResponseEntry>,
-    handles: Vec<serde_json::Value>,
-}
-
-impl RuntimeState {
-    fn new() -> Self {
-        Self {
-            memory: None,
-            strings: Vec::new(),
-            responses: Vec::new(),
-            handles: vec![serde_json::Value::Null],
-        }
-    }
-
-    fn alloc_handle(&mut self, val: serde_json::Value) -> usize {
-        let id = self.handles.len();
-        self.handles.push(val);
-        id
-    }
-
-    fn get_response_body(&mut self, id: usize) -> Result<String, String> {
-        if id < self.responses.len() {
-            let res = self.responses[id].resolve()?.to_string();
-            Ok(res)
-        } else {
-            Err(format!("Invalid response id {id}"))
-        }
-    }
-
-    fn to_js_value(&self, val: i64) -> serde_json::Value {
-        let bits = val as u64;
-        if bits == TAG_UNDEFINED || bits == TAG_NULL {
-            serde_json::Value::Null
-        } else if bits == TAG_TRUE {
-            serde_json::Value::Bool(true)
-        } else if bits == TAG_FALSE {
-            serde_json::Value::Bool(false)
-        } else if (bits >> 48) == STRING_TAG {
-            let id = (bits & 0xFFFF_FFFF) as usize;
-            serde_json::Value::String(self.strings.get(id).cloned().unwrap_or_default())
-        } else if (bits >> 48) == POINTER_TAG {
-            let id = (bits & 0xFFFF_FFFF) as usize;
-            self.handles.get(id).cloned().unwrap_or(serde_json::Value::Null)
-        } else {
-            let f = f64::from_bits(bits);
-            if f.fract() == 0.0 && f >= (i64::MIN as f64) && f <= (i64::MAX as f64) {
-                serde_json::Value::Number(serde_json::Number::from(f as i64))
-            } else if let Some(num) = serde_json::Number::from_f64(f) {
-                serde_json::Value::Number(num)
-            } else {
-                serde_json::Value::Null
-            }
-        }
-    }
-
-    fn from_js_value(&mut self, v: serde_json::Value) -> i64 {
-        match v {
-            serde_json::Value::Null => TAG_NULL as i64,
-            serde_json::Value::Bool(true) => TAG_TRUE as i64,
-            serde_json::Value::Bool(false) => TAG_FALSE as i64,
-            serde_json::Value::Number(n) => {
-                if let Some(f) = n.as_f64() {
-                    f.to_bits() as i64
-                } else if let Some(i) = n.as_i64() {
-                    (i as f64).to_bits() as i64
-                } else {
-                    0
-                }
-            }
-            serde_json::Value::String(s) => {
-                let id = self.strings.len();
-                self.strings.push(s);
-                nanbox_string(id)
-            }
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                let id = self.alloc_handle(v);
-                nanbox_pointer(id)
-            }
-        }
-    }
-
-    fn get_string(&self, val: i64) -> String {
-        let bits = val as u64;
-        if bits == TAG_UNDEFINED {
-            return "undefined".to_string();
-        }
-        if bits == TAG_NULL {
-            return "null".to_string();
-        }
-        if bits == TAG_TRUE {
-            return "true".to_string();
-        }
-        if bits == TAG_FALSE {
-            return "false".to_string();
-        }
-        if (bits >> 48) == STRING_TAG {
-            let id = (bits & 0xFFFF_FFFF) as usize;
-            if let Some(s) = self.strings.get(id) {
-                return s.clone();
-            }
-        } else if (bits >> 48) == POINTER_TAG {
-            let id = (bits & 0xFFFF_FFFF) as usize;
-            if let Some(h) = self.handles.get(id) {
-                return match h {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                };
-            }
-        } else {
-            let f = f64::from_bits(bits);
-            if f.fract() == 0.0 && f >= (i64::MIN as f64) && f <= (i64::MAX as f64) {
-                return format!("{}", f as i64);
-            } else {
-                return format!("{f}");
-            }
-        }
-        format!("{val}")
     }
 }
 
@@ -274,469 +148,658 @@ fn start_http_get(url: &str) -> Result<FutureIncomingResponse, String> {
     Ok(future_resp)
 }
 
-// Embedded core wasm bytecode generated by perry from examples/merge_docs.ts
-static CORE_WASM: &[u8] = include_bytes!("../../../dist/merge_docs.core.wasm");
+#[derive(Clone, Debug)]
+pub enum JsHandle {
+    Null,
+    Json(serde_json::Value),
+    Array(Vec<i64>),
+    Response(usize),
+}
 
-struct Component;
+pub struct RuntimeState {
+    pub strings: Vec<String>,
+    pub responses: Vec<ResponseEntry>,
+    pub handles: Vec<JsHandle>,
+}
 
-impl Guest for Component {
-    fn run() -> Result<(), ()> {
-        let engine = Engine::default();
-        let module = match Module::new(&engine, CORE_WASM) {
-            Ok(m) => m,
-            Err(e) => {
-                print_stdout(&format!("Module error: {e:?}\n"));
-                return Err(());
+impl RuntimeState {
+    fn new() -> Self {
+        Self {
+            strings: Vec::new(),
+            responses: Vec::new(),
+            handles: vec![JsHandle::Null],
+        }
+    }
+
+    pub fn alloc_handle(&mut self, h: JsHandle) -> usize {
+        let id = self.handles.len();
+        self.handles.push(h);
+        id
+    }
+
+    pub fn get_handle(&self, val: i64) -> Option<&JsHandle> {
+        let id = get_pointer_id(val)?;
+        self.handles.get(id)
+    }
+
+    pub fn get_handle_mut(&mut self, val: i64) -> Option<&mut JsHandle> {
+        let id = get_pointer_id(val)?;
+        self.handles.get_mut(id)
+    }
+
+    pub fn get_response_body(&mut self, id: usize) -> Result<String, String> {
+        if id < self.responses.len() {
+            let res = self.responses[id].resolve()?.to_string();
+            Ok(res)
+        } else {
+            Err(format!("Invalid response id {id}"))
+        }
+    }
+
+    pub fn to_js_value(&self, val: i64) -> serde_json::Value {
+        let bits = val as u64;
+        if bits == TAG_UNDEFINED || bits == TAG_NULL {
+            serde_json::Value::Null
+        } else if bits == TAG_TRUE {
+            serde_json::Value::Bool(true)
+        } else if bits == TAG_FALSE {
+            serde_json::Value::Bool(false)
+        } else if (bits >> 48) == STRING_TAG {
+            let id = (bits & 0xFFFF_FFFF) as usize;
+            serde_json::Value::String(self.strings.get(id).cloned().unwrap_or_default())
+        } else if (bits >> 48) == POINTER_TAG {
+            let id = (bits & 0xFFFF_FFFF) as usize;
+            match self.handles.get(id) {
+                Some(JsHandle::Json(v)) => v.clone(),
+                Some(JsHandle::Array(arr)) => {
+                    let items: Vec<serde_json::Value> = arr.iter().map(|&elem| self.to_js_value(elem)).collect();
+                    serde_json::Value::Array(items)
+                }
+                _ => serde_json::Value::Null,
             }
-        };
-        let mut store = Store::new(&engine, RuntimeState::new());
-        let mut linker = Linker::new(&engine);
+        } else {
+            let f = f64::from_bits(bits);
+            if f.fract() == 0.0 && f >= (i64::MIN as f64) && f <= (i64::MAX as f64) {
+                serde_json::Value::Number(serde_json::Number::from(f as i64))
+            } else if let Some(num) = serde_json::Number::from_f64(f) {
+                serde_json::Value::Number(num)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+    }
 
-        // Define string_new(offset: i32, len: i32)
-        linker
-            .define(
-                "rt",
-                "string_new",
-                Func::wrap(&mut store, |mut caller: Caller<'_, RuntimeState>, offset: i32, len: i32| {
-                    let memory = match caller.get_export("memory").and_then(wasmi::Extern::into_memory).or(caller.data().memory) {
-                        Some(m) => m,
-                        None => {
-                            print_stdout("string_new: memory not found!\n");
-                            return;
-                        }
-                    };
-                    let mut buf = vec![0u8; len as usize];
-                    if memory.read(&caller, offset as usize, &mut buf).is_ok() {
-                        if let Ok(s) = std::str::from_utf8(&buf) {
-                            caller.data_mut().strings.push(s.to_string());
-                        }
-                    }
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define string_concat(a: i64, b: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "string_concat",
-                Func::wrap(&mut store, |mut caller: Caller<'_, RuntimeState>, a: i64, b: i64| -> i64 {
-                    let s_a = caller.data().get_string(a);
-                    let s_b = caller.data().get_string(b);
-                    let res = format!("{s_a}{s_b}");
-                    let id = caller.data().strings.len();
-                    caller.data_mut().strings.push(res);
-                    nanbox_string(id)
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define js_add(a: i64, b: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "js_add",
-                Func::wrap(&mut store, |mut caller: Caller<'_, RuntimeState>, a: i64, b: i64| -> i64 {
-                    if get_string_id(a).is_some() || get_string_id(b).is_some() {
-                        let s_a = caller.data().get_string(a);
-                        let s_b = caller.data().get_string(b);
-                        let res = format!("{s_a}{s_b}");
-                        let id = caller.data().strings.len();
-                        caller.data_mut().strings.push(res);
-                        nanbox_string(id)
-                    } else {
-                        a + b
-                    }
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define console_log(val: i64)
-        linker
-            .define(
-                "rt",
-                "console_log",
-                Func::wrap(&mut store, |caller: Caller<'_, RuntimeState>, val: i64| {
-                    let msg = caller.data().get_string(val);
-                    print_stdout(&format!("{msg}\n"));
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define fetch_url(url_val: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "fetch_url",
-                Func::wrap(&mut store, |mut caller: Caller<'_, RuntimeState>, url_val: i64| -> i64 {
-                    let url = caller.data().get_string(url_val);
-                    match start_http_get(&url) {
-                        Ok(fut) => {
-                            let id = caller.data().responses.len();
-                            caller.data_mut().responses.push(ResponseEntry::InFlight(fut));
-                            nanbox_pointer(id)
-                        }
-                        Err(e) => {
-                            print_stdout(&format!("HTTP Error: {e}\n"));
-                            0
-                        }
-                    }
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define fetch_with_options(url_val, ...) -> i64
-        linker
-            .define(
-                "rt",
-                "fetch_with_options",
-                Func::wrap(
-                    &mut store,
-                    |mut caller: Caller<'_, RuntimeState>,
-                     url_val: i64,
-                     _method: i64,
-                     _body: i64,
-                     _headers: i64|
-                     -> i64 {
-                        let url = caller.data().get_string(url_val);
-                        match start_http_get(&url) {
-                            Ok(fut) => {
-                                let id = caller.data().responses.len();
-                                caller.data_mut().responses.push(ResponseEntry::InFlight(fut));
-                                nanbox_pointer(id)
-                            }
-                            Err(e) => {
-                                print_stdout(&format!("HTTP Error: {e}\n"));
-                                0
-                            }
-                        }
-                    },
-                ),
-            )
-            .map_err(|_| ())?;
-
-        // Define response_text(resp_val: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "response_text",
-                Func::wrap(&mut store, |mut caller: Caller<'_, RuntimeState>, resp_val: i64| -> i64 {
-                    if let Some(id) = get_pointer_id(resp_val) {
-                        if let Ok(body) = caller.data_mut().get_response_body(id) {
-                            let str_id = caller.data().strings.len();
-                            caller.data_mut().strings.push(body);
-                            return nanbox_string(str_id);
-                        }
-                    }
+    pub fn from_js_value(&mut self, v: serde_json::Value) -> i64 {
+        match v {
+            serde_json::Value::Null => TAG_NULL as i64,
+            serde_json::Value::Bool(true) => TAG_TRUE as i64,
+            serde_json::Value::Bool(false) => TAG_FALSE as i64,
+            serde_json::Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    f.to_bits() as i64
+                } else if let Some(i) = n.as_i64() {
+                    (i as f64).to_bits() as i64
+                } else {
                     0
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define response_json(resp_val: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "response_json",
-                Func::wrap(&mut store, |mut caller: Caller<'_, RuntimeState>, resp_val: i64| -> i64 {
-                    if let Some(id) = get_pointer_id(resp_val) {
-                        if let Ok(body) = caller.data_mut().get_response_body(id) {
-                            let parsed: serde_json::Value =
-                                serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-                            let h_id = caller.data_mut().alloc_handle(parsed);
-                            return nanbox_pointer(h_id);
-                        }
-                    }
-                    0
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define json_stringify(val: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "json_stringify",
-                Func::wrap(&mut store, |mut caller: Caller<'_, RuntimeState>, val: i64| -> i64 {
-                    let val_json = caller.data().to_js_value(val);
-                    let json_str = serde_json::to_string_pretty(&val_json).unwrap_or_else(|_| "{}".to_string());
-                    let str_id = caller.data().strings.len();
-                    caller.data_mut().strings.push(json_str);
-                    nanbox_string(str_id)
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define jsvalue_to_template_string(val: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "jsvalue_to_template_string",
-                Func::wrap(&mut store, |_caller: Caller<'_, RuntimeState>, val: i64| -> i64 {
-                    val
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define jsvalue_to_string(val: i64) -> i64
-        linker
-            .define(
-                "rt",
-                "jsvalue_to_string",
-                Func::wrap(&mut store, |_caller: Caller<'_, RuntimeState>, val: i64| -> i64 {
-                    val
-                }),
-            )
-            .map_err(|_| ())?;
-
-        // Define mem_call(name_id: f64, arg_count: f64, base_addr: i32) -> f64
-        linker
-            .define(
-                "rt",
-                "mem_call",
-                Func::wrap(
-                    &mut store,
-                    |mut caller: Caller<'_, RuntimeState>,
-                     name_id: f64,
-                     arg_count: f64,
-                     base_addr: i32|
-                     -> f64 {
-                        let name = caller
-                            .data()
-                            .strings
-                            .get(name_id as usize)
-                            .cloned()
-                            .unwrap_or_else(|| format!("unknown_id_{name_id}"));
-                        let argc = arg_count as usize;
-                        let base = base_addr as usize;
-
-                        let memory = match caller
-                            .get_export("memory")
-                            .and_then(wasmi::Extern::into_memory)
-                            .or(caller.data().memory)
-                        {
-                            Some(m) => m,
-                            None => {
-                                print_stdout("mem_call: no memory!\n");
-                                return 0.0;
-                            }
-                        };
-
-                        let mut raw_args = Vec::new();
-                        for i in 0..argc {
-                            let mut buf = [0u8; 8];
-                            if memory.read(&caller, base + i * 8, &mut buf).is_ok() {
-                                raw_args.push(i64::from_le_bytes(buf));
-                            }
-                        }
-
-                        let mut result_i64: i64 = 0;
-
-                        if name == "fetch_url" || name == "fetch" || name == "fetch_with_options" {
-                            if let Some(&url_arg) = raw_args.first() {
-                                let url = caller.data().get_string(url_arg);
-                                match start_http_get(&url) {
-                                    Ok(fut) => {
-                                        let id = caller.data().responses.len();
-                                        caller.data_mut().responses.push(ResponseEntry::InFlight(fut));
-                                        result_i64 = nanbox_pointer(id);
-                                    }
-                                    Err(e) => {
-                                        print_stdout(&format!("HTTP Error: {e}\n"));
-                                    }
-                                }
-                            }
-                        } else if name == "response_json" || name == "json" {
-                            let handle = raw_args.first().copied().unwrap_or(0);
-                            if let Some(id) = get_pointer_id(handle) {
-                                match caller.data_mut().get_response_body(id) {
-                                    Ok(body) => {
-                                        let parsed: serde_json::Value =
-                                            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-                                        let h_id = caller.data_mut().alloc_handle(parsed);
-                                        result_i64 = nanbox_pointer(h_id);
-                                    }
-                                    Err(e) => {
-                                        print_stdout(&format!("Response JSON error: {e}\n"));
-                                    }
-                                }
-                            }
-                        } else if name == "response_text" || name == "text" {
-                            let handle = raw_args.first().copied().unwrap_or(0);
-                            if let Some(id) = get_pointer_id(handle) {
-                                match caller.data_mut().get_response_body(id) {
-                                    Ok(body) => {
-                                        let str_id = caller.data().strings.len();
-                                        caller.data_mut().strings.push(body);
-                                        result_i64 = nanbox_string(str_id);
-                                    }
-                                    Err(e) => {
-                                        print_stdout(&format!("Response text error: {e}\n"));
-                                    }
-                                }
-                            }
-                        } else if name == "object_new" {
-                            let h_id = caller
-                                .data_mut()
-                                .alloc_handle(serde_json::Value::Object(serde_json::Map::new()));
-                            result_i64 = nanbox_pointer(h_id);
-                        } else if name == "object_set" {
-                            if raw_args.len() >= 3 {
-                                let target_handle = raw_args[0];
-                                let key_str = caller.data().get_string(raw_args[1]);
-                                let val_json = caller.data().to_js_value(raw_args[2]);
-                                if let Some(id) = get_pointer_id(target_handle) {
-                                    if let Some(serde_json::Value::Object(map)) =
-                                        caller.data_mut().handles.get_mut(id)
-                                    {
-                                        map.insert(key_str, val_json);
-                                    }
-                                }
-                                result_i64 = target_handle;
-                            }
-                        } else if name == "object_assign" {
-                            if raw_args.len() >= 2 {
-                                let target_handle = raw_args[0];
-                                let source_handle = raw_args[1];
-                                let source_json = caller.data().to_js_value(source_handle);
-                                if let Some(id) = get_pointer_id(target_handle) {
-                                    if let Some(serde_json::Value::Object(target_map)) =
-                                        caller.data_mut().handles.get_mut(id)
-                                    {
-                                        if let serde_json::Value::Object(src_map) = source_json {
-                                            for (k, v) in src_map {
-                                                target_map.insert(k, v);
-                                            }
-                                        }
-                                    }
-                                }
-                                result_i64 = target_handle;
-                            }
-                        } else if name == "object_get" {
-                            if raw_args.len() >= 2 {
-                                let target_handle = raw_args[0];
-                                let key_str = caller.data().get_string(raw_args[1]);
-                                if let Some(id) = get_pointer_id(target_handle) {
-                                    if let Some(serde_json::Value::Object(map)) =
-                                        caller.data().handles.get(id)
-                                    {
-                                        if let Some(v) = map.get(&key_str) {
-                                            let v_clone = v.clone();
-                                            result_i64 = caller.data_mut().from_js_value(v_clone);
-                                        }
-                                    }
-                                }
-                            }
-                        } else if name == "json_stringify" {
-                            let arg = raw_args.first().copied().unwrap_or(0);
-                            let val_json = caller.data().to_js_value(arg);
-                            let json_str = serde_json::to_string_pretty(&val_json)
-                                .unwrap_or_else(|_| "{}".to_string());
-                            let str_id = caller.data().strings.len();
-                            caller.data_mut().strings.push(json_str);
-                            result_i64 = nanbox_string(str_id);
-                        } else if name == "json_parse" {
-                            let arg = raw_args.first().copied().unwrap_or(0);
-                            let s = caller.data().get_string(arg);
-                            let val_json: serde_json::Value =
-                                serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
-                            result_i64 = caller.data_mut().from_js_value(val_json);
-                        } else if name == "console_log" || name == "log" {
-                            let arg = raw_args.last().copied().unwrap_or(0);
-                            let msg = caller.data().get_string(arg);
-                            print_stdout(&format!("{msg}\n"));
-                        } else if name == "string_concat" || name == "js_add" {
-                            if raw_args.len() >= 2 {
-                                let s_a = caller.data().get_string(raw_args[0]);
-                                let s_b = caller.data().get_string(raw_args[1]);
-                                let res = format!("{s_a}{s_b}");
-                                let str_id = caller.data().strings.len();
-                                caller.data_mut().strings.push(res);
-                                result_i64 = nanbox_string(str_id);
-                            }
-                        } else if name == "await_promise" {
-                            let arg = raw_args.first().copied().unwrap_or(0);
-                            if let Some(id) = get_pointer_id(arg) {
-                                let _ = caller.data_mut().get_response_body(id);
-                            }
-                            result_i64 = arg;
-                        }
-
-                        // Write result back to base_addr
-                        let _ = memory.write(&mut caller, base, &result_i64.to_le_bytes());
-
-                        0.0
-                    },
-                ),
-            )
-            .map_err(|_| ())?;
-
-        // Define mem_call_i32(name_id: f64, arg_count: f64, base_addr: i32) -> i32
-        linker
-            .define(
-                "rt",
-                "mem_call_i32",
-                Func::wrap(
-                    &mut store,
-                    |_caller: Caller<'_, RuntimeState>,
-                     _name_id: f64,
-                     _arg_count: f64,
-                     _base_addr: i32|
-                     -> i32 {
-                        0
-                    },
-                ),
-            )
-            .map_err(|_| ())?;
-
-        // Stubs for any remaining imported functions
-        for import in module.imports() {
-            if import.module() == "rt" {
-                if let ExternType::Func(func_type) = import.ty() {
-                    let results_types = func_type.results().to_vec();
-                    let _ = linker.define(
-                        import.module(),
-                        import.name(),
-                        Func::new(&mut store, func_type.clone(), move |_caller, _params, results| {
-                            for (i, res_ty) in results_types.iter().enumerate() {
-                                results[i] = match res_ty {
-                                    ValType::I32 => Val::I32(0),
-                                    ValType::I64 => Val::I64(0),
-                                    ValType::F32 => Val::F32(0.0.into()),
-                                    ValType::F64 => Val::F64(0.0.into()),
-                                    _ => Val::I64(0),
-                                };
-                            }
-                            Ok(())
-                        }),
-                    );
                 }
             }
-        }
-
-        let instance = linker
-            .instantiate_and_start(&mut store, &module)
-            .map_err(|_| ())?;
-
-        if let Some(memory) = instance.get_memory(&store, "memory") {
-            store.data_mut().memory = Some(memory);
-        }
-
-        // Call _start to execute the Perry program
-        if let Some(start_func) = instance.get_func(&store, "_start") {
-            let _ = start_func.call(&mut store, &[], &mut []);
-        }
-
-        // Call run if exported
-        if let Some(run_func) = instance.get_func(&store, "run") {
-            if let Err(e) = run_func.call(&mut store, &[], &mut []) {
-                print_stdout(&format!("run call error: {e:?}\n"));
-                return Err(());
+            serde_json::Value::String(s) => {
+                let id = self.strings.len();
+                self.strings.push(s);
+                nanbox_string(id)
+            }
+            serde_json::Value::Array(arr) => {
+                let items: Vec<i64> = arr.into_iter().map(|item| self.from_js_value(item)).collect();
+                let id = self.alloc_handle(JsHandle::Array(items));
+                nanbox_pointer(id)
+            }
+            serde_json::Value::Object(_) => {
+                let id = self.alloc_handle(JsHandle::Json(v));
+                nanbox_pointer(id)
             }
         }
+    }
 
-        Ok(())
+    pub fn get_string(&self, val: i64) -> String {
+        let bits = val as u64;
+        if bits == TAG_UNDEFINED {
+            return "undefined".to_string();
+        }
+        if bits == TAG_NULL {
+            return "null".to_string();
+        }
+        if bits == TAG_TRUE {
+            return "true".to_string();
+        }
+        if bits == TAG_FALSE {
+            return "false".to_string();
+        }
+        if (bits >> 48) == STRING_TAG {
+            let id = (bits & 0xFFFF_FFFF) as usize;
+            if let Some(s) = self.strings.get(id) {
+                return s.clone();
+            }
+        } else if (bits >> 48) == POINTER_TAG {
+            let id = (bits & 0xFFFF_FFFF) as usize;
+            if let Some(h) = self.handles.get(id) {
+                return match h {
+                    JsHandle::Json(serde_json::Value::String(s)) => s.clone(),
+                    JsHandle::Json(other) => serde_json::to_string(other).unwrap_or_default(),
+                    JsHandle::Array(arr) => format!("[array len {}]", arr.len()),
+                    JsHandle::Response(_) => "[Response]".to_string(),
+                    JsHandle::Null => "null".to_string(),
+                };
+            }
+        } else {
+            let f = f64::from_bits(bits);
+            if f.fract() == 0.0 && f >= (i64::MIN as f64) && f <= (i64::MAX as f64) {
+                return format!("{}", f as i64);
+            } else {
+                return format!("{f}");
+            }
+        }
+        format!("{val}")
     }
 }
 
-bindings::export!(Component with_types_in bindings);
+static mut STATE: Option<RuntimeState> = None;
+
+fn get_state() -> &'static mut RuntimeState {
+    unsafe {
+        if STATE.is_none() {
+            STATE = Some(RuntimeState::new());
+        }
+        STATE.as_mut().unwrap()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn string_new(offset: i32, len: i32) {
+    let state = get_state();
+    let slice = unsafe { std::slice::from_raw_parts(offset as *const u8, len as usize) };
+    if let Ok(s) = std::str::from_utf8(slice) {
+        state.strings.push(s.to_string());
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn console_log(val: i64) {
+    let state = get_state();
+    let msg = state.get_string(val);
+    print_stdout(&format!("{msg}\n"));
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state.strings.get(name_idx).map(|s| s.as_str()).unwrap_or("").to_string();
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    let mut result_i64: i64 = 0;
+
+    if name == "fetch_url" || name == "fetch" || name == "fetch_with_options" {
+        if let Some(&url_arg) = raw_args.first() {
+            let url = state.get_string(url_arg);
+            match start_http_get(&url) {
+                Ok(fut) => {
+                    let id = state.responses.len();
+                    state.responses.push(ResponseEntry::InFlight(fut));
+                    let h_id = state.alloc_handle(JsHandle::Response(id));
+                    result_i64 = nanbox_pointer(h_id);
+                }
+                Err(e) => {
+                    print_stdout(&format!("HTTP Error: {e}\n"));
+                }
+            }
+        }
+    } else if name == "all" {
+        // Promise.all(iterable)
+        let arr_arg = if raw_args.len() >= 2 {
+            raw_args[1]
+        } else {
+            raw_args.first().copied().unwrap_or(0)
+        };
+        if let Some(JsHandle::Array(items)) = state.get_handle(arr_arg).cloned() {
+            for &item in &items {
+                if let Some(JsHandle::Response(resp_id)) = state.get_handle(item) {
+                    let resp_id = *resp_id;
+                    let _ = state.get_response_body(resp_id);
+                }
+            }
+            let res_arr_id = state.alloc_handle(JsHandle::Array(items));
+            result_i64 = nanbox_pointer(res_arr_id);
+        }
+    } else if name == "response_json" || name == "json" {
+        let handle = raw_args.first().copied().unwrap_or(0);
+        let resp_id = match state.get_handle(handle) {
+            Some(JsHandle::Response(id)) => Some(*id),
+            _ => get_pointer_id(handle),
+        };
+        if let Some(id) = resp_id {
+            match state.get_response_body(id) {
+                Ok(body) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                    let h_id = state.alloc_handle(JsHandle::Json(parsed));
+                    result_i64 = nanbox_pointer(h_id);
+                }
+                Err(e) => {
+                    print_stdout(&format!("Response JSON error: {e}\n"));
+                }
+            }
+        }
+    } else if name == "response_text" || name == "text" {
+        let handle = raw_args.first().copied().unwrap_or(0);
+        let resp_id = match state.get_handle(handle) {
+            Some(JsHandle::Response(id)) => Some(*id),
+            _ => get_pointer_id(handle),
+        };
+        if let Some(id) = resp_id {
+            match state.get_response_body(id) {
+                Ok(body) => {
+                    let str_id = state.strings.len();
+                    state.strings.push(body);
+                    result_i64 = nanbox_string(str_id);
+                }
+                Err(e) => {
+                    print_stdout(&format!("Response text error: {e}\n"));
+                }
+            }
+        }
+    } else if name == "array_new" {
+        let h_id = state.alloc_handle(JsHandle::Array(Vec::new()));
+        result_i64 = nanbox_pointer(h_id);
+    } else if name == "array_push" {
+        if raw_args.len() >= 2 {
+            let arr_handle = raw_args[0];
+            let item = raw_args[1];
+            if let Some(JsHandle::Array(arr)) = state.get_handle_mut(arr_handle) {
+                arr.push(item);
+            }
+            result_i64 = arr_handle;
+        }
+    } else if name == "array_get" || name == "object_get_dynamic" {
+        if raw_args.len() >= 2 {
+            let target_handle = raw_args[0];
+            let idx_val = raw_args[1];
+            let bits = idx_val as u64;
+            let idx = if (bits >> 48) < 0x7ff8 {
+                f64::from_bits(bits) as usize
+            } else {
+                (bits & 0xFFFF_FFFF) as usize
+            };
+            if let Some(h) = state.get_handle(target_handle).cloned() {
+                match h {
+                    JsHandle::Array(arr) => {
+                        if let Some(&elem) = arr.get(idx) {
+                            result_i64 = elem;
+                        }
+                    }
+                    JsHandle::Json(serde_json::Value::Array(arr)) => {
+                        if let Some(elem) = arr.get(idx) {
+                            result_i64 = state.from_js_value(elem.clone());
+                        }
+                    }
+                    JsHandle::Json(serde_json::Value::Object(map)) => {
+                        let key_str = state.get_string(idx_val);
+                        if let Some(v) = map.get(&key_str) {
+                            result_i64 = state.from_js_value(v.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    } else if name == "string_len" || name == "array_length" {
+        let arg = raw_args.first().copied().unwrap_or(0);
+        if let Some(h) = state.get_handle(arg) {
+            match h {
+                JsHandle::Array(arr) => {
+                    result_i64 = (arr.len() as f64).to_bits() as i64;
+                }
+                JsHandle::Json(serde_json::Value::Array(arr)) => {
+                    result_i64 = (arr.len() as f64).to_bits() as i64;
+                }
+                _ => {
+                    let len = state.get_string(arg).len();
+                    result_i64 = (len as f64).to_bits() as i64;
+                }
+            }
+        } else {
+            let len = state.get_string(arg).len();
+            result_i64 = (len as f64).to_bits() as i64;
+        }
+    } else if name == "object_new" {
+        let h_id = state.alloc_handle(JsHandle::Json(serde_json::Value::Object(serde_json::Map::new())));
+        result_i64 = nanbox_pointer(h_id);
+    } else if name == "object_set" {
+        if raw_args.len() >= 3 {
+            let target_handle = raw_args[0];
+            let key_str = state.get_string(raw_args[1]);
+            let val_json = state.to_js_value(raw_args[2]);
+            if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle_mut(target_handle) {
+                map.insert(key_str, val_json);
+            }
+            result_i64 = target_handle;
+        }
+    } else if name == "object_assign" {
+        if raw_args.len() >= 2 {
+            let target_handle = raw_args[0];
+            let source_handle = raw_args[1];
+            let source_json = state.to_js_value(source_handle);
+            if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) = state.get_handle_mut(target_handle) {
+                if let serde_json::Value::Object(src_map) = source_json {
+                    for (k, v) in src_map {
+                        target_map.insert(k, v);
+                    }
+                }
+            }
+            result_i64 = target_handle;
+        }
+    } else if name == "object_get" {
+        if raw_args.len() >= 2 {
+            let target_handle = raw_args[0];
+            let key_str = state.get_string(raw_args[1]);
+            if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target_handle) {
+                if let Some(v) = map.get(&key_str) {
+                    let v_clone = v.clone();
+                    result_i64 = state.from_js_value(v_clone);
+                }
+            }
+        }
+    } else if name == "json_stringify" {
+        let arg = raw_args.first().copied().unwrap_or(0);
+        let val_json = state.to_js_value(arg);
+        let json_str = serde_json::to_string_pretty(&val_json)
+            .unwrap_or_else(|_| "{}".to_string());
+        let str_id = state.strings.len();
+        state.strings.push(json_str);
+        result_i64 = nanbox_string(str_id);
+    } else if name == "json_parse" {
+        let arg = raw_args.first().copied().unwrap_or(0);
+        let s = state.get_string(arg);
+        let val_json: serde_json::Value =
+            serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
+        result_i64 = state.from_js_value(val_json);
+    } else if name == "console_log" || name == "log" {
+        let arg = raw_args.last().copied().unwrap_or(0);
+        let msg = state.get_string(arg);
+        print_stdout(&format!("{msg}\n"));
+    } else if name == "string_concat" || name == "js_add" {
+        if raw_args.len() >= 2 {
+            let s_a = state.get_string(raw_args[0]);
+            let s_b = state.get_string(raw_args[1]);
+            let res = format!("{s_a}{s_b}");
+            let str_id = state.strings.len();
+            state.strings.push(res);
+            result_i64 = nanbox_string(str_id);
+        }
+    } else if name == "await_promise" {
+        let arg = raw_args.first().copied().unwrap_or(0);
+        if let Some(JsHandle::Response(resp_id)) = state.get_handle(arg) {
+            let resp_id = *resp_id;
+            let _ = state.get_response_body(resp_id);
+        } else if let Some(id) = get_pointer_id(arg) {
+            let _ = state.get_response_body(id);
+        }
+        result_i64 = arg;
+    }
+
+    // Write result back to base_addr
+    unsafe {
+        *(base_addr as *mut i64) = result_i64;
+    }
+
+    0.0
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32) -> i32 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state.strings.get(name_idx).map(|s| s.as_str()).unwrap_or("");
+    let count = arg_count as usize;
+
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if name == "is_truthy" {
+        if let Some(&arg) = raw_args.first() {
+            let bits = arg as u64;
+            if bits == TAG_UNDEFINED || bits == TAG_NULL || bits == TAG_FALSE {
+                return 0;
+            }
+            if bits == TAG_TRUE {
+                return 1;
+            }
+            let f = f64::from_bits(bits);
+            if f == 0.0 || f.is_nan() {
+                return 0;
+            }
+            return 1;
+        }
+    }
+
+    0
+}
+
+// -----------------------------------------------------------------------------
+// Auto-generated runtime function stubs (208 stubs for static link compatibility)
+// -----------------------------------------------------------------------------
+#[no_mangle] pub extern "C" fn console_warn(_a: i64) {}
+#[no_mangle] pub extern "C" fn console_error(_a: i64) {}
+#[no_mangle] pub extern "C" fn string_concat(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn js_add(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_eq(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn string_len(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn jsvalue_to_string(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn jsvalue_to_template_string(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn is_truthy(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn js_strict_eq(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn math_floor(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_ceil(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_round(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_abs(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_sqrt(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_pow(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_random() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_log(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_now() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn js_typeof(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_min(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_max(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn parse_int(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn parse_float(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn js_mod(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn is_null_or_undefined(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn object_new() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn object_set(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn object_get(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn object_get_dynamic(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn object_set_dynamic(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn object_delete(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn object_delete_dynamic(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn object_keys(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn object_values(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn object_entries(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn object_has_property(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn object_assign(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_new() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_push(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_pop(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_get(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_set(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn array_length(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_slice(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_splice(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_shift(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_unshift(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn array_join(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_index_of(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_includes(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn array_concat(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_reverse(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_flat(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_is_array(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn array_from(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_push_spread(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_charAt(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_substring(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_indexOf(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_slice(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_toLowerCase(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_toUpperCase(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_trim(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_includes(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn string_startsWith(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn string_endsWith(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn string_replace(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_split(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_fromCharCode(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_padStart(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_padEnd(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_repeat(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn string_match(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_log2(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn math_log10(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn closure_new(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn closure_set_capture(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn closure_call_0(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn closure_call_1(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn closure_call_2(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn closure_call_3(_a: i64, _b: i64, _c: i64, _d: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn closure_call_spread(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_map(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_filter(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_forEach(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn array_reduce(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_find(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_find_index(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_sort(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn array_some(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn array_every(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn class_new(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn class_set_method(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn class_call_method(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn class_get_field(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn class_set_field(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn class_set_static(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn class_get_static(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn class_instanceof(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn json_parse(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn json_stringify(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn map_new() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn map_set(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn map_get(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn map_has(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn map_delete(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn map_size(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn map_clear(_a: i64) {}
+#[no_mangle] pub extern "C" fn map_entries(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn map_keys(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn map_values(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn set_new() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn set_new_from_array(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn set_add(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn set_has(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn set_delete(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn set_size(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn set_clear(_a: i64) {}
+#[no_mangle] pub extern "C" fn set_values(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_new_val(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_time(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_to_iso_string(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_full_year(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_month(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_date(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_day(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_hours(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_minutes(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_seconds(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn date_get_milliseconds(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn error_new(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn error_message(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn regexp_new(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn regexp_test(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn number_coerce(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn is_nan(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn is_finite(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn console_log_multi(_a: i64) {}
+#[no_mangle] pub extern "C" fn class_set_parent(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn try_start() {}
+#[no_mangle] pub extern "C" fn try_end() {}
+#[no_mangle] pub extern "C" fn throw_value(_a: i64) {}
+#[no_mangle] pub extern "C" fn has_exception() -> i32 { 0 }
+#[no_mangle] pub extern "C" fn get_exception() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_parse(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_href(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_pathname(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_hostname(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_port(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_search(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_hash(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_origin(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_protocol(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn url_get_search_params(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn searchparams_get(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn searchparams_has(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn searchparams_set(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn searchparams_append(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn searchparams_delete(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn searchparams_to_string(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn crypto_random_uuid() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn crypto_random_bytes(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn path_join(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn path_dirname(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn path_basename(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn path_extname(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn path_resolve(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn os_platform() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn process_argv() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn process_cwd() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_alloc(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_from_string(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_to_string(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_get(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_set(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn buffer_length(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_slice(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_concat(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn uint8array_new(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn uint8array_from(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn uint8array_length(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn uint8array_get(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn uint8array_set(_a: i64, _b: i64, _c: i64) {}
+#[no_mangle] pub extern "C" fn set_timeout(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn set_interval(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn clear_timeout(_a: i64) {}
+#[no_mangle] pub extern "C" fn clear_interval(_a: i64) {}
+#[no_mangle] pub extern "C" fn response_status(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn response_ok(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn response_headers_get(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn response_url(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_copy(_a: i64, _b: i64, _c: i64, _d: i64, _e: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_write(_a: i64, _b: i64, _c: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn buffer_equals(_a: i64, _b: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn buffer_is_buffer(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn buffer_byte_length(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn crypto_sha256(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn crypto_md5(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn path_is_absolute(_a: i64) -> i32 { 0 }
+#[no_mangle] pub extern "C" fn fetch_url(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn fetch_with_options(_a: i64, _b: i64, _c: i64, _d: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn response_json(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn response_text(_a: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn promise_new() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn promise_resolve(_a: i64, _b: i64) {}
+#[no_mangle] pub extern "C" fn promise_then(_a: i64, _b: i64) -> i64 { 0 }
+#[no_mangle] pub extern "C" fn await_promise(_a: i64) -> i64 { 0 }

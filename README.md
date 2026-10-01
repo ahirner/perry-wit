@@ -1,36 +1,46 @@
 # perry-wit
 
-End-to-end demonstration compiling TypeScript to native **WebAssembly WASI Preview 2 (WASI 0.2.4)** components using the sub-crates of [PerryTS/perry](https://github.com/PerryTS/perry) (`perry-parser`, `perry-hir`, `perry-codegen-wasm`) and deterministic WASI Preview 2 WIT bindings.
+End-to-end demonstration compiling TypeScript to native **WebAssembly WASI Preview 2 (WASI 0.2.4)** components using the sub-crates of [PerryTS/perry](https://github.com/PerryTS/perry) (`perry-parser`, `perry-hir`, `perry-codegen-wasm`), native static linking (`wasm-merge`), and deterministic WASI Preview 2 WIT bindings.
 
 ---
 
 ## Overview & Architecture
+
+Unlike typical JS-on-Wasm runtimes that embed dynamic bytecode interpreters (like QuickJS, SpiderMonkey, or Wasmi) at a cost of 1.4 MB to 15 MB, **perry-wit compiles TypeScript directly to native WebAssembly bytecode**.
+
+The compiled Core Wasm module is statically linked with a lightweight C-ABI guest runtime (`crates/guest-runtime`) using `wasm-merge` (Binaryen), and then componentized using `wasm-tools component new`.
 
 ```
                        ┌────────────────────────────┐
                        │   examples/merge_docs.ts   │
                        └─────────────┬──────────────┘
                                      │
-           perry-parser / perry-hir / perry-codegen-wasm
+                perry-parser / perry-hir / perry-codegen-wasm
                                      │
                                      ▼
                        ┌────────────────────────────┐
-                       │   Core WebAssembly Module  │ (~10 KB)
+                       │   Core WebAssembly Module  │ (~13 KB)
                        │   (Perry NaN-boxed ABI)    │
                        └─────────────┬──────────────┘
-                                     │ embedded inside
+                                     │
+                 wasm-merge (Binaryen) with guest-runtime
+                 (statically binds rt imports to shared linear memory)
+                                     │
                                      ▼
-      ┌──────────────────────────────────────────────────────────────┐
-      │             WASI Preview 2 Component (guest-runtime)        │
-      │                                                              │
-      │   wit-bindgen 0.61.1 + wasmi 2.0 (no C/Python dependencies)   │
-      │                                                              │
-      │   Runtime Bridge:                                            │
-      │     - rt::fetch_with_options / fetch ──► wasi:http (in-flight)│
-      │     - rt::response_json              ──► wasi:http + serde   │
-      │     - rt::object_assign (splatting)  ──► JSON object merge   │
-      │     - rt::console_log                ──► wasi:cli/stdout     │
-      └──────────────────────────────┬───────────────────────────────┘
+       ┌──────────────────────────────────────────────────────────────┐
+       │             WASI Preview 2 Component (Zero Interpreters)     │
+       │                                                              │
+       │   Canonical ABI entry: wasi:cli/run@0.2.6#run                │
+       │   Execution: Native Cranelift JIT (No Wasmi / No QuickJS)    │
+       │   Size: ~111 KB stripped                                     │
+       │                                                              │
+       │   Runtime Bridge:                                            │
+       │     - Promise.all([fetch, fetch]) ──► concurrent wasi:http   │
+       │     - Array destructuring         ──► NaN-box index access   │
+       │     - Response.json()             ──► serde_json stream      │
+       │     - Object splatting ({...a})   ──► native object_assign   │
+       │     - console.log                 ──► wasi:cli/stdout        │
+       └──────────────────────────────┬───────────────────────────────┘
                                      │
                              wasmtime wasip2
                                      │
@@ -41,88 +51,54 @@ End-to-end demonstration compiling TypeScript to native **WebAssembly WASI Previ
 ### Components
 
 1. **Host Compiler CLI (`perry-wit`)**:
-   Uses Perry's sub-crates:
    - `perry-parser`: parses TypeScript syntax into an AST.
    - `perry-hir`: lowers AST to Perry's High-level Intermediate Representation.
    - `perry-codegen-wasm`: compiles HIR into a Core WebAssembly binary with the Perry NaN-boxed ABI (`string_new`, `mem_call`, `fetch_with_options`, etc.).
    - Applies HIR rewrites for object spread IIFEs into native `Expr::ObjectAssign` and rewrites untyped `.json()` calls to `NativeMethodCall`.
+   - Synthesizes `wasi:cli/run@0.2.6#run` entry point and aligns linear memory to 32 pages (2 MB) for the merged runtime data segment.
 2. **Guest Runtime (`crates/guest-runtime`)**:
-   A WASI Preview 2 component built with `wit-bindgen 0.61.1` and `wasmi 2.0` targeting `wasm32-wasip2`.
-   - Embeds the compiled core WebAssembly module (`dist/merge_docs.core.wasm`).
-   - Dispatches HTTP requests immediately non-blocking via `wasi:http/outgoing-handler@0.2.4` so requests run concurrently in-flight on the host.
-   - Implements JS object manipulation, splatting, and JSON serialization.
-   - Ensures strict WASI resource drop ordering (dropping stream, body, response, pollable before future response) to satisfy Component Model lifetime rules.
-   - Executes with zero external C/Python dependencies.
-3. **Deterministic WIT Interfaces (`wit/`)**:
-   Vendored complete canonical WASI 0.2.4 definitions (`wasi:cli`, `wasi:clocks`, `wasi:filesystem`, `wasi:http`, `wasi:io`, `wasi:random`, `wasi:sockets`) following the deterministic patterns of `standalone-components`.
+   - Minimal C-ABI runtime module targeting `wasm32-unknown-unknown` with imported linear memory.
+   - Unified handle storage (`JsHandle`) avoiding ID collisions across JSON values, arrays, and in-flight HTTP streams.
+   - Non-blocking `wasi:http/outgoing-handler@0.2.4` dispatch allowing multiple outgoing HTTP requests to run concurrently in parallel on the host event loop.
+   - Strict WASI resource drop ordering (dropping stream, body, response, pollable before future response) to satisfy Component Model lifetime invariants.
+3. **Static Linker & Componentizer**:
+   - `wasm-merge`: fuses the compiled TypeScript module (`env`) and the runtime (`rt`), automatically resolving all 200+ ABI imports into direct internal function calls on shared linear memory.
+   - `wasm-tools component embed` & `wasm-tools component new`: packages the linked core module into a WASI Preview 2 component matching `wit/world.wit`.
 
 ---
 
-## Binary Footprint & Size Breakdown
+## Binary Footprint & Size Comparison
 
-| Artifact | Size | Role / Contents |
-| :--- | :--- | :--- |
-| `dist/merge_docs.core.wasm` | **~10 KB** | Pure compiled TypeScript bytecode generated by Perry |
-| `dist/perry_merge_docs.wasm` | **~1.4 MB** | Full WASI 0.2.4 Component (includes guest runtime, unstripped) |
-| `dist/perry_merge_docs.stripped.wasm` | **~1.4 MB** | Stripped WASI 0.2.4 Component ready for execution |
-
-### Why is the component ~1.4 MB?
-- The TypeScript program itself compiles to only **10 KB** of WebAssembly.
-- To execute dynamic Core WebAssembly inside a standalone WASI Preview 2 component without requiring host JIT recompilation or C/Node runtime dependencies, `guest-runtime` embeds:
-  - `wasmi 2.0`: an embeddable, pure-Rust WebAssembly interpreter engine.
-  - Rust standard library runtime and memory allocator for `wasm32-wasip2`.
-  - `serde_json` for JSON parsing and serialization.
-  - Canonical ABI glue code generated by `wit-bindgen`.
-- This is the standard architecture for running guest dynamic code in WebAssembly components:
-  - Shopify's **Javy** (QuickJS inside WASI): **~1.5 MB – 2.0 MB**
-  - Bytecode Alliance's **Componentize-JS** (SpiderMonkey inside WASI): **~5 MB – 15 MB**
-  - **perry-wit** (`wasmi` inside WASI): **~1.4 MB**
+| Architecture | Approach | Size (Stripped) | Overhead / Engines |
+| :--- | :--- | :--- | :--- |
+| **Componentize-JS** | SpiderMonkey | ~5 MB – 15 MB | Heavy JS engine |
+| **Javy** | QuickJS | ~1.5 MB – 2.0 MB | In-wasm JS interpreter |
+| **perry-wit (previous)** | Wasmi | ~1.4 MB | In-wasm WebAssembly interpreter |
+| **perry-wit (current)** | **Native Ahead-of-Time** | **~111 KB** | **Zero interpreters, direct native code** |
 
 ---
 
-## How Async & Concurrent Fetch Works in WebAssembly
+## Concurrent Fetch & `Promise.all`
 
-### Sequential vs Concurrent Execution in Wasm
-In WebAssembly linear execution, single-threaded code cannot magically execute multiple instructions at once. However, **network I/O is performed by the host (Wasmtime)**:
+### Concurrency in WebAssembly
+WebAssembly execution within a single instance is single-threaded. However, **network I/O is asynchronous and handled by the host (Wasmtime)**:
 
-1. **Sequential `await` (No Concurrency Benefit)**:
-   ```typescript
-   const res1 = await fetch("http://.../doc1.json"); // Blocks until doc1 finishes
-   const res2 = await fetch("http://.../doc2.json"); // Only starts after doc1 is done
-   ```
-   Total duration = `T(doc1) + T(doc2)`.
+1. Calling `fetch(url1)` immediately dispatches `wasi:http/outgoing-handler::handle`, returning an in-flight `future-incoming-response` handle.
+2. Calling `fetch(url2)` immediately dispatches the second request.
+3. Both TCP handshakes, TLS negotiations, and HTTP downloads proceed in parallel on Wasmtime's Tokio event loop in the host.
+4. `Promise.all([fetch1, fetch2])` ensures all in-flight requests are actively progressing concurrently before awaiting results.
 
-2. **Overlapped / In-Flight `fetch` (True Host Concurrency)**:
-   ```typescript
-   // 1. Dispatch both requests immediately to the host
-   const p1 = fetch("http://.../doc1.json");
-   const p2 = fetch("http://.../doc2.json");
-
-   // 2. Await both responses
-   const res1 = await p1;
-   const doc1 = await res1.json();
-
-   const res2 = await p2; // doc2 was downloading concurrently on the host!
-   const doc2 = await res2.json();
-   ```
-   When `fetch()` is called, `wasi:http/outgoing-handler::handle` immediately hands the request to Wasmtime's Tokio event loop in the host. The host initiates TCP handshakes and transfers in parallel background tasks. Total duration = `max(T(doc1), T(doc2))`.
-
----
-
-## Example: Concurrent Fetch & Splatting
-
-The TypeScript source in [`examples/merge_docs.ts`](examples/merge_docs.ts):
+### TypeScript Example: `examples/merge_docs.ts`
 
 ```typescript
-// 1. Initiate BOTH HTTP requests concurrently so both are in flight simultaneously!
-const p1 = fetch("http://127.0.0.1:8080/doc1.json");
-const p2 = fetch("http://127.0.0.1:8080/doc2.json");
+// 1. Initiate BOTH HTTP requests concurrently using Promise.all
+const [res1, res2] = await Promise.all([
+    fetch("http://127.0.0.1:8080/doc1.json"),
+    fetch("http://127.0.0.1:8080/doc2.json")
+]);
 
-// 2. Await both responses and parse JSON
-const res1 = await p1;
+// 2. Parse JSON documents
 const doc1 = await res1.json();
-
-const res2 = await p2;
 const doc2 = await res2.json();
 
 // 3. Merge using object splatting
@@ -138,28 +114,26 @@ console.log("==================================");
 ## Quick Start & Verification
 
 ### 1. Build the Component
-Compile the TypeScript program to Core Wasm, link the WASIp2 guest component, strip debug info, and validate:
+Compile the TypeScript program to Core Wasm, compile the runtime, merge with `wasm-merge`, embed WIT, and componentize:
 
 ```bash
 ./scripts/build.sh
 ```
 
 ### 2. Run the End-to-End Test
-Launches the multithreaded mock HTTP server (port 8080) and runs the component in Nix `wasmtime`:
+Launches the background mock HTTP server (port 8080) and runs the component in Nix `wasmtime`:
 
 ```bash
 ./scripts/test_e2e.sh
 ```
 
 ### 3. Run Manually with Wasmtime
-With any HTTP server serving `doc1.json` and `doc2.json` on port 8080:
-
 ```bash
 nix run nixpkgs#wasmtime -- run -S http=y -S inherit-network=y dist/perry_merge_docs.stripped.wasm
 ```
 
 Expected output:
-```text
+```json
 === MERGED DOCUMENT (SPLATTED) ===
 {
   "author": "WebAssembly Community Group",
