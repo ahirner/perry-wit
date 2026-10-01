@@ -1,42 +1,71 @@
-use anyhow::Result;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, ensure};
 use perry_codegen_wasm::compile_modules_to_wasm;
 use perry_hir::lower_module;
 use perry_parser::parse_typescript;
-use std::fs;
-use std::path::Path;
-use wasmparser::Parser;
-use wasmparser::Payload;
+
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let ts_file_path = if args.len() > 1 && !args[1].starts_with('-') {
-        &args[1]
-    } else {
-        "examples/merge_docs.ts"
-    };
+    let mut ts_file_path = "examples/merge_docs.ts".to_string();
+    let mut out_file_path = "dist/perry_merge_docs.stripped.wasm".to_string();
+    let mut runtime_wasm_path: Option<String> = None;
+    let mut wit_dir_path = "wit".to_string();
+    let mut world_name = Some("merge-docs".to_string());
+    let mut core_only = false;
 
-    let mut out_file_path = "dist/merge_docs.core.wasm".to_string();
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "-o" && i + 1 < args.len() {
-            out_file_path = args[i + 1].clone();
-            i += 2;
-        } else {
-            i += 1;
+        match args[i].as_str() {
+            "-o" | "--out" if i + 1 < args.len() => {
+                out_file_path = args[i + 1].clone();
+                i += 2;
+            }
+            "--runtime" if i + 1 < args.len() => {
+                runtime_wasm_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--wit" if i + 1 < args.len() => {
+                wit_dir_path = args[i + 1].clone();
+                i += 2;
+            }
+            "--world" if i + 1 < args.len() => {
+                world_name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--core-only" => {
+                core_only = true;
+                i += 1;
+            }
+            arg if !arg.starts_with('-') => {
+                ts_file_path = arg.to_string();
+                i += 1;
+            }
+            other => {
+                eprintln!("Unknown argument: {other}");
+                i += 1;
+            }
         }
     }
 
-    let ts_file = Path::new(ts_file_path);
+    if out_file_path.ends_with(".core.wasm") {
+        core_only = true;
+    }
+
+    let ts_file = Path::new(&ts_file_path);
     let ts_content = fs::read_to_string(ts_file)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", ts_file.display()))?;
+        .with_context(|| format!("Failed to read TypeScript source {}", ts_file.display()))?;
     println!("Compiling {} ({} bytes)...", ts_file.display(), ts_content.len());
 
     let file_name = ts_file.file_name().and_then(|s| s.to_str()).unwrap_or("module.ts");
     let ast = parse_typescript(&ts_content, file_name)
-        .map_err(|e| anyhow::anyhow!("Failed to parse: {e:?}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {e:?}", ts_file.display()))?;
 
     let mut hir = lower_module(&ast, "main", file_name)
-        .map_err(|e| anyhow::anyhow!("Failed to lower: {e:?}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to lower {}: {e:?}", ts_file.display()))?;
 
     println!("Lowered AST to HIR. Functions: {}, Inits: {}", hir.functions.len(), hir.init.len());
 
@@ -126,28 +155,90 @@ fn main() -> Result<()> {
 
     let wasm_bytes = add_wasi_cli_run_export(&wasm_bytes)?;
 
-    println!("Compiled to Core Wasm: {} bytes -> {}", wasm_bytes.len(), out_file_path);
-    fs::write(&out_file_path, &wasm_bytes)?;
+    if let Some(parent) = Path::new(&out_file_path).parent() {
+        fs::create_dir_all(parent)?;
+    }
 
-    println!("Imports in generated Core Wasm:");
-    let mut import_count = 0;
-    for payload in Parser::new(0).parse_all(&wasm_bytes) {
-        if let Payload::ImportSection(s) = payload? {
-            for import_group in s {
-                if let wasmparser::Imports::Single(_, imp) = import_group? {
-                    import_count += 1;
-                    if import_count <= 10 {
-                        println!("  {}:{}", imp.module, imp.name);
-                    }
-                }
-            }
-        }
+    if core_only {
+        println!("Writing Core Wasm ({} bytes) -> {}", wasm_bytes.len(), out_file_path);
+        fs::write(&out_file_path, &wasm_bytes)?;
+        return Ok(());
     }
-    if import_count > 10 {
-        println!("  ... and {} more imports (total: {})", import_count - 10, import_count);
-    }
+
+    // Full in-process pipeline: Link -> Embed WIT -> Component Encode -> Strip
+    let rt_path = match runtime_wasm_path {
+        Some(p) => PathBuf::from(p),
+        None => ensure_guest_runtime_compiled()?,
+    };
+
+    println!("Linking with guest runtime: {}...", rt_path.display());
+    let rt_bytes = fs::read(&rt_path)
+        .with_context(|| format!("Reading guest runtime from {}", rt_path.display()))?;
+
+    let merged_core = perry_wit::linker::merge_core_modules(&wasm_bytes, &rt_bytes)
+        .context("Linking TypeScript core wasm with guest runtime")?;
+    println!("Linked into unified Core Wasm: {} bytes", merged_core.len());
+
+    println!("Embedding WIT ({}) and encoding component (world: {:?})...", wit_dir_path, world_name);
+    let component_bytes = perry_wit::component::embed_and_encode(
+        &merged_core,
+        Path::new(&wit_dir_path),
+        world_name.as_deref(),
+    )?;
+
+    let stripped_bytes = perry_wit::strip::component(&component_bytes)
+        .context("Stripping custom sections from component")?;
+
+    println!(
+        "Component built: raw = {} bytes, stripped = {} bytes -> {}",
+        component_bytes.len(),
+        stripped_bytes.len(),
+        out_file_path
+    );
+    fs::write(&out_file_path, &stripped_bytes)?;
+
+    println!("Validating component with wasmparser...");
+    let mut validator = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
+    validator.validate_all(&stripped_bytes).context("Validating stripped component")?;
+    println!("Component validated successfully!");
 
     Ok(())
+}
+
+fn ensure_guest_runtime_compiled() -> Result<PathBuf> {
+    let default_path = PathBuf::from("target/wasm32-unknown-unknown/release/guest_runtime.wasm");
+    if default_path.exists() {
+        return Ok(default_path);
+    }
+
+    println!("guest_runtime.wasm not found; compiling guest-runtime crate...");
+    let status = Command::new("cargo")
+        .args([
+            "rustc",
+            "--release",
+            "--package",
+            "guest-runtime",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--",
+            "-C",
+            "link-arg=--import-memory",
+            "-C",
+            "link-arg=--global-base=1048576",
+            "-C",
+            "link-arg=--no-entry",
+        ])
+        .status()
+        .context("Running cargo rustc for guest-runtime")?;
+
+    ensure!(status.success(), "Failed to compile guest-runtime crate");
+    ensure!(
+        default_path.exists(),
+        "guest_runtime.wasm still not found at {}",
+        default_path.display()
+    );
+
+    Ok(default_path)
 }
 
 fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
@@ -156,7 +247,6 @@ fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
 
     // Ensure memory has enough pages for guest runtime (at least 32 pages = 2MB)
     let mut wat = wat.replace("(memory (;0;) 2)", "(memory (;0;) 32)");
-    // format is typically: (export "_start" (func (;213;))) or (export "_start" (func 213))
     let pattern = "(export \"_start\" (func ";
     let idx = wat.find(pattern)
         .ok_or_else(|| anyhow::anyhow!("Could not find _start export in wat"))?;
@@ -164,7 +254,6 @@ fn add_wasi_cli_run_export(wasm_bytes: &[u8]) -> Result<Vec<u8>> {
     let close = rest.find(')')
         .ok_or_else(|| anyhow::anyhow!("Malformed _start export in wat"))?;
     let start_func_ref = rest[..close].trim();
-    // start_func_ref might be "(;213;)" or "213" or "$_start"
     let clean_func_ref = start_func_ref.trim_matches(|c| c == '(' || c == ';' || c == ')');
 
     let last_paren = wat.rfind(')')
