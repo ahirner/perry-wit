@@ -9,8 +9,8 @@ use perry_parser::parse_typescript;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let mut ts_file_path = "examples/merge_docs.ts".to_string();
-    let mut out_file_path = "dist/perry_merge_docs.stripped.wasm".to_string();
+    let mut ts_file_path: Option<String> = None;
+    let mut out_file_path: Option<String> = None;
     let mut runtime_wasm_path: Option<String> = None;
     let mut wit_dir_path = "wit".to_string();
     let mut world_name = Some("merge-docs".to_string());
@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "-o" | "--out" if i + 1 < args.len() => {
-                out_file_path = args[i + 1].clone();
+                out_file_path = Some(args[i + 1].clone());
                 i += 2;
             }
             "--runtime" if i + 1 < args.len() => {
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
                 i += 1;
             }
             arg if !arg.starts_with('-') => {
-                ts_file_path = arg.to_string();
+                ts_file_path = Some(arg.to_string());
                 i += 1;
             }
             "-h" | "--help" => {
@@ -61,6 +61,19 @@ fn main() -> Result<()> {
             }
         }
     }
+
+    let Some(ts_file_path) = ts_file_path else {
+        eprintln!("Error: missing input TypeScript file");
+        eprintln!("Usage: perry-wit [OPTIONS] <input.ts>");
+        eprintln!("Try 'perry-wit --help' for more information.");
+        std::process::exit(1);
+    };
+
+    let out_file_path = out_file_path.unwrap_or_else(|| {
+        let p = Path::new(&ts_file_path);
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+        format!("dist/{stem}.wasm")
+    });
 
     if out_file_path.ends_with(".core.wasm") {
         core_only = true;
