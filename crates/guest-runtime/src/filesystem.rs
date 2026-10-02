@@ -4,7 +4,7 @@ use crate::bindings::wasi::filesystem::types::{
 };
 use crate::bindings::wasi::io::streams::StreamError;
 use crate::nanbox::TAG_UNDEFINED;
-use crate::state::get_state;
+use crate::state::{get_state, JsHandle};
 
 /// Normalizes a path string, resolving '.' and '..' components and checking confinement.
 /// Returns (normalized_path, is_absolute).
@@ -240,17 +240,20 @@ fn fs_read_file_impl(path_val: i64, as_utf8: bool) -> i64 {
 
 pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64, options: i64) -> i64 {
     let state = get_state();
-    if !supported_write_options(&state.to_js_value(options)) {
+    let byte_view = match state.get_handle(content_val) {
+        Some(JsHandle::Uint8Array(view)) => Some(view),
+        _ => None,
+    };
+    if !supported_write_options(&state.to_js_value(options), byte_view.is_some()) {
         state.current_exception = Some("TypeError: Unsupported writeFileSync options; only UTF-8 encoding and flag 'w' are supported".into());
         return TAG_UNDEFINED as i64;
     }
     let path = state.get_string(path_val);
-    let bytes: Vec<u8> =
-        if let Some(crate::state::JsHandle::Uint8Array(view)) = state.get_handle(content_val) {
-            view.to_vec()
-        } else {
-            state.get_string(content_val).into_bytes()
-        };
+    let bytes = if let Some(view) = byte_view {
+        view.to_vec()
+    } else {
+        state.get_string(content_val).into_bytes()
+    };
 
     let (dir, rel_path) = match locate_preopen(&path) {
         Ok(loc) => loc,
@@ -316,12 +319,12 @@ pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64, options: i64) 
 }
 
 /// The write implementation must reject options that change its semantics.
-fn supported_write_options(options: &serde_json::Value) -> bool {
+fn supported_write_options(options: &serde_json::Value, is_byte_view: bool) -> bool {
     let valid_encoding = |encoding: &serde_json::Value| {
         encoding.as_str().is_some_and(|e| {
             e.eq_ignore_ascii_case("utf8")
                 || e.eq_ignore_ascii_case("utf-8")
-                || e.eq_ignore_ascii_case("binary")
+                || (is_byte_view && e.eq_ignore_ascii_case("binary"))
         })
     };
     match options {

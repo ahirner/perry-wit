@@ -75,6 +75,58 @@ fn mkdir_options_are_evaluated_and_rejected_before_directory_creation() {
 }
 
 #[test]
+fn binary_write_encoding_requires_byte_views_and_preserves_files_on_rejection() {
+    for (import, write) in [
+        ("import * as fs from 'fs';", "fs.writeFileSync"),
+        ("import { writeFileSync } from 'node:fs';", "writeFileSync"),
+    ] {
+        let scratch = support::Scratch::new();
+        let directory = scratch.0.join("sandbox");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("existing.txt"), "original").unwrap();
+        let source = r#"
+            IMPORT
+            const options = ["binary", {encoding: "binary"}];
+            const bytes = Uint8Array.from([90, 233, 0, 255, 91]).subarray(1, 4);
+            for (let i = 0; i < options.length; i++) {
+                try {
+                    WRITE("/sandbox/existing.txt", "é", options[i]);
+                    console.log("unreachable");
+                } catch (error) { console.log("caught"); }
+                try {
+                    WRITE("/sandbox/missing.txt", "é", options[i]);
+                    console.log("unreachable");
+                } catch (error) { console.log("caught"); }
+                WRITE("/sandbox/bytes" + i, bytes, options[i]);
+            }
+            WRITE("/sandbox/utf8.txt", "é", "utf8");
+        "#
+        .replace("IMPORT", import)
+        .replace("WRITE", write);
+        let wasm = scratch.compile(&source, None);
+        let output = Command::new(support::get_wasmtime_path())
+            .args(["run", "-C", "cache=n", "--dir"])
+            .arg(format!("{}::/sandbox", directory.display()))
+            .arg(wasm)
+            .output()
+            .unwrap();
+        assert_eq!(support::stdout(&output), "caught\n".repeat(4), "{import}");
+        assert_eq!(
+            fs::read(directory.join("existing.txt")).unwrap(),
+            b"original"
+        );
+        assert!(!directory.join("missing.txt").exists());
+        for index in 0..2 {
+            assert_eq!(
+                fs::read(directory.join(format!("bytes{index}"))).unwrap(),
+                [233, 0, 255]
+            );
+        }
+        assert_eq!(fs::read(directory.join("utf8.txt")).unwrap(), [0xc3, 0xa9]);
+    }
+}
+
+#[test]
 fn unsupported_write_options_never_modify_or_create_files() {
     let scratch = support::Scratch::new();
     let directory = scratch.0.join("sandbox");
