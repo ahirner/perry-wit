@@ -176,12 +176,13 @@ Verification:
 - [x] **9.1. UTF-8 File Reads/Writes**
     - [x] Support `readFileSync` / `writeFileSync` within host-provided preopens, with explicit path rules and confinement through descriptor-relative operations.
     - [x] Verify round-trips, short I/O handling, missing files, denied access, path escape attempts, and resource cleanup on success/failure.
-- [ ] **9.2. Binary File Reads/Writes** — Needs D.1 and the file operations from 9.1.
-    - [ ] Transfer byte views without text conversion, documenting the return type until Node `Buffer` compatibility exists.
-    - [ ] Verify arbitrary-byte round-trips, subview writes, and repeated-operation cleanup.
-- [ ] **9.3. Directory & Metadata Operations** — Add when a filesystem consumer needs them.
-    - [ ] Support the required subset of `readdirSync`, `statSync`, and `unlinkSync`, keeping Node-facing shapes such as `stats.isFile()` consistent with the declared API.
-    - [ ] Verify listing, metadata, and removal for that subset, including failure paths and resource cleanup.
+- [ ] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
+    - [ ] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`.
+    - [ ] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
+- [ ] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
+    - [ ] Support `fs.readdirSync(path)` via `Descriptor::read_directory` stream collecting child entry names, and `fs.unlinkSync(path)` via `Descriptor::unlink_file_at`.
+    - [ ] Support `fs.statSync(path)` via `Descriptor::stat`, exposing `{ isFile(): boolean, isDirectory(): boolean, size: number, mtimeMs: number }`.
+    - [ ] Verify listing, metadata, and removal for that subset, including failure paths (`ENOENT`, `ENOTDIR`, `EISDIR`) and descriptor cleanup.
 
 Verification:
 - Added `wasi:filesystem/types@0.2.6` and `wasi:filesystem/preopens@0.2.6` to WIT world adapter in `wit/world.wit`.
