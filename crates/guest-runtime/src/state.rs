@@ -94,6 +94,39 @@ impl RuntimeState {
         }
     }
 
+    /// Numeric coercion for the primitive values accepted by byte operations.
+    pub(crate) fn to_number(&self, value: i64) -> f64 {
+        match value as u64 {
+            TAG_UNDEFINED => f64::NAN,
+            TAG_NULL | TAG_FALSE => 0.0,
+            TAG_TRUE => 1.0,
+            bits if bits >> 48 == STRING_TAG => number_from_string(&self.get_string(value)),
+            bits if bits >> 48 == POINTER_TAG => match self.get_handle(value) {
+                Some(JsHandle::Date(timestamp)) => *timestamp,
+                Some(JsHandle::Array(items)) if items.is_empty() => 0.0,
+                Some(JsHandle::Array(items)) if items.len() == 1 => {
+                    if matches!(items[0] as u64, TAG_NULL | TAG_UNDEFINED) {
+                        0.0
+                    } else {
+                        self.to_number(items[0])
+                    }
+                }
+                _ => number_from_string(&self.get_string(value)),
+            },
+            bits => f64::from_bits(bits),
+        }
+    }
+
+    /// ECMAScript ToUint8: truncate finite numbers, then wrap modulo 256.
+    pub(crate) fn to_uint8(&self, value: i64) -> u8 {
+        let number = self.to_number(value);
+        if number.is_finite() {
+            number.trunc().rem_euclid(256.0) as u8
+        } else {
+            0
+        }
+    }
+
     pub(crate) fn from_js_value(&mut self, v: serde_json::Value) -> i64 {
         match v {
             serde_json::Value::Null => TAG_NULL as i64,
@@ -175,6 +208,27 @@ impl RuntimeState {
             }
         }
         format!("{val}")
+    }
+}
+
+fn number_from_string(text: &str) -> f64 {
+    let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    if text.is_empty() {
+        return 0.0;
+    }
+    for (prefixes, radix) in [(["0x", "0X"], 16), (["0o", "0O"], 8), (["0b", "0B"], 2)] {
+        if let Some(digits) = prefixes.iter().find_map(|prefix| text.strip_prefix(prefix)) {
+            return u64::from_str_radix(digits, radix).map_or(f64::NAN, |n| n as f64);
+        }
+    }
+    match text {
+        "Infinity" | "+Infinity" => f64::INFINITY,
+        "-Infinity" => f64::NEG_INFINITY,
+        _ => text
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
+            .unwrap_or(f64::NAN),
     }
 }
 

@@ -2,7 +2,33 @@
 
 mod support;
 
-use std::process::Command;
+use std::{fs, process::Command};
+
+#[test]
+fn byte_construction_and_writes_coerce_truncate_and_wrap() {
+    assert_matches_node(
+        r#"
+        const values = [256, 257, -1, -257, 258.9, -258.9, NaN, Infinity, -Infinity,
+                        true, false, null, undefined, "257", "-1", "0x100", ""];
+        const from = Uint8Array.from(values);
+        const assigned = new Uint8Array(values.length);
+        for (let i = 0; i < values.length; i++) { assigned[i] = values[i]; }
+        console.log(JSON.stringify(from));
+        console.log(JSON.stringify(assigned));
+    "#,
+    );
+    assert_direct_runtime(
+        r#"
+        const values = [256, 257, -1, -257, 258.9, -258.9];
+        const view = rt.uint8array_from(importJson(values));
+        for (let i = 0; i < values.length; i++) {
+            assert.equal(number(rt.uint8array_get(view, value(i))), new Uint8Array(values)[i]);
+            rt.uint8array_set(view, value(i), value(values[values.length - 1 - i]));
+            assert.equal(number(rt.uint8array_get(view, value(i))), new Uint8Array(values.toReversed())[i]);
+        }
+    "#,
+    );
+}
 
 #[test]
 fn typed_array_json_uses_numeric_object_keys_including_nested_views() {
@@ -23,6 +49,47 @@ fn assert_matches_node(source: &str) {
         .unwrap();
     let actual = support::run(source, None, None);
     assert_eq!(support::stdout(&actual), support::stdout(&expected));
+}
+
+fn assert_direct_runtime(script: &str) {
+    let scratch = support::Scratch::new();
+    let path = scratch.0.join("runtime.wasm");
+    fs::write(
+        &path,
+        perry_wit::runtime::resolve_guest_runtime_bytes(None).unwrap(),
+    )
+    .unwrap();
+    let script = [r#"
+        const assert = require('node:assert/strict');
+        const module = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
+        const memory = new WebAssembly.Memory({initial: 32});
+        const imports = {env: {memory}};
+        for (const {module: mod, name, kind} of WebAssembly.Module.imports(module)) {
+            if (kind === 'function') {
+                (imports[mod] ??= {})[name] = () => { throw new Error(`unexpected import ${mod} ${name}`); };
+            }
+        }
+        const rt = new WebAssembly.Instance(module, imports).exports;
+        const bits = new DataView(new ArrayBuffer(8));
+        function value(n) { bits.setFloat64(0, n, true); return bits.getBigInt64(0, true); }
+        function number(n) { bits.setBigInt64(0, n, true); return bits.getFloat64(0, true); }
+        function importJson(input) {
+            const bytes = new TextEncoder().encode(JSON.stringify(input));
+            const ptr = rt.cabi_realloc(0, 0, 1, bytes.length);
+            new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+            return rt.cabi_import_json(ptr, bytes.length);
+        }
+    "#, script].concat();
+    let output = Command::new("node")
+        .args(["--eval", &script])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

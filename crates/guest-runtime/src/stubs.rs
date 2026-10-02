@@ -126,15 +126,10 @@ pub(crate) extern "C" fn object_set_dynamic(target: i64, key: i64, val: i64) {
     };
     let key_str = state.get_string(key);
     let val_json = state.to_js_value(val);
+    let val_byte = state.to_uint8(val);
     if let Some(h) = state.get_handle_mut(target) {
         match h {
             JsHandle::Uint8Array(v) => {
-                let val_bits = val as u64;
-                let val_byte = if (val_bits >> 48) < 0x7ff8 {
-                    f64::from_bits(val_bits) as u8
-                } else {
-                    (val_bits & 0xFF) as u8
-                };
                 v.set(idx, val_byte);
             }
             JsHandle::Array(arr) => {
@@ -713,7 +708,11 @@ pub(crate) extern "C" fn buffer_concat(arr_handle: i64) -> i64 {
 pub(crate) extern "C" fn uint8array_new(size: i64) -> i64 {
     let state = get_state();
     let size_f = f64::from_bits(size as u64);
-    let len = if size_f.is_finite() && size_f > 0.0 { size_f as usize } else { 0 };
+    let len = if size_f.is_finite() && size_f > 0.0 {
+        size_f as usize
+    } else {
+        0
+    };
     let view = crate::buffer::Uint8ArrayView::new(len);
     let id = state.alloc_handle(JsHandle::Uint8Array(view));
     nanbox_pointer(id)
@@ -730,17 +729,14 @@ pub(crate) extern "C" fn uint8array_from(val: i64) -> i64 {
             JsHandle::Array(arr) => {
                 bytes.reserve(arr.len());
                 for elem in arr {
-                    bytes.push(f64::from_bits(elem as u64) as u8);
+                    bytes.push(state.to_uint8(elem));
                 }
             }
             JsHandle::Json(serde_json::Value::Array(arr)) => {
                 bytes.reserve(arr.len());
                 for item in arr {
-                    if let Some(n) = item.as_f64() {
-                        bytes.push(n as u8);
-                    } else if let Some(i) = item.as_i64() {
-                        bytes.push(i as u8);
-                    }
+                    let value = state.from_js_value(item);
+                    bytes.push(state.to_uint8(value));
                 }
             }
             _ => {}
@@ -781,7 +777,7 @@ pub(crate) extern "C" fn uint8array_set(handle: i64, idx: i64, val: i64) {
     let state = get_state();
     if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
         let i = f64::from_bits(idx as u64) as usize;
-        let byte = f64::from_bits(val as u64) as u8;
+        let byte = state.to_uint8(val);
         v.set(i, byte);
     }
 }
