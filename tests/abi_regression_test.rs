@@ -11,6 +11,20 @@ const RUNTIME_IMPORTS: &str = r#"
 "#;
 
 #[test]
+fn void_exports_accept_targets_with_and_without_core_results() {
+    let wit = format!(
+        "package test:abi; world test {{ {RUNTIME_IMPORTS} export run-task: func(input: string); }}"
+    );
+    for source in [
+        "export function runTask(input: string): void { console.log(input); }",
+        "export function runTask(input: string): number { console.log(input); return 7; }",
+    ] {
+        let output = support::run(source, Some(&wit), Some("run-task(\"void works\")"));
+        assert_eq!(support::stdout(&output).trim(), "void works\n()");
+    }
+}
+
+#[test]
 fn scalar_results_have_typed_core_signatures_and_no_buffer_cleanup() {
     for (ty, value) in [
         ("s8", "-128"),

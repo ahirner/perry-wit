@@ -11,6 +11,7 @@ use crate::abi::wit_meta::{AbiType, ExportedWitFunction, WitWorldExports, matche
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveredExports {
     pub start_func: Option<u32>,
+    pub function_types: Vec<wasmparser::FuncType>,
     pub user_functions: HashMap<String, u32>,
     pub cabi_import_string: Option<u32>,
     pub cabi_export_string: Option<u32>,
@@ -23,30 +24,54 @@ pub struct DiscoveredExports {
 /// Parses the export section of a core WebAssembly module to extract known symbols and indices.
 pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
     let mut exports = DiscoveredExports::default();
+    let mut types = Vec::new();
+    let mut function_type_indices = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        if let Payload::ExportSection(reader) = payload? {
-            for exp in reader {
-                let exp = exp?;
-                if exp.kind == ExternalKind::Func {
-                    match exp.name {
-                        "_start" => exports.start_func = Some(exp.index),
-                        "cabi_import_string" => exports.cabi_import_string = Some(exp.index),
-                        "cabi_export_string" => exports.cabi_export_string = Some(exp.index),
-                        "cabi_export_result_string" => {
-                            exports.cabi_export_result_string = Some(exp.index)
-                        }
-                        "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
-                        "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
-                        "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
-                        name => {
-                            exports.user_functions.insert(name.to_string(), exp.index);
+        match payload? {
+            Payload::TypeSection(reader) => {
+                types = reader
+                    .into_iter_err_on_gc_types()
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    if let wasmparser::TypeRef::Func(index) = import?.ty {
+                        function_type_indices.push(index);
+                    }
+                }
+            }
+            Payload::FunctionSection(reader) => {
+                function_type_indices.extend(reader.into_iter().collect::<Result<Vec<_>, _>>()?);
+            }
+            Payload::ExportSection(reader) => {
+                for exp in reader {
+                    let exp = exp?;
+                    if exp.kind == ExternalKind::Func {
+                        match exp.name {
+                            "_start" => exports.start_func = Some(exp.index),
+                            "cabi_import_string" => exports.cabi_import_string = Some(exp.index),
+                            "cabi_export_string" => exports.cabi_export_string = Some(exp.index),
+                            "cabi_export_result_string" => {
+                                exports.cabi_export_result_string = Some(exp.index)
+                            }
+                            "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
+                            "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
+                            "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
+                            name => {
+                                exports.user_functions.insert(name.to_string(), exp.index);
+                            }
                         }
                     }
                 }
             }
+            _ => {}
         }
     }
+    exports.function_types = function_type_indices
+        .into_iter()
+        .map(|index| types[index as usize].clone())
+        .collect();
 
     Ok(exports)
 }
@@ -251,7 +276,11 @@ pub fn synthesize_trampolines(
                     .unwrap_or_else(|| "cabi_export_json".to_string());
                 format!("call {helper}")
             }
-            AbiType::Unit => "drop".to_string(),
+            AbiType::Unit => "drop\n".repeat(
+                discovered.function_types[target_func as usize]
+                    .results()
+                    .len(),
+            ),
             AbiType::I32 => "f64.reinterpret_i64\n    i32.trunc_f64_s".into(),
             AbiType::U32 => "f64.reinterpret_i64\n    i32.trunc_f64_u".into(),
             AbiType::I64 => "f64.reinterpret_i64\n    i64.trunc_f64_s".into(),
