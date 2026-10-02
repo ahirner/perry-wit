@@ -187,6 +187,159 @@ pub extern "C" fn mem_call_clocks_random(func_name_id: f64, arg_count: f64, base
     crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
 }
 
+fn dispatch_env(name: &str, raw_args: &[i64]) -> Option<i64> {
+    match name {
+        "process_env" => Some(crate::environment::process_env()),
+        "process_env_get" => {
+            let key = if raw_args.len() >= 2 {
+                raw_args[1]
+            } else {
+                raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64)
+            };
+            Some(crate::environment::process_env_get(key))
+        }
+        "process_argv" => Some(crate::environment::process_argv()),
+        "process_cwd" => Some(crate::environment::process_cwd()),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_env(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_env(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_clocks_env(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_clocks(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_env(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_random_env(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_random(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_env(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_all_sync(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_clocks(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_random(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_env(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
 #[no_mangle]
 pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
     let state = get_state();
@@ -212,6 +365,13 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
     }
 
     if let Some(res) = dispatch_random(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_env(&name, &raw_args) {
         unsafe {
             *(base_addr as *mut i64) = res;
         }
@@ -426,6 +586,36 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
                 return 0;
             }
             return 1;
+        }
+    } else if name == "array_includes" {
+        if raw_args.len() >= 2 {
+            return crate::stubs::array_includes(raw_args[0], raw_args[1]);
+        }
+    } else if name == "string_includes" {
+        if raw_args.len() >= 2 {
+            return crate::stubs::string_includes(raw_args[0], raw_args[1]);
+        }
+    } else if name == "string_startsWith" || name == "string_starts_with" {
+        if raw_args.len() >= 2 {
+            return crate::stubs::string_startsWith(raw_args[0], raw_args[1]);
+        }
+    } else if name == "string_endsWith" || name == "string_ends_with" {
+        if raw_args.len() >= 2 {
+            return crate::stubs::string_endsWith(raw_args[0], raw_args[1]);
+        }
+    } else if name == "object_has_property" {
+        if raw_args.len() >= 2 {
+            return crate::stubs::object_has_property(raw_args[0], raw_args[1]);
+        }
+    } else if name == "array_is_array" {
+        if let Some(&arg) = raw_args.first() {
+            if let Some(h) = state.get_handle(arg) {
+                return match h {
+                    JsHandle::Array(_) => 1,
+                    JsHandle::Json(serde_json::Value::Array(_)) => 1,
+                    _ => 0,
+                };
+            }
         }
     }
 

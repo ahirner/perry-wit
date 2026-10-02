@@ -20,6 +20,8 @@ pub(crate) struct RuntimeState {
     pub(crate) strings: Vec<Vec<u16>>,
     pub(crate) handles: Vec<JsHandle>,
     pub(crate) current_exception: Option<String>,
+    pub(crate) process_env: Option<i64>,
+    pub(crate) process_argv: Option<i64>,
 }
 
 impl RuntimeState {
@@ -28,6 +30,8 @@ impl RuntimeState {
             strings: Vec::new(),
             handles: vec![JsHandle::Null],
             current_exception: None,
+            process_env: None,
+            process_argv: None,
         }
     }
 

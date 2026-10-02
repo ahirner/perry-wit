@@ -26,6 +26,7 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
         needs_clocks: false,
         needs_http: false,
         needs_random: false,
+        needs_env: false,
     };
     for stmt in &mut program.init {
         rewriter.rewrite_stmt(stmt);
@@ -93,6 +94,31 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
                 "__needs_random__".into(),
             )));
     }
+    if rewriter.needs_env {
+        program
+            .init
+            .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                "__needs_env__".into(),
+            )));
+        for name in [
+            "process_env",
+            "process_env_get",
+            "process_argv",
+            "process_cwd",
+            "object_keys",
+            "object_values",
+            "object_entries",
+            "object_has_property",
+            "object_delete",
+            "object_delete_dynamic",
+        ] {
+            program
+                .init
+                .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                    name.into(),
+                )));
+        }
+    }
 }
 
 struct Rewriter {
@@ -100,6 +126,7 @@ struct Rewriter {
     needs_clocks: bool,
     needs_http: bool,
     needs_random: bool,
+    needs_env: bool,
 }
 
 impl Rewriter {
@@ -265,6 +292,13 @@ impl Rewriter {
             | perry_hir::ir::Expr::CryptoRandomBytes(_) => {
                 self.needs_random = true;
             }
+            perry_hir::ir::Expr::ProcessEnv
+            | perry_hir::ir::Expr::EnvGet(_)
+            | perry_hir::ir::Expr::EnvGetDynamic(_)
+            | perry_hir::ir::Expr::ProcessArgv
+            | perry_hir::ir::Expr::ProcessCwd => {
+                self.needs_env = true;
+            }
             _ => {}
         }
         if let perry_hir::ir::Expr::NativeMethodCall {
@@ -312,6 +346,77 @@ impl Rewriter {
                 type_args: Vec::new(),
                 byte_offset: 0,
             };
+        }
+        if matches!(expr, perry_hir::ir::Expr::ProcessEnv) {
+            self.needs_env = true;
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "process_env".into(),
+                    byte_offset: 0,
+                }),
+                args: Vec::new(),
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if let perry_hir::ir::Expr::EnvGet(var_name) = expr {
+            self.needs_env = true;
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "process_env_get".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![perry_hir::ir::Expr::String(var_name.clone())],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if let perry_hir::ir::Expr::EnvGetDynamic(key_expr) = expr {
+            self.needs_env = true;
+            let key = std::mem::replace(key_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "process_env_get".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![key],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if matches!(expr, perry_hir::ir::Expr::ProcessArgv) {
+            self.needs_env = true;
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "process_argv".into(),
+                    byte_offset: 0,
+                }),
+                args: Vec::new(),
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if matches!(expr, perry_hir::ir::Expr::ProcessCwd) {
+            self.needs_env = true;
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "process_cwd".into(),
+                    byte_offset: 0,
+                }),
+                args: Vec::new(),
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
         }
         if let perry_hir::ir::Expr::JsonStringifyFull(val, _, _) = expr {
             *expr = perry_hir::ir::Expr::JsonStringify(val.clone());

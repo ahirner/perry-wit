@@ -63,6 +63,18 @@ pub(crate) fn module_needs_random(a: &ParsedModuleA) -> bool {
     false
 }
 
+pub(crate) fn module_needs_env(a: &ParsedModuleA) -> bool {
+    for d in &a.data {
+        if d.data
+            .windows(b"__needs_env__".len())
+            .any(|w| w == b"__needs_env__")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn compute_pruning_plan(
     a: &ParsedModuleA,
     b: &ParsedModuleB,

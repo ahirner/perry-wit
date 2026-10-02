@@ -14,7 +14,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail, ensure};
-use prune::{compute_pruning_plan, module_needs_clocks, module_needs_http, module_needs_random};
+use prune::{
+    compute_pruning_plan, module_needs_clocks, module_needs_env, module_needs_http,
+    module_needs_random,
+};
 use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
 use wasm_encoder::{
     DataSegment, DataSegmentMode, ElementMode, ElementSegment, Elements, ExportKind, Module,
@@ -62,6 +65,7 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     let needs_http = module_needs_http(&a);
     let needs_clocks = module_needs_clocks(&a);
     let needs_random = module_needs_random(&a);
+    let needs_env = module_needs_env(&a);
 
     let mut resolved_imports_a = Vec::with_capacity(a.imports.len());
     for &(mod_name, name, _ty) in &a.imports {
@@ -72,14 +76,17 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         let target_name = if name == "mem_call" {
             if needs_http {
                 "mem_call"
-            } else if needs_clocks && needs_random {
-                "mem_call_clocks_random"
-            } else if needs_clocks {
-                "mem_call_clocks"
-            } else if needs_random {
-                "mem_call_random"
             } else {
-                "mem_call_pure"
+                match (needs_clocks, needs_random, needs_env) {
+                    (true, true, true) => "mem_call_all_sync",
+                    (true, true, false) => "mem_call_clocks_random",
+                    (true, false, true) => "mem_call_clocks_env",
+                    (true, false, false) => "mem_call_clocks",
+                    (false, true, true) => "mem_call_random_env",
+                    (false, true, false) => "mem_call_random",
+                    (false, false, true) => "mem_call_env",
+                    (false, false, false) => "mem_call_pure",
+                }
             }
         } else {
             name

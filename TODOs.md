@@ -151,10 +151,18 @@ Verification:
 
 ### Phase 8: Environment & Arguments (`wasi:cli`)
 
-- [ ] **8.1. Process Context**
-    - [ ] Expose host-provided environment and arguments as `process.env` / `process.argv`, initializing only when needed and retaining values for their documented lifetime.
-    - [ ] Specify argument mapping and guest mutation behavior for the initial subset, including any differences from Node's executable/script prefixes.
-    - [ ] Verify supplied/missing/empty variables, argument order, and repeated access without initializing unrelated capabilities.
+- [x] **8.1. Process Context**
+    - [x] Expose host-provided environment and arguments as `process.env` / `process.argv` / `process.cwd()`, initializing only when needed and retaining values for their documented lifetime.
+    - [x] Specify argument mapping and guest mutation behavior for the initial subset, including any differences from Node's executable/script prefixes.
+    - [x] Verify supplied/missing/empty variables, argument order, and repeated access without initializing unrelated capabilities.
+
+Verification:
+- Added `import wasi:cli/environment@0.2.6;` to `wit/world.wit`.
+- Implemented `process_env()`, `process_env_get()`, `process_argv()`, and `process_cwd()` in `crates/guest-runtime/src/environment.rs`.
+- AST rewrites and capability detection in `src/compiler/rewrites.rs` emitting `__needs_env__` for `process.env`, `process.argv`, and `process.cwd()`.
+- Linker pruning in `src/linker/prune.rs` and import routing in `src/linker/mod.rs` selecting specialized dispatchers (`mem_call_env`, `mem_call_clocks_env`, `mem_call_random_env`, `mem_call_all_sync`, etc.) so pure components prune `wasi:cli/environment`.
+- Implemented missing direct runtime imports in `crates/guest-runtime/src/stubs.rs` (`js_typeof`, `object_*`, `array_*`, `json_parse`, `json_stringify`, `string_includes`, `string_startsWith`, `string_endsWith`) and `crates/guest-runtime/src/dispatch.rs` / `dispatch_pure.rs`.
+- Verified in `tests/env_test.rs` (4 integration tests passing under Wasmtime) and differential conformance case `tests/conformance/cases/10_env.ts` (100% match against Node.js oracle).
 
 ### Phase 9: Sandboxed Filesystem (`wasi:filesystem`)
 

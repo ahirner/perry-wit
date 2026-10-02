@@ -89,6 +89,7 @@ fn test_differential_conformance_suite() {
     assert!(json_report.contains("web.fetch"));
     assert!(json_report.contains("web.response_json"));
     assert!(json_report.contains("node.process_exit"));
+    assert!(json_report.contains("cli.env"));
 
     for ev in &report.evidence {
         if ev.status != EvidenceStatus::Unsupported {

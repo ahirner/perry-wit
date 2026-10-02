@@ -12,6 +12,7 @@ world runtime-adapter {
   import wasi:io/streams@0.2.6;
   import wasi:random/random@0.2.6;
   import wasi:random/insecure@0.2.6;
+  import wasi:cli/environment@0.2.6;
 }
 
 world merge-docs {

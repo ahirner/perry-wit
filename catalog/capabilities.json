@@ -184,6 +184,24 @@
       ]
     },
     {
+      "id": "cli.env",
+      "name": "Process Environment, Arguments, and CWD",
+      "tier": "tier-2-node-core",
+      "support": "full",
+      "domain": "Accessing environment variables, command-line arguments, and working directory via wasi:cli/environment",
+      "invariants": [
+        "process.env exposes host environment variables as a JavaScript object",
+        "process.argv exposes command-line arguments as a JavaScript string array",
+        "process.cwd() returns the current working directory string"
+      ],
+      "differences": [
+        "Backed by wasi:cli/environment@0.2.6 get-environment, get-arguments, and initial-cwd"
+      ],
+      "conformance": [
+        "tests/conformance/cases/10_env.ts"
+      ]
+    },
+    {
       "id": "lang.eval",
       "name": "Dynamic Code Evaluation (eval / new Function)",
       "tier": "non-goals",

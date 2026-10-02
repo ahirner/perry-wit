@@ -167,7 +167,7 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             serde_json::Map::new(),
         )));
         result_i64 = nanbox_pointer(h_id);
-    } else if name == "object_set" {
+    } else if name == "object_set" || name == "class_set_field" {
         if raw_args.len() >= 3 {
             let target_handle = raw_args[0];
             let key_str = state.get_string(raw_args[1]);
@@ -240,10 +240,73 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                 state.get_handle(target_handle)
             {
                 if let Some(v) = map.get(&key_str) {
-                    let v_clone = v.clone();
-                    result_i64 = state.from_js_value(v_clone);
+                    result_i64 = state.from_js_value(v.clone());
                 }
             }
+        }
+    } else if name == "object_keys" {
+        let target_handle = raw_args.first().copied().unwrap_or(0);
+        if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
+            state.get_handle(target_handle).cloned()
+        {
+            let keys: Vec<i64> = map.keys().map(|k| state.alloc_string(k)).collect();
+            let arr_id = state.alloc_handle(JsHandle::Array(keys));
+            result_i64 = nanbox_pointer(arr_id);
+        }
+    } else if name == "object_values" {
+        let target_handle = raw_args.first().copied().unwrap_or(0);
+        if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
+            state.get_handle(target_handle).cloned()
+        {
+            let values: Vec<i64> = map
+                .values()
+                .cloned()
+                .map(|v| state.from_js_value(v))
+                .collect();
+            let arr_id = state.alloc_handle(JsHandle::Array(values));
+            result_i64 = nanbox_pointer(arr_id);
+        }
+    } else if name == "object_entries" {
+        let target_handle = raw_args.first().copied().unwrap_or(0);
+        if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
+            state.get_handle(target_handle).cloned()
+        {
+            let entries: Vec<i64> = map
+                .iter()
+                .map(|(k, v)| {
+                    let k_val = state.alloc_string(k);
+                    let v_val = state.from_js_value(v.clone());
+                    let pair_id = state.alloc_handle(JsHandle::Array(vec![k_val, v_val]));
+                    nanbox_pointer(pair_id)
+                })
+                .collect();
+            let arr_id = state.alloc_handle(JsHandle::Array(entries));
+            result_i64 = nanbox_pointer(arr_id);
+        }
+    } else if name == "object_has_property" {
+        if raw_args.len() >= 2 {
+            let target_handle = raw_args[0];
+            let key_str = state.get_string(raw_args[1]);
+            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
+                state.get_handle(target_handle)
+            {
+                result_i64 = if map.contains_key(&key_str) {
+                    TAG_TRUE as i64
+                } else {
+                    TAG_FALSE as i64
+                };
+            }
+        }
+    } else if name == "object_delete" || name == "object_delete_dynamic" {
+        if raw_args.len() >= 2 {
+            let target_handle = raw_args[0];
+            let key_str = state.get_string(raw_args[1]);
+            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
+                state.get_handle_mut(target_handle)
+            {
+                map.remove(&key_str);
+            }
+            result_i64 = TAG_TRUE as i64;
         }
     } else if name == "json_stringify" {
         let arg = raw_args.first().copied().unwrap_or(0);
@@ -255,6 +318,9 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         let val_json: serde_json::Value = serde_json::from_str(&s)
             .unwrap_or_else(|error| fail_with_error(&format!("JSON parse error: {error}")));
         result_i64 = state.from_js_value(val_json);
+    } else if name == "js_typeof" {
+        let arg = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+        result_i64 = crate::stubs::js_typeof(arg);
     } else if name == "console_log" || name == "log" {
         let arg = raw_args.last().copied().unwrap_or(0);
         let msg = state.get_string(arg);
