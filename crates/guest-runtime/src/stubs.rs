@@ -707,7 +707,10 @@ pub(crate) extern "C" fn buffer_concat(arr_handle: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn uint8array_new(size: i64) -> i64 {
     let state = get_state();
-    let size_f = f64::from_bits(size as u64);
+    if state.get_handle(size).is_some() {
+        return uint8array_from(size);
+    }
+    let size_f = state.to_number(size);
     let len = if size_f.is_finite() && size_f > 0.0 {
         size_f as usize
     } else {

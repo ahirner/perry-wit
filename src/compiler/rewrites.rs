@@ -217,6 +217,20 @@ impl Rewriter {
     }
 
     fn rewrite_current_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
+        // Perry's specialized constructor omits its arguments from string collection.
+        if let Expr::Uint8ArrayNew(size) = expr {
+            *expr = Expr::Call {
+                callee: Box::new(Expr::PropertyGet {
+                    object: Box::new(Expr::Undefined),
+                    property: "uint8array_new".into(),
+                    byte_offset: 0,
+                }),
+                args: size.take().map(|size| *size).into_iter().collect(),
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
         // Perry otherwise lowers both an omitted argument and explicit undefined to the same call.
         if let perry_hir::ir::Expr::DateNew(args) = expr
             && args.is_empty()

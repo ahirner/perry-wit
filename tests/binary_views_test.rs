@@ -5,6 +5,37 @@ mod support;
 use std::{fs, process::Command};
 
 #[test]
+fn constructors_copy_arrays_and_visible_view_bytes_independently() {
+    assert_matches_node(
+        r#"
+        const unrelated = [{a: 1}, [2, 3], new Uint8Array(9)];
+        const array = [10, 20, 257, -1];
+        const source = new Uint8Array(array);
+        const copy = new Uint8Array(source.subarray(1, 3));
+        array[0] = 99;
+        source[1] = 88;
+        copy[1] = 77;
+        console.log(JSON.stringify(source));
+        console.log(JSON.stringify(copy));
+        const empty = new Uint8Array([]);
+        const numeric = new Uint8Array("3");
+        console.log(empty.length);
+        console.log(numeric.length);
+    "#,
+    );
+    assert_direct_runtime(
+        r#"
+        const source = rt.uint8array_new(importJson([10, 20, 257, -1]));
+        const copy = rt.uint8array_new(source);
+        rt.uint8array_set(source, value(0), value(99));
+        assert.equal(number(rt.uint8array_length(copy)), 4);
+        assert.equal(number(rt.uint8array_get(copy, value(0))), 10);
+        assert.equal(number(rt.uint8array_get(copy, value(2))), 1);
+    "#,
+    );
+}
+
+#[test]
 fn byte_construction_and_writes_coerce_truncate_and_wrap() {
     assert_matches_node(
         r#"

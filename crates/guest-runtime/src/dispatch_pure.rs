@@ -56,24 +56,8 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             result_i64 = arr_handle;
         }
     } else if name == "uint8array_new" || name == "buffer_alloc" {
-        let size_f = if let Some(&arg) = raw_args.first() {
-            let bits = arg as u64;
-            if (bits >> 48) < 0x7ff8 {
-                f64::from_bits(bits)
-            } else {
-                (bits & 0xFFFF_FFFF) as f64
-            }
-        } else {
-            0.0
-        };
-        let size = if size_f.is_finite() && size_f > 0.0 {
-            size_f as usize
-        } else {
-            0
-        };
-        let view = crate::buffer::Uint8ArrayView::new(size);
-        let id = state.alloc_handle(JsHandle::Uint8Array(view));
-        result_i64 = nanbox_pointer(id);
+        result_i64 =
+            crate::stubs::uint8array_new(raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64));
     } else if name == "uint8array_from" {
         result_i64 = crate::stubs::uint8array_from(
             raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64),
