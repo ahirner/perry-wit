@@ -8,13 +8,26 @@ For runtime boundaries, compilation pipeline details, and conformance specificat
 
 ## Environment
 
-A development environment is defined in `flake.nix`:
+For developing the Perry-WIT compiler, enter the repository's default shell:
 
 ```bash
 nix develop
 ```
 
-This supplies `wasmtime`, `node`, `rustc` (with `wasm32-unknown-unknown`), `wasm-tools`, and dynamically resolved WASI Preview 2 WIT definitions via `$WASI_WIT_PATH`.
+This supplies the Rust toolchain, Node.js, TypeScript, Wasmtime, `wasm-tools`, and
+WASI Preview 2 definitions via `$WASI_WIT_PATH`. Cargo uses the prepared guest
+runtime through `$GUEST_RUNTIME_PATH`; use `cargo build`, `cargo run`, and
+`cargo test` to work on the compiler.
+
+For authoring TypeScript components, select the SDK shell:
+
+```bash
+nix develop .#sdk
+```
+
+The SDK shell provides the packaged `perry-wit` compiler, `tsc`, Wasmtime, and
+`wasm-tools`, and generates contracts for the current project's `wit/` directory.
+See [Authoring Components](#authoring-components) for the template workflow.
 
 ---
 
@@ -43,10 +56,10 @@ cargo build --release
 
 ### Compile
 
-Compile a TypeScript script to a WASI Preview 2 component:
+From the compiler checkout, compile a TypeScript script to a WASI Preview 2 component:
 
 ```bash
-perry-wit examples/merge_docs.ts -o dist/my_component.wasm
+cargo run -- examples/merge_docs.ts -o dist/my_component.wasm
 ```
 
 Pass `--core-only` to output unlinked Core WebAssembly without component wrapping, or `--wit <PATH>` and `--world <NAME>` to specify custom WIT contracts.
@@ -82,17 +95,22 @@ Create a new TypeScript WebAssembly component project from the template:
 
 ```bash
 nix flake init -t github:<ORG-TBD>/perry-wit
-```
-
-Or explore the zero-config development shell in any component repository:
-
-```bash
 nix develop
 ```
 
-When entering `nix develop`:
-- `perry-wit gen-types` runs automatically if a `wit/` directory is present, emitting `.perry/types/world.d.ts`.
-- `tsconfig.json` links `.perry/types/` for immediate IDE autocompletion and type safety.
+The template's default shell selects Perry-WIT's `devShells.sdk`, so plain
+`nix develop` enters the component-author environment in generated projects.
+
+For an existing component project, enter the SDK shell directly from its directory:
+
+```bash
+nix develop github:<ORG-TBD>/perry-wit#sdk
+```
+
+When entering the SDK shell:
+
+- `perry-wit gen-types` runs automatically if a `wit/` directory is present, emitting `.perry/types/world.d.ts` and `.perry/types/implementation-check.ts`.
+- A missing `tsconfig.json` is generated with the implementation check included. The template already includes these files in its configuration.
 - `perry-wit`, `tsc`, `wasmtime`, and `wasm-tools` are placed directly in `$PATH`.
 
 ### Type Checking & Building

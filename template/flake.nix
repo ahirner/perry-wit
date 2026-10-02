@@ -20,7 +20,7 @@
           world = "task";
         };
 
-        devShells.default = perry-wit.devShells.${system}.default;
+        devShells.default = perry-wit.devShells.${system}.sdk;
       }
     );
 }

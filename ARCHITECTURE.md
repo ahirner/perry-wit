@@ -238,6 +238,11 @@ At runtime in `example-host`, modular components link dynamically:
 
 To give component authors an ergonomic workflow where they can simply run `nix develop` and immediately start writing type-safe code, `perry-wit` implements an AST-based type generator and automated Nix integration:
 
+Consumer templates select `devShells.sdk`, which provides the packaged compiler
+and generates SDK contracts on entry. Existing component projects can select it
+with `nix develop github:<ORG-TBD>/perry-wit#sdk`. The compiler repository's default
+shell supplies the Rust development toolchain and prepared guest runtime for Cargo.
+
 ```
   ┌────────────────────────────────────────────────────────┐
   │                 WIT World Definition                   │
@@ -305,4 +310,3 @@ To expand the capabilities of `perry-wit` while maximizing code reuse across the
 3. **Modular Capability Slices:**
    - *Current State:* The guest runtime adapter bundles standard I/O and HTTP into `guest_runtime.wasm`.
    - *Expansion:* Split runtime capabilities into composable feature slices (`perry:http`, `perry:kv`, `perry:blob`). Consumer components declare only the capability slices they need in their `world.wit`, and `buildComponent` links only the required runtime slices, reducing component size to 5–15 KB.
-

@@ -225,9 +225,9 @@
         };
 
         devShells.default = pkgs.mkShell {
+          name = "perry-wit-dev";
           packages = [
             toolchain
-            perryWitBin
             pkgs.wasmtime
             pkgs.wasm-tools
             pkgs.nodejs
@@ -237,25 +237,33 @@
             pkgs.cacert
           ];
 
+          WASI_WIT_PATH = wasiWit;
+          GUEST_RUNTIME_PATH = "${guestRuntime}/lib/guest_runtime.wasm";
+
           shellHook = ''
-            export WASI_WIT_PATH="${wasiWit}"
-            export GUEST_RUNTIME_PATH="${guestRuntime}/lib/guest_runtime.wasm"
-            if [ ! -e wit/deps ]; then
-              mkdir -p wit
+            if [ -d wit ] && [ ! -e wit/deps ]; then
               ln -sfn "${wasiWit}" wit/deps
             fi
+            echo "Perry-WIT compiler development: cargo build, cargo test"
+          '';
+        };
+
+        devShells.sdk = pkgs.mkShell {
+          name = "perry-wit-sdk";
+          packages = [
+            perryWitBin
+            pkgs.typescript
+            pkgs.wasmtime
+            pkgs.wasm-tools
+          ];
+
+          WASI_WIT_PATH = wasiWit;
+
+          shellHook = ''
             if [ -d wit ]; then
-              ${perryWitBin}/bin/perry-wit gen-types --wit wit >/dev/null 2>&1 || true
+              ${perryWitBin}/bin/perry-wit gen-types --wit wit
             fi
-            echo "=== Perry-WIT Hermetic Environment ==="
-            echo "perry-wit:  $(${perryWitBin}/bin/perry-wit --help | head -n 1)"
-            echo "wasmtime:   $(${pkgs.wasmtime}/bin/wasmtime --version)"
-            echo "node:       $(${pkgs.nodejs}/bin/node --version)"
-            echo "tsc:        $(${pkgs.typescript}/bin/tsc --version)"
-            echo "rustc:      $(${toolchain}/bin/rustc --version)"
-            echo "WASI WIT:   $WASI_WIT_PATH"
-            echo "RT Build:   $GUEST_RUNTIME_PATH"
-            echo "======================================"
+            echo "Perry-WIT component SDK: tsc --noEmit, perry-wit, wasmtime"
           '';
         };
       }

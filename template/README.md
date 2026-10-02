@@ -6,11 +6,19 @@ The compiler input resolves from the published repository. To test a local compi
 
 ## Quickstart
 
-1. **Enter the development shell:**
+1. **Enter the component SDK shell:**
    ```bash
    nix develop
    ```
-   Entering the Nix devshell automatically detects `wit/world.wit`, generates TypeScript declarations in `.perry/types/world.d.ts`, and configures `tsconfig.json`.
+   This template maps its default shell to Perry-WIT's `devShells.sdk`. It provides
+   `perry-wit`, `tsc`, Wasmtime, and `wasm-tools`. On entry it generates declarations
+   in `.perry/types/world.d.ts` and an implementation check in
+   `.perry/types/implementation-check.ts`; the supplied `tsconfig.json` includes both.
+
+   To use the SDK in an existing component project without this template, run
+   `nix develop github:<ORG-TBD>/perry-wit#sdk` from that project's directory.
+   Inside a Perry-WIT compiler checkout, `nix develop .#sdk` selects this shell;
+   plain `nix develop` there selects the Rust contributor environment.
 
 2. **Type check with `tsc`:**
    ```bash
