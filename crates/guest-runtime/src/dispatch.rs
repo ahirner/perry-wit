@@ -132,121 +132,6 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mem_call_fs(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
-    let state = get_state();
-    let name_idx = func_name_id as usize;
-    let name = state
-        .strings
-        .get(name_idx)
-        .map(|s| String::from_utf16_lossy(s))
-        .unwrap_or_default();
-
-    let count = arg_count as usize;
-    let mut raw_args = Vec::with_capacity(count);
-    let ptr = base_addr as *const i64;
-    for i in 0..count {
-        raw_args.push(unsafe { *ptr.add(i) });
-    }
-
-    if let Some(res) = dispatch_filesystem(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
-}
-
-#[no_mangle]
-pub extern "C" fn mem_call_clocks(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
-    let state = get_state();
-    let name_idx = func_name_id as usize;
-    let name = state
-        .strings
-        .get(name_idx)
-        .map(|s| String::from_utf16_lossy(s))
-        .unwrap_or_default();
-
-    let count = arg_count as usize;
-    let mut raw_args = Vec::with_capacity(count);
-    let ptr = base_addr as *const i64;
-    for i in 0..count {
-        raw_args.push(unsafe { *ptr.add(i) });
-    }
-
-    if let Some(res) = dispatch_clocks(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
-}
-
-#[no_mangle]
-pub extern "C" fn mem_call_random(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
-    let state = get_state();
-    let name_idx = func_name_id as usize;
-    let name = state
-        .strings
-        .get(name_idx)
-        .map(|s| String::from_utf16_lossy(s))
-        .unwrap_or_default();
-
-    let count = arg_count as usize;
-    let mut raw_args = Vec::with_capacity(count);
-    let ptr = base_addr as *const i64;
-    for i in 0..count {
-        raw_args.push(unsafe { *ptr.add(i) });
-    }
-
-    if let Some(res) = dispatch_random(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
-}
-
-#[no_mangle]
-pub extern "C" fn mem_call_clocks_random(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
-    let state = get_state();
-    let name_idx = func_name_id as usize;
-    let name = state
-        .strings
-        .get(name_idx)
-        .map(|s| String::from_utf16_lossy(s))
-        .unwrap_or_default();
-
-    let count = arg_count as usize;
-    let mut raw_args = Vec::with_capacity(count);
-    let ptr = base_addr as *const i64;
-    for i in 0..count {
-        raw_args.push(unsafe { *ptr.add(i) });
-    }
-
-    if let Some(res) = dispatch_clocks(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    if let Some(res) = dispatch_random(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
-}
-
 fn dispatch_env(name: &str, raw_args: &[i64]) -> Option<i64> {
     match name {
         "process_env" => Some(crate::environment::process_env()),
@@ -264,69 +149,44 @@ fn dispatch_env(name: &str, raw_args: &[i64]) -> Option<i64> {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mem_call_env(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
-    let state = get_state();
-    let name_idx = func_name_id as usize;
-    let name = state
-        .strings
-        .get(name_idx)
-        .map(|s| String::from_utf16_lossy(s))
-        .unwrap_or_default();
-
-    let count = arg_count as usize;
-    let mut raw_args = Vec::with_capacity(count);
-    let ptr = base_addr as *const i64;
-    for i in 0..count {
-        raw_args.push(unsafe { *ptr.add(i) });
-    }
-
-    if let Some(res) = dispatch_env(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+macro_rules! sync_dispatchers {
+    ($($name:ident => [$($dispatcher:ident),+];)+) => {
+        $(
+            #[no_mangle]
+            pub extern "C" fn $name(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+                mem_call_sync(func_name_id, arg_count, base_addr, |name, args| {
+                    None$(.or_else(|| $dispatcher(name, args)))+
+                })
+            }
+        )+
+    };
 }
 
-#[no_mangle]
-pub extern "C" fn mem_call_clocks_env(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
-    let state = get_state();
-    let name_idx = func_name_id as usize;
-    let name = state
-        .strings
-        .get(name_idx)
-        .map(|s| String::from_utf16_lossy(s))
-        .unwrap_or_default();
-
-    let count = arg_count as usize;
-    let mut raw_args = Vec::with_capacity(count);
-    let ptr = base_addr as *const i64;
-    for i in 0..count {
-        raw_args.push(unsafe { *ptr.add(i) });
-    }
-
-    if let Some(res) = dispatch_clocks(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    if let Some(res) = dispatch_env(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+sync_dispatchers! {
+    mem_call_clocks => [dispatch_clocks];
+    mem_call_random => [dispatch_random];
+    mem_call_env => [dispatch_env];
+    mem_call_fs => [dispatch_filesystem];
+    mem_call_clocks_random => [dispatch_clocks, dispatch_random];
+    mem_call_clocks_env => [dispatch_clocks, dispatch_env];
+    mem_call_clocks_fs => [dispatch_clocks, dispatch_filesystem];
+    mem_call_random_env => [dispatch_random, dispatch_env];
+    mem_call_random_fs => [dispatch_random, dispatch_filesystem];
+    mem_call_env_fs => [dispatch_env, dispatch_filesystem];
+    mem_call_clocks_random_env => [dispatch_clocks, dispatch_random, dispatch_env];
+    mem_call_clocks_random_fs => [dispatch_clocks, dispatch_random, dispatch_filesystem];
+    mem_call_clocks_env_fs => [dispatch_clocks, dispatch_env, dispatch_filesystem];
+    mem_call_random_env_fs => [dispatch_random, dispatch_env, dispatch_filesystem];
+    mem_call_all_sync => [dispatch_clocks, dispatch_random, dispatch_env, dispatch_filesystem];
 }
 
-#[no_mangle]
-pub extern "C" fn mem_call_random_env(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+/// Monomorphization leaves only each entrypoint's selected capabilities reachable.
+fn mem_call_sync(
+    func_name_id: f64,
+    arg_count: f64,
+    base_addr: i32,
+    dispatch: impl FnOnce(&str, &[i64]) -> Option<i64>,
+) -> f64 {
     let state = get_state();
     let name_idx = func_name_id as usize;
     let name = state
@@ -342,68 +202,12 @@ pub extern "C" fn mem_call_random_env(func_name_id: f64, arg_count: f64, base_ad
         raw_args.push(unsafe { *ptr.add(i) });
     }
 
-    if let Some(res) = dispatch_random(&name, &raw_args) {
+    if let Some(result) = dispatch(&name, &raw_args) {
         unsafe {
-            *(base_addr as *mut i64) = res;
+            *(base_addr as *mut i64) = result;
         }
         return 0.0;
     }
-
-    if let Some(res) = dispatch_env(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
-}
-
-#[no_mangle]
-pub extern "C" fn mem_call_all_sync(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
-    let state = get_state();
-    let name_idx = func_name_id as usize;
-    let name = state
-        .strings
-        .get(name_idx)
-        .map(|s| String::from_utf16_lossy(s))
-        .unwrap_or_default();
-
-    let count = arg_count as usize;
-    let mut raw_args = Vec::with_capacity(count);
-    let ptr = base_addr as *const i64;
-    for i in 0..count {
-        raw_args.push(unsafe { *ptr.add(i) });
-    }
-
-    if let Some(res) = dispatch_clocks(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    if let Some(res) = dispatch_random(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    if let Some(res) = dispatch_env(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
-    if let Some(res) = dispatch_filesystem(&name, &raw_args) {
-        unsafe {
-            *(base_addr as *mut i64) = res;
-        }
-        return 0.0;
-    }
-
     crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
 }
 

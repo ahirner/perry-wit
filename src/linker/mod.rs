@@ -77,22 +77,24 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         let target_name = if name == "mem_call" {
             if needs_http {
                 "mem_call"
-            } else if needs_fs {
-                if needs_clocks || needs_random || needs_env {
-                    "mem_call_all_sync"
-                } else {
-                    "mem_call_fs"
-                }
             } else {
-                match (needs_clocks, needs_random, needs_env) {
-                    (true, true, true) => "mem_call_all_sync",
-                    (true, true, false) => "mem_call_clocks_random",
-                    (true, false, true) => "mem_call_clocks_env",
-                    (true, false, false) => "mem_call_clocks",
-                    (false, true, true) => "mem_call_random_env",
-                    (false, true, false) => "mem_call_random",
-                    (false, false, true) => "mem_call_env",
-                    (false, false, false) => "mem_call_pure",
+                match (needs_clocks, needs_random, needs_env, needs_fs) {
+                    (false, false, false, false) => "mem_call_pure",
+                    (true, false, false, false) => "mem_call_clocks",
+                    (false, true, false, false) => "mem_call_random",
+                    (false, false, true, false) => "mem_call_env",
+                    (false, false, false, true) => "mem_call_fs",
+                    (true, true, false, false) => "mem_call_clocks_random",
+                    (true, false, true, false) => "mem_call_clocks_env",
+                    (true, false, false, true) => "mem_call_clocks_fs",
+                    (false, true, true, false) => "mem_call_random_env",
+                    (false, true, false, true) => "mem_call_random_fs",
+                    (false, false, true, true) => "mem_call_env_fs",
+                    (true, true, true, false) => "mem_call_clocks_random_env",
+                    (true, true, false, true) => "mem_call_clocks_random_fs",
+                    (true, false, true, true) => "mem_call_clocks_env_fs",
+                    (false, true, true, true) => "mem_call_random_env_fs",
+                    (true, true, true, true) => "mem_call_all_sync",
                 }
             }
         } else {

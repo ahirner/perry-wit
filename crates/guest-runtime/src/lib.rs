@@ -40,8 +40,9 @@ pub use date::{
     date_to_iso_string, performance_now,
 };
 pub use dispatch::{
-    console_error, console_log, mem_call, mem_call_all_sync, mem_call_clocks,
-    mem_call_clocks_env, mem_call_clocks_random, mem_call_env, mem_call_fs, mem_call_i32,
-    mem_call_random, mem_call_random_env, string_new,
+    console_error, console_log, mem_call, mem_call_all_sync, mem_call_clocks, mem_call_clocks_env,
+    mem_call_clocks_env_fs, mem_call_clocks_fs, mem_call_clocks_random, mem_call_clocks_random_env,
+    mem_call_clocks_random_fs, mem_call_env, mem_call_env_fs, mem_call_fs, mem_call_i32,
+    mem_call_random, mem_call_random_env, mem_call_random_env_fs, mem_call_random_fs, string_new,
 };
 pub use dispatch_pure::mem_call_pure;

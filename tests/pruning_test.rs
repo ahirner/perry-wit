@@ -2,6 +2,82 @@
 
 mod support;
 
+use std::{fs, process::Command};
+
+#[test]
+fn synchronous_capability_combinations_import_only_requested_interfaces() {
+    let capabilities = [
+        (
+            "wasi:clocks/",
+            "console.log(Date.now() > 0 && performance.now() >= 0);",
+        ),
+        (
+            "wasi:random/",
+            "console.log(Math.random() >= 0 && crypto.randomUUID().length === 36);",
+        ),
+        (
+            "wasi:cli/environment",
+            "console.log(process.env.PERRY_PRUNING === 'env');",
+        ),
+        (
+            "wasi:filesystem/",
+            "import * as fs from 'node:fs'; console.log(fs.readFileSync('/sandbox/value.txt', 'utf8') === 'file');",
+        ),
+    ];
+    let scratch = support::Scratch::new();
+    fs::write(scratch.0.join("value.txt"), "file").unwrap();
+    for mask in 0u32..16 {
+        let mut source = String::from("console.log('complete');\n");
+        for (index, (_, code)) in capabilities.iter().enumerate() {
+            if mask & (1 << index) != 0 {
+                source.push_str(code);
+                source.push('\n');
+            }
+        }
+        let compiled = scratch.compile_artifacts(&source, None);
+        wasmparser::Validator::new()
+            .validate_all(&compiled.core)
+            .unwrap();
+        let mut imports = Vec::new();
+        for payload in wasmparser::Parser::new(0).parse_all(&compiled.core) {
+            if let wasmparser::Payload::ImportSection(reader) = payload.unwrap() {
+                for import in reader.into_imports() {
+                    imports.push(import.unwrap().module.to_owned());
+                }
+            }
+        }
+        for (index, (interface, _)) in capabilities.iter().enumerate() {
+            assert_eq!(
+                imports.iter().any(|name| name.starts_with(interface)),
+                mask & (1 << index) != 0,
+                "capability mask {mask}: unexpected imports for {interface}: {imports:?}"
+            );
+        }
+        assert!(!imports.iter().any(|name| name.starts_with("wasi:http/")));
+
+        let component = scratch.0.join("test.wasm");
+        fs::write(&component, compiled.component.unwrap()).unwrap();
+        let output = Command::new(support::get_wasmtime_path())
+            .args([
+                "run",
+                "-C",
+                "cache=n",
+                "--env",
+                "PERRY_PRUNING=env",
+                "--dir",
+            ])
+            .arg(format!("{}::/sandbox", scratch.0.display()))
+            .arg(component)
+            .output()
+            .unwrap();
+        assert_eq!(
+            support::stdout(&output),
+            format!("complete\n{}", "true\n".repeat(mask.count_ones() as usize)),
+            "capability mask {mask}"
+        );
+    }
+}
+
 #[test]
 fn pure_await_and_promise_all_work_without_http_imports() {
     for clock_use in ["", "Date.now();"] {
