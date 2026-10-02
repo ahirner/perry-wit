@@ -56,6 +56,7 @@ fn response_json_preserves_primitive_and_composite_values() {
             const numberResponse = await fetch("http://{0}/number");
             const numberValue = await numberResponse.json();
             console.log(numberValue * 2);
+            console.log(numberValue + 1);
             const booleanResponse = await fetch("http://{0}/boolean");
             console.log((await booleanResponse.json()) === true);
             const stringResponse = await fetch("http://{0}/string");
@@ -74,7 +75,10 @@ fn response_json_preserves_primitive_and_composite_values() {
         None,
         None,
     );
-    assert_eq!(support::stdout(&output), "84\ntrue\nhello!\ntrue\n14\n16\n");
+    assert_eq!(
+        support::stdout(&output),
+        "84\n43\ntrue\nhello!\ntrue\n14\n16\n"
+    );
 }
 
 #[test]

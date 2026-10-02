@@ -303,12 +303,26 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         crate::io::print_stderr(&format!("{msg}\n"));
     } else if name == "string_concat" || name == "js_add" {
         if raw_args.len() >= 2 {
-            let s_a = state.get_string(raw_args[0]);
-            let s_b = state.get_string(raw_args[1]);
-            let res = format!("{s_a}{s_b}");
-            let str_id = state.strings.len();
-            state.strings.push(res);
-            result_i64 = nanbox_string(str_id);
+            let args = [raw_args[0], raw_args[1]];
+            if name == "js_add"
+                && args
+                    .iter()
+                    .all(|&value| !matches!((value as u64) >> 48, STRING_TAG | POINTER_TAG))
+            {
+                let [left, right] = args.map(|value| match value as u64 {
+                    TAG_TRUE => 1.0,
+                    TAG_FALSE | TAG_NULL => 0.0,
+                    TAG_UNDEFINED => f64::NAN,
+                    bits => f64::from_bits(bits),
+                });
+                result_i64 = (left + right).to_bits() as i64;
+            } else {
+                let mut text = state.get_string(args[0]);
+                text.push_str(&state.get_string(args[1]));
+                let str_id = state.strings.len();
+                state.strings.push(text);
+                result_i64 = nanbox_string(str_id);
+            }
         }
     } else if name == "process_exit" || name == "exit" {
         let code = raw_args.last().copied().unwrap_or(0);

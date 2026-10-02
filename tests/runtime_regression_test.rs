@@ -48,12 +48,16 @@ fn malformed_json_fails_while_valid_primitives_keep_their_types() {
         console.log(JSON.parse("null"));
         console.log(JSON.parse("true"));
         console.log(JSON.parse("42") * 2);
+        console.log(JSON.parse("42") + 1);
+        console.log(JSON.parse("true") + 1);
+        console.log(JSON.parse("null") + 1);
+        console.log(undefined + 1);
         console.log(JSON.parse('"hello"'));
     "#,
         None,
         None,
     );
-    assert_eq!(stdout(&output), "null\ntrue\n84\nhello\n");
+    assert_eq!(stdout(&output), "null\ntrue\n84\n43\n2\n1\nNaN\nhello\n");
 }
 
 #[test]
