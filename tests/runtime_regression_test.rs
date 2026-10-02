@@ -3,6 +3,29 @@ mod support;
 use support::{run, stdout};
 
 #[test]
+fn malformed_json_fails_while_valid_primitives_keep_their_types() {
+    let output = run(
+        "console.log(JSON.parse('{invalid')); console.log('after');",
+        None,
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("JSON parse error"));
+    let output = run(
+        r#"
+        console.log(JSON.parse("null"));
+        console.log(JSON.parse("true"));
+        console.log(JSON.parse("42") * 2);
+        console.log(JSON.parse('"hello"'));
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(stdout(&output), "null\ntrue\n84\nhello\n");
+}
+
+#[test]
 fn process_exit_terminates_immediately_with_wasi_status() {
     for (argument, success) in [("", true), ("0", true), ("5", false), ("-1", false)] {
         let output = run(

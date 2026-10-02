@@ -250,8 +250,8 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
     } else if name == "json_parse" {
         let arg = raw_args.first().copied().unwrap_or(0);
         let s = state.get_string(arg);
-        let val_json: serde_json::Value =
-            serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
+        let val_json: serde_json::Value = serde_json::from_str(&s)
+            .unwrap_or_else(|error| fail_with_error(&format!("JSON parse error: {error}")));
         result_i64 = state.from_js_value(val_json);
     } else if name == "console_log" || name == "log" {
         let arg = raw_args.last().copied().unwrap_or(0);
