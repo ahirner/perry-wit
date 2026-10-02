@@ -1,7 +1,7 @@
 //! JavaScript Date runtime support for WASI Preview 2.
 
 use crate::clocks::wall_clock_now_ms;
-use crate::nanbox::{nanbox_pointer, nanbox_string, TAG_NULL, TAG_UNDEFINED};
+use crate::nanbox::{nanbox_pointer, nanbox_string, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED};
 use crate::state::{get_state, JsHandle, RuntimeState};
 
 /// Convert Unix timestamp (seconds) to UTC date components.
@@ -16,12 +16,7 @@ pub(crate) fn timestamp_to_components(secs: i64) -> (i32, u32, u32, u32, u32, u3
     let hour = ((abs_secs / 3600) % 24) as u32;
 
     let days = if is_negative {
-        -((abs_secs / 86400) as i64)
-            - if (abs_secs % 86400) != 0 {
-                1
-            } else {
-                0
-            }
+        -((abs_secs / 86400) as i64) - if (abs_secs % 86400) != 0 { 1 } else { 0 }
     } else {
         (abs_secs / 86400) as i64
     };
@@ -112,8 +107,12 @@ pub extern "C" fn date_now() -> i64 {
 pub extern "C" fn date_new_val(arg: i64) -> i64 {
     let state = get_state();
     let bits = arg as u64;
-    let ts = if bits == TAG_UNDEFINED || bits == TAG_NULL {
-        wall_clock_now_ms()
+    let ts = if bits == TAG_UNDEFINED {
+        f64::NAN
+    } else if bits == TAG_NULL || bits == TAG_FALSE {
+        0.0
+    } else if bits == TAG_TRUE {
+        1.0
     } else if let Some(JsHandle::Date(existing)) = state.get_handle(arg) {
         *existing
     } else {
@@ -252,4 +251,3 @@ pub extern "C" fn performance_now() -> i64 {
     let now = crate::clocks::monotonic_clock_now_ms();
     now.to_bits() as i64
 }
-

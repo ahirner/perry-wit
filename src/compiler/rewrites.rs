@@ -191,6 +191,12 @@ impl Rewriter {
     }
 
     fn rewrite_current_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
+        // Perry otherwise lowers both an omitted argument and explicit undefined to the same call.
+        if let perry_hir::ir::Expr::DateNew(args) = expr
+            && args.is_empty()
+        {
+            args.push(perry_hir::ir::Expr::DateNow);
+        }
         match expr {
             perry_hir::ir::Expr::DateNow
             | perry_hir::ir::Expr::DateNew(_)

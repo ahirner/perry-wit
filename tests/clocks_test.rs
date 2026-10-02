@@ -5,6 +5,28 @@ mod support;
 use std::{fs, process::Command};
 
 #[test]
+fn date_constructor_distinguishes_omitted_and_explicit_primitive_arguments() {
+    let output = support::run(
+        r#"
+        function time(value: any): number {
+            const date = new Date(value);
+            return date.getTime();
+        }
+        console.log(time(null));
+        console.log(time(undefined));
+        console.log(time(false));
+        console.log(time(true));
+        console.log(time(1.9));
+        console.log(time(-1.9));
+        console.log(new Date().getTime() > 1700000000000);
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(support::stdout(&output), "0\nNaN\n0\n1\n1\n-1\ntrue\n");
+}
+
+#[test]
 fn wall_clock_uses_whole_milliseconds_without_reducing_monotonic_precision() {
     let scratch = support::Scratch::new();
     let wit = format!(
