@@ -27,6 +27,8 @@ pub enum AbiType {
 pub struct ExportedWitFunction {
     pub name: String,
     pub kebab_name: String,
+    pub core_name: String,
+    pub implementation_name: String,
     pub params: Vec<(String, AbiType)>,
     pub result: AbiType,
 }
@@ -83,7 +85,14 @@ pub fn extract_from_world(resolve: &Resolve, world_id: WorldId) -> Result<WitWor
                 }
                 if !is_wasi_cli {
                     for (_, iface_func) in &iface.functions {
-                        functions.push(lower_function(resolve, iface_func)?);
+                        let mut function = lower_function(resolve, iface_func)?;
+                        function.core_name =
+                            super::export_names::core_export_name(resolve, key, iface_func);
+                        function.implementation_name =
+                            super::export_names::interface_implementation_name(
+                                resolve, world, key, iface_func,
+                            );
+                        functions.push(function);
                     }
                 }
             }
@@ -132,6 +141,8 @@ fn lower_function(
     Ok(ExportedWitFunction {
         name: function.name.clone(),
         kebab_name: function.name.clone(),
+        core_name: function.name.clone(),
+        implementation_name: crate::sdk::codegen::to_camel_case(&function.name),
         params,
         result,
     })

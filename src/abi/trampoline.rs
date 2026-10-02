@@ -110,26 +110,55 @@ pub fn synthesize_trampolines(
 
     let mut mapped_functions = Vec::new();
 
-    for (ts_name, fid) in hir_exported_functions {
-        if let Some(wit_fn) = wit_exports
+    for wit_fn in &wit_exports.functions {
+        let bare_is_unique = wit_exports
             .functions
             .iter()
-            .find(|wf| matches_export_name(ts_name, &wf.kebab_name))
-            && let Some(pos) = hir_functions
-                .iter()
-                .filter(|f| !f.is_async)
-                .position(|f| f.id == *fid)
-            && let Some(&raw_id) = perry_raw_ids.get(1 + pos)
-            && let Some(&wasm_func_idx) = discovered
-                .user_functions
-                .get(&format!("__wasm_func_{raw_id}"))
-        {
-            mapped_functions.push(MappedExportFunction {
-                ts_name: ts_name.clone(),
-                wit_function: wit_fn.clone(),
-                wasm_func_index: wasm_func_idx,
-            });
-        }
+            .filter(|other| other.name == wit_fn.name)
+            .count()
+            == 1;
+        let (ts_name, fid) = hir_exported_functions
+            .iter()
+            .find(|(name, _)| {
+                matches_export_name(
+                    name,
+                    &crate::abi::to_kebab_case(&wit_fn.implementation_name),
+                )
+            })
+            .or_else(|| {
+                bare_is_unique
+                    .then(|| {
+                        hir_exported_functions
+                            .iter()
+                            .find(|(name, _)| matches_export_name(name, &wit_fn.kebab_name))
+                    })
+                    .flatten()
+            })
+            .with_context(|| {
+                format!(
+                    "missing implementation '{}' for WIT export '{}'",
+                    wit_fn.implementation_name, wit_fn.core_name
+                )
+            })?;
+        let pos = hir_functions
+            .iter()
+            .filter(|function| !function.is_async)
+            .position(|function| function.id == *fid)
+            .with_context(|| {
+                format!(
+                    "export '{}' must have a synchronous implementation",
+                    wit_fn.core_name
+                )
+            })?;
+        let raw_id = perry_raw_ids
+            .get(1 + pos)
+            .context("missing compiled function")?;
+        let wasm_func_index = discovered.user_functions[&format!("__wasm_func_{raw_id}")];
+        mapped_functions.push(MappedExportFunction {
+            ts_name: ts_name.clone(),
+            wit_function: wit_fn.clone(),
+            wasm_func_index,
+        });
     }
 
     let wat = wasmprinter::print_bytes(wasm_bytes)
@@ -179,8 +208,8 @@ pub fn synthesize_trampolines(
 
     // Synthesize trampolines for each mapped task export function
     for (i, mapped) in mapped_functions.iter().enumerate() {
-        let kebab_name = &mapped.wit_function.kebab_name;
-        let sanitized = format!("{}_{i}", kebab_name.replace('-', "_"));
+        let kebab_name = &mapped.wit_function.core_name;
+        let sanitized = i.to_string();
         let target_func = mapped.wasm_func_index;
 
         let mut param_types = Vec::new();

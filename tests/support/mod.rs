@@ -23,6 +23,17 @@ impl Scratch {
     }
 
     pub fn compile(&self, source: &str, wit: Option<&str>) -> PathBuf {
+        let compiled = self.compile_artifacts(source, wit);
+        let path = self.0.join("test.wasm");
+        fs::write(&path, compiled.component.unwrap()).unwrap();
+        path
+    }
+
+    pub fn compile_artifacts(
+        &self,
+        source: &str,
+        wit: Option<&str>,
+    ) -> perry_wit::compiler::Compiled {
         let mut options = CompileOptions::default();
         if let Some(wit) = wit {
             options.wit_dir = self.0.join("wit");
@@ -30,10 +41,7 @@ impl Scratch {
             fs::create_dir_all(&options.wit_dir).unwrap();
             fs::write(options.wit_dir.join("test.wit"), wit).unwrap();
         }
-        let compiled = compile_typescript(source, "test.ts", &options).unwrap();
-        let path = self.0.join("test.wasm");
-        fs::write(&path, compiled.component.unwrap()).unwrap();
-        path
+        compile_typescript(source, "test.ts", &options).unwrap()
     }
 }
 

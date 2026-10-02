@@ -1,6 +1,53 @@
 mod support;
 
 #[test]
+fn interface_exports_preserve_qualified_names_and_distinct_members() {
+    let wit = format!(
+        r#"package test:interfaces;
+        interface first {{ run-task: func(input: string) -> string; }}
+        interface second {{ run-task: func(input: string) -> string; }}
+        world test {{ {RUNTIME_IMPORTS} export first; export second; }}"#
+    );
+    let source = r#"
+        export function firstRunTask(input: string): string { return "first:" + input; }
+        export function secondRunTask(input: string): string { return "second:" + input; }
+    "#;
+    let scratch = support::Scratch::new();
+    let compiled = scratch.compile_artifacts(source, Some(&wit));
+    assert!(compiled.component.is_some());
+    std::fs::write(scratch.0.join("core.wasm"), compiled.core).unwrap();
+    std::fs::write(scratch.0.join("check.cjs"), r#"
+        const assert = require('node:assert/strict');
+        const module_ = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[2]));
+        const imports = {};
+        for (const {module, name} of WebAssembly.Module.imports(module_)) {
+            (imports[module] ??= {})[name] = () => { throw new Error('unexpected WASI call'); };
+        }
+        const e = new WebAssembly.Instance(module_, imports).exports;
+        for (const name of ['first', 'second']) {
+            const arg = new TextEncoder().encode('value');
+            const ptr = e.cabi_realloc(0, 0, 1, arg.length);
+            new Uint8Array(e.memory.buffer, ptr, arg.length).set(arg);
+            const exportName = `test:interfaces/${name}#run-task`;
+            const ret = e[exportName](ptr, arg.length);
+            const [data, len] = new Uint32Array(e.memory.buffer, ret, 2);
+            assert.equal(new TextDecoder().decode(new Uint8Array(e.memory.buffer, data, len)), `${name}:value`);
+            e[`cabi_post_${exportName}`](ret);
+        }
+    "#).unwrap();
+    let output = std::process::Command::new("node")
+        .arg(scratch.0.join("check.cjs"))
+        .arg(scratch.0.join("core.wasm"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn unsupported_record_parameters_and_results_fail_with_explicit_diagnostics() {
     use perry_wit::compiler::{CompileOptions, compile_typescript};
     for signature in ["func(input: payload) -> string", "func() -> payload"] {
