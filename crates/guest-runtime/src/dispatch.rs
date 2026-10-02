@@ -3,7 +3,8 @@
 use crate::http::{start_http_get, ResponseEntry};
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
-    get_pointer_id, nanbox_pointer, nanbox_string, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED,
+    get_pointer_id, nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL,
+    TAG_TRUE, TAG_UNDEFINED,
 };
 use crate::state::{get_state, JsHandle};
 
@@ -312,6 +313,12 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
                 return 0;
             }
             if bits == TAG_TRUE {
+                return 1;
+            }
+            if bits >> 48 == STRING_TAG {
+                return i32::from(!state.get_string(arg).is_empty());
+            }
+            if bits >> 48 == POINTER_TAG {
                 return 1;
             }
             let f = f64::from_bits(bits);
