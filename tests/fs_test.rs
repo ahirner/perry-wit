@@ -6,6 +6,75 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn mkdir_options_are_evaluated_and_rejected_before_directory_creation() {
+    for (import, mkdir) in [
+        ("import * as fs from 'fs';", "fs.mkdirSync"),
+        ("import { mkdirSync } from 'node:fs';", "mkdirSync"),
+    ] {
+        let scratch = support::Scratch::new();
+        let directory = scratch.0.join("sandbox");
+        fs::create_dir(&directory).unwrap();
+        let source = r#"
+            IMPORT
+            let evaluations = "";
+            function path(index: number) {
+                evaluations += "path;";
+                return "/sandbox/rejected" + index;
+            }
+            function options(index: number) {
+                evaluations += "options;";
+                return [0o700, {mode: 0o700}, {recursive: true}, {recursive: false, mode: 0o700}][index];
+            }
+            for (let i = 0; i < 4; i++) {
+                try {
+                    MKDIR(path(i), options(i));
+                    console.log("unreachable");
+                } catch (error) { console.log(error); }
+            }
+            console.log(evaluations);
+            MKDIR("/sandbox/default");
+            MKDIR("/sandbox/explicit", undefined);
+        "#
+        .replace("IMPORT", import)
+        .replace("MKDIR", mkdir);
+        let wasm = scratch.compile(&source, None);
+        let output = Command::new(support::get_wasmtime_path())
+            .args(["run", "-C", "cache=n", "--dir"])
+            .arg(format!("{}::/sandbox", directory.display()))
+            .arg(wasm)
+            .output()
+            .unwrap();
+        assert_eq!(
+            support::stdout(&output),
+            format!(
+                "{}{}\n",
+                "TypeError: mkdirSync options are not supported\n".repeat(4),
+                "path;options;".repeat(4)
+            ),
+            "{import}"
+        );
+        for index in 0..4 {
+            assert!(!directory.join(format!("rejected{index}")).exists());
+        }
+        assert!(directory.join("default").is_dir());
+        assert!(directory.join("explicit").is_dir());
+    }
+    let output = support::run(
+        r#"
+            import { mkdirSync } from "fs";
+            try { mkdirSync("/no-preopen/private", 0o700); console.log("unreachable"); }
+            catch (error) { console.log(error); }
+        "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: mkdirSync options are not supported\n"
+    );
+}
+
+#[test]
 fn unsupported_write_options_never_modify_or_create_files() {
     let scratch = support::Scratch::new();
     let directory = scratch.0.join("sandbox");
@@ -569,7 +638,10 @@ fn fs_binary_repeated_operations() {
     let output = command.output().expect("wasmtime execution failed");
     let stdout = support::stdout(&output);
 
-    assert!(stdout.contains("BINARY_CYCLES_PASSED=200"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("BINARY_CYCLES_PASSED=200"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -700,7 +772,10 @@ fn fs_unlink_and_rmdir() {
     let stdout = support::stdout(&output);
 
     assert!(stdout.contains("FILE_EXISTS_PRE=true"), "stdout: {stdout}");
-    assert!(stdout.contains("FILE_EXISTS_POST=false"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("FILE_EXISTS_POST=false"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("DIR_EXISTS_PRE=true"), "stdout: {stdout}");
     assert!(stdout.contains("DIR_EXISTS_POST=false"), "stdout: {stdout}");
 }
@@ -764,8 +839,14 @@ fn fs_metadata_error_handling() {
     let stdout = support::stdout(&output);
 
     assert!(stdout.contains("ENOTDIR_PASSED=true"), "stdout: {stdout}");
-    assert!(stdout.contains("ENOENT_STAT_PASSED=true"), "stdout: {stdout}");
-    assert!(stdout.contains("ENOENT_UNLINK_PASSED=true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("ENOENT_STAT_PASSED=true"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("ENOENT_UNLINK_PASSED=true"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]

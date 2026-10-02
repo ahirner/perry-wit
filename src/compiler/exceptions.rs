@@ -332,7 +332,7 @@ fn bridge_events(
             Some("throw_value") => (BridgeKind::Throwing, 5),
             Some(
                 "date_to_iso_string" | "uint8array_new" | "buffer_alloc" | "$$cryptoFillRandom"
-                | "fs_read_file_sync" | "fs_write_file_sync",
+                | "fs_read_file_sync" | "fs_write_file_sync" | "fs_mkdir_sync",
             ) => (BridgeKind::Throwing, 9),
             Some("__perry_catch_start") => (BridgeKind::TryStart, 10),
             Some("__perry_catch_end") => (BridgeKind::TryEnd, 10),

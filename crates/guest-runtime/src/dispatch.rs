@@ -192,8 +192,9 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
             } else {
                 raw_args
             };
-            let path = args.first().copied().unwrap_or(0);
-            Some(crate::filesystem::fs_mkdir_sync(path))
+            let path = args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+            let options = args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::filesystem::fs_mkdir_sync(path, options))
         }
         "fs_rmdir_sync" | "rmdirSync" => {
             let args = if raw_args.len() >= 2

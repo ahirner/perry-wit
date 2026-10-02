@@ -245,13 +245,12 @@ pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64, options: i64) 
         return TAG_UNDEFINED as i64;
     }
     let path = state.get_string(path_val);
-    let bytes: Vec<u8> = if let Some(crate::state::JsHandle::Uint8Array(view)) =
-        state.get_handle(content_val)
-    {
-        view.to_vec()
-    } else {
-        state.get_string(content_val).into_bytes()
-    };
+    let bytes: Vec<u8> =
+        if let Some(crate::state::JsHandle::Uint8Array(view)) = state.get_handle(content_val) {
+            view.to_vec()
+        } else {
+            state.get_string(content_val).into_bytes()
+        };
 
     let (dir, rel_path) = match locate_preopen(&path) {
         Ok(loc) => loc,
@@ -387,15 +386,18 @@ pub(crate) fn fs_unlink_sync(path_val: i64) -> i64 {
         }
         Err(err) => {
             drop(dir);
-            get_state().current_exception =
-                Some(format_error_code(err, "unlink", &path));
+            get_state().current_exception = Some(format_error_code(err, "unlink", &path));
             0
         }
     }
 }
 
-pub(crate) fn fs_mkdir_sync(path_val: i64) -> i64 {
+pub(crate) fn fs_mkdir_sync(path_val: i64, options: i64) -> i64 {
     let state = get_state();
+    if options as u64 != TAG_UNDEFINED {
+        state.current_exception = Some("TypeError: mkdirSync options are not supported".into());
+        return TAG_UNDEFINED as i64;
+    }
     let path = state.get_string(path_val);
 
     let (dir, rel_path) = match locate_preopen(&path) {
@@ -408,8 +410,7 @@ pub(crate) fn fs_mkdir_sync(path_val: i64) -> i64 {
 
     if rel_path.is_empty() {
         drop(dir);
-        get_state().current_exception =
-            Some(format_error_code(ErrorCode::Exist, "mkdir", &path));
+        get_state().current_exception = Some(format_error_code(ErrorCode::Exist, "mkdir", &path));
         return 0;
     }
 
@@ -420,8 +421,7 @@ pub(crate) fn fs_mkdir_sync(path_val: i64) -> i64 {
         }
         Err(err) => {
             drop(dir);
-            get_state().current_exception =
-                Some(format_error_code(err, "mkdir", &path));
+            get_state().current_exception = Some(format_error_code(err, "mkdir", &path));
             0
         }
     }
@@ -453,8 +453,7 @@ pub(crate) fn fs_rmdir_sync(path_val: i64) -> i64 {
         }
         Err(err) => {
             drop(dir);
-            get_state().current_exception =
-                Some(format_error_code(err, "rmdir", &path));
+            get_state().current_exception = Some(format_error_code(err, "rmdir", &path));
             0
         }
     }
@@ -487,8 +486,7 @@ pub(crate) fn fs_readdir_sync(path_val: i64) -> i64 {
         Ok(d) => d,
         Err(err) => {
             drop(dir);
-            get_state().current_exception =
-                Some(format_error_code(err, "readdir", &path));
+            get_state().current_exception = Some(format_error_code(err, "readdir", &path));
             return 0;
         }
     };
@@ -498,8 +496,7 @@ pub(crate) fn fs_readdir_sync(path_val: i64) -> i64 {
         Ok(s) => s,
         Err(err) => {
             drop(dir_desc);
-            get_state().current_exception =
-                Some(format_error_code(err, "readdir", &path));
+            get_state().current_exception = Some(format_error_code(err, "readdir", &path));
             return 0;
         }
     };
@@ -555,8 +552,7 @@ pub(crate) fn fs_stat_sync(path_val: i64) -> i64 {
         Ok(s) => s,
         Err(err) => {
             drop(dir);
-            get_state().current_exception =
-                Some(format_error_code(err, "stat", &path));
+            get_state().current_exception = Some(format_error_code(err, "stat", &path));
             return 0;
         }
     };
@@ -577,6 +573,7 @@ pub(crate) fn fs_stat_sync(path_val: i64) -> i64 {
     map.insert("isFile".to_string(), serde_json::Value::Bool(is_file));
     map.insert("isDirectory".to_string(), serde_json::Value::Bool(is_dir));
 
-    let obj_id = get_state().alloc_handle(crate::state::JsHandle::Json(serde_json::Value::Object(map)));
+    let obj_id =
+        get_state().alloc_handle(crate::state::JsHandle::Json(serde_json::Value::Object(map)));
     crate::nanbox::nanbox_pointer(obj_id)
 }

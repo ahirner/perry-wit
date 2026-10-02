@@ -1215,7 +1215,7 @@ pub(crate) extern "C" fn fs_unlink_sync(path: i64) -> i64 {
 
 #[no_mangle]
 pub(crate) extern "C" fn fs_mkdir_sync(path: i64) -> i64 {
-    crate::filesystem::fs_mkdir_sync(path)
+    crate::filesystem::fs_mkdir_sync(path, TAG_UNDEFINED as i64)
 }
 
 #[no_mangle]

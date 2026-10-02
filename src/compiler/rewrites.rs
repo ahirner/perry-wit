@@ -399,16 +399,7 @@ impl Rewriter {
         if let perry_hir::ir::Expr::FsMkdirSync(path_expr) = expr {
             self.needs_fs = true;
             let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
-            *expr = perry_hir::ir::Expr::Call {
-                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
-                    object: Box::new(perry_hir::ir::Expr::Undefined),
-                    property: "fs_mkdir_sync".into(),
-                    byte_offset: 0,
-                }),
-                args: vec![path],
-                type_args: Vec::new(),
-                byte_offset: 0,
-            };
+            *expr = runtime_method_call("fs_mkdir_sync", vec![path]);
             return;
         }
         if let perry_hir::ir::Expr::FsUnlinkSync(path_expr) = expr {
@@ -576,21 +567,7 @@ impl Rewriter {
                     return;
                 } else if method == "mkdirSync" {
                     self.needs_fs = true;
-                    let path = if !args.is_empty() {
-                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
-                    } else {
-                        perry_hir::ir::Expr::Undefined
-                    };
-                    *expr = perry_hir::ir::Expr::Call {
-                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
-                            object: Box::new(perry_hir::ir::Expr::Undefined),
-                            property: "fs_mkdir_sync".into(),
-                            byte_offset: 0,
-                        }),
-                        args: vec![path],
-                        type_args: Vec::new(),
-                        byte_offset: 0,
-                    };
+                    *expr = runtime_method_call("fs_mkdir_sync", std::mem::take(args));
                     return;
                 } else if method == "rmdirSync" {
                     self.needs_fs = true;
@@ -883,21 +860,7 @@ impl Rewriter {
                             return;
                         } else if property == "mkdirSync" {
                             self.needs_fs = true;
-                            let path = if !args.is_empty() {
-                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
-                            } else {
-                                perry_hir::ir::Expr::Undefined
-                            };
-                            *expr = perry_hir::ir::Expr::Call {
-                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
-                                    object: Box::new(perry_hir::ir::Expr::Undefined),
-                                    property: "fs_mkdir_sync".into(),
-                                    byte_offset: 0,
-                                }),
-                                args: vec![path],
-                                type_args: Vec::new(),
-                                byte_offset: 0,
-                            };
+                            *expr = runtime_method_call("fs_mkdir_sync", std::mem::take(args));
                             return;
                         } else if property == "rmdirSync" {
                             self.needs_fs = true;
@@ -1027,14 +990,18 @@ impl Rewriter {
 
 /// Preserves exception-region boundaries through Perry's memory-call emission.
 fn exception_marker(name: &str) -> Stmt {
-    Stmt::Expr(Expr::Call {
+    Stmt::Expr(runtime_method_call(name, Vec::new()))
+}
+
+fn runtime_method_call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call {
         callee: Box::new(Expr::PropertyGet {
             object: Box::new(Expr::Undefined),
             property: name.into(),
             byte_offset: 0,
         }),
-        args: Vec::new(),
+        args,
         type_args: Vec::new(),
         byte_offset: 0,
-    })
+    }
 }
