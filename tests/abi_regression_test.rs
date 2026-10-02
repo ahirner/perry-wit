@@ -1,6 +1,33 @@
 mod support;
 
 #[test]
+fn unsupported_record_parameters_and_results_fail_with_explicit_diagnostics() {
+    use perry_wit::compiler::{CompileOptions, compile_typescript};
+    for signature in ["func(input: payload) -> string", "func() -> payload"] {
+        let scratch = support::Scratch::new();
+        let wit_dir = scratch.0.join("wit");
+        std::fs::create_dir_all(&wit_dir).unwrap();
+        std::fs::write(wit_dir.join("world.wit"), format!("package test:abi; world test {{ {RUNTIME_IMPORTS} record payload {{ title: string, count: u32 }} export run-task: {signature}; }}")).unwrap();
+        let error = compile_typescript(
+            "export function runTask(input: any): any { return input; }",
+            "record.ts",
+            &CompileOptions {
+                wit_dir,
+                world: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("export 'run-task'"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("WIT record 'payload' is unsupported"),
+            "{diagnostic}"
+        );
+    }
+}
+
+#[test]
 fn string_results_export_the_selected_branch_and_payload() {
     let wit = format!(
         "package test:abi; world test {{ {RUNTIME_IMPORTS} export run-task: func() -> result<string, string>; }}"

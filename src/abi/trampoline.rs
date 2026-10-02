@@ -201,18 +201,6 @@ pub fn synthesize_trampolines(
                     ));
                     local_idx += 2;
                 }
-                AbiType::JsonRecord => {
-                    param_types.push("i32 i32");
-                    let helper = discovered
-                        .cabi_import_json
-                        .map(|idx| idx.to_string())
-                        .unwrap_or_else(|| "cabi_import_json".to_string());
-                    import_calls.push(format!(
-                        "local.get {local_idx}\n    local.get {}\n    call {helper}",
-                        local_idx + 1
-                    ));
-                    local_idx += 2;
-                }
                 AbiType::I32
                 | AbiType::U32
                 | AbiType::I64
@@ -237,17 +225,11 @@ pub fn synthesize_trampolines(
                     import_calls.push(format!("local.get {local_idx}\n    {conversion}"));
                     local_idx += 1;
                 }
-                _ => {
-                    param_types.push("i32 i32");
-                    let helper = discovered
-                        .cabi_import_string
-                        .map(|idx| idx.to_string())
-                        .unwrap_or_else(|| "cabi_import_string".to_string());
-                    import_calls.push(format!(
-                        "local.get {local_idx}\n    local.get {}\n    call {helper}",
-                        local_idx + 1
-                    ));
-                    local_idx += 2;
+                AbiType::ResultString | AbiType::Unit => {
+                    anyhow::bail!(
+                        "unsupported WIT parameter layout for export '{}'",
+                        mapped.wit_function.name
+                    );
                 }
             }
         }
@@ -271,13 +253,6 @@ pub fn synthesize_trampolines(
                     .cabi_export_result_string
                     .map(|idx| idx.to_string())
                     .unwrap_or_else(|| "cabi_export_result_string".to_string());
-                format!("call {helper}")
-            }
-            AbiType::JsonRecord => {
-                let helper = discovered
-                    .cabi_export_json
-                    .map(|idx| idx.to_string())
-                    .unwrap_or_else(|| "cabi_export_json".to_string());
                 format!("call {helper}")
             }
             AbiType::Unit => "drop\n".repeat(
@@ -324,7 +299,7 @@ pub fn synthesize_trampolines(
         if let Some(post_cleanup) = post_cleanup
             && matches!(
                 mapped.wit_function.result,
-                AbiType::String | AbiType::ResultString | AbiType::JsonRecord
+                AbiType::String | AbiType::ResultString
             )
         {
             snippets.push_str(&format!(

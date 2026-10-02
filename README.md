@@ -120,3 +120,10 @@ perry-wit gen-types --wit wit --world task -o .perry/types
 
 Develop inside `nix develop` to ensure matching toolchain versions across dependencies. Format all code with `cargo fmt --all` and ensure both `cargo test` and `nix flake check` pass cleanly before submitting changes.
 
+
+Task export ABI support currently covers strings, numeric and boolean scalars,
+void results, and `result<string, string>` results. WIT record parameters and
+results are rejected with a compile-time diagnostic until canonical record
+marshalling is implemented. Records use canonical field layouts at a component
+boundary; JSON payloads should be declared as WIT `string` and parsed explicitly.
+The SDK can describe composite WIT types beyond the compiler's current ABI support.

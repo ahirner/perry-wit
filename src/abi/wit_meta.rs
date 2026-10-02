@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem, WorldKey};
 
 use crate::component::wit::resolve_wit;
@@ -11,7 +11,6 @@ use crate::component::wit::resolve_wit;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbiType {
     String,
-    JsonRecord,
     I32,
     U32,
     I64,
@@ -61,22 +60,7 @@ pub fn extract_from_world(resolve: &Resolve, world_id: WorldId) -> Result<WitWor
     for (key, item) in &world.exports {
         match item {
             WorldItem::Function(func) => {
-                let kebab_name = func.name.clone();
-                let params = func
-                    .params
-                    .iter()
-                    .map(|param| (param.name.clone(), lower_wit_type(resolve, &param.ty)))
-                    .collect();
-                let result = match &func.result {
-                    Some(ty) => lower_wit_type(resolve, ty),
-                    None => AbiType::Unit,
-                };
-                functions.push(ExportedWitFunction {
-                    name: kebab_name.clone(),
-                    kebab_name,
-                    params,
-                    result,
-                });
+                functions.push(lower_function(resolve, func)?);
             }
             WorldItem::Interface { id, .. } => {
                 let iface = &resolve.interfaces[*id];
@@ -99,22 +83,7 @@ pub fn extract_from_world(resolve: &Resolve, world_id: WorldId) -> Result<WitWor
                 }
                 if !is_wasi_cli {
                     for (_, iface_func) in &iface.functions {
-                        let kebab_name = iface_func.name.clone();
-                        let params = iface_func
-                            .params
-                            .iter()
-                            .map(|param| (param.name.clone(), lower_wit_type(resolve, &param.ty)))
-                            .collect();
-                        let result = match &iface_func.result {
-                            Some(ty) => lower_wit_type(resolve, ty),
-                            None => AbiType::Unit,
-                        };
-                        functions.push(ExportedWitFunction {
-                            name: kebab_name.clone(),
-                            kebab_name,
-                            params,
-                            result,
-                        });
+                        functions.push(lower_function(resolve, iface_func)?);
                     }
                 }
             }
@@ -137,8 +106,39 @@ pub fn extract_from_world(resolve: &Resolve, world_id: WorldId) -> Result<WitWor
     })
 }
 
-fn lower_wit_type(resolve: &Resolve, ty: &Type) -> AbiType {
-    match ty {
+fn lower_function(
+    resolve: &Resolve,
+    function: &wit_parser::Function,
+) -> Result<ExportedWitFunction> {
+    let params = function
+        .params
+        .iter()
+        .map(|param| {
+            Ok((
+                param.name.clone(),
+                lower_wit_type(resolve, &param.ty).with_context(|| {
+                    format!("parameter '{}' of export '{}'", param.name, function.name)
+                })?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let result = function
+        .result
+        .as_ref()
+        .map(|ty| lower_wit_type(resolve, ty))
+        .transpose()
+        .with_context(|| format!("result of export '{}'", function.name))?
+        .unwrap_or(AbiType::Unit);
+    Ok(ExportedWitFunction {
+        name: function.name.clone(),
+        kebab_name: function.name.clone(),
+        params,
+        result,
+    })
+}
+
+fn lower_wit_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
+    Ok(match ty {
         Type::String => AbiType::String,
         Type::Bool => AbiType::Bool,
         Type::S8 | Type::S16 | Type::S32 => AbiType::I32,
@@ -148,13 +148,27 @@ fn lower_wit_type(resolve: &Resolve, ty: &Type) -> AbiType {
         Type::F32 => AbiType::F32,
         Type::F64 => AbiType::F64,
         Type::Id(id) => match &resolve.types[*id].kind {
-            TypeDefKind::Record(_) => AbiType::JsonRecord,
-            TypeDefKind::Result(_) => AbiType::ResultString,
-            TypeDefKind::Type(inner) => lower_wit_type(resolve, inner),
-            _ => AbiType::String,
+            TypeDefKind::Record(_) => bail!(
+                "WIT record '{}' is unsupported: canonical record marshalling is not implemented",
+                resolve.types[*id].name.as_deref().unwrap_or("<anonymous>")
+            ),
+            TypeDefKind::Result(result) => {
+                if let (Some(ok), Some(err)) = (&result.ok, &result.err)
+                    && lower_wit_type(resolve, ok)? == AbiType::String
+                    && lower_wit_type(resolve, err)? == AbiType::String
+                {
+                    AbiType::ResultString
+                } else {
+                    bail!(
+                        "unsupported WIT result layout: only result<string, string> is implemented"
+                    )
+                }
+            }
+            TypeDefKind::Type(inner) => return lower_wit_type(resolve, inner),
+            kind => bail!("unsupported WIT ABI type: {}", kind.as_str()),
         },
-        _ => AbiType::String,
-    }
+        other => bail!("unsupported WIT ABI type: {other:?}"),
+    })
 }
 
 /// Converts a camelCase or snake_case string identifier into kebab-case.
