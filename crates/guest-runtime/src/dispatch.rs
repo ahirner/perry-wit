@@ -270,6 +270,9 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             state.strings.push(res);
             result_i64 = nanbox_string(str_id);
         }
+    } else if name == "process_exit" || name == "exit" {
+        let code = raw_args.last().copied().unwrap_or(0);
+        crate::io::exit_process(f64::from_bits(code as u64) as i32);
     } else if name == "await_promise" {
         let arg = raw_args.first().copied().unwrap_or(0);
         if let Some(JsHandle::Response(resp_id)) = state.get_handle(arg) {

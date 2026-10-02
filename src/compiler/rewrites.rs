@@ -26,6 +26,22 @@ fn rewrite_stmt(stmt: &mut perry_hir::ir::Stmt) {
 }
 
 fn rewrite_expr(expr: &mut perry_hir::ir::Expr) {
+    if let perry_hir::ir::Expr::ProcessExit(code) = expr {
+        let code = code
+            .take()
+            .map(|code| *code)
+            .unwrap_or(perry_hir::ir::Expr::Integer(0));
+        *expr = perry_hir::ir::Expr::Call {
+            callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                object: Box::new(perry_hir::ir::Expr::Undefined),
+                property: "process_exit".into(),
+                byte_offset: 0,
+            }),
+            args: vec![code],
+            type_args: Vec::new(),
+            byte_offset: 0,
+        };
+    }
     if let perry_hir::ir::Expr::JsonStringifyFull(val, _, _) = expr {
         *expr = perry_hir::ir::Expr::JsonStringify(val.clone());
         return;

@@ -3,6 +3,19 @@ mod support;
 use support::{run, stdout};
 
 #[test]
+fn process_exit_terminates_immediately_with_wasi_status() {
+    for (argument, success) in [("", true), ("0", true), ("5", false), ("-1", false)] {
+        let output = run(
+            &format!("console.log('before'); process.exit({argument}); console.log('after');"),
+            None,
+            None,
+        );
+        assert_eq!(output.status.success(), success);
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "before\n");
+    }
+}
+
+#[test]
 fn truthiness_distinguishes_tagged_values_from_numeric_nan() {
     let output = run(
         r#"

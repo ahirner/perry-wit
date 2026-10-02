@@ -20,6 +20,10 @@ pub(crate) fn print_stderr(text: &str) {
 
 pub(crate) fn fail_with_error(msg: &str) -> ! {
     print_stderr(&format!("Error: {msg}\n"));
-    exit(Err(()));
+    exit_process(1);
+}
+
+pub(crate) fn exit_process(code: i32) -> ! {
+    exit(if code == 0 { Ok(()) } else { Err(()) });
     core::arch::wasm32::unreachable();
 }
