@@ -102,16 +102,31 @@ fn dispatch_random(name: &str, raw_args: &[i64]) -> Option<i64> {
 fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
     match name {
         "fs_read_file_sync" | "readFileSync" => {
-            let path = if raw_args.len() >= 2
+            let args = if raw_args.len() >= 2
                 && (raw_args[0] == TAG_UNDEFINED as i64
                     || raw_args[0] == TAG_NULL as i64
                     || raw_args[0] == 0)
             {
-                raw_args[1]
+                &raw_args[1..]
             } else {
-                raw_args.first().copied().unwrap_or(0)
+                raw_args
             };
-            Some(crate::filesystem::fs_read_file_sync(path))
+            let path = args.first().copied().unwrap_or(0);
+            let options = args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::filesystem::fs_read_file_sync(path, options))
+        }
+        "fs_read_file_binary" | "readFileBuffer" => {
+            let args = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                &raw_args[1..]
+            } else {
+                raw_args
+            };
+            let path = args.first().copied().unwrap_or(0);
+            Some(crate::filesystem::fs_read_file_binary(path))
         }
         "fs_write_file_sync" | "writeFileSync" => {
             let args = if raw_args.len() >= 3

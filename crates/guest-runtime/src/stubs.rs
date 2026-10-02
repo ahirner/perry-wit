@@ -206,9 +206,19 @@ pub(crate) extern "C" fn object_set(target: i64, key: i64, val: i64) -> i64 {
 pub(crate) extern "C" fn object_get(target: i64, key: i64) -> i64 {
     let state = get_state();
     let key_str = state.get_string(key);
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target) {
-        if let Some(v) = map.get(&key_str) {
-            return state.from_js_value(v.clone());
+    if let Some(h) = state.get_handle(target) {
+        match h {
+            JsHandle::Uint8Array(v) => match key_str.as_str() {
+                "length" | "byteLength" => return (v.byte_length as f64).to_bits() as i64,
+                "byteOffset" => return (v.byte_offset as f64).to_bits() as i64,
+                _ => {}
+            },
+            JsHandle::Json(serde_json::Value::Object(map)) => {
+                if let Some(v) = map.get(&key_str) {
+                    return state.from_js_value(v.clone());
+                }
+            }
+            _ => {}
         }
     }
     TAG_UNDEFINED as i64
@@ -1170,7 +1180,12 @@ pub(crate) extern "C" fn await_promise(_a: i64) -> i64 {
 
 #[no_mangle]
 pub(crate) extern "C" fn fs_read_file_sync(path: i64) -> i64 {
-    crate::filesystem::fs_read_file_sync(path)
+    crate::filesystem::fs_read_file_sync(path, TAG_UNDEFINED as i64)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_read_file_binary(path: i64) -> i64 {
+    crate::filesystem::fs_read_file_binary(path)
 }
 
 #[no_mangle]

@@ -415,3 +415,159 @@ fn fs_repeated_operations_no_descriptor_leakage() {
 
     assert!(stdout.contains("CYCLES_PASSED=500"), "stdout: {stdout}");
 }
+
+#[test]
+fn fs_binary_read_write_roundtrip() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import * as fs from "fs";
+
+        // Non-UTF8 byte sequence: 0x00, 0xFF, 0xFE, 0x80, 0x42
+        const buf = new Uint8Array(5);
+        buf[0] = 0;
+        buf[1] = 255;
+        buf[2] = 254;
+        buf[3] = 128;
+        buf[4] = 66;
+
+        fs.writeFileSync("/sandbox/binary.dat", buf);
+
+        const readBack = fs.readFileSync("/sandbox/binary.dat");
+        console.log("BIN_LEN=" + readBack.length);
+        console.log("BIN_0=" + readBack[0]);
+        console.log("BIN_1=" + readBack[1]);
+        console.log("BIN_2=" + readBack[2]);
+        console.log("BIN_3=" + readBack[3]);
+        console.log("BIN_4=" + readBack[4]);
+
+        const sub = readBack.subarray(1, 4);
+        console.log("SUB_LEN=" + sub.length);
+        console.log("SUB_0=" + sub[0]);
+        console.log("SUB_2=" + sub[2]);
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("BIN_LEN=5"), "stdout: {stdout}");
+    assert!(stdout.contains("BIN_0=0"), "stdout: {stdout}");
+    assert!(stdout.contains("BIN_1=255"), "stdout: {stdout}");
+    assert!(stdout.contains("BIN_2=254"), "stdout: {stdout}");
+    assert!(stdout.contains("BIN_3=128"), "stdout: {stdout}");
+    assert!(stdout.contains("BIN_4=66"), "stdout: {stdout}");
+    assert!(stdout.contains("SUB_LEN=3"), "stdout: {stdout}");
+    assert!(stdout.contains("SUB_0=255"), "stdout: {stdout}");
+    assert!(stdout.contains("SUB_2=128"), "stdout: {stdout}");
+}
+
+#[test]
+fn fs_binary_subview_write_and_empty() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import * as fs from "fs";
+
+        // Write from a subarray with non-zero byte_offset
+        const base = new Uint8Array(8);
+        for (let i = 0; i < 8; i++) {
+            base[i] = i * 10;
+        }
+        const slice = base.subarray(2, 6); // [20, 30, 40, 50]
+        fs.writeFileSync("/sandbox/slice.dat", slice);
+
+        const readSlice = fs.readFileSync("/sandbox/slice.dat");
+        console.log("SLICE_LEN=" + readSlice.length);
+        console.log("SLICE_0=" + readSlice[0]);
+        console.log("SLICE_3=" + readSlice[3]);
+
+        // Empty Uint8Array write
+        const empty = new Uint8Array(0);
+        fs.writeFileSync("/sandbox/empty.dat", empty);
+        const readEmpty = fs.readFileSync("/sandbox/empty.dat");
+        console.log("EMPTY_LEN=" + readEmpty.length);
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("SLICE_LEN=4"), "stdout: {stdout}");
+    assert!(stdout.contains("SLICE_0=20"), "stdout: {stdout}");
+    assert!(stdout.contains("SLICE_3=50"), "stdout: {stdout}");
+    assert!(stdout.contains("EMPTY_LEN=0"), "stdout: {stdout}");
+}
+
+#[test]
+fn fs_binary_repeated_operations() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import * as fs from "fs";
+
+        for (let i = 0; i < 200; i++) {
+            const buf = new Uint8Array(4);
+            buf[0] = i & 0xff;
+            buf[1] = (i + 1) & 0xff;
+            buf[2] = (i + 2) & 0xff;
+            buf[3] = (i + 3) & 0xff;
+
+            const path = "/sandbox/bin_" + (i % 5) + ".dat";
+            fs.writeFileSync(path, buf);
+            const read = fs.readFileSync(path);
+            if (read.length !== 4 || read[0] !== (i & 0xff)) {
+                throw new Error("Mismatch at iteration " + i);
+            }
+        }
+        console.log("BINARY_CYCLES_PASSED=200");
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("BINARY_CYCLES_PASSED=200"), "stdout: {stdout}");
+}

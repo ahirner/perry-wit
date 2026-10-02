@@ -86,10 +86,10 @@ Verification:
 
 The current `uint8array_*` operations are stubs and the runtime lacks byte-buffer/view values.
 
-- [ ] **D.1. Byte Storage & Uint8Array Views** — Build with the first binary API; reuse instances only with E.1's lifetime guarantees.
-    - [ ] Support byte storage and views with identity, offset, length, and shared mutation; choose a representation compatible with existing guest values and their ownership.
-    - [ ] Implement the construction, indexed access, and subview behavior needed by that API, keeping bytes intact across its host boundary.
-    - [ ] Verify mutation through overlapping views, bounds, empty views, non-UTF-8 bytes, and cleanup for the supported lifecycle.
+- [x] **D.1. Byte Storage & Uint8Array Views** — Build with the first binary API; reuse instances only with E.1's lifetime guarantees.
+    - [x] Support byte storage and views with identity, offset, length, and shared mutation; choose a representation compatible with existing guest values and their ownership.
+    - [x] Implement the construction, indexed access, and subview behavior needed by that API, keeping bytes intact across its host boundary.
+    - [x] Verify mutation through overlapping views, bounds, empty views, non-UTF-8 bytes, and cleanup for the supported lifecycle.
 
 Further view types and Node `Buffer` compatibility follow specific consumers.
 
@@ -176,9 +176,9 @@ Verification:
 - [x] **9.1. UTF-8 File Reads/Writes**
     - [x] Support `readFileSync` / `writeFileSync` within host-provided preopens, with explicit path rules and confinement through descriptor-relative operations.
     - [x] Verify round-trips, short I/O handling, missing files, denied access, path escape attempts, and resource cleanup on success/failure.
-- [ ] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
-    - [ ] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`.
-    - [ ] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
+- [x] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
+    - [x] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`.
+    - [x] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
 - [ ] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
     - [ ] Support `fs.readdirSync(path)` via `Descriptor::read_directory` stream collecting child entry names, and `fs.unlinkSync(path)` via `Descriptor::unlink_file_at`.
     - [ ] Support `fs.statSync(path)` via `Descriptor::stat`, exposing `{ isFile(): boolean, isDirectory(): boolean, size: number, mtimeMs: number }`.

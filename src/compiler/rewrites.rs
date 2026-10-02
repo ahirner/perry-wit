@@ -335,15 +335,28 @@ impl Rewriter {
             }
             _ => {}
         }
-        if let perry_hir::ir::Expr::FsReadFileSync(path_expr)
-        | perry_hir::ir::Expr::FsReadFileBinary(path_expr) = expr
-        {
+        if let perry_hir::ir::Expr::FsReadFileSync(path_expr) = expr {
             self.needs_fs = true;
             let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
             *expr = perry_hir::ir::Expr::Call {
                 callee: Box::new(perry_hir::ir::Expr::PropertyGet {
                     object: Box::new(perry_hir::ir::Expr::Undefined),
                     property: "fs_read_file_sync".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![path, perry_hir::ir::Expr::String("utf8".into())],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if let perry_hir::ir::Expr::FsReadFileBinary(path_expr) = expr {
+            self.needs_fs = true;
+            let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "fs_read_file_binary".into(),
                     byte_offset: 0,
                 }),
                 args: vec![path],
@@ -403,13 +416,18 @@ impl Rewriter {
                     } else {
                         perry_hir::ir::Expr::Undefined
                     };
+                    let options = if args.len() >= 2 {
+                        std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
                     *expr = perry_hir::ir::Expr::Call {
                         callee: Box::new(perry_hir::ir::Expr::PropertyGet {
                             object: Box::new(perry_hir::ir::Expr::Undefined),
                             property: "fs_read_file_sync".into(),
                             byte_offset: 0,
                         }),
-                        args: vec![path],
+                        args: vec![path, options],
                         type_args: Vec::new(),
                         byte_offset: 0,
                     };
@@ -597,13 +615,18 @@ impl Rewriter {
                             } else {
                                 perry_hir::ir::Expr::Undefined
                             };
+                            let options = if args.len() >= 2 {
+                                std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
                             *expr = perry_hir::ir::Expr::Call {
                                 callee: Box::new(perry_hir::ir::Expr::PropertyGet {
                                     object: Box::new(perry_hir::ir::Expr::Undefined),
                                     property: "fs_read_file_sync".into(),
                                     byte_offset: 0,
                                 }),
-                                args: vec![path],
+                                args: vec![path, options],
                                 type_args: Vec::new(),
                                 byte_offset: 0,
                             };
@@ -639,7 +662,10 @@ impl Rewriter {
                         }
                     }
                 }
-                if property == "fs_read_file_sync" || property == "fs_write_file_sync" {
+                if property == "fs_read_file_sync"
+                    || property == "fs_read_file_binary"
+                    || property == "fs_write_file_sync"
+                {
                     self.needs_fs = true;
                 }
                 if property == "json" {

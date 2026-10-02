@@ -133,7 +133,33 @@ fn format_error_code(code: ErrorCode, op: &str, path: &str) -> String {
     }
 }
 
-pub(crate) fn fs_read_file_sync(path_val: i64) -> i64 {
+pub(crate) fn fs_read_file_sync(path_val: i64, options_val: i64) -> i64 {
+    let options_js = get_state().to_js_value(options_val);
+    let as_utf8 = is_utf8_encoding(&options_js);
+    fs_read_file_impl(path_val, as_utf8)
+}
+
+pub(crate) fn fs_read_file_binary(path_val: i64) -> i64 {
+    fs_read_file_impl(path_val, false)
+}
+
+fn is_utf8_encoding(options: &serde_json::Value) -> bool {
+    match options {
+        serde_json::Value::String(s) => {
+            s.eq_ignore_ascii_case("utf8") || s.eq_ignore_ascii_case("utf-8")
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(s)) = map.get("encoding") {
+                s.eq_ignore_ascii_case("utf8") || s.eq_ignore_ascii_case("utf-8")
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn fs_read_file_impl(path_val: i64, as_utf8: bool) -> i64 {
     let state = get_state();
     let path = state.get_string(path_val);
 
@@ -196,13 +222,19 @@ pub(crate) fn fs_read_file_sync(path_val: i64) -> i64 {
     drop(stream);
     drop(file_desc);
 
-    match core::str::from_utf8(&bytes) {
-        Ok(text) => get_state().alloc_string(text),
-        Err(_) => {
-            get_state().current_exception =
-                Some(format!("Error: file '{path}' is not valid UTF-8"));
-            0
+    if as_utf8 {
+        match core::str::from_utf8(&bytes) {
+            Ok(text) => get_state().alloc_string(text),
+            Err(_) => {
+                get_state().current_exception =
+                    Some(format!("Error: file '{path}' is not valid UTF-8"));
+                0
+            }
         }
+    } else {
+        let view = crate::buffer::Uint8ArrayView::from_bytes(bytes);
+        let id = get_state().alloc_handle(crate::state::JsHandle::Uint8Array(view));
+        crate::nanbox::nanbox_pointer(id)
     }
 }
 
@@ -213,7 +245,13 @@ pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64, options: i64) 
         return TAG_UNDEFINED as i64;
     }
     let path = state.get_string(path_val);
-    let content = state.get_string(content_val);
+    let bytes: Vec<u8> = if let Some(crate::state::JsHandle::Uint8Array(view)) =
+        state.get_handle(content_val)
+    {
+        view.to_vec()
+    } else {
+        state.get_string(content_val).into_bytes()
+    };
 
     let (dir, rel_path) = match locate_preopen(&path) {
         Ok(loc) => loc,
@@ -254,7 +292,6 @@ pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64, options: i64) 
         }
     };
 
-    let bytes = content.as_bytes();
     let mut write_err = false;
     if !bytes.is_empty() {
         for chunk in bytes.chunks(4096) {
@@ -279,18 +316,20 @@ pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64, options: i64) 
     TAG_UNDEFINED as i64
 }
 
-/// The UTF-8 overwrite implementation must reject options that change its semantics.
+/// The write implementation must reject options that change its semantics.
 fn supported_write_options(options: &serde_json::Value) -> bool {
-    let utf8 = |encoding: &serde_json::Value| {
-        encoding.as_str().is_some_and(|encoding| {
-            encoding.eq_ignore_ascii_case("utf8") || encoding.eq_ignore_ascii_case("utf-8")
+    let valid_encoding = |encoding: &serde_json::Value| {
+        encoding.as_str().is_some_and(|e| {
+            e.eq_ignore_ascii_case("utf8")
+                || e.eq_ignore_ascii_case("utf-8")
+                || e.eq_ignore_ascii_case("binary")
         })
     };
     match options {
         serde_json::Value::Null => true,
-        serde_json::Value::String(_) => utf8(options),
+        serde_json::Value::String(_) => valid_encoding(options),
         serde_json::Value::Object(fields) => fields.iter().all(|(key, value)| match key.as_str() {
-            "encoding" => utf8(value),
+            "encoding" => valid_encoding(value) || value.is_null(),
             "flag" => value.as_str() == Some("w"),
             _ => false,
         }),
