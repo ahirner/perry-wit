@@ -22,6 +22,11 @@ pub struct DiscoveredExports {
     pub cabi_post_cleanup: Option<u32>,
     pub cabi_post_result_cleanup: Option<u32>,
     pub cabi_check_exception: Option<u32>,
+    pub cabi_record_init_checkpoint: Option<u32>,
+    pub cabi_reset_invocation_state: Option<u32>,
+    pub cabi_register_global_root: Option<u32>,
+    pub cabi_reclaim_temporaries: Option<u32>,
+    pub user_i64_globals: Vec<u32>,
 }
 
 /// Parses the export section of a core WebAssembly module to extract known symbols and indices.
@@ -29,6 +34,8 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
     let mut exports = DiscoveredExports::default();
     let mut types = Vec::new();
     let mut function_type_indices = Vec::new();
+    let mut i64_globals = std::collections::HashSet::new();
+    let mut num_imported_globals = 0u32;
 
     for payload in Parser::new(0).parse_all(wasm_bytes) {
         match payload? {
@@ -39,44 +46,86 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
             }
             Payload::ImportSection(reader) => {
                 for import in reader.into_imports() {
-                    if let wasmparser::TypeRef::Func(index) = import?.ty {
-                        function_type_indices.push(index);
+                    let import = import?;
+                    match import.ty {
+                        wasmparser::TypeRef::Func(index) => {
+                            function_type_indices.push(index);
+                        }
+                        wasmparser::TypeRef::Global(g) => {
+                            if g.content_type == wasmparser::ValType::I64 {
+                                i64_globals.insert(num_imported_globals);
+                            }
+                            num_imported_globals += 1;
+                        }
+                        _ => {}
                     }
                 }
             }
             Payload::FunctionSection(reader) => {
                 function_type_indices.extend(reader.into_iter().collect::<Result<Vec<_>, _>>()?);
             }
+            Payload::GlobalSection(reader) => {
+                let mut g_idx = num_imported_globals;
+                for g in reader {
+                    let g = g?;
+                    if g.ty.content_type == wasmparser::ValType::I64 {
+                        i64_globals.insert(g_idx);
+                    }
+                    g_idx += 1;
+                }
+            }
             Payload::ExportSection(reader) => {
                 for exp in reader {
                     let exp = exp?;
-                    if exp.kind == ExternalKind::Func {
-                        match exp.name {
-                            "_start" => exports.start_func = Some(exp.index),
-                            "cabi_import_string" => exports.cabi_import_string = Some(exp.index),
-                            "cabi_export_string" => exports.cabi_export_string = Some(exp.index),
-                            "cabi_export_result_string" => {
-                                exports.cabi_export_result_string = Some(exp.index)
-                            }
-                            "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
-                            "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
-                            "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
-                            "cabi_check_exception" => {
-                                exports.cabi_check_exception = Some(exp.index)
-                            }
-                            "cabi_post_result_cleanup" => {
-                                exports.cabi_post_result_cleanup = Some(exp.index)
-                            }
-                            name => {
-                                exports.user_functions.insert(name.to_string(), exp.index);
+                    match exp.kind {
+                        ExternalKind::Func => {
+                            match exp.name {
+                                "_start" => exports.start_func = Some(exp.index),
+                                "cabi_import_string" => exports.cabi_import_string = Some(exp.index),
+                                "cabi_export_string" => exports.cabi_export_string = Some(exp.index),
+                                "cabi_export_result_string" => {
+                                    exports.cabi_export_result_string = Some(exp.index)
+                                }
+                                "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
+                                "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
+                                "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
+                                "cabi_check_exception" => {
+                                    exports.cabi_check_exception = Some(exp.index)
+                                }
+                                "cabi_post_result_cleanup" => {
+                                    exports.cabi_post_result_cleanup = Some(exp.index)
+                                }
+                                "cabi_record_init_checkpoint" => {
+                                    exports.cabi_record_init_checkpoint = Some(exp.index)
+                                }
+                                "cabi_reset_invocation_state" => {
+                                    exports.cabi_reset_invocation_state = Some(exp.index)
+                                }
+                                "cabi_register_global_root" => {
+                                    exports.cabi_register_global_root = Some(exp.index)
+                                }
+                                "cabi_reclaim_temporaries" => {
+                                    exports.cabi_reclaim_temporaries = Some(exp.index)
+                                }
+                                name => {
+                                    exports.user_functions.insert(name.to_string(), exp.index);
+                                }
                             }
                         }
+                        ExternalKind::Global => {
+                            if exp.name.starts_with("__wasm_global_") && i64_globals.contains(&exp.index) {
+                                exports.user_i64_globals.push(exp.index);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
             _ => {}
         }
     }
+    exports.user_i64_globals.sort_unstable();
+    exports.user_i64_globals.dedup();
     exports.function_types = function_type_indices
         .into_iter()
         .map(|index| types[index as usize].clone())
@@ -180,6 +229,28 @@ pub fn synthesize_trampolines(
         .cabi_check_exception
         .context("guest runtime is missing cabi_check_exception")?;
 
+    let record_init_call = discovered
+        .cabi_record_init_checkpoint
+        .map(|idx| format!("call {idx}\n      "))
+        .unwrap_or_default();
+
+    let reset_call = discovered
+        .cabi_reset_invocation_state
+        .map(|idx| format!("call {idx}\n    "))
+        .unwrap_or_default();
+
+    let reclaim_temporaries_call = discovered
+        .cabi_reclaim_temporaries
+        .map(|idx| format!("call {idx}\n    "))
+        .unwrap_or_default();
+
+    let mut scan_globals_body = String::new();
+    if let Some(reg) = discovered.cabi_register_global_root {
+        for gidx in &discovered.user_i64_globals {
+            write!(scan_globals_body, "global.get {gidx}\n    call {reg}\n    ").unwrap();
+        }
+    }
+
     // Emitted init guard
     let start_func_ref = discovered
         .start_func
@@ -196,10 +267,15 @@ pub fn synthesize_trampolines(
     if
       call {start_func_ref}
       call {check_exception}
-      i32.const 1
+      {record_init_call}i32.const 1
       global.set $perry_init_guard
     end
   )
+  (func $perry_scan_globals
+    {scan_globals_body})
+  (func $perry_safe_reset
+    call $perry_scan_globals
+    {reset_call})
 "#
     )
     .unwrap();
@@ -210,6 +286,7 @@ pub fn synthesize_trampolines(
             r#"
   (func $wasi_cli_run (result i32)
     call $perry_ensure_init
+    call $perry_safe_reset
     i32.const 0
   )
   (export "wasi:cli/run@0.2.6#run" (func $wasi_cli_run))
@@ -295,11 +372,18 @@ pub fn synthesize_trampolines(
                     .unwrap_or_else(|| "cabi_export_result_string".to_string());
                 format!("call {helper}")
             }
-            AbiType::Unit => "drop\n".repeat(
-                discovered.function_types[target_func as usize]
-                    .results()
-                    .len(),
-            ),
+            AbiType::Unit => {
+                let drops = "drop\n    ".repeat(
+                    discovered.function_types[target_func as usize]
+                        .results()
+                        .len(),
+                );
+                let reclaim = discovered
+                    .cabi_reclaim_temporaries
+                    .map(|idx| format!("call $perry_scan_globals\n    call {idx}\n    "))
+                    .unwrap_or_default();
+                format!("{drops}{reclaim}")
+            }
             AbiType::I32 => "f64.reinterpret_i64\n    i32.trunc_f64_s".into(),
             AbiType::U32 => "f64.reinterpret_i64\n    i32.trunc_f64_u".into(),
             AbiType::I64 => "f64.reinterpret_i64\n    i64.trunc_f64_s".into(),
@@ -324,6 +408,7 @@ pub fn synthesize_trampolines(
             r#"
   (func $cabi_trampoline_{sanitized} {params_sig} {results_sig}
     call $perry_ensure_init
+    call $perry_safe_reset
     {import_body}
     call {target_func}
     call {check_exception}
@@ -351,7 +436,8 @@ pub fn synthesize_trampolines(
   (func $cabi_post_trampoline_{sanitized} (param i32)
     local.get 0
     call {post_cleanup}
-  )
+    call $perry_scan_globals
+    {reclaim_temporaries_call}  )
   (export "cabi_post_{kebab_name}" (func $cabi_post_trampoline_{sanitized}))
 "#
             )

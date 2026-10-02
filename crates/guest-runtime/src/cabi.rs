@@ -26,7 +26,9 @@ pub extern "C" fn cabi_import_string(ptr: i32, len: i32) -> i64 {
 pub extern "C" fn cabi_export_string(val: i64) -> i32 {
     let state = get_state();
     let s = state.get_string(val);
-    Box::into_raw(Box::new(allocate_bytes(s.as_bytes()))) as i32
+    let area = Box::into_raw(Box::new(allocate_bytes(s.as_bytes()))) as i32;
+    state.pending_return_area = Some((area, 2));
+    area
 }
 
 /// Exports a nanboxed JS value as a Canonical ABI `result<string, string>`.
@@ -49,7 +51,9 @@ pub extern "C" fn cabi_export_result_string(val: i64) -> i32 {
             crate::io::fail_with_error("WIT result requires a string payload in 'value' or 'error'")
         });
     let [ptr, len] = allocate_bytes(payload.as_bytes());
-    Box::into_raw(Box::new([branch, ptr, len])) as i32
+    let area = Box::into_raw(Box::new([branch, ptr, len])) as i32;
+    get_state().pending_return_area = Some((area, 3));
+    area
 }
 
 fn allocate_bytes(bytes: &[u8]) -> [u32; 2] {
@@ -79,19 +83,31 @@ pub extern "C" fn cabi_import_json(ptr: i32, len: i32) -> i64 {
 pub extern "C" fn cabi_export_json(val: i64) -> i32 {
     let state = get_state();
     let json = state.stringify(val);
-    Box::into_raw(Box::new(allocate_bytes(json.as_bytes()))) as i32
+    let area = Box::into_raw(Box::new(allocate_bytes(json.as_bytes()))) as i32;
+    state.pending_return_area = Some((area, 2));
+    area
 }
 
 /// Cleanup hook called by host post-return to reclaim Canonical ABI memory buffers.
 #[no_mangle]
 pub extern "C" fn cabi_post_cleanup(ret_ptr: i32) {
+    get_state().pending_return_area = None;
     free_string_return_area::<2>(ret_ptr);
 }
 
 /// Reclaims a result discriminant and its selected string payload.
 #[no_mangle]
 pub extern "C" fn cabi_post_result_cleanup(ret_ptr: i32) {
+    get_state().pending_return_area = None;
     free_string_return_area::<3>(ret_ptr);
+}
+
+pub(crate) fn free_pending_return_area(ret_ptr: i32, words: usize) {
+    if words == 3 {
+        free_string_return_area::<3>(ret_ptr);
+    } else {
+        free_string_return_area::<2>(ret_ptr);
+    }
 }
 
 fn free_string_return_area<const WORDS: usize>(ret_ptr: i32) {
@@ -104,5 +120,70 @@ fn free_string_return_area<const WORDS: usize>(ret_ptr: i32) {
         if len != 0 {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
         }
+    }
+}
+
+/// Records the boundary of static strings and handles allocated during module initialization.
+#[no_mangle]
+pub extern "C" fn cabi_record_init_checkpoint() {
+    get_state().record_init_checkpoint();
+}
+
+/// Prepares the instance for a new invocation, clearing prior errors and reclaiming abandoned state.
+#[no_mangle]
+pub extern "C" fn cabi_reset_invocation_state() {
+    get_state().reset_invocation_state();
+}
+
+/// Debug hook to print internal state lengths and capacities.
+#[no_mangle]
+pub extern "C" fn cabi_debug_state() {
+    let state = get_state();
+    eprintln!(
+        "DEBUG: strings len={} cap={} | handles len={} cap={} | free_s={} free_h={} | roots={}",
+        state.strings.len(),
+        state.strings.capacity(),
+        state.handles.len(),
+        state.handles.capacity(),
+        state.free_strings.len(),
+        state.free_handles.len(),
+        state.global_roots.len()
+    );
+}
+
+/// Registers a live global NaN-boxed value as a root to survive reclamation.
+#[no_mangle]
+pub extern "C" fn cabi_register_global_root(val: i64) {
+    get_state().register_root(val);
+}
+
+/// Reclaims invocation-scoped temporaries while preserving static literals and surviving roots.
+#[no_mangle]
+pub extern "C" fn cabi_reclaim_temporaries() {
+    get_state().reclaim_temporaries();
+}
+
+/// Canonical ABI allocator with proper deallocation on zero size.
+#[no_mangle]
+pub unsafe extern "C" fn cabi_realloc(
+    old_ptr: *mut u8,
+    old_len: usize,
+    align: usize,
+    new_len: usize,
+) -> *mut u8 {
+    use core::alloc::Layout;
+    if new_len == 0 {
+        if old_len > 0 && !old_ptr.is_null() {
+            let layout = Layout::from_size_align_unchecked(old_len, align.max(1));
+            std::alloc::dealloc(old_ptr, layout);
+        }
+        return align as *mut u8;
+    }
+    if old_len == 0 || old_ptr.is_null() {
+        let layout = Layout::from_size_align_unchecked(new_len, align.max(1));
+        std::alloc::alloc(layout)
+    } else {
+        let layout = Layout::from_size_align_unchecked(old_len, align.max(1));
+        std::alloc::realloc(old_ptr, layout, new_len)
     }
 }

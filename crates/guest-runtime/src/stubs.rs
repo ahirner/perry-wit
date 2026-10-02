@@ -19,7 +19,6 @@ pub(crate) extern "C" fn string_concat(a: i64, b: i64) -> i64 {
 }
 #[no_mangle]
 pub(crate) extern "C" fn js_add(a: i64, b: i64) -> i64 {
-    let state = get_state();
     let args = [a, b];
     if args
         .iter()
@@ -379,7 +378,7 @@ pub(crate) extern "C" fn array_push(target: i64, item: i64) -> i64 {
     let state = get_state();
     if let Some(JsHandle::Array(arr)) = state.get_handle_mut(target) {
         arr.push(item);
-        return (arr.len() as f64).to_bits() as i64;
+        return target;
     }
     0
 }
@@ -428,8 +427,29 @@ pub(crate) extern "C" fn array_shift(_a: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn array_unshift(_a: i64, _b: i64) {}
 #[no_mangle]
-pub(crate) extern "C" fn array_join(_a: i64, _b: i64) -> i64 {
-    0
+pub(crate) extern "C" fn array_join(target: i64, sep: i64) -> i64 {
+    let state = get_state();
+    let separator = if sep == 0 || (sep as u64) == crate::nanbox::TAG_UNDEFINED {
+        ",".to_string()
+    } else {
+        state.get_string(sep)
+    };
+    if let Some(JsHandle::Array(arr)) = state.get_handle(target) {
+        let items = arr.clone();
+        let parts: Vec<String> = items
+            .iter()
+            .map(|&item| {
+                if (item as u64) == crate::nanbox::TAG_UNDEFINED || (item as u64) == crate::nanbox::TAG_NULL {
+                    String::new()
+                } else {
+                    get_state().get_string(item)
+                }
+            })
+            .collect();
+        let joined = parts.join(&separator);
+        return get_state().alloc_string(&joined);
+    }
+    state.alloc_string("")
 }
 #[no_mangle]
 pub(crate) extern "C" fn array_index_of(_a: i64, _b: i64) -> i64 {

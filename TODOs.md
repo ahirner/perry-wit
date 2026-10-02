@@ -99,15 +99,22 @@ Further view types and Node `Buffer` compatibility follow specific consumers.
 `cabi_post_cleanup` frees ABI return buffers, not those runtime values.
 The existing memory test covers return buffers rather than repeated task allocations.
 
-- [ ] **E.1. Repeated Task Calls**
-    - [ ] Establish which values outlive a call, including literals, globals, returned values, and pending work; use that evidence to choose a reclamation approach.
-    - [ ] Reclaim call temporaries once results have been consumed while preserving surviving values. Invocation-scoped storage is an option only where escape behavior permits it.
-    - [ ] Verify repeated allocating string/JSON calls in one instance, with post-return each time, reach bounded live allocations and a stable memory high-water mark after warm-up; include recoverable failures and retained globals.
-    - [ ] Define and test whether an instance remains reusable after failures that interrupt normal cleanup.
+- [x] **E.1. Repeated Task Calls**
+    - [x] Establish which values outlive a call, including literals, globals, returned values, and pending work; use that evidence to choose a reclamation approach.
+    - [x] Reclaim call temporaries once results have been consumed while preserving surviving values. Invocation-scoped storage is an option only where escape behavior permits it.
+    - [x] Verify repeated allocating string/JSON calls in one instance, with post-return each time, reach bounded live allocations and a stable memory high-water mark after warm-up; include recoverable failures and retained globals.
+    - [x] Define and test whether an instance remains reusable after failures that interrupt normal cleanup.
 - [ ] **E.2. Retained Values for the First Async/Callback Consumer** — Deliver with B.1 or B.2, extending E.1's ownership rules.
     - [ ] Keep that consumer's captures or suspended values alive until their owner completes or releases them; choose retention/reclamation around the actual value graph, including any supported cycles.
     - [ ] Verify survival across calls or suspension, reclamation after release, and protection against stale handles aliasing newly allocated values.
     - [ ] Verify repeated retained-work cycles stay bounded on success and failure; include cancellation if the consumer exposes it.
+
+Verification:
+- Implemented lifecycle checkpoints (`cabi_record_init_checkpoint`), invocation reset (`cabi_reset_invocation_state`), global root registration (`cabi_register_global_root`), and temporary reclamation (`cabi_reclaim_temporaries`) in `crates/guest-runtime/src/cabi.rs` and `crates/guest-runtime/src/state.rs`.
+- Synthesized `$perry_ensure_init`, `$perry_scan_globals`, and `$perry_safe_reset` in `src/abi/trampoline.rs`, hooking export trampolines and post-return hooks to scan exported `__wasm_global_*` state and reclaim temporaries.
+- Added slot recycling (`free_strings`, `free_handles`) and array child-element traversal during reachability sweeps in `RuntimeState`.
+- Implemented Canonical ABI deallocating `cabi_realloc` on zero-size and tracked pending return areas to guarantee recovery and zero memory leakage even when the host interrupts or abandons post-return calls.
+- Verified in `tests/repeated_task_calls_test.rs` (5 comprehensive test cases) covering 15,000 allocating calls with zero heap growth after warm-up, global retention across repeated calls, recoverable failure cycles (`result<string, string>`), interrupted post-return recovery, and live Wasmtime CLI component invocation.
 
 E.2 completes for its first consumer.
 Later handler, timer, and I/O slices own their additional lifetime tests; future resource types do not hold this slice open indefinitely.

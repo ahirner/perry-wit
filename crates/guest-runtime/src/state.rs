@@ -22,6 +22,16 @@ pub(crate) struct RuntimeState {
     pub(crate) current_exception: Option<String>,
     pub(crate) process_env: Option<i64>,
     pub(crate) process_argv: Option<i64>,
+    pub(crate) init_strings_len: usize,
+    pub(crate) init_handles_len: usize,
+    pub(crate) global_roots: Vec<i64>,
+    pub(crate) free_strings: Vec<usize>,
+    pub(crate) free_handles: Vec<usize>,
+    pub(crate) invocation_in_progress: bool,
+    pub(crate) worklist: Vec<i64>,
+    pub(crate) reachable_strings: Vec<bool>,
+    pub(crate) reachable_handles: Vec<bool>,
+    pub(crate) pending_return_area: Option<(i32, usize)>,
 }
 
 impl RuntimeState {
@@ -32,7 +42,135 @@ impl RuntimeState {
             current_exception: None,
             process_env: None,
             process_argv: None,
+            init_strings_len: 0,
+            init_handles_len: 1,
+            global_roots: Vec::new(),
+            free_strings: Vec::new(),
+            free_handles: Vec::new(),
+            invocation_in_progress: false,
+            worklist: Vec::new(),
+            reachable_strings: Vec::new(),
+            reachable_handles: Vec::new(),
+            pending_return_area: None,
         }
+    }
+
+    pub(crate) fn record_init_checkpoint(&mut self) {
+        self.init_strings_len = self.strings.len();
+        self.init_handles_len = self.handles.len();
+    }
+
+    pub(crate) fn reset_invocation_state(&mut self) {
+        self.current_exception = None;
+        if let Some((ptr, words)) = self.pending_return_area.take() {
+            crate::cabi::free_pending_return_area(ptr, words);
+        }
+        if self.invocation_in_progress {
+            self.reclaim_temporaries();
+        }
+        self.invocation_in_progress = true;
+    }
+
+    pub(crate) fn register_root(&mut self, val: i64) {
+        self.global_roots.push(val);
+    }
+
+    pub(crate) fn reclaim_temporaries(&mut self) {
+        self.invocation_in_progress = false;
+        self.pending_return_area = None;
+
+        let num_strings = self.strings.len();
+        let num_handles = self.handles.len();
+
+        self.reachable_strings.clear();
+        self.reachable_strings.resize(num_strings, false);
+        self.reachable_handles.clear();
+        self.reachable_handles.resize(num_handles, false);
+
+        // 1. Initial module strings are roots.
+        let init_strings = self.init_strings_len.min(num_strings);
+        for i in 0..init_strings {
+            self.reachable_strings[i] = true;
+        }
+
+        // 2. Initial handles, registered global roots, and environment handles.
+        self.worklist.clear();
+        let init_handles = self.init_handles_len.min(num_handles);
+        for i in 0..init_handles {
+            self.worklist.push(nanbox_pointer(i));
+        }
+        self.worklist.extend_from_slice(&self.global_roots);
+        self.global_roots.clear();
+        if let Some(env) = self.process_env {
+            self.worklist.push(env);
+        }
+        if let Some(argv) = self.process_argv {
+            self.worklist.push(argv);
+        }
+
+        // 3. Mark reachable strings and handles.
+        while let Some(val) = self.worklist.pop() {
+            let bits = val as u64;
+            if (bits >> 48) == STRING_TAG {
+                let id = (bits & 0xFFFF_FFFF) as usize;
+                if id < num_strings && !self.reachable_strings[id] {
+                    self.reachable_strings[id] = true;
+                }
+            } else if (bits >> 48) == POINTER_TAG {
+                let id = (bits & 0xFFFF_FFFF) as usize;
+                if id < num_handles && !self.reachable_handles[id] {
+                    self.reachable_handles[id] = true;
+                    if let Some(handle) = self.handles.get(id) {
+                        match handle {
+                            JsHandle::Array(arr) => {
+                                for &item in arr {
+                                    self.worklist.push(item);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Find the high-water mark of surviving items.
+        let max_alive_string = self
+            .reachable_strings
+            .iter()
+            .rposition(|&r| r)
+            .map(|i| i + 1)
+            .unwrap_or(init_strings)
+            .max(init_strings);
+
+        let max_alive_handle = self
+            .reachable_handles
+            .iter()
+            .rposition(|&r| r)
+            .map(|i| i + 1)
+            .unwrap_or(init_handles)
+            .max(init_handles);
+
+        // 5. Clean up dead items between init and max_alive, recycling slots.
+        self.free_strings.clear();
+        self.free_handles.clear();
+
+        for i in init_strings..max_alive_string {
+            if !self.reachable_strings[i] {
+                self.strings[i] = Vec::new();
+                self.free_strings.push(i);
+            }
+        }
+        for i in init_handles..max_alive_handle {
+            if !self.reachable_handles[i] {
+                self.handles[i] = JsHandle::Null;
+                self.free_handles.push(i);
+            }
+        }
+
+        // 6. Truncate vectors past the highest surviving index.
+        self.strings.truncate(max_alive_string);
+        self.handles.truncate(max_alive_handle);
     }
 
     pub(crate) fn alloc_string(&mut self, text: &str) -> i64 {
@@ -40,9 +178,14 @@ impl RuntimeState {
     }
 
     pub(crate) fn alloc_string_units(&mut self, units: Vec<u16>) -> i64 {
-        let id = self.strings.len();
-        self.strings.push(units);
-        nanbox_string(id)
+        if let Some(id) = self.free_strings.pop() {
+            self.strings[id] = units;
+            nanbox_string(id)
+        } else {
+            let id = self.strings.len();
+            self.strings.push(units);
+            nanbox_string(id)
+        }
     }
 
     pub(crate) fn string_units(&self, value: i64) -> Cow<'_, [u16]> {
@@ -89,9 +232,14 @@ impl RuntimeState {
     }
 
     pub(crate) fn alloc_handle(&mut self, h: JsHandle) -> usize {
-        let id = self.handles.len();
-        self.handles.push(h);
-        id
+        if let Some(id) = self.free_handles.pop() {
+            self.handles[id] = h;
+            id
+        } else {
+            let id = self.handles.len();
+            self.handles.push(h);
+            id
+        }
     }
 
     pub(crate) fn get_handle(&self, val: i64) -> Option<&JsHandle> {

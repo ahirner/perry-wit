@@ -53,6 +53,10 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             }
             result_i64 = arr_handle;
         }
+    } else if name == "array_join" {
+        let arr_handle = raw_args.first().copied().unwrap_or(0);
+        let sep = raw_args.get(1).copied().unwrap_or(0);
+        result_i64 = crate::stubs::array_join(arr_handle, sep);
     } else if name == "uint8array_new" || name == "buffer_alloc" {
         result_i64 =
             crate::stubs::uint8array_new(raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64));

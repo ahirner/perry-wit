@@ -44,3 +44,12 @@ world merge-task {
   export run-task: func(input: string) -> string;
   export merge-task: func(input: string) -> string;
 }
+
+world repeated-runner {
+  include runtime-adapter;
+  export run-task: func(input: string) -> string;
+  export push-item: func(item: string) -> string;
+  export get-history: func() -> string;
+  export reset-history: func() -> string;
+  export fallible-task: func(input: string) -> result<string, string>;
+}
