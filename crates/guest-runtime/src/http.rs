@@ -11,13 +11,16 @@ pub(crate) enum ResponseEntry {
         url: String,
         future_resp: FutureIncomingResponse,
     },
-    Ready(String),
+    Ready {
+        body: String,
+        status: u16,
+    },
 }
 
 impl ResponseEntry {
     pub(crate) fn resolve(&mut self) -> Result<&str, String> {
         match self {
-            ResponseEntry::Ready(s) => Ok(s.as_str()),
+            ResponseEntry::Ready { body, .. } => Ok(body.as_str()),
             ResponseEntry::InFlight { url, future_resp } => {
                 let pollable = future_resp.subscribe();
                 pollable.block();
@@ -29,9 +32,6 @@ impl ResponseEntry {
                     .map_err(|e| format!("HTTP request to '{url}' failed: {e:?}"))?;
 
                 let status = response.status();
-                if status < 200 || status >= 300 {
-                    return Err(format!("HTTP request to '{url}' returned status {status}"));
-                }
 
                 let body = response
                     .consume()
@@ -65,12 +65,23 @@ impl ResponseEntry {
                 drop(response);
                 drop(pollable);
 
-                *self = ResponseEntry::Ready(body_str);
+                *self = ResponseEntry::Ready {
+                    body: body_str,
+                    status,
+                };
                 match self {
-                    ResponseEntry::Ready(s) => Ok(s.as_str()),
+                    ResponseEntry::Ready { body, .. } => Ok(body.as_str()),
                     _ => unreachable!(),
                 }
             }
+        }
+    }
+
+    pub(crate) fn status(&mut self) -> Result<u16, String> {
+        self.resolve()?;
+        match self {
+            Self::Ready { status, .. } => Ok(*status),
+            _ => unreachable!(),
         }
     }
 }

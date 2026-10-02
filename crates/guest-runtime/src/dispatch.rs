@@ -1,12 +1,12 @@
 //! Dispatcher for Perry runtime ABI function calls (`mem_call`, `mem_call_i32`).
 
-use crate::http::{start_http_get, ResponseEntry};
+use crate::http::{ResponseEntry, start_http_get};
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
-    get_pointer_id, nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL,
-    TAG_TRUE, TAG_UNDEFINED,
+    POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED, get_pointer_id,
+    nanbox_pointer, nanbox_string,
 };
-use crate::state::{get_state, JsHandle};
+use crate::state::{JsHandle, get_state};
 
 #[no_mangle]
 pub extern "C" fn string_new(offset: i32, len: i32) {
@@ -227,10 +227,27 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             }
             result_i64 = target_handle;
         }
-    } else if name == "object_get" {
+    } else if name == "object_get" || name == "class_get_field" {
         if raw_args.len() >= 2 {
             let target_handle = raw_args[0];
             let key_str = state.get_string(raw_args[1]);
+            if let Some(JsHandle::Response(id)) = state.get_handle(target_handle) {
+                let id = *id;
+                let status = state.responses[id]
+                    .status()
+                    .unwrap_or_else(|error| fail_with_error(&error));
+                result_i64 = match key_str.as_str() {
+                    "status" => (status as f64).to_bits() as i64,
+                    "ok" => {
+                        (if (200..300).contains(&status) {
+                            TAG_TRUE
+                        } else {
+                            TAG_FALSE
+                        }) as i64
+                    }
+                    _ => TAG_UNDEFINED as i64,
+                };
+            }
             if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
                 state.get_handle(target_handle)
             {

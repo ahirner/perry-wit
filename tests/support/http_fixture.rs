@@ -1,0 +1,103 @@
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+#[derive(Clone, Debug)]
+pub struct Request {
+    pub method: String,
+    pub target: String,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+pub enum Reply {
+    Body(u16, String),
+    Disconnect,
+    Stall,
+}
+
+pub struct HttpFixture {
+    pub address: SocketAddr,
+    pub requests: Arc<Mutex<Vec<Request>>>,
+    shutdown: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl HttpFixture {
+    pub fn new(handler: impl Fn(&Request) -> Reply + Send + Sync + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (stop, received) = (shutdown.clone(), requests.clone());
+        let handler = Arc::new(handler);
+        let worker = thread::spawn(move || {
+            let mut connections = Vec::new();
+            for stream in listener.incoming() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut stream = stream.unwrap();
+                let (handler, stop, received) = (handler.clone(), stop.clone(), received.clone());
+                connections.push(thread::spawn(move || {
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    let header_end = loop {
+                        let mut buffer = [0u8; 4096];
+                        let count = stream.read(&mut buffer).unwrap_or(0);
+                        if count == 0 { return; }
+                        request.extend_from_slice(&buffer[..count]);
+                        if let Some(offset) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") { break offset + 4; }
+                    };
+                    let header = String::from_utf8_lossy(&request[..header_end]);
+                    let mut lines = header.lines();
+                    let mut first = lines.next().unwrap().split_whitespace();
+                    let (method, target) = (first.next().unwrap().to_string(), first.next().unwrap().to_string());
+                    let headers: Vec<_> = lines.filter_map(|line| line.split_once(':')).map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_string())).collect();
+                    let length = headers.iter().find(|(name, _)| name == "content-length").map(|(_, value)| value.parse::<usize>().unwrap()).unwrap_or(0);
+                    while request.len() < header_end + length {
+                        let mut buffer = [0u8; 4096];
+                        let count = stream.read(&mut buffer).unwrap();
+                        if count == 0 { break; }
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    let request = Request { method, target, headers, body: String::from_utf8(request[header_end..].to_vec()).unwrap() };
+                    received.lock().unwrap().push(request.clone());
+                    match handler(&request) {
+                        Reply::Body(status, body) => {
+                            let header = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(body.as_bytes());
+                        }
+                        Reply::Disconnect => {}
+                        Reply::Stall => while !stop.load(Ordering::Relaxed) { thread::sleep(Duration::from_millis(10)); },
+                    }
+                }));
+            }
+            for connection in connections {
+                connection.join().unwrap();
+            }
+        });
+        Self {
+            address,
+            requests,
+            shutdown,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for HttpFixture {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.address);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}

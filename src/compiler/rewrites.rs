@@ -124,6 +124,26 @@ impl Rewriter {
     }
 
     fn rewrite_current_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
+        if let perry_hir::ir::Expr::NativeMethodCall {
+            module,
+            object: Some(object),
+            method,
+            args,
+            ..
+        } = expr
+            && matches!(
+                module.as_str(),
+                "fetch" | "fetchWithAuth" | "fetchPostWithAuth"
+            )
+            && matches!(method.as_str(), "status" | "ok")
+            && args.is_empty()
+        {
+            *expr = perry_hir::ir::Expr::PropertyGet {
+                object: object.clone(),
+                property: method.clone(),
+                byte_offset: 0,
+            };
+        }
         if let perry_hir::ir::Expr::New {
             class_name, args, ..
         } = expr
