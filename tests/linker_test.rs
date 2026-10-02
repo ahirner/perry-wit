@@ -3,7 +3,78 @@ use perry_wit::linker::merge_core_modules;
 use perry_wit::strip;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use wasmparser::{Parser, Payload, Validator, WasmFeatures};
+
+#[expect(
+    dead_code,
+    reason = "These core-Wasm fixtures only need Scratch storage."
+)]
+mod support;
+
+#[test]
+fn global_function_references_keep_runtime_functions_and_their_imports() {
+    let fixtures = [
+        (
+            r#"(module (memory (export "memory") 1))"#,
+            r#"(module
+                (import "wasi:test" "value" (func $value (result i32)))
+                (func $dead (result i32) i32.const 0)
+                (func $callback (result i32) call $value)
+                (global (export "callback") funcref (ref.func $callback)))"#,
+        ),
+        (
+            r#"(module
+                (import "rt" "callback" (func $callback (result i32)))
+                (memory (export "memory") 1)
+                (global (export "callback") funcref (ref.func $callback)))"#,
+            r#"(module
+                (import "wasi:test" "value" (func $value (result i32)))
+                (func $dead (result i32) i32.const 0)
+                (func (export "callback") (result i32) call $value))"#,
+        ),
+        (
+            r#"(module (memory (export "memory") 1))"#,
+            r#"(module
+                (import "wasi:test" "value" (func $value (result i32)))
+                (global (export "callback") funcref (ref.func $value)))"#,
+        ),
+    ];
+    for (application, runtime) in fixtures {
+        let application = wat::parse_str(application).unwrap();
+        let runtime = wat::parse_str(runtime).unwrap();
+        for bytes in [&application, &runtime] {
+            Validator::new().validate_all(bytes).unwrap();
+        }
+        let merged = merge_core_modules(&application, &runtime).unwrap();
+        Validator::new().validate_all(&merged).unwrap();
+        let scratch = support::Scratch::new();
+        let path = scratch.0.join("globals.wasm");
+        fs::write(&path, merged).unwrap();
+        let output = Command::new("node")
+            .arg("--eval")
+            .arg(
+                r#"
+                const assert = require('node:assert/strict');
+                const bytes = require('node:fs').readFileSync(process.argv[1]);
+                const module = new WebAssembly.Module(bytes);
+                assert.deepEqual(WebAssembly.Module.imports(module), [
+                    {module: 'wasi:test', name: 'value', kind: 'function'}
+                ]);
+                const instance = new WebAssembly.Instance(module, {'wasi:test': {value: () => 42}});
+                assert.equal(instance.exports.callback.value(), 42);
+            "#,
+            )
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
 
 #[test]
 fn test_merge_core_modules() {

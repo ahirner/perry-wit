@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 
 use anyhow::Result;
-use wasmparser::{ElementItems, ExternalKind, Operator};
+use wasmparser::{ElementItems, ExternalKind, Global, Operator};
 
 use super::sections::{ParsedModuleA, ParsedModuleB};
 
@@ -69,8 +69,8 @@ pub(crate) fn compute_pruning_plan(
 
     // 1. Module A Roots
     // All defined functions in Module A are kept and scanned.
-    for i in 0..num_a_defs {
-        reachable_a_def[i] = true;
+    for (i, reachable) in reachable_a_def.iter_mut().enumerate() {
+        *reachable = true;
         worklist.push_back(FuncNode::A(i));
     }
     // Also mark any exports that map to imports directly (re-exports)
@@ -92,21 +92,19 @@ pub(crate) fn compute_pruning_plan(
     }
     for el in &a.elements {
         if let ElementItems::Functions(ref funcs) = el.items {
-            for f_res in funcs.clone() {
-                if let Ok(f) = f_res {
-                    mark_a(
-                        f as usize,
-                        num_a_imports,
-                        resolved_imports_a,
-                        num_wasi,
-                        num_b_defs,
-                        num_a_defs,
-                        &mut worklist,
-                        &mut reachable_wasi,
-                        &mut reachable_b_def,
-                        &mut reachable_a_def,
-                    );
-                }
+            for f in funcs.clone() {
+                mark_a(
+                    f? as usize,
+                    num_a_imports,
+                    resolved_imports_a,
+                    num_wasi,
+                    num_b_defs,
+                    num_a_defs,
+                    &mut worklist,
+                    &mut reachable_wasi,
+                    &mut reachable_b_def,
+                    &mut reachable_a_def,
+                );
             }
         }
     }
@@ -139,19 +137,42 @@ pub(crate) fn compute_pruning_plan(
     // Module B table elements (Rust function pointer table / vtables)
     for el in &b.elements {
         if let ElementItems::Functions(ref funcs) = el.items {
-            for f_res in funcs.clone() {
-                if let Ok(f) = f_res {
-                    mark_b(
-                        f as usize,
-                        num_wasi,
-                        num_b_defs,
-                        &mut worklist,
-                        &mut reachable_wasi,
-                        &mut reachable_b_def,
-                    );
-                }
+            for f in funcs.clone() {
+                mark_b(
+                    f? as usize,
+                    num_wasi,
+                    num_b_defs,
+                    &mut worklist,
+                    &mut reachable_wasi,
+                    &mut reachable_b_def,
+                );
             }
         }
+    }
+
+    for function in global_function_references(&a.globals)? {
+        mark_a(
+            function as usize,
+            num_a_imports,
+            resolved_imports_a,
+            num_wasi,
+            num_b_defs,
+            num_a_defs,
+            &mut worklist,
+            &mut reachable_wasi,
+            &mut reachable_b_def,
+            &mut reachable_a_def,
+        );
+    }
+    for function in global_function_references(&b.globals)? {
+        mark_b(
+            function as usize,
+            num_wasi,
+            num_b_defs,
+            &mut worklist,
+            &mut reachable_wasi,
+            &mut reachable_b_def,
+        );
     }
 
     // 3. Process Worklist
@@ -233,17 +254,14 @@ pub(crate) fn compute_pruning_plan(
 
     // Module B Function Map: maps any old Module B function index to its new index
     let mut func_map_b = Vec::with_capacity(num_wasi + num_b_defs);
-    for i in 0..num_wasi {
-        func_map_b.push(wasi_old_to_new[i].unwrap_or(0));
-    }
-    for j in 0..num_b_defs {
-        func_map_b.push(b_def_old_to_new[j].unwrap_or(0));
+    for index in wasi_old_to_new.iter().chain(&b_def_old_to_new) {
+        func_map_b.push(index.unwrap_or(0));
     }
 
     // Module A Function Map: maps any old Module A function index to its new index
     let mut func_map_a = Vec::with_capacity(num_a_imports + num_a_defs);
-    for i in 0..num_a_imports {
-        let b_target = resolved_imports_a[i] as usize;
+    for &target in resolved_imports_a {
+        let b_target = target as usize;
         func_map_a.push(func_map_b[b_target]);
     }
     for i in 0..num_a_defs {
@@ -259,7 +277,21 @@ pub(crate) fn compute_pruning_plan(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Finds roots in global initializers, which survive function pruning.
+fn global_function_references(globals: &[Global<'_>]) -> Result<Vec<u32>> {
+    let mut functions = Vec::new();
+    for global in globals {
+        let mut reader = global.init_expr.get_operators_reader();
+        while !reader.eof() {
+            if let Operator::RefFunc { function_index } = reader.read()? {
+                functions.push(function_index);
+            }
+        }
+    }
+    Ok(functions)
+}
+
+#[expect(clippy::too_many_arguments)]
 fn mark_a(
     idx: usize,
     num_a_imports: usize,
