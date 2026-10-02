@@ -1,6 +1,7 @@
 //! Shared byte storage and Uint8Array / Buffer views for the guest runtime.
 
 use std::cell::RefCell;
+use std::collections::TryReserveError;
 use std::rc::Rc;
 
 /// Shared backing storage for byte buffers.
@@ -10,13 +11,6 @@ pub(crate) struct BufferStorage {
 }
 
 impl BufferStorage {
-    /// Allocate zero-filled storage of the given size.
-    pub(crate) fn new(size: usize) -> Self {
-        Self {
-            data: Rc::new(RefCell::new(vec![0u8; size])),
-        }
-    }
-
     /// Allocate storage initialized with existing bytes.
     pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
         Self {
@@ -34,13 +28,12 @@ pub(crate) struct Uint8ArrayView {
 }
 
 impl Uint8ArrayView {
-    /// Create a new Uint8Array view of specified size backed by zero-filled storage.
-    pub(crate) fn new(size: usize) -> Self {
-        Self {
-            storage: BufferStorage::new(size),
-            byte_offset: 0,
-            byte_length: size,
-        }
+    /// Allocate zero-filled storage, allowing the caller to report allocation failure.
+    pub(crate) fn try_new(size: usize) -> Result<Self, TryReserveError> {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size)?;
+        bytes.resize(size, 0);
+        Ok(Self::from_bytes(bytes))
     }
 
     /// Create a new Uint8Array view copying existing bytes.

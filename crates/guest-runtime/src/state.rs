@@ -243,11 +243,13 @@ fn number_from_string(text: &str) -> f64 {
     match text {
         "Infinity" | "+Infinity" => f64::INFINITY,
         "-Infinity" => f64::NEG_INFINITY,
-        _ => text
-            .parse::<f64>()
-            .ok()
-            .filter(|number| number.is_finite())
-            .unwrap_or(f64::NAN),
+        _ if text
+            .chars()
+            .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'e' | 'E')) =>
+        {
+            f64::NAN
+        }
+        _ => text.parse::<f64>().unwrap_or(f64::NAN),
     }
 }
 

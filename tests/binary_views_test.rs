@@ -5,6 +5,51 @@ mod support;
 use std::{fs, process::Command};
 
 #[test]
+fn constructor_lengths_coerce_and_invalid_lengths_throw_at_the_call() {
+    assert_matches_node(
+        r#"
+        const sizes = [undefined, null, false, true, NaN, -0.5, 2.9, "3"];
+        for (let i = 0; i < sizes.length; i++) {
+            const bytes = new Uint8Array(sizes[i]);
+            console.log(bytes.length);
+        }
+        function construct(size) {
+            const bytes = new Uint8Array(size);
+            console.log("unreachable");
+        }
+        const invalid = [-1, -1.5, Infinity, -Infinity, "-1", "1e999"];
+        for (let i = 0; i < invalid.length; i++) {
+            try { construct(invalid[i]); console.log("unreachable caller"); }
+            catch { console.log("caught"); }
+            finally { console.log("cleanup"); }
+        }
+    "#,
+    );
+    assert_direct_runtime(
+        r#"
+        for (const invalid of [-1, -1.5, Infinity, -Infinity, 2 ** 32]) {
+            assert.equal(rt.uint8array_new(value(invalid)), 0x7ffc000000000001n);
+            assert.equal(rt.has_exception(), 1);
+            rt.get_exception();
+        }
+        for (const size of [NaN, -0.5, 2.9]) {
+            const view = rt.uint8array_new(value(size));
+            assert.equal(number(rt.uint8array_length(view)), new Uint8Array(size).length);
+            assert.equal(rt.has_exception(), 0);
+        }
+    "#,
+    );
+    let output = support::run(
+        "new Uint8Array(-1); console.log('unreachable');",
+        None,
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("RangeError"));
+}
+
+#[test]
 fn subarray_bounds_are_relative_to_the_current_view() {
     assert_matches_node(
         r#"

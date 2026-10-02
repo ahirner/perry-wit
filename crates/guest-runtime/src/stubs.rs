@@ -688,7 +688,9 @@ pub(crate) extern "C" fn buffer_slice(handle: i64, start: i64, end: i64) -> i64 
         let id = state.alloc_handle(JsHandle::Uint8Array(subview));
         nanbox_pointer(id)
     } else {
-        let id = state.alloc_handle(JsHandle::Uint8Array(crate::buffer::Uint8ArrayView::new(0)));
+        let id = state.alloc_handle(JsHandle::Uint8Array(
+            crate::buffer::Uint8ArrayView::from_bytes(Vec::new()),
+        ));
         nanbox_pointer(id)
     }
 }
@@ -713,13 +715,16 @@ pub(crate) extern "C" fn uint8array_new(size: i64) -> i64 {
     if state.get_handle(size).is_some() {
         return uint8array_from(size);
     }
-    let size_f = state.to_number(size);
-    let len = if size_f.is_finite() && size_f > 0.0 {
-        size_f as usize
-    } else {
-        0
+    let integer = state.to_number(size).trunc();
+    let length = if integer.is_nan() { 0.0 } else { integer };
+    if !(0.0..=isize::MAX as f64).contains(&length) {
+        state.current_exception = Some("RangeError: Invalid typed array length".into());
+        return TAG_UNDEFINED as i64;
+    }
+    let Ok(view) = crate::buffer::Uint8ArrayView::try_new(length as usize) else {
+        state.current_exception = Some("RangeError: Unable to allocate typed array".into());
+        return TAG_UNDEFINED as i64;
     };
-    let view = crate::buffer::Uint8ArrayView::new(len);
     let id = state.alloc_handle(JsHandle::Uint8Array(view));
     nanbox_pointer(id)
 }
