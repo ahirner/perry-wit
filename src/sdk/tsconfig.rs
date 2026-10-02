@@ -9,7 +9,7 @@ pub fn generate_default_tsconfig() -> String {
     "moduleResolution": "bundler",
     "strict": true,
     "noEmit": true,
-    "skipLibCheck": true,
+    "skipLibCheck": false,
     "typeRoots": [
       "./.perry/types",
       "./node_modules/@types"

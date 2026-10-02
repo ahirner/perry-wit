@@ -151,6 +151,7 @@ fn run() -> Result<()> {
 fn run_gen_types(args: &[String]) -> Result<()> {
     let mut wit_dir_path = "wit".to_string();
     let mut world_name = None;
+    let mut entry = PathBuf::from("src/index.ts");
     let mut out_dir_path = ".perry/types".to_string();
 
     let mut i = 0;
@@ -158,6 +159,10 @@ fn run_gen_types(args: &[String]) -> Result<()> {
         match args[i].as_str() {
             "-o" | "--out" if i + 1 < args.len() => {
                 out_dir_path = args[i + 1].clone();
+                i += 2;
+            }
+            "--entry" if i + 1 < args.len() => {
+                entry = PathBuf::from(&args[i + 1]);
                 i += 2;
             }
             "--wit" if i + 1 < args.len() => {
@@ -183,6 +188,7 @@ fn run_gen_types(args: &[String]) -> Result<()> {
                 println!(
                     "  -o, --out <DIR>       Output directory for generated types (default: '.perry/types')"
                 );
+                println!("      --entry <PATH>    Implementation module (default: src/index.ts)");
                 println!("  -h, --help            Print help information");
                 return Ok(());
             }
@@ -199,6 +205,7 @@ fn run_gen_types(args: &[String]) -> Result<()> {
         world: world_name,
         out_dir: PathBuf::from(out_dir_path),
         project_root: None,
+        entry,
     };
 
     let result = perry_wit::generate_sdk_files(&options)?;

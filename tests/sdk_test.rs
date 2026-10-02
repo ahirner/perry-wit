@@ -17,6 +17,7 @@ fn test_generate_sdk_files_for_merge_task() {
         world: Some("merge-task".to_string()),
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
+        entry: PathBuf::from("src/index.ts"),
     };
 
     let result = generate_sdk_files(&options).expect("generate_sdk_files failed");
@@ -72,6 +73,7 @@ fn test_generate_sdk_files_for_template_world() {
         world: Some("task".to_string()),
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
+        entry: PathBuf::from("src/index.ts"),
     };
 
     let result = generate_sdk_files(&options).expect("generate_sdk_files for template failed");
@@ -98,11 +100,12 @@ fn test_typecheck_examples_against_generated_declarations() {
         world: Some("merge-task".to_string()),
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
+        entry: PathBuf::from("src/index.ts"),
     };
     generate_sdk_files(&options).unwrap();
 
     // 2. Copy examples/merge_task.ts to src/merge_task.ts
-    fs::copy("examples/merge_task.ts", src_dir.join("merge_task.ts")).unwrap();
+    fs::copy("examples/merge_task.ts", src_dir.join("index.ts")).unwrap();
 
     // 3. Attempt tsc validation
     let direct_tsc = Command::new("tsc")

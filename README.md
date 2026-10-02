@@ -116,6 +116,13 @@ You can also run type generation standalone:
 perry-wit gen-types --wit wit --world task -o .perry/types
 ```
 
+Generation also writes `.perry/types/implementation-check.ts`, which binds the
+WIT contract to `src/index.ts`. Select another implementation with
+`--entry src/my-task.ts`. The generated default tsconfig includes this check;
+an existing custom tsconfig must include it in its `files` or `include` list.
+Interface members use prefixed implementation names, such as `apiRunTask` for
+`api`'s `run-task`; `ComponentImplementation` in `world.d.ts` lists the exact names.
+
 ## Contributing
 
 Develop inside `nix develop` to ensure matching toolchain versions across dependencies. Format all code with `cargo fmt --all` and ensure both `cargo test` and `nix flake check` pass cleanly before submitting changes.

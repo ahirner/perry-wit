@@ -14,6 +14,7 @@ pub struct SdkOptions {
     pub world: Option<String>,
     pub out_dir: PathBuf,
     pub project_root: Option<PathBuf>,
+    pub entry: PathBuf,
 }
 
 impl Default for SdkOptions {
@@ -23,6 +24,7 @@ impl Default for SdkOptions {
             world: None,
             out_dir: PathBuf::from(".perry/types"),
             project_root: None,
+            entry: PathBuf::from("src/index.ts"),
         }
     }
 }
@@ -31,6 +33,7 @@ impl Default for SdkOptions {
 #[derive(Debug, Clone)]
 pub struct SdkResult {
     pub types_path: PathBuf,
+    pub check_path: PathBuf,
     pub tsconfig_path: Option<PathBuf>,
 }
 
@@ -65,8 +68,19 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     });
 
     let tsconfig_path = project_root.join("tsconfig.json");
+    let entry = project_root.join(&options.entry);
+    let entry_import = relative_path(&options.out_dir, &entry.with_extension(""))?;
+    let check_path = options.out_dir.join("implementation-check.ts");
+    let check = format!(
+        "import * as implementation from {};\nimport type {{ ComponentImplementation }} from './world';\nconst checked: ComponentImplementation = implementation;\nexport {{ checked }};\n",
+        serde_json::to_string(&entry_import)?
+    );
+    fs::write(&check_path, check)?;
     let generated_tsconfig = if !tsconfig_path.exists() {
-        let tsconfig_content = tsconfig::generate_default_tsconfig();
+        let mut config: serde_json::Value =
+            serde_json::from_str(&tsconfig::generate_default_tsconfig())?;
+        config["files"] = serde_json::json!([relative_path(&project_root, &check_path)?]);
+        let tsconfig_content = serde_json::to_string_pretty(&config)?;
         fs::write(&tsconfig_path, tsconfig_content).with_context(|| {
             format!(
                 "Failed to write tsconfig.json at {}",
@@ -80,6 +94,34 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
 
     Ok(SdkResult {
         types_path: dts_path,
+        check_path,
         tsconfig_path: generated_tsconfig,
     })
+}
+
+fn relative_path(from: &Path, to: &Path) -> Result<String> {
+    fn normalized(path: &Path) -> Result<PathBuf> {
+        let mut result = PathBuf::new();
+        for component in std::path::absolute(path)?.components() {
+            if component == std::path::Component::ParentDir {
+                result.pop();
+            } else {
+                result.push(component);
+            }
+        }
+        Ok(result)
+    }
+    let from = normalized(from)?;
+    let to = normalized(to)?;
+    let common = from
+        .components()
+        .zip(to.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut relative = PathBuf::from(".");
+    for _ in from.components().skip(common) {
+        relative.push("..");
+    }
+    relative.extend(to.components().skip(common));
+    Ok(relative.to_string_lossy().replace('\\', "/"))
 }

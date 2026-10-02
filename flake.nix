@@ -197,7 +197,7 @@
           cp -r ${./wit}/* work/wit/
           cp ${./examples/merge_task.ts} work/src/merge_task.ts
           cd work
-          perry-wit gen-types --wit wit --world merge-task
+          perry-wit gen-types --wit wit --world merge-task --entry src/merge_task.ts
           tsc --noEmit
           touch "$out"
         '';

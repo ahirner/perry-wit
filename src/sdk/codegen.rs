@@ -277,6 +277,55 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
         }
     }
 
+    out.push_str("export interface ComponentImplementation {\n");
+    for (key, item) in &world.exports {
+        let functions = match item {
+            WorldItem::Function(function) => vec![(to_camel_case(&function.name), function)],
+            WorldItem::Interface { id, .. } => {
+                let interface = &resolve.interfaces[*id];
+                if interface.name.as_deref() == Some("run")
+                    && interface.package.is_some_and(|package| {
+                        let name = &resolve.packages[package].name;
+                        name.namespace == "wasi" && name.name == "cli"
+                    })
+                {
+                    continue;
+                }
+                interface
+                    .functions
+                    .values()
+                    .map(|function| {
+                        (
+                            crate::abi::export_names::interface_implementation_name(
+                                resolve, world, key, function,
+                            ),
+                            function,
+                        )
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        for (name, function) in functions {
+            let params = function
+                .params
+                .iter()
+                .map(|param| {
+                    format!(
+                        "{}: {}",
+                        to_camel_case(&param.name),
+                        wit_type_to_ts(resolve, &param.ty)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "  {name}: ({params}) => {};\n",
+                wit_result_to_ts(resolve, function)
+            ));
+        }
+    }
+    out.push_str("}\n");
     Ok(out)
 }
 
@@ -328,6 +377,11 @@ fn emit_type_def(
     let type_name = type_name(resolve, type_id);
     let td = &resolve.types[type_id];
     match &td.kind {
+        TypeDefKind::Resource => {
+            out.push_str(&format!(
+                "export declare class {type_name} {{ private readonly __witResource: never; }}\n\n"
+            ));
+        }
         TypeDefKind::Record(record) => {
             out.push_str(&format!("export interface {type_name} {{\n"));
             for field in &record.fields {

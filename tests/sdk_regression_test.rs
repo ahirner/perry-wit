@@ -1,6 +1,70 @@
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
 #[test]
+fn generated_contract_checks_the_selected_implementation_module() {
+    for custom in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "perry-sdk-contract-{}-{custom}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("wit")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("wit/world.wit"),
+            "package test:contract; world test { export run-task: func(input: string) -> string; }",
+        )
+        .unwrap();
+        let entry = if custom {
+            "src/custom.ts"
+        } else {
+            "src/index.ts"
+        };
+        let result = generate_sdk_files(&SdkOptions {
+            wit_dir: root.join("wit"),
+            world: Some("test".into()),
+            out_dir: root.join(if custom {
+                "generated/types"
+            } else {
+                ".perry/types"
+            }),
+            project_root: Some(root.clone()),
+            entry: entry.into(),
+        })
+        .unwrap();
+        assert!(result.check_path.exists());
+        for (source, valid) in [
+            (
+                "export function runTask(input: string): string { return input; }",
+                true,
+            ),
+            (
+                "export function runTask(input: number): boolean { return true; }",
+                false,
+            ),
+            ("export const unrelated = 1;", false),
+        ] {
+            fs::write(root.join(entry), source).unwrap();
+            let output = Command::new("tsc")
+                .current_dir(&root)
+                .args(["--noEmit", "--skipLibCheck", "true"])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                valid,
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            if !valid {
+                assert!(String::from_utf8_lossy(&output.stdout).contains("runTask"));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
     let root = std::env::temp_dir().join(format!("perry-sdk-identities-{}", std::process::id()));
     fs::create_dir_all(root.join("wit")).unwrap();
@@ -20,12 +84,15 @@ fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
         world: Some("test".into()),
         out_dir: root.join(".perry/types"),
         project_root: Some(root.clone()),
+        entry: std::path::PathBuf::from("src/index.ts"),
     })
     .unwrap();
     fs::write(
         root.join("src/index.ts"),
         r#"
         import type { A, B } from '../.perry/types/world';
+        export function aGet() { return { text: "one" }; }
+        export function bGet() { return { count: 2 }; }
         const a: ReturnType<typeof A.get> = { text: "one" };
         const b: ReturnType<typeof B.get> = { count: 2 };
         // @ts-expect-error interface b has a different item type
@@ -77,6 +144,7 @@ fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
         world: Some("test".into()),
         out_dir: root.join(".perry/types"),
         project_root: Some(root.clone()),
+        entry: std::path::PathBuf::from("src/index.ts"),
     })
     .unwrap();
     fs::write(root.join("src/index.ts"), r#"
