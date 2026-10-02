@@ -136,18 +136,39 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         return 0.0;
     }
 
+    if name == "all" {
+        let array = raw_args.get(1).or(raw_args.first()).copied().unwrap_or(0);
+        if let Some(JsHandle::Array(items)) = state.get_handle(array) {
+            let response_ids: Vec<_> = items
+                .iter()
+                .filter_map(|&item| match state.get_handle(item) {
+                    Some(JsHandle::Response(id)) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            crate::http::wait_for_responses(crate::http::get_responses(), &response_ids)
+                .unwrap_or_else(|error| fail_with_error(&error));
+        }
+    } else if name == "await_promise" {
+        if let Some(JsHandle::Response(id)) =
+            raw_args.first().and_then(|&arg| state.get_handle(arg))
+        {
+            crate::http::get_responses()[*id]
+                .wait()
+                .unwrap_or_else(|error| fail_with_error(&error));
+        }
+    }
+
     if matches!(
         name.as_str(),
         "fetch_url"
             | "fetch"
             | "fetch_with_options"
             | "fetch_request"
-            | "all"
             | "response_json"
             | "json"
             | "response_text"
             | "text"
-            | "await_promise"
     ) {
         let result_i64 = dispatch_http(&name, &raw_args);
         unsafe {
@@ -232,26 +253,6 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
                 }
             }
         }
-    } else if name == "all" {
-        let arr_arg = if raw_args.len() >= 2 {
-            raw_args[1]
-        } else {
-            raw_args.first().copied().unwrap_or(0)
-        };
-        if let Some(JsHandle::Array(items)) = state.get_handle(arr_arg).cloned() {
-            let response_ids: Vec<_> = items
-                .iter()
-                .filter_map(|&item| match state.get_handle(item) {
-                    Some(JsHandle::Response(id)) => Some(*id),
-                    _ => None,
-                })
-                .collect();
-            let responses = crate::http::get_responses();
-            crate::http::wait_for_responses(responses, &response_ids)
-                .unwrap_or_else(|error| fail_with_error(&error));
-            let res_arr_id = state.alloc_handle(JsHandle::Array(items));
-            return nanbox_pointer(res_arr_id);
-        }
     } else if name == "response_json" || name == "json" {
         let handle = raw_args.first().copied().unwrap_or(0);
         let resp_id = match state.get_handle(handle) {
@@ -293,16 +294,6 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
         } else {
             fail_with_error("Invalid response handle passed to .text()");
         }
-    } else if name == "await_promise" {
-        let arg = raw_args.first().copied().unwrap_or(0);
-        if let Some(JsHandle::Response(resp_id)) = state.get_handle(arg) {
-            let resp_id = *resp_id;
-            let responses = crate::http::get_responses();
-            if let Err(e) = responses[resp_id].wait() {
-                fail_with_error(&e);
-            }
-        }
-        return arg;
     }
     0
 }

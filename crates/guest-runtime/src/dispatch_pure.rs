@@ -6,8 +6,8 @@
 
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
-    nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL,
-    TAG_TRUE, TAG_UNDEFINED,
+    nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE,
+    TAG_UNDEFINED,
 };
 use crate::state::{get_state, JsHandle};
 
@@ -30,7 +30,15 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
 
     let mut result_i64: i64 = 0;
 
-    if name == "array_new" {
+    if name == "await_promise" {
+        result_i64 = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+    } else if name == "all" {
+        let array = raw_args.get(1).or(raw_args.first()).copied().unwrap_or(0);
+        if let Some(JsHandle::Array(items)) = state.get_handle(array).cloned() {
+            let id = state.alloc_handle(JsHandle::Array(items));
+            result_i64 = nanbox_pointer(id);
+        }
+    } else if name == "array_new" {
         let h_id = state.alloc_handle(JsHandle::Array(Vec::new()));
         result_i64 = nanbox_pointer(h_id);
     } else if name == "array_push" {
