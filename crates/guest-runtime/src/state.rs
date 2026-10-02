@@ -117,6 +117,25 @@ impl RuntimeState {
         }
     }
 
+    /// Accepts only canonical, finite, nonnegative integer element keys.
+    pub(crate) fn element_index(&self, key: i64) -> Option<usize> {
+        let bits = key as u64;
+        let number = if bits >> 48 == STRING_TAG {
+            let text = self.get_string(key);
+            let number = text.parse::<f64>().ok()?;
+            if text == "-0" || number.to_string() != text {
+                return None;
+            }
+            number
+        } else if matches!(bits >> 48, 0x7ffc | POINTER_TAG) {
+            return None;
+        } else {
+            f64::from_bits(bits)
+        };
+        (number.is_finite() && number >= 0.0 && number.fract() == 0.0 && number < usize::MAX as f64)
+            .then_some(number as usize)
+    }
+
     /// ECMAScript ToUint8: truncate finite numbers, then wrap modulo 256.
     pub(crate) fn to_uint8(&self, value: i64) -> u8 {
         let number = self.to_number(value);

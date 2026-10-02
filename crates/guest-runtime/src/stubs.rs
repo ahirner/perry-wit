@@ -127,10 +127,13 @@ pub(crate) extern "C" fn object_set_dynamic(target: i64, key: i64, val: i64) {
     let key_str = state.get_string(key);
     let val_json = state.to_js_value(val);
     let val_byte = state.to_uint8(val);
+    let element_index = state.element_index(key);
     if let Some(h) = state.get_handle_mut(target) {
         match h {
             JsHandle::Uint8Array(v) => {
-                v.set(idx, val_byte);
+                if let Some(index) = element_index {
+                    v.set(index, val_byte);
+                }
             }
             JsHandle::Array(arr) => {
                 if idx < arr.len() {
@@ -765,8 +768,7 @@ pub(crate) extern "C" fn uint8array_length(handle: i64) -> i64 {
 pub(crate) extern "C" fn uint8array_get(handle: i64, idx: i64) -> i64 {
     let state = get_state();
     if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
-        let i = f64::from_bits(idx as u64) as usize;
-        if let Some(b) = v.get(i) {
+        if let Some(b) = state.element_index(idx).and_then(|index| v.get(index)) {
             (b as f64).to_bits() as i64
         } else {
             TAG_UNDEFINED as i64
@@ -778,10 +780,10 @@ pub(crate) extern "C" fn uint8array_get(handle: i64, idx: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn uint8array_set(handle: i64, idx: i64, val: i64) {
     let state = get_state();
-    if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
-        let i = f64::from_bits(idx as u64) as usize;
-        let byte = state.to_uint8(val);
-        v.set(i, byte);
+    if let (Some(JsHandle::Uint8Array(view)), Some(index)) =
+        (state.get_handle(handle), state.element_index(idx))
+    {
+        view.set(index, state.to_uint8(val));
     }
 }
 #[no_mangle]

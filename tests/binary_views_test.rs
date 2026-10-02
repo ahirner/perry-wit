@@ -5,6 +5,43 @@ mod support;
 use std::{fs, process::Command};
 
 #[test]
+fn invalid_element_indices_never_alias_bytes() {
+    assert_matches_node(
+        r#"
+        function read(view, key) { return view[key]; }
+        function write(view, key, value) { view[key] = value; }
+        const bytes = Uint8Array.from([10, 20]);
+        const invalid = [-1, -0.5, 1.5, NaN, Infinity, -Infinity, 2, 4294967296];
+        for (let i = 0; i < invalid.length; i++) {
+            const key = invalid[i];
+            console.log(bytes[key]);
+            bytes[key] = 99;
+            console.log(read(bytes, key));
+            write(bytes, key, 88);
+        }
+        console.log(JSON.stringify(bytes));
+        console.log(read(bytes, "0"));
+        console.log(read(bytes, "1"));
+        console.log(read(bytes, "-0"));
+        console.log(read(bytes, "01"));
+        console.log(bytes[-0]);
+    "#,
+    );
+    assert_direct_runtime(
+        r#"
+        const bytes = rt.uint8array_new(importJson([10, 20]));
+        for (const key of [-1, -0.5, 1.5, NaN, Infinity, -Infinity, 2, 4294967296]) {
+            assert.equal(rt.uint8array_get(bytes, value(key)), 0x7ffc000000000001n);
+            rt.uint8array_set(bytes, value(key), value(99));
+            rt.object_set_dynamic(bytes, value(key), value(88));
+        }
+        assert.equal(number(rt.uint8array_get(bytes, value(0))), 10);
+        assert.equal(number(rt.uint8array_get(bytes, value(1))), 20);
+    "#,
+    );
+}
+
+#[test]
 fn constructors_copy_arrays_and_visible_view_bytes_independently() {
     assert_matches_node(
         r#"

@@ -68,38 +68,12 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             result_i64 = (v.byte_length as f64).to_bits() as i64;
         }
     } else if name == "uint8array_get" || name == "buffer_get" {
-        if raw_args.len() >= 2 {
-            let handle = raw_args[0];
-            let idx_val = raw_args[1];
-            let bits = idx_val as u64;
-            let idx = if (bits >> 48) < 0x7ff8 {
-                f64::from_bits(bits) as usize
-            } else {
-                (bits & 0xFFFF_FFFF) as usize
-            };
-            if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
-                if let Some(b) = v.get(idx) {
-                    result_i64 = (b as f64).to_bits() as i64;
-                } else {
-                    result_i64 = TAG_UNDEFINED as i64;
-                }
-            }
+        if let [handle, index, ..] = raw_args.as_slice() {
+            result_i64 = crate::stubs::uint8array_get(*handle, *index);
         }
     } else if name == "uint8array_set" || name == "buffer_set" {
-        if raw_args.len() >= 3 {
-            let handle = raw_args[0];
-            let idx_val = raw_args[1];
-            let val_val = raw_args[2];
-            let idx_bits = idx_val as u64;
-            let idx = if (idx_bits >> 48) < 0x7ff8 {
-                f64::from_bits(idx_bits) as usize
-            } else {
-                (idx_bits & 0xFFFF_FFFF) as usize
-            };
-            let val_byte = state.to_uint8(val_val);
-            if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
-                v.set(idx, val_byte);
-            }
+        if let [handle, index, value, ..] = raw_args.as_slice() {
+            crate::stubs::uint8array_set(*handle, *index, *value);
         }
     } else if name == "buffer_slice" {
         if !raw_args.is_empty() {
@@ -162,7 +136,8 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                         }
                     }
                     JsHandle::Uint8Array(v) => {
-                        if let Some(b) = v.get(idx) {
+                        if let Some(b) = state.element_index(idx_val).and_then(|index| v.get(index))
+                        {
                             result_i64 = (b as f64).to_bits() as i64;
                         } else {
                             result_i64 = TAG_UNDEFINED as i64;
@@ -279,10 +254,13 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             let key_str = state.get_string(idx_val);
             let val_json = state.to_js_value(val_val);
             let val_byte = state.to_uint8(val_val);
+            let element_index = state.element_index(idx_val);
             if let Some(h) = state.get_handle_mut(target_handle) {
                 match h {
                     JsHandle::Uint8Array(v) => {
-                        v.set(idx, val_byte);
+                        if let Some(index) = element_index {
+                            v.set(index, val_byte);
+                        }
                     }
                     JsHandle::Array(arr) => {
                         if idx < arr.len() {
