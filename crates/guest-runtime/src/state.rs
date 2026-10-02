@@ -72,12 +72,13 @@ impl RuntimeState {
                     }
                 }
                 Some(JsHandle::Uint8Array(view)) => {
-                    let items: Vec<serde_json::Value> = view
+                    let items = view
                         .to_vec()
                         .into_iter()
-                        .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
+                        .enumerate()
+                        .map(|(index, byte)| (index.to_string(), serde_json::Value::from(byte)))
                         .collect();
-                    serde_json::Value::Array(items)
+                    serde_json::Value::Object(items)
                 }
                 _ => serde_json::Value::Null,
             }

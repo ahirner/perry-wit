@@ -2,6 +2,29 @@
 
 mod support;
 
+use std::process::Command;
+
+#[test]
+fn typed_array_json_uses_numeric_object_keys_including_nested_views() {
+    assert_matches_node(
+        r#"
+        const bytes = Uint8Array.from([7, 8, 9]);
+        console.log(JSON.stringify(bytes));
+        console.log(JSON.stringify({ bytes: bytes, nested: [bytes.subarray(1)] }));
+        console.log(JSON.stringify(new Uint8Array(0)));
+    "#,
+    );
+}
+
+fn assert_matches_node(source: &str) {
+    let expected = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    let actual = support::run(source, None, None);
+    assert_eq!(support::stdout(&actual), support::stdout(&expected));
+}
+
 #[test]
 fn uint8array_basic_construction_and_indexed_access() {
     let source = r#"
@@ -36,10 +59,7 @@ fn uint8array_from_elements() {
         console.log("arr[4]:" + arr[4]);
     "#;
     let output = support::run(source, None, None);
-    assert_eq!(
-        support::stdout(&output),
-        "len:5\narr[0]:10\narr[4]:50\n"
-    );
+    assert_eq!(support::stdout(&output), "len:5\narr[0]:10\narr[4]:50\n");
 }
 
 #[test]
@@ -147,7 +167,16 @@ fn pure_component_using_uint8array_has_zero_capability_imports() {
     // Inspect wasm imports to ensure wasi:http, wasi:clocks, and wasi:random are all pruned!
     let wasm_bytes = std::fs::read(&wasm_path).unwrap();
     let wat = wasmprinter::print_bytes(&wasm_bytes).expect("wasmprinter failed");
-    assert!(!wat.contains("wasi:http"), "pure component should not import wasi:http");
-    assert!(!wat.contains("wasi:clocks"), "pure component should not import wasi:clocks");
-    assert!(!wat.contains("wasi:random"), "pure component should not import wasi:random");
+    assert!(
+        !wat.contains("wasi:http"),
+        "pure component should not import wasi:http"
+    );
+    assert!(
+        !wat.contains("wasi:clocks"),
+        "pure component should not import wasi:clocks"
+    );
+    assert!(
+        !wat.contains("wasi:random"),
+        "pure component should not import wasi:random"
+    );
 }
