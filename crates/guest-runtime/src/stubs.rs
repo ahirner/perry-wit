@@ -676,10 +676,10 @@ pub(crate) extern "C" fn buffer_length(handle: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn buffer_slice(handle: i64, start: i64, end: i64) -> i64 {
     let state = get_state();
-    let start_idx = f64::from_bits(start as u64) as usize;
+    let start_idx = state.to_number(start);
     let end_bits = end as u64;
     let end_idx = if end_bits != TAG_UNDEFINED {
-        Some(f64::from_bits(end_bits) as usize)
+        Some(state.to_number(end))
     } else {
         None
     };

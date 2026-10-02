@@ -65,7 +65,7 @@ fn crypto_get_random_values_on_subarray() {
         const orig = new Uint8Array(8);
         orig[0] = 77;
         orig[1] = 88;
-        const sub = orig.subarray(2, 8);
+        const sub = orig.subarray(-6);
         crypto.getRandomValues(sub);
         console.log("head0=" + orig[0]);
         console.log("head1=" + orig[1]);

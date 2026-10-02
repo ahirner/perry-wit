@@ -89,14 +89,27 @@ impl Uint8ArrayView {
 
     /// Create a subview sharing the same backing storage.
     /// Mutations to overlapping regions will be visible across both views.
-    pub(crate) fn subview(&self, start: usize, end: Option<usize>) -> Self {
-        let start = start.min(self.byte_length);
-        let end = end.unwrap_or(self.byte_length).min(self.byte_length);
-        let len = if end > start { end - start } else { 0 };
+    pub(crate) fn subview(&self, start: f64, end: Option<f64>) -> Self {
+        let start = relative_bound(start, self.byte_length);
+        let end = end.map_or(self.byte_length, |end| {
+            relative_bound(end, self.byte_length)
+        });
+        let len = end.saturating_sub(start);
         Self {
             storage: self.storage.clone(),
             byte_offset: self.byte_offset + start,
             byte_length: len,
         }
     }
+}
+
+/// Resolves ToIntegerOrInfinity bounds against the current view, before clamping.
+fn relative_bound(value: f64, length: usize) -> usize {
+    let integer = if value.is_nan() { 0.0 } else { value.trunc() };
+    let relative = if integer < 0.0 {
+        length as f64 + integer
+    } else {
+        integer
+    };
+    relative.clamp(0.0, length as f64) as usize
 }

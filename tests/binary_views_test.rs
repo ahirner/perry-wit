@@ -5,6 +5,37 @@ mod support;
 use std::{fs, process::Command};
 
 #[test]
+fn subarray_bounds_are_relative_to_the_current_view() {
+    assert_matches_node(
+        r#"
+        const bytes = Uint8Array.from([10, 20, 30, 40]);
+        const bounds = [[-2, undefined], [0, -1], [-99, 99], [3, 1],
+                        [-2.9, -0.5], [NaN, Infinity], [-Infinity, 2]];
+        for (let i = 0; i < bounds.length; i++) {
+            console.log(JSON.stringify(bytes.subarray(bounds[i][0], bounds[i][1])));
+        }
+        const middle = bytes.subarray(1, -1);
+        const tail = middle.subarray(-1);
+        tail[0] = 77;
+        console.log(JSON.stringify(bytes));
+        console.log(JSON.stringify(middle));
+    "#,
+    );
+    assert_direct_runtime(
+        r#"
+        const source = rt.uint8array_from(importJson([10, 20, 30, 40]));
+        const middle = rt.buffer_slice(source, value(1), value(-1));
+        const tail = rt.buffer_slice(middle, value(-1), 0x7ffc000000000001n);
+        rt.uint8array_set(tail, value(0), value(77));
+        assert.equal(number(rt.uint8array_length(middle)), 2);
+        assert.equal(number(rt.uint8array_length(tail)), 1);
+        assert.equal(number(rt.uint8array_get(source, value(2))), 77);
+        assert.equal(number(rt.uint8array_get(source, value(3))), 40);
+    "#,
+    );
+}
+
+#[test]
 fn invalid_element_indices_never_alias_bytes() {
     assert_matches_node(
         r#"

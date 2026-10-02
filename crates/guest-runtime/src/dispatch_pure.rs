@@ -76,47 +76,10 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             crate::stubs::uint8array_set(*handle, *index, *value);
         }
     } else if name == "buffer_slice" {
-        if !raw_args.is_empty() {
-            let handle = raw_args[0];
-            let start = if raw_args.len() >= 2 {
-                let bits = raw_args[1] as u64;
-                if (bits >> 48) < 0x7ff8 {
-                    let f = f64::from_bits(bits);
-                    if f.is_finite() && f > 0.0 {
-                        f as usize
-                    } else {
-                        0
-                    }
-                } else {
-                    (bits & 0xFFFF_FFFF) as usize
-                }
-            } else {
-                0
-            };
-            let end = if raw_args.len() >= 3 && raw_args[2] as u64 != TAG_UNDEFINED {
-                let bits = raw_args[2] as u64;
-                if (bits >> 48) < 0x7ff8 {
-                    let f = f64::from_bits(bits);
-                    if f.is_finite() && f >= 0.0 {
-                        Some(f as usize)
-                    } else {
-                        Some(0)
-                    }
-                } else {
-                    Some((bits & 0xFFFF_FFFF) as usize)
-                }
-            } else {
-                None
-            };
-            if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle).cloned() {
-                let subview = v.subview(start, end);
-                let id = state.alloc_handle(JsHandle::Uint8Array(subview));
-                result_i64 = nanbox_pointer(id);
-            } else {
-                let id =
-                    state.alloc_handle(JsHandle::Uint8Array(crate::buffer::Uint8ArrayView::new(0)));
-                result_i64 = nanbox_pointer(id);
-            }
+        if let Some(&handle) = raw_args.first() {
+            let start = raw_args.get(1).copied().unwrap_or(0);
+            let end = raw_args.get(2).copied().unwrap_or(TAG_UNDEFINED as i64);
+            result_i64 = crate::stubs::buffer_slice(handle, start, end);
         }
     } else if name == "array_get" || name == "object_get_dynamic" {
         if raw_args.len() >= 2 {
