@@ -184,14 +184,28 @@ pub fn synthesize_trampolines(
                     ));
                     local_idx += 2;
                 }
-                AbiType::I32 | AbiType::Bool => {
-                    param_types.push("i32");
-                    import_calls.push(format!("local.get {local_idx}\n    i64.extend_i32_u"));
-                    local_idx += 1;
-                }
-                AbiType::I64 => {
-                    param_types.push("i64");
-                    import_calls.push(format!("local.get {local_idx}"));
+                AbiType::I32
+                | AbiType::U32
+                | AbiType::I64
+                | AbiType::U64
+                | AbiType::F32
+                | AbiType::F64
+                | AbiType::Bool => {
+                    let (core_type, conversion) = match pty {
+                        AbiType::I32 => ("i32", "f64.convert_i32_s\n    i64.reinterpret_f64"),
+                        AbiType::U32 => ("i32", "f64.convert_i32_u\n    i64.reinterpret_f64"),
+                        AbiType::I64 => ("i64", "f64.convert_i64_s\n    i64.reinterpret_f64"),
+                        AbiType::U64 => ("i64", "f64.convert_i64_u\n    i64.reinterpret_f64"),
+                        AbiType::F32 => ("f32", "f64.promote_f32\n    i64.reinterpret_f64"),
+                        AbiType::F64 => ("f64", "i64.reinterpret_f64"),
+                        AbiType::Bool => (
+                            "i32",
+                            "if (result i64)\n      i64.const 0x7ffc000000000004\n    else\n      i64.const 0x7ffc000000000003\n    end",
+                        ),
+                        _ => unreachable!(),
+                    };
+                    param_types.push(core_type);
+                    import_calls.push(format!("local.get {local_idx}\n    {conversion}"));
                     local_idx += 1;
                 }
                 _ => {
