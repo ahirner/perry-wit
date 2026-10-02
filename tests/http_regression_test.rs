@@ -3,6 +3,12 @@ mod http_fixture;
 mod support;
 
 use http_fixture::{HttpFixture, Reply};
+use std::{
+    path::Path,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 #[test]
 fn http_error_statuses_resolve_with_status_and_readable_body() {
@@ -164,4 +170,102 @@ fn unsupported_fetch_options_fail_before_sending_a_request() {
         );
     }
     assert!(fixture.requests.lock().unwrap().is_empty());
+}
+
+fn run_bounded(wasm: &Path) -> Output {
+    let mut child = Command::new("wasmtime")
+        .args([
+            "run",
+            "-C",
+            "cache=n",
+            "-S",
+            "http=y",
+            "-S",
+            "inherit-network=y",
+        ])
+        .arg(wasm)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "request remained blocked: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn promise_all_observes_later_failure_while_earlier_request_stalls() {
+    let fixture = HttpFixture::new(|request| match request.target.as_str() {
+        "/stall" => Reply::Stall,
+        "/body" => Reply::StallBody,
+        "/fail" => Reply::Disconnect,
+        _ => panic!("unexpected request: {request:?}"),
+    });
+    for path in ["stall", "body"] {
+        let scratch = support::Scratch::new();
+        let wasm = scratch.compile(
+            &format!(
+                r#"
+                await Promise.all([fetch("http://{0}/{path}"), fetch("http://{0}/fail")]);
+                console.log("continued");
+            "#,
+                fixture.address
+            ),
+            None,
+        );
+        let output = run_bounded(&wasm);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("HTTP request") && error.contains("/fail"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn promise_all_retains_input_order_and_fetch_resolves_before_body_completion() {
+    let fixture = HttpFixture::new(|request| match request.target.as_str() {
+        "/first" => {
+            thread::sleep(Duration::from_millis(100));
+            Reply::Body(200, "first".into())
+        }
+        "/second" => Reply::Body(200, "second".into()),
+        "/body" => Reply::StallBody,
+        _ => panic!("unexpected request: {request:?}"),
+    });
+    let scratch = support::Scratch::new();
+    let wasm = scratch.compile(
+        &format!(
+            r#"
+            const first = fetch("http://{0}/first");
+            const second = fetch("http://{0}/second");
+            const responses = await Promise.all([first, second, first]);
+            console.log(await responses[0].text());
+            console.log(await responses[1].text());
+            console.log(await responses[2].text());
+            const empty = await Promise.all([]);
+            console.log(empty.length);
+            const response = await fetch("http://{0}/body");
+            console.log(response.status);
+        "#,
+            fixture.address
+        ),
+        None,
+    );
+    assert_eq!(
+        support::stdout(&run_bounded(&wasm)),
+        "first\nsecond\nfirst\n0\n200\n"
+    );
 }

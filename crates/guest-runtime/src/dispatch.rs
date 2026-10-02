@@ -1,12 +1,12 @@
 //! Dispatcher for Perry runtime ABI function calls (`mem_call`, `mem_call_i32`).
 
-use crate::http::{ResponseEntry, start_http_request};
+use crate::http::{start_http_request, ResponseEntry};
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
-    POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED, get_pointer_id,
-    nanbox_pointer, nanbox_string,
+    get_pointer_id, nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL,
+    TAG_TRUE, TAG_UNDEFINED,
 };
-use crate::state::{JsHandle, get_state};
+use crate::state::{get_state, JsHandle};
 
 #[no_mangle]
 pub extern "C" fn string_new(offset: i32, len: i32) {
@@ -101,14 +101,15 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             raw_args.first().copied().unwrap_or(0)
         };
         if let Some(JsHandle::Array(items)) = state.get_handle(arr_arg).cloned() {
-            for &item in &items {
-                if let Some(JsHandle::Response(resp_id)) = state.get_handle(item) {
-                    let resp_id = *resp_id;
-                    if let Err(e) = state.get_response_body(resp_id) {
-                        fail_with_error(&e);
-                    }
-                }
-            }
+            let response_ids: Vec<_> = items
+                .iter()
+                .filter_map(|&item| match state.get_handle(item) {
+                    Some(JsHandle::Response(id)) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            crate::http::wait_for_responses(&mut state.responses, &response_ids)
+                .unwrap_or_else(|error| fail_with_error(&error));
             let res_arr_id = state.alloc_handle(JsHandle::Array(items));
             result_i64 = nanbox_pointer(res_arr_id);
         }
@@ -316,7 +317,7 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         let arg = raw_args.first().copied().unwrap_or(0);
         if let Some(JsHandle::Response(resp_id)) = state.get_handle(arg) {
             let resp_id = *resp_id;
-            if let Err(e) = state.get_response_body(resp_id) {
+            if let Err(e) = state.responses[resp_id].wait() {
                 fail_with_error(&e);
             }
         }

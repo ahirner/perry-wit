@@ -3,13 +3,17 @@
 use crate::bindings;
 use crate::bindings::wasi::http::outgoing_handler::handle;
 use crate::bindings::wasi::http::types::{
-    Fields, FutureIncomingResponse, Method, OutgoingBody, OutgoingRequest, Scheme,
+    Fields, FutureIncomingResponse, IncomingResponse, Method, OutgoingBody, OutgoingRequest, Scheme,
 };
 
 pub(crate) enum ResponseEntry {
     InFlight {
         url: String,
         future_resp: FutureIncomingResponse,
+    },
+    Headers {
+        url: String,
+        response: IncomingResponse,
     },
     Ready {
         body: String,
@@ -18,70 +22,102 @@ pub(crate) enum ResponseEntry {
 }
 
 impl ResponseEntry {
+    pub(crate) fn wait(&mut self) -> Result<(), String> {
+        if let Self::InFlight { future_resp, .. } = self {
+            let pollable = future_resp.subscribe();
+            pollable.block();
+        }
+        self.receive()
+    }
+
+    fn receive(&mut self) -> Result<(), String> {
+        if let Self::InFlight { url, future_resp } = self {
+            let response = future_resp
+                .get()
+                .ok_or_else(|| format!("Response for {url} not available"))?
+                .map_err(|_| format!("Response for {url} already consumed"))?
+                .map_err(|error| format!("HTTP request to '{url}' failed: {error:?}"))?;
+            *self = Self::Headers {
+                url: std::mem::take(url),
+                response,
+            };
+        }
+        Ok(())
+    }
+
     pub(crate) fn resolve(&mut self) -> Result<&str, String> {
-        match self {
-            ResponseEntry::Ready { body, .. } => Ok(body.as_str()),
-            ResponseEntry::InFlight { url, future_resp } => {
-                let pollable = future_resp.subscribe();
-                pollable.block();
-
-                let response = future_resp
-                    .get()
-                    .ok_or_else(|| format!("Response for {url} not available"))?
-                    .map_err(|_| format!("Response for {url} already consumed"))?
-                    .map_err(|e| format!("HTTP request to '{url}' failed: {e:?}"))?;
-
-                let status = response.status();
-
-                let body = response
-                    .consume()
-                    .map_err(|_| format!("Failed to consume response body for {url}"))?;
-                let stream = body
-                    .stream()
-                    .map_err(|_| format!("Failed to get response stream for {url}"))?;
-
-                let mut content = Vec::new();
-                loop {
-                    match stream.blocking_read(8192) {
-                        Ok(chunk) => {
-                            if chunk.is_empty() {
-                                break;
-                            }
-                            content.extend_from_slice(&chunk);
-                        }
-                        Err(bindings::wasi::io::streams::StreamError::Closed) => {
-                            break;
-                        }
-                        Err(e) => {
-                            return Err(format!("Stream error reading response from {url}: {e:?}"));
-                        }
+        self.wait()?;
+        if let Self::Headers { url, response } = self {
+            let status = response.status();
+            let body = response
+                .consume()
+                .map_err(|_| format!("Failed to consume response body for {url}"))?;
+            let stream = body
+                .stream()
+                .map_err(|_| format!("Failed to get response stream for {url}"))?;
+            let mut content = Vec::new();
+            loop {
+                match stream.blocking_read(8192) {
+                    Ok(chunk) => content.extend_from_slice(&chunk),
+                    Err(bindings::wasi::io::streams::StreamError::Closed) => break,
+                    Err(error) => {
+                        return Err(format!(
+                            "Stream error reading response from {url}: {error:?}"
+                        ))
                     }
                 }
-
-                let body_str = String::from_utf8(content)
-                    .map_err(|e| format!("Response from {url} was not UTF-8: {e}"))?;
-                drop(stream);
-                drop(body);
-                drop(response);
-                drop(pollable);
-
-                *self = ResponseEntry::Ready {
-                    body: body_str,
-                    status,
-                };
-                match self {
-                    ResponseEntry::Ready { body, .. } => Ok(body.as_str()),
-                    _ => unreachable!(),
-                }
             }
+            let body_str = String::from_utf8(content)
+                .map_err(|error| format!("Response from {url} was not UTF-8: {error}"))?;
+            drop(stream);
+            drop(body);
+            *self = Self::Ready {
+                body: body_str,
+                status,
+            };
+        }
+        match self {
+            Self::Ready { body, .. } => Ok(body),
+            _ => unreachable!(),
         }
     }
 
     pub(crate) fn status(&mut self) -> Result<u16, String> {
-        self.resolve()?;
+        self.wait()?;
         match self {
+            Self::Headers { response, .. } => Ok(response.status()),
             Self::Ready { status, .. } => Ok(*status),
-            _ => unreachable!(),
+            Self::InFlight { .. } => unreachable!(),
+        }
+    }
+}
+
+pub(crate) fn wait_for_responses(
+    responses: &mut [ResponseEntry],
+    ids: &[usize],
+) -> Result<(), String> {
+    loop {
+        let pending: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|&id| matches!(responses[id], ResponseEntry::InFlight { .. }))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let ready = {
+            let pollables: Vec<_> = pending
+                .iter()
+                .map(|&id| match &responses[id] {
+                    ResponseEntry::InFlight { future_resp, .. } => future_resp.subscribe(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            let borrowed: Vec<_> = pollables.iter().collect();
+            bindings::wasi::io::poll::poll(&borrowed)
+        };
+        for index in ready {
+            responses[pending[index as usize]].receive()?;
         }
     }
 }
