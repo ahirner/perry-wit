@@ -12,16 +12,86 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
 }
 
 fn rewrite_stmt(stmt: &mut perry_hir::ir::Stmt) {
+    use perry_hir::ir::Stmt;
     match stmt {
-        perry_hir::ir::Stmt::Expr(e)
-        | perry_hir::ir::Stmt::Return(Some(e))
-        | perry_hir::ir::Stmt::Throw(e) => {
-            rewrite_expr(e);
+        Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr)
+        | Stmt::Let {
+            init: Some(expr), ..
+        } => rewrite_expr(expr),
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            rewrite_expr(condition);
+            for stmt in then_branch
+                .iter_mut()
+                .chain(else_branch.iter_mut().flatten())
+            {
+                rewrite_stmt(stmt);
+            }
         }
-        perry_hir::ir::Stmt::Let { init: Some(e), .. } => {
-            rewrite_expr(e);
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+            rewrite_expr(condition);
+            for stmt in body {
+                rewrite_stmt(stmt);
+            }
         }
-        _ => {}
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                rewrite_stmt(init);
+            }
+            for expr in condition.iter_mut().chain(update.iter_mut()) {
+                rewrite_expr(expr);
+            }
+            for stmt in body {
+                rewrite_stmt(stmt);
+            }
+        }
+        Stmt::Labeled { body, .. } => rewrite_stmt(body),
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            for stmt in body
+                .iter_mut()
+                .chain(catch.iter_mut().flat_map(|catch| catch.body.iter_mut()))
+                .chain(finally.iter_mut().flatten())
+            {
+                rewrite_stmt(stmt);
+            }
+        }
+        Stmt::Switch {
+            discriminant,
+            cases,
+        } => {
+            rewrite_expr(discriminant);
+            for case in cases {
+                if let Some(test) = &mut case.test {
+                    rewrite_expr(test);
+                }
+                for stmt in &mut case.body {
+                    rewrite_stmt(stmt);
+                }
+            }
+        }
+        Stmt::Let { init: None, .. }
+        | Stmt::Return(None)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::LabeledBreak(_)
+        | Stmt::LabeledContinue(_)
+        | Stmt::PreallocateBoxes(_)
+        | Stmt::PreallocateTdzBoxes(_)
+        | Stmt::ReleaseBoxes(_) => {}
     }
 }
 
@@ -97,6 +167,11 @@ fn rewrite_expr(expr: &mut perry_hir::ir::Expr) {
                 };
                 return;
             }
+        }
+    }
+    if let perry_hir::ir::Expr::Closure { body, .. } = expr {
+        for stmt in body {
+            rewrite_stmt(stmt);
         }
     }
     perry_hir::walker::walk_expr_children_mut(expr, &mut rewrite_expr);
