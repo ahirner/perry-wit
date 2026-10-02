@@ -30,8 +30,40 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
         rewriter.rewrite_stmt(stmt);
     }
     for func in &mut program.functions {
-        for stmt in &mut func.body {
-            rewriter.rewrite_stmt(stmt);
+        rewriter.rewrite_function(func);
+    }
+    for global in &mut program.globals {
+        if let Some(init) = &mut global.init {
+            rewriter.rewrite_expr(init);
+        }
+    }
+    for class in &mut program.classes {
+        for function in class
+            .constructor
+            .iter_mut()
+            .chain(&mut class.methods)
+            .chain(&mut class.static_methods)
+            .chain(class.getters.iter_mut().map(|(_, function)| function))
+            .chain(class.setters.iter_mut().map(|(_, function)| function))
+            .chain(
+                class
+                    .computed_members
+                    .iter_mut()
+                    .map(|member| &mut member.function),
+            )
+        {
+            rewriter.rewrite_function(function);
+        }
+        for field in class.fields.iter_mut().chain(&mut class.static_fields) {
+            for expr in field.init.iter_mut().chain(&mut field.key_expr) {
+                rewriter.rewrite_expr(expr);
+            }
+        }
+        for member in &mut class.computed_members {
+            rewriter.rewrite_expr(&mut member.key_expr);
+        }
+        if let Some(parent) = &mut class.extends_expr {
+            rewriter.rewrite_expr(parent);
         }
     }
     if rewriter.needs_clocks {
@@ -62,6 +94,18 @@ struct Rewriter {
 }
 
 impl Rewriter {
+    /// Rewrites a callable's defaults and body before selecting its capabilities.
+    fn rewrite_function(&mut self, function: &mut perry_hir::ir::Function) {
+        for parameter in &mut function.params {
+            if let Some(default) = &mut parameter.default {
+                self.rewrite_expr(default);
+            }
+        }
+        for statement in &mut function.body {
+            self.rewrite_stmt(statement);
+        }
+    }
+
     fn rewrite_stmt(&mut self, stmt: &mut perry_hir::ir::Stmt) {
         use perry_hir::ir::Stmt;
         match stmt {
@@ -288,7 +332,6 @@ impl Rewriter {
                         target: Box::new(target),
                         sources,
                     };
-                    return;
                 }
             }
         }

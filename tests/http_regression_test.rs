@@ -11,6 +11,24 @@ use std::{
 };
 
 #[test]
+fn fetch_in_class_method_selects_http_dispatch() {
+    let fixture = HttpFixture::new(|_| Reply::Body(200, "class response".into()));
+    let output = support::run(
+        &format!(
+            r#"
+            class Client {{ static request() {{ return fetch("http://{}"); }} }}
+            const response = await Client.request();
+            console.log(await response.text());
+        "#,
+            fixture.address
+        ),
+        None,
+        None,
+    );
+    assert_eq!(support::stdout(&output), "class response\n");
+}
+
+#[test]
 fn http_error_statuses_resolve_with_status_and_readable_body() {
     let fixture = HttpFixture::new(|request| {
         Reply::Body(request.target[1..].parse().unwrap(), "error body".into())

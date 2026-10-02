@@ -3,6 +3,45 @@ mod rewrites;
 mod support;
 
 #[test]
+fn class_bodies_contribute_runtime_capabilities() {
+    for member in [
+        "constructor() { OP; }",
+        "read() { return OP; }",
+        "static read() { return OP; }",
+        "get value() { return OP; }",
+        "set value(value: any) { OP; }",
+        "value = OP;",
+        "static value = OP;",
+    ] {
+        for (operation, marker) in [
+            ("Date.now()", "__needs_clocks__"),
+            ("fetch('http://example.test')", "__needs_http__"),
+        ] {
+            let source = format!("class Capability {{ {} }}", member.replace("OP", operation));
+            let ast = perry_parser::parse_typescript(&source, "class.ts").unwrap();
+            let mut hir = perry_hir::lower_module(&ast, "main", "class.ts").unwrap();
+            rewrites::rewrite_program(&mut hir);
+            assert!(
+                hir.init.iter().any(|statement| matches!(statement,
+                    perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(value)) if value == marker
+                )),
+                "missing {marker} in {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn static_class_clock_call_selects_clock_dispatch() {
+    let output = support::run(
+        "class Clock { static read() { return Date.now(); } } console.log(Clock.read() > 0);",
+        None,
+        None,
+    );
+    assert_eq!(support::stdout(&output), "true\n");
+}
+
+#[test]
 fn replacements_rewrite_their_children_including_nested_spreads() {
     let output = support::run(
         r#"
