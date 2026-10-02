@@ -66,6 +66,7 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     let needs_clocks = module_needs_clocks(&a);
     let needs_random = module_needs_random(&a);
     let needs_env = module_needs_env(&a);
+    let needs_fs = prune::module_needs_fs(&a);
 
     let mut resolved_imports_a = Vec::with_capacity(a.imports.len());
     for &(mod_name, name, _ty) in &a.imports {
@@ -76,6 +77,12 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         let target_name = if name == "mem_call" {
             if needs_http {
                 "mem_call"
+            } else if needs_fs {
+                if needs_clocks || needs_random || needs_env {
+                    "mem_call_all_sync"
+                } else {
+                    "mem_call_fs"
+                }
             } else {
                 match (needs_clocks, needs_random, needs_env) {
                     (true, true, true) => "mem_call_all_sync",

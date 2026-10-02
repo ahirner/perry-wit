@@ -173,15 +173,25 @@ Verification:
 
 ### Phase 9: Sandboxed Filesystem (`wasi:filesystem`)
 
-- [ ] **9.1. UTF-8 File Reads/Writes**
-    - [ ] Support `readFileSync` / `writeFileSync` within host-provided preopens, with explicit path rules and confinement through descriptor-relative operations.
-    - [ ] Verify round-trips, short I/O handling, missing files, denied access, path escape attempts, and resource cleanup on success/failure.
+- [x] **9.1. UTF-8 File Reads/Writes**
+    - [x] Support `readFileSync` / `writeFileSync` within host-provided preopens, with explicit path rules and confinement through descriptor-relative operations.
+    - [x] Verify round-trips, short I/O handling, missing files, denied access, path escape attempts, and resource cleanup on success/failure.
 - [ ] **9.2. Binary File Reads/Writes** — Needs D.1 and the file operations from 9.1.
     - [ ] Transfer byte views without text conversion, documenting the return type until Node `Buffer` compatibility exists.
     - [ ] Verify arbitrary-byte round-trips, subview writes, and repeated-operation cleanup.
 - [ ] **9.3. Directory & Metadata Operations** — Add when a filesystem consumer needs them.
     - [ ] Support the required subset of `readdirSync`, `statSync`, and `unlinkSync`, keeping Node-facing shapes such as `stats.isFile()` consistent with the declared API.
     - [ ] Verify listing, metadata, and removal for that subset, including failure paths and resource cleanup.
+
+Verification:
+- Added `wasi:filesystem/types@0.2.6` and `wasi:filesystem/preopens@0.2.6` to WIT world adapter in `wit/world.wit`.
+- Implemented `normalize_path()`, `locate_preopen()`, `fs_read_file_sync()`, and `fs_write_file_sync()` in `crates/guest-runtime/src/filesystem.rs`.
+- Enforced sandboxed confinement: path normalization eliminates `.` and `..` segments, rejects NUL bytes, matches longest mounted preopen prefix, and prohibits escapes outside preopened directories.
+- Handled short I/O and streaming in both directions: `fs_read_file_sync` streams chunks of up to 64KB until EOF; `fs_write_file_sync` chunks writes into 4096-byte slices with clean descriptor and stream drops.
+- Formatted POSIX-compliant error codes (`ENOENT`, `EACCES`, `EEXIST`, `EISDIR`, `ENOTDIR`, `EPERM`, `EROFS`, `EIO`) integrated with guest runtime exception propagation.
+- Added AST rewrites for `fs.readFileSync`, `fs.writeFileSync`, and named imports in `src/compiler/rewrites.rs` emitting `__needs_fs__`.
+- Linker pruning in `src/linker/prune.rs` and import routing in `src/linker/mod.rs` so pure components completely prune `wasi:filesystem`, while filesystem components import `wasi:filesystem` and route through `mem_call_fs` or `mem_call_all_sync`.
+- Verified in `tests/fs_test.rs` (8 integration tests passing under Wasmtime): round-trip UTF-8 file reads/writes, named imports (`node:fs`), missing files throwing `ENOENT`, sandbox escape attempts throwing `EACCES`, 128KB multi-chunk read/write, 500 repeated descriptor open/close cycles without resource leaks, and import pruning.
 
 Promise-based filesystem APIs need guest async execution and evidence that their underlying operations can make progress; they are a later slice.
 

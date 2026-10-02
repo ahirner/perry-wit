@@ -27,6 +27,7 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
         needs_http: false,
         needs_random: false,
         needs_env: false,
+        needs_fs: false,
     };
     for stmt in &mut program.init {
         rewriter.rewrite_stmt(stmt);
@@ -119,6 +120,20 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
                 )));
         }
     }
+    if rewriter.needs_fs {
+        program
+            .init
+            .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                "__needs_fs__".into(),
+            )));
+        for name in ["fs_read_file_sync", "fs_write_file_sync"] {
+            program
+                .init
+                .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                    name.into(),
+                )));
+        }
+    }
 }
 
 struct Rewriter {
@@ -127,6 +142,7 @@ struct Rewriter {
     needs_http: bool,
     needs_random: bool,
     needs_env: bool,
+    needs_fs: bool,
 }
 
 impl Rewriter {
@@ -299,7 +315,45 @@ impl Rewriter {
             | perry_hir::ir::Expr::ProcessCwd => {
                 self.needs_env = true;
             }
+            perry_hir::ir::Expr::FsReadFileSync(_)
+            | perry_hir::ir::Expr::FsReadFileBinary(_)
+            | perry_hir::ir::Expr::FsWriteFileSync(_, _) => {
+                self.needs_fs = true;
+            }
             _ => {}
+        }
+        if let perry_hir::ir::Expr::FsReadFileSync(path_expr)
+            | perry_hir::ir::Expr::FsReadFileBinary(path_expr) = expr
+        {
+            self.needs_fs = true;
+            let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "fs_read_file_sync".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![path],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if let perry_hir::ir::Expr::FsWriteFileSync(path_expr, data_expr) = expr {
+            self.needs_fs = true;
+            let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            let data = std::mem::replace(data_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "fs_write_file_sync".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![path, data],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
         }
         if let perry_hir::ir::Expr::NativeMethodCall {
             module,
@@ -320,6 +374,58 @@ impl Rewriter {
                 property: method.clone(),
                 byte_offset: 0,
             };
+        }
+        if let perry_hir::ir::Expr::NativeMethodCall {
+            module,
+            method,
+            args,
+            ..
+        } = expr
+        {
+            if module == "fs" || module == "node:fs" {
+                if method == "readFileSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_read_file_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                } else if method == "writeFileSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    let content = if args.len() >= 2 {
+                        std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_write_file_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path, content],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                }
+            }
         }
         if let perry_hir::ir::Expr::New {
             class_name, args, ..
@@ -464,6 +570,55 @@ impl Rewriter {
                 ) {
                     self.needs_random = true;
                 }
+                if let perry_hir::ir::Expr::NativeModuleRef(module) = object.as_ref() {
+                    if module == "fs" || module == "node:fs" {
+                        if property == "readFileSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_read_file_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
+                        } else if property == "writeFileSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            let content = if args.len() >= 2 {
+                                std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_write_file_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path, content],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
+                        }
+                    }
+                }
+                if property == "fs_read_file_sync" || property == "fs_write_file_sync" {
+                    self.needs_fs = true;
+                }
                 if property == "json" {
                     *expr = perry_hir::ir::Expr::NativeMethodCall {
                         module: "fetch".to_string(),
@@ -473,6 +628,16 @@ impl Rewriter {
                         args: args.clone(),
                     };
                     return;
+                }
+            }
+            if let perry_hir::ir::Expr::ExternFuncRef { name, .. } = callee.as_ref() {
+                if name == "js_native_module_named_esm_export_value" {
+                    if let Some(perry_hir::ir::Expr::String(mod_name)) = args.first() {
+                        if mod_name == "fs" || mod_name == "node:fs" {
+                            *expr = perry_hir::ir::Expr::Undefined;
+                            return;
+                        }
+                    }
                 }
             }
             if let perry_hir::ir::Expr::Closure { body, .. } = callee.as_mut() {

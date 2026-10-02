@@ -99,6 +99,65 @@ fn dispatch_random(name: &str, raw_args: &[i64]) -> Option<i64> {
     }
 }
 
+fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
+    match name {
+        "fs_read_file_sync" | "readFileSync" => {
+            let path = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                raw_args[1]
+            } else {
+                raw_args.first().copied().unwrap_or(0)
+            };
+            Some(crate::filesystem::fs_read_file_sync(path))
+        }
+        "fs_write_file_sync" | "writeFileSync" => {
+            let (path, content) = if raw_args.len() >= 3
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                (raw_args[1], raw_args[2])
+            } else if raw_args.len() >= 2 {
+                (raw_args[0], raw_args[1])
+            } else {
+                (raw_args.first().copied().unwrap_or(0), 0)
+            };
+            Some(crate::filesystem::fs_write_file_sync(path, content))
+        }
+        _ => None,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_fs(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_filesystem(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
 #[no_mangle]
 pub extern "C" fn mem_call_clocks(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
     let state = get_state();
@@ -337,6 +396,13 @@ pub extern "C" fn mem_call_all_sync(func_name_id: f64, arg_count: f64, base_addr
         return 0.0;
     }
 
+    if let Some(res) = dispatch_filesystem(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
     crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
 }
 
@@ -372,6 +438,13 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
     }
 
     if let Some(res) = dispatch_env(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_filesystem(&name, &raw_args) {
         unsafe {
             *(base_addr as *mut i64) = res;
         }

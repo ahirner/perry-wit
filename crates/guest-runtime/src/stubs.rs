@@ -1168,3 +1168,18 @@ pub(crate) extern "C" fn promise_then(_a: i64, _b: i64) -> i64 {
 pub(crate) extern "C" fn await_promise(_a: i64) -> i64 {
     0
 }
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_read_file_sync(path: i64) -> i64 {
+    crate::filesystem::fs_read_file_sync(path)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_write_file_sync(path: i64, content: i64) -> i64 {
+    crate::filesystem::fs_write_file_sync(path, content)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn js_native_module_named_esm_export_value(_module: f64, _property: f64) -> f64 {
+    f64::from_bits(crate::nanbox::TAG_UNDEFINED)
+}

@@ -75,6 +75,18 @@ pub(crate) fn module_needs_env(a: &ParsedModuleA) -> bool {
     false
 }
 
+pub(crate) fn module_needs_fs(a: &ParsedModuleA) -> bool {
+    for d in &a.data {
+        if d.data
+            .windows(b"__needs_fs__".len())
+            .any(|w| w == b"__needs_fs__")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn compute_pruning_plan(
     a: &ParsedModuleA,
     b: &ParsedModuleB,
