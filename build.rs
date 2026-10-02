@@ -14,6 +14,7 @@ fn main() {
     if let Ok(override_path) = env::var("GUEST_RUNTIME_PATH") {
         let p = Path::new(&override_path);
         if p.exists() {
+            println!("cargo:rerun-if-changed={}", p.display());
             fs::copy(p, &target_wasm).expect("Failed to copy GUEST_RUNTIME_PATH artifact");
             println!(
                 "cargo:rustc-env=GUEST_RUNTIME_WASM={}",
@@ -32,6 +33,7 @@ fn main() {
 
     for candidate in candidates {
         if candidate.exists() {
+            println!("cargo:rerun-if-changed={}", candidate.display());
             fs::copy(&candidate, &target_wasm)
                 .expect("Failed to copy precompiled guest_runtime.wasm");
             println!(
