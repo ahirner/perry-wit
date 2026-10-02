@@ -16,7 +16,7 @@ It eliminates in-Wasm JavaScript interpreters (such as QuickJS, SpiderMonkey, or
    - **Bottom-Up:** Conformance to WASI Preview 2 host capability invariants (`wasi:http`, `wasi:cli`, `wasi:io`, `wasi:clocks`, `wasi:random`).
 3. **Decoupled Packaging Modes (Modular vs. Standalone):**
    - **Standalone ("Fat") Components:** Embeds the TypeScript logic and guest runtime adapter into a single, self-contained WASIp2 component runnable on any vanilla host.
-   - **Modular ("Thin") Components:** Emits a lightweight task component importing a standardized runtime interface (`perry:runtime` or standard WIT), linked dynamically at runtime by the host (such as `example-host`) or composed via `wac`.
+   - **Modular ("Thin") Components:** Emits a lightweight task component importing a standardized runtime interface (`perry:runtime` or standard WIT), linked dynamically at runtime by the host or composed via `wac`.
 4. **Hermetic, Nix-First Toolchain:**
    All dependencies (Rust toolchain, WASI WIT contracts, `wasm-tools`, `wasmtime`) are hermetically fetched and pinned by Nix. WIT contract definitions are supplied from Nix derivations rather than committed to git history.
 5. **Zero-Config Developer SDK:**
@@ -183,7 +183,7 @@ export async function handleRequest(req: FetchRequest): Promise<FetchResponse> {
 
 #### Corresponding Component Model WIT (`world.wit`)
 ```wit
-package example-host:http-worker@0.1.0;
+package example:http-worker@0.1.0;
 
 interface types {
   record fetch-request {
@@ -226,9 +226,9 @@ This enables any standard TypeScript function to be orchestrated as an isolated,
 | **Packaging** | Bundles application logic + guest runtime into a single WASIp2 component. | Emits lightweight task component (~5–10 KB) importing runtime interfaces. |
 | **Dependencies** | Self-contained. Runs on any WASIp2 engine (`wasmtime run`). | Host-bound or dynamically linked at deployment. |
 | **Footprint** | ~118 KB (stripped). | ~5–12 KB. |
-| **Use Case** | CLI distribution, independent binary execution, standalone microservices. | High-density task orchestration (`example-host`), FaaS pipelines, dynamic workflows. |
+| **Use Case** | CLI distribution, independent binary execution, standalone microservices. | High-density task orchestration, FaaS pipelines, dynamic workflows. |
 
-At runtime in `example-host`, modular components link dynamically:
+At runtime, modular components link dynamically:
 - Either via native Rust host providers satisfying the `perry:runtime` WIT world directly in host memory.
 - Or via `wac plug task.wasm --plug guest-runtime.wasm` during deployment.
 
@@ -239,9 +239,10 @@ At runtime in `example-host`, modular components link dynamically:
 To give component authors an ergonomic workflow where they can simply run `nix develop` and immediately start writing type-safe code, `perry-wit` implements an AST-based type generator and automated Nix integration:
 
 Consumer templates select `devShells.sdk`, which provides the packaged compiler
-and generates SDK contracts on entry. Existing component projects can select it
-with `nix develop github:<ORG-TBD>/perry-wit#sdk`. The compiler repository's default
-shell supplies the Rust development toolchain and prepared guest runtime for Cargo.
+and generates SDK contracts on entry. The compiler source is configured through
+the template's `inputs.perry-wit.url` flake reference. The compiler repository's
+default shell supplies the Rust development toolchain and prepared guest runtime
+for Cargo.
 
 ```
   ┌────────────────────────────────────────────────────────┐
@@ -301,7 +302,7 @@ To expand the capabilities of `perry-wit` while maximizing code reuse across the
 
 1. **Unified Dual-Sided Host/Guest Bindings:**
    - *Current State:* Guest declarations are generated via `perry-wit gen-types`, while host runners manually bind components or use `wasmtime::component::bindgen!`.
-   - *Expansion:* Provide a unified CLI and library module that emits both the TypeScript guest contract (`.d.ts`) and the Rust host adapter structs from the same WIT package. This eliminates contract divergence between host runtimes (like `example-host`) and guest components.
+   - *Expansion:* Provide a unified CLI and library module that emits both the TypeScript guest contract (`.d.ts`) and the Rust host adapter structs from the same WIT package. This eliminates contract divergence between host runtimes and guest components.
 
 2. **Async Component Model (`cm-async`) & Stream Lowering:**
    - *Current State:* Task functions are synchronous or block synchronously on WASI HTTP polling.

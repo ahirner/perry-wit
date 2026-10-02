@@ -4,14 +4,18 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    perry-wit.url = "github:<ORG-TBD>/perry-wit";
+    # Set this to the compiler flake reference for your project.
+    perry-wit.url = "../";
   };
 
-  outputs = { self, nixpkgs, flake-utils, perry-wit }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-      in {
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+    perry-wit,
+  }:
+    flake-utils.lib.eachDefaultSystem (
+      system: {
         packages.default = perry-wit.lib.${system}.buildComponent {
           name = "my-task";
           src = ./.;

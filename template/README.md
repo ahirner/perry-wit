@@ -1,8 +1,14 @@
 # WASI Preview 2 TypeScript Component Template
 
-This template provides a zero-config developer experience for authoring hermetic WebAssembly components in TypeScript using [Perry-WIT](https://github.com/<ORG-TBD>/perry-wit).
+This template provides a development environment for authoring hermetic WebAssembly components in TypeScript using Perry-WIT.
 
-The compiler input resolves from the published repository. To test a local compiler checkout, use `nix develop --override-input perry-wit path:/absolute/path/to/perry-wit` or the same override with `nix build`.
+Configure `inputs.perry-wit.url` in `flake.nix` with the compiler's flake reference,
+such as `git+file:///absolute/path/to/perry-wit` or
+`github:<ORG-TBD>/perry-wit` with the chosen organization.
+The default `../` resolves relative to the template directory.
+To override the configured source for a command, pass
+`--override-input perry-wit git+file:///absolute/path/to/perry-wit` to
+`nix develop` or `nix build` instead.
 
 ## Quickstart
 
@@ -16,7 +22,7 @@ The compiler input resolves from the published repository. To test a local compi
    `.perry/types/implementation-check.ts`; the supplied `tsconfig.json` includes both.
 
    To use the SDK in an existing component project without this template, run
-   `nix develop github:<ORG-TBD>/perry-wit#sdk` from that project's directory.
+   `nix develop "git+file:///absolute/path/to/perry-wit#sdk"` from that project's directory.
    Inside a Perry-WIT compiler checkout, `nix develop .#sdk` selects this shell;
    plain `nix develop` there selects the Rust contributor environment.
 

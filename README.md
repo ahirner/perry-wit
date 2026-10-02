@@ -91,12 +91,20 @@ nix flake check
 
 ## Authoring Components
 
-Create a new TypeScript WebAssembly component project from the template:
+From an empty component project directory, initialize the template using a
+Perry-WIT flake reference. For example, with a compiler checkout:
 
 ```bash
-nix flake init -t github:<ORG-TBD>/perry-wit
-nix develop
+perry_wit_source="git+file:///absolute/path/to/perry-wit"
+nix flake init -t "$perry_wit_source"
 ```
+
+Set `inputs.perry-wit.url` in the generated `flake.nix` to the same reference,
+then run `nix develop`. A repository reference such as
+`github:<ORG-TBD>/perry-wit` can also be used; substitute the chosen organization.
+The template's `../` default resolves relative to its directory.
+To override the configured source for a command, pass
+`--override-input perry-wit "$perry_wit_source"` to `nix develop` or `nix build`.
 
 The template's default shell selects Perry-WIT's `devShells.sdk`, so plain
 `nix develop` enters the component-author environment in generated projects.
@@ -104,7 +112,7 @@ The template's default shell selects Perry-WIT's `devShells.sdk`, so plain
 For an existing component project, enter the SDK shell directly from its directory:
 
 ```bash
-nix develop github:<ORG-TBD>/perry-wit#sdk
+nix develop "$perry_wit_source#sdk"
 ```
 
 When entering the SDK shell:
