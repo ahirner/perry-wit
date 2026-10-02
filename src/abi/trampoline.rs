@@ -1,6 +1,7 @@
 //! Canonical ABI trampoline synthesizer for Core WebAssembly modules.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use anyhow::{Context, Result};
 use wasmparser::{ExternalKind, Parser, Payload};
@@ -178,7 +179,8 @@ pub fn synthesize_trampolines(
         .map(|idx| idx.to_string())
         .unwrap_or_else(|| "_start".to_string());
 
-    snippets.push_str(&format!(
+    write!(
+        snippets,
         r#"
   (global $perry_init_guard (mut i32) (i32.const 0))
   (func $perry_ensure_init
@@ -191,7 +193,8 @@ pub fn synthesize_trampolines(
     end
   )
 "#
-    ));
+    )
+    .unwrap();
 
     // Synthesize CLI entry if world expects it
     if wit_exports.has_cli_command {
@@ -308,7 +311,8 @@ pub fn synthesize_trampolines(
 
         let import_body = import_calls.join("\n    ");
 
-        snippets.push_str(&format!(
+        write!(
+            snippets,
             r#"
   (func $cabi_trampoline_{sanitized} {params_sig} {results_sig}
     call $perry_ensure_init
@@ -318,7 +322,8 @@ pub fn synthesize_trampolines(
   )
   (export "{kebab_name}" (func $cabi_trampoline_{sanitized}))
 "#
-        ));
+        )
+        .unwrap();
 
         let post_cleanup = if mapped.wit_function.result == AbiType::ResultString {
             discovered.cabi_post_result_cleanup
@@ -331,7 +336,8 @@ pub fn synthesize_trampolines(
                 AbiType::String | AbiType::ResultString
             )
         {
-            snippets.push_str(&format!(
+            write!(
+                snippets,
                 r#"
   (func $cabi_post_trampoline_{sanitized} (param i32)
     local.get 0
@@ -339,7 +345,8 @@ pub fn synthesize_trampolines(
   )
   (export "cabi_post_{kebab_name}" (func $cabi_post_trampoline_{sanitized}))
 "#
-            ));
+            )
+            .unwrap();
         }
     }
 

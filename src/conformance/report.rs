@@ -1,6 +1,7 @@
 //! Conformance report generation and evidence aggregation.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -144,10 +145,10 @@ impl ConformanceReport {
     pub fn render_markdown_table(&self) -> String {
         let mut md = String::new();
         md.push_str("# Conformance Evaluation Report\n\n");
-        md.push_str(&format!(
+        write!(md,
             "**Catalog Version:** {} | **Supported Capabilities:** {} | **Passing:** {} | **Coverage:** {:.1}%\n\n",
             self.version, self.supported_capabilities, self.passing_capabilities, self.coverage_percent
-        ));
+        ).unwrap();
         md.push_str("| Capability ID | Name | Tier | Support | Status |\n");
         md.push_str("| :--- | :--- | :--- | :--- | :--- |\n");
 
@@ -163,10 +164,12 @@ impl ConformanceReport {
                 SupportLevel::Partial => "partial",
                 SupportLevel::Unsupported => "unsupported",
             };
-            md.push_str(&format!(
+            write!(
+                md,
                 "| `{}` | {} | {} | {} | {} |\n",
                 ev.capability_id, ev.capability_name, ev.tier, support_str, status_badge
-            ));
+            )
+            .unwrap();
         }
 
         md
