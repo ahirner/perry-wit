@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::fmt::Write;
+
 use crate::nanbox::{
     get_pointer_id, nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL,
     TAG_TRUE, TAG_UNDEFINED,
@@ -14,7 +17,7 @@ pub(crate) enum JsHandle {
 }
 
 pub(crate) struct RuntimeState {
-    pub(crate) strings: Vec<String>,
+    pub(crate) strings: Vec<Vec<u16>>,
     pub(crate) handles: Vec<JsHandle>,
     pub(crate) current_exception: Option<String>,
 }
@@ -25,6 +28,59 @@ impl RuntimeState {
             strings: Vec::new(),
             handles: vec![JsHandle::Null],
             current_exception: None,
+        }
+    }
+
+    pub(crate) fn alloc_string(&mut self, text: &str) -> i64 {
+        self.alloc_string_units(text.encode_utf16().collect())
+    }
+
+    pub(crate) fn alloc_string_units(&mut self, units: Vec<u16>) -> i64 {
+        let id = self.strings.len();
+        self.strings.push(units);
+        nanbox_string(id)
+    }
+
+    pub(crate) fn string_units(&self, value: i64) -> Cow<'_, [u16]> {
+        let bits = value as u64;
+        if bits >> 48 == STRING_TAG {
+            Cow::Borrowed(
+                self.strings
+                    .get((bits & 0xffff_ffff) as usize)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            )
+        } else {
+            Cow::Owned(self.get_string(value).encode_utf16().collect())
+        }
+    }
+
+    /// String methods apply ToIntegerOrInfinity; property access uses element_index instead.
+    pub(crate) fn string_code_unit(&self, value: i64, index: i64) -> Option<u16> {
+        let number = self.to_number(index);
+        let index = if number.is_nan() { 0.0 } else { number.trunc() };
+        let units = self.string_units(value);
+        if index >= 0.0 && index < units.len() as f64 {
+            units.get(index as usize).copied()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn stringify(&self, value: i64) -> String {
+        if (value as u64) >> 48 == STRING_TAG {
+            quote_utf16(&self.string_units(value))
+        } else if let Some(JsHandle::Array(items)) = self.get_handle(value) {
+            format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|&item| self.stringify(item))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        } else {
+            serde_json::to_string(&self.to_js_value(value)).unwrap_or_else(|_| "null".into())
         }
     }
 
@@ -54,7 +110,9 @@ impl RuntimeState {
             serde_json::Value::Bool(false)
         } else if (bits >> 48) == STRING_TAG {
             let id = (bits & 0xFFFF_FFFF) as usize;
-            serde_json::Value::String(self.strings.get(id).cloned().unwrap_or_default())
+            serde_json::Value::String(String::from_utf16_lossy(
+                self.strings.get(id).map(Vec::as_slice).unwrap_or_default(),
+            ))
         } else if (bits >> 48) == POINTER_TAG {
             let id = (bits & 0xFFFF_FFFF) as usize;
             match self.handles.get(id) {
@@ -100,7 +158,9 @@ impl RuntimeState {
             TAG_UNDEFINED => f64::NAN,
             TAG_NULL | TAG_FALSE => 0.0,
             TAG_TRUE => 1.0,
-            bits if bits >> 48 == STRING_TAG => number_from_string(&self.get_string(value)),
+            bits if bits >> 48 == STRING_TAG => {
+                crate::equality::string_number(&self.get_string(value))
+            }
             bits if bits >> 48 == POINTER_TAG => match self.get_handle(value) {
                 Some(JsHandle::Date(timestamp)) => *timestamp,
                 Some(JsHandle::Array(items)) if items.is_empty() => 0.0,
@@ -111,7 +171,7 @@ impl RuntimeState {
                         self.to_number(items[0])
                     }
                 }
-                _ => number_from_string(&self.get_string(value)),
+                _ => crate::equality::string_number(&self.get_string(value)),
             },
             bits => f64::from_bits(bits),
         }
@@ -160,11 +220,7 @@ impl RuntimeState {
                     0
                 }
             }
-            serde_json::Value::String(s) => {
-                let id = self.strings.len();
-                self.strings.push(s);
-                nanbox_string(id)
-            }
+            serde_json::Value::String(s) => self.alloc_string(&s),
             serde_json::Value::Array(arr) => {
                 let items: Vec<i64> = arr
                     .into_iter()
@@ -197,7 +253,7 @@ impl RuntimeState {
         if (bits >> 48) == STRING_TAG {
             let id = (bits & 0xFFFF_FFFF) as usize;
             if let Some(s) = self.strings.get(id) {
-                return s.clone();
+                return String::from_utf16_lossy(s);
             }
         } else if (bits >> 48) == POINTER_TAG {
             let id = (bits & 0xFFFF_FFFF) as usize;
@@ -230,27 +286,29 @@ impl RuntimeState {
     }
 }
 
-fn number_from_string(text: &str) -> f64 {
-    let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-    if text.is_empty() {
-        return 0.0;
-    }
-    for (prefixes, radix) in [(["0x", "0X"], 16), (["0o", "0O"], 8), (["0b", "0B"], 2)] {
-        if let Some(digits) = prefixes.iter().find_map(|prefix| text.strip_prefix(prefix)) {
-            return u64::from_str_radix(digits, radix).map_or(f64::NAN, |n| n as f64);
+/// JSON escapes unpaired UTF-16 surrogates instead of replacing their code units.
+fn quote_utf16(units: &[u16]) -> String {
+    let mut quoted = String::from("\"");
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok('"') => quoted.push_str("\\\""),
+            Ok('\\') => quoted.push_str("\\\\"),
+            Ok('\n') => quoted.push_str("\\n"),
+            Ok('\r') => quoted.push_str("\\r"),
+            Ok('\t') => quoted.push_str("\\t"),
+            Ok('\u{8}') => quoted.push_str("\\b"),
+            Ok('\u{c}') => quoted.push_str("\\f"),
+            Ok(c) if c < '\u{20}' => {
+                write!(quoted, "\\u{:04x}", c as u32).unwrap();
+            }
+            Ok(c) => quoted.push(c),
+            Err(error) => {
+                write!(quoted, "\\u{:04x}", error.unpaired_surrogate()).unwrap();
+            }
         }
     }
-    match text {
-        "Infinity" | "+Infinity" => f64::INFINITY,
-        "-Infinity" => f64::NEG_INFINITY,
-        _ if text
-            .chars()
-            .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'e' | 'E')) =>
-        {
-            f64::NAN
-        }
-        _ => text.parse::<f64>().unwrap_or(f64::NAN),
-    }
+    quoted.push('"');
+    quoted
 }
 
 static mut STATE: Option<RuntimeState> = None;

@@ -1,6 +1,45 @@
 mod support;
 
+use std::process::Command;
 use support::{run, stdout};
+
+#[test]
+fn strings_use_utf16_code_units_for_methods_indices_and_length() {
+    let source = r#"
+        const text = "😀x𝄞é";
+        console.log(text.length);
+        console.log(text.charAt(2));
+        console.log(text[2]);
+        for (let i = 0; i < text.length; i++) {
+            const fromMethod = text.charAt(i);
+            const fromIndex = text[i];
+            console.log(fromMethod.length);
+            console.log(text.charCodeAt(i));
+            console.log(fromMethod.charCodeAt(0));
+            console.log(fromIndex.charCodeAt(0));
+            console.log(fromMethod === fromIndex);
+            console.log(JSON.stringify(fromIndex));
+        }
+        console.log(text[0] === text[1]);
+        console.log(text[0] + text[1] === "😀");
+        console.log(JSON.stringify([text[0], text[1], text[2]]));
+        const indices = [-1, -0.5, 1.9, NaN, Infinity, undefined, 99];
+        for (let i = 0; i < indices.length; i++) {
+            console.log(JSON.stringify(text.charAt(indices[i])));
+            console.log(text.charCodeAt(indices[i]));
+        }
+        console.log(text[-1]);
+        console.log(text[1.5]);
+        console.log(text[99]);
+        console.log(text["2"]);
+    "#;
+    let expected = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    let actual = run(source, None, None);
+    assert_eq!(stdout(&actual), stdout(&expected));
+}
 
 #[test]
 fn equality_compares_strings_primitives_and_object_identity() {

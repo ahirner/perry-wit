@@ -1,7 +1,7 @@
 //! JavaScript Date runtime support for WASI Preview 2.
 
 use crate::clocks::wall_clock_now_ms;
-use crate::nanbox::{nanbox_pointer, nanbox_string, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED};
+use crate::nanbox::{nanbox_pointer, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED};
 use crate::state::{get_state, JsHandle, RuntimeState};
 
 /// Convert Unix timestamp (seconds) to UTC date components.
@@ -140,9 +140,7 @@ pub extern "C" fn date_to_iso_string(arg: i64) -> i64 {
     let state = get_state();
     let ts = get_date_timestamp(state, arg);
     if let Some(iso) = format_iso(ts) {
-        let str_id = state.strings.len();
-        state.strings.push(iso);
-        nanbox_string(str_id)
+        state.alloc_string(&iso)
     } else {
         state.current_exception = Some("RangeError: Invalid time value".to_string());
         TAG_UNDEFINED as i64

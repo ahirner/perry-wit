@@ -3,12 +3,10 @@
 use perry_hir::ir::{Expr, Stmt};
 
 pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
-    // Perry emits this dispatcher call but omits its name from its runtime string pool.
-    program
-        .init
-        .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
-            "js_loose_eq".into(),
-        )));
+    // Perry emits these dispatcher calls but omits their names from its string pool.
+    for name in ["js_loose_eq", "string_char_at", "string_char_code_at"] {
+        program.init.push(Stmt::Expr(Expr::String(name.into())));
+    }
     let mut rewriter = Rewriter {
         literal_shapes: program
             .classes

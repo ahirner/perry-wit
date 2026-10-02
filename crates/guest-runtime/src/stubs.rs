@@ -19,8 +19,8 @@ pub(crate) extern "C" fn string_eq(_a: i64, _b: i64) -> i32 {
     0
 }
 #[no_mangle]
-pub(crate) extern "C" fn string_len(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn string_len(value: i64) -> i64 {
+    (get_state().string_units(value).len() as f64).to_bits() as i64
 }
 #[no_mangle]
 pub(crate) extern "C" fn jsvalue_to_string(_a: i64) -> i64 {
@@ -246,8 +246,10 @@ pub(crate) extern "C" fn array_push_spread(_a: i64, _b: i64) -> i64 {
     0
 }
 #[no_mangle]
-pub(crate) extern "C" fn string_charAt(_a: i64, _b: i64) -> i64 {
-    0
+pub(crate) extern "C" fn string_charAt(value: i64, index: i64) -> i64 {
+    let state = get_state();
+    let units = state.string_code_unit(value, index).into_iter().collect();
+    state.alloc_string_units(units)
 }
 #[no_mangle]
 pub(crate) extern "C" fn string_substring(_a: i64, _b: i64, _c: i64) -> i64 {
@@ -531,9 +533,7 @@ pub(crate) extern "C" fn has_exception() -> i32 {
 pub(crate) extern "C" fn get_exception() -> i64 {
     let state = crate::state::get_state();
     if let Some(err) = state.current_exception.take() {
-        let str_id = state.strings.len();
-        state.strings.push(err);
-        crate::nanbox::nanbox_string(str_id)
+        state.alloc_string(&err)
     } else {
         crate::nanbox::TAG_UNDEFINED as i64
     }
@@ -654,9 +654,7 @@ pub(crate) extern "C" fn buffer_to_string(handle: i64, _encoding: i64) -> i64 {
     if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
         let bytes = v.to_vec();
         let s = String::from_utf8_lossy(&bytes).into_owned();
-        let id = state.strings.len();
-        state.strings.push(s);
-        nanbox_string(id)
+        state.alloc_string(&s)
     } else {
         nanbox_string(0)
     }

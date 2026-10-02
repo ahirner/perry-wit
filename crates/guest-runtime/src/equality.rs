@@ -9,7 +9,7 @@ enum Value<'a> {
     Null,
     Bool(bool),
     Number(f64),
-    String(Cow<'a, str>),
+    String(Cow<'a, [u16]>),
     Object(i64),
 }
 
@@ -23,15 +23,15 @@ fn decode(state: &RuntimeState, value: i64) -> Value<'_> {
             state
                 .strings
                 .get((bits & 0xffff_ffff) as usize)
-                .map(String::as_str)
-                .unwrap_or(""),
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         )),
         bits if bits >> 48 == POINTER_TAG => Value::Object(value),
         bits => Value::Number(f64::from_bits(bits)),
     }
 }
 
-fn string_number(value: &str) -> f64 {
+pub(crate) fn string_number(value: &str) -> f64 {
     let value = value.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     match value {
         "" => return 0.0,
@@ -81,7 +81,11 @@ fn array_element_string(value: &serde_json::Value) -> String {
 }
 
 fn object_primitive(state: &RuntimeState, object: i64) -> Value<'static> {
-    Value::String(Cow::Owned(array_element_string(&state.to_js_value(object))))
+    Value::String(Cow::Owned(
+        array_element_string(&state.to_js_value(object))
+            .encode_utf16()
+            .collect(),
+    ))
 }
 
 fn loose_equal(state: &RuntimeState, left: Value<'_>, right: Value<'_>) -> bool {
@@ -95,7 +99,9 @@ fn loose_equal(state: &RuntimeState, left: Value<'_>, right: Value<'_>) -> bool 
             loose_equal(state, other, Value::Number(u8::from(value) as f64))
         }
         (Value::Number(number), Value::String(string))
-        | (Value::String(string), Value::Number(number)) => number == string_number(&string),
+        | (Value::String(string), Value::Number(number)) => {
+            number == string_number(&String::from_utf16_lossy(&string))
+        }
         (Value::Object(object), other @ (Value::String(_) | Value::Number(_))) => {
             loose_equal(state, object_primitive(state, object), other)
         }

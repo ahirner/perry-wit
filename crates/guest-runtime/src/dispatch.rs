@@ -3,8 +3,8 @@
 use crate::http::{start_http_request, ResponseEntry};
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
-    get_pointer_id, nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL,
-    TAG_TRUE, TAG_UNDEFINED,
+    get_pointer_id, nanbox_pointer, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE,
+    TAG_UNDEFINED,
 };
 use crate::state::{get_state, JsHandle};
 
@@ -13,7 +13,7 @@ pub extern "C" fn string_new(offset: i32, len: i32) {
     let state = get_state();
     let slice = unsafe { std::slice::from_raw_parts(offset as *const u8, len as usize) };
     if let Ok(s) = std::str::from_utf8(slice) {
-        state.strings.push(s.to_string());
+        state.alloc_string(s);
     }
 }
 
@@ -106,9 +106,8 @@ pub extern "C" fn mem_call_clocks(func_name_id: f64, arg_count: f64, base_addr: 
     let name = state
         .strings
         .get(name_idx)
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
 
     let count = arg_count as usize;
     let mut raw_args = Vec::with_capacity(count);
@@ -134,9 +133,8 @@ pub extern "C" fn mem_call_random(func_name_id: f64, arg_count: f64, base_addr: 
     let name = state
         .strings
         .get(name_idx)
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
 
     let count = arg_count as usize;
     let mut raw_args = Vec::with_capacity(count);
@@ -156,19 +154,14 @@ pub extern "C" fn mem_call_random(func_name_id: f64, arg_count: f64, base_addr: 
 }
 
 #[no_mangle]
-pub extern "C" fn mem_call_clocks_random(
-    func_name_id: f64,
-    arg_count: f64,
-    base_addr: i32,
-) -> f64 {
+pub extern "C" fn mem_call_clocks_random(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
     let state = get_state();
     let name_idx = func_name_id as usize;
     let name = state
         .strings
         .get(name_idx)
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
 
     let count = arg_count as usize;
     let mut raw_args = Vec::with_capacity(count);
@@ -201,9 +194,8 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
     let name = state
         .strings
         .get(name_idx)
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
 
     let count = arg_count as usize;
     let mut raw_args = Vec::with_capacity(count);
@@ -373,9 +365,7 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
         if let Some(id) = resp_id {
             match crate::http::get_response_body(id) {
                 Ok(body) => {
-                    let str_id = state.strings.len();
-                    state.strings.push(body);
-                    return nanbox_string(str_id);
+                    return state.alloc_string(&body);
                 }
                 Err(e) => {
                     fail_with_error(&e);
@@ -395,8 +385,8 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
     let name = state
         .strings
         .get(name_idx)
-        .map(|s| s.as_str())
-        .unwrap_or("");
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
     let count = arg_count as usize;
 
     let mut raw_args = Vec::with_capacity(count);
@@ -407,7 +397,7 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
 
     if name == "has_exception" {
         return crate::stubs::has_exception();
-    } else if matches!(name, "string_eq" | "js_strict_eq" | "js_loose_eq") {
+    } else if matches!(name.as_str(), "string_eq" | "js_strict_eq" | "js_loose_eq") {
         if let [left, right] = raw_args.as_slice() {
             return i32::from(crate::equality::equal(
                 state,

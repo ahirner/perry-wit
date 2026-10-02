@@ -1,6 +1,5 @@
 //! Canonical ABI memory layout, string conversion, and argument marshalling.
 
-use crate::nanbox::nanbox_string;
 use crate::state::get_state;
 
 /// Stops a component invocation if guest execution left an uncaught exception.
@@ -17,9 +16,7 @@ pub extern "C" fn cabi_import_string(ptr: i32, len: i32) -> i64 {
     let state = get_state();
     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let s = std::str::from_utf8(slice).unwrap_or_default();
-    let id = state.strings.len();
-    state.strings.push(s.to_string());
-    nanbox_string(id)
+    state.alloc_string(s)
 }
 
 /// Exports a nanboxed JS value as a Canonical ABI UTF-8 string `(ptr, len)`.
@@ -71,9 +68,7 @@ pub extern "C" fn cabi_import_json(ptr: i32, len: i32) -> i64 {
         crate::nanbox::nanbox_pointer(id)
     } else {
         let s = std::str::from_utf8(slice).unwrap_or_default();
-        let id = state.strings.len();
-        state.strings.push(s.to_string());
-        nanbox_string(id)
+        state.alloc_string(s)
     }
 }
 
@@ -83,9 +78,8 @@ pub extern "C" fn cabi_import_json(ptr: i32, len: i32) -> i64 {
 #[no_mangle]
 pub extern "C" fn cabi_export_json(val: i64) -> i32 {
     let state = get_state();
-    let js_val = state.to_js_value(val);
-    let bytes = serde_json::to_vec(&js_val).unwrap_or_else(|_| b"null".to_vec());
-    Box::into_raw(Box::new(allocate_bytes(&bytes))) as i32
+    let json = state.stringify(val);
+    Box::into_raw(Box::new(allocate_bytes(json.as_bytes()))) as i32
 }
 
 /// Cleanup hook called by host post-return to reclaim Canonical ABI memory buffers.

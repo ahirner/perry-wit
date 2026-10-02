@@ -6,8 +6,7 @@
 
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
-    nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE,
-    TAG_UNDEFINED,
+    nanbox_pointer, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED,
 };
 use crate::state::{get_state, JsHandle};
 
@@ -18,9 +17,8 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
     let name = state
         .strings
         .get(name_idx)
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(|s| String::from_utf16_lossy(s))
+        .unwrap_or_default();
     let count = arg_count as usize;
     let mut raw_args = Vec::with_capacity(count);
     let ptr = base_addr as *const i64;
@@ -120,50 +118,28 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                     _ => {}
                 }
             } else if (target_handle as u64) >> 48 == STRING_TAG {
-                let s = state.get_string(target_handle);
-                if let Some(c) = s.chars().nth(idx) {
-                    let str_id = state.strings.len();
-                    state.strings.push(c.to_string());
-                    result_i64 = nanbox_string(str_id);
-                } else {
-                    result_i64 = TAG_UNDEFINED as i64;
-                }
+                let unit = state
+                    .element_index(idx_val)
+                    .and_then(|index| state.string_units(target_handle).get(index).copied());
+                result_i64 = unit.map_or(TAG_UNDEFINED as i64, |unit| {
+                    state.alloc_string_units(vec![unit])
+                });
             }
         }
     } else if name == "string_charAt" || name == "string_char_at" {
-        if raw_args.len() >= 2 {
-            let s = state.get_string(raw_args[0]);
-            let idx_val = raw_args[1];
-            let idx_f = f64::from_bits(idx_val as u64);
-            let ch_str = if idx_f.is_finite() && idx_f >= 0.0 {
-                let idx = idx_f as usize;
-                s.chars()
-                    .nth(idx)
-                    .map(|c| c.to_string())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let str_id = state.strings.len();
-            state.strings.push(ch_str);
-            result_i64 = nanbox_string(str_id);
-        }
-    } else if name == "string_charCodeAt" || name == "string_char_code_at" {
-        if raw_args.len() >= 2 {
-            let s = state.get_string(raw_args[0]);
-            let idx_val = raw_args[1];
-            let idx_f = f64::from_bits(idx_val as u64);
-            if idx_f.is_finite() && idx_f >= 0.0 {
-                let idx = idx_f as usize;
-                if let Some(c) = s.chars().nth(idx) {
-                    result_i64 = ((c as u32) as f64).to_bits() as i64;
-                } else {
-                    result_i64 = f64::NAN.to_bits() as i64;
-                }
-            } else {
-                result_i64 = f64::NAN.to_bits() as i64;
-            }
-        }
+        let value = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+        let index = raw_args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+        result_i64 = crate::stubs::string_charAt(value, index);
+    } else if matches!(
+        name.as_str(),
+        "charCodeAt" | "string_charCodeAt" | "string_char_code_at"
+    ) {
+        let value = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+        let index = raw_args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+        result_i64 = state
+            .string_code_unit(value, index)
+            .map_or(f64::NAN, f64::from)
+            .to_bits() as i64;
     } else if name == "string_len" || name == "array_length" {
         let arg = raw_args.first().copied().unwrap_or(0);
         if let Some(h) = state.get_handle(arg) {
@@ -178,12 +154,12 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                     result_i64 = (arr.len() as f64).to_bits() as i64;
                 }
                 _ => {
-                    let len = state.get_string(arg).len();
+                    let len = state.string_units(arg).len();
                     result_i64 = (len as f64).to_bits() as i64;
                 }
             }
         } else {
-            let len = state.get_string(arg).len();
+            let len = state.string_units(arg).len();
             result_i64 = (len as f64).to_bits() as i64;
         }
     } else if name == "object_new" {
@@ -271,11 +247,8 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         }
     } else if name == "json_stringify" {
         let arg = raw_args.first().copied().unwrap_or(0);
-        let val_json = state.to_js_value(arg);
-        let json_str = serde_json::to_string(&val_json).unwrap_or_else(|_| "{}".to_string());
-        let str_id = state.strings.len();
-        state.strings.push(json_str);
-        result_i64 = nanbox_string(str_id);
+        let json_str = state.stringify(arg);
+        result_i64 = state.alloc_string(&json_str);
     } else if name == "json_parse" {
         let arg = raw_args.first().copied().unwrap_or(0);
         let s = state.get_string(arg);
@@ -306,11 +279,9 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                 });
                 result_i64 = (left + right).to_bits() as i64;
             } else {
-                let mut text = state.get_string(args[0]);
-                text.push_str(&state.get_string(args[1]));
-                let str_id = state.strings.len();
-                state.strings.push(text);
-                result_i64 = nanbox_string(str_id);
+                let mut units = state.string_units(args[0]).into_owned();
+                units.extend_from_slice(&state.string_units(args[1]));
+                result_i64 = state.alloc_string_units(units);
             }
         }
     } else if name == "process_exit" || name == "exit" {

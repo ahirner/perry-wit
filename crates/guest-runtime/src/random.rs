@@ -1,6 +1,6 @@
 //! WASI Preview 2 Random implementation for Math.random and crypto APIs.
 
-use crate::nanbox::{nanbox_pointer, nanbox_string, TAG_UNDEFINED};
+use crate::nanbox::{nanbox_pointer, TAG_UNDEFINED};
 use crate::state::{get_state, JsHandle};
 
 /// Generates a pseudo-random floating point number in [0.0, 1.0) using WASI insecure random.
@@ -33,9 +33,7 @@ pub(crate) fn crypto_random_uuid() -> i64 {
     );
 
     let state = get_state();
-    let id = state.strings.len();
-    state.strings.push(uuid_str);
-    nanbox_string(id)
+    state.alloc_string(&uuid_str)
 }
 
 /// Fills a typed array in-place with cryptographically secure random bytes from wasi:random.
