@@ -252,19 +252,21 @@ pub fn synthesize_trampolines(
                 format!("call {helper}")
             }
             AbiType::Unit => "drop".to_string(),
-            _ => {
-                let helper = discovered
-                    .cabi_export_string
-                    .map(|idx| idx.to_string())
-                    .unwrap_or_else(|| "cabi_export_string".to_string());
-                format!("call {helper}")
-            }
+            AbiType::I32 => "f64.reinterpret_i64\n    i32.trunc_f64_s".into(),
+            AbiType::U32 => "f64.reinterpret_i64\n    i32.trunc_f64_u".into(),
+            AbiType::I64 => "f64.reinterpret_i64\n    i64.trunc_f64_s".into(),
+            AbiType::U64 => "f64.reinterpret_i64\n    i64.trunc_f64_u".into(),
+            AbiType::F32 => "f64.reinterpret_i64\n    f32.demote_f64".into(),
+            AbiType::F64 => "f64.reinterpret_i64".into(),
+            AbiType::Bool => "i64.const 0x7ffc000000000004\n    i64.eq".into(),
         };
 
-        let results_sig = if mapped.wit_function.result == AbiType::Unit {
-            String::new()
-        } else {
-            "(result i32)".to_string()
+        let results_sig = match mapped.wit_function.result {
+            AbiType::Unit => "",
+            AbiType::I64 | AbiType::U64 => "(result i64)",
+            AbiType::F32 => "(result f32)",
+            AbiType::F64 => "(result f64)",
+            _ => "(result i32)",
         };
 
         let import_body = import_calls.join("\n    ");
@@ -282,7 +284,10 @@ pub fn synthesize_trampolines(
         ));
 
         if let Some(post_cleanup) = discovered.cabi_post_cleanup
-            && mapped.wit_function.result != AbiType::Unit
+            && matches!(
+                mapped.wit_function.result,
+                AbiType::String | AbiType::ResultString | AbiType::JsonRecord
+            )
         {
             snippets.push_str(&format!(
                 r#"
