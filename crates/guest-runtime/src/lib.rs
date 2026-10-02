@@ -12,6 +12,7 @@ mod bindings {
 
 mod cabi;
 mod dispatch;
+mod equality;
 mod http;
 mod io;
 mod nanbox;

@@ -309,7 +309,16 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
         raw_args.push(unsafe { *ptr.add(i) });
     }
 
-    if name == "is_truthy" {
+    if matches!(name, "string_eq" | "js_strict_eq" | "js_loose_eq") {
+        if let [left, right] = raw_args.as_slice() {
+            return i32::from(crate::equality::equal(
+                state,
+                *left,
+                *right,
+                name == "js_loose_eq",
+            ));
+        }
+    } else if name == "is_truthy" {
         if let Some(&arg) = raw_args.first() {
             let bits = arg as u64;
             if bits == TAG_UNDEFINED || bits == TAG_NULL || bits == TAG_FALSE {

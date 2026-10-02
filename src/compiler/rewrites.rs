@@ -1,6 +1,12 @@
 //! Perry HIR rewrites for WebAssembly component compatibility.
 
 pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
+    // Perry emits this dispatcher call but omits its name from its runtime string pool.
+    program
+        .init
+        .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+            "js_loose_eq".into(),
+        )));
     for stmt in &mut program.init {
         rewrite_stmt(stmt);
     }

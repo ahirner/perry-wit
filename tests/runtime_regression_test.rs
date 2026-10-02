@@ -3,6 +3,37 @@ mod support;
 use support::{run, stdout};
 
 #[test]
+fn equality_compares_strings_primitives_and_object_identity() {
+    let output = run(
+        r#"
+        const a: any = JSON.parse('{"x":1}');
+        const b: any = JSON.parse('{"x":1}');
+        console.log("same" === ("sa" + "me"));
+        console.log("same" !== "other");
+        console.log(a === a);
+        console.log(a === b);
+        console.log(NaN === NaN);
+        console.log(0 === -0);
+        console.log(true === 1);
+        console.log(null === undefined);
+        console.log(null == undefined);
+        console.log("42" == 42);
+        console.log(false == "");
+        console.log(" 0x2a " == 42);
+        console.log("inf" == Infinity);
+        console.log([1] == 1);
+        console.log("x" == 0);
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        stdout(&output),
+        "true\ntrue\ntrue\nfalse\nfalse\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn malformed_json_fails_while_valid_primitives_keep_their_types() {
     let output = run(
         "console.log(JSON.parse('{invalid')); console.log('after');",
