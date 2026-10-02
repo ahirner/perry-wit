@@ -1,6 +1,7 @@
 //! Formal conformance evaluation and capability contracts.
 
 pub mod catalog;
+mod output;
 pub mod report;
 pub mod runner;
 

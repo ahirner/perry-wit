@@ -1,11 +1,32 @@
 //! Integration test for formal behavioral conformance and differential equivalence against Node.js oracle.
 
+#[path = "../src/conformance/output.rs"]
+mod output;
+
 use std::fs;
 use std::path::Path;
 
 use perry_wit::conformance::{
     CapabilityCatalog, ConformanceReport, EvidenceStatus, run_conformance_suite,
 };
+
+#[test]
+fn shell_banner_filter_preserves_component_output() {
+    for banner in [
+        "",
+        "Perry-WIT compiler development: cargo build, cargo test\n",
+        "Perry-WIT component SDK: tsc --noEmit, perry-wit, wasmtime\n",
+        "=== Perry-WIT Hermetic Environment ===\nTools ready\n======================================\n",
+    ] {
+        let captured = format!("{banner}Perry-WIT application output\n42\n");
+        let filtered = output::filter_nix_banner(&captured);
+        assert_eq!(filtered, "Perry-WIT application output\n42");
+        assert_eq!(
+            output::normalize_stream(&filtered),
+            ["Perry-WIT application output", "42"]
+        );
+    }
+}
 
 #[test]
 fn test_differential_conformance_suite() {

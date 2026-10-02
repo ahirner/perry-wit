@@ -12,6 +12,7 @@ use std::thread;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
+use super::output::{filter_nix_banner, normalize_stream};
 use crate::compiler::{CompileOptions, compile_file};
 
 /// Captured execution vector from an engine run.
@@ -304,41 +305,4 @@ pub fn run_conformance_suite(
     }
 
     Ok(results)
-}
-
-fn filter_nix_banner(s: &str) -> String {
-    let mut out = Vec::new();
-    let mut in_banner = false;
-    for line in s.lines() {
-        let trimmed = line.trim();
-        if trimmed.contains("=== Perry-WIT Hermetic Environment ===")
-            || trimmed.contains("Perry-WIT compiler development")
-            || trimmed.starts_with("Perry-WIT")
-        {
-            in_banner = true;
-            continue;
-        }
-        if in_banner {
-            if trimmed.contains("======================================") {
-                in_banner = false;
-            }
-            continue;
-        }
-        if trimmed.starts_with("warning:")
-            || trimmed.starts_with("building '/nix/store")
-            || trimmed.starts_with("evaluating flake")
-            || trimmed.starts_with("copying path '/nix/store")
-        {
-            continue;
-        }
-        out.push(line);
-    }
-    out.join("\n").trim().to_string()
-}
-
-fn normalize_stream(s: &str) -> Vec<String> {
-    s.lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
 }
