@@ -21,22 +21,7 @@ pub extern "C" fn cabi_import_string(ptr: i32, len: i32) -> i64 {
 pub extern "C" fn cabi_export_string(val: i64) -> i32 {
     let state = get_state();
     let s = state.get_string(val);
-    let bytes = s.into_bytes();
-    let str_len = bytes.len() as u32;
-
-    let str_ptr = if str_len > 0 {
-        let mut b = bytes.into_boxed_slice();
-        let p = b.as_mut_ptr();
-        std::mem::forget(b);
-        p as u32
-    } else {
-        1
-    };
-
-    let mut ret_area = Box::new([0u32; 2]);
-    ret_area[0] = str_ptr;
-    ret_area[1] = str_len;
-    Box::into_raw(ret_area) as *mut u8 as i32
+    Box::into_raw(Box::new(allocate_bytes(s.as_bytes()))) as i32
 }
 
 /// Exports a nanboxed JS value as a Canonical ABI `result<string, string>`.
@@ -44,26 +29,28 @@ pub extern "C" fn cabi_export_string(val: i64) -> i32 {
 /// Returns an `i32` pointer to a 12-byte return area:
 /// `[u32 discriminant, u32 str_ptr, u32 str_len]` (0 = ok, 1 = err).
 #[no_mangle]
-pub extern "C" fn cabi_export_result_string(val: i64, is_err: i32) -> i32 {
-    let state = get_state();
-    let s = state.get_string(val);
-    let bytes = s.into_bytes();
-    let str_len = bytes.len() as u32;
-
-    let str_ptr = if str_len > 0 {
-        let mut b = bytes.into_boxed_slice();
-        let p = b.as_mut_ptr();
-        std::mem::forget(b);
-        p as u32
-    } else {
-        1
+pub extern "C" fn cabi_export_result_string(val: i64) -> i32 {
+    let value = get_state().to_js_value(val);
+    let (branch, payload) = match value.get("ok").and_then(serde_json::Value::as_bool) {
+        Some(true) => (0, value.get("value")),
+        Some(false) => (1, value.get("error")),
+        None => {
+            crate::io::fail_with_error("WIT result requires an object with a boolean 'ok' field")
+        }
     };
+    let payload = payload
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| {
+            crate::io::fail_with_error("WIT result requires a string payload in 'value' or 'error'")
+        });
+    let [ptr, len] = allocate_bytes(payload.as_bytes());
+    Box::into_raw(Box::new([branch, ptr, len])) as i32
+}
 
-    let mut ret_area = Box::new([0u32; 3]);
-    ret_area[0] = is_err as u32;
-    ret_area[1] = str_ptr;
-    ret_area[2] = str_len;
-    Box::into_raw(ret_area) as *mut u8 as i32
+fn allocate_bytes(bytes: &[u8]) -> [u32; 2] {
+    let len = bytes.len() as u32;
+    let ptr = Box::into_raw(bytes.to_vec().into_boxed_slice()) as *mut u8 as u32;
+    [ptr, len]
 }
 
 /// Imports a UTF-8 JSON payload from Canonical ABI memory into a structured JS object handle.
@@ -90,21 +77,7 @@ pub extern "C" fn cabi_export_json(val: i64) -> i32 {
     let state = get_state();
     let js_val = state.to_js_value(val);
     let bytes = serde_json::to_vec(&js_val).unwrap_or_else(|_| b"null".to_vec());
-    let json_len = bytes.len() as u32;
-
-    let json_ptr = if json_len > 0 {
-        let mut b = bytes.into_boxed_slice();
-        let p = b.as_mut_ptr();
-        std::mem::forget(b);
-        p as u32
-    } else {
-        1
-    };
-
-    let mut ret_area = Box::new([0u32; 2]);
-    ret_area[0] = json_ptr;
-    ret_area[1] = json_len;
-    Box::into_raw(ret_area) as *mut u8 as i32
+    Box::into_raw(Box::new(allocate_bytes(&bytes))) as i32
 }
 
 /// Cleanup hook called by host post-return to reclaim Canonical ABI memory buffers.

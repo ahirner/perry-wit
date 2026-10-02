@@ -271,7 +271,7 @@ pub fn synthesize_trampolines(
                     .cabi_export_result_string
                     .map(|idx| idx.to_string())
                     .unwrap_or_else(|| "cabi_export_result_string".to_string());
-                format!("i32.const 0\n    call {helper}")
+                format!("call {helper}")
             }
             AbiType::JsonRecord => {
                 let helper = discovered

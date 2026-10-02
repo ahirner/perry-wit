@@ -25,9 +25,15 @@ fn result_and_string_post_return_reclaim_payloads_and_exact_return_areas() {
         }
         const e = new WebAssembly.Instance(module_, imports).exports;
         e._start();
+        const values = [true, false].map(ok => {
+            const bytes = new TextEncoder().encode(JSON.stringify(ok ? {ok, value: '0'} : {ok, error: '0'}));
+            const ptr = e.cabi_realloc(0, 0, 1, bytes.length);
+            new Uint8Array(e.memory.buffer, ptr, bytes.length).set(bytes);
+            return e.cabi_import_json(ptr, bytes.length);
+        });
         function cycle() {
             for (let branch = 0; branch < 2; branch++) {
-                const ptr = e.cabi_export_result_string(0n, branch);
+                const ptr = e.cabi_export_result_string(values[branch]);
                 const words = new Uint32Array(e.memory.buffer, ptr, 3);
                 assert.equal(words[0], branch);
                 assert.equal(new TextDecoder().decode(new Uint8Array(e.memory.buffer, words[1], words[2])), '0');

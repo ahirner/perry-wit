@@ -1,5 +1,25 @@
 mod support;
 
+#[test]
+fn string_results_export_the_selected_branch_and_payload() {
+    let wit = format!(
+        "package test:abi; world test {{ {RUNTIME_IMPORTS} export run-task: func() -> result<string, string>; }}"
+    );
+    for (expression, expected) in [
+        (r#"{ ok: true, value: "done" }"#, r#"ok("done")"#),
+        (r#"{ ok: false, error: "failed" }"#, r#"err("failed")"#),
+        (r#"{ ok: true, value: "" }"#, r#"ok("")"#),
+        (r#"{ ok: false, error: "" }"#, r#"err("")"#),
+    ] {
+        let output = support::run(
+            &format!("export function runTask(): any {{ return {expression}; }}"),
+            Some(&wit),
+            Some("run-task()"),
+        );
+        assert_eq!(support::stdout(&output).trim(), expected);
+    }
+}
+
 const RUNTIME_IMPORTS: &str = r#"
     import wasi:cli/stdout@0.2.6;
     import wasi:cli/stderr@0.2.6;
