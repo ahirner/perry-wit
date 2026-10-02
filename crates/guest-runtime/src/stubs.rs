@@ -552,6 +552,11 @@ pub(crate) extern "C" fn string_trim(_a: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn string_includes(target: i64, search: i64) -> i32 {
     let state = get_state();
+    if let Some(JsHandle::Array(_)) | Some(JsHandle::Json(serde_json::Value::Array(_))) =
+        state.get_handle(target)
+    {
+        return array_includes(target, search);
+    }
     let target = state.string_units(target);
     let search = state.string_units(search);
     i32::from(search.is_empty() || target.windows(search.len()).any(|part| part == &*search))
@@ -1191,6 +1196,36 @@ pub(crate) extern "C" fn fs_read_file_binary(path: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn fs_write_file_sync(path: i64, content: i64) -> i64 {
     crate::filesystem::fs_write_file_sync(path, content, TAG_UNDEFINED as i64)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_readdir_sync(path: i64) -> i64 {
+    crate::filesystem::fs_readdir_sync(path)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_stat_sync(path: i64) -> i64 {
+    crate::filesystem::fs_stat_sync(path)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_unlink_sync(path: i64) -> i64 {
+    crate::filesystem::fs_unlink_sync(path)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_mkdir_sync(path: i64) -> i64 {
+    crate::filesystem::fs_mkdir_sync(path)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_rmdir_sync(path: i64) -> i64 {
+    crate::filesystem::fs_rmdir_sync(path)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn fs_exists_sync(path: i64) -> i64 {
+    crate::filesystem::fs_exists_sync(path)
 }
 
 #[no_mangle]

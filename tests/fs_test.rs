@@ -571,3 +571,239 @@ fn fs_binary_repeated_operations() {
 
     assert!(stdout.contains("BINARY_CYCLES_PASSED=200"), "stdout: {stdout}");
 }
+
+#[test]
+fn fs_exists_and_mkdir_and_readdir() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import * as fs from "fs";
+
+        console.log("EXISTS_BEFORE=" + fs.existsSync("/sandbox/folder"));
+        fs.mkdirSync("/sandbox/folder");
+        console.log("EXISTS_AFTER=" + fs.existsSync("/sandbox/folder"));
+
+        fs.writeFileSync("/sandbox/folder/file1.txt", "hello 1");
+        fs.writeFileSync("/sandbox/folder/file2.txt", "hello 2");
+
+        const entries = fs.readdirSync("/sandbox/folder");
+        console.log("ENTRIES_LEN=" + entries.length);
+        console.log("HAS_FILE1=" + entries.includes("file1.txt"));
+        console.log("HAS_FILE2=" + entries.includes("file2.txt"));
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("EXISTS_BEFORE=false"), "stdout: {stdout}");
+    assert!(stdout.contains("EXISTS_AFTER=true"), "stdout: {stdout}");
+    assert!(stdout.contains("ENTRIES_LEN=2"), "stdout: {stdout}");
+    assert!(stdout.contains("HAS_FILE1=true"), "stdout: {stdout}");
+    assert!(stdout.contains("HAS_FILE2=true"), "stdout: {stdout}");
+}
+
+#[test]
+fn fs_stat_file_and_directory() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import * as fs from "fs";
+
+        fs.writeFileSync("/sandbox/test_stat.txt", "1234567890");
+        const fileStat = fs.statSync("/sandbox/test_stat.txt");
+        console.log("FILE_IS_FILE=" + fileStat.isFile());
+        console.log("FILE_IS_DIR=" + fileStat.isDirectory());
+        console.log("FILE_SIZE=" + fileStat.size);
+        console.log("FILE_HAS_MTIME=" + (fileStat.mtimeMs > 0));
+
+        const dirStat = fs.statSync("/sandbox");
+        console.log("DIR_IS_FILE=" + dirStat.isFile());
+        console.log("DIR_IS_DIR=" + dirStat.isDirectory());
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("FILE_IS_FILE=true"), "stdout: {stdout}");
+    assert!(stdout.contains("FILE_IS_DIR=false"), "stdout: {stdout}");
+    assert!(stdout.contains("FILE_SIZE=10"), "stdout: {stdout}");
+    assert!(stdout.contains("FILE_HAS_MTIME=true"), "stdout: {stdout}");
+    assert!(stdout.contains("DIR_IS_FILE=false"), "stdout: {stdout}");
+    assert!(stdout.contains("DIR_IS_DIR=true"), "stdout: {stdout}");
+}
+
+#[test]
+fn fs_unlink_and_rmdir() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import * as fs from "fs";
+
+        fs.mkdirSync("/sandbox/temp_dir");
+        fs.writeFileSync("/sandbox/temp_dir/temp_file.txt", "temp");
+
+        console.log("FILE_EXISTS_PRE=" + fs.existsSync("/sandbox/temp_dir/temp_file.txt"));
+        fs.unlinkSync("/sandbox/temp_dir/temp_file.txt");
+        console.log("FILE_EXISTS_POST=" + fs.existsSync("/sandbox/temp_dir/temp_file.txt"));
+
+        console.log("DIR_EXISTS_PRE=" + fs.existsSync("/sandbox/temp_dir"));
+        fs.rmdirSync("/sandbox/temp_dir");
+        console.log("DIR_EXISTS_POST=" + fs.existsSync("/sandbox/temp_dir"));
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("FILE_EXISTS_PRE=true"), "stdout: {stdout}");
+    assert!(stdout.contains("FILE_EXISTS_POST=false"), "stdout: {stdout}");
+    assert!(stdout.contains("DIR_EXISTS_PRE=true"), "stdout: {stdout}");
+    assert!(stdout.contains("DIR_EXISTS_POST=false"), "stdout: {stdout}");
+}
+
+#[test]
+fn fs_metadata_error_handling() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import * as fs from "fs";
+
+        fs.writeFileSync("/sandbox/plain.txt", "not a directory");
+
+        let enotdirCaught = false;
+        try {
+            fs.readdirSync("/sandbox/plain.txt");
+        } catch (e: any) {
+            const msg = "" + e;
+            console.log("CAUGHT_READDIR=" + msg);
+            enotdirCaught = msg.includes("ENOTDIR");
+        }
+        console.log("ENOTDIR_PASSED=" + enotdirCaught);
+
+        let enoentStatCaught = false;
+        try {
+            fs.statSync("/sandbox/does_not_exist.txt");
+        } catch (e: any) {
+            const msg = "" + e;
+            console.log("CAUGHT_STAT=" + msg);
+            enoentStatCaught = msg.includes("ENOENT");
+        }
+        console.log("ENOENT_STAT_PASSED=" + enoentStatCaught);
+
+        let enoentUnlinkCaught = false;
+        try {
+            fs.unlinkSync("/sandbox/does_not_exist.txt");
+        } catch (e: any) {
+            const msg = "" + e;
+            console.log("CAUGHT_UNLINK=" + msg);
+            enoentUnlinkCaught = msg.includes("ENOENT");
+        }
+        console.log("ENOENT_UNLINK_PASSED=" + enoentUnlinkCaught);
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("ENOTDIR_PASSED=true"), "stdout: {stdout}");
+    assert!(stdout.contains("ENOENT_STAT_PASSED=true"), "stdout: {stdout}");
+    assert!(stdout.contains("ENOENT_UNLINK_PASSED=true"), "stdout: {stdout}");
+}
+
+#[test]
+fn fs_named_imports_metadata_execution() {
+    let scratch = support::Scratch::new();
+    let host_dir = scratch.0.join("sandbox");
+    fs::create_dir_all(&host_dir).unwrap();
+
+    let wasm = scratch.compile(
+        r#"
+        import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+
+        mkdirSync("/sandbox/named_dir");
+        console.log("NAMED_EXISTS=" + existsSync("/sandbox/named_dir"));
+
+        const entries = readdirSync("/sandbox");
+        console.log("NAMED_HAS_DIR=" + entries.includes("named_dir"));
+
+        const st = statSync("/sandbox/named_dir");
+        console.log("NAMED_IS_DIR=" + st.isDirectory());
+    "#,
+        None,
+    );
+
+    let mut command = Command::new(support::get_wasmtime_path());
+    command.args([
+        "run",
+        "-C",
+        "cache=n",
+        "--dir",
+        &format!("{}::/sandbox", host_dir.display()),
+        wasm.to_str().unwrap(),
+    ]);
+
+    let output = command.output().expect("wasmtime execution failed");
+    let stdout = support::stdout(&output);
+
+    assert!(stdout.contains("NAMED_EXISTS=true"), "stdout: {stdout}");
+    assert!(stdout.contains("NAMED_HAS_DIR=true"), "stdout: {stdout}");
+    assert!(stdout.contains("NAMED_IS_DIR=true"), "stdout: {stdout}");
+}

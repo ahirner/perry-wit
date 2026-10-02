@@ -57,6 +57,17 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         let arr_handle = raw_args.first().copied().unwrap_or(0);
         let sep = raw_args.get(1).copied().unwrap_or(0);
         result_i64 = crate::stubs::array_join(arr_handle, sep);
+    } else if name == "array_includes" || name == "includes" {
+        if raw_args.len() >= 2 {
+            let res = if crate::stubs::array_includes(raw_args[0], raw_args[1]) != 0
+                || crate::stubs::string_includes(raw_args[0], raw_args[1]) != 0
+            {
+                TAG_TRUE as i64
+            } else {
+                TAG_FALSE as i64
+            };
+            result_i64 = res;
+        }
     } else if name == "uint8array_new" || name == "buffer_alloc" {
         result_i64 =
             crate::stubs::uint8array_new(raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64));

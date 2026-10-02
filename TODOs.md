@@ -179,20 +179,22 @@ Verification:
 - [x] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
     - [x] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`.
     - [x] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
-- [ ] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
-    - [ ] Support `fs.readdirSync(path)` via `Descriptor::read_directory` stream collecting child entry names, and `fs.unlinkSync(path)` via `Descriptor::unlink_file_at`.
-    - [ ] Support `fs.statSync(path)` via `Descriptor::stat`, exposing `{ isFile(): boolean, isDirectory(): boolean, size: number, mtimeMs: number }`.
-    - [ ] Verify listing, metadata, and removal for that subset, including failure paths (`ENOENT`, `ENOTDIR`, `EISDIR`) and descriptor cleanup.
+- [x] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
+    - [x] Support `fs.readdirSync(path)` via `Descriptor::read_directory` stream collecting child entry names, and `fs.unlinkSync(path)` via `Descriptor::unlink_file_at`.
+    - [x] Support `fs.mkdirSync(path)` via `Descriptor::create_directory_at` and `fs.rmdirSync(path)` via `Descriptor::remove_directory_at`.
+    - [x] Support `fs.existsSync(path)` via `Descriptor::stat_at` (never throws on non-existent paths).
+    - [x] Support `fs.statSync(path)` via `Descriptor::stat_at(PathFlags::SYMLINK_FOLLOW, ...)`, exposing `{ isFile(): boolean, isDirectory(): boolean, size: number, mtimeMs: number }`.
+    - [x] Verify listing, metadata, and removal for that subset, including failure paths (`ENOENT`, `ENOTDIR`, `EISDIR`) and descriptor cleanup.
 
 Verification:
 - Added `wasi:filesystem/types@0.2.6` and `wasi:filesystem/preopens@0.2.6` to WIT world adapter in `wit/world.wit`.
-- Implemented `normalize_path()`, `locate_preopen()`, `fs_read_file_sync()`, and `fs_write_file_sync()` in `crates/guest-runtime/src/filesystem.rs`.
+- Implemented `normalize_path()`, `locate_preopen()`, `fs_read_file_sync()`, `fs_read_file_binary()`, `fs_write_file_sync()`, `fs_readdir_sync()`, `fs_stat_sync()`, `fs_unlink_sync()`, `fs_mkdir_sync()`, `fs_rmdir_sync()`, and `fs_exists_sync()` in `crates/guest-runtime/src/filesystem.rs`.
 - Enforced sandboxed confinement: path normalization eliminates `.` and `..` segments, rejects NUL bytes, matches longest mounted preopen prefix, and prohibits escapes outside preopened directories.
 - Handled short I/O and streaming in both directions: `fs_read_file_sync` streams chunks of up to 64KB until EOF; `fs_write_file_sync` chunks writes into 4096-byte slices with clean descriptor and stream drops.
 - Formatted POSIX-compliant error codes (`ENOENT`, `EACCES`, `EEXIST`, `EISDIR`, `ENOTDIR`, `EPERM`, `EROFS`, `EIO`) integrated with guest runtime exception propagation.
-- Added AST rewrites for `fs.readFileSync`, `fs.writeFileSync`, and named imports in `src/compiler/rewrites.rs` emitting `__needs_fs__`.
+- Added AST rewrites for `fs.readFileSync`, `fs.writeFileSync`, `fs.readdirSync`, `fs.statSync`, `fs.unlinkSync`, `fs.mkdirSync`, `fs.rmdirSync`, `fs.existsSync`, and named imports in `src/compiler/rewrites.rs` emitting `__needs_fs__`.
 - Linker pruning in `src/linker/prune.rs` and import routing in `src/linker/mod.rs` so pure components completely prune `wasi:filesystem`, while filesystem components import `wasi:filesystem` and route through `mem_call_fs` or `mem_call_all_sync`.
-- Verified in `tests/fs_test.rs` (8 integration tests passing under Wasmtime): round-trip UTF-8 file reads/writes, named imports (`node:fs`), missing files throwing `ENOENT`, sandbox escape attempts throwing `EACCES`, 128KB multi-chunk read/write, 500 repeated descriptor open/close cycles without resource leaks, and import pruning.
+- Verified in `tests/fs_test.rs` (17 integration tests passing under Wasmtime): round-trip UTF-8 file reads/writes, binary Uint8Array reads/writes with subarray offsets, named imports (`node:fs`), missing files throwing `ENOENT`, directory listing and creation (`readdirSync`, `mkdirSync`), file and directory metadata (`statSync.isFile()`, `statSync.isDirectory()`, `statSync.size`, `statSync.mtimeMs`), existence checks (`existsSync`), file and directory deletion (`unlinkSync`, `rmdirSync`), error handling (`ENOTDIR`, `ENOENT`), sandbox escape attempts throwing `EACCES`, 128KB multi-chunk read/write, 500 repeated descriptor open/close cycles without resource leaks, and capability pruning.
 
 Promise-based filesystem APIs need guest async execution and evidence that their underlying operations can make progress; they are a later slice.
 

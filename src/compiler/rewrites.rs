@@ -381,6 +381,66 @@ impl Rewriter {
             };
             return;
         }
+        if let perry_hir::ir::Expr::FsExistsSync(path_expr) = expr {
+            self.needs_fs = true;
+            let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "fs_exists_sync".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![path],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if let perry_hir::ir::Expr::FsMkdirSync(path_expr) = expr {
+            self.needs_fs = true;
+            let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "fs_mkdir_sync".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![path],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if let perry_hir::ir::Expr::FsUnlinkSync(path_expr) = expr {
+            self.needs_fs = true;
+            let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "fs_unlink_sync".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![path],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
+        if let perry_hir::ir::Expr::FsRmRecursive(path_expr) = expr {
+            self.needs_fs = true;
+            let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
+            *expr = perry_hir::ir::Expr::Call {
+                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                    property: "fs_rmdir_sync".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![path],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
         if let perry_hir::ir::Expr::NativeMethodCall {
             module,
             object: Some(object),
@@ -456,6 +516,114 @@ impl Rewriter {
                             byte_offset: 0,
                         }),
                         args: vec![path, content, options],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                } else if method == "readdirSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_readdir_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                } else if method == "statSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_stat_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                } else if method == "unlinkSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_unlink_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                } else if method == "mkdirSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_mkdir_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                } else if method == "rmdirSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_rmdir_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path],
+                        type_args: Vec::new(),
+                        byte_offset: 0,
+                    };
+                    return;
+                } else if method == "existsSync" {
+                    self.needs_fs = true;
+                    let path = if !args.is_empty() {
+                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                    } else {
+                        perry_hir::ir::Expr::Undefined
+                    };
+                    *expr = perry_hir::ir::Expr::Call {
+                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                            object: Box::new(perry_hir::ir::Expr::Undefined),
+                            property: "fs_exists_sync".into(),
+                            byte_offset: 0,
+                        }),
+                        args: vec![path],
                         type_args: Vec::new(),
                         byte_offset: 0,
                     };
@@ -659,13 +827,131 @@ impl Rewriter {
                                 byte_offset: 0,
                             };
                             return;
+                        } else if property == "readdirSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_readdir_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
+                        } else if property == "statSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_stat_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
+                        } else if property == "unlinkSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_unlink_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
+                        } else if property == "mkdirSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_mkdir_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
+                        } else if property == "rmdirSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_rmdir_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
+                        } else if property == "existsSync" {
+                            self.needs_fs = true;
+                            let path = if !args.is_empty() {
+                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                            } else {
+                                perry_hir::ir::Expr::Undefined
+                            };
+                            *expr = perry_hir::ir::Expr::Call {
+                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                    object: Box::new(perry_hir::ir::Expr::Undefined),
+                                    property: "fs_exists_sync".into(),
+                                    byte_offset: 0,
+                                }),
+                                args: vec![path],
+                                type_args: Vec::new(),
+                                byte_offset: 0,
+                            };
+                            return;
                         }
                     }
                 }
-                if property == "fs_read_file_sync"
-                    || property == "fs_read_file_binary"
-                    || property == "fs_write_file_sync"
-                {
+                if matches!(
+                    property.as_str(),
+                    "fs_read_file_sync"
+                        | "fs_read_file_binary"
+                        | "fs_write_file_sync"
+                        | "fs_readdir_sync"
+                        | "fs_stat_sync"
+                        | "fs_unlink_sync"
+                        | "fs_mkdir_sync"
+                        | "fs_rmdir_sync"
+                        | "fs_exists_sync"
+                        | "isFile"
+                        | "isDirectory"
+                ) {
                     self.needs_fs = true;
                 }
                 if property == "json" {

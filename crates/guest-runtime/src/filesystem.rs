@@ -1,6 +1,6 @@
 use crate::bindings::wasi::filesystem::preopens;
 use crate::bindings::wasi::filesystem::types::{
-    Descriptor, DescriptorFlags, ErrorCode, OpenFlags, PathFlags,
+    Descriptor, DescriptorFlags, DescriptorType, ErrorCode, OpenFlags, PathFlags,
 };
 use crate::bindings::wasi::io::streams::StreamError;
 use crate::nanbox::TAG_UNDEFINED;
@@ -335,4 +335,248 @@ fn supported_write_options(options: &serde_json::Value) -> bool {
         }),
         _ => false,
     }
+}
+
+pub(crate) fn fs_exists_sync(path_val: i64) -> i64 {
+    let state = get_state();
+    let path = state.get_string(path_val);
+
+    let (dir, rel_path) = match locate_preopen(&path) {
+        Ok(loc) => loc,
+        Err(_) => return crate::nanbox::TAG_FALSE as i64,
+    };
+
+    let target_path = if rel_path.is_empty() {
+        ".".to_string()
+    } else {
+        rel_path
+    };
+
+    let exists = dir.stat_at(PathFlags::SYMLINK_FOLLOW, &target_path).is_ok();
+    drop(dir);
+    if exists {
+        crate::nanbox::TAG_TRUE as i64
+    } else {
+        crate::nanbox::TAG_FALSE as i64
+    }
+}
+
+pub(crate) fn fs_unlink_sync(path_val: i64) -> i64 {
+    let state = get_state();
+    let path = state.get_string(path_val);
+
+    let (dir, rel_path) = match locate_preopen(&path) {
+        Ok(loc) => loc,
+        Err(err) => {
+            get_state().current_exception = Some(err);
+            return 0;
+        }
+    };
+
+    if rel_path.is_empty() {
+        drop(dir);
+        get_state().current_exception =
+            Some(format_error_code(ErrorCode::NotPermitted, "unlink", &path));
+        return 0;
+    }
+
+    match dir.unlink_file_at(&rel_path) {
+        Ok(()) => {
+            drop(dir);
+            TAG_UNDEFINED as i64
+        }
+        Err(err) => {
+            drop(dir);
+            get_state().current_exception =
+                Some(format_error_code(err, "unlink", &path));
+            0
+        }
+    }
+}
+
+pub(crate) fn fs_mkdir_sync(path_val: i64) -> i64 {
+    let state = get_state();
+    let path = state.get_string(path_val);
+
+    let (dir, rel_path) = match locate_preopen(&path) {
+        Ok(loc) => loc,
+        Err(err) => {
+            get_state().current_exception = Some(err);
+            return 0;
+        }
+    };
+
+    if rel_path.is_empty() {
+        drop(dir);
+        get_state().current_exception =
+            Some(format_error_code(ErrorCode::Exist, "mkdir", &path));
+        return 0;
+    }
+
+    match dir.create_directory_at(&rel_path) {
+        Ok(()) => {
+            drop(dir);
+            TAG_UNDEFINED as i64
+        }
+        Err(err) => {
+            drop(dir);
+            get_state().current_exception =
+                Some(format_error_code(err, "mkdir", &path));
+            0
+        }
+    }
+}
+
+pub(crate) fn fs_rmdir_sync(path_val: i64) -> i64 {
+    let state = get_state();
+    let path = state.get_string(path_val);
+
+    let (dir, rel_path) = match locate_preopen(&path) {
+        Ok(loc) => loc,
+        Err(err) => {
+            get_state().current_exception = Some(err);
+            return 0;
+        }
+    };
+
+    if rel_path.is_empty() {
+        drop(dir);
+        get_state().current_exception =
+            Some(format_error_code(ErrorCode::NotPermitted, "rmdir", &path));
+        return 0;
+    }
+
+    match dir.remove_directory_at(&rel_path) {
+        Ok(()) => {
+            drop(dir);
+            TAG_UNDEFINED as i64
+        }
+        Err(err) => {
+            drop(dir);
+            get_state().current_exception =
+                Some(format_error_code(err, "rmdir", &path));
+            0
+        }
+    }
+}
+
+pub(crate) fn fs_readdir_sync(path_val: i64) -> i64 {
+    let state = get_state();
+    let path = state.get_string(path_val);
+
+    let (dir, rel_path) = match locate_preopen(&path) {
+        Ok(loc) => loc,
+        Err(err) => {
+            get_state().current_exception = Some(err);
+            return 0;
+        }
+    };
+
+    let target_path = if rel_path.is_empty() {
+        ".".to_string()
+    } else {
+        rel_path
+    };
+
+    let dir_desc = match dir.open_at(
+        PathFlags::SYMLINK_FOLLOW,
+        &target_path,
+        OpenFlags::DIRECTORY,
+        DescriptorFlags::READ,
+    ) {
+        Ok(d) => d,
+        Err(err) => {
+            drop(dir);
+            get_state().current_exception =
+                Some(format_error_code(err, "readdir", &path));
+            return 0;
+        }
+    };
+    drop(dir);
+
+    let stream = match dir_desc.read_directory() {
+        Ok(s) => s,
+        Err(err) => {
+            drop(dir_desc);
+            get_state().current_exception =
+                Some(format_error_code(err, "readdir", &path));
+            return 0;
+        }
+    };
+
+    let mut entries = Vec::new();
+    let mut read_err = None;
+    loop {
+        match stream.read_directory_entry() {
+            Ok(Some(entry)) => {
+                if entry.name != "." && entry.name != ".." {
+                    let s_id = get_state().alloc_string(&entry.name);
+                    entries.push(s_id);
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                read_err = Some(format_error_code(err, "readdir", &path));
+                break;
+            }
+        }
+    }
+    drop(stream);
+    drop(dir_desc);
+
+    if let Some(err_msg) = read_err {
+        get_state().current_exception = Some(err_msg);
+        return 0;
+    }
+
+    let arr_id = get_state().alloc_handle(crate::state::JsHandle::Array(entries));
+    crate::nanbox::nanbox_pointer(arr_id)
+}
+
+pub(crate) fn fs_stat_sync(path_val: i64) -> i64 {
+    let state = get_state();
+    let path = state.get_string(path_val);
+
+    let (dir, rel_path) = match locate_preopen(&path) {
+        Ok(loc) => loc,
+        Err(err) => {
+            get_state().current_exception = Some(err);
+            return 0;
+        }
+    };
+
+    let target_path = if rel_path.is_empty() {
+        ".".to_string()
+    } else {
+        rel_path
+    };
+
+    let stat = match dir.stat_at(PathFlags::SYMLINK_FOLLOW, &target_path) {
+        Ok(s) => s,
+        Err(err) => {
+            drop(dir);
+            get_state().current_exception =
+                Some(format_error_code(err, "stat", &path));
+            return 0;
+        }
+    };
+    drop(dir);
+
+    let is_file = matches!(stat.type_, DescriptorType::RegularFile);
+    let is_dir = matches!(stat.type_, DescriptorType::Directory);
+    let size = stat.size as f64;
+    let mtime_ms = if let Some(dt) = stat.data_modification_timestamp {
+        (dt.seconds as f64 * 1000.0) + (dt.nanoseconds as f64 / 1_000_000.0)
+    } else {
+        0.0
+    };
+
+    let mut map = serde_json::Map::new();
+    map.insert("size".to_string(), serde_json::Value::from(size));
+    map.insert("mtimeMs".to_string(), serde_json::Value::from(mtime_ms));
+    map.insert("isFile".to_string(), serde_json::Value::Bool(is_file));
+    map.insert("isDirectory".to_string(), serde_json::Value::Bool(is_dir));
+
+    let obj_id = get_state().alloc_handle(crate::state::JsHandle::Json(serde_json::Value::Object(map)));
+    crate::nanbox::nanbox_pointer(obj_id)
 }

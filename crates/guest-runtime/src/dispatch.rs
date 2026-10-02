@@ -143,6 +143,116 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
                 path, content, options,
             ))
         }
+        "fs_readdir_sync" | "readdirSync" => {
+            let args = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                &raw_args[1..]
+            } else {
+                raw_args
+            };
+            let path = args.first().copied().unwrap_or(0);
+            Some(crate::filesystem::fs_readdir_sync(path))
+        }
+        "fs_stat_sync" | "statSync" => {
+            let args = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                &raw_args[1..]
+            } else {
+                raw_args
+            };
+            let path = args.first().copied().unwrap_or(0);
+            Some(crate::filesystem::fs_stat_sync(path))
+        }
+        "fs_unlink_sync" | "unlinkSync" => {
+            let args = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                &raw_args[1..]
+            } else {
+                raw_args
+            };
+            let path = args.first().copied().unwrap_or(0);
+            Some(crate::filesystem::fs_unlink_sync(path))
+        }
+        "fs_mkdir_sync" | "mkdirSync" => {
+            let args = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                &raw_args[1..]
+            } else {
+                raw_args
+            };
+            let path = args.first().copied().unwrap_or(0);
+            Some(crate::filesystem::fs_mkdir_sync(path))
+        }
+        "fs_rmdir_sync" | "rmdirSync" => {
+            let args = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                &raw_args[1..]
+            } else {
+                raw_args
+            };
+            let path = args.first().copied().unwrap_or(0);
+            Some(crate::filesystem::fs_rmdir_sync(path))
+        }
+        "fs_exists_sync" | "existsSync" => {
+            let args = if raw_args.len() >= 2
+                && (raw_args[0] == TAG_UNDEFINED as i64
+                    || raw_args[0] == TAG_NULL as i64
+                    || raw_args[0] == 0)
+            {
+                &raw_args[1..]
+            } else {
+                raw_args
+            };
+            let path = args.first().copied().unwrap_or(0);
+            Some(crate::filesystem::fs_exists_sync(path))
+        }
+        "isFile" => {
+            let state = crate::state::get_state();
+            let target = raw_args.first().copied().unwrap_or(0);
+            if let Some(crate::state::JsHandle::Json(serde_json::Value::Object(map))) =
+                state.get_handle(target)
+            {
+                if let Some(serde_json::Value::Bool(b)) = map.get("isFile") {
+                    return Some(if *b {
+                        crate::nanbox::TAG_TRUE as i64
+                    } else {
+                        crate::nanbox::TAG_FALSE as i64
+                    });
+                }
+            }
+            Some(crate::nanbox::TAG_FALSE as i64)
+        }
+        "isDirectory" => {
+            let state = crate::state::get_state();
+            let target = raw_args.first().copied().unwrap_or(0);
+            if let Some(crate::state::JsHandle::Json(serde_json::Value::Object(map))) =
+                state.get_handle(target)
+            {
+                if let Some(serde_json::Value::Bool(b)) = map.get("isDirectory") {
+                    return Some(if *b {
+                        crate::nanbox::TAG_TRUE as i64
+                    } else {
+                        crate::nanbox::TAG_FALSE as i64
+                    });
+                }
+            }
+            Some(crate::nanbox::TAG_FALSE as i64)
+        }
         _ => None,
     }
 }
@@ -480,9 +590,15 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
             }
             return 1;
         }
-    } else if name == "array_includes" {
+    } else if name == "array_includes" || name == "includes" {
         if raw_args.len() >= 2 {
-            return crate::stubs::array_includes(raw_args[0], raw_args[1]);
+            return if crate::stubs::array_includes(raw_args[0], raw_args[1]) != 0
+                || crate::stubs::string_includes(raw_args[0], raw_args[1]) != 0
+            {
+                1
+            } else {
+                0
+            };
         }
     } else if name == "string_includes" {
         if raw_args.len() >= 2 {
