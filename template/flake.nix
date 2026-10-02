@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    perry-wit.url = "path:.."; # In consumer repo: github:<ORG-TBD>/perry-wit
+    perry-wit.url = "github:<ORG-TBD>/perry-wit";
   };
 
   outputs = { self, nixpkgs, flake-utils, perry-wit }:

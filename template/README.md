@@ -2,6 +2,8 @@
 
 This template provides a zero-config developer experience for authoring hermetic WebAssembly components in TypeScript using [Perry-WIT](https://github.com/<ORG-TBD>/perry-wit).
 
+The compiler input resolves from the published repository. To test a local compiler checkout, use `nix develop --override-input perry-wit path:/absolute/path/to/perry-wit` or the same override with `nix build`.
+
 ## Quickstart
 
 1. **Enter the development shell:**
