@@ -6,6 +6,73 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn unsupported_write_options_never_modify_or_create_files() {
+    let scratch = support::Scratch::new();
+    let directory = scratch.0.join("sandbox");
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("existing.txt"), "original").unwrap();
+    let wasm = scratch.compile(
+        r#"
+        import { writeFileSync } from "node:fs";
+        let evaluations = 0;
+        function options(flag: string) { evaluations++; return {flag: flag}; }
+        const rejected = [options("wx"), options("a"), {encoding: "hex"}, {mode: 384}];
+        for (let i = 0; i < rejected.length; i++) {
+            try {
+                writeFileSync("/sandbox/existing.txt", "new", rejected[i]);
+                console.log("unreachable");
+            } catch (error) { console.log("caught"); }
+            try {
+                writeFileSync("/sandbox/missing.txt", "new", rejected[i]);
+                console.log("unreachable");
+            } catch (error) { console.log("caught"); }
+        }
+        console.log(evaluations);
+        writeFileSync("/sandbox/valid.txt", "initial", "utf8");
+        writeFileSync("/sandbox/valid.txt", "é", {encoding: "utf-8", flag: "w"});
+    "#,
+        None,
+    );
+    let output = Command::new(support::get_wasmtime_path())
+        .args([
+            "run",
+            "-C",
+            "cache=n",
+            "--dir",
+            &format!("{}::/sandbox", directory.display()),
+        ])
+        .arg(wasm)
+        .output()
+        .unwrap();
+    assert_eq!(
+        support::stdout(&output),
+        format!("{}2\n", "caught\n".repeat(8))
+    );
+    assert_eq!(
+        fs::read_to_string(directory.join("existing.txt")).unwrap(),
+        "original"
+    );
+    assert!(!directory.join("missing.txt").exists());
+    assert_eq!(
+        fs::read_to_string(directory.join("valid.txt")).unwrap(),
+        "é"
+    );
+    let output = support::run(
+        r#"
+        import * as fs from "fs";
+        try { fs.writeFileSync("/no-preopen/file", "new", {flag: "wx"}); }
+        catch (error) { console.log(error); }
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: Unsupported writeFileSync options; only UTF-8 encoding and flag 'w' are supported\n"
+    );
+}
+
+#[test]
 fn pure_component_prunes_filesystem_imports() {
     let scratch = support::Scratch::new();
     let compiled = scratch.compile_artifacts(

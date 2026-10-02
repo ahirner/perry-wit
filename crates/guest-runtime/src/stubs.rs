@@ -305,7 +305,8 @@ pub(crate) extern "C" fn object_delete_dynamic(target: i64, key: i64) {
 #[no_mangle]
 pub(crate) extern "C" fn object_keys(target: i64) -> i64 {
     let state = get_state();
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned() {
+    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned()
+    {
         let keys: Vec<i64> = map.keys().map(|k| state.alloc_string(k)).collect();
         let arr_id = state.alloc_handle(JsHandle::Array(keys));
         return nanbox_pointer(arr_id);
@@ -316,8 +317,13 @@ pub(crate) extern "C" fn object_keys(target: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn object_values(target: i64) -> i64 {
     let state = get_state();
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned() {
-        let values: Vec<i64> = map.values().cloned().map(|v| state.from_js_value(v)).collect();
+    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned()
+    {
+        let values: Vec<i64> = map
+            .values()
+            .cloned()
+            .map(|v| state.from_js_value(v))
+            .collect();
         let arr_id = state.alloc_handle(JsHandle::Array(values));
         return nanbox_pointer(arr_id);
     }
@@ -327,7 +333,8 @@ pub(crate) extern "C" fn object_values(target: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn object_entries(target: i64) -> i64 {
     let state = get_state();
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned() {
+    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned()
+    {
         let entries: Vec<i64> = map
             .iter()
             .map(|(k, v)| {
@@ -358,7 +365,9 @@ pub(crate) extern "C" fn object_has_property(target: i64, key: i64) -> i32 {
 pub(crate) extern "C" fn object_assign(target: i64, source: i64) -> i64 {
     let state = get_state();
     let source_json = state.to_js_value(source);
-    if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) = state.get_handle_mut(target) {
+    if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) =
+        state.get_handle_mut(target)
+    {
         if let serde_json::Value::Object(src_map) = source_json {
             for (k, v) in src_map {
                 target_map.insert(k, v);
@@ -439,7 +448,9 @@ pub(crate) extern "C" fn array_join(target: i64, sep: i64) -> i64 {
         let parts: Vec<String> = items
             .iter()
             .map(|&item| {
-                if (item as u64) == crate::nanbox::TAG_UNDEFINED || (item as u64) == crate::nanbox::TAG_NULL {
+                if (item as u64) == crate::nanbox::TAG_UNDEFINED
+                    || (item as u64) == crate::nanbox::TAG_NULL
+                {
                     String::new()
                 } else {
                     get_state().get_string(item)
@@ -1176,10 +1187,13 @@ pub(crate) extern "C" fn fs_read_file_sync(path: i64) -> i64 {
 
 #[no_mangle]
 pub(crate) extern "C" fn fs_write_file_sync(path: i64, content: i64) -> i64 {
-    crate::filesystem::fs_write_file_sync(path, content)
+    crate::filesystem::fs_write_file_sync(path, content, TAG_UNDEFINED as i64)
 }
 
 #[no_mangle]
-pub(crate) extern "C" fn js_native_module_named_esm_export_value(_module: f64, _property: f64) -> f64 {
+pub(crate) extern "C" fn js_native_module_named_esm_export_value(
+    _module: f64,
+    _property: f64,
+) -> f64 {
     f64::from_bits(crate::nanbox::TAG_UNDEFINED)
 }

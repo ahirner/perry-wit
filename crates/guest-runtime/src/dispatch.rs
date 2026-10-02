@@ -114,18 +114,19 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
             Some(crate::filesystem::fs_read_file_sync(path))
         }
         "fs_write_file_sync" | "writeFileSync" => {
-            let (path, content) = if raw_args.len() >= 3
-                && (raw_args[0] == TAG_UNDEFINED as i64
-                    || raw_args[0] == TAG_NULL as i64
-                    || raw_args[0] == 0)
+            let args = if raw_args.len() >= 3
+                && matches!(raw_args[0] as u64, TAG_UNDEFINED | TAG_NULL | 0)
             {
-                (raw_args[1], raw_args[2])
-            } else if raw_args.len() >= 2 {
-                (raw_args[0], raw_args[1])
+                &raw_args[1..]
             } else {
-                (raw_args.first().copied().unwrap_or(0), 0)
+                raw_args
             };
-            Some(crate::filesystem::fs_write_file_sync(path, content))
+            let path = args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+            let content = args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+            let options = args.get(2).copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::filesystem::fs_write_file_sync(
+                path, content, options,
+            ))
         }
         _ => None,
     }

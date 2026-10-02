@@ -112,7 +112,9 @@ pub(crate) fn locate_preopen(path: &str) -> Result<(Descriptor, String), String>
     }
 
     best_match.ok_or_else(|| {
-        format!("Error: EACCES: permission denied, path '{path}' is not within any preopened directory")
+        format!(
+            "Error: EACCES: permission denied, path '{path}' is not within any preopened directory"
+        )
     })
 }
 
@@ -121,7 +123,9 @@ fn format_error_code(code: ErrorCode, op: &str, path: &str) -> String {
         ErrorCode::NoEntry => format!("Error: ENOENT: no such file or directory, {op} '{path}'"),
         ErrorCode::Access => format!("Error: EACCES: permission denied, {op} '{path}'"),
         ErrorCode::Exist => format!("Error: EEXIST: file already exists, {op} '{path}'"),
-        ErrorCode::IsDirectory => format!("Error: EISDIR: illegal operation on a directory, {op} '{path}'"),
+        ErrorCode::IsDirectory => {
+            format!("Error: EISDIR: illegal operation on a directory, {op} '{path}'")
+        }
         ErrorCode::NotDirectory => format!("Error: ENOTDIR: not a directory, {op} '{path}'"),
         ErrorCode::NotPermitted => format!("Error: EPERM: operation not permitted, {op} '{path}'"),
         ErrorCode::ReadOnly => format!("Error: EROFS: read-only file system, {op} '{path}'"),
@@ -202,8 +206,12 @@ pub(crate) fn fs_read_file_sync(path_val: i64) -> i64 {
     }
 }
 
-pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64) -> i64 {
+pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64, options: i64) -> i64 {
     let state = get_state();
+    if !supported_write_options(&state.to_js_value(options)) {
+        state.current_exception = Some("TypeError: Unsupported writeFileSync options; only UTF-8 encoding and flag 'w' are supported".into());
+        return TAG_UNDEFINED as i64;
+    }
     let path = state.get_string(path_val);
     let content = state.get_string(content_val);
 
@@ -263,9 +271,29 @@ pub(crate) fn fs_write_file_sync(path_val: i64, content_val: i64) -> i64 {
     drop(file_desc);
 
     if write_err {
-        get_state().current_exception = Some(format!("Error: EIO: i/o error while writing '{path}'"));
+        get_state().current_exception =
+            Some(format!("Error: EIO: i/o error while writing '{path}'"));
         return 0;
     }
 
     TAG_UNDEFINED as i64
+}
+
+/// The UTF-8 overwrite implementation must reject options that change its semantics.
+fn supported_write_options(options: &serde_json::Value) -> bool {
+    let utf8 = |encoding: &serde_json::Value| {
+        encoding.as_str().is_some_and(|encoding| {
+            encoding.eq_ignore_ascii_case("utf8") || encoding.eq_ignore_ascii_case("utf-8")
+        })
+    };
+    match options {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(_) => utf8(options),
+        serde_json::Value::Object(fields) => fields.iter().all(|(key, value)| match key.as_str() {
+            "encoding" => utf8(value),
+            "flag" => value.as_str() == Some("w"),
+            _ => false,
+        }),
+        _ => false,
+    }
 }

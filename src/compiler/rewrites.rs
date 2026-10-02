@@ -323,7 +323,7 @@ impl Rewriter {
             _ => {}
         }
         if let perry_hir::ir::Expr::FsReadFileSync(path_expr)
-            | perry_hir::ir::Expr::FsReadFileBinary(path_expr) = expr
+        | perry_hir::ir::Expr::FsReadFileBinary(path_expr) = expr
         {
             self.needs_fs = true;
             let path = std::mem::replace(path_expr.as_mut(), perry_hir::ir::Expr::Undefined);
@@ -413,13 +413,18 @@ impl Rewriter {
                     } else {
                         perry_hir::ir::Expr::Undefined
                     };
+                    let options = if args.len() >= 3 {
+                        std::mem::replace(&mut args[2], Expr::Undefined)
+                    } else {
+                        Expr::Undefined
+                    };
                     *expr = perry_hir::ir::Expr::Call {
                         callee: Box::new(perry_hir::ir::Expr::PropertyGet {
                             object: Box::new(perry_hir::ir::Expr::Undefined),
                             property: "fs_write_file_sync".into(),
                             byte_offset: 0,
                         }),
-                        args: vec![path, content],
+                        args: vec![path, content, options],
                         type_args: Vec::new(),
                         byte_offset: 0,
                     };
@@ -602,13 +607,18 @@ impl Rewriter {
                             } else {
                                 perry_hir::ir::Expr::Undefined
                             };
+                            let options = if args.len() >= 3 {
+                                std::mem::replace(&mut args[2], Expr::Undefined)
+                            } else {
+                                Expr::Undefined
+                            };
                             *expr = perry_hir::ir::Expr::Call {
                                 callee: Box::new(perry_hir::ir::Expr::PropertyGet {
                                     object: Box::new(perry_hir::ir::Expr::Undefined),
                                     property: "fs_write_file_sync".into(),
                                     byte_offset: 0,
                                 }),
-                                args: vec![path, content],
+                                args: vec![path, content, options],
                                 type_args: Vec::new(),
                                 byte_offset: 0,
                             };
