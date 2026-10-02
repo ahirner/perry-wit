@@ -330,9 +330,9 @@ fn bridge_events(
             Some("try_start") => (BridgeKind::TryStart, 5),
             Some("try_end") => (BridgeKind::TryEnd, 5),
             Some("throw_value") => (BridgeKind::Throwing, 5),
-            Some("date_to_iso_string" | "uint8array_new" | "buffer_alloc") => {
-                (BridgeKind::Throwing, 9)
-            }
+            Some(
+                "date_to_iso_string" | "uint8array_new" | "buffer_alloc" | "$$cryptoFillRandom",
+            ) => (BridgeKind::Throwing, 9),
             Some("__perry_catch_start") => (BridgeKind::TryStart, 10),
             Some("__perry_catch_end") => (BridgeKind::TryEnd, 10),
             Some("__perry_finally_start") => (BridgeKind::FinallyStart, 10),

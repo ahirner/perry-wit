@@ -2,6 +2,102 @@
 
 mod support;
 
+use std::{fs, process::Command};
+
+#[test]
+fn random_quota_is_checked_before_host_calls_or_mutation() {
+    let scratch = support::Scratch::new();
+    let wit = format!(
+        r#"{}
+        world test {{
+            include runtime-adapter;
+            export fill: func(size: f64) -> f64;
+            export fill-tail: func() -> f64;
+        }}
+    "#,
+        include_str!("../wit/world.wit")
+    );
+    let compiled = scratch.compile_artifacts(
+        r#"
+        export function fill(size: number): number {
+            const bytes = new Uint8Array(size);
+            bytes[0] = 7;
+            bytes[size - 1] = 9;
+            try {
+                const returned = crypto.getRandomValues(bytes);
+                if (returned !== bytes) { return -1; }
+                return size === 0 ? 0 : bytes[0];
+            } catch { return bytes[0] + bytes[size - 1]; }
+        }
+        export function fillTail(): number {
+            const bytes = new Uint8Array(65538);
+            bytes[0] = 7;
+            const tail = bytes.subarray(-2);
+            crypto.getRandomValues(tail);
+            return bytes[0] + bytes[65537];
+        }
+    "#,
+        Some(&wit),
+    );
+    let path = scratch.0.join("random.wasm");
+    fs::write(&path, compiled.core).unwrap();
+    let output = Command::new("node")
+        .arg("--eval")
+        .arg(
+            r#"
+        const assert = require('node:assert/strict');
+        const module = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
+        const imports = {};
+        const requests = [];
+        let rt;
+        for (const {module: mod, name} of WebAssembly.Module.imports(module)) {
+            let implementation = () => { throw new Error(`unexpected import ${mod} ${name}`); };
+            if (mod === 'wasi:random/random@0.2.6' && name === 'get-random-bytes') {
+                implementation = (length, result) => {
+                    requests.push(Number(length));
+                    assert.ok(length <= 65536n);
+                    const ptr = rt.cabi_realloc(0, 0, 1, Number(length));
+                    new Uint8Array(rt.memory.buffer, ptr, Number(length)).fill(165);
+                    const memory = new DataView(rt.memory.buffer);
+                    memory.setUint32(result, ptr, true);
+                    memory.setUint32(result + 4, Number(length), true);
+                };
+            }
+            (imports[mod] ??= {})[name] = implementation;
+        }
+        rt = new WebAssembly.Instance(module, imports).exports;
+        assert.equal(rt.fill(65537), 16);
+        assert.deepEqual(requests, []);
+        assert.equal(rt.fill(65536), 165);
+        assert.equal(rt.fill(0), 0);
+        assert.equal(rt['fill-tail'](), 172);
+        assert.deepEqual(requests, [65536, 2]);
+    "#,
+        )
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = support::run(
+        r#"
+        try {
+            crypto.getRandomValues(new Uint8Array(65537));
+            console.log("unreachable");
+        } catch (error) { console.log(error); }
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "QuotaExceededError: Random view exceeds 65536 bytes\n"
+    );
+}
+
 #[test]
 fn math_random_returns_values_in_unit_interval() {
     let source = r#"

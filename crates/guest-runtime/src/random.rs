@@ -1,6 +1,6 @@
 //! WASI Preview 2 Random implementation for Math.random and crypto APIs.
 
-use crate::nanbox::{nanbox_pointer, nanbox_string};
+use crate::nanbox::{nanbox_pointer, nanbox_string, TAG_UNDEFINED};
 use crate::state::{get_state, JsHandle};
 
 /// Generates a pseudo-random floating point number in [0.0, 1.0) using WASI insecure random.
@@ -46,6 +46,11 @@ pub(crate) fn crypto_fill_random(handle: i64) -> i64 {
         match h {
             JsHandle::Uint8Array(view) => {
                 let len = view.byte_length;
+                if len > 65_536 {
+                    state.current_exception =
+                        Some("QuotaExceededError: Random view exceeds 65536 bytes".into());
+                    return TAG_UNDEFINED as i64;
+                }
                 if len > 0 {
                     let rand_bytes =
                         crate::bindings::wasi::random::random::get_random_bytes(len as u64);
