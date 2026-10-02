@@ -21,6 +21,7 @@ pub struct DiscoveredExports {
     pub cabi_export_json: Option<u32>,
     pub cabi_post_cleanup: Option<u32>,
     pub cabi_post_result_cleanup: Option<u32>,
+    pub cabi_check_exception: Option<u32>,
 }
 
 /// Parses the export section of a core WebAssembly module to extract known symbols and indices.
@@ -60,6 +61,9 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                             "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
                             "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
                             "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
+                            "cabi_check_exception" => {
+                                exports.cabi_check_exception = Some(exp.index)
+                            }
                             "cabi_post_result_cleanup" => {
                                 exports.cabi_post_result_cleanup = Some(exp.index)
                             }
@@ -172,6 +176,9 @@ pub fn synthesize_trampolines(
         .ok_or_else(|| anyhow::anyhow!("No closing paren in wat"))?;
 
     let mut snippets = String::new();
+    let check_exception = discovered
+        .cabi_check_exception
+        .context("guest runtime is missing cabi_check_exception")?;
 
     // Emitted init guard
     let start_func_ref = discovered
@@ -188,6 +195,7 @@ pub fn synthesize_trampolines(
     i32.eqz
     if
       call {start_func_ref}
+      call {check_exception}
       i32.const 1
       global.set $perry_init_guard
     end
@@ -318,6 +326,7 @@ pub fn synthesize_trampolines(
     call $perry_ensure_init
     {import_body}
     call {target_func}
+    call {check_exception}
     {result_handling}
   )
   (export "{kebab_name}" (func $cabi_trampoline_{sanitized}))

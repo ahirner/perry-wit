@@ -479,9 +479,9 @@ pub(crate) extern "C" fn try_start() {}
 #[no_mangle]
 pub(crate) extern "C" fn try_end() {}
 #[no_mangle]
-pub(crate) extern "C" fn throw_value(_a: i64) {
+pub(crate) extern "C" fn throw_value(value: i64) {
     let state = crate::state::get_state();
-    state.current_exception = Some("Error".to_string());
+    state.current_exception = Some(state.get_string(value));
 }
 #[no_mangle]
 pub(crate) extern "C" fn has_exception() -> i32 {

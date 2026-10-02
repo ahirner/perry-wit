@@ -315,7 +315,9 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
         raw_args.push(unsafe { *ptr.add(i) });
     }
 
-    if matches!(name, "string_eq" | "js_strict_eq" | "js_loose_eq") {
+    if name == "has_exception" {
+        return crate::stubs::has_exception();
+    } else if matches!(name, "string_eq" | "js_strict_eq" | "js_loose_eq") {
         if let [left, right] = raw_args.as_slice() {
             return i32::from(crate::equality::equal(
                 state,

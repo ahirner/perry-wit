@@ -145,9 +145,7 @@ pub extern "C" fn date_to_iso_string(arg: i64) -> i64 {
         nanbox_string(str_id)
     } else {
         state.current_exception = Some("RangeError: Invalid time value".to_string());
-        let str_id = state.strings.len();
-        state.strings.push("Invalid Date".to_string());
-        nanbox_string(str_id)
+        TAG_UNDEFINED as i64
     }
 }
 

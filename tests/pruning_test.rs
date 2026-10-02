@@ -24,7 +24,7 @@ fn pure_await_and_promise_all_work_without_http_imports() {
         );
         let scratch = support::Scratch::new();
         let compiled = scratch.compile_artifacts(&source, None);
-        let wat = wasmprinter::print_bytes(&compiled.component.unwrap()).unwrap();
+        let wat = wasmprinter::print_bytes(compiled.component.unwrap()).unwrap();
         assert!(!wat.contains("wasi:http"));
         assert_eq!(wat.contains("wasi:clocks"), !clock_use.is_empty());
     }

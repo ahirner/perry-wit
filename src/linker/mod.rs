@@ -7,7 +7,7 @@
 
 mod prune;
 mod remap;
-mod sections;
+pub(crate) mod sections;
 mod types;
 
 use std::borrow::Cow;

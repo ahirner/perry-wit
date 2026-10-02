@@ -3,6 +3,14 @@
 use crate::nanbox::nanbox_string;
 use crate::state::get_state;
 
+/// Stops a component invocation if guest execution left an uncaught exception.
+#[no_mangle]
+pub extern "C" fn cabi_check_exception() {
+    if let Some(error) = get_state().current_exception.as_deref() {
+        crate::io::fail_with_error(error);
+    }
+}
+
 /// Imports a UTF-8 string slice from Canonical ABI memory into a nanboxed JS string value.
 #[no_mangle]
 pub extern "C" fn cabi_import_string(ptr: i32, len: i32) -> i64 {

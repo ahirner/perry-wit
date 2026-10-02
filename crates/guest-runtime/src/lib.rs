@@ -25,13 +25,15 @@ mod state;
 mod stubs;
 
 pub use cabi::{
-    cabi_export_json, cabi_export_result_string, cabi_export_string, cabi_import_json,
-    cabi_import_string, cabi_post_cleanup, cabi_post_result_cleanup,
+    cabi_check_exception, cabi_export_json, cabi_export_result_string, cabi_export_string,
+    cabi_import_json, cabi_import_string, cabi_post_cleanup, cabi_post_result_cleanup,
 };
 pub use date::{
-    date_get_date, date_get_day, date_get_full_year, date_get_hours,
-    date_get_milliseconds, date_get_minutes, date_get_month, date_get_seconds,
-    date_get_time, date_new_val, date_now, date_to_iso_string, performance_now,
+    date_get_date, date_get_day, date_get_full_year, date_get_hours, date_get_milliseconds,
+    date_get_minutes, date_get_month, date_get_seconds, date_get_time, date_new_val, date_now,
+    date_to_iso_string, performance_now,
 };
-pub use dispatch::{console_error, console_log, mem_call, mem_call_clocks, mem_call_i32, string_new};
+pub use dispatch::{
+    console_error, console_log, mem_call, mem_call_clocks, mem_call_i32, string_new,
+};
 pub use dispatch_pure::mem_call_pure;

@@ -5,6 +5,101 @@ mod support;
 use std::{fs, process::Command};
 
 #[test]
+fn invalid_dates_throw_at_the_call_site_and_can_be_caught() {
+    let source = r#"
+        try {
+            const invalid = new Date(8640000000000001);
+            console.log(invalid.toISOString());
+            console.log("unreachable");
+        } catch (error) {
+            console.log(error);
+        }
+        console.log("after");
+    "#;
+    let output = support::run(source, None, None);
+    assert_eq!(
+        support::stdout(&output),
+        "RangeError: Invalid time value\nafter\n"
+    );
+}
+
+#[test]
+fn date_exceptions_unwind_functions_loops_and_finally_blocks() {
+    let output = support::run(
+        r#"
+        function invalid(): string {
+            return "prefix:" + new Date(8640000000000001).toISOString();
+        }
+        function cleanup(): void { console.log("cleanup"); }
+        for (let i = 0; i < 2; i++) {
+            try {
+                try {
+                    console.log(invalid());
+                    console.log("unreachable");
+                } finally {
+                    cleanup();
+                    console.log("finally end");
+                }
+                console.log("unreachable after finally");
+            } catch (error) {
+                console.log(error);
+            }
+        }
+        try {
+            try { invalid(); } catch (error) { throw error; }
+            finally { console.log("rethrow cleanup"); }
+        } catch (error) { console.log(error); }
+        try {
+            try { invalid(); } finally { throw "replacement"; }
+        } catch (error) { console.log(error); }
+        for (let i = 0; i < 3; i++) {
+            try {
+                if (i === 0) { continue; }
+                if (i === 2) { break; }
+                invalid();
+            } catch { console.log("caught without binding"); }
+        }
+        console.log(new Date(0).toISOString());
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "cleanup\nfinally end\nRangeError: Invalid time value\ncleanup\nfinally end\nRangeError: Invalid time value\nrethrow cleanup\nRangeError: Invalid time value\nreplacement\ncaught without binding\n1970-01-01T00:00:00.000Z\n"
+    );
+}
+
+#[test]
+fn uncaught_date_exceptions_fail_command_and_task_invocations() {
+    let output = support::run(
+        "new Date(8640000000000001).toISOString(); console.log('unreachable');",
+        None,
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Error: RangeError: Invalid time value\n"
+    );
+    let output = support::run(
+        "export function runTask(input: string): string { return new Date(8640000000000001).toISOString(); }",
+        Some(&format!(
+            "{}\nworld test {{ include runtime-adapter; export run-task: func(input: string) -> string; }}",
+            include_str!("../wit/world.wit")
+        )),
+        Some("run-task(\"invalid\")"),
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Error: RangeError: Invalid time value\n"
+    );
+}
+
+#[test]
 fn date_constructor_distinguishes_omitted_and_explicit_primitive_arguments() {
     let output = support::run(
         r#"

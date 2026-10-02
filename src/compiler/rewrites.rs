@@ -1,5 +1,7 @@
 //! Perry HIR rewrites for WebAssembly component compatibility.
 
+use perry_hir::ir::{Expr, Stmt};
+
 pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
     // Perry emits this dispatcher call but omits its name from its runtime string pool.
     program
@@ -107,7 +109,6 @@ impl Rewriter {
     }
 
     fn rewrite_stmt(&mut self, stmt: &mut perry_hir::ir::Stmt) {
-        use perry_hir::ir::Stmt;
         match stmt {
             Stmt::Expr(expr)
             | Stmt::Return(Some(expr))
@@ -163,6 +164,22 @@ impl Rewriter {
                 {
                     self.rewrite_stmt(stmt);
                 }
+                if let Some(finally) = finally {
+                    if let Some(catch) = catch {
+                        catch
+                            .body
+                            .insert(0, exception_marker("__perry_catch_start"));
+                        catch.body.push(exception_marker("__perry_catch_end"));
+                    }
+                    finally.insert(0, exception_marker("__perry_finally_start"));
+                    finally.push(exception_marker("__perry_finally_end"));
+                }
+                let original = std::mem::replace(stmt, Stmt::Return(None));
+                *stmt = Stmt::If {
+                    condition: perry_hir::ir::Expr::Bool(true),
+                    then_branch: vec![original, exception_marker("__perry_exception_resume")],
+                    else_branch: None,
+                };
             }
             Stmt::Switch {
                 discriminant,
@@ -352,4 +369,18 @@ impl Rewriter {
         }
         perry_hir::walker::walk_expr_children_mut(expr, &mut |expr| self.rewrite_expr(expr));
     }
+}
+
+/// Preserves exception-region boundaries through Perry's memory-call emission.
+fn exception_marker(name: &str) -> Stmt {
+    Stmt::Expr(Expr::Call {
+        callee: Box::new(Expr::PropertyGet {
+            object: Box::new(Expr::Undefined),
+            property: name.into(),
+            byte_offset: 0,
+        }),
+        args: Vec::new(),
+        type_args: Vec::new(),
+        byte_offset: 0,
+    })
 }

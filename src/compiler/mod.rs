@@ -1,6 +1,7 @@
 //! TypeScript compilation pipeline, HIR rewrites, linking, and component packaging.
 
 mod clocks;
+mod exceptions;
 mod fetch;
 mod rewrites;
 
@@ -79,6 +80,7 @@ pub fn compile_typescript(
 
     let raw_wasm = compile_modules_to_wasm(&[("main".to_string(), hir)])
         .map_err(|e| anyhow::anyhow!("Compilation failed: {e:?}"))?;
+    let raw_wasm = exceptions::lower_runtime_exceptions(&raw_wasm)?;
 
     // Ensure initial memory has enough pages for guest runtime
     let wat = wasmprinter::print_bytes(&raw_wasm)
