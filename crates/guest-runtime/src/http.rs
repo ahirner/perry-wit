@@ -76,7 +76,11 @@ impl ResponseEntry {
 }
 
 pub(crate) fn start_http_get(url: &str) -> Result<FutureIncomingResponse, String> {
-    let (scheme, authority, path) = split_url(url)?;
+    let parsed = crate::http_url::parse_http_url(url)?;
+    let scheme = match parsed.scheme {
+        crate::http_url::HttpScheme::Http => Scheme::Http,
+        crate::http_url::HttpScheme::Https => Scheme::Https,
+    };
 
     let headers = Fields::new();
     let request = OutgoingRequest::new(headers);
@@ -87,10 +91,10 @@ pub(crate) fn start_http_get(url: &str) -> Result<FutureIncomingResponse, String
         .set_scheme(Some(&scheme))
         .map_err(|_| "Failed to set scheme")?;
     request
-        .set_authority(Some(&authority))
+        .set_authority(Some(parsed.authority))
         .map_err(|_| "Failed to set authority")?;
     request
-        .set_path_with_query(Some(&path))
+        .set_path_with_query(Some(&parsed.path_with_query))
         .map_err(|_| "Failed to set path")?;
 
     let outgoing_body = request.body().map_err(|_| "Failed to get request body")?;
@@ -98,21 +102,4 @@ pub(crate) fn start_http_get(url: &str) -> Result<FutureIncomingResponse, String
 
     let future_resp = handle(request, None).map_err(|e| format!("HTTP handle error: {e:?}"))?;
     Ok(future_resp)
-}
-
-fn split_url(url: &str) -> Result<(Scheme, String, String), String> {
-    let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
-        (Scheme::Https, rest)
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        (Scheme::Http, rest)
-    } else {
-        return Err(format!("Unsupported scheme in URL: {url}"));
-    };
-
-    let (authority, path) = match rest.find('/') {
-        Some(pos) => (&rest[..pos], &rest[pos..]),
-        None => (rest, "/"),
-    };
-
-    Ok((scheme, authority.to_string(), path.to_string()))
 }
