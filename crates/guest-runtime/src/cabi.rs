@@ -1,5 +1,7 @@
 //! Canonical ABI memory layout, string conversion, and argument marshalling.
 
+use core::alloc::Layout;
+
 use crate::state::get_state;
 
 /// Stops a component invocation if guest execution left an uncaught exception.
@@ -171,7 +173,6 @@ pub unsafe extern "C" fn cabi_realloc(
     align: usize,
     new_len: usize,
 ) -> *mut u8 {
-    use core::alloc::Layout;
     if new_len == 0 {
         if old_len > 0 && !old_ptr.is_null() {
             let layout = Layout::from_size_align_unchecked(old_len, align.max(1));
@@ -179,11 +180,15 @@ pub unsafe extern "C" fn cabi_realloc(
         }
         return align as *mut u8;
     }
-    if old_len == 0 || old_ptr.is_null() {
+    let pointer = if old_len == 0 || old_ptr.is_null() {
         let layout = Layout::from_size_align_unchecked(new_len, align.max(1));
         std::alloc::alloc(layout)
     } else {
         let layout = Layout::from_size_align_unchecked(old_len, align.max(1));
         std::alloc::realloc(old_ptr, layout, new_len)
+    };
+    if pointer.is_null() {
+        core::arch::wasm32::unreachable();
     }
+    pointer
 }

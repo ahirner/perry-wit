@@ -2,6 +2,55 @@ use perry_wit::compiler::{CompileOptions, compile_typescript};
 use std::{fs, process::Command};
 
 #[test]
+fn canonical_allocator_traps_when_allocating_or_growing_exhausts_memory() {
+    let path = std::env::temp_dir().join(format!("perry-allocator-{}.wasm", std::process::id()));
+    fs::write(
+        &path,
+        perry_wit::runtime::resolve_guest_runtime_bytes(None).unwrap(),
+    )
+    .unwrap();
+    let output = Command::new("node").arg("--eval").arg(r#"
+        const assert = require('node:assert/strict');
+        const module = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
+        for (const grow of [false, true]) {
+            const memory = new WebAssembly.Memory({initial: 32, maximum: 64});
+            const imports = {env: {memory}};
+            for (const {module: mod, name, kind} of WebAssembly.Module.imports(module)) {
+                if (kind === 'function') {
+                    (imports[mod] ??= {})[name] = () => { throw new Error(`unexpected host call ${mod} ${name}`); };
+                }
+            }
+            const rt = new WebAssembly.Instance(module, imports).exports;
+            let ptr = rt.cabi_realloc(0, 0, 16, 65536);
+            assert.notEqual(ptr, 0);
+            assert.equal(ptr % 16, 0);
+            new Uint8Array(memory.buffer, ptr, 32).fill(123);
+            let size = 65536;
+            let successes = 0;
+            assert.throws(() => {
+                for (let i = 0; i < 256; i++) {
+                    const next = grow ? rt.cabi_realloc(ptr, size, 16, size + 65536)
+                                      : rt.cabi_realloc(0, 0, 16, 65536);
+                    assert.notEqual(next, 0, 'allocation failure must trap, never return address zero');
+                    if (grow) { ptr = next; size += 65536; }
+                    assert.ok(new Uint8Array(memory.buffer, ptr, 32).every(byte => byte === 123));
+                    successes++;
+                }
+                throw new Error('expected memory exhaustion');
+            }, WebAssembly.RuntimeError);
+            assert.ok(successes > 0);
+            assert.ok(new Uint8Array(memory.buffer, ptr, 32).every(byte => byte === 123));
+        }
+    "#).arg(&path).output().unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn result_and_string_post_return_reclaim_payloads_and_exact_return_areas() {
     let scratch = std::env::temp_dir().join(format!("perry-memory-{}", std::process::id()));
     fs::create_dir_all(&scratch).unwrap();
