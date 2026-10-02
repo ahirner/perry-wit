@@ -23,6 +23,8 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
                 )
             })
             .collect(),
+        needs_clocks: false,
+        needs_http: false,
     };
     for stmt in &mut program.init {
         rewriter.rewrite_stmt(stmt);
@@ -32,10 +34,31 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
             rewriter.rewrite_stmt(stmt);
         }
     }
+    if rewriter.needs_clocks {
+        program
+            .init
+            .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                "__needs_clocks__".into(),
+            )));
+        program
+            .init
+            .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                "date_new".into(),
+            )));
+    }
+    if rewriter.needs_http {
+        program
+            .init
+            .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                "__needs_http__".into(),
+            )));
+    }
 }
 
 struct Rewriter {
     literal_shapes: std::collections::HashMap<String, Vec<String>>,
+    needs_clocks: bool,
+    needs_http: bool,
 }
 
 impl Rewriter {
@@ -124,6 +147,32 @@ impl Rewriter {
     }
 
     fn rewrite_current_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
+        match expr {
+            perry_hir::ir::Expr::DateNow
+            | perry_hir::ir::Expr::DateNew(_)
+            | perry_hir::ir::Expr::DateGetTime(_)
+            | perry_hir::ir::Expr::DateToISOString(_)
+            | perry_hir::ir::Expr::DateGetFullYear(_)
+            | perry_hir::ir::Expr::DateGetMonth(_)
+            | perry_hir::ir::Expr::DateGetDate(_)
+            | perry_hir::ir::Expr::DateGetDay(_)
+            | perry_hir::ir::Expr::DateGetHours(_)
+            | perry_hir::ir::Expr::DateGetMinutes(_)
+            | perry_hir::ir::Expr::DateGetSeconds(_)
+            | perry_hir::ir::Expr::DateGetMilliseconds(_)
+            | perry_hir::ir::Expr::DateParse(_)
+            | perry_hir::ir::Expr::DateUtc(_)
+            | perry_hir::ir::Expr::DateValueOf(_)
+            | perry_hir::ir::Expr::PerformanceNow => {
+                self.needs_clocks = true;
+            }
+            perry_hir::ir::Expr::FetchWithOptions { .. }
+            | perry_hir::ir::Expr::FetchGetWithAuth { .. }
+            | perry_hir::ir::Expr::FetchPostWithAuth { .. } => {
+                self.needs_http = true;
+            }
+            _ => {}
+        }
         if let perry_hir::ir::Expr::NativeMethodCall {
             module,
             object: Some(object),
@@ -178,16 +227,32 @@ impl Rewriter {
             if let perry_hir::ir::Expr::PropertyGet {
                 object, property, ..
             } = callee.as_ref()
-                && property == "json"
             {
-                *expr = perry_hir::ir::Expr::NativeMethodCall {
-                    module: "fetch".to_string(),
-                    class_name: Some("Response".to_string()),
-                    object: Some(object.clone()),
-                    method: "json".to_string(),
-                    args: args.clone(),
-                };
-                return;
+                if property == "performance_now" || property.starts_with("date_") {
+                    self.needs_clocks = true;
+                }
+                if matches!(
+                    property.as_str(),
+                    "fetch_request"
+                        | "fetch_url"
+                        | "fetch_with_options"
+                        | "response_json"
+                        | "response_text"
+                        | "response_status"
+                        | "response_ok"
+                ) {
+                    self.needs_http = true;
+                }
+                if property == "json" {
+                    *expr = perry_hir::ir::Expr::NativeMethodCall {
+                        module: "fetch".to_string(),
+                        class_name: Some("Response".to_string()),
+                        object: Some(object.clone()),
+                        method: "json".to_string(),
+                        args: args.clone(),
+                    };
+                    return;
+                }
             }
             if let perry_hir::ir::Expr::Closure { body, .. } = callee.as_mut() {
                 let mut sources = Vec::new();

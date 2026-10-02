@@ -21,6 +21,28 @@ pub(crate) enum ResponseEntry {
     },
 }
 
+static mut RESPONSES: Option<Vec<ResponseEntry>> = None;
+
+pub(crate) fn get_responses() -> &'static mut Vec<ResponseEntry> {
+    unsafe {
+        let resp_ptr = core::ptr::addr_of_mut!(RESPONSES);
+        if (*resp_ptr).is_none() {
+            *resp_ptr = Some(Vec::new());
+        }
+        (*resp_ptr).as_mut().unwrap()
+    }
+}
+
+pub(crate) fn get_response_body(id: usize) -> Result<String, String> {
+    let responses = get_responses();
+    if id < responses.len() {
+        let res = responses[id].resolve()?.to_string();
+        Ok(res)
+    } else {
+        Err(format!("Invalid response id {id}"))
+    }
+}
+
 impl ResponseEntry {
     pub(crate) fn wait(&mut self) -> Result<(), String> {
         if let Self::InFlight { future_resp, .. } = self {

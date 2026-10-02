@@ -1,6 +1,3 @@
-//! Runtime handle storage and JS value conversion.
-
-use crate::http::ResponseEntry;
 use crate::nanbox::{
     get_pointer_id, nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL,
     TAG_TRUE, TAG_UNDEFINED,
@@ -12,20 +9,21 @@ pub(crate) enum JsHandle {
     Json(serde_json::Value),
     Array(Vec<i64>),
     Response(usize),
+    Date(f64),
 }
 
 pub(crate) struct RuntimeState {
     pub(crate) strings: Vec<String>,
-    pub(crate) responses: Vec<ResponseEntry>,
     pub(crate) handles: Vec<JsHandle>,
+    pub(crate) current_exception: Option<String>,
 }
 
 impl RuntimeState {
     fn new() -> Self {
         Self {
             strings: Vec::new(),
-            responses: Vec::new(),
             handles: vec![JsHandle::Null],
+            current_exception: None,
         }
     }
 
@@ -43,15 +41,6 @@ impl RuntimeState {
     pub(crate) fn get_handle_mut(&mut self, val: i64) -> Option<&mut JsHandle> {
         let id = get_pointer_id(val)?;
         self.handles.get_mut(id)
-    }
-
-    pub(crate) fn get_response_body(&mut self, id: usize) -> Result<String, String> {
-        if id < self.responses.len() {
-            let res = self.responses[id].resolve()?.to_string();
-            Ok(res)
-        } else {
-            Err(format!("Invalid response id {id}"))
-        }
     }
 
     pub(crate) fn to_js_value(&self, val: i64) -> serde_json::Value {
@@ -73,6 +62,13 @@ impl RuntimeState {
                     let items: Vec<serde_json::Value> =
                         arr.iter().map(|&elem| self.to_js_value(elem)).collect();
                     serde_json::Value::Array(items)
+                }
+                Some(JsHandle::Date(ts)) => {
+                    if let Some(iso) = crate::date::format_iso(*ts) {
+                        serde_json::Value::String(iso)
+                    } else {
+                        serde_json::Value::Null
+                    }
                 }
                 _ => serde_json::Value::Null,
             }
@@ -150,6 +146,9 @@ impl RuntimeState {
                     JsHandle::Array(arr) => format!("[array len {}]", arr.len()),
                     JsHandle::Response(_) => "[Response]".to_string(),
                     JsHandle::Null => "null".to_string(),
+                    JsHandle::Date(ts) => {
+                        crate::date::format_iso(*ts).unwrap_or_else(|| "Invalid Date".to_string())
+                    }
                 };
             }
         } else {

@@ -5,6 +5,7 @@
 //! directly to guest runtime exports, unifying memory, remapping function/type/global/table
 //! indices, and combining data segments.
 
+mod prune;
 mod remap;
 mod sections;
 mod types;
@@ -13,6 +14,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail, ensure};
+use prune::{compute_pruning_plan, module_needs_clocks, module_needs_http};
 use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
 use wasm_encoder::{
     DataSegment, DataSegmentMode, ElementMode, ElementSegment, Elements, ExportKind, Module,
@@ -56,46 +58,36 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         type_map_b.push(idx);
     }
 
-    // 2. Compute Function Index Spaces
-    let num_wasi_imports = b.wasi_imports.len() as u32;
-    let num_a_imports = a.imports.len() as u32;
-    let num_a_funcs = a.func_types.len() as u32;
-    let num_b_funcs = b.func_types.len() as u32;
+    // 2. Resolve Module A imports and compute Pruning Plan
+    let needs_http = module_needs_http(&a);
+    let needs_clocks = module_needs_clocks(&a);
 
-    // Module B function mapping
-    let mut func_map_b = Vec::with_capacity((num_wasi_imports + num_b_funcs) as usize);
-    // Module B's WASI imports stay at indices 0..num_wasi_imports - 1
-    for i in 0..num_wasi_imports {
-        func_map_b.push(i);
-    }
-    // Module B's defined functions come after Module A's defined functions
-    for j in 0..num_b_funcs {
-        func_map_b.push(num_wasi_imports + num_a_funcs + j);
-    }
-
-    // Module A function mapping
-    let mut func_map_a = Vec::with_capacity((num_a_imports + num_a_funcs) as usize);
-    // Resolve Module A's imports against Module B's exports
+    let mut resolved_imports_a = Vec::with_capacity(a.imports.len());
     for &(mod_name, name, _ty) in &a.imports {
         ensure!(
             mod_name == "rt",
             "Module A contains unexpected import module '{mod_name}' (expected 'rt')"
         );
-        let b_func_idx = b.export_funcs.get(name).copied().with_context(|| {
-            format!("Runtime import 'rt:{name}' not found in guest-runtime exports")
+        let target_name = if name == "mem_call" {
+            if needs_http {
+                "mem_call"
+            } else if needs_clocks {
+                "mem_call_clocks"
+            } else {
+                "mem_call_pure"
+            }
+        } else {
+            name
+        };
+        let b_func_idx = b.export_funcs.get(target_name).copied().with_context(|| {
+            format!("Runtime import 'rt:{target_name}' not found in guest-runtime exports")
         })?;
-        let merged_idx = func_map_b
-            .get(b_func_idx as usize)
-            .copied()
-            .with_context(|| {
-                format!("Exported function {b_func_idx} for '{name}' out of range in Module B")
-            })?;
-        func_map_a.push(merged_idx);
+        resolved_imports_a.push(b_func_idx);
     }
-    // Module A's defined functions come immediately after WASI imports
-    for i in 0..num_a_funcs {
-        func_map_a.push(num_wasi_imports + i);
-    }
+
+    let plan = compute_pruning_plan(&a, &b, &resolved_imports_a)?;
+    let func_map_a = plan.func_map_a;
+    let func_map_b = plan.func_map_b;
 
     // 3. Globals Mapping
     let num_a_globals = a.globals.len() as u32;
@@ -112,11 +104,13 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     }
     module.section(&type_sec);
 
-    // Import Section (only Module B's WASI imports remain)
+    // Import Section (only REACHABLE WASI imports remain)
     let mut import_sec = wasm_encoder::ImportSection::new();
-    for &(m, n, ty) in &b.wasi_imports {
-        let merged_ty = type_map_b[ty as usize];
-        import_sec.import(m, n, wasm_encoder::EntityType::Function(merged_ty));
+    for (i, &(m, n, ty)) in b.wasi_imports.iter().enumerate() {
+        if plan.wasi_old_to_new[i].is_some() {
+            let merged_ty = type_map_b[ty as usize];
+            import_sec.import(m, n, wasm_encoder::EntityType::Function(merged_ty));
+        }
     }
     module.section(&import_sec);
 
@@ -126,9 +120,11 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     for &ty in &a.func_types {
         func_sec.function(type_map_a[ty as usize]);
     }
-    // Second, Module B's defined functions
-    for &ty in &b.func_types {
-        func_sec.function(type_map_b[ty as usize]);
+    // Second, Module B's reachable defined functions
+    for (j, &opt_new_idx) in plan.b_def_old_to_new.iter().enumerate() {
+        if opt_new_idx.is_some() {
+            func_sec.function(type_map_b[b.func_types[j] as usize]);
+        }
     }
     module.section(&func_sec);
 
@@ -210,12 +206,14 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
             _ => (),
         }
     }
-    // Exports from Module B (e.g. cabi_realloc, __data_end, __heap_base, runtime methods)
+    // Exports from Module B (preserve only cabi_* functions and globals)
     for exp in &b.exports {
         match exp.kind {
             ExternalKind::Func => {
-                let merged_f = func_map_b[exp.index as usize];
-                export_sec.export(exp.name, ExportKind::Func, merged_f);
+                if exp.name.starts_with("cabi_") {
+                    let merged_f = func_map_b[exp.index as usize];
+                    export_sec.export(exp.name, ExportKind::Func, merged_f);
+                }
             }
             ExternalKind::Global => {
                 export_sec.export(exp.name, ExportKind::Global, exp.index + num_a_globals);
@@ -310,24 +308,27 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         }
         code_sec.function(&func);
     }
-    // Bodies from Module B
+    // Bodies from Module B (only reachable functions)
     let mut re_b = ReencodeB {
         func_map: &func_map_b,
         type_map: &type_map_b,
         global_offset: num_a_globals,
     };
-    for body in &b.bodies {
-        let mut func = re_b
-            .new_function_with_parsed_locals(body)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut reader = body.get_operators_reader()?;
-        while !reader.eof() {
-            let op = re_b
-                .parse_instruction(&mut reader)
+    for (j, &opt_new_idx) in plan.b_def_old_to_new.iter().enumerate() {
+        if opt_new_idx.is_some() {
+            let body = &b.bodies[j];
+            let mut func = re_b
+                .new_function_with_parsed_locals(body)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            func.instruction(&op);
+            let mut reader = body.get_operators_reader()?;
+            while !reader.eof() {
+                let op = re_b
+                    .parse_instruction(&mut reader)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                func.instruction(&op);
+            }
+            code_sec.function(&func);
         }
-        code_sec.function(&func);
     }
     module.section(&code_sec);
 

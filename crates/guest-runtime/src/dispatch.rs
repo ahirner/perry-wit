@@ -31,6 +31,86 @@ pub extern "C" fn console_error(val: i64) {
     crate::io::print_stderr(&format!("{msg}\n"));
 }
 
+fn dispatch_clocks(name: &str, raw_args: &[i64]) -> Option<i64> {
+    match name {
+        "date_now" => Some(crate::date::date_now()),
+        "performance_now" => Some(crate::date::performance_now()),
+        "date_new" | "date_new_val" => {
+            let arg = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::date::date_new_val(arg))
+        }
+        "date_get_time" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_time(arg))
+        }
+        "date_to_iso_string" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_to_iso_string(arg))
+        }
+        "date_get_full_year" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_full_year(arg))
+        }
+        "date_get_month" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_month(arg))
+        }
+        "date_get_date" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_date(arg))
+        }
+        "date_get_day" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_day(arg))
+        }
+        "date_get_hours" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_hours(arg))
+        }
+        "date_get_minutes" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_minutes(arg))
+        }
+        "date_get_seconds" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_seconds(arg))
+        }
+        "date_get_milliseconds" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::date::date_get_milliseconds(arg))
+        }
+        _ => None,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_clocks(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_clocks(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
 #[no_mangle]
 pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
     let state = get_state();
@@ -41,6 +121,7 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         .map(|s| s.as_str())
         .unwrap_or("")
         .to_string();
+
     let count = arg_count as usize;
     let mut raw_args = Vec::with_capacity(count);
     let ptr = base_addr as *const i64;
@@ -48,10 +129,67 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         raw_args.push(unsafe { *ptr.add(i) });
     }
 
-    let mut result_i64: i64 = 0;
+    if let Some(res) = dispatch_clocks(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
 
     if matches!(
         name.as_str(),
+        "fetch_url"
+            | "fetch"
+            | "fetch_with_options"
+            | "fetch_request"
+            | "all"
+            | "response_json"
+            | "json"
+            | "response_text"
+            | "text"
+            | "await_promise"
+    ) {
+        let result_i64 = dispatch_http(&name, &raw_args);
+        unsafe {
+            *(base_addr as *mut i64) = result_i64;
+        }
+        return 0.0;
+    }
+
+    if matches!(name.as_str(), "object_get" | "class_get_field") && raw_args.len() >= 2 {
+        let target_handle = raw_args[0];
+        if let Some(JsHandle::Response(id)) = state.get_handle(target_handle) {
+            let id = *id;
+            let key_str = state.get_string(raw_args[1]);
+            let responses = crate::http::get_responses();
+            let status = responses[id]
+                .status()
+                .unwrap_or_else(|error| fail_with_error(&error));
+            let result_i64 = match key_str.as_str() {
+                "status" => (status as f64).to_bits() as i64,
+                "ok" => {
+                    (if (200..300).contains(&status) {
+                        TAG_TRUE
+                    } else {
+                        TAG_FALSE
+                    }) as i64
+                }
+                _ => TAG_UNDEFINED as i64,
+            };
+            unsafe {
+                *(base_addr as *mut i64) = result_i64;
+            }
+            return 0.0;
+        }
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
+fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
+    let state = get_state();
+    if matches!(
+        name,
         "fetch_url" | "fetch" | "fetch_with_options" | "fetch_request"
     ) {
         let args = if name == "fetch_request" {
@@ -80,13 +218,14 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
                 .unwrap_or_else(|error| fail_with_error(&error));
             match start_http_request(&url, options) {
                 Ok(fut) => {
-                    let id = state.responses.len();
-                    state.responses.push(ResponseEntry::InFlight {
-                        url,
+                    let responses = crate::http::get_responses();
+                    let id = responses.len();
+                    responses.push(ResponseEntry::InFlight {
+                        url: url.clone(),
                         future_resp: fut,
                     });
                     let h_id = state.alloc_handle(JsHandle::Response(id));
-                    result_i64 = nanbox_pointer(h_id);
+                    return nanbox_pointer(h_id);
                 }
                 Err(e) => {
                     fail_with_error(&format!("HTTP fetch initialization error for {url}: {e}"));
@@ -94,7 +233,6 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             }
         }
     } else if name == "all" {
-        // Promise.all(iterable)
         let arr_arg = if raw_args.len() >= 2 {
             raw_args[1]
         } else {
@@ -108,10 +246,11 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
                     _ => None,
                 })
                 .collect();
-            crate::http::wait_for_responses(&mut state.responses, &response_ids)
+            let responses = crate::http::get_responses();
+            crate::http::wait_for_responses(responses, &response_ids)
                 .unwrap_or_else(|error| fail_with_error(&error));
             let res_arr_id = state.alloc_handle(JsHandle::Array(items));
-            result_i64 = nanbox_pointer(res_arr_id);
+            return nanbox_pointer(res_arr_id);
         }
     } else if name == "response_json" || name == "json" {
         let handle = raw_args.first().copied().unwrap_or(0);
@@ -120,9 +259,9 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             _ => get_pointer_id(handle),
         };
         if let Some(id) = resp_id {
-            match state.get_response_body(id) {
+            match crate::http::get_response_body(id) {
                 Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
-                    Ok(parsed) => result_i64 = state.from_js_value(parsed),
+                    Ok(parsed) => return state.from_js_value(parsed),
                     Err(e) => {
                         fail_with_error(&format!("JSON parse error: {e}"));
                     }
@@ -141,11 +280,11 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             _ => get_pointer_id(handle),
         };
         if let Some(id) = resp_id {
-            match state.get_response_body(id) {
+            match crate::http::get_response_body(id) {
                 Ok(body) => {
                     let str_id = state.strings.len();
                     state.strings.push(body);
-                    result_i64 = nanbox_string(str_id);
+                    return nanbox_string(str_id);
                 }
                 Err(e) => {
                     fail_with_error(&e);
@@ -154,196 +293,18 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         } else {
             fail_with_error("Invalid response handle passed to .text()");
         }
-    } else if name == "array_new" {
-        let h_id = state.alloc_handle(JsHandle::Array(Vec::new()));
-        result_i64 = nanbox_pointer(h_id);
-    } else if name == "array_push" {
-        if raw_args.len() >= 2 {
-            let arr_handle = raw_args[0];
-            let item = raw_args[1];
-            if let Some(JsHandle::Array(arr)) = state.get_handle_mut(arr_handle) {
-                arr.push(item);
-            }
-            result_i64 = arr_handle;
-        }
-    } else if name == "array_get" || name == "object_get_dynamic" {
-        if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let idx_val = raw_args[1];
-            let bits = idx_val as u64;
-            let idx = if (bits >> 48) < 0x7ff8 {
-                f64::from_bits(bits) as usize
-            } else {
-                (bits & 0xFFFF_FFFF) as usize
-            };
-            if let Some(h) = state.get_handle(target_handle).cloned() {
-                match h {
-                    JsHandle::Array(arr) => {
-                        if let Some(&elem) = arr.get(idx) {
-                            result_i64 = elem;
-                        }
-                    }
-                    JsHandle::Json(serde_json::Value::Array(arr)) => {
-                        if let Some(elem) = arr.get(idx) {
-                            result_i64 = state.from_js_value(elem.clone());
-                        }
-                    }
-                    JsHandle::Json(serde_json::Value::Object(map)) => {
-                        let key_str = state.get_string(idx_val);
-                        if let Some(v) = map.get(&key_str) {
-                            result_i64 = state.from_js_value(v.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    } else if name == "string_len" || name == "array_length" {
-        let arg = raw_args.first().copied().unwrap_or(0);
-        if let Some(h) = state.get_handle(arg) {
-            match h {
-                JsHandle::Array(arr) => {
-                    result_i64 = (arr.len() as f64).to_bits() as i64;
-                }
-                JsHandle::Json(serde_json::Value::Array(arr)) => {
-                    result_i64 = (arr.len() as f64).to_bits() as i64;
-                }
-                _ => {
-                    let len = state.get_string(arg).len();
-                    result_i64 = (len as f64).to_bits() as i64;
-                }
-            }
-        } else {
-            let len = state.get_string(arg).len();
-            result_i64 = (len as f64).to_bits() as i64;
-        }
-    } else if name == "object_new" {
-        let h_id = state.alloc_handle(JsHandle::Json(serde_json::Value::Object(
-            serde_json::Map::new(),
-        )));
-        result_i64 = nanbox_pointer(h_id);
-    } else if name == "object_set" {
-        if raw_args.len() >= 3 {
-            let target_handle = raw_args[0];
-            let key_str = state.get_string(raw_args[1]);
-            let val_json = state.to_js_value(raw_args[2]);
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle_mut(target_handle)
-            {
-                map.insert(key_str, val_json);
-            }
-            result_i64 = target_handle;
-        }
-    } else if name == "object_assign" {
-        if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let source_handle = raw_args[1];
-            let source_json = state.to_js_value(source_handle);
-            if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) =
-                state.get_handle_mut(target_handle)
-            {
-                if let serde_json::Value::Object(src_map) = source_json {
-                    for (k, v) in src_map {
-                        target_map.insert(k, v);
-                    }
-                }
-            }
-            result_i64 = target_handle;
-        }
-    } else if name == "object_get" || name == "class_get_field" {
-        if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let key_str = state.get_string(raw_args[1]);
-            if let Some(JsHandle::Response(id)) = state.get_handle(target_handle) {
-                let id = *id;
-                let status = state.responses[id]
-                    .status()
-                    .unwrap_or_else(|error| fail_with_error(&error));
-                result_i64 = match key_str.as_str() {
-                    "status" => (status as f64).to_bits() as i64,
-                    "ok" => {
-                        (if (200..300).contains(&status) {
-                            TAG_TRUE
-                        } else {
-                            TAG_FALSE
-                        }) as i64
-                    }
-                    _ => TAG_UNDEFINED as i64,
-                };
-            }
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle(target_handle)
-            {
-                if let Some(v) = map.get(&key_str) {
-                    let v_clone = v.clone();
-                    result_i64 = state.from_js_value(v_clone);
-                }
-            }
-        }
-    } else if name == "json_stringify" {
-        let arg = raw_args.first().copied().unwrap_or(0);
-        let val_json = state.to_js_value(arg);
-        let json_str = serde_json::to_string_pretty(&val_json).unwrap_or_else(|_| "{}".to_string());
-        let str_id = state.strings.len();
-        state.strings.push(json_str);
-        result_i64 = nanbox_string(str_id);
-    } else if name == "json_parse" {
-        let arg = raw_args.first().copied().unwrap_or(0);
-        let s = state.get_string(arg);
-        let val_json: serde_json::Value = serde_json::from_str(&s)
-            .unwrap_or_else(|error| fail_with_error(&format!("JSON parse error: {error}")));
-        result_i64 = state.from_js_value(val_json);
-    } else if name == "console_log" || name == "log" {
-        let arg = raw_args.last().copied().unwrap_or(0);
-        let msg = state.get_string(arg);
-        print_stdout(&format!("{msg}\n"));
-    } else if name == "console_error" || name == "error" {
-        let arg = raw_args.last().copied().unwrap_or(0);
-        let msg = state.get_string(arg);
-        crate::io::print_stderr(&format!("{msg}\n"));
-    } else if name == "string_concat" || name == "js_add" {
-        if raw_args.len() >= 2 {
-            let args = [raw_args[0], raw_args[1]];
-            if name == "js_add"
-                && args
-                    .iter()
-                    .all(|&value| !matches!((value as u64) >> 48, STRING_TAG | POINTER_TAG))
-            {
-                let [left, right] = args.map(|value| match value as u64 {
-                    TAG_TRUE => 1.0,
-                    TAG_FALSE | TAG_NULL => 0.0,
-                    TAG_UNDEFINED => f64::NAN,
-                    bits => f64::from_bits(bits),
-                });
-                result_i64 = (left + right).to_bits() as i64;
-            } else {
-                let mut text = state.get_string(args[0]);
-                text.push_str(&state.get_string(args[1]));
-                let str_id = state.strings.len();
-                state.strings.push(text);
-                result_i64 = nanbox_string(str_id);
-            }
-        }
-    } else if name == "process_exit" || name == "exit" {
-        let code = raw_args.last().copied().unwrap_or(0);
-        crate::io::exit_process(f64::from_bits(code as u64) as i32);
     } else if name == "await_promise" {
         let arg = raw_args.first().copied().unwrap_or(0);
         if let Some(JsHandle::Response(resp_id)) = state.get_handle(arg) {
             let resp_id = *resp_id;
-            if let Err(e) = state.responses[resp_id].wait() {
+            let responses = crate::http::get_responses();
+            if let Err(e) = responses[resp_id].wait() {
                 fail_with_error(&e);
             }
         }
-        result_i64 = arg;
+        return arg;
     }
-
-    // Write result back to base_addr
-    unsafe {
-        *(base_addr as *mut i64) = result_i64;
-    }
-
-    0.0
+    0
 }
 
 #[no_mangle]

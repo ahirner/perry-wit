@@ -67,10 +67,7 @@ pub(crate) extern "C" fn math_random() -> i64 {
 pub(crate) extern "C" fn math_log(_a: i64) -> i64 {
     0
 }
-#[no_mangle]
-pub(crate) extern "C" fn date_now() -> i64 {
-    0
-}
+
 #[no_mangle]
 pub(crate) extern "C" fn js_typeof(_a: i64) -> i64 {
     0
@@ -446,50 +443,6 @@ pub(crate) extern "C" fn set_values(_a: i64) -> i64 {
     0
 }
 #[no_mangle]
-pub(crate) extern "C" fn date_new_val(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_time(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_to_iso_string(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_full_year(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_month(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_date(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_day(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_hours(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_minutes(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_seconds(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn date_get_milliseconds(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
 pub(crate) extern "C" fn error_new(_a: i64) -> i64 {
     0
 }
@@ -526,14 +479,29 @@ pub(crate) extern "C" fn try_start() {}
 #[no_mangle]
 pub(crate) extern "C" fn try_end() {}
 #[no_mangle]
-pub(crate) extern "C" fn throw_value(_a: i64) {}
+pub(crate) extern "C" fn throw_value(_a: i64) {
+    let state = crate::state::get_state();
+    state.current_exception = Some("Error".to_string());
+}
 #[no_mangle]
 pub(crate) extern "C" fn has_exception() -> i32 {
-    0
+    let state = crate::state::get_state();
+    if state.current_exception.is_some() {
+        1
+    } else {
+        0
+    }
 }
 #[no_mangle]
 pub(crate) extern "C" fn get_exception() -> i64 {
-    0
+    let state = crate::state::get_state();
+    if let Some(err) = state.current_exception.take() {
+        let str_id = state.strings.len();
+        state.strings.push(err);
+        crate::nanbox::nanbox_string(str_id)
+    } else {
+        crate::nanbox::TAG_UNDEFINED as i64
+    }
 }
 #[no_mangle]
 pub(crate) extern "C" fn url_parse(_a: i64) -> i64 {
