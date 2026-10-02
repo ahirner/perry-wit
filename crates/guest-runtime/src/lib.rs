@@ -10,6 +10,7 @@ mod bindings {
     });
 }
 
+mod buffer;
 mod cabi;
 mod clocks;
 mod date;

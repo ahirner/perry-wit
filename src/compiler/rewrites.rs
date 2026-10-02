@@ -295,6 +295,17 @@ impl Rewriter {
                 object, property, ..
             } = callee.as_ref()
             {
+                if property == "subarray" {
+                    let mut args_iter = args.clone().into_iter();
+                    let start = args_iter.next();
+                    let end = args_iter.next();
+                    *expr = perry_hir::ir::Expr::BufferSlice {
+                        buffer: object.clone(),
+                        start: start.map(Box::new),
+                        end: end.map(Box::new),
+                    };
+                    return;
+                }
                 if property == "performance_now" || property.starts_with("date_") {
                     self.needs_clocks = true;
                 }

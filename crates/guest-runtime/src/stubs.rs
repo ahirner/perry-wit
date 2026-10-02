@@ -1,6 +1,9 @@
 // -----------------------------------------------------------------------------
 // Auto-generated runtime function stubs (208 stubs for static link compatibility)
 // -----------------------------------------------------------------------------
+use crate::nanbox::{nanbox_pointer, nanbox_string, TAG_UNDEFINED};
+use crate::state::{get_state, JsHandle};
+
 #[no_mangle]
 pub(crate) extern "C" fn console_warn(_a: i64) {}
 #[no_mangle]
@@ -113,7 +116,41 @@ pub(crate) extern "C" fn object_get_dynamic(_a: i64, _b: i64) -> i64 {
     0
 }
 #[no_mangle]
-pub(crate) extern "C" fn object_set_dynamic(_a: i64, _b: i64, _c: i64) {}
+pub(crate) extern "C" fn object_set_dynamic(target: i64, key: i64, val: i64) {
+    let state = get_state();
+    let idx_bits = key as u64;
+    let idx = if (idx_bits >> 48) < 0x7ff8 {
+        f64::from_bits(idx_bits) as usize
+    } else {
+        (idx_bits & 0xFFFF_FFFF) as usize
+    };
+    let key_str = state.get_string(key);
+    let val_json = state.to_js_value(val);
+    if let Some(h) = state.get_handle_mut(target) {
+        match h {
+            JsHandle::Uint8Array(v) => {
+                let val_bits = val as u64;
+                let val_byte = if (val_bits >> 48) < 0x7ff8 {
+                    f64::from_bits(val_bits) as u8
+                } else {
+                    (val_bits & 0xFF) as u8
+                };
+                v.set(idx, val_byte);
+            }
+            JsHandle::Array(arr) => {
+                if idx < arr.len() {
+                    arr[idx] = val;
+                } else if idx == arr.len() {
+                    arr.push(val);
+                }
+            }
+            JsHandle::Json(serde_json::Value::Object(map)) => {
+                map.insert(key_str, val_json);
+            }
+            _ => {}
+        }
+    }
+}
 #[no_mangle]
 pub(crate) extern "C" fn object_delete(_a: i64, _b: i64) {}
 #[no_mangle]
@@ -602,53 +639,152 @@ pub(crate) extern "C" fn process_cwd() -> i64 {
     0
 }
 #[no_mangle]
-pub(crate) extern "C" fn buffer_alloc(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_alloc(size: i64) -> i64 {
+    uint8array_new(size)
 }
 #[no_mangle]
-pub(crate) extern "C" fn buffer_from_string(_a: i64, _b: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_from_string(s_val: i64, _encoding: i64) -> i64 {
+    let state = get_state();
+    let s = state.get_string(s_val);
+    let view = crate::buffer::Uint8ArrayView::from_bytes(s.into_bytes());
+    let id = state.alloc_handle(JsHandle::Uint8Array(view));
+    nanbox_pointer(id)
 }
 #[no_mangle]
-pub(crate) extern "C" fn buffer_to_string(_a: i64, _b: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_to_string(handle: i64, _encoding: i64) -> i64 {
+    let state = get_state();
+    if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
+        let bytes = v.to_vec();
+        let s = String::from_utf8_lossy(&bytes).into_owned();
+        let id = state.strings.len();
+        state.strings.push(s);
+        nanbox_string(id)
+    } else {
+        nanbox_string(0)
+    }
 }
 #[no_mangle]
-pub(crate) extern "C" fn buffer_get(_a: i64, _b: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_get(handle: i64, idx: i64) -> i64 {
+    uint8array_get(handle, idx)
 }
 #[no_mangle]
-pub(crate) extern "C" fn buffer_set(_a: i64, _b: i64, _c: i64) {}
-#[no_mangle]
-pub(crate) extern "C" fn buffer_length(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_set(handle: i64, idx: i64, val: i64) {
+    uint8array_set(handle, idx, val);
 }
 #[no_mangle]
-pub(crate) extern "C" fn buffer_slice(_a: i64, _b: i64, _c: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_length(handle: i64) -> i64 {
+    uint8array_length(handle)
 }
 #[no_mangle]
-pub(crate) extern "C" fn buffer_concat(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_slice(handle: i64, start: i64, end: i64) -> i64 {
+    let state = get_state();
+    let start_idx = f64::from_bits(start as u64) as usize;
+    let end_bits = end as u64;
+    let end_idx = if end_bits != TAG_UNDEFINED {
+        Some(f64::from_bits(end_bits) as usize)
+    } else {
+        None
+    };
+    if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle).cloned() {
+        let subview = v.subview(start_idx, end_idx);
+        let id = state.alloc_handle(JsHandle::Uint8Array(subview));
+        nanbox_pointer(id)
+    } else {
+        let id = state.alloc_handle(JsHandle::Uint8Array(crate::buffer::Uint8ArrayView::new(0)));
+        nanbox_pointer(id)
+    }
 }
 #[no_mangle]
-pub(crate) extern "C" fn uint8array_new(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn buffer_concat(arr_handle: i64) -> i64 {
+    let state = get_state();
+    let mut all_bytes = Vec::new();
+    if let Some(JsHandle::Array(items)) = state.get_handle(arr_handle).cloned() {
+        for item in items {
+            if let Some(JsHandle::Uint8Array(v)) = state.get_handle(item) {
+                all_bytes.extend(v.to_vec());
+            }
+        }
+    }
+    let view = crate::buffer::Uint8ArrayView::from_bytes(all_bytes);
+    let id = state.alloc_handle(JsHandle::Uint8Array(view));
+    nanbox_pointer(id)
 }
 #[no_mangle]
-pub(crate) extern "C" fn uint8array_from(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn uint8array_new(size: i64) -> i64 {
+    let state = get_state();
+    let size_f = f64::from_bits(size as u64);
+    let len = if size_f.is_finite() && size_f > 0.0 { size_f as usize } else { 0 };
+    let view = crate::buffer::Uint8ArrayView::new(len);
+    let id = state.alloc_handle(JsHandle::Uint8Array(view));
+    nanbox_pointer(id)
 }
 #[no_mangle]
-pub(crate) extern "C" fn uint8array_length(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn uint8array_from(val: i64) -> i64 {
+    let state = get_state();
+    let mut bytes = Vec::new();
+    if let Some(h) = state.get_handle(val).cloned() {
+        match h {
+            JsHandle::Uint8Array(v) => {
+                bytes = v.to_vec();
+            }
+            JsHandle::Array(arr) => {
+                bytes.reserve(arr.len());
+                for elem in arr {
+                    bytes.push(f64::from_bits(elem as u64) as u8);
+                }
+            }
+            JsHandle::Json(serde_json::Value::Array(arr)) => {
+                bytes.reserve(arr.len());
+                for item in arr {
+                    if let Some(n) = item.as_f64() {
+                        bytes.push(n as u8);
+                    } else if let Some(i) = item.as_i64() {
+                        bytes.push(i as u8);
+                    }
+                }
+            }
+            _ => {}
+        }
+    } else {
+        let s = state.get_string(val);
+        bytes = s.into_bytes();
+    }
+    let view = crate::buffer::Uint8ArrayView::from_bytes(bytes);
+    let id = state.alloc_handle(JsHandle::Uint8Array(view));
+    nanbox_pointer(id)
 }
 #[no_mangle]
-pub(crate) extern "C" fn uint8array_get(_a: i64, _b: i64) -> i64 {
-    0
+pub(crate) extern "C" fn uint8array_length(handle: i64) -> i64 {
+    let state = get_state();
+    if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
+        (v.byte_length as f64).to_bits() as i64
+    } else {
+        0
+    }
 }
 #[no_mangle]
-pub(crate) extern "C" fn uint8array_set(_a: i64, _b: i64, _c: i64) {}
+pub(crate) extern "C" fn uint8array_get(handle: i64, idx: i64) -> i64 {
+    let state = get_state();
+    if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
+        let i = f64::from_bits(idx as u64) as usize;
+        if let Some(b) = v.get(i) {
+            (b as f64).to_bits() as i64
+        } else {
+            TAG_UNDEFINED as i64
+        }
+    } else {
+        TAG_UNDEFINED as i64
+    }
+}
+#[no_mangle]
+pub(crate) extern "C" fn uint8array_set(handle: i64, idx: i64, val: i64) {
+    let state = get_state();
+    if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
+        let i = f64::from_bits(idx as u64) as usize;
+        let byte = f64::from_bits(val as u64) as u8;
+        v.set(i, byte);
+    }
+}
 #[no_mangle]
 pub(crate) extern "C" fn set_timeout(_a: i64, _b: i64) -> i64 {
     0

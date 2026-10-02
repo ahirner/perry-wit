@@ -1,0 +1,153 @@
+//! Tests for Item D.1: Shared Binary Values & Uint8Array Views.
+
+mod support;
+
+#[test]
+fn uint8array_basic_construction_and_indexed_access() {
+    let source = r#"
+        const buf = new Uint8Array(4);
+        console.log("len:" + buf.length);
+        console.log("b0:" + buf[0]);
+        console.log("b3:" + buf[3]);
+
+        buf[0] = 12;
+        buf[1] = 34;
+        buf[2] = 56;
+        buf[3] = 78;
+
+        console.log("after0:" + buf[0]);
+        console.log("after1:" + buf[1]);
+        console.log("after2:" + buf[2]);
+        console.log("after3:" + buf[3]);
+    "#;
+    let output = support::run(source, None, None);
+    assert_eq!(
+        support::stdout(&output),
+        "len:4\nb0:0\nb3:0\nafter0:12\nafter1:34\nafter2:56\nafter3:78\n"
+    );
+}
+
+#[test]
+fn uint8array_from_elements() {
+    let source = r#"
+        const arr = Uint8Array.from([10, 20, 30, 40, 50]);
+        console.log("len:" + arr.length);
+        console.log("arr[0]:" + arr[0]);
+        console.log("arr[4]:" + arr[4]);
+    "#;
+    let output = support::run(source, None, None);
+    assert_eq!(
+        support::stdout(&output),
+        "len:5\narr[0]:10\narr[4]:50\n"
+    );
+}
+
+#[test]
+fn uint8array_bounds_and_empty_views() {
+    let source = r#"
+        const empty = new Uint8Array(0);
+        console.log("empty len:" + empty.length);
+        console.log("empty[0]:" + empty[0]);
+
+        const buf = new Uint8Array(2);
+        buf[0] = 5;
+        buf[1] = 10;
+
+        // Out of bounds read returns undefined
+        console.log("buf[2]:" + buf[2]);
+        console.log("buf[100]:" + buf[100]);
+
+        // Out of bounds write is safely ignored
+        buf[2] = 99;
+        buf[100] = 100;
+        console.log("len unchanged:" + buf.length);
+        console.log("buf[0]:" + buf[0]);
+        console.log("buf[1]:" + buf[1]);
+    "#;
+    let output = support::run(source, None, None);
+    assert_eq!(
+        support::stdout(&output),
+        "empty len:0\nempty[0]:undefined\nbuf[2]:undefined\nbuf[100]:undefined\nlen unchanged:2\nbuf[0]:5\nbuf[1]:10\n"
+    );
+}
+
+#[test]
+fn uint8array_shared_subviews_and_mutation_visibility() {
+    let source = r#"
+        const orig = Uint8Array.from([1, 2, 3, 4, 5, 6]);
+        const sub = orig.subarray(2, 5); // elements at indices 2, 3, 4 -> [3, 4, 5]
+
+        console.log("sub len:" + sub.length);
+        console.log("sub[0]:" + sub[0]);
+        console.log("sub[1]:" + sub[1]);
+        console.log("sub[2]:" + sub[2]);
+
+        // Mutating subview alters underlying buffer and is visible in original
+        sub[0] = 99;
+        console.log("orig[2] after sub write:" + orig[2]);
+
+        // Mutating original alters underlying buffer and is visible in subview
+        orig[3] = 88;
+        console.log("sub[1] after orig write:" + sub[1]);
+
+        // Chained overlapping subview
+        const sub2 = sub.subarray(1, 3); // relative to sub -> elements [88, 5]
+        console.log("sub2 len:" + sub2.length);
+        console.log("sub2[0]:" + sub2[0]);
+        sub2[0] = 77;
+        console.log("sub[1] after sub2 write:" + sub[1]);
+        console.log("orig[3] after sub2 write:" + orig[3]);
+    "#;
+    let output = support::run(source, None, None);
+    assert_eq!(
+        support::stdout(&output),
+        "sub len:3\nsub[0]:3\nsub[1]:4\nsub[2]:5\norig[2] after sub write:99\nsub[1] after orig write:88\nsub2 len:2\nsub2[0]:88\nsub[1] after sub2 write:77\norig[3] after sub2 write:77\n"
+    );
+}
+
+#[test]
+fn non_utf8_and_binary_edge_values() {
+    let source = r#"
+        const raw = Uint8Array.from([0, 255, 128, 127, 1]);
+        console.log("0:" + raw[0]);
+        console.log("255:" + raw[1]);
+        console.log("128:" + raw[2]);
+        console.log("127:" + raw[3]);
+        console.log("1:" + raw[4]);
+
+        const slice = raw.subarray(1, 3);
+        console.log("slice[0]:" + slice[0]);
+        console.log("slice[1]:" + slice[1]);
+    "#;
+    let output = support::run(source, None, None);
+    assert_eq!(
+        support::stdout(&output),
+        "0:0\n255:255\n128:128\n127:127\n1:1\nslice[0]:255\nslice[1]:128\n"
+    );
+}
+
+#[test]
+fn pure_component_using_uint8array_has_zero_capability_imports() {
+    let source = r#"
+        const buf = new Uint8Array(4);
+        buf[0] = 65;
+        buf[1] = 66;
+        console.log("buf0:" + buf[0]);
+    "#;
+    let scratch = support::Scratch::new();
+    let wasm_path = scratch.compile(source, None);
+
+    // Verify component runs and succeeds
+    let mut cmd = std::process::Command::new(support::get_wasmtime_path());
+    cmd.args(["run", "-C", "cache=n"]);
+    cmd.arg(&wasm_path);
+    let output = cmd.output().expect("wasmtime execution failed");
+    assert_eq!(support::stdout(&output), "buf0:65\n");
+
+    // Inspect wasm imports to ensure wasi:http, wasi:clocks, and wasi:random are all pruned!
+    let wasm_bytes = std::fs::read(&wasm_path).unwrap();
+    let wat = wasmprinter::print_bytes(&wasm_bytes).expect("wasmprinter failed");
+    assert!(!wat.contains("wasi:http"), "pure component should not import wasi:http");
+    assert!(!wat.contains("wasi:clocks"), "pure component should not import wasi:clocks");
+    assert!(!wat.contains("wasi:random"), "pure component should not import wasi:random");
+}

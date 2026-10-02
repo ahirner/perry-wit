@@ -55,6 +55,153 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             }
             result_i64 = arr_handle;
         }
+    } else if name == "uint8array_new" || name == "buffer_alloc" {
+        let size_f = if let Some(&arg) = raw_args.first() {
+            let bits = arg as u64;
+            if (bits >> 48) < 0x7ff8 {
+                f64::from_bits(bits)
+            } else {
+                (bits & 0xFFFF_FFFF) as f64
+            }
+        } else {
+            0.0
+        };
+        let size = if size_f.is_finite() && size_f > 0.0 {
+            size_f as usize
+        } else {
+            0
+        };
+        let view = crate::buffer::Uint8ArrayView::new(size);
+        let id = state.alloc_handle(JsHandle::Uint8Array(view));
+        result_i64 = nanbox_pointer(id);
+    } else if name == "uint8array_from" {
+        let mut bytes = Vec::new();
+        if let Some(&arg) = raw_args.first() {
+            if let Some(h) = state.get_handle(arg).cloned() {
+                match h {
+                    JsHandle::Uint8Array(v) => {
+                        bytes = v.to_vec();
+                    }
+                    JsHandle::Array(arr) => {
+                        bytes.reserve(arr.len());
+                        for &elem in &arr {
+                            let bits = elem as u64;
+                            let b = if (bits >> 48) < 0x7ff8 {
+                                f64::from_bits(bits) as u8
+                            } else {
+                                (bits & 0xFF) as u8
+                            };
+                            bytes.push(b);
+                        }
+                    }
+                    JsHandle::Json(serde_json::Value::Array(arr)) => {
+                        bytes.reserve(arr.len());
+                        for item in arr {
+                            if let Some(n) = item.as_f64() {
+                                bytes.push(n as u8);
+                            } else if let Some(i) = item.as_i64() {
+                                bytes.push(i as u8);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                let s = state.get_string(arg);
+                bytes = s.into_bytes();
+            }
+        }
+        let view = crate::buffer::Uint8ArrayView::from_bytes(bytes);
+        let id = state.alloc_handle(JsHandle::Uint8Array(view));
+        result_i64 = nanbox_pointer(id);
+    } else if name == "uint8array_length" || name == "buffer_length" {
+        let arg = raw_args.first().copied().unwrap_or(0);
+        if let Some(JsHandle::Uint8Array(v)) = state.get_handle(arg) {
+            result_i64 = (v.byte_length as f64).to_bits() as i64;
+        }
+    } else if name == "uint8array_get" || name == "buffer_get" {
+        if raw_args.len() >= 2 {
+            let handle = raw_args[0];
+            let idx_val = raw_args[1];
+            let bits = idx_val as u64;
+            let idx = if (bits >> 48) < 0x7ff8 {
+                f64::from_bits(bits) as usize
+            } else {
+                (bits & 0xFFFF_FFFF) as usize
+            };
+            if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
+                if let Some(b) = v.get(idx) {
+                    result_i64 = (b as f64).to_bits() as i64;
+                } else {
+                    result_i64 = TAG_UNDEFINED as i64;
+                }
+            }
+        }
+    } else if name == "uint8array_set" || name == "buffer_set" {
+        if raw_args.len() >= 3 {
+            let handle = raw_args[0];
+            let idx_val = raw_args[1];
+            let val_val = raw_args[2];
+            let idx_bits = idx_val as u64;
+            let idx = if (idx_bits >> 48) < 0x7ff8 {
+                f64::from_bits(idx_bits) as usize
+            } else {
+                (idx_bits & 0xFFFF_FFFF) as usize
+            };
+            let val_bits = val_val as u64;
+            let val_byte = if (val_bits >> 48) < 0x7ff8 {
+                f64::from_bits(val_bits) as u8
+            } else {
+                (val_bits & 0xFF) as u8
+            };
+            if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle) {
+                v.set(idx, val_byte);
+            }
+        }
+    } else if name == "buffer_slice" {
+        if !raw_args.is_empty() {
+            let handle = raw_args[0];
+            let start = if raw_args.len() >= 2 {
+                let bits = raw_args[1] as u64;
+                if (bits >> 48) < 0x7ff8 {
+                    let f = f64::from_bits(bits);
+                    if f.is_finite() && f > 0.0 {
+                        f as usize
+                    } else {
+                        0
+                    }
+                } else {
+                    (bits & 0xFFFF_FFFF) as usize
+                }
+            } else {
+                0
+            };
+            let end = if raw_args.len() >= 3 && raw_args[2] as u64 != TAG_UNDEFINED {
+                let bits = raw_args[2] as u64;
+                if (bits >> 48) < 0x7ff8 {
+                    let f = f64::from_bits(bits);
+                    if f.is_finite() && f >= 0.0 {
+                        Some(f as usize)
+                    } else {
+                        Some(0)
+                    }
+                } else {
+                    Some((bits & 0xFFFF_FFFF) as usize)
+                }
+            } else {
+                None
+            };
+            if let Some(JsHandle::Uint8Array(v)) = state.get_handle(handle).cloned() {
+                let subview = v.subview(start, end);
+                let id = state.alloc_handle(JsHandle::Uint8Array(subview));
+                result_i64 = nanbox_pointer(id);
+            } else {
+                let id = state.alloc_handle(JsHandle::Uint8Array(crate::buffer::Uint8ArrayView::new(
+                    0,
+                )));
+                result_i64 = nanbox_pointer(id);
+            }
+        }
     } else if name == "array_get" || name == "object_get_dynamic" {
         if raw_args.len() >= 2 {
             let target_handle = raw_args[0];
@@ -70,6 +217,13 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                     JsHandle::Array(arr) => {
                         if let Some(&elem) = arr.get(idx) {
                             result_i64 = elem;
+                        }
+                    }
+                    JsHandle::Uint8Array(v) => {
+                        if let Some(b) = v.get(idx) {
+                            result_i64 = (b as f64).to_bits() as i64;
+                        } else {
+                            result_i64 = TAG_UNDEFINED as i64;
                         }
                     }
                     JsHandle::Json(serde_json::Value::Array(arr)) => {
@@ -93,6 +247,9 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             match h {
                 JsHandle::Array(arr) => {
                     result_i64 = (arr.len() as f64).to_bits() as i64;
+                }
+                JsHandle::Uint8Array(v) => {
+                    result_i64 = (v.byte_length as f64).to_bits() as i64;
                 }
                 JsHandle::Json(serde_json::Value::Array(arr)) => {
                     result_i64 = (arr.len() as f64).to_bits() as i64;
@@ -122,6 +279,45 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                 map.insert(key_str, val_json);
             }
             result_i64 = target_handle;
+        }
+    } else if name == "object_set_dynamic" || name == "array_set" {
+        if raw_args.len() >= 3 {
+            let target_handle = raw_args[0];
+            let idx_val = raw_args[1];
+            let val_val = raw_args[2];
+            let idx_bits = idx_val as u64;
+            let idx = if (idx_bits >> 48) < 0x7ff8 {
+                f64::from_bits(idx_bits) as usize
+            } else {
+                (idx_bits & 0xFFFF_FFFF) as usize
+            };
+            let key_str = state.get_string(idx_val);
+            let val_json = state.to_js_value(val_val);
+            if let Some(h) = state.get_handle_mut(target_handle) {
+                match h {
+                    JsHandle::Uint8Array(v) => {
+                        let val_bits = val_val as u64;
+                        let val_byte = if (val_bits >> 48) < 0x7ff8 {
+                            f64::from_bits(val_bits) as u8
+                        } else {
+                            (val_bits & 0xFF) as u8
+                        };
+                        v.set(idx, val_byte);
+                    }
+                    JsHandle::Array(arr) => {
+                        if idx < arr.len() {
+                            arr[idx] = val_val;
+                        } else if idx == arr.len() {
+                            arr.push(val_val);
+                        }
+                    }
+                    JsHandle::Json(serde_json::Value::Object(map)) => {
+                        map.insert(key_str, val_json);
+                    }
+                    _ => {}
+                }
+            }
+            result_i64 = val_val;
         }
     } else if name == "object_assign" {
         if raw_args.len() >= 2 {

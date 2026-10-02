@@ -10,6 +10,7 @@ pub(crate) enum JsHandle {
     Array(Vec<i64>),
     Response(usize),
     Date(f64),
+    Uint8Array(crate::buffer::Uint8ArrayView),
 }
 
 pub(crate) struct RuntimeState {
@@ -69,6 +70,14 @@ impl RuntimeState {
                     } else {
                         serde_json::Value::Null
                     }
+                }
+                Some(JsHandle::Uint8Array(view)) => {
+                    let items: Vec<serde_json::Value> = view
+                        .to_vec()
+                        .into_iter()
+                        .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
+                        .collect();
+                    serde_json::Value::Array(items)
                 }
                 _ => serde_json::Value::Null,
             }
@@ -148,6 +157,11 @@ impl RuntimeState {
                     JsHandle::Null => "null".to_string(),
                     JsHandle::Date(ts) => {
                         crate::date::format_iso(*ts).unwrap_or_else(|| "Invalid Date".to_string())
+                    }
+                    JsHandle::Uint8Array(view) => {
+                        let bytes = view.to_vec();
+                        let parts: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
+                        parts.join(",")
                     }
                 };
             }
