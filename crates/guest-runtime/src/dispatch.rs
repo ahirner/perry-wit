@@ -1,6 +1,6 @@
 //! Dispatcher for Perry runtime ABI function calls (`mem_call`, `mem_call_i32`).
 
-use crate::http::{ResponseEntry, start_http_get};
+use crate::http::{ResponseEntry, start_http_request};
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
     POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED, get_pointer_id,
@@ -50,10 +50,35 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
 
     let mut result_i64: i64 = 0;
 
-    if name == "fetch_url" || name == "fetch" || name == "fetch_with_options" {
-        if let Some(&url_arg) = raw_args.first() {
+    if matches!(
+        name.as_str(),
+        "fetch_url" | "fetch" | "fetch_with_options" | "fetch_request"
+    ) {
+        let args = if name == "fetch_request" {
+            &raw_args[1..]
+        } else {
+            &raw_args[..]
+        };
+        if let Some(&url_arg) = args.first() {
             let url = state.get_string(url_arg);
-            match start_http_get(&url) {
+            let options = if name == "fetch_with_options" {
+                let mut options = serde_json::Map::new();
+                for (index, key) in [(1, "method"), (2, "body"), (3, "headers"), (4, "redirect")] {
+                    if let Some(&value) = args.get(index) {
+                        if value as u64 != TAG_UNDEFINED {
+                            options.insert(key.into(), state.to_js_value(value));
+                        }
+                    }
+                }
+                serde_json::Value::Object(options)
+            } else {
+                args.get(1)
+                    .map(|&value| state.to_js_value(value))
+                    .unwrap_or(serde_json::Value::Null)
+            };
+            let options = crate::http_options::parse_options(options)
+                .unwrap_or_else(|error| fail_with_error(&error));
+            match start_http_request(&url, options) {
                 Ok(fut) => {
                     let id = state.responses.len();
                     state.responses.push(ResponseEntry::InFlight {

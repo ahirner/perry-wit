@@ -86,17 +86,35 @@ impl ResponseEntry {
     }
 }
 
-pub(crate) fn start_http_get(url: &str) -> Result<FutureIncomingResponse, String> {
+pub(crate) fn start_http_request(
+    url: &str,
+    mut options: crate::http_options::RequestOptions,
+) -> Result<FutureIncomingResponse, String> {
     let parsed = crate::http_url::parse_http_url(url)?;
     let scheme = match parsed.scheme {
         crate::http_url::HttpScheme::Http => Scheme::Http,
         crate::http_url::HttpScheme::Https => Scheme::Https,
     };
 
-    let headers = Fields::new();
+    if !options
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        options.headers.push((
+            "content-length".into(),
+            options.body.len().to_string().into_bytes(),
+        ));
+    }
+    let headers = Fields::from_list(&options.headers)
+        .map_err(|error| format!("Invalid request headers: {error:?}"))?;
     let request = OutgoingRequest::new(headers);
+    let method = match options.method {
+        crate::http_options::RequestMethod::Get => Method::Get,
+        crate::http_options::RequestMethod::Post => Method::Post,
+    };
     request
-        .set_method(&Method::Get)
+        .set_method(&method)
         .map_err(|_| "Failed to set method")?;
     request
         .set_scheme(Some(&scheme))
@@ -109,8 +127,17 @@ pub(crate) fn start_http_get(url: &str) -> Result<FutureIncomingResponse, String
         .map_err(|_| "Failed to set path")?;
 
     let outgoing_body = request.body().map_err(|_| "Failed to get request body")?;
-    OutgoingBody::finish(outgoing_body, None).map_err(|_| "Failed to finish outgoing body")?;
-
+    let stream = outgoing_body
+        .write()
+        .map_err(|_| "Failed to open request body stream")?;
     let future_resp = handle(request, None).map_err(|e| format!("HTTP handle error: {e:?}"))?;
+    for chunk in options.body.chunks(4096) {
+        stream
+            .blocking_write_and_flush(chunk)
+            .map_err(|error| format!("Failed to write request body: {error:?}"))?;
+    }
+    drop(stream);
+    OutgoingBody::finish(outgoing_body, None)
+        .map_err(|error| format!("Failed to finish outgoing body: {error:?}"))?;
     Ok(future_resp)
 }

@@ -134,3 +134,8 @@ results are rejected with a compile-time diagnostic until canonical record
 marshalling is implemented. Records use canonical field layouts at a component
 boundary; JSON payloads should be declared as WIT `string` and parsed explicitly.
 The SDK can describe composite WIT types beyond the compiler's current ABI support.
+
+`fetch` supports GET and POST, string request bodies, and headers supplied as a
+plain object or an array of name/value pairs. Other request options fail with a
+diagnostic before sending the request. HTTP error statuses remain readable
+responses with `status` and `ok` properties.

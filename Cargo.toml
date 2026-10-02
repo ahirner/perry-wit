@@ -20,6 +20,7 @@ strip = true
 perry-parser = { git = "https://github.com/PerryTS/perry" }
 perry-hir = { git = "https://github.com/PerryTS/perry" }
 perry-codegen-wasm = { git = "https://github.com/PerryTS/perry" }
+swc_ecma_visit = "19.0"
 wasm-encoder = { version = "0.258", features = ["wasmparser"] }
 wasmparser = "0.258"
 wit-parser = { version = "0.258" }

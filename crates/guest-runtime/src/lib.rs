@@ -14,6 +14,7 @@ mod cabi;
 mod dispatch;
 mod equality;
 mod http;
+mod http_options;
 mod http_url;
 mod io;
 mod nanbox;

@@ -1,5 +1,6 @@
 //! TypeScript compilation pipeline, HIR rewrites, linking, and component packaging.
 
+mod fetch;
 mod rewrites;
 
 use std::fs;
@@ -62,8 +63,9 @@ pub fn compile_typescript(
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let ast = parse_typescript(ts_source, file_name)
+    let mut ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
+    fetch::preserve_options(&mut ast);
 
     let mut hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
