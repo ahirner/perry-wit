@@ -1,7 +1,5 @@
 //! Canonical ABI memory layout, string conversion, and argument marshalling.
 
-use std::alloc::Layout;
-
 use crate::nanbox::nanbox_string;
 use crate::state::get_state;
 
@@ -112,17 +110,24 @@ pub extern "C" fn cabi_export_json(val: i64) -> i32 {
 /// Cleanup hook called by host post-return to reclaim Canonical ABI memory buffers.
 #[no_mangle]
 pub extern "C" fn cabi_post_cleanup(ret_ptr: i32) {
-    if ret_ptr != 0 {
-        unsafe {
-            let ptr_slice = std::slice::from_raw_parts_mut(ret_ptr as *mut u32, 2);
-            let str_ptr = ptr_slice[0] as *mut u8;
-            let str_len = ptr_slice[1] as usize;
-            if !str_ptr.is_null() && str_ptr as usize != 1 && str_len > 0 {
-                let layout = Layout::from_size_align_unchecked(str_len, 1);
-                std::alloc::dealloc(str_ptr, layout);
-            }
-            let ret_layout = Layout::from_size_align_unchecked(8, 4);
-            std::alloc::dealloc(ret_ptr as *mut u8, ret_layout);
+    free_string_return_area::<2>(ret_ptr);
+}
+
+/// Reclaims a result discriminant and its selected string payload.
+#[no_mangle]
+pub extern "C" fn cabi_post_result_cleanup(ret_ptr: i32) {
+    free_string_return_area::<3>(ret_ptr);
+}
+
+fn free_string_return_area<const WORDS: usize>(ret_ptr: i32) {
+    if ret_ptr == 0 {
+        return;
+    }
+    unsafe {
+        let area = Box::from_raw(ret_ptr as *mut [u32; WORDS]);
+        let (ptr, len) = (area[WORDS - 2] as *mut u8, area[WORDS - 1] as usize);
+        if len != 0 {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
         }
     }
 }

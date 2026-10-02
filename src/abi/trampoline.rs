@@ -19,6 +19,7 @@ pub struct DiscoveredExports {
     pub cabi_import_json: Option<u32>,
     pub cabi_export_json: Option<u32>,
     pub cabi_post_cleanup: Option<u32>,
+    pub cabi_post_result_cleanup: Option<u32>,
 }
 
 /// Parses the export section of a core WebAssembly module to extract known symbols and indices.
@@ -58,6 +59,9 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                             "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
                             "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
                             "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
+                            "cabi_post_result_cleanup" => {
+                                exports.cabi_post_result_cleanup = Some(exp.index)
+                            }
                             name => {
                                 exports.user_functions.insert(name.to_string(), exp.index);
                             }
@@ -312,7 +316,12 @@ pub fn synthesize_trampolines(
 "#
         ));
 
-        if let Some(post_cleanup) = discovered.cabi_post_cleanup
+        let post_cleanup = if mapped.wit_function.result == AbiType::ResultString {
+            discovered.cabi_post_result_cleanup
+        } else {
+            discovered.cabi_post_cleanup
+        };
+        if let Some(post_cleanup) = post_cleanup
             && matches!(
                 mapped.wit_function.result,
                 AbiType::String | AbiType::ResultString | AbiType::JsonRecord
