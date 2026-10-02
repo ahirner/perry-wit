@@ -79,23 +79,19 @@ impl ConformanceReport {
             }
 
             let mut case_evidences = Vec::new();
-            let mut all_passed = true;
-            let mut has_case = false;
+            let mut has_failed = false;
+            let mut has_missing = cap.conformance.is_empty();
 
             for case_ref in &cap.conformance {
                 if let Some(res) = results_by_path.get(case_ref) {
-                    has_case = true;
-                    if !res.matched {
-                        all_passed = false;
-                    }
+                    has_failed |= !res.matched;
                     case_evidences.push(CaseEvidence {
                         case_path: case_ref.clone(),
                         passed: res.matched,
                         discrepancies: res.discrepancies.clone(),
                     });
                 } else {
-                    has_case = false;
-                    all_passed = false;
+                    has_missing = true;
                     case_evidences.push(CaseEvidence {
                         case_path: case_ref.clone(),
                         passed: false,
@@ -104,15 +100,15 @@ impl ConformanceReport {
                 }
             }
 
-            let status = if !has_case {
-                missing_capabilities += 1;
-                EvidenceStatus::Missing
-            } else if all_passed {
-                passing_capabilities += 1;
-                EvidenceStatus::Passed
-            } else {
+            let status = if has_failed {
                 failing_capabilities += 1;
                 EvidenceStatus::Failed
+            } else if has_missing {
+                missing_capabilities += 1;
+                EvidenceStatus::Missing
+            } else {
+                passing_capabilities += 1;
+                EvidenceStatus::Passed
             };
 
             evidence.push(CapabilityEvidence {
