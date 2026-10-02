@@ -42,34 +42,21 @@ pub(crate) fn crypto_random_uuid() -> i64 {
 /// Returns the input array handle per Web Cryptography API specification.
 pub(crate) fn crypto_fill_random(handle: i64) -> i64 {
     let state = get_state();
-    if let Some(h) = state.get_handle_mut(handle) {
-        match h {
-            JsHandle::Uint8Array(view) => {
-                let len = view.byte_length;
-                if len > 65_536 {
-                    state.current_exception =
-                        Some("QuotaExceededError: Random view exceeds 65536 bytes".into());
-                    return TAG_UNDEFINED as i64;
-                }
-                if len > 0 {
-                    let rand_bytes =
-                        crate::bindings::wasi::random::random::get_random_bytes(len as u64);
-                    for (i, &b) in rand_bytes.iter().enumerate().take(len) {
-                        view.set(i, b);
-                    }
-                }
-            }
-            JsHandle::Array(arr) => {
-                let len = arr.len();
-                if len > 0 {
-                    let rand_bytes =
-                        crate::bindings::wasi::random::random::get_random_bytes(len as u64);
-                    for (i, &b) in rand_bytes.iter().enumerate().take(len) {
-                        arr[i] = (b as f64).to_bits() as i64;
-                    }
-                }
-            }
-            _ => {}
+    let Some(JsHandle::Uint8Array(view)) = state.get_handle(handle) else {
+        state.current_exception =
+            Some("TypeMismatchError: Expected an integer typed-array view".into());
+        return TAG_UNDEFINED as i64;
+    };
+    let len = view.byte_length;
+    if len > 65_536 {
+        state.current_exception =
+            Some("QuotaExceededError: Random view exceeds 65536 bytes".into());
+        return TAG_UNDEFINED as i64;
+    }
+    if len > 0 {
+        let rand_bytes = crate::bindings::wasi::random::random::get_random_bytes(len as u64);
+        for (index, &byte) in rand_bytes.iter().enumerate().take(len) {
+            view.set(index, byte);
         }
     }
     handle

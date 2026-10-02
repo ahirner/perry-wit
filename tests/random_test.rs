@@ -5,7 +5,7 @@ mod support;
 use std::{fs, process::Command};
 
 #[test]
-fn random_quota_is_checked_before_host_calls_or_mutation() {
+fn random_validation_precedes_host_calls_and_mutation() {
     let scratch = support::Scratch::new();
     let wit = format!(
         r#"{}
@@ -13,6 +13,7 @@ fn random_quota_is_checked_before_host_calls_or_mutation() {
             include runtime-adapter;
             export fill: func(size: f64) -> f64;
             export fill-tail: func() -> f64;
+            export reject: func(index: f64) -> f64;
         }}
     "#,
         include_str!("../wit/world.wit")
@@ -28,6 +29,12 @@ fn random_quota_is_checked_before_host_calls_or_mutation() {
                 if (returned !== bytes) { return -1; }
                 return size === 0 ? 0 : bytes[0];
             } catch { return bytes[0] + bytes[size - 1]; }
+        }
+        export function reject(index: number): number {
+            const values = [[1, 2, 3], null, undefined, "bytes", 42, {}, true];
+            const input = values[index];
+            try { crypto.getRandomValues(input); return -1; }
+            catch { return 1; }
         }
         export function fillTail(): number {
             const bytes = new Uint8Array(65538);
@@ -66,6 +73,7 @@ fn random_quota_is_checked_before_host_calls_or_mutation() {
             (imports[mod] ??= {})[name] = implementation;
         }
         rt = new WebAssembly.Instance(module, imports).exports;
+        for (let index = 0; index < 7; index++) { assert.equal(rt.reject(index), 1); }
         assert.equal(rt.fill(65537), 16);
         assert.deepEqual(requests, []);
         assert.equal(rt.fill(65536), 165);
@@ -95,6 +103,26 @@ fn random_quota_is_checked_before_host_calls_or_mutation() {
     assert_eq!(
         support::stdout(&output),
         "QuotaExceededError: Random view exceeds 65536 bytes\n"
+    );
+}
+
+#[test]
+fn random_rejects_ordinary_arrays_and_null_without_mutating_them() {
+    let output = support::run(
+        r#"
+        const array = [1, 2, 3];
+        try { crypto.getRandomValues(array); console.log("unreachable"); }
+        catch (error) { console.log(error); }
+        console.log(JSON.stringify(array));
+        try { crypto.getRandomValues(null); console.log("unreachable"); }
+        catch (error) { console.log(error); }
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeMismatchError: Expected an integer typed-array view\n[1,2,3]\nTypeMismatchError: Expected an integer typed-array view\n"
     );
 }
 
