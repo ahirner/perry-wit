@@ -151,15 +151,18 @@
       "id": "web.date",
       "name": "Date and Wall Clocks",
       "tier": "tier-1-web-primaries",
-      "support": "full",
+      "support": "partial",
       "domain": "Wall clock time and date calendar operations using wasi:clocks/wall-clock",
       "invariants": [
-        "Date.now() returns current UTC timestamp in milliseconds since UNIX epoch",
-        "new Date(timestamp) and new Date() instantiate valid Date objects",
-        "getTime(), toISOString(), and calendar getters (getFullYear, getMonth, getDate, getDay, getHours, getMinutes, getSeconds, getMilliseconds) operate in UTC"
+        "Date.now() returns whole UTC milliseconds since the UNIX epoch",
+        "Omitted arguments use current time; numeric timestamps, Date copies, and the tested null/undefined/boolean conversions preserve the supported Date semantics",
+        "getTime(), toISOString(), and calendar getters (getFullYear, getMonth, getDate, getDay, getHours, getMinutes, getSeconds, getMilliseconds) operate in UTC",
+        "Invalid Date toISOString calls raise a guest exception at the call site"
       ],
       "differences": [
-        "Backed by wasi:clocks/wall-clock; parsing arbitrary human-formatted date strings is currently deferred"
+        "Calendar getters use UTC rather than the host local timezone",
+        "Date string parsing, multi-argument constructors, setters, and the remaining Date API are outside the supported subset",
+        "Detailed constructor and exception regressions run in tests/clocks_test.rs"
       ],
       "conformance": [
         "tests/conformance/cases/08_date.ts"
@@ -169,15 +172,18 @@
       "id": "web.random",
       "name": "Randomness and Cryptography",
       "tier": "tier-1-web-primaries",
-      "support": "full",
+      "support": "partial",
       "domain": "Cryptographic and pseudo-random generation using wasi:random",
       "invariants": [
         "Math.random() generates floating point numbers in [0.0, 1.0)",
         "crypto.randomUUID() generates valid RFC 4122 v4 UUID strings",
-        "crypto.getRandomValues(arr) fills typed arrays in-place with secure random bytes and returns the array instance"
+        "crypto.getRandomValues(view) fills and returns the supplied Uint8Array, restricted to its visible byte range",
+        "Unsupported arguments and views larger than 65536 bytes fail before host randomness is requested or bytes are mutated"
       ],
       "differences": [
-        "Powered by wasi:random/random and wasi:random/insecure interfaces"
+        "Only Uint8Array is supported for getRandomValues; other integer view types are not implemented",
+        "Powered by wasi:random/random and wasi:random/insecure; controlled fill tests are in tests/random_test.rs",
+        "Controlled host-input edge tests for UUID generation and Math.random remain outstanding"
       ],
       "conformance": [
         "tests/conformance/cases/09_random.ts"
@@ -187,18 +193,67 @@
       "id": "cli.env",
       "name": "Process Environment, Arguments, and CWD",
       "tier": "tier-2-node-core",
-      "support": "full",
+      "support": "partial",
       "domain": "Accessing environment variables, command-line arguments, and working directory via wasi:cli/environment",
       "invariants": [
         "process.env exposes host environment variables as a JavaScript object",
         "process.argv exposes command-line arguments as a JavaScript string array",
-        "process.cwd() returns the current working directory string"
+        "process.cwd() returns the current working directory string",
+        "Guest environment writes coerce the supported values to strings; aliases, deletion, and enumeration observe the same guest-local object"
       ],
       "differences": [
-        "Backed by wasi:cli/environment@0.2.6 get-environment, get-arguments, and initial-cwd"
+        "Environment and arguments are cached guest-local snapshots; mutations do not update the host",
+        "Arguments are the host-provided WASI list without synthesized Node executable/script prefixes",
+        "Working directory is initial-cwd, with / used when the host supplies none",
+        "Detailed mutation, deletion, and argument tests run in tests/env_test.rs"
       ],
       "conformance": [
         "tests/conformance/cases/10_env.ts"
+      ]
+    },
+    {
+      "id": "web.uint8array",
+      "name": "Uint8Array Byte Views",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "Byte construction, indexed access, and shared subviews used by randomness and filesystem APIs",
+      "invariants": [
+        "Numeric lengths create zero-filled views; array/view inputs copy the visible bytes",
+        "Construction and indexed writes apply wrapping byte conversion; invalid indices do not alias valid elements",
+        "Subarrays share storage and resolve negative bounds relative to the current view",
+        "JSON serialization exposes enumerable numeric object keys"
+      ],
+      "differences": [
+        "Other typed-array classes, ArrayBuffer interoperability, Node Buffer compatibility, and broader Uint8Array methods are outside the tested subset",
+        "This evidence is a Rust integration suite; the TypeScript differential report does not execute it"
+      ],
+      "conformance": [
+        "tests/binary_views_test.rs"
+      ]
+    },
+    {
+      "id": "node.fs",
+      "name": "Sandboxed Synchronous Filesystem",
+      "tier": "tier-2-node-core",
+      "support": "partial",
+      "domain": "Synchronous file and directory operations relative to host-provided WASI preopens",
+      "invariants": [
+        "UTF-8 reads/writes and raw Uint8Array reads/writes work inside supplied preopens",
+        "Byte-view writes preserve offsets, lengths, and arbitrary byte values",
+        "Directory listing, creation, removal, existence checks, and the tested size/time/type metadata are available",
+        "Unsupported write modes, binary string writes, and supplied mkdir options are rejected before mutation"
+      ],
+      "differences": [
+        "UTF-8 reads reject invalid UTF-8; omitted encoding returns Uint8Array",
+        "Non-UTF-8 read options currently fall back to byte views, including binary; this differs from Node and still needs validation",
+        "Write support is overwrite-only; append/exclusive flags, permissions, recursive operations, and filesystem promises are unsupported",
+        "mkdirSync accepts omitted options or undefined; other supplied options are evaluated and rejected",
+        "Other directory/metadata rewrites currently discard options; evaluating and rejecting unsupported forms remains open",
+        "Stats support is limited to size, mtimeMs, isFile(), and isDirectory()",
+        "This evidence is a Rust integration suite using preopened scratch directories; the TypeScript differential report does not execute it"
+      ],
+      "conformance": [
+        "tests/fs_test.rs"
       ]
     },
     {

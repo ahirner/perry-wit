@@ -5,11 +5,10 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 
 ## Choosing the Next Slice
 
-1. Clocks (**6.1**), environment (**8.1**), and UUIDs / `Math.random()` (**7.1**) offer small synchronous starting points.
-2. Prioritize pruning (**C**) when minimal host requirements matter, and repeated-call reclamation (**E.1**) when instances must be reused.
-3. Build binary values (**D.1**) with the first consumer: in-place randomness, filesystem buffers, or binary HTTP.
-4. Develop callbacks (**B.1**), guest async execution (**B.2**), and retained lifetimes (**E.2**) around the first handler or timer that needs them.
-5. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
+1. Close the remaining acceptance and diagnostic gaps recorded under **C.2**, **7.1**, **9.1**, and **9.3**; implemented behavior stays checked separately from missing evidence.
+2. Extend the working HTTP client through **10.1** and **10.2**, using the existing byte views and controlled HTTP fixtures.
+3. Develop callbacks (**B.1**), guest async execution (**B.2**), and retained lifetimes (**E.2**) around the first handler or timer that needs them.
+4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
 
 ## Tracking Completion
 
@@ -30,6 +29,14 @@ These are standing criteria, not checkboxes to complete once or copy under every
 - SDK declarations, diagnostics, and `catalog/capabilities.json` reflect any support changes; unimplemented forms do not silently return dummy values.
 - Focused tests cover the acceptance outcomes and relevant failure/cleanup paths. Use Node comparisons where applicable and controlled inputs or property checks for nondeterministic behavior.
 - Verification records identify checks run and relevant limits or fixture dependencies; explain any inapplicable criterion.
+
+## Verification Baseline (2026-10-03)
+
+- `nix develop -c cargo test --package perry-wit`: 120 tests passed, including 19 filesystem tests and 7 HTTP regression tests. HTTP and conformance suites use local socket fixtures.
+- The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
+- Scoped formatting passed. Project Clippy checks completed with existing warnings. Parent `make format-rs` / `make lint-rs` targets cannot run here because they require rustup's `+nightly` handling and the separate `monty-bench` workspace; the pinned Nix checks are the applicable checks for this workspace.
+- SDK generation describes selected WIT contracts, not ambient JavaScript/Node API compatibility. These runtime slices do not change WIT export types; supported API subsets and limits belong in the capability catalog and tests.
+- Catalog `conformance` references can identify TypeScript differential cases or Rust integration suites. The differential report executes only TypeScript cases; integration-only entries remain `MISSING` in that report and are verified separately by Cargo.
 
 ## Runtime Foundations
 
@@ -63,58 +70,63 @@ Component Model futures/streams remain a separate experiment in Phase 13.
 
 ### Item C: Safe Runtime Pruning
 
-Pure object construction and JSON operations currently use `mem_call`, whose branches also reach HTTP.
-Function reachability alone therefore retains HTTP for ordinary pure tasks.
+Pure operations use `mem_call_pure`; the linker selects specialized dispatch for all 16 combinations of clocks, randomness, environment, and filesystem access.
+HTTP uses the broader dispatcher; minimal imports for mixed HTTP capability combinations have not been established.
 
 - [x] **C.1. Separable Capability Dispatch**
     - [x] Give statically known pure operations a path that does not reach HTTP, using direct calls or dispatcher specialization according to what the backend exposes.
     - [x] Preserve behavior for unresolved dispatch and avoid unconditional initialization of unused capabilities.
     - [x] Verify a JSON/object task uses the separable path and existing HTTP behavior still works.
-- [x] **C.2. Pruned Components** — Needs C.1 for the pure-task import guarantee.
+- [ ] **C.2. Pruned Components** — Needs C.1 for the pure-task import guarantee.
     - [x] Base reachability on the complete ABI: selected WIT exports, applicable initialization, generated trampolines/post-return hooks, host-called `cabi_realloc`, and their helpers. Run after trampoline synthesis, or derive equivalent roots from the same WIT/ABI metadata before sweeping.
     - [x] Preserve indirect-call targets, tables, globals, and memory initialization conservatively; start with provably dead functions/imports. Keep raw runtime exports only where the component ABI or core/debug contract needs them.
-    - [x] Compile a task that parses JSON, constructs an object, and returns serialized JSON; verify the final component omits HTTP imports and runs without HTTP host bindings.
-    - [x] Verify string/result marshalling, host allocation, post-return cleanup, an indirect-call fixture, and retained imports for an HTTP task. Include final WIT/component metadata in the check.
-    - [x] Record before/after sizes for these examples and use the results to choose any further optimization.
+    - [ ] Compile a task that parses JSON, constructs an object, and returns serialized JSON; verify the final component omits HTTP imports and runs without HTTP host bindings.
+    - [ ] Verify string/result marshalling, host allocation, post-return cleanup, an indirect-call fixture, and retained imports for an HTTP task. Include final WIT/component metadata in the check.
+    - [ ] Record before/after sizes for these examples and use the results to choose any further optimization.
 
 Verification:
-- Separable runtime dispatch implemented in `crates/guest-runtime/src/dispatch_pure.rs` (`mem_call_pure`), `crates/guest-runtime/src/dispatch.rs` (`mem_call_clocks`, `mem_call`), and decoupled `ResponseEntry` storage out of `RuntimeState` into `http.rs`.
-- Linker pruning implemented in `src/linker/prune.rs` and `src/linker/mod.rs` selecting specialized dispatchers and dead-stripping unused host capabilities.
-- Verified in `tests/pruning_test.rs`: pure components contain zero `wasi:http` and zero `wasi:clocks` imports; clocks-only components contain `wasi:clocks` and zero `wasi:http` imports; HTTP components retain `wasi:http`.
+
+- `nix develop -c cargo test --test pruning_test --test linker_test --test abi_regression_test --test runtime_memory_test --test http_regression_test`: suites passed in the baseline run. Coverage includes all 16 synchronous capability combinations, pure await/array collection, global `ref.func` roots, scalar/string/result ABI calls, allocator exhaustion, post-return cleanup, and HTTP behavior.
+- Pruning runs before trampoline synthesis. It conservatively roots all TypeScript functions, runtime `cabi_*` exports, initialization, table entries, and global function references, retaining helpers needed by the current trampolines.
+- C.2 remains open: no combined exported JSON-task/import assertion, dedicated indirect-call fixture, or recorded before/after size comparison was found. The legacy artifact-dependent linker test can return early when its input Wasm files are absent; its passing status does not establish those missing checks.
 
 ### Item D: Shared Binary Values
 
-The current `uint8array_*` operations are stubs and the runtime lacks byte-buffer/view values.
+`JsHandle::Uint8Array` holds views with shared byte storage, offsets, and lengths.
+Construction, indexed access, and subarrays serve random fills and filesystem byte I/O.
 
 - [x] **D.1. Byte Storage & Uint8Array Views** — Build with the first binary API; reuse instances only with E.1's lifetime guarantees.
     - [x] Support byte storage and views with identity, offset, length, and shared mutation; choose a representation compatible with existing guest values and their ownership.
     - [x] Implement the construction, indexed access, and subview behavior needed by that API, keeping bytes intact across its host boundary.
     - [x] Verify mutation through overlapping views, bounds, empty views, non-UTF-8 bytes, and cleanup for the supported lifecycle.
 
-Further view types and Node `Buffer` compatibility follow specific consumers.
+Verification:
+
+- `nix develop -c cargo test --test binary_views_test --test random_test --test fs_test`: 12 byte-view, 7 randomness, and 19 filesystem tests passed in the baseline run.
+- Tests cover byte coercion, copy construction, invalid lengths/indices, shared subviews, JSON object shape, exact filesystem bytes, and random-fill identity/quota handling. The supported surface is `Uint8Array`; further view types and Node `Buffer` compatibility follow specific consumers.
+- Repeated byte I/O is exercised within an invocation. Suspended or callback-owned views need the retained-lifetime coverage in E.2.
 
 ### Item E: Value Lifetimes & Bounded Memory
 
-`RuntimeState` stores strings, handles, and responses in append-only vectors.
-`cabi_post_cleanup` frees ABI return buffers, not those runtime values.
-The existing memory test covers return buffers rather than repeated task allocations.
+`RuntimeState` now reclaims invocation temporaries and recycles string/handle slots while retaining initialization values, registered globals, and process-context handles.
+Post-return hooks release ABI buffers and trigger value reclamation; callback captures and suspended work still need E.2.
 
 - [x] **E.1. Repeated Task Calls**
     - [x] Establish which values outlive a call, including literals, globals, returned values, and pending work; use that evidence to choose a reclamation approach.
     - [x] Reclaim call temporaries once results have been consumed while preserving surviving values. Invocation-scoped storage is an option only where escape behavior permits it.
     - [x] Verify repeated allocating string/JSON calls in one instance, with post-return each time, reach bounded live allocations and a stable memory high-water mark after warm-up; include recoverable failures and retained globals.
     - [x] Define and test whether an instance remains reusable after failures that interrupt normal cleanup.
+
+Verification:
+
+- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 5 repeated-call and 2 ABI memory tests passed in the baseline run.
+- Coverage includes stable memory after warm-up, retained global arrays/strings, recoverable result failures, skipped post-return recovery, direct component invocation, and allocation/reallocation exhaustion trapping rather than returning address zero.
+- Checkpoints, global scans, slot recycling, and return-area tracking are implemented in `state.rs`, `cabi.rs`, and ABI trampolines. Recovery claims cover the tested interrupted-cleanup paths; arbitrary traps or exhausted instances are not promised reusable.
+
 - [ ] **E.2. Retained Values for the First Async/Callback Consumer** — Deliver with B.1 or B.2, extending E.1's ownership rules.
     - [ ] Keep that consumer's captures or suspended values alive until their owner completes or releases them; choose retention/reclamation around the actual value graph, including any supported cycles.
     - [ ] Verify survival across calls or suspension, reclamation after release, and protection against stale handles aliasing newly allocated values.
     - [ ] Verify repeated retained-work cycles stay bounded on success and failure; include cancellation if the consumer exposes it.
-
-Verification:
-- Implemented lifecycle checkpoints (`cabi_record_init_checkpoint`), invocation reset (`cabi_reset_invocation_state`), global root registration (`cabi_register_global_root`), and temporary reclamation (`cabi_reclaim_temporaries`) in `crates/guest-runtime/src/cabi.rs` and `crates/guest-runtime/src/state.rs`.
-- Synthesized `$perry_ensure_init`, `$perry_scan_globals`, and `$perry_safe_reset` in `src/abi/trampoline.rs`, hooking export trampolines and post-return hooks to scan exported `__wasm_global_*` state and reclaim temporaries.
-- Added slot recycling (`free_strings`, `free_handles`) and array child-element traversal during reachability sweeps in `RuntimeState`.
-- Implemented Canonical ABI deallocating `cabi_realloc` on zero-size and tracked pending return areas to guarantee recovery and zero memory leakage even when the host interrupts or abandons post-return calls.
-- Verified in `tests/repeated_task_calls_test.rs` (5 comprehensive test cases) covering 15,000 allocating calls with zero heap growth after warm-up, global retention across repeated calls, recoverable failure cycles (`result<string, string>`), interrupted post-return recovery, and live Wasmtime CLI component invocation.
 
 E.2 completes for its first consumer.
 Later handler, timer, and I/O slices own their additional lifetime tests; future resource types do not hold this slice open indefinitely.
@@ -132,29 +144,24 @@ WebAssembly memory need not shrink, but repeated bounded workloads must stop gro
     - [x] Verify fixed-timestamp formatting and invalid-date behavior against Node; cover current-time construction if the declared constructor subset includes it.
 
 Verification:
-- Added `wasi:clocks/wall-clock@0.2.6` and `wasi:clocks/monotonic-clock@0.2.6` to WIT world adapter.
-- Implemented `wall_clock_now_ms()` and `monotonic_clock_now_ms()` in `crates/guest-runtime/src/clocks.rs`.
-- AST rewrite pass for `performance.now()` in `src/compiler/clocks.rs`.
-- Date constructors, getters (`getTime`, `getFullYear`, `getMonth`, `getDate`, `getDay`, `getHours`, `getMinutes`, `getSeconds`, `getMilliseconds`), and `toISOString()` in `crates/guest-runtime/src/date.rs`.
-- Verified in `tests/clocks_test.rs` (4 tests passing) against live WASI Preview 2 host runtime in Wasmtime.
+
+- `nix develop -c cargo test --test clocks_test`: 9 tests passed in the baseline run, covering clock bounds/precision, Node comparisons for constructor arguments and ISO formatting, invalid dates, and exception control flow.
+- Current-time construction, numeric timestamps, copying Date values, and the tested null/undefined/boolean conversions are supported. Calendar getters use UTC. String parsing, multi-argument constructors, timezone behavior, and the rest of the Date API are outside this slice.
 
 ### Phase 7: Randomness (`wasi:random`)
 
-- [x] **7.1. UUIDs & Math.random()** — Does not need guest binary views.
+- [ ] **7.1. UUIDs & Math.random()** — Does not need guest binary views.
     - [x] Expose `crypto.randomUUID()` backed by secure host randomness and `Math.random()` with values in `[0, 1)` through the pinned random interfaces.
-    - [x] Verify UUID format/version/variant and numeric bounds with controlled edge inputs; collision sampling is not a correctness guarantee.
+    - [ ] Verify UUID format/version/variant and numeric bounds with controlled edge inputs; collision sampling is not a correctness guarantee.
 - [x] **7.2. In-Place Random Fill** — Needs D.1's view behavior.
     - [x] Make `crypto.getRandomValues(view)` fill a supported integer view's byte range and return that exact view, with type/size validation; start with `Uint8Array` if sufficient.
     - [x] Verify mutation, return identity, alias visibility, nonzero offsets, unchanged bytes outside the view, empty views, and invalid arguments using controlled random input.
 
 Verification:
-- Added `wasi:random/random@0.2.6` and `wasi:random/insecure@0.2.6` to WIT world adapter in `wit/world.wit`.
-- Implemented `math_random()`, `crypto_random_uuid()`, `crypto_fill_random()`, and `crypto_random_bytes()` in `crates/guest-runtime/src/random.rs`.
-- Added granular capability dispatchers `mem_call_random` and `mem_call_clocks_random` in `crates/guest-runtime/src/dispatch.rs`.
-- Added random property and expression detection (`Math.random`, `crypto.randomUUID`, `crypto.getRandomValues`, `$$cryptoFillRandom`) emitting `__needs_random__` in `src/compiler/rewrites.rs`.
-- Added reachability analysis in `src/linker/prune.rs` and import routing in `src/linker/mod.rs` so pure components prune `wasi:random`, while random-using components retain only `wasi:random`.
-- Added string indexed access (`s[i]`), `string_charAt`, and `string_charCodeAt` in `crates/guest-runtime/src/dispatch_pure.rs`.
-- Verified in `tests/random_test.rs` (5 integration tests passing) and `tests/conformance/cases/09_random.ts` (differential equivalence with Node.js).
+
+- `nix develop -c cargo test --test random_test`: 7 tests passed in the baseline run; `tests/conformance/cases/09_random.ts` also passed the Node comparison in `conformance_test`.
+- 7.1's APIs and sampled UUID/range checks work, but controlled host-input edge tests for UUID generation and `Math.random()` are not present. Its verification item and parent remain open.
+- 7.2 has controlled host-byte tests for quota/type validation before host calls, empty views, return identity, and fills restricted to subviews. `getRandomValues` supports `Uint8Array` with a 65,536-byte quota; other view types remain outside the subset.
 
 ### Phase 8: Environment & Arguments (`wasi:cli`)
 
@@ -164,37 +171,33 @@ Verification:
     - [x] Verify supplied/missing/empty variables, argument order, and repeated access without initializing unrelated capabilities.
 
 Verification:
-- Added `import wasi:cli/environment@0.2.6;` to `wit/world.wit`.
-- Implemented `process_env()`, `process_env_get()`, `process_argv()`, and `process_cwd()` in `crates/guest-runtime/src/environment.rs`.
-- AST rewrites and capability detection in `src/compiler/rewrites.rs` emitting `__needs_env__` for `process.env`, `process.argv`, and `process.cwd()`.
-- Linker pruning in `src/linker/prune.rs` and import routing in `src/linker/mod.rs` selecting specialized dispatchers (`mem_call_env`, `mem_call_clocks_env`, `mem_call_random_env`, `mem_call_all_sync`, etc.) so pure components prune `wasi:cli/environment`.
-- Implemented missing direct runtime imports in `crates/guest-runtime/src/stubs.rs` (`js_typeof`, `object_*`, `array_*`, `json_parse`, `json_stringify`, `string_includes`, `string_startsWith`, `string_endsWith`) and `crates/guest-runtime/src/dispatch.rs` / `dispatch_pure.rs`.
-- Verified in `tests/env_test.rs` (4 integration tests passing under Wasmtime) and differential conformance case `tests/conformance/cases/10_env.ts` (100% match against Node.js oracle).
+
+- `nix develop -c cargo test --test env_test`: 6 tests passed in the baseline run; `tests/conformance/cases/10_env.ts` also passed the Node comparison. Tests cover supplied/missing/empty values, argument order, aliases, deletion, string coercion, enumeration, and capability pruning.
+- `process.env` is a lazily cached, guest-local mutable snapshot; writes do not update the host environment. `process.argv` preserves the host's WASI argument list without synthesizing Node executable/script prefixes. `process.cwd()` returns `initial-cwd`, falling back to `/` if absent.
 
 ### Phase 9: Sandboxed Filesystem (`wasi:filesystem`)
 
-- [x] **9.1. UTF-8 File Reads/Writes**
+- [ ] **9.1. UTF-8 File Reads/Writes**
     - [x] Support `readFileSync` / `writeFileSync` within host-provided preopens, with explicit path rules and confinement through descriptor-relative operations.
     - [x] Verify round-trips, short I/O handling, missing files, denied access, path escape attempts, and resource cleanup on success/failure.
+    - [ ] Validate read encodings/options before I/O; unsupported encodings currently fall through to binary reads instead of a diagnostic.
 - [x] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
     - [x] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`. Writing with `binary` encoding requires a byte view; strings support UTF-8 and reject `binary` before opening the file.
     - [x] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
-- [x] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
+- [ ] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
     - [x] Support `fs.readdirSync(path)` via `Descriptor::read_directory` stream collecting child entry names, and `fs.unlinkSync(path)` via `Descriptor::unlink_file_at`.
     - [x] Support `fs.mkdirSync(path)` via `Descriptor::create_directory_at` and `fs.rmdirSync(path)` via `Descriptor::remove_directory_at`. Supplied `mkdirSync` options are evaluated and rejected before creating a directory; permission modes and recursive creation remain unsupported.
     - [x] Support `fs.existsSync(path)` via `Descriptor::stat_at` (never throws on non-existent paths).
     - [x] Support `fs.statSync(path)` via `Descriptor::stat_at(PathFlags::SYMLINK_FOLLOW, ...)`, exposing `{ isFile(): boolean, isDirectory(): boolean, size: number, mtimeMs: number }`.
     - [x] Verify listing, metadata, and removal for that subset, including failure paths (`ENOENT`, `ENOTDIR`, `EISDIR`) and descriptor cleanup.
+    - [ ] Preserve evaluation and reject unsupported options for the remaining directory/metadata calls; the current guarantee covers `mkdirSync`, while other rewrites still discard options.
 
 Verification:
-- Added `wasi:filesystem/types@0.2.6` and `wasi:filesystem/preopens@0.2.6` to WIT world adapter in `wit/world.wit`.
-- Implemented `normalize_path()`, `locate_preopen()`, `fs_read_file_sync()`, `fs_read_file_binary()`, `fs_write_file_sync()`, `fs_readdir_sync()`, `fs_stat_sync()`, `fs_unlink_sync()`, `fs_mkdir_sync()`, `fs_rmdir_sync()`, and `fs_exists_sync()` in `crates/guest-runtime/src/filesystem.rs`.
-- Enforced sandboxed confinement: path normalization eliminates `.` and `..` segments, rejects NUL bytes, matches longest mounted preopen prefix, and prohibits escapes outside preopened directories.
-- Handled short I/O and streaming in both directions: `fs_read_file_sync` streams chunks of up to 64KB until EOF; `fs_write_file_sync` chunks writes into 4096-byte slices with clean descriptor and stream drops.
-- Formatted POSIX-compliant error codes (`ENOENT`, `EACCES`, `EEXIST`, `EISDIR`, `ENOTDIR`, `EPERM`, `EROFS`, `EIO`) integrated with guest runtime exception propagation.
-- Added AST rewrites for `fs.readFileSync`, `fs.writeFileSync`, `fs.readdirSync`, `fs.statSync`, `fs.unlinkSync`, `fs.mkdirSync`, `fs.rmdirSync`, `fs.existsSync`, and named imports in `src/compiler/rewrites.rs` emitting `__needs_fs__`.
-- Linker pruning in `src/linker/prune.rs` and import routing in `src/linker/mod.rs` so pure components completely prune `wasi:filesystem`, while filesystem components import `wasi:filesystem` and route through `mem_call_fs` or `mem_call_all_sync`.
-- Verified in `tests/fs_test.rs` (19 integration tests passing under Wasmtime): round-trip UTF-8 file reads/writes, binary Uint8Array reads/writes with subarray offsets, named imports (`node:fs`), missing files throwing `ENOENT`, directory listing and creation (`readdirSync`, `mkdirSync`), file and directory metadata (`statSync.isFile()`, `statSync.isDirectory()`, `statSync.size`, `statSync.mtimeMs`), existence checks (`existsSync`), file and directory deletion (`unlinkSync`, `rmdirSync`), error handling (`ENOTDIR`, `ENOENT`), sandbox escape attempts throwing `EACCES`, 128KB multi-chunk read/write, 500 repeated descriptor open/close cycles without resource leaks, capability pruning, and rejection of unsupported directory options and binary string writes before mutation.
+
+- `nix develop -c cargo test --test fs_test`: 19 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, and import pruning.
+- Unsupported write modes and binary string encodings are rejected before opening files. Supplied `mkdirSync` options other than `undefined` are evaluated and rejected before creation. Supported writes overwrite; append/exclusive modes and permission changes remain unsupported.
+- 9.1 and 9.3 remain open for the option-validation gaps above. `readFileSync` currently returns bytes for non-UTF-8 encoding options; `readdirSync`, `statSync`, and removal calls do not yet validate their options. Binary encoding on reads is a byte-view extension, not Node's Latin-1 string behavior.
+- UTF-8 reads reject invalid UTF-8. Metadata is limited to size, modification time, and file/directory predicates; permissions, ownership, recursive operations, and broader Node `Stats` behavior are not implemented.
 
 Promise-based filesystem APIs need guest async execution and evidence that their underlying operations can make progress; they are a later slice.
 

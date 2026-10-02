@@ -1,4 +1,5 @@
 use perry_wit::conformance::{CapabilityCatalog, SupportLevel};
+use std::path::Path;
 
 #[test]
 fn test_embedded_catalog_loads_and_validates() {
@@ -25,6 +26,13 @@ fn test_embedded_catalog_loads_and_validates() {
             "capability '{}' must have conformance references",
             cap.id
         );
+        for reference in &cap.conformance {
+            assert!(
+                Path::new(reference).is_file(),
+                "capability '{}' references missing evidence: {reference}",
+                cap.id
+            );
+        }
     }
 }
 
