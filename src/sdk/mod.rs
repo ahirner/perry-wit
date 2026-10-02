@@ -60,6 +60,7 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
                 .out_dir
                 .parent()
                 .and_then(|p| p.parent())
+                .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."))
                 .to_path_buf()
         } else {

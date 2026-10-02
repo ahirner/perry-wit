@@ -1,7 +1,7 @@
 //! Canonical ABI definitions, WIT metadata introspection, and trampoline synthesis.
 
-pub mod trampoline;
 pub mod export_names;
+pub mod trampoline;
 pub mod wit_meta;
 
 pub use trampoline::synthesize_trampolines;

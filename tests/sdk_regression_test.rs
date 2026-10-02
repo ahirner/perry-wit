@@ -117,6 +117,47 @@ fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
 use std::{fs, process::Command};
 
 #[test]
+fn cli_generates_a_checked_sdk_with_default_relative_paths() {
+    let root = std::env::temp_dir().join(format!("perry-sdk-cli-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("wit")).unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("wit/world.wit"),
+        "package test:cli; world task { export run-task: func(input: string) -> string; }",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/index.ts"),
+        "export function runTask(input: string): string { return input; }",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_perry-wit"))
+        .current_dir(&root)
+        .arg("gen-types")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.join("tsconfig.json").exists());
+    assert!(root.join(".perry/types/implementation-check.ts").exists());
+    let output = Command::new("tsc")
+        .current_dir(&root)
+        .arg("--noEmit")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
     let root = std::env::temp_dir().join(format!("perry-sdk-composites-{}", std::process::id()));
     fs::create_dir_all(root.join("wit")).unwrap();
