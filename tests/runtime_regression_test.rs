@@ -4,6 +4,38 @@ use std::process::Command;
 use support::{run, stdout};
 
 #[test]
+fn string_search_and_array_join_preserve_surrogate_units() {
+    let source = r#"
+        const emoji = "😀";
+        const high = emoji.charAt(0);
+        const low = emoji.charAt(1);
+        console.log(high.includes("�"));
+        console.log(high.startsWith("�"));
+        console.log(low.endsWith("�"));
+        console.log(emoji.includes(high));
+        console.log(emoji.startsWith(high));
+        console.log(emoji.endsWith(low));
+        console.log(high.includes(low));
+        console.log(high.includes(""));
+        console.log(high.startsWith(""));
+        console.log(low.endsWith(""));
+        console.log([high, low].join("") === emoji);
+        console.log(JSON.stringify([high, low].join("-")));
+        console.log(JSON.stringify([high, "x"].join(low)));
+        console.log(["a", null, undefined, "b"].join());
+        console.log(["a", "b"].join(0));
+        console.log([].join(high));
+    "#;
+    let expected = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    assert!(expected.status.success());
+    let actual = run(source, None, None);
+    assert_eq!(stdout(&actual), stdout(&expected));
+}
+
+#[test]
 fn strings_use_utf16_code_units_for_methods_indices_and_length() {
     let source = r#"
         const text = "😀x𝄞é";

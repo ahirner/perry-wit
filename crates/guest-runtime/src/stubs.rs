@@ -438,29 +438,23 @@ pub(crate) extern "C" fn array_unshift(_a: i64, _b: i64) {}
 #[no_mangle]
 pub(crate) extern "C" fn array_join(target: i64, sep: i64) -> i64 {
     let state = get_state();
-    let separator = if sep == 0 || (sep as u64) == crate::nanbox::TAG_UNDEFINED {
-        ",".to_string()
+    let separator = if sep as u64 == TAG_UNDEFINED {
+        vec![b',' as u16]
     } else {
-        state.get_string(sep)
+        state.string_units(sep).into_owned()
     };
-    if let Some(JsHandle::Array(arr)) = state.get_handle(target) {
-        let items = arr.clone();
-        let parts: Vec<String> = items
-            .iter()
-            .map(|&item| {
-                if (item as u64) == crate::nanbox::TAG_UNDEFINED
-                    || (item as u64) == crate::nanbox::TAG_NULL
-                {
-                    String::new()
-                } else {
-                    get_state().get_string(item)
-                }
-            })
-            .collect();
-        let joined = parts.join(&separator);
-        return get_state().alloc_string(&joined);
+    let mut joined = Vec::new();
+    if let Some(JsHandle::Array(items)) = state.get_handle(target) {
+        for (index, &item) in items.iter().enumerate() {
+            if index > 0 {
+                joined.extend_from_slice(&separator);
+            }
+            if !matches!(item as u64, TAG_UNDEFINED | TAG_NULL) {
+                joined.extend_from_slice(&state.string_units(item));
+            }
+        }
     }
-    state.alloc_string("")
+    state.alloc_string_units(joined)
 }
 #[no_mangle]
 pub(crate) extern "C" fn array_index_of(_a: i64, _b: i64) -> i64 {
@@ -546,35 +540,27 @@ pub(crate) extern "C" fn string_trim(_a: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn string_includes(target: i64, search: i64) -> i32 {
     let state = get_state();
-    let target_s = state.get_string(target);
-    let search_s = state.get_string(search);
-    if target_s.contains(&search_s) {
-        1
-    } else {
-        0
-    }
+    let target = state.string_units(target);
+    let search = state.string_units(search);
+    i32::from(search.is_empty() || target.windows(search.len()).any(|part| part == &*search))
 }
 #[no_mangle]
 pub(crate) extern "C" fn string_startsWith(target: i64, search: i64) -> i32 {
     let state = get_state();
-    let target_s = state.get_string(target);
-    let search_s = state.get_string(search);
-    if target_s.starts_with(&search_s) {
-        1
-    } else {
-        0
-    }
+    i32::from(
+        state
+            .string_units(target)
+            .starts_with(&state.string_units(search)),
+    )
 }
 #[no_mangle]
 pub(crate) extern "C" fn string_endsWith(target: i64, search: i64) -> i32 {
     let state = get_state();
-    let target_s = state.get_string(target);
-    let search_s = state.get_string(search);
-    if target_s.ends_with(&search_s) {
-        1
-    } else {
-        0
-    }
+    i32::from(
+        state
+            .string_units(target)
+            .ends_with(&state.string_units(search)),
+    )
 }
 #[no_mangle]
 pub(crate) extern "C" fn string_replace(_a: i64, _b: i64, _c: i64) -> i64 {
