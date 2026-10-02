@@ -66,42 +66,44 @@ pub fn wit_type_to_ts(resolve: &Resolve, ty: &Type) -> String {
             if let Some(name) = &type_def.name {
                 to_pascal_case(name)
             } else {
-                match &type_def.kind {
-                    TypeDefKind::List(elem) => {
-                        if matches!(elem, Type::U8) {
-                            "Uint8Array".to_string()
-                        } else {
-                            format!("Array<{}>", wit_type_to_ts(resolve, elem))
-                        }
-                    }
-                    TypeDefKind::Option(inner) => {
-                        format!("{} | null | undefined", wit_type_to_ts(resolve, inner))
-                    }
-                    TypeDefKind::Result(WitResult { ok, err }) => {
-                        let ok_str = ok
-                            .as_ref()
-                            .map(|t| wit_type_to_ts(resolve, t))
-                            .unwrap_or_else(|| "void".to_string());
-                        let err_str = err
-                            .as_ref()
-                            .map(|t| wit_type_to_ts(resolve, t))
-                            .unwrap_or_else(|| "unknown".to_string());
-                        format!(
-                            "{{ ok: true; value: {ok_str} }} | {{ ok: false; error: {err_str} }}"
-                        )
-                    }
-                    TypeDefKind::Tuple(tuple) => {
-                        let items: Vec<String> = tuple
-                            .types
-                            .iter()
-                            .map(|t| wit_type_to_ts(resolve, t))
-                            .collect();
-                        format!("[{}]", items.join(", "))
-                    }
-                    _ => "unknown".to_string(),
-                }
+                type_kind_to_ts(resolve, &type_def.kind)
             }
         }
+    }
+}
+
+fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
+    match kind {
+        TypeDefKind::List(elem) => {
+            if matches!(elem, Type::U8) {
+                "Uint8Array".to_string()
+            } else {
+                format!("Array<{}>", wit_type_to_ts(resolve, elem))
+            }
+        }
+        TypeDefKind::Option(inner) => {
+            format!("{} | null | undefined", wit_type_to_ts(resolve, inner))
+        }
+        TypeDefKind::Result(WitResult { ok, err }) => {
+            let ok_str = ok
+                .as_ref()
+                .map(|t| wit_type_to_ts(resolve, t))
+                .unwrap_or_else(|| "void".to_string());
+            let err_str = err
+                .as_ref()
+                .map(|t| wit_type_to_ts(resolve, t))
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("{{ ok: true; value: {ok_str} }} | {{ ok: false; error: {err_str} }}")
+        }
+        TypeDefKind::Tuple(tuple) => {
+            let items: Vec<String> = tuple
+                .types
+                .iter()
+                .map(|t| wit_type_to_ts(resolve, t))
+                .collect();
+            format!("[{}]", items.join(", "))
+        }
+        _ => "unknown".to_string(),
     }
 }
 
@@ -247,25 +249,28 @@ fn emit_nested_types(
         let td = &resolve.types[*id];
         if let Some(name) = &td.name {
             emit_type_def(resolve, *id, name, emitted, out);
-        }
-        match &td.kind {
-            TypeDefKind::List(elem) => emit_nested_types(resolve, elem, emitted, out),
-            TypeDefKind::Option(inner) => emit_nested_types(resolve, inner, emitted, out),
-            TypeDefKind::Result(WitResult { ok, err }) => {
-                if let Some(o) = ok {
-                    emit_nested_types(resolve, o, emitted, out);
-                }
-                if let Some(e) = err {
-                    emit_nested_types(resolve, e, emitted, out);
-                }
+        } else {
+            for child in type_children(&td.kind) {
+                emit_nested_types(resolve, child, emitted, out);
             }
-            TypeDefKind::Tuple(tuple) => {
-                for t in &tuple.types {
-                    emit_nested_types(resolve, t, emitted, out);
-                }
-            }
-            _ => {}
         }
+    }
+}
+
+fn type_children(kind: &TypeDefKind) -> Vec<&Type> {
+    match kind {
+        TypeDefKind::List(inner) | TypeDefKind::Option(inner) | TypeDefKind::Type(inner) => {
+            vec![inner]
+        }
+        TypeDefKind::Result(result) => result.ok.iter().chain(result.err.iter()).collect(),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().collect(),
+        TypeDefKind::Record(record) => record.fields.iter().map(|field| &field.ty).collect(),
+        TypeDefKind::Variant(variant) => variant
+            .cases
+            .iter()
+            .filter_map(|case| case.ty.as_ref())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -337,7 +342,19 @@ fn emit_type_def(
             let alias_ty = wit_type_to_ts(resolve, alias);
             out.push_str(&format!("export type {type_name} = {alias_ty};\n\n"));
         }
+        TypeDefKind::List(_)
+        | TypeDefKind::Option(_)
+        | TypeDefKind::Tuple(_)
+        | TypeDefKind::Result(_) => {
+            out.push_str(&format!(
+                "export type {type_name} = {};\n\n",
+                type_kind_to_ts(resolve, &td.kind)
+            ));
+        }
         _ => {}
+    }
+    for child in type_children(&td.kind) {
+        emit_nested_types(resolve, child, emitted, out);
     }
 }
 
