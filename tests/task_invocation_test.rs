@@ -6,6 +6,26 @@ use std::process::Command;
 
 use perry_wit::compiler::{CompileOptions, compile_file};
 
+fn get_wasmtime_cmd() -> Command {
+    if let Ok(path) = std::env::var("WASMTIME") {
+        return Command::new(path);
+    }
+    if Command::new("wasmtime").arg("--version").output().is_ok() {
+        return Command::new("wasmtime");
+    }
+    if let Ok(entries) = std::fs::read_dir("/nix/store") {
+        for entry in entries.flatten() {
+            let path = entry.path().join("bin/wasmtime");
+            if path.exists() {
+                return Command::new(path);
+            }
+        }
+    }
+    let mut cmd = Command::new("nix");
+    cmd.args(["develop", "--command", "wasmtime"]);
+    cmd
+}
+
 #[test]
 fn test_task_component_direct_invocation() {
     let out_dir = std::env::temp_dir().join("perry_wit_task_test");
@@ -27,45 +47,20 @@ fn test_task_component_direct_invocation() {
     let comp_bytes = compiled.component.unwrap();
     fs::write(&wasm_path, &comp_bytes).unwrap();
 
-    // Check direct invocation using wasmtime
-    let direct_wasmtime = Command::new("wasmtime")
-        .arg("--version")
+    let mut cmd = get_wasmtime_cmd();
+    let output = cmd
+        .args([
+            "run",
+            "-S",
+            "http=y",
+            "-S",
+            "inherit-network=y",
+            "--invoke",
+            "run-task(\"hello-component-task\")",
+        ])
+        .arg(&wasm_path)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let output = if direct_wasmtime {
-        Command::new("wasmtime")
-            .args([
-                "run",
-                "-S",
-                "http=y",
-                "-S",
-                "inherit-network=y",
-                "--invoke",
-                "run-task(\"hello-component-task\")",
-            ])
-            .arg(&wasm_path)
-            .output()
-            .expect("Running wasmtime")
-    } else {
-        Command::new("nix")
-            .args([
-                "develop",
-                "--command",
-                "wasmtime",
-                "run",
-                "-S",
-                "http=y",
-                "-S",
-                "inherit-network=y",
-                "--invoke",
-                "run-task(\"hello-component-task\")",
-            ])
-            .arg(&wasm_path)
-            .output()
-            .expect("Running wasmtime via nix develop")
-    };
+        .expect("Running wasmtime");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -106,45 +101,20 @@ fn test_multi_task_component_direct_invocation() {
     let comp_bytes = compiled.component.unwrap();
     fs::write(&wasm_path, &comp_bytes).unwrap();
 
-    let direct_wasmtime = Command::new("wasmtime")
-        .arg("--version")
+    let mut cmd1 = get_wasmtime_cmd();
+    let output1 = cmd1
+        .args([
+            "run",
+            "-S",
+            "http=y",
+            "-S",
+            "inherit-network=y",
+            "--invoke",
+            "run-task(\"doc1\")",
+        ])
+        .arg(&wasm_path)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    // 1. Invoke run-task
-    let output1 = if direct_wasmtime {
-        Command::new("wasmtime")
-            .args([
-                "run",
-                "-S",
-                "http=y",
-                "-S",
-                "inherit-network=y",
-                "--invoke",
-                "run-task(\"doc1\")",
-            ])
-            .arg(&wasm_path)
-            .output()
-            .expect("Running wasmtime for run-task")
-    } else {
-        Command::new("nix")
-            .args([
-                "develop",
-                "--command",
-                "wasmtime",
-                "run",
-                "-S",
-                "http=y",
-                "-S",
-                "inherit-network=y",
-                "--invoke",
-                "run-task(\"doc1\")",
-            ])
-            .arg(&wasm_path)
-            .output()
-            .expect("Running wasmtime via nix develop")
-    };
+        .expect("Running wasmtime for run-task");
 
     let stdout1 = String::from_utf8_lossy(&output1.stdout);
     assert!(
@@ -155,38 +125,20 @@ fn test_multi_task_component_direct_invocation() {
     assert!(stdout1.contains("TASK_PROCESSED: doc1"));
 
     // 2. Invoke merge-task
-    let output2 = if direct_wasmtime {
-        Command::new("wasmtime")
-            .args([
-                "run",
-                "-S",
-                "http=y",
-                "-S",
-                "inherit-network=y",
-                "--invoke",
-                "merge-task(\"payload\")",
-            ])
-            .arg(&wasm_path)
-            .output()
-            .expect("Running wasmtime for merge-task")
-    } else {
-        Command::new("nix")
-            .args([
-                "develop",
-                "--command",
-                "wasmtime",
-                "run",
-                "-S",
-                "http=y",
-                "-S",
-                "inherit-network=y",
-                "--invoke",
-                "merge-task(\"payload\")",
-            ])
-            .arg(&wasm_path)
-            .output()
-            .expect("Running wasmtime via nix develop")
-    };
+    let mut cmd2 = get_wasmtime_cmd();
+    let output2 = cmd2
+        .args([
+            "run",
+            "-S",
+            "http=y",
+            "-S",
+            "inherit-network=y",
+            "--invoke",
+            "merge-task(\"payload\")",
+        ])
+        .arg(&wasm_path)
+        .output()
+        .expect("Running wasmtime for merge-task");
 
     let stdout2 = String::from_utf8_lossy(&output2.stdout);
     assert!(

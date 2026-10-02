@@ -51,10 +51,28 @@ impl Drop for Scratch {
     }
 }
 
+pub fn get_wasmtime_path() -> PathBuf {
+    if let Ok(path) = std::env::var("WASMTIME") {
+        return PathBuf::from(path);
+    }
+    if Command::new("wasmtime").arg("--version").output().is_ok() {
+        return PathBuf::from("wasmtime");
+    }
+    if let Ok(entries) = std::fs::read_dir("/nix/store") {
+        for entry in entries.flatten() {
+            let path = entry.path().join("bin/wasmtime");
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+    PathBuf::from("wasmtime")
+}
+
 pub fn run(source: &str, wit: Option<&str>, invocation: Option<&str>) -> Output {
     let scratch = Scratch::new();
     let wasm = scratch.compile(source, wit);
-    let mut command = Command::new("wasmtime");
+    let mut command = Command::new(get_wasmtime_path());
     command.args([
         "run",
         "-C",

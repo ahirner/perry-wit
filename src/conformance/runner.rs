@@ -50,42 +50,34 @@ pub fn run_node_oracle(script_path: &Path) -> Result<ExecutionVector> {
     })
 }
 
+fn get_wasmtime_cmd() -> Command {
+    if let Ok(path) = std::env::var("WASMTIME") {
+        return Command::new(path);
+    }
+    if Command::new("wasmtime").arg("--version").output().is_ok() {
+        return Command::new("wasmtime");
+    }
+    if let Ok(entries) = std::fs::read_dir("/nix/store") {
+        for entry in entries.flatten() {
+            let path = entry.path().join("bin/wasmtime");
+            if path.exists() {
+                return Command::new(path);
+            }
+        }
+    }
+    let mut cmd = Command::new("nix");
+    cmd.args(["develop", "--command", "wasmtime"]);
+    cmd
+}
+
 /// Executes a compiled WASIp2 component under wasmtime.
 pub fn run_wasmtime(wasm_path: &Path) -> Result<ExecutionVector> {
-    // Check if wasmtime is directly runnable, else route via nix develop
-    let direct_wasmtime = Command::new("wasmtime")
-        .arg("--version")
+    let mut cmd = get_wasmtime_cmd();
+    let output = cmd
+        .args(["run", "-S", "http=y", "-S", "inherit-network=y"])
+        .arg(wasm_path)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let output = if direct_wasmtime {
-        Command::new("wasmtime")
-            .args(["run", "-S", "http=y", "-S", "inherit-network=y"])
-            .arg(wasm_path)
-            .output()
-            .with_context(|| format!("Failed to run wasmtime for {}", wasm_path.display()))?
-    } else {
-        Command::new("nix")
-            .args([
-                "develop",
-                "--command",
-                "wasmtime",
-                "run",
-                "-S",
-                "http=y",
-                "-S",
-                "inherit-network=y",
-            ])
-            .arg(wasm_path)
-            .output()
-            .with_context(|| {
-                format!(
-                    "Failed to run nix develop wasmtime for {}",
-                    wasm_path.display()
-                )
-            })?
-    };
+        .with_context(|| format!("Failed to run wasmtime for {}", wasm_path.display()))?;
 
     let exit_code = output.status.code().unwrap_or(-1);
     let raw_stdout = String::from_utf8_lossy(&output.stdout);
@@ -319,7 +311,10 @@ fn filter_nix_banner(s: &str) -> String {
     let mut in_banner = false;
     for line in s.lines() {
         let trimmed = line.trim();
-        if trimmed.contains("=== Perry-WIT Hermetic Environment ===") {
+        if trimmed.contains("=== Perry-WIT Hermetic Environment ===")
+            || trimmed.contains("Perry-WIT compiler development")
+            || trimmed.starts_with("Perry-WIT")
+        {
             in_banner = true;
             continue;
         }

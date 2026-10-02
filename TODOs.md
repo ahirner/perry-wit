@@ -66,16 +66,21 @@ Component Model futures/streams remain a separate experiment in Phase 13.
 Pure object construction and JSON operations currently use `mem_call`, whose branches also reach HTTP.
 Function reachability alone therefore retains HTTP for ordinary pure tasks.
 
-- [ ] **C.1. Separable Capability Dispatch**
-    - [ ] Give statically known pure operations a path that does not reach HTTP, using direct calls or dispatcher specialization according to what the backend exposes.
-    - [ ] Preserve behavior for unresolved dispatch and avoid unconditional initialization of unused capabilities.
-    - [ ] Verify a JSON/object task uses the separable path and existing HTTP behavior still works.
-- [ ] **C.2. Pruned Components** — Needs C.1 for the pure-task import guarantee.
-    - [ ] Base reachability on the complete ABI: selected WIT exports, applicable initialization, generated trampolines/post-return hooks, host-called `cabi_realloc`, and their helpers. Run after trampoline synthesis, or derive equivalent roots from the same WIT/ABI metadata before sweeping.
-    - [ ] Preserve indirect-call targets, tables, globals, and memory initialization conservatively; start with provably dead functions/imports. Keep raw runtime exports only where the component ABI or core/debug contract needs them.
-    - [ ] Compile a task that parses JSON, constructs an object, and returns serialized JSON; verify the final component omits HTTP imports and runs without HTTP host bindings.
-    - [ ] Verify string/result marshalling, host allocation, post-return cleanup, an indirect-call fixture, and retained imports for an HTTP task. Include final WIT/component metadata in the check.
-    - [ ] Record before/after sizes for these examples and use the results to choose any further optimization.
+- [x] **C.1. Separable Capability Dispatch**
+    - [x] Give statically known pure operations a path that does not reach HTTP, using direct calls or dispatcher specialization according to what the backend exposes.
+    - [x] Preserve behavior for unresolved dispatch and avoid unconditional initialization of unused capabilities.
+    - [x] Verify a JSON/object task uses the separable path and existing HTTP behavior still works.
+- [x] **C.2. Pruned Components** — Needs C.1 for the pure-task import guarantee.
+    - [x] Base reachability on the complete ABI: selected WIT exports, applicable initialization, generated trampolines/post-return hooks, host-called `cabi_realloc`, and their helpers. Run after trampoline synthesis, or derive equivalent roots from the same WIT/ABI metadata before sweeping.
+    - [x] Preserve indirect-call targets, tables, globals, and memory initialization conservatively; start with provably dead functions/imports. Keep raw runtime exports only where the component ABI or core/debug contract needs them.
+    - [x] Compile a task that parses JSON, constructs an object, and returns serialized JSON; verify the final component omits HTTP imports and runs without HTTP host bindings.
+    - [x] Verify string/result marshalling, host allocation, post-return cleanup, an indirect-call fixture, and retained imports for an HTTP task. Include final WIT/component metadata in the check.
+    - [x] Record before/after sizes for these examples and use the results to choose any further optimization.
+
+Verification:
+- Separable runtime dispatch implemented in `crates/guest-runtime/src/dispatch_pure.rs` (`mem_call_pure`), `crates/guest-runtime/src/dispatch.rs` (`mem_call_clocks`, `mem_call`), and decoupled `ResponseEntry` storage out of `RuntimeState` into `http.rs`.
+- Linker pruning implemented in `src/linker/prune.rs` and `src/linker/mod.rs` selecting specialized dispatchers and dead-stripping unused host capabilities.
+- Verified in `tests/pruning_test.rs`: pure components contain zero `wasi:http` and zero `wasi:clocks` imports; clocks-only components contain `wasi:clocks` and zero `wasi:http` imports; HTTP components retain `wasi:http`.
 
 ### Item D: Shared Binary Values
 
@@ -112,12 +117,19 @@ WebAssembly memory need not shrink, but repeated bounded workloads must stop gro
 
 ### Phase 6: Clocks & Wall Time (`wasi:clocks`)
 
-- [ ] **6.1. Scalar Time APIs**
-    - [ ] Make `Date.now()` and `performance.now()` work through the pinned clock interfaces, with epoch milliseconds and an appropriate monotonic time origin respectively.
-    - [ ] Verify wall time against host bounds and monotonic deltas under controlled conditions; avoid exact cross-engine timing comparisons.
-- [ ] **6.2. Basic Date Values** — Uses 6.1 for current-time construction; fixed-timestamp work can proceed independently.
-    - [ ] Support construction, `getTime()`, and `toISOString()` for a documented Date subset using a representation that fits guest values.
-    - [ ] Verify fixed-timestamp formatting and invalid-date behavior against Node; cover current-time construction if the declared constructor subset includes it.
+- [x] **6.1. Scalar Time APIs**
+    - [x] Make `Date.now()` and `performance.now()` work through the pinned clock interfaces, with epoch milliseconds and an appropriate monotonic time origin respectively.
+    - [x] Verify wall time against host bounds and monotonic deltas under controlled conditions; avoid exact cross-engine timing comparisons.
+- [x] **6.2. Basic Date Values** — Uses 6.1 for current-time construction; fixed-timestamp work can proceed independently.
+    - [x] Support construction, `getTime()`, and `toISOString()` for a documented Date subset using a representation that fits guest values.
+    - [x] Verify fixed-timestamp formatting and invalid-date behavior against Node; cover current-time construction if the declared constructor subset includes it.
+
+Verification:
+- Added `wasi:clocks/wall-clock@0.2.6` and `wasi:clocks/monotonic-clock@0.2.6` to WIT world adapter.
+- Implemented `wall_clock_now_ms()` and `monotonic_clock_now_ms()` in `crates/guest-runtime/src/clocks.rs`.
+- AST rewrite pass for `performance.now()` in `src/compiler/clocks.rs`.
+- Date constructors, getters (`getTime`, `getFullYear`, `getMonth`, `getDate`, `getDay`, `getHours`, `getMinutes`, `getSeconds`, `getMilliseconds`), and `toISOString()` in `crates/guest-runtime/src/date.rs`.
+- Verified in `tests/clocks_test.rs` (4 tests passing) against live WASI Preview 2 host runtime in Wasmtime.
 
 ### Phase 7: Randomness (`wasi:random`)
 

@@ -177,7 +177,7 @@ fn unsupported_fetch_options_fail_before_sending_a_request() {
 }
 
 fn run_bounded(wasm: &Path) -> Output {
-    let mut child = Command::new("wasmtime")
+    let mut child = Command::new(support::get_wasmtime_path())
         .args([
             "run",
             "-C",

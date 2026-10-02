@@ -1,4 +1,27 @@
+use std::fs;
+use std::process::Command;
+
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
+
+fn get_tsc_cmd() -> Command {
+    if let Ok(path) = std::env::var("TSC") {
+        return Command::new(path);
+    }
+    if Command::new("tsc").arg("--version").output().is_ok() {
+        return Command::new("tsc");
+    }
+    if let Ok(entries) = std::fs::read_dir("/nix/store") {
+        for entry in entries.flatten() {
+            let path = entry.path().join("bin/tsc");
+            if path.exists() {
+                return Command::new(path);
+            }
+        }
+    }
+    let mut cmd = Command::new("nix");
+    cmd.args(["develop", "--command", "tsc"]);
+    cmd
+}
 
 #[test]
 fn generated_contract_checks_the_selected_implementation_module() {
@@ -45,7 +68,7 @@ fn generated_contract_checks_the_selected_implementation_module() {
             ("export const unrelated = 1;", false),
         ] {
             fs::write(root.join(entry), source).unwrap();
-            let output = Command::new("tsc")
+            let output = get_tsc_cmd()
                 .current_dir(&root)
                 .args(["--noEmit", "--skipLibCheck", "true"])
                 .output()
@@ -102,7 +125,7 @@ fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
     "#,
     )
     .unwrap();
-    let output = Command::new("tsc")
+    let output = get_tsc_cmd()
         .current_dir(&root)
         .args(["--noEmit", "--skipLibCheck", "false"])
         .output()
@@ -114,7 +137,6 @@ fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
     );
     fs::remove_dir_all(root).unwrap();
 }
-use std::{fs, process::Command};
 
 #[test]
 fn cli_generates_a_checked_sdk_with_default_relative_paths() {
@@ -144,7 +166,7 @@ fn cli_generates_a_checked_sdk_with_default_relative_paths() {
     );
     assert!(root.join("tsconfig.json").exists());
     assert!(root.join(".perry/types/implementation-check.ts").exists());
-    let output = Command::new("tsc")
+    let output = get_tsc_cmd()
         .current_dir(&root)
         .arg("--noEmit")
         .output()
@@ -194,7 +216,7 @@ fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
         // @ts-expect-error the generated nested list must require strings
         const invalid: Outcome = { ok: true, value: [[42], {text: "item"}] };
     "#).unwrap();
-    let output = Command::new("tsc")
+    let output = get_tsc_cmd()
         .current_dir(&root)
         .args(["--noEmit", "--skipLibCheck", "false"])
         .output()

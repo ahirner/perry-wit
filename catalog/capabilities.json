@@ -131,6 +131,41 @@
       ]
     },
     {
+      "id": "web.clocks",
+      "name": "performance.now and Monotonic Clocks",
+      "tier": "tier-1-web-primaries",
+      "support": "full",
+      "domain": "High-resolution monotonic time measurement using wasi:clocks/monotonic-clock",
+      "invariants": [
+        "performance.now() returns monotonic time in milliseconds as a float",
+        "Values never decrease across successive calls"
+      ],
+      "differences": [
+        "Resolution and origin are backed by the host's wasi:clocks/monotonic-clock implementation"
+      ],
+      "conformance": [
+        "tests/conformance/cases/07_clocks.ts"
+      ]
+    },
+    {
+      "id": "web.date",
+      "name": "Date and Wall Clocks",
+      "tier": "tier-1-web-primaries",
+      "support": "full",
+      "domain": "Wall clock time and date calendar operations using wasi:clocks/wall-clock",
+      "invariants": [
+        "Date.now() returns current UTC timestamp in milliseconds since UNIX epoch",
+        "new Date(timestamp) and new Date() instantiate valid Date objects",
+        "getTime(), toISOString(), and calendar getters (getFullYear, getMonth, getDate, getDay, getHours, getMinutes, getSeconds, getMilliseconds) operate in UTC"
+      ],
+      "differences": [
+        "Backed by wasi:clocks/wall-clock; parsing arbitrary human-formatted date strings is currently deferred"
+      ],
+      "conformance": [
+        "tests/conformance/cases/08_date.ts"
+      ]
+    },
+    {
       "id": "lang.eval",
       "name": "Dynamic Code Evaluation (eval / new Function)",
       "tier": "non-goals",
