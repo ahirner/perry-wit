@@ -166,6 +166,24 @@
       ]
     },
     {
+      "id": "web.random",
+      "name": "Randomness and Cryptography",
+      "tier": "tier-1-web-primaries",
+      "support": "full",
+      "domain": "Cryptographic and pseudo-random generation using wasi:random",
+      "invariants": [
+        "Math.random() generates floating point numbers in [0.0, 1.0)",
+        "crypto.randomUUID() generates valid RFC 4122 v4 UUID strings",
+        "crypto.getRandomValues(arr) fills typed arrays in-place with secure random bytes and returns the array instance"
+      ],
+      "differences": [
+        "Powered by wasi:random/random and wasi:random/insecure interfaces"
+      ],
+      "conformance": [
+        "tests/conformance/cases/09_random.ts"
+      ]
+    },
+    {
       "id": "lang.eval",
       "name": "Dynamic Code Evaluation (eval / new Function)",
       "tier": "non-goals",

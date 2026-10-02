@@ -45,7 +45,7 @@ fn test_pure_typescript_prunes_http_and_clocks() {
     let component_wasm = compiled.component.expect("component artifact");
     let wat = wasmprinter::print_bytes(&component_wasm).expect("print component wat");
 
-    // Pure component must NOT import wasi:http or wasi:clocks
+    // Pure component must NOT import wasi:http, wasi:clocks, or wasi:random
     assert!(
         !wat.contains("wasi:http"),
         "pure component should not contain wasi:http imports"
@@ -53,6 +53,10 @@ fn test_pure_typescript_prunes_http_and_clocks() {
     assert!(
         !wat.contains("wasi:clocks"),
         "pure component should not contain wasi:clocks imports"
+    );
+    assert!(
+        !wat.contains("wasi:random"),
+        "pure component should not contain wasi:random imports"
     );
 }
 
@@ -71,7 +75,7 @@ fn test_clocks_only_component_prunes_http() {
     let component_wasm = compiled.component.expect("component artifact");
     let wat = wasmprinter::print_bytes(&component_wasm).expect("print component wat");
 
-    // Clocks component must import wasi:clocks, but must NOT import wasi:http
+    // Clocks component must import wasi:clocks, but must NOT import wasi:http or wasi:random
     assert!(
         wat.contains("wasi:clocks"),
         "clocks component should import wasi:clocks"
@@ -79,6 +83,10 @@ fn test_clocks_only_component_prunes_http() {
     assert!(
         !wat.contains("wasi:http"),
         "clocks component should not contain wasi:http imports"
+    );
+    assert!(
+        !wat.contains("wasi:random"),
+        "clocks component should not contain wasi:random imports"
     );
 }
 

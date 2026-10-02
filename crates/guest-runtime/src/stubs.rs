@@ -64,7 +64,7 @@ pub(crate) extern "C" fn math_pow(_a: i64, _b: i64) -> i64 {
 }
 #[no_mangle]
 pub(crate) extern "C" fn math_random() -> i64 {
-    0
+    crate::random::math_random()
 }
 #[no_mangle]
 pub(crate) extern "C" fn math_log(_a: i64) -> i64 {
@@ -600,11 +600,11 @@ pub(crate) extern "C" fn searchparams_to_string(_a: i64) -> i64 {
 }
 #[no_mangle]
 pub(crate) extern "C" fn crypto_random_uuid() -> i64 {
-    0
+    crate::random::crypto_random_uuid()
 }
 #[no_mangle]
-pub(crate) extern "C" fn crypto_random_bytes(_a: i64) -> i64 {
-    0
+pub(crate) extern "C" fn crypto_random_bytes(len: i64) -> i64 {
+    crate::random::crypto_random_bytes(len)
 }
 #[no_mangle]
 pub(crate) extern "C" fn path_join(_a: i64, _b: i64) -> i64 {

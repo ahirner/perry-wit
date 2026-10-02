@@ -83,6 +83,22 @@ fn dispatch_clocks(name: &str, raw_args: &[i64]) -> Option<i64> {
     }
 }
 
+fn dispatch_random(name: &str, raw_args: &[i64]) -> Option<i64> {
+    match name {
+        "math_random" => Some(crate::random::math_random()),
+        "crypto_random_uuid" => Some(crate::random::crypto_random_uuid()),
+        "$$cryptoFillRandom" => {
+            let handle = raw_args.first().copied().unwrap_or(0);
+            Some(crate::random::crypto_fill_random(handle))
+        }
+        "crypto_random_bytes" => {
+            let arg = raw_args.first().copied().unwrap_or(0);
+            Some(crate::random::crypto_random_bytes(arg))
+        }
+        _ => None,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn mem_call_clocks(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
     let state = get_state();
@@ -112,6 +128,73 @@ pub extern "C" fn mem_call_clocks(func_name_id: f64, arg_count: f64, base_addr: 
 }
 
 #[no_mangle]
+pub extern "C" fn mem_call_random(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_random(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
+#[no_mangle]
+pub extern "C" fn mem_call_clocks_random(
+    func_name_id: f64,
+    arg_count: f64,
+    base_addr: i32,
+) -> f64 {
+    let state = get_state();
+    let name_idx = func_name_id as usize;
+    let name = state
+        .strings
+        .get(name_idx)
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let count = arg_count as usize;
+    let mut raw_args = Vec::with_capacity(count);
+    let ptr = base_addr as *const i64;
+    for i in 0..count {
+        raw_args.push(unsafe { *ptr.add(i) });
+    }
+
+    if let Some(res) = dispatch_clocks(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_random(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+}
+
+#[no_mangle]
 pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) -> f64 {
     let state = get_state();
     let name_idx = func_name_id as usize;
@@ -130,6 +213,13 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
     }
 
     if let Some(res) = dispatch_clocks(&name, &raw_args) {
+        unsafe {
+            *(base_addr as *mut i64) = res;
+        }
+        return 0.0;
+    }
+
+    if let Some(res) = dispatch_random(&name, &raw_args) {
         unsafe {
             *(base_addr as *mut i64) = res;
         }

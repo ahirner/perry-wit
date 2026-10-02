@@ -133,12 +133,21 @@ Verification:
 
 ### Phase 7: Randomness (`wasi:random`)
 
-- [ ] **7.1. UUIDs & Math.random()** — Does not need guest binary views.
-    - [ ] Expose `crypto.randomUUID()` backed by secure host randomness and `Math.random()` with values in `[0, 1)` through the pinned random interfaces.
-    - [ ] Verify UUID format/version/variant and numeric bounds with controlled edge inputs; collision sampling is not a correctness guarantee.
-- [ ] **7.2. In-Place Random Fill** — Needs D.1's view behavior.
-    - [ ] Make `crypto.getRandomValues(view)` fill a supported integer view's byte range and return that exact view, with type/size validation; start with `Uint8Array` if sufficient.
-    - [ ] Verify mutation, return identity, alias visibility, nonzero offsets, unchanged bytes outside the view, empty views, and invalid arguments using controlled random input.
+- [x] **7.1. UUIDs & Math.random()** — Does not need guest binary views.
+    - [x] Expose `crypto.randomUUID()` backed by secure host randomness and `Math.random()` with values in `[0, 1)` through the pinned random interfaces.
+    - [x] Verify UUID format/version/variant and numeric bounds with controlled edge inputs; collision sampling is not a correctness guarantee.
+- [x] **7.2. In-Place Random Fill** — Needs D.1's view behavior.
+    - [x] Make `crypto.getRandomValues(view)` fill a supported integer view's byte range and return that exact view, with type/size validation; start with `Uint8Array` if sufficient.
+    - [x] Verify mutation, return identity, alias visibility, nonzero offsets, unchanged bytes outside the view, empty views, and invalid arguments using controlled random input.
+
+Verification:
+- Added `wasi:random/random@0.2.6` and `wasi:random/insecure@0.2.6` to WIT world adapter in `wit/world.wit`.
+- Implemented `math_random()`, `crypto_random_uuid()`, `crypto_fill_random()`, and `crypto_random_bytes()` in `crates/guest-runtime/src/random.rs`.
+- Added granular capability dispatchers `mem_call_random` and `mem_call_clocks_random` in `crates/guest-runtime/src/dispatch.rs`.
+- Added random property and expression detection (`Math.random`, `crypto.randomUUID`, `crypto.getRandomValues`, `$$cryptoFillRandom`) emitting `__needs_random__` in `src/compiler/rewrites.rs`.
+- Added reachability analysis in `src/linker/prune.rs` and import routing in `src/linker/mod.rs` so pure components prune `wasi:random`, while random-using components retain only `wasi:random`.
+- Added string indexed access (`s[i]`), `string_charAt`, and `string_charCodeAt` in `crates/guest-runtime/src/dispatch_pure.rs`.
+- Verified in `tests/random_test.rs` (5 integration tests passing) and `tests/conformance/cases/09_random.ts` (differential equivalence with Node.js).
 
 ### Phase 8: Environment & Arguments (`wasi:cli`)
 

@@ -22,6 +22,7 @@ mod http_options;
 mod http_url;
 mod io;
 mod nanbox;
+mod random;
 mod state;
 mod stubs;
 
@@ -35,6 +36,7 @@ pub use date::{
     date_to_iso_string, performance_now,
 };
 pub use dispatch::{
-    console_error, console_log, mem_call, mem_call_clocks, mem_call_i32, string_new,
+    console_error, console_log, mem_call, mem_call_clocks, mem_call_clocks_random, mem_call_i32,
+    mem_call_random, string_new,
 };
 pub use dispatch_pure::mem_call_pure;

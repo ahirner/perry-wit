@@ -27,6 +27,7 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
             .collect(),
         needs_clocks: false,
         needs_http: false,
+        needs_random: false,
     };
     for stmt in &mut program.init {
         rewriter.rewrite_stmt(stmt);
@@ -87,12 +88,20 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
                 "__needs_http__".into(),
             )));
     }
+    if rewriter.needs_random {
+        program
+            .init
+            .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(
+                "__needs_random__".into(),
+            )));
+    }
 }
 
 struct Rewriter {
     literal_shapes: std::collections::HashMap<String, Vec<String>>,
     needs_clocks: bool,
     needs_http: bool,
+    needs_random: bool,
 }
 
 impl Rewriter {
@@ -238,6 +247,12 @@ impl Rewriter {
             | perry_hir::ir::Expr::FetchPostWithAuth { .. } => {
                 self.needs_http = true;
             }
+            perry_hir::ir::Expr::MathRandom
+            | perry_hir::ir::Expr::CryptoRandomUUID
+            | perry_hir::ir::Expr::CryptoRandomUUIDv7
+            | perry_hir::ir::Expr::CryptoRandomBytes(_) => {
+                self.needs_random = true;
+            }
             _ => {}
         }
         if let perry_hir::ir::Expr::NativeMethodCall {
@@ -320,6 +335,17 @@ impl Rewriter {
                         | "response_ok"
                 ) {
                     self.needs_http = true;
+                }
+                if matches!(
+                    property.as_str(),
+                    "math_random"
+                        | "randomUUID"
+                        | "randomUUIDv7"
+                        | "getRandomValues"
+                        | "$$cryptoFillRandom"
+                        | "randomBytes"
+                ) {
+                    self.needs_random = true;
                 }
                 if property == "json" {
                     *expr = perry_hir::ir::Expr::NativeMethodCall {

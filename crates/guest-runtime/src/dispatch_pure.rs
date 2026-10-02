@@ -239,6 +239,46 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                     }
                     _ => {}
                 }
+            } else if (target_handle as u64) >> 48 == STRING_TAG {
+                let s = state.get_string(target_handle);
+                if let Some(c) = s.chars().nth(idx) {
+                    let str_id = state.strings.len();
+                    state.strings.push(c.to_string());
+                    result_i64 = nanbox_string(str_id);
+                } else {
+                    result_i64 = TAG_UNDEFINED as i64;
+                }
+            }
+        }
+    } else if name == "string_charAt" || name == "string_char_at" {
+        if raw_args.len() >= 2 {
+            let s = state.get_string(raw_args[0]);
+            let idx_val = raw_args[1];
+            let idx_f = f64::from_bits(idx_val as u64);
+            let ch_str = if idx_f.is_finite() && idx_f >= 0.0 {
+                let idx = idx_f as usize;
+                s.chars().nth(idx).map(|c| c.to_string()).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let str_id = state.strings.len();
+            state.strings.push(ch_str);
+            result_i64 = nanbox_string(str_id);
+        }
+    } else if name == "string_charCodeAt" || name == "string_char_code_at" {
+        if raw_args.len() >= 2 {
+            let s = state.get_string(raw_args[0]);
+            let idx_val = raw_args[1];
+            let idx_f = f64::from_bits(idx_val as u64);
+            if idx_f.is_finite() && idx_f >= 0.0 {
+                let idx = idx_f as usize;
+                if let Some(c) = s.chars().nth(idx) {
+                    result_i64 = ((c as u32) as f64).to_bits() as i64;
+                } else {
+                    result_i64 = f64::NAN.to_bits() as i64;
+                }
+            } else {
+                result_i64 = f64::NAN.to_bits() as i64;
             }
         }
     } else if name == "string_len" || name == "array_length" {

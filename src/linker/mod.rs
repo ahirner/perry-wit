@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail, ensure};
-use prune::{compute_pruning_plan, module_needs_clocks, module_needs_http};
+use prune::{compute_pruning_plan, module_needs_clocks, module_needs_http, module_needs_random};
 use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
 use wasm_encoder::{
     DataSegment, DataSegmentMode, ElementMode, ElementSegment, Elements, ExportKind, Module,
@@ -61,6 +61,7 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     // 2. Resolve Module A imports and compute Pruning Plan
     let needs_http = module_needs_http(&a);
     let needs_clocks = module_needs_clocks(&a);
+    let needs_random = module_needs_random(&a);
 
     let mut resolved_imports_a = Vec::with_capacity(a.imports.len());
     for &(mod_name, name, _ty) in &a.imports {
@@ -71,8 +72,12 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         let target_name = if name == "mem_call" {
             if needs_http {
                 "mem_call"
+            } else if needs_clocks && needs_random {
+                "mem_call_clocks_random"
             } else if needs_clocks {
                 "mem_call_clocks"
+            } else if needs_random {
+                "mem_call_random"
             } else {
                 "mem_call_pure"
             }
