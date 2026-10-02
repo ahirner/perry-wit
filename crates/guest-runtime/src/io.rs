@@ -6,12 +6,16 @@ use crate::bindings::wasi::cli::stdout::get_stdout;
 
 pub(crate) fn print_stdout(text: &str) {
     let stdout = get_stdout();
-    let _ = stdout.blocking_write_and_flush(text.as_bytes());
+    for chunk in text.as_bytes().chunks(4096) {
+        let _ = stdout.blocking_write_and_flush(chunk);
+    }
 }
 
 pub(crate) fn print_stderr(text: &str) {
     let stderr = get_stderr();
-    let _ = stderr.blocking_write_and_flush(text.as_bytes());
+    for chunk in text.as_bytes().chunks(4096) {
+        let _ = stderr.blocking_write_and_flush(chunk);
+    }
 }
 
 pub(crate) fn fail_with_error(msg: &str) -> ! {

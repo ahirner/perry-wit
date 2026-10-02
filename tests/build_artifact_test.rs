@@ -5,12 +5,14 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
     let scratch = std::env::temp_dir().join(format!("perry-build-artifact-{}", std::process::id()));
     fs::create_dir_all(scratch.join("out")).unwrap();
     let script = scratch.join("build-script");
-    assert!(Command::new("rustc")
-        .args(["build.rs", "-o"])
-        .arg(&script)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("rustc")
+            .args(["build.rs", "-o"])
+            .arg(&script)
+            .status()
+            .unwrap()
+            .success()
+    );
 
     for relative in [
         "override.wasm",
@@ -31,10 +33,15 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
             }
             let output = command.output().unwrap();
             assert!(output.status.success());
-            assert!(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-                line == format!("cargo:rerun-if-changed={}", artifact.display())
-            }));
-            assert_eq!(fs::read(scratch.join("out/guest_runtime.wasm")).unwrap(), bytes);
+            assert!(
+                String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                    line == format!("cargo:rerun-if-changed={}", artifact.display())
+                })
+            );
+            assert_eq!(
+                fs::read(scratch.join("out/guest_runtime.wasm")).unwrap(),
+                bytes
+            );
         }
     }
     fs::remove_dir_all(scratch).unwrap();
