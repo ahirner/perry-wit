@@ -258,6 +258,19 @@ impl Rewriter {
     }
 
     fn rewrite_current_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
+        if let Expr::Delete(target) = expr {
+            let key = match target.as_mut() {
+                Expr::EnvGet(name) => Some(Expr::String(name.clone())),
+                Expr::EnvGetDynamic(key) => Some(std::mem::replace(key.as_mut(), Expr::Undefined)),
+                _ => None,
+            };
+            if let Some(key) = key {
+                **target = Expr::IndexGet {
+                    object: Box::new(Expr::ProcessEnv),
+                    index: Box::new(key),
+                };
+            }
+        }
         // Perry's specialized constructor omits its arguments from string collection.
         if let Expr::Uint8ArrayNew(size) = expr {
             *expr = Expr::Call {

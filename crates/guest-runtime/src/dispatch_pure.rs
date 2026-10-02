@@ -117,6 +117,8 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                         let key_str = state.get_string(idx_val);
                         if let Some(v) = map.get(&key_str) {
                             result_i64 = state.from_js_value(v.clone());
+                        } else {
+                            result_i64 = TAG_UNDEFINED as i64;
                         }
                     }
                     _ => {}
@@ -238,15 +240,7 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         }
     } else if name == "object_get" || name == "class_get_field" {
         if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let key_str = state.get_string(raw_args[1]);
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle(target_handle)
-            {
-                if let Some(v) = map.get(&key_str) {
-                    result_i64 = state.from_js_value(v.clone());
-                }
-            }
+            result_i64 = crate::stubs::object_get(raw_args[0], raw_args[1]);
         }
     } else if name == "object_keys" {
         let target_handle = raw_args.first().copied().unwrap_or(0);

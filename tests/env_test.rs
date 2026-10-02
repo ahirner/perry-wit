@@ -5,6 +5,38 @@ mod support;
 use std::process::Command;
 
 #[test]
+fn environment_deletion_preserves_references_and_aliases() {
+    let source = r#"
+        const env = process.env;
+        process.env.PERRY_DELETE_STATIC = "static";
+        console.log(delete process.env.PERRY_DELETE_STATIC);
+        console.log(process.env.PERRY_DELETE_STATIC);
+        console.log(env.PERRY_DELETE_STATIC);
+        console.log("PERRY_DELETE_STATIC" in env);
+        console.log(Object.keys(env).includes("PERRY_DELETE_STATIC"));
+        process.env.PERRY_DELETE_DYNAMIC = "dynamic";
+        let evaluations = 0;
+        function key() { evaluations++; return "PERRY_DELETE_DYNAMIC"; }
+        console.log(delete process.env[key()]);
+        console.log(evaluations);
+        console.log(process.env.PERRY_DELETE_DYNAMIC);
+        console.log(env["PERRY_DELETE_DYNAMIC"]);
+        console.log(delete process.env.PERRY_DELETE_MISSING);
+        env.PERRY_DELETE_ALIAS = "alias";
+        console.log(delete env.PERRY_DELETE_ALIAS);
+        console.log(process.env.PERRY_DELETE_ALIAS);
+        console.log(JSON.stringify(env).includes("PERRY_DELETE_"));
+    "#;
+    let expected = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    assert!(expected.status.success());
+    let actual = support::run(source, None, None);
+    assert_eq!(support::stdout(&actual), support::stdout(&expected));
+}
+
+#[test]
 fn pure_component_prunes_environment_import() {
     let scratch = support::Scratch::new();
     let compiled = scratch.compile_artifacts(
@@ -61,21 +93,15 @@ fn process_env_only_component_retains_environment_and_prunes_http_and_clocks() {
         "Component using process.env must import wasi:cli/environment, found: {imported_modules:?}"
     );
     assert!(
-        !imported_modules
-            .iter()
-            .any(|m| m.contains("wasi:http")),
+        !imported_modules.iter().any(|m| m.contains("wasi:http")),
         "Component using only process.env must prune wasi:http, found: {imported_modules:?}"
     );
     assert!(
-        !imported_modules
-            .iter()
-            .any(|m| m.contains("wasi:clocks")),
+        !imported_modules.iter().any(|m| m.contains("wasi:clocks")),
         "Component using only process.env must prune wasi:clocks, found: {imported_modules:?}"
     );
     assert!(
-        !imported_modules
-            .iter()
-            .any(|m| m.contains("wasi:random")),
+        !imported_modules.iter().any(|m| m.contains("wasi:random")),
         "Component using only process.env must prune wasi:random, found: {imported_modules:?}"
     );
 }
@@ -132,7 +158,10 @@ fn process_env_and_argv_execution_under_wasmtime() {
     assert!(stdout.contains("FOO=hello_wasm"), "stdout: {stdout}");
     assert!(stdout.contains("BAR=world_preview2"), "stdout: {stdout}");
     assert!(stdout.contains("EMPTY=is_empty"), "stdout: {stdout}");
-    assert!(stdout.contains("NONEXISTENT=is_undefined"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("NONEXISTENT=is_undefined"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("DYNAMIC=custom_value"), "stdout: {stdout}");
     assert!(stdout.contains("ARGV_LEN=3"), "stdout: {stdout}");
     assert!(stdout.contains("ARG1=first_arg"), "stdout: {stdout}");
@@ -160,12 +189,7 @@ fn process_env_object_keys_and_json_stringify() {
     );
 
     let mut command = Command::new(support::get_wasmtime_path());
-    command.args([
-        "run",
-        "-C",
-        "cache=n",
-        wasm.to_str().unwrap(),
-    ]);
+    command.args(["run", "-C", "cache=n", wasm.to_str().unwrap()]);
 
     let output = command.output().expect("wasmtime execution failed");
     let stdout = support::stdout(&output);
