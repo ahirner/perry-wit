@@ -66,25 +66,9 @@ pub(crate) fn string_number(value: &str) -> f64 {
     value.parse().unwrap_or(f64::NAN)
 }
 
-fn array_element_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(value) => value.clone(),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(array_element_string)
-            .collect::<Vec<_>>()
-            .join(","),
-        serde_json::Value::Object(_) => "[object Object]".into(),
-        value => value.to_string(),
-    }
-}
-
 fn object_primitive(state: &RuntimeState, object: i64) -> Value<'static> {
     Value::String(Cow::Owned(
-        array_element_string(&state.to_js_value(object))
-            .encode_utf16()
-            .collect(),
+        state.coerce_string(object).encode_utf16().collect(),
     ))
 }
 

@@ -5,6 +5,37 @@ mod support;
 use std::process::Command;
 
 #[test]
+fn environment_assignments_coerce_values_through_direct_and_aliased_writes() {
+    let source = r#"
+        const env = process.env;
+        const values = [42, undefined, null, true, false, NaN, Infinity, -Infinity, -0, "é", [1, null, 2], {a: 1}];
+        for (let i = 0; i < values.length; i++) {
+            process.env.PERRY_VALUE = values[i];
+            env.PERRY_ALIAS = values[i];
+            env["PERRY_DYNAMIC"] = values[i];
+            console.log(JSON.stringify([process.env.PERRY_VALUE, env.PERRY_ALIAS, env["PERRY_DYNAMIC"]]));
+            console.log(typeof process.env.PERRY_VALUE);
+            console.log("PERRY_VALUE" in env);
+            console.log(Object.values(env).includes(process.env.PERRY_VALUE));
+        }
+        Object.assign(env, {PERRY_ASSIGNED: 123, PERRY_NULL: null});
+        console.log(process.env.PERRY_ASSIGNED === "123");
+        console.log(process.env.PERRY_NULL === "null");
+        console.log(JSON.stringify(env).includes('"PERRY_ASSIGNED":"123"'));
+        const ordinary = {};
+        ordinary.value = 42;
+        console.log(typeof ordinary.value);
+    "#;
+    let expected = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    assert!(expected.status.success());
+    let actual = support::run(source, None, None);
+    assert_eq!(support::stdout(&actual), support::stdout(&expected));
+}
+
+#[test]
 fn environment_deletion_preserves_references_and_aliases() {
     let source = r#"
         const env = process.env;

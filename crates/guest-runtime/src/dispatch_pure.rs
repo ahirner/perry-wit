@@ -177,7 +177,7 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         if raw_args.len() >= 3 {
             let target_handle = raw_args[0];
             let key_str = state.get_string(raw_args[1]);
-            let val_json = state.to_js_value(raw_args[2]);
+            let val_json = state.object_property_value(target_handle, raw_args[2]);
             if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
                 state.get_handle_mut(target_handle)
             {
@@ -197,7 +197,7 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                 (idx_bits & 0xFFFF_FFFF) as usize
             };
             let key_str = state.get_string(idx_val);
-            let val_json = state.to_js_value(val_val);
+            let val_json = state.object_property_value(target_handle, val_val);
             let val_byte = state.to_uint8(val_val);
             let element_index = state.element_index(idx_val);
             if let Some(h) = state.get_handle_mut(target_handle) {
@@ -224,19 +224,7 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         }
     } else if name == "object_assign" {
         if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let source_handle = raw_args[1];
-            let source_json = state.to_js_value(source_handle);
-            if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) =
-                state.get_handle_mut(target_handle)
-            {
-                if let serde_json::Value::Object(src_map) = source_json {
-                    for (k, v) in src_map {
-                        target_map.insert(k, v);
-                    }
-                }
-            }
-            result_i64 = target_handle;
+            result_i64 = crate::stubs::object_assign(raw_args[0], raw_args[1]);
         }
     } else if name == "object_get" || name == "class_get_field" {
         if raw_args.len() >= 2 {

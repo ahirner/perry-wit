@@ -252,6 +252,37 @@ impl RuntimeState {
         self.handles.get_mut(id)
     }
 
+    pub(crate) fn object_property_value(&self, target: i64, value: i64) -> serde_json::Value {
+        if self.process_env == Some(target) {
+            serde_json::Value::String(self.coerce_string(value))
+        } else {
+            self.to_js_value(value)
+        }
+    }
+
+    /// JavaScript string coercion for the runtime's primitive, array, and JSON values.
+    pub(crate) fn coerce_string(&self, value: i64) -> String {
+        match self.get_handle(value) {
+            Some(JsHandle::Array(items)) => items
+                .iter()
+                .map(|&item| {
+                    if matches!(item as u64, TAG_NULL | TAG_UNDEFINED) {
+                        String::new()
+                    } else {
+                        self.coerce_string(item)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            Some(JsHandle::Json(value)) => json_string_coercion(value),
+            _ => match f64::from_bits(value as u64) {
+                f64::INFINITY => "Infinity".into(),
+                f64::NEG_INFINITY => "-Infinity".into(),
+                _ => self.get_string(value),
+            },
+        }
+    }
+
     pub(crate) fn to_js_value(&self, val: i64) -> serde_json::Value {
         let bits = val as u64;
         if bits == TAG_UNDEFINED || bits == TAG_NULL {
@@ -435,6 +466,25 @@ impl RuntimeState {
             }
         }
         format!("{val}")
+    }
+}
+
+pub(crate) fn json_string_coercion(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                if value.is_null() {
+                    String::new()
+                } else {
+                    json_string_coercion(value)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        serde_json::Value::Object(_) => "[object Object]".into(),
+        value => value.to_string(),
     }
 }
 

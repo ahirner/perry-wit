@@ -196,7 +196,7 @@ pub(crate) extern "C" fn object_new() -> i64 {
 pub(crate) extern "C" fn object_set(target: i64, key: i64, val: i64) -> i64 {
     let state = get_state();
     let key_str = state.get_string(key);
-    let val_json = state.to_js_value(val);
+    let val_json = state.object_property_value(target, val);
     if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle_mut(target) {
         map.insert(key_str, val_json);
     }
@@ -266,7 +266,7 @@ pub(crate) extern "C" fn object_set_dynamic(target: i64, key: i64, val: i64) {
         (idx_bits & 0xFFFF_FFFF) as usize
     };
     let key_str = state.get_string(key);
-    let val_json = state.to_js_value(val);
+    let val_json = state.object_property_value(target, val);
     let val_byte = state.to_uint8(val);
     let element_index = state.element_index(key);
     if let Some(h) = state.get_handle_mut(target) {
@@ -364,14 +364,16 @@ pub(crate) extern "C" fn object_has_property(target: i64, key: i64) -> i32 {
 #[no_mangle]
 pub(crate) extern "C" fn object_assign(target: i64, source: i64) -> i64 {
     let state = get_state();
-    let source_json = state.to_js_value(source);
-    if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) =
-        state.get_handle_mut(target)
-    {
-        if let serde_json::Value::Object(src_map) = source_json {
-            for (k, v) in src_map {
-                target_map.insert(k, v);
+    if let serde_json::Value::Object(mut source_map) = state.to_js_value(source) {
+        if state.process_env == Some(target) {
+            for value in source_map.values_mut() {
+                *value = serde_json::Value::String(crate::state::json_string_coercion(value));
             }
+        }
+        if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) =
+            state.get_handle_mut(target)
+        {
+            target_map.extend(source_map);
         }
     }
     target
