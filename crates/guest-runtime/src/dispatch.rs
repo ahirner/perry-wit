@@ -96,10 +96,7 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         if let Some(id) = resp_id {
             match state.get_response_body(id) {
                 Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
-                    Ok(parsed) => {
-                        let h_id = state.alloc_handle(JsHandle::Json(parsed));
-                        result_i64 = nanbox_pointer(h_id);
-                    }
+                    Ok(parsed) => result_i64 = state.from_js_value(parsed),
                     Err(e) => {
                         fail_with_error(&format!("JSON parse error: {e}"));
                     }
