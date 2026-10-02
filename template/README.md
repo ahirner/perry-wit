@@ -28,5 +28,5 @@ The compiler input resolves from the published repository. To test a local compi
 
 4. **Execute directly with wasmtime:**
    ```bash
-   wasmtime run --invoke 'run-task("hello-world")' result/lib/my-task.wasm
+   wasmtime run -S http=y -S inherit-network=y --invoke 'run-task("hello-world")' result/lib/my-task.wasm
    ```
