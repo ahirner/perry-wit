@@ -221,11 +221,11 @@ impl Rewriter {
         if let Expr::Uint8ArrayNew(size) = expr {
             *expr = Expr::Call {
                 callee: Box::new(Expr::PropertyGet {
-                    object: Box::new(Expr::Undefined),
+                    object: size.take().unwrap_or_else(|| Box::new(Expr::Undefined)),
                     property: "uint8array_new".into(),
                     byte_offset: 0,
                 }),
-                args: size.take().map(|size| *size).into_iter().collect(),
+                args: Vec::new(),
                 type_args: Vec::new(),
                 byte_offset: 0,
             };
