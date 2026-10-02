@@ -95,7 +95,7 @@ fn rewrite_stmt(stmt: &mut perry_hir::ir::Stmt) {
     }
 }
 
-fn rewrite_expr(expr: &mut perry_hir::ir::Expr) {
+fn rewrite_current_expr(expr: &mut perry_hir::ir::Expr) {
     if let perry_hir::ir::Expr::ProcessExit(code) = expr {
         let code = code
             .take()
@@ -169,6 +169,10 @@ fn rewrite_expr(expr: &mut perry_hir::ir::Expr) {
             }
         }
     }
+}
+
+fn rewrite_expr(expr: &mut perry_hir::ir::Expr) {
+    rewrite_current_expr(expr);
     if let perry_hir::ir::Expr::Closure { body, .. } = expr {
         for stmt in body {
             rewrite_stmt(stmt);

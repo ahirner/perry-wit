@@ -3,6 +3,26 @@ mod rewrites;
 mod support;
 
 #[test]
+fn replacements_rewrite_their_children_including_nested_spreads() {
+    let output = support::run(
+        r#"
+        const a = JSON.parse('{"title":"nested"}');
+        console.log(JSON.stringify({ ...a }));
+        console.log(JSON.stringify({ ...{ ...a } }));
+        if (true) { console.log(JSON.stringify({ ...a })); }
+    "#,
+        None,
+        None,
+    );
+    let output = support::stdout(&output);
+    let objects = serde_json::Deserializer::from_str(&output)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(objects, vec![serde_json::json!({"title": "nested"}); 3]);
+}
+
+#[test]
 fn compatibility_rewrites_visit_nested_statement_bodies_and_conditions() {
     let source = r#"
         if (JSON.stringify(1)) { JSON.stringify(2); } else { JSON.stringify(3); }
