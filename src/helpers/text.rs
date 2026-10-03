@@ -389,17 +389,20 @@ pub extern "C" fn str_join_total_len(
     descriptors_ptr: u32,
     count: u32,
     sep_byte_len: u32,
-) -> u32 {
+) -> u64 {
     if count == 0 {
         return 0;
     }
     let descs = descriptors_ptr as *const u32;
-    let mut total = 0u32;
+    let mut total = u64::from(count - 1) * u64::from(sep_byte_len);
     for i in 0..count {
         let chunk_byte_len = unsafe { *descs.add((i as usize) * 3 + 1) };
-        total += chunk_byte_len;
+        let Some(next) = total.checked_add(u64::from(chunk_byte_len)) else {
+            return u64::MAX;
+        };
+        total = next;
     }
-    total + (count - 1) * sep_byte_len
+    total
 }
 
 /// Joins count string descriptors separated by sep, writing to out_ptr.

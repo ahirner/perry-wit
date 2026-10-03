@@ -1,5 +1,6 @@
 //! UTF-8 text operations backed by guest helpers.
 
+use super::allocation::checked_allocation_size;
 use super::descriptor::StringDescriptor;
 use crate::waffle_backend::abi::{self, CompletionStatus};
 use crate::waffle_backend::link::HELPER_MODULE;
@@ -89,7 +90,7 @@ pub(super) fn declare_split_imports(module: &mut Module<'static>) -> Result<(Fun
 pub(super) fn declare_join_imports(module: &mut Module<'static>) -> Result<(Func, Func)> {
     let sig_jtl = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::I32, Type::I32],
-        returns: vec![Type::I32],
+        returns: vec![Type::I64],
     });
     let func_jtl = module
         .funcs
@@ -430,11 +431,18 @@ pub(super) fn emit_split(
         &[Type::I32],
     );
 
-    // Allocate array buffer: 8 bytes header + count * 12 bytes
-    let twelve = body.add_op(entry, Operator::I32Const { value: 12 }, &[], &[Type::I32]);
-    let items_bytes = body.add_op(entry, Operator::I32Mul, &[count, twelve], &[Type::I32]);
+    let count64 = body.add_op(entry, Operator::I64ExtendI32U, &[count], &[Type::I64]);
+    let stride = body.add_op(entry, Operator::I64Const { value: 12 }, &[], &[Type::I64]);
+    let items_bytes = body.add_op(entry, Operator::I64Mul, &[count64, stride], &[Type::I64]);
+    let header = body.add_op(entry, Operator::I64Const { value: 8 }, &[], &[Type::I64]);
+    let total = body.add_op(
+        entry,
+        Operator::I64Add,
+        &[items_bytes, header],
+        &[Type::I64],
+    );
+    let (entry, total_alloc) = checked_allocation_size(&mut body, entry, total);
     let eight = body.add_op(entry, Operator::I32Const { value: 8 }, &[], &[Type::I32]);
-    let total_alloc = body.add_op(entry, Operator::I32Add, &[items_bytes, eight], &[Type::I32]);
 
     let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
     let align = body.add_op(entry, Operator::I32Const { value: 4 }, &[], &[Type::I32]);
@@ -572,8 +580,9 @@ pub(super) fn emit_join(
             function_index: total_len_helper,
         },
         &[elements_ptr, count, s_len],
-        &[Type::I32],
+        &[Type::I64],
     );
+    let (entry, needed_bytes) = checked_allocation_size(&mut body, entry, needed_bytes);
 
     let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
     let align = body.add_op(entry, Operator::I32Const { value: 1 }, &[], &[Type::I32]);

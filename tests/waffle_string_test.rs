@@ -1556,3 +1556,35 @@ async fn test_from_code_point_unwinds_guest_handlers() -> Result<()> {
     run_cases(r#"export function run(cp: number): string { try { return String.fromCodePoint(cp); } catch (e) { return "caught"; } }"#,
         &[(vec![Val::Float64(-1.0)], Val::String("caught".into()))]).await
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_join_rejects_size_overflow_before_copying() -> Result<()> {
+    let source =
+        r#"export function run(s: string, sep: string): string { return s.split(",").join(sep); }"#;
+    let error = run_cases(
+        source,
+        &[(
+            vec![
+                Val::String(",".repeat(65_536)),
+                Val::String("x".repeat(65_536)),
+            ],
+            Val::String("".into()),
+        )],
+    )
+    .await
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("unreachable"), "{error}");
+    assert!(
+        !error.contains("out of bounds"),
+        "Join must reject overflow before writing: {error}"
+    );
+    run_cases(
+        source,
+        &[(
+            vec![Val::String(",".repeat(1024)), Val::String("🦀".into())],
+            Val::String("🦀".repeat(1024)),
+        )],
+    )
+    .await
+}

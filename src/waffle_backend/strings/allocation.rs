@@ -2,11 +2,47 @@
 
 use anyhow::Result;
 use waffle::{
-    BlockTarget, Export, ExportKind, Func, FuncDecl, FunctionBody, Memory, MemoryArg, Module,
-    Operator, SignatureData, Terminator, Type,
+    Block, BlockTarget, Export, ExportKind, Func, FuncDecl, FunctionBody, Memory, MemoryArg,
+    Module, Operator, SignatureData, Terminator, Type, Value,
 };
 
 pub(super) const PAGE_BYTES: u32 = 65_536;
+
+/// Narrows only after checking sizes computed outside the allocator's i32 ABI.
+pub(super) fn checked_allocation_size(
+    body: &mut FunctionBody,
+    block: Block,
+    bytes: Value,
+) -> (Block, Value) {
+    let limit = body.add_op(
+        block,
+        Operator::I64Const {
+            value: u32::MAX as u64,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let overflow = body.add_op(block, Operator::I64GtU, &[bytes, limit], &[Type::I32]);
+    let trap = body.add_block();
+    let valid = body.add_block();
+    body.set_terminator(trap, Terminator::Unreachable);
+    body.set_terminator(
+        block,
+        Terminator::CondBr {
+            cond: overflow,
+            if_true: BlockTarget {
+                block: trap,
+                args: vec![],
+            },
+            if_false: BlockTarget {
+                block: valid,
+                args: vec![],
+            },
+        },
+    );
+    let size = body.add_op(valid, Operator::I32WrapI64, &[bytes], &[Type::I32]);
+    (valid, size)
+}
 
 /// Allocates only after validating address arithmetic and growing memory successfully.
 pub(super) fn emit_allocator(
