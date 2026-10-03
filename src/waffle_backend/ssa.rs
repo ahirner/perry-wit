@@ -85,7 +85,6 @@ pub(crate) fn lower_module(
     };
 
     // 2. Pre-declare all module functions to allow mutual / intra-module calls
-    let mut func_signatures = BTreeMap::new();
     let mut func_decls = BTreeMap::new();
 
     for func in &hir.functions {
@@ -96,12 +95,18 @@ pub(crate) fn lower_module(
             .collect::<Result<Vec<_>>>()?;
         let returns = map_return_type_to_waffle(&func.return_type)?;
         let sig = module.signatures.push(SignatureData { params, returns });
-        func_signatures.insert(func.id, sig);
+        let mut body = FunctionBody::new(&module, sig);
+        body.set_terminator(body.entry, Terminator::Unreachable);
+        let declaration = module
+            .funcs
+            .push(FuncDecl::Body(sig, func.name.clone(), body));
+        func_decls.insert(func.id, declaration);
     }
 
     // 3. Lower each function body
     for func in &hir.functions {
-        let sig = func_signatures[&func.id];
+        let func_decl = func_decls[&func.id];
+        let sig = module.funcs[func_decl].sig();
         let body = lower_function_body(
             func,
             sig,
@@ -111,10 +116,7 @@ pub(crate) fn lower_module(
             &func_decls,
             stream_helpers,
         )?;
-        let func_decl = module
-            .funcs
-            .push(FuncDecl::Body(sig, func.name.clone(), body));
-        func_decls.insert(func.id, func_decl);
+        module.funcs[func_decl] = FuncDecl::Body(sig, func.name.clone(), body);
 
         if func.is_exported || func.id == contract.entry_func_id {
             let export_name = if func.name == "main"

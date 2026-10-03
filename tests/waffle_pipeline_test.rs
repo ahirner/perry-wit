@@ -162,13 +162,28 @@ async fn test_waffle_while_loops_with_block_parameters() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_intra_module_function_calls() -> Result<()> {
     let source = r#"
+        export function run(input: number): number {
+            let s = square(input);
+            return s + square(2) + factorial(input) + even(input);
+        }
+
         function square(x: number): number {
             return x * x;
         }
 
-        export function run(input: number): number {
-            let s = square(input);
-            return s + square(2);
+        function factorial(x: number): number {
+            if (x <= 1) { return 1; }
+            return x * factorial(x - 1);
+        }
+
+        function even(x: number): number {
+            if (x <= 0) { return 1; }
+            return odd(x - 1);
+        }
+
+        function odd(x: number): number {
+            if (x <= 0) { return 0; }
+            return even(x - 1);
         }
     "#;
 
@@ -184,9 +199,10 @@ async fn test_waffle_intra_module_function_calls() -> Result<()> {
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
 
-    // input = 5 => square(5) = 25, square(2) = 4 => total = 29
     let (res,) = run.call_async(&mut store, (5.0,)).await?;
-    assert_eq!(res, 29.0);
+    assert_eq!(res, 149.0);
+    let (res_even,) = run.call_async(&mut store, (4.0,)).await?;
+    assert_eq!(res_even, 45.0);
 
     Ok(())
 }
