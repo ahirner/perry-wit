@@ -1,361 +1,269 @@
-# Perry-WIT Roadmap: Runtime Foundations & WASI Preview 2 Capabilities
-
-Deliver useful TypeScript APIs in small slices with observable acceptance outcomes.
-Phase numbers identify capability areas rather than a fixed implementation sequence.
-
-## Choosing the Next Slice
-
-1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
-2. HTTP metadata/methods (**10.1**) and buffered binary bodies (**10.2**) are complete. Use those client paths and fixtures as the baseline for handlers and streaming.
-3. One-shot timers and intervals (**11.1**, **11.2**) establish callback execution (**B.1**) and retained lifetimes (**E.2**), including reclamation between callbacks. Guest async execution (**B.2**) and incoming handlers (**10.3**, **10.4**) complete timer-backed requests and streamed body forwarding through the component ABI. Readiness (**11.3**) now serves that forwarding consumer.
-4. Rust host contracts (**A.1**) now verify repeated typed task calls against the same WIT as the guest declarations. Use the verified readiness and ownership paths for the first TCP client (**12.1**); Component Model async feasibility (**13.1**) also remains open. Wider stream compatibility follows a consumer needing it.
-
-## Tracking Completion
-
-Each numbered slice has one parent checkbox and a finite set of work-item checkboxes.
-Tick a work item when its stated outcome is implemented and verified.
-Tick the parent when its required work items and the definition of done below are satisfied.
-Headings, prerequisites, and deferred work do not carry separate completion status.
-
-Add a short `Verification:` note beneath a completed slice with test commands/results and documented limits.
-Required checks that failed or have not run keep the slice open.
-If implementation reveals a larger problem, narrow or split the slice around a useful, verified outcome and record the remaining work explicitly; do not tick the original promise as complete.
-
-### Definition of Done for Every Slice
-
-These are standing criteria, not checkboxes to complete once or copy under every slice.
-
-- A representative TypeScript example compiles and runs through the actual compiler/runtime/component path for the promised behavior.
-- SDK declarations, diagnostics, and `catalog/capabilities.json` reflect any support changes; unimplemented forms do not silently return dummy values.
-- Focused tests cover the acceptance outcomes and relevant failure/cleanup paths. Use Node comparisons where applicable and controlled inputs or property checks for nondeterministic behavior.
-- Verification records identify checks run and relevant limits or fixture dependencies; explain any inapplicable criterion.
-
-## Verification Baseline (2026-10-03)
-
-- `nix develop -c cargo test --locked --package perry-wit`: 162 tests passed, including 25 filesystem tests, 17 HTTP regression tests, and the generated Rust host contract test. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
-- The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
-- Scoped formatting passed. Project and WebAssembly guest Clippy checks completed with existing warnings. Automatic approval review rejected parent `make format-rs` because it could rewrite the broader workspace; parent `make lint-rs` fails because `monty-bench` is outside this workspace. The pinned, scoped Nix checks are the applicable checks here.
-- SDK generation describes selected WIT contracts and guest implementation signatures, not ambient JavaScript/Node API compatibility. The incoming-handler adapter supplies resource ownership and its Request/Response implementation contract; supported buffered/streaming subsets and limits belong in the capability catalog and tests.
-- Catalog `conformance` references can identify TypeScript differential cases or Rust integration suites. The differential report executes only TypeScript cases; integration-only entries remain `MISSING` in that report and are verified separately by Cargo.
-
-## Runtime Foundations
-
-### Item A: Shared WIT Host/Guest Contracts
-
-- [x] **A.1. Host/Guest Contract Parity** — Take when a Rust host integration needs it.
-    - [x] Exercise the same resolved WIT package/world through guest declarations and Rust host bindings, starting with currently supported export types that integration uses.
-    - [x] Verify a host invocation agrees with the generated guest contract; use existing Wasmtime binding tools for ABI marshalling where they fit.
-
-Verification (A.1):
-
-- `generated_rust_host_and_guest_declarations_share_the_task_contract` in `tests/task_invocation_test.rs` uses the existing `wit/world.wit` and `repeated-runner` world for Wasmtime's generated Rust bindings, the TypeScript SDK declarations, and compilation of the guest component. Wasmtime 48.0.1 and its Preview 2 bindings are pinned development dependencies, matching the current Nix host; production and guest dependencies are unchanged.
-- The test typechecks the implementation and invokes it through an in-process Rust component host. Sixty repeated cycles cover a named async task, retained/reset strings, WIT success/error results, empty strings, Unicode, embedded NULs, and a 160,000-byte input. Generated bindings perform marshalling and post-return; no handwritten Canonical ABI layout or custom host generator is required.
-- A changed input signature fails the TypeScript implementation check. A component compiled against the corresponding changed WIT signature is rejected by the original Rust bindings before invocation. Further export/resource types follow an integration needing them; this test verifies the string/result contract used by the first host consumer.
-- The updated Nix dependency build and full `cargo test --locked --package perry-wit` suite passed all 162 tests, including local HTTP fixtures. Scoped formatting and all-target compiler Clippy passed with existing warnings. The dependency update preserves every prior locked package identity. This verification adds no runtime API support, so the capability catalog needs no support change.
-
-A custom host generator is deferred until an integration demonstrates missing reusable glue.
-
-### Item B: Guest Callbacks & Async Execution
-
-`JsHandle::Closure` retains raw captured values, and the runtime creates and invokes synchronous guest function values.
-The linker generates typed callback calls into TypeScript table 0 while Rust indirect calls remain in table 1.
-Read-only lexical captures can retain mutable objects/views; shared mutable bindings and other unsupported function forms currently produce diagnostics.
-The compiler adapts the pinned Perry state-machine transform into guest cells and Promise continuations.
-Named async functions and direct Promise constructors can complete through the synchronous component boundary; HTTP producers still need their own readiness integration.
-
-- [x] **B.1. Guest Callback Execution** — Develop retained capture lifetimes with E.2.
-    - [x] Make guest function values callable through a path that respects the linker's TypeScript/Rust table separation; select the bridge to match the emitted callback ABI.
-    - [x] Support the captures needed by the first consumer, including their lifetime beyond the creating call; diagnose unsupported closure forms.
-    - [x] Verify an identity callback returns its argument, a captured value survives delayed invocation, and repeated creation/invocation/release has bounded memory. Cover shared mutable captures if they are exposed.
-
-Verification:
-
-- `runtime_regression_test` compares callback values, named aliases, missing/excess parameters, evaluation order, nested invocation, and void returns with Node; it also tests exception propagation and unsupported-form diagnostics.
-- `retained_callback_graphs_survive_calls_and_release_on_success_and_failure` exercises 1,000 retained/released callback cycles after warm-up, including captured strings/views, object/closure cycles, recoverable throws, and skipped post-return; linear memory stays at its warmed high-water mark. The same callback path runs through a Wasmtime component export.
-- The first scheduled consumer is 11.1's one-shot timer. Its callbacks retain strings, cyclic objects, and byte views after the creating function returns, then release ownership on delivery or cancellation. Shared mutable lexical bindings and the other diagnosed function forms remain outside the supported callback subset.
-
-- [x] **B.2. Guest Async Execution** — Needs retained suspended state from E.2; use B.1 where the chosen lowering invokes guest callbacks.
-    - [x] Reproduce the named async export failure with a minimal `async runTask`, then make its body compile, link, and execute in the guest. Choose a backend change or upgrade based on that probe.
-    - [x] Support suspension, resumption, and rejection for the first task's `async`/`await` subset, reusing existing HTTP polling where practical.
-    - [x] Make exported async tasks complete through the host ABI with the declared result/error behavior; a synchronous Preview 2 boundary may drive the guest operation to completion.
-    - [x] Verify named exports, nested awaits, a genuinely pending operation, rejection propagation, and release of completed/rejected state through component invocation.
-
-Start with scalar/string tasks; richer async signatures follow demonstrated consumers.
-Component Model futures/streams remain a separate experiment in Phase 13.
-
-Verification:
-
-- The 154-test baseline, project and Wasm guest Clippy checks, and scoped formatting passed. Clippy retains the existing warnings recorded above.
-- Named async bodies reuse the pinned Perry state-machine transform with guest cells and queued continuations. The minimal export formerly failed on an unresolved `rt:__async_inner`; it now returns its resolved string through Wasmtime's component invocation. Functions without `await` also execute their guest bodies and return distinct task Promises.
-- `abi_regression_test` compares continuation ordering, concurrent activations, loops, adoption, and catch/finally behavior with Node. `guest_async_tasks_release_suspended_graphs_on_success_and_rejection` covers strings, cyclic objects, byte views, scalar/result/unit exports, trapped rejection, recovery, and skipped post-return across 1,000 cycles after warm-up; memory stops growing.
-- `guest_async_timer_producers_settle_once_and_resume_in_microtask_order` compares genuinely pending timers, microtasks between timer callbacks, executor failures, first-settlement/adoption behavior, and self-resolution rejection with Node. Wasmtime invokes both a named async export and a synchronous export returning a pending Promise; each returns the resolved WIT string. Constructor rewriting respects lexical bindings and remains correct when `undefined` is shadowed.
-- The existing scheduled-callback fixture also runs 1,000 pending-task success/rejection/cancellation/recovery cycles after warm-up and a 5,000-await allocating loop. Captured cyclic objects and byte views survive, memory stays at its warmed high-water mark, and all subscriptions are released. Wasmtime verifies resolved strings, handled WIT errors, and uncaught rejection from timer-backed exports. A canceled producer with no runnable work reports an error instead of polling indefinitely.
-- SDK implementation contracts accept synchronous results or `Promise` results while retaining the WIT host signatures and rejecting wrong resolved types. Async expressions/class methods, generators, captured named functions, and advanced parameters report diagnostics. Direct global `new Promise(executor)` uses the guest callback subset; static methods in programs using native async or constructors are diagnosed, and instance methods raise a guest exception.
-- B.2 completes for the timer-backed task subset. General Promise APIs, arbitrary thenables, and discarded-task rejection reporting remain outside that subset. Legacy top-level synchronous await does not drive pending timer Promises; use named async functions or return the Promise from an export. Incoming handlers and body forwarding own their additional resource/readiness checks in 10.3/10.4/11.3; outgoing HTTP guest Promise producers need their own integration. Pure async jobs make no host poll calls; shared runtime cleanup still retains `wasi:io/poll`, so broader import minimization remains an integration concern.
-
-### Item C: Safe Runtime Pruning
-
-Pure operations use `mem_call_pure`; the linker selects specialized dispatch for all 16 combinations of clocks, randomness, environment, and filesystem access.
-Outgoing HTTP uses the broader dispatcher; minimal imports for mixed outgoing HTTP capability combinations have not been established.
-Incoming handlers wrap the selected dispatcher with their own body methods; timer-free forwarding retains no clock or outgoing-handler imports.
-
-- [x] **C.1. Separable Capability Dispatch**
-    - [x] Give statically known pure operations a path that does not reach HTTP, using direct calls or dispatcher specialization according to what the backend exposes.
-    - [x] Preserve behavior for unresolved dispatch and avoid unconditional initialization of unused capabilities.
-    - [x] Verify a JSON/object task uses the separable path and existing HTTP behavior still works.
-- [x] **C.2. Pruned Components** — Needs C.1 for the pure-task import guarantee.
-    - [x] Base reachability on the complete ABI: selected WIT exports, applicable initialization, generated trampolines/post-return hooks, host-called `cabi_realloc`, and their helpers. Run after trampoline synthesis, or derive equivalent roots from the same WIT/ABI metadata before sweeping.
-    - [x] Preserve indirect-call targets, tables, globals, and memory initialization conservatively; start with provably dead functions/imports. Keep raw runtime exports only where the component ABI or core/debug contract needs them.
-    - [x] Compile a task that parses JSON, constructs an object, and returns serialized JSON; verify the final component omits HTTP imports and runs without HTTP host bindings.
-    - [x] Verify string/result marshalling, host allocation, post-return cleanup, an indirect-call fixture, and retained imports for an HTTP task. Include final WIT/component metadata in the check.
-    - [x] Record before/after sizes for these examples and use the results to choose any further optimization.
-
-Verification:
-
-- `nix develop -c cargo test --test pruning_test --test linker_test --test abi_regression_test --test runtime_memory_test --test http_regression_test`: all test suites pass cleanly.
-- `test_merge_core_modules` in `tests/linker_test.rs` compiles TypeScript in-process via `perry_wit::compiler::compile_typescript_raw` and executes without skipping.
-- Dedicated indirect table fixture `table_indirect_calls_preserve_runtime_functions_and_imports` in `tests/linker_test.rs` validates indirect `call_indirect` function table dispatch across merged modules.
-- `exported_json_task_prunes_http_and_runs_without_http_bindings` in `tests/pruning_test.rs` proves pure JSON tasks completely prune `wasi:http`, `wasi:clocks`, `wasi:filesystem`, and `wasi:random` from the component and run successfully under wasmtime without `-S http=y` or `-S inherit-network=y`.
-- `http_task_retains_http_and_verifies_abi_marshalling_and_cleanup` in `tests/pruning_test.rs` validates `cabi_realloc` host allocation, `result<string, string>` return marshalling, `cabi_post_run-task` cleanup, retained `wasi:http` imports in WAT, and live HTTP request execution against a local HTTP test fixture.
-- Component and core wasm sizes recorded at C.2 closure (`record_pruning_and_component_sizes` in `tests/pruning_test.rs`):
-  - Pure JSON Task: raw TS wasm: 9,787 B; guest runtime: 255,991 B; unlinked total: 265,778 B; pruned merged core: 172,400 B (64.9% of unlinked, 93,378 B pruned); final stripped component: 173,533 B.
-  - HTTP Task: raw TS wasm: 9,809 B; guest runtime: 255,991 B; unlinked total: 265,800 B; pruned merged core: 215,280 B (81.0% of unlinked, 50,520 B pruned); final stripped component: 226,883 B.
-  - The pure task stripped component is 53,350 B smaller than the HTTP task component, confirming dead HTTP runtime logic is pruned.
-
-### Item D: Shared Binary Values
-
-`JsHandle::Uint8Array` holds views with shared byte storage, offsets, and lengths.
-Construction, indexed access, and subarrays serve random fills and filesystem byte I/O.
-
-- [x] **D.1. Byte Storage & Uint8Array Views** — Build with the first binary API; reuse instances only with E.1's lifetime guarantees.
-    - [x] Support byte storage and views with identity, offset, length, and shared mutation; choose a representation compatible with existing guest values and their ownership.
-    - [x] Implement the construction, indexed access, and subview behavior needed by that API, keeping bytes intact across its host boundary.
-    - [x] Verify mutation through overlapping views, bounds, empty views, non-UTF-8 bytes, and cleanup for the supported lifecycle.
-
-Verification:
-
-- `nix develop -c cargo test --test binary_views_test --test random_test --test fs_test`: 14 byte-view, 8 randomness, and 25 filesystem tests passed in the baseline run.
-- Tests cover byte coercion, copy construction, invalid lengths/indices, shared subviews, JSON object shape, exact filesystem bytes, and random-fill identity/quota handling. The supported surface is `Uint8Array`; further view types and Node `Buffer` compatibility follow specific consumers.
-- Repeated byte I/O is exercised within an invocation. Suspended or callback-owned views need the retained-lifetime coverage in E.2.
-
-### Item E: Value Lifetimes & Bounded Memory
-
-`RuntimeState` now reclaims invocation temporaries and recycles string/handle slots while retaining initialization values, registered globals, and process-context handles.
-Post-return hooks release ABI buffers and trigger value reclamation. Callback graphs, pending timer arguments, and queued async activations are roots until their owner releases them.
-Timer-produced Promises extend those ownership tests; handlers and other I/O producers will own their further resource tests.
-
-- [x] **E.1. Repeated Task Calls**
-    - [x] Establish which values outlive a call, including literals, globals, returned values, and pending work; use that evidence to choose a reclamation approach.
-    - [x] Reclaim call temporaries once results have been consumed while preserving surviving values. Invocation-scoped storage is an option only where escape behavior permits it.
-    - [x] Verify repeated allocating string/JSON calls in one instance, with post-return each time, reach bounded live allocations and a stable memory high-water mark after warm-up; include recoverable failures and retained globals.
-    - [x] Define and test whether an instance remains reusable after failures that interrupt normal cleanup.
-
-Verification:
-
-- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 8 repeated-call and 2 ABI memory tests passed in the baseline run, including callback graphs, timer lifecycles, and pure/timer-backed async activation cleanup.
-- Coverage includes stable memory after warm-up, retained global arrays/strings, recoverable result failures, skipped post-return recovery, direct component invocation, and allocation/reallocation exhaustion trapping rather than returning address zero.
-- Checkpoints, global scans, slot recycling, and return-area tracking are implemented in `state.rs`, `cabi.rs`, and ABI trampolines. Recovery claims cover the tested interrupted-cleanup paths; arbitrary traps or exhausted instances are not promised reusable.
-
-- [x] **E.2. Retained Values for the First Async/Callback Consumer** — Deliver with B.1 or B.2, extending E.1's ownership rules.
-    - [x] Keep that consumer's captures or suspended values alive until their owner completes or releases them; choose retention/reclamation around the actual value graph, including any supported cycles.
-    - [x] Verify survival across calls or suspension, reclamation after release, and protection against stale handles aliasing newly allocated values.
-    - [x] Verify repeated retained-work cycles stay bounded on success and failure; include cancellation if the consumer exposes it.
-
-Verification:
-
-- The retained callback graph test under B.1 verifies survival across component calls and reclamation after release. `scheduled_callbacks_release_captures_resources_and_stale_ids` extends that graph ownership to queued timers, including strings, cyclic objects/closures, shared byte views, and raw callback arguments.
-- The timer test runs 100 warm-up and 1,000 further cycles with delivery, cancellation, caught/uncaught guest errors, and skipped post-return cleanup. Fixed-size success/error payloads keep memory at its warmed high-water mark; every created subscription is dropped and live pollables remain bounded. Repeated expired IDs and invalid IDs leave newly scheduled work intact. Initialization and synchronous failures also release pending subscriptions. Arbitrary host traps and exhausted instances are outside the recovery guarantee.
-
-E.2 completes for its first consumer.
-Later handler, timer, and I/O slices own their additional lifetime tests; future resource types do not hold this slice open indefinitely.
-WebAssembly memory need not shrink, but repeated bounded workloads must stop growing after warm-up.
-
-## WASI Capability Slices
-
-### Phase 6: Clocks & Wall Time (`wasi:clocks`)
-
-- [x] **6.1. Scalar Time APIs**
-    - [x] Make `Date.now()` and `performance.now()` work through the pinned clock interfaces, with epoch milliseconds and an appropriate monotonic time origin respectively.
-    - [x] Verify wall time against host bounds and monotonic deltas under controlled conditions; avoid exact cross-engine timing comparisons.
-- [x] **6.2. Basic Date Values** — Uses 6.1 for current-time construction; fixed-timestamp work can proceed independently.
-    - [x] Support construction, `getTime()`, and `toISOString()` for a documented Date subset using a representation that fits guest values.
-    - [x] Verify fixed-timestamp formatting and invalid-date behavior against Node; cover current-time construction if the declared constructor subset includes it.
-
-Verification:
-
-- `nix develop -c cargo test --test clocks_test`: 9 tests passed in the baseline run, covering clock bounds/precision, Node comparisons for constructor arguments and ISO formatting, invalid dates, and exception control flow.
-- Current-time construction, numeric timestamps, copying Date values, and the tested null/undefined/boolean conversions are supported. Calendar getters use UTC. String parsing, multi-argument constructors, timezone behavior, and the rest of the Date API are outside this slice.
-
-### Phase 7: Randomness (`wasi:random`)
-
-- [x] **7.1. UUIDs & Math.random()** — Does not need guest binary views.
-    - [x] Expose `crypto.randomUUID()` backed by secure host randomness and `Math.random()` with values in `[0, 1)` through the pinned random interfaces.
-    - [x] Verify UUID format/version/variant and numeric bounds with controlled edge inputs; collision sampling is not a correctness guarantee.
-- [x] **7.2. In-Place Random Fill** — Needs D.1's view behavior.
-    - [x] Make `crypto.getRandomValues(view)` fill a supported integer view's byte range and return that exact view, with type/size validation; start with `Uint8Array` if sufficient.
-    - [x] Verify mutation, return identity, alias visibility, nonzero offsets, unchanged bytes outside the view, empty views, and invalid arguments using controlled random input.
-
-Verification:
-
-- `nix develop -c cargo test --test random_test`: 8 tests passed in the baseline run; `tests/conformance/cases/09_random.ts` also passed the Node comparison in `conformance_test`.
-- 7.1's APIs, sampled UUID/range checks, and controlled host-input edge tests (bounds 0.0, max float < 1.0, 53-bit mantissa bit-masking, RFC 4122 v4 version and variant bits on all-0x00 and all-0xFF inputs, exact vector matching, and short host buffer padding) are verified in `tests/random_test.rs`.
-- 7.2 has controlled host-byte tests for quota/type validation before host calls, empty views, return identity, and fills restricted to subviews. `getRandomValues` supports `Uint8Array` with a 65,536-byte quota; other view types remain outside the subset.
-
-### Phase 8: Environment & Arguments (`wasi:cli`)
-
-- [x] **8.1. Process Context**
-    - [x] Expose host-provided environment and arguments as `process.env` / `process.argv` / `process.cwd()`, initializing only when needed and retaining values for their documented lifetime.
-    - [x] Specify argument mapping and guest mutation behavior for the initial subset, including any differences from Node's executable/script prefixes.
-    - [x] Verify supplied/missing/empty variables, argument order, and repeated access without initializing unrelated capabilities.
-
-Verification:
-
-- `nix develop -c cargo test --test env_test`: 6 tests passed in the baseline run; `tests/conformance/cases/10_env.ts` also passed the Node comparison. Tests cover supplied/missing/empty values, argument order, aliases, deletion, string coercion, enumeration, and capability pruning.
-- `process.env` is a lazily cached, guest-local mutable snapshot; writes do not update the host environment. `process.argv` preserves the host's WASI argument list without synthesizing Node executable/script prefixes. `process.cwd()` returns `initial-cwd`, falling back to `/` if absent.
-
-### Phase 9: Sandboxed Filesystem (`wasi:filesystem`)
-
-- [x] **9.1. UTF-8 File Reads/Writes**
-    - [x] Support `readFileSync` / `writeFileSync` within host-provided preopens, with explicit path rules and confinement through descriptor-relative operations.
-    - [x] Verify round-trips, short I/O handling, missing files, denied access, path escape attempts, and resource cleanup on success/failure.
-    - [x] Validate read encodings/options before I/O; unsupported encodings currently fall through to binary reads instead of a diagnostic.
-- [x] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
-    - [x] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`. Writing with `binary` encoding requires a byte view; strings support UTF-8 and reject `binary` before opening the file.
-    - [x] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
-- [x] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
-    - [x] Support `fs.readdirSync(path)` via `Descriptor::read_directory` stream collecting child entry names, and `fs.unlinkSync(path)` via `Descriptor::unlink_file_at`.
-    - [x] Support `fs.mkdirSync(path)` via `Descriptor::create_directory_at` and `fs.rmdirSync(path)` via `Descriptor::remove_directory_at`. Supplied `mkdirSync` options are evaluated and rejected before creating a directory; permission modes and recursive creation remain unsupported.
-    - [x] Support `fs.existsSync(path)` via `Descriptor::stat_at` (never throws on non-existent paths).
-    - [x] Support `fs.statSync(path)` via `Descriptor::stat_at(PathFlags::SYMLINK_FOLLOW, ...)`, exposing `{ isFile(): boolean, isDirectory(): boolean, size: number, mtimeMs: number }`.
-    - [x] Verify listing, metadata, and removal for that subset, including failure paths (`ENOENT`, `ENOTDIR`, `EISDIR`) and descriptor cleanup.
-    - [x] Preserve evaluation and reject unsupported options for all directory/metadata calls (`readdirSync`, `statSync`, `unlinkSync`, `rmdirSync`, `mkdirSync`); arguments are evaluated in standard left-to-right order and unsupported options are rejected before preopen resolution or mutation.
-
-Verification:
-
-- `nix develop -c cargo test --test fs_test`: 25 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, import pruning, binding-aware unlink calls, and option validation before I/O across all fs calls.
-- Unsupported write modes and binary string encodings are rejected before opening files. Read options/encodings are validated before I/O: only UTF-8 and binary encodings and flag 'r' are permitted; unsupported options throw a TypeError before file opening or preopen check.
-- Directory and metadata operations (`mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`, `rmdirSync`) preserve left-to-right evaluation order and reject unsupported options before preopen checking or mutating the filesystem. Supported writes overwrite; append/exclusive modes and permission changes remain unsupported.
-- UTF-8 reads reject invalid UTF-8. Metadata is limited to size, modification time, and file/directory predicates; permissions, ownership, recursive operations, and broader Node `Stats` behavior are not implemented.
-
-Promise-based filesystem APIs need guest async execution and evidence that their underlying operations can make progress; they are a later slice.
-
-### Phase 10: HTTP (`wasi:http`)
-
-Existing GET/POST, string-body, header, and response status/ok support is covered by `tests/http_regression_test.rs`.
-Use that baseline when extending the client.
-
-- [x] **10.1. Client Metadata & Methods**
-    - [x] Send outgoing headers and string request bodies through the existing HTTP path.
-    - [x] Add the response header access and additional methods required by a client use case, with validation and documented status-text behavior supported by the host.
-    - [x] Verify the new behavior alongside existing GET/POST, status, and error-response behavior using a controlled fixture.
-
-Verification (10.1):
-
-- The full `cargo test --locked --package perry-wit` suite passed 133 tests under `nix develop` with a fresh temporary directory. After adding diagnostic and error-status coverage, `cargo test --test http_regression_test` passed all 9 tests.
-- Controlled fixtures verify method spelling, GET/POST bodies, GET/HEAD body rejection, forbidden/invalid methods, header lookup and identity, absent/empty/duplicate fields, metadata after body consumption, and 200/404/500 responses. Invalid header names and unsupported mutations/iteration report diagnostics.
-- Response headers expose read-only `get` and `has`. `statusText` is empty because the pinned WASI interface does not provide a reason phrase. Redirect handling and broader Headers APIs remain outside this subset. SDK WIT declarations are unchanged; the capability catalog records these limits.
-- Scoped formatting and compiler/guest Clippy checks pass with existing warnings. The parent Makefile checks remain inapplicable as described in the verification baseline.
-
-- [x] **10.2. Buffered Binary Bodies** — Needs D.1.
-    - [x] Preserve byte views through request-option objects and shallow copies, keeping identity, shared mutation, and retained references intact; adapt object storage where the binary bridge exposes value copying.
-    - [x] Support binary request/response bodies through the shared byte representation and verify byte-exact round-trips and cleanup.
-
-Verification (10.2 object-storage prerequisite):
-
-- The full `cargo test --locked --package perry-wit` suite passed 136 tests under `nix develop`, including local HTTP fixtures. Compiler and guest Clippy checks pass with existing warnings; applicable scoped formatting passes.
-- `tests/binary_views_test.rs` compares object/spread/assign identity, shared mutations, enumeration, key order, nested UTF-16 strings, and circular JSON errors against Node. `tests/repeated_task_calls_test.rs` verifies retained cyclic objects and nested byte views survive post-return, then release without memory growth after warm-up over 1,000 cycles.
-- This prerequisite changes guest value storage; it does not change WIT SDK contracts or establish callback/suspended-value lifetimes for E.2.
-
-Verification (10.2 binary transfer and cleanup):
-
-- The full `cargo test --locked --package perry-wit` suite passed 139 tests under `nix develop`, including all 12 HTTP tests. Compiler and guest Clippy checks and scoped formatting pass with existing warnings; the parent Makefile limitations remain as recorded in the baseline.
-- `tests/http_regression_test.rs` verifies exact request/response bytes, offset subviews passed through options/spreads, empty bodies, and a 131,073-byte transfer through live HTTP fixtures. Text/JSON decoding handles a UTF-8 BOM and invalid-byte replacement without changing cached bytes. Ordinary arrays and objects are rejected as binary bodies before dispatch; GET/HEAD body validation still applies.
-- A resource-counting WASI host runs 600 calls in one instance, including unread futures/responses, retained nested responses, and skipped post-return cleanup, with stable memory after warm-up and bounded resources. A partial body-read failure releases its stream, body, and error resource; the next invocation releases the failed response and successfully transfers bytes again. The component invocation/pruning tests verify the cleanup ABI remains valid and pure tasks retain no HTTP imports.
-- Request bodies accept strings or `Uint8Array`; `Response.bytes()` returns an independent view. Buffered reads can repeat from cached bytes. ArrayBuffer, Blob, FormData, cloning, single-use body semantics, and streaming remain outside this subset; unsupported body APIs report diagnostics. Host resource drops run at ordinary invocation boundaries because component post-return cannot call imports. SDK WIT declarations are unchanged; the capability catalog records these limits.
-
-- [x] **10.3. Buffered Incoming Handler** — Needs B.2; reusable handlers need the relevant E.2 lifetime support.
-    - [x] Expose `wasi:http/incoming-handler` and map incoming requests and response outparams to the Request/Response subset needed by one handler, including resource ownership.
-    - [x] Execute an async TypeScript handler and complete its response/error through the ABI. Start with bounded UTF-8 bodies; add binary bodies when D.1 is ready.
-    - [x] Verify a successful request, an awaited operation, rejection, body-limit behavior, and bounded memory/resources across repeated requests.
-
-Verification (10.3):
-
-- The complete `cargo test --locked --package perry-wit` suite passed all 160 tests under Nix, including local HTTP fixtures. Scoped formatting and compiler/guest Clippy checks pass with the same existing warnings; the parent Makefile limitations remain as recorded in the baseline.
-- `http-server` selects the generated resource adapter before runtime pruning. `incomingHandlerHandle(request)` accepts the buffered request and returns a Response or guest Promise<Response>; existing task and CLI contracts remain compatible. SDK generation accepts the buffered implementation signature and rejects wrong input/resolved result types.
-- The existing HTTP regression suite runs an actual Wasmtime server with reused instances. It verifies awaited timers, UTF-8 and binary requests/responses, headers including Latin-1, URL/method metadata, caught JSON failures, rejected/wrong results, body limits, and recovery. The fixture uses `-S cli=y -O pooling-max-tables-per-module=2` for the current runtime requirements.
-- A resource-counting host exercises 300 success/rejection/pending-task calls in one instance after warm-up without memory growth. It checks retained/released request values, exactly 1 MiB and oversized bodies, partial reads, failed writes, recovery, and 100 calls after initializer failure. Every invocation releases its host resources; initialization failure permanently prevents guest execution in that instance.
-- At 10.3 closure, request bodies buffered before guest execution and response bodies before sending, with a 1 MiB limit. Slice 10.4 replaces eager request buffering with owned sources while preserving bounded, cached text/json/bytes methods and their repeat reads. Unsupported constructor options/body methods report guest exceptions; the catalog records the subset. A Node comparison covers construction, copied subviews, metadata, header normalization, JSON shape, and text/binary decoding.
-
-- [x] **10.4. Streaming Bodies** — Needs guest async execution, binary values, and stream readiness from 11.3.
-    - [x] Expose incremental reads/writes for one Request/Response use case, defining backpressure, cancellation, and close/error ownership at that boundary.
-    - [x] Verify multi-chunk transfer, a slow consumer, and early cancellation; measure peak buffering before expanding stream compatibility.
-
-Verification (10.4):
-
-- The full `cargo test --locked --package perry-wit` suite passed 161 tests under Nix, including all 17 HTTP tests and local fixtures. Scoped formatting and compiler/guest Clippy checks passed with existing warnings. SDK checks accept `return new Response(request.body)`; the catalog records the supported surface.
-- `incoming_component_streams_before_upload_completion_and_recovers_after_disconnect` exercises that consumer through an actual Wasmtime component server. It holds a 2 MiB upload after its first chunk until response bytes arrive, checks exact bytes with a slow consumer, disconnects early three times, and verifies subsequent requests work. Constructed `Response.body` forwarding also preserves binary bytes; the existing Node comparison covers that pure path.
-- The existing resource-counting host now checks blocked reads, partial output permits, flush completion, and no input read-ahead. A 4 MiB transfer leaves guest memory at the warmed 2,162,688-byte high-water mark; forwarding owns at most one 8,192-byte body chunk. Fifty read/write/flush failure, callback failure, cancellation, and recovery cycles also leave memory stable and every host resource released.
-- Forwarding consumes its shared source. Retained consumed or unread sources cannot alias a later request; unsupported reader methods raise guest exceptions. Materialized body methods retain the 1 MiB cached subset. General readers, user-created streams, transforms, abort signals, and full single-use/bodyUsed compatibility remain deferred to a concrete consumer; this slice establishes body forwarding rather than broader DOM compatibility.
-
-### Phase 11: Polling & Timers (`wasi:io/poll`)
-
-Existing HTTP `Promise.all` polls response futures together.
-Extend that mechanism where it fits each consumer; timers and stream readiness need not wait for each other.
-
-- [x] **11.1. One-Shot Timers** — Needs B.1, retained callback lifetimes, and monotonic clocks; promise-facing behavior also needs B.2.
-    - [x] Deliver `setTimeout` callbacks and support `clearTimeout`, using clock pollables and a pending-work representation appropriate to the runtime.
-    - [x] Define observable callback ordering and idle termination; release captures and subscriptions when timers fire or are cancelled.
-    - [x] Verify delivery exactly once, delayed capture survival, cancellation before firing and from another callback, idle termination, and bounded repeated allocations.
-
-Verification:
-
-- `nix develop -c cargo test --locked --package perry-wit --test clocks_test --test repeated_task_calls_test`: all 12 clock/timer and 7 repeated-call tests pass in the full baseline run. A Node comparison checks callback order, delayed captures, once-only argument evaluation, and extra arguments; the controlled clock host checks deadline ties, delay coercion, nested scheduling, cancellation, idle termination, stale IDs, and bounded resources/memory. Timers also run through actual Wasmtime CLI and component exports.
-- `timers.rs` owns pending work and subscriptions. Direct timer call specialization retains only monotonic-clock/poll imports for timer-only tasks; the pure and mixed-capability pruning suites remain green. Invocations drain pending callbacks before returning; the synchronous function computes its return value before that drain. Post-return never performs host polling or resource drops.
-- The catalog records direct global calls, numeric IDs, Node-style whole-millisecond delays, and the existing supported callback forms. Timer function values report diagnostics; intervals are covered in 11.2. Promise timers, microtasks, Node Timeout objects, and broader timer API forms belong to subsequent consumers; WIT export types and SDK contracts are unchanged. Validation uses indexed array iteration; a heterogeneous inline `for…of` probe currently hangs and remains a separate compiler limitation.
-- [x] **11.2. Intervals** — Builds on 11.1 when recurring work is needed.
-    - [x] Add `setInterval` / `clearInterval` with defined rescheduling and cancellation behavior compatible with the supported timer subset.
-    - [x] Verify repeated callbacks, clearing during execution, and bounded memory/resources over many cycles.
-
-Verification (11.2):
-
-- `nix develop -c cargo test --locked --package perry-wit --test clocks_test --test repeated_task_calls_test --test runtime_regression_test`: all 29 tests passed. The Node comparison covers captures, extra arguments evaluated once, self-cancellation, cancellation before delivery and from another callback, interchangeable clear APIs, validation, and shadowed names. Property increment/decrement and numeric remainder bridges restore the recurring callback's state updates; the existing callback comparison checks coercion, prefix/postfix results, and receiver evaluation once.
-- The existing controlled-clock lifetime test performs 50,000 interval callbacks after a 100-callback warm-up and checks linear memory stays at its warmed high-water mark during delivery. It verifies cyclic captures/views, globals, fresh string/result return values, void exports, stale IDs, skipped post-return, 100 failure/recovery cycles, and subscription release. A late clock checks rescheduling from callback start without replaying missed ticks. Timer-only components still prune unrelated capability imports, and an interval task also runs through a real Wasmtime component invocation.
-- The ABI driver reclaims completed callback allocations with no live TypeScript frames, rooting the enclosing raw result and globals alongside pending timer graphs. Runtime hooks own and release subscriptions at ordinary invocation boundaries; post-return makes no host calls. Uncleared intervals keep the invocation running. SDK WIT contracts are unchanged; the capability catalog records the timer subset and rescheduling behavior.
-- The full `cargo test --locked --package perry-wit` suite passed all 147 tests under Nix, including local HTTP fixtures. Scoped formatting and compiler/guest Clippy checks passed with existing warnings; the parent Makefile limitations remain as recorded in the baseline.
-- [x] **11.3. Stream Readiness** — Build with the first async I/O consumer and its lifetime requirements.
-    - [x] Resume that consumer when input/output is ready, handling partial progress and ownership on completion/error/cancellation; reuse HTTP polling infrastructure where suitable.
-    - [x] Verify progress with slow or blocked peers, mixed pending operations, and cleanup without busy-waiting or unbounded buffering.
-
-Verification (11.3):
-
-- Slice 10.4's body forwarder uses nonblocking stream calls and owned subscriptions. An empty read, zero write permit, or pending flush waits through `wasi:io/poll`; the next step respects available capacity. Polling shares the earliest timer subscription, and queued microtasks run before returning to I/O. Completed guest frames allow reclamation while the response and pending work remain rooted.
-- The extended HTTP host proves a timer can schedule another timer and an async continuation while its I/O peer stays blocked. It enforces partial permits and completed flushes before another input chunk, and checks child-before-parent resource release on completion, read/write/flush errors, callback failure, and early close. A canceled transfer with an active interval terminates and releases pending work instead of draining indefinitely. See 10.4 for live-host and bounded-memory evidence.
-- Timer-free forwarding prunes clocks, randomness, filesystem, and the outgoing-handler interface. The full baseline also verifies all synchronous capability combinations, existing outgoing HTTP behavior, and timer ordering. `streams.rs` keeps the shared I/O interface limited to bounded writes/forwarding and an owned readiness callback; further producers or socket consumers must establish their own progress and lifetime evidence.
-
-### Phase 12: TCP Client Sockets (`wasi:sockets`)
-
-- [ ] **12.1. First TCP Client** — Needs D.1 and readiness/lifetime support; event-style APIs also need B.1.
-    - [ ] Connect, exchange bytes, and close through the pinned socket interfaces for one client use case; add hostname resolution if that use case needs it.
-    - [ ] Expose only the required `net.createConnection` / callback subset, reusing the guest invocation and binary I/O paths.
-    - [ ] Verify echo, connection failure, partial writes, EOF, close/cancellation, and resource cleanup before attempting a database/cache client.
-
-### Phase 13: Component Model Async (Deferred)
-
-- [ ] **13.1. Component Async Feasibility** — Take when composition needs exceed the working Preview 2 guest async path.
-    - [ ] Check the pinned parser, encoder, and host support, then select one future or stream use case that the available toolchain can express.
-    - [ ] Exercise it between a producer and consumer, mapping the needed guest Promise/AsyncIterable behavior and verifying failure, cancellation, backpressure, and ownership as applicable.
-    - [ ] Compare copying, memory, and throughput with the existing polling path; use those results to decide whether further lowering work is justified.
-
-## Deliberately Deferred Complexity
-
-| Area | Initial scope | Revisit when |
+# Perry-WIT Roadmap: Perry HIR → WAFFLE → WASI 0.3
+
+Transform perry-wit into a compiler with a dedicated Perry HIR → WAFFLE backend
+and WASI 0.3 (P3) component interfaces. Keep LLVM out of perry-wit's dependency
+and link graph. Reuse Perry's frontend and suitable transforms, Rust libraries,
+and component binding tools; replace the implementation choices that obstruct
+this path rather than preserving the current guest runtime as a requirement.
+
+## Architectural Outcomes
+
+```text
+TypeScript + resolved bindings + selected Perry transforms
+    → Perry HIR with explicit language semantics and typed capability operations
+    → WAFFLE control flow and values
+    → core Wasm + the language support that the workload actually needs
+    → WASI 0.3 component, built against resolved WIT
+    → host async primitives and existing WASI bindings
+```
+
+- **P3 is the async component target.** External waiting, I/O readiness, and
+  wakeup propagation belong to host primitives wherever the tested ABI permits.
+  Guest code still implements language evaluation, supported Promise behavior,
+  cleanup, and ownership. An async Rust host call alone is not proof of P3 output.
+- **WAFFLE replaces `perry-codegen-wasm`.** Lower HIR deliberately into typed
+  values, branches, loops, calls, and exceptional/suspending paths. Today's
+  LLVM-oriented `perry-codegen` is not the replacement. Reuse a Perry transform
+  only after its output and assumptions work with this backend and language contract.
+- **All text is valid UTF-8 with Unicode-scalar semantics.** Apply the contract
+  below to source decoding, literals, folding, supporting libraries, runtime values,
+  and component/I/O boundaries. This deliberately changes ECMAScript's UTF-16
+  string semantics; retain Node comparisons wherever the contracts still agree.
+  Define this target now, then implement it on the established WAFFLE path.
+- **Capabilities have a small compiler-lowering trait.** Group related typed
+  operations by responsibility after resolving their bindings. Shared async,
+  stream, value, and ABI mechanisms remain outside individual capabilities.
+  Derive the trait from working consumers; it is not a plugin or feature-gating framework.
+
+This roadmap does not require maintaining two compiler backends.
+
+### Language Contracts to Establish
+
+**Strings:** Every string is valid UTF-8. Length, indexing, slicing, iteration,
+and supported search/regex inputs and returned positions count Unicode scalar
+values. A returned search position must work as an index or slice bound; operations
+must never split a UTF-8 sequence. For `"😀x"`, the logical length is **2**, index 0
+is `"😀"`, and index 1 is `"x"`; the encoded length is **5 bytes**. Scalars are not
+grapheme clusters. Preserve text without automatic normalization, and use
+scalar-sequence equality and lexicographic scalar ordering.
+
+Reject malformed UTF-8 and unpaired surrogate escapes in source and JSON while
+the input still identifies them; valid paired escapes decode to a scalar. Preserve
+familiar coercion and out-of-range behavior where compatible. Arbitrary bytes remain
+binary values. ABI byte lengths and API-specific restrictions remain intact;
+any deliberately lossy decoder needs a separate, explicit API contract.
+UTF-16-specific APIs such as `charCodeAt` and `fromCharCode` need a documented
+scalar interpretation or an unsupported-operation diagnostic. Prefer code-point
+APIs for consumers; do not retain an internal code-unit string mode.
+
+**Await and Promise:** Begin with immediately awaited, statically known operations
+and named async tasks, with an explicit initial concurrency limit. Direct lowering
+may avoid constructing a Promise only where it preserves the declared observable
+behavior, including evaluation/start order, errors, and await ordering. This also
+applies to already-completed operations and `await` of ordinary values when exposed.
+
+A P3 `future<T>` transports one result through an owned readable end; it is not
+a reusable JS Promise object. A stored/shared Promise needs its settled value or
+rejection retained for repeated awaits and multiple observers, with the supported
+reaction ordering. An async WIT function returning `T` and a WIT function returning
+`future<T>` are different contracts; do not mechanically translate every
+`Promise<T>` annotation into a WIT future.
+[Component Model concurrency](https://github.com/WebAssembly/component-model/blob/main/design/mvp/Concurrency.md#streams-and-futures)
+provides the boundary mechanics, not these language semantics.
+
+Define the supported surface before advertising it. Stored Promises are a separate
+working slice below; constructors, thenables, combinators, callbacks, and detached
+work enter through demonstrated consumers. Unsupported forms must be diagnosed,
+not silently serialized, fulfilled with dummy values, or mapped to consumed futures.
+
+## Starting Point
+
+These are implementation baselines, not completed outcomes for the new pipeline.
+
+| Evidence | What it establishes | What remains to prove |
 | --- | --- | --- |
-| Custom Rust host generator | Shared WIT plus existing binding generation | A host integration has repeated glue the existing tools cannot cover |
-| Runtime feature matrices or separate capability packages | One runtime build with separable dispatch and pruning | Measured packaging or host constraints require another distribution model |
-| Aggressive whole-module optimization | Conservative function/import pruning | Measured size or speed remains a problem; then consider type/data compaction or more precise analysis |
-| General-purpose garbage collector | Reclamation matched to demonstrated lifetimes | Supported escaping/cyclic values cannot be reclaimed reliably by the simpler design |
-| Broad JavaScript/Node compatibility | Tested subsets for the first Date, buffer, filesystem, timer, and network consumers | A concrete consumer needs timezone parsing, more view types, Node Buffer, filesystem promises, or broader stream/event behavior |
-| General scheduler and networking stack | Per-consumer polling, one-shot timers, and a TCP client | Workloads require broader scheduling, UDP, TLS, or additional protocol support |
-| Component async and zero-copy optimization | Guest async on Preview 2; a bounded feasibility slice only when needed | Composition requirements and measurements justify the additional ABI work |
+| Current production compiler, guest runtime, and regression suites | P2 task contracts, guest async/callback behavior, capability APIs, and lifetime regressions to reuse | Equivalent or explicitly revised behavior through the new backend and P3 boundary |
+| [Local experiment](experiments/component-async/README.md) and [integration tests](experiments/component-async/tests/native_async.rs) | HIR built directly into WAFFLE SSA; numeric branches/loops/awaits; native byte streams; a real P3 clock import; P2/P3 host coexistence | Production integration, general values, UTF-8 string semantics, exceptions, Promise values, and broader ABI coverage. Its synchronous canonical calls use Wasmtime stack suspension; serial calls and store disposal on cancellation still need the production lifecycle checks below |
 
-Callback execution, in-place byte mutation, complete ABI roots, and bounded live memory remain required correctness outcomes for the slices that promise them.
+## Where the Largest Changes Belong
+
+| Area | Direction of replacement |
+| --- | --- |
+| Compiler orchestration, rewrites, and dependencies | Preserve binding identity and semantic decisions through HIR; introduce WAFFLE lowering and remove dependence on the old emitter's conventions |
+| Guest values and supporting libraries | Establish valid UTF-8 and shared value/call conventions for the primitives, objects, arrays, binary views, and captures that supported tasks need. Verify identity, mutation, escape, and reclamation as each form enters; choose storage from those consumers |
+| Exceptions and async execution | Generate control flow deliberately; separate language reactions from host waiting instead of repairing generated Wasm or extending a P2 reactor |
+| WIT, ABI, packaging, and linking | Generate against the resolved P3 contracts with existing tools where suitable; replace legacy trampoline, index/table remapping, and memory-patching obligations as their consumers move |
+| SDK, capability catalog, conformance, and builds | Describe the actual source semantics and P3 imports; migrate tests and artifacts coherently, with an auditable LLVM-free compiler dependency graph |
+
+## Tracking Work and Completion
+
+Each R-numbered slice has one parent checkbox and identifiable work items.
+Tick a work item when its stated outcome is implemented and verified. Tick its
+parent only when all required children and the promised outcome are satisfied.
+
+When a probe reveals an unforeseen difficulty, keep the original outcome and
+its checkbox open. Add smaller children or linked follow-up slices, stating what
+the delivered subset covers and which residual obligation prevents completion.
+
+A required check that failed, was skipped, or lacks a fixture keeps the
+relevant item open.
+
+Standing acceptance criteria:
+
+- Execute a representative source task through the new backend and real component
+  boundary. Validate the emitted component, inspect its resolved interfaces/imports,
+  and use independent host or component bindings to catch ABI mismatches.
+- Use Node comparisons for semantics that agree. Give scalar-string differences
+  explicit contract expectations and examples; do not disable whole differential suites.
+- Check failure, ownership, cancellation, and repeated-allocation behavior where the
+  slice introduces them. Distinguish bounded live storage from a fixed-size toy buffer.
+- Update SDK declarations, diagnostics, catalog support, and toolchain/artifact contracts
+  as applicable.
+
+## Replacement Slices
+
+First establish the WAFFLE basis: R1's executable compiler path, a working
+exception/cleanup path from R2, and a real P3 wait from R3. Use primitive values
+for these probes. This is enough evidence to begin R4's UTF-8 implementation;
+completion of every exception or async case is not a prerequisite.
+
+Implement UTF-8 storage, operations, and text boundaries on that new path.
+The contract guides early design, but does not require converting the legacy
+runtime, dispatcher, or backend. Investigate frontend assumptions early where
+they affect lowering; make semantic changes when the new text path needs them.
+
+Use concrete consumers to shape R5, build shared streams with real I/O, and add
+Promise-value support when values escape direct await. R8 expands these paths;
+R9 closes the production cutover. String-boundary and async-lifetime checks grow
+with their consumers, keeping unresolved obligations open.
+
+### R1 — An LLVM-Free HIR → WAFFLE Compiler Path
+
+- [ ] **Compile and run a useful resolved HIR subset through WAFFLE in the production pipeline.**
+    - [ ] **R1.1:** Bring the experiment's approach into an independently verifiable compiler path. Pin a recent, compatible toolchain and WASI 0.3 WIT inputs through `flake.nix`/`flake.lock`. Make P3 definitions and tools reproducibly available, aligning WIT extraction/resolution with Cargo binding and host async features; keep any still-needed P2 inputs distinct. Change or upgrade dependencies as needed. Retain inspectable HIR/WAFFLE/core/component artifacts and audit compiler dependencies and linked libraries for LLVM/inkwell.
+    - [ ] **R1.2:** Resolve imports, aliases, built-ins, and shadowing before capability classification loses binding identity. Carry typed operation identity into lowering, preserving receiver/argument evaluation. Cover constructors, methods, defaults, and initialization when exposed.
+    - [ ] **R1.3:** Prove assignments, branches, loops, function calls, and return/evaluation order using small source tasks with primitive values. Establish the value and call conventions those tasks need without porting the legacy string representation; check SSA and Wasm validity, and reject uncovered HIR explicitly. Reuse only Perry transforms whose outputs survive these probes. Reduce a tooling limitation to a failing case before choosing a dependency fix, alternative lowering, or scoped adapter; keep uncovered forms as residual work.
+    - [ ] **R1.4:** Rewrite ARCHITECTURE to the final state as if all slices were implemented to the best of the current knowledge.
+
+**Retire:** `perry-codegen-wasm` emission for migrated tasks, name-only call
+rewrites, and patches tied solely to that emitter. Keep the legacy route bounded
+until R9 accounts for its remaining supported consumers.
+
+### R2 — Exceptions and Cleanup Generated from HIR
+
+- [ ] **Preserve the promised throwing and cleanup behavior without post-emission repair.**
+    - [ ] **R2.1:** Choose an exception representation that WAFFLE, the host, and necessary support libraries can express. Prove nested calls, throw/catch, return, and finally ordering with primitive payloads before expanding value and function forms. This first path must work without the UTF-8 implementation; isolate a toolchain gap rather than encode dependence on old Wasm instruction patterns.
+    - [ ] **R2.2:** Separate language exceptions/rejections, WIT domain errors, host traps, and cancellation. Verify that failures reach the declared guest/host channel and cannot become successful dummy results. Define when an instance is reusable and when it must be discarded. Canonical ABI allocation failure must trap rather than return null for a nonempty allocation; establish the error policy for other resource exhaustion through the consumer that exposes it.
+    - [ ] **R2.3:** Exercise repeated success and recoverable failure with the values and resources available on the new path. Verify cleanup and bounded live storage; extend coverage to strings after R4, binary values as introduced, and suspension in R3/R6. Keep these later checks open without making them a barrier to the first working backend.
+
+**Retire:** Exception bytecode scanning/patching and the implicit dispatch-based
+exception convention for replaced paths. A language error channel may remain;
+its existence does not require preserving today's runtime bridge.
+
+### R3 — P3 Structured Await and Component ABI
+
+- [ ] **Run named async source tasks against real P3 operations with correct failure and lifetime behavior.**
+    - [ ] **R3.1:** Use R1.1's pinned P3 definitions and tooling to generate resolved WIT imports/exports and marshalling with existing Rust/component tools. Add a Nix-backed check that compiles a source task, validates its component, and executes an actually pending P3 clock operation against independently generated host bindings. Begin with primitive values/results; extend to text with R4 and other ABI types through consumers. Verify the resolved WIT, bindings, and enabled host async features agree; isolate demonstrated binding gaps in small adapters. An async export does not by itself require a `future<T>` result.
+    - [ ] **R3.2:** Select the simplest suspension ABI that passes the task's semantics, using the experiment's stack suspension as a first probe. Make suspension/resumption deliberate in control-flow lowering; if explicit continuations are needed, retain values live across suspension and preserve enclosing cleanup regions. Prove loops/branches and multiple awaits, with rejection entering the guest exception path at the await. Check completed/non-Promise await ordering and host parking without busy polling before eliding language support.
+    - [ ] **R3.3:** Give pending operations and their ABI buffers, return areas, and borrows clear invocation owners. Reuse bindings for event routing where possible; any guest adapter must distinguish subtask status from stream/future transfer completion and keep language reactions separate from external readiness. Exercise immediate and delayed completion without lost wakeups, duplicate settlement, or resuming a finished invocation; grow this shared mechanism only as consumers require it.
+    - [ ] **R3.4:** Run the P3 task and an existing P2 component in the same host setup. Record required host features and unsupported ABI/type combinations; leave compiler or binding gaps visible rather than silently falling back to P2 output.
+    - [ ] **R3.5:** Test cancellation requests, completion races, cleanup, and repeated calls, including release of native handles and protection against stale completion reaching reused state. Record concurrency and instance-reuse limits. Keep pending storage alive until completion or cancellation is acknowledged. Store disposal can establish a scoped lifecycle, but any promised cooperative cleanup remains open until demonstrated; propagate these checks to streams and escaped Promise values as they enter.
+
+**Retire:** P2 polling/readiness bridges and synchronous task-driving loops for
+migrated direct-await consumers. Keep only the shared task/event adapter required
+by the selected ABI and guest scheduling required by observable language behavior;
+external readiness stays with the host.
+
+### R4 — Valid UTF-8 Values and a Working Text ABI
+
+Begin implementation once R1 and the initial R2/R3 probes establish control flow,
+calls, failure handling, and P3 suspension through WAFFLE. Build the string path
+once against those conventions; expand or revise them only where a text consumer
+demonstrates a gap.
+
+- [ ] **Make the supported string surface obey the scalar contract throughout the new path.**
+    - [ ] **R4.1:** Trace decoding, escapes, HIR literals, folding, and intrinsic lowering into the WAFFLE path, locating conversions that can erase invalid input. Establish a compact operation matrix recording index units, coercion, boundary behavior, and deliberate Node differences. Probe ASCII, BMP/non-BMP text, combining sequences, empty strings, paired escapes, and malformed inputs. Fix required shared frontend/transform behavior at that boundary, keeping legacy runtime conversion outside this slice.
+    - [ ] **R4.2:** Deliver a source task through WAFFLE using scalar length/index/slice/search and a UTF-8 WIT string round trip. Add simple valid-text storage and ownership to the established value/call/ABI conventions, reusing Rust facilities where suitable. Verify negative/out-of-range bounds and search-position reuse; compare literals with runtime expressions and representative function/class paths. Keep ABI pointers/lengths in the required units and test exact bytes for empty, permitted embedded-NUL, and multibyte text.
+    - [ ] **R4.3:** Migrate the matrix's remaining operations through combined tasks: scalar `charAt`/code-point access, empty-separator splitting and iteration; concatenation/templates/joins/replacement/conversion, including nested values; comparison/sorting; case/whitespace helpers; JSON values and keys; regex positions. Test ordering that differs from UTF-16, case mappings that change length, and paired/unpaired JSON escapes. Document supported regex flags/classes and UTF-16-specific API decisions; split distinct gaps without making a full ECMAScript regex engine a prerequisite.
+    - [ ] **R4.4:** Audit text import/export, filesystem, HTTP, environment, arguments, and logging as each boundary is introduced. Preserve arbitrary binary bytes and API-specific restrictions; reject invalid text through the proper error channel before dependent side effects. Verify literal/global/returned/retained lifetimes and repeated allocating calls, cleanup, and recoverable failures for ASCII and multibyte strings. Require bounded live storage and string-only tasks without unrelated imports; measure before adding caches or more elaborate storage.
+
+**Retire:** UTF-16/WTF-8 runtime string storage, surrogate-half operations, lossy
+conversions that hide invalid input, and compiler shortcuts that preserve the old
+contract as their consumers migrate; remove obsolete legacy code rather than
+converting it first. Paired-escape decoding remains an input codec, not an internal string mode.
+Use contract-specific Unicode expectations while retaining matching Node comparisons.
+
+### R5 — Typed Capability Lowering with a Small Rust Trait
+
+- [ ] **Lower resolved capability operations through a shared, consumer-shaped compiler contract.**
+    - [ ] **R5.1:** Derive the trait from two concrete consumers, such as clocks and the first filesystem operation. Group typed operations by responsibility and carry the operands, result/error behavior, and imports their lowering needs. Choose methods and context from those implementations; defer registration, dynamic loading, packages, and feature combinations until a consumer demonstrates a need.
+    - [ ] **R5.2:** Keep language values, exceptions, async suspension, stream transfers, and ABI ownership in shared lowering/support code. Capability implementations use these mechanisms and do not own separate schedulers, Promise engines, or stream registries. Verify a mixed-capability source task to expose misplaced responsibilities early.
+    - [ ] **R5.3:** Verify bound aliases, shadowed built-ins, unrelated member names, dynamic forms that are exposed, and argument side effects. Inspect pure and mixed tasks' component imports and instantiate with only the requested interfaces. Retain ABI, indirect-call/global references, and initialization dependencies correctly; add finer pruning only when measured output needs it.
+
+**Retire:** String capability markers, generic `mem_call` capability routing,
+and dispatcher-combination specialization for replaced operations. Conservative
+reachability remains useful where support code needs it; a feature-matrix runtime
+or replacement plugin architecture is not the goal.
+
+### R6 — Minimal Promise Values for a Real Consumer
+
+- [ ] **Support a task that starts work, stores its Promise, and awaits it more than once.**
+    - [ ] **R6.1:** Establish the retained-result/rejection and identity contract with a real consumer, verifying the caller continues while the operation remains pending. Consume a P3 result once and retain the language outcome for later awaits where necessary. Separate observation of that outcome from authority to settle it. Choose the smallest representation these cases require, measuring per-await/settlement allocations before adding optimizations.
+    - [ ] **R6.2:** Prove eager execution up to suspension, single settlement, repeated awaits, multiple observers, and supported reaction ordering with trace-based tests. Lower away Promise objects only where equivalence holds. Extend constructors, adoption, then/catch/finally, or combinators through required consumers; diagnose unimplemented forms. Track additional API coverage separately from this stored/repeated-await slice, with existing advertised obligations retained in the migration matrix.
+    - [ ] **R6.3:** Define owners for pending operations, settled results, observers, and escaped captures. Cancelling one observer must follow the stated policy for other observers, not automatically destroy their shared operation. Verify rejection, abandonment, cancellation races, and repeated allocating cycles release roots and reach bounded live storage. Any exposed callback needs a tested invocation/capture ABI before a timer or executor relies on it.
+
+**Retire:** Perry-state-machine-to-guest-cell adaptation and the old continuation
+queue/runtime where the replacement satisfies its consumers. Retained outcomes
+and observable reaction scheduling may still need small guest support; neither is
+supplied by the host future's one-result transport.
+
+### R7 — Shared Native Streams through Real I/O
+
+- [ ] **Process and forward data incrementally through P3/native stream boundaries with bounded storage.**
+    - [ ] **R7.1:** Extend the fixed-buffer experiment through an actual P3 I/O capability, starting with a file or HTTP workload. Exercise read and write/forwarding paths against resolved WIT and a real producer/consumer; choose batch sizes and adapter ownership from that workload. Check stream types and ownership against independent bindings, adding a composed-component probe where host fixtures leave a contract untested.
+    - [ ] **R7.2:** Share byte buffers, views, transfer and completion handling across capabilities. Prove exact binary bytes, partial transfers, empty chunks, EOF, and separate failure/completion channels; EOF alone need not mean success. Text decoding must preserve scalars split across chunks and reject malformed or unfinished sequences. A returned stream/future may outlive result delivery: retain its producer, pending buffers, and native handles until completion or acknowledged cancellation. Split lifecycle gaps into follow-ups rather than treating export return as universal cleanup.
+    - [ ] **R7.3:** Use delayed producers and slow/abandoned consumers to verify backpressure, cancellation, early return, error cleanup, and ownership of both stream ends. Check input/output larger than guest memory and repeated calls for bounded live storage. Promised overlapping calls also need per-call isolation; otherwise record the serial limit. Split concurrency work out if it blocks a smaller consumer, keeping any original concurrency promise open.
+
+**Retire:** P2 stream-resource polling, readiness subscriptions, and bespoke
+`guest_stream_step`/body-forwarding protocols for migrated consumers. Keep any
+source-level stream wrapper limited to its advertised semantics; Web Streams,
+async iteration, and zero-copy claims need their own consumer evidence.
+
+### R8 — Migrate the Advertised Capability Surface
+
+- [ ] **Make currently promised capability tasks work through typed lowering and the new contracts.**
+    - [ ] **R8.1:** Migrate clocks, randomness, environment/arguments, and required timer APIs in small combined tasks. Preserve time units, random-fill view identity/quotas, context coercion/mutation, and promised callback ordering/lifetimes. Validate inputs before side effects and test cancellation without assuming rollback; recurring work must not grow retained storage without bound. Use controlled host input for nondeterministic behavior.
+    - [ ] **R8.2:** Migrate filesystem consumers with preopen confinement, exact binary I/O, and valid UTF-8 text boundaries. Preserve options and argument effects, honoring or rejecting permissions/flags/encodings before I/O. Verify denial, invalid text/options, resource cleanup, repeated calls, and unrelated user functions through the public component path. Split metadata or other gaps according to actual consumers without closing the filesystem promise early.
+    - [ ] **R8.3:** Migrate outgoing HTTP and incoming handlers using P3 bindings and R7's shared body transfers. Preserve the supported method/header/status/body contracts and error channels. Verify delayed I/O, concurrent requests when advertised, cancellation before/after response return, abandoned bodies, and bounded retained resources; split buffered and streaming subsets when their implementation or lifecycle needs differ, leaving the parent open until both promised paths work.
+
+**Retire:** Each migrated capability's P2 bindings, name-based rewrites, and
+capability-owned runtime/readiness adapter once its consumers are covered. Reuse
+existing fixtures and behavior tests; do not require a fresh test file per variant
+or expand into new APIs to declare migration complete.
+
+### R9 — Production Cutover and Retirement
+
+- [ ] **Make HIR → WAFFLE → P3 the production pipeline and remove its superseded dependencies and machinery.**
+    - [ ] **R9.1:** Reconcile the migration matrix established at the start: every advertised source/API/WIT consumer has a verified new path, an explicit semantic change, or a still-open gap. Resolve required gaps before removing the legacy route. A smaller successful subset is progress, not completion of the original production replacement.
+    - [ ] **R9.2:** Remove `perry-codegen-wasm`, emitter-specific Wasm patches, unused runtime/dispatcher/Promise/stream code, and linker/table/memory workarounds with no remaining consumers. Simplify ABI/linking around the final support modules; audit actual references and complete ABI roots before deleting helpers or replacing custom merging with existing tools.
+    - [ ] **R9.3:** Finish production packaging on the P3 Nix build path established in R1/R3, aligning WIT, SDK declarations, catalog support, Unicode differential expectations, fixtures, bundled libraries, and generated artifacts. Audit compiler and library paths for surviving UTF-16/WTF-8 storage, surrogate-half operations, and implicit lossy conversion; account for any legitimate input codec. Run the new production compiler/component/host, failure/cancellation, ownership/memory, and capability-import suites. Keep matching Node comparisons and P2/P3 host coexistence checks; verify the compiler's final dependency/link graph remains LLVM-free.
+    - [ ] **R9.4:** Record component size, memory, and representative string/I/O throughput for the final path against useful earlier baselines. Address demonstrated regressions and publish the supported surface and limitations. Rebuild incompatible artifacts coherently; do not require speculative optimization work to close a correct, measured cutover.
+
+**Retire:** The legacy compilation route and compatibility scaffolding that only
+kept its implementation alive. Keep useful regression fixtures and any small
+language/ABI support still justified by the established contracts.
+
+## Complexity Deferred Until a Consumer Requires It
+
+| Area | Initial approach | Evidence needed to expand |
+| --- | --- | --- |
+| Complete JavaScript/Node compatibility | Explicit source/API subsets, scalar UTF-8 semantics, matching differential cases | A consumer needing another Promise, string/regex, Date, Buffer, or event API |
+| New networking breadth | Migrate existing HTTP; a first TCP client uses the shared P3 mechanisms when needed | A concrete socket workload; UDP/TLS/general event APIs are not cutover prerequisites |
+| Value/string storage sophistication | Simple typed support and lifetimes that pass escape, cycle, and memory probes | A supported graph or measured performance issue the simpler representation cannot handle |
+| Custom component tooling | Existing WIT/binding/encoding tools plus isolated, tested gaps | A working ABI consumer that those tools cannot express |
+| Plugin systems, feature matrices, separate runtime packages | One small capability-lowering trait and selected imports/support | Demonstrated distribution constraints, not a growing list of capability names |
+| Aggressive optimization and zero-copy designs | Correct control flow, conservative dependency selection, bounded transfers | Measured component size, copying, memory, or throughput bottlenecks |
+
+Correct exceptions, Unicode semantics, ownership, cancellation behavior, and bounded
+live memory remain acceptance obligations for every slice that promises them.
+They are not deferred merely because a prototype works on the happy path.
