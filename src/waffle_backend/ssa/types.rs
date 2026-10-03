@@ -56,7 +56,9 @@ impl FunctionLowerer<'_> {
                         || property == "join"
                     {
                         return HirType::String;
-                    } else if property == "indexOf" || property == "codePointAt" {
+                    } else if property == "codePointAt" {
+                        return HirType::Union(vec![HirType::Number, HirType::Void]);
+                    } else if property == "indexOf" {
                         return HirType::Number;
                     } else if property == "split" {
                         return HirType::Array(Box::new(HirType::String));
@@ -92,5 +94,9 @@ impl FunctionLowerer<'_> {
 
     pub(super) fn is_string_or_undefined(&self, expr: &Expr) -> bool {
         StringKind::of(&self.infer_expr_type(expr)).is_some()
+    }
+
+    pub(super) fn is_optional_number(&self, expr: &Expr) -> bool {
+        self.infer_expr_type(expr) == HirType::Union(vec![HirType::Number, HirType::Void])
     }
 }

@@ -1483,3 +1483,40 @@ async fn test_undefined_only_equality_without_string_helpers() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_code_points_preserve_number_or_undefined() -> Result<()> {
+    let source = r#"export async function run(s: string, index: number): Promise<number> {
+        let cp = await s.codePointAt(index);
+        let result = 0;
+        if (cp === undefined) { result = result + 1; }
+        if (cp === cp) { result = result + 2; }
+        if (cp === 65) { result = result + 4; }
+        if (undefined !== cp) { result = result + 8; }
+        if (cp) { result = result + 16; }
+        if (cp == s.codePointAt(999)) { result = result + 32; }
+        if (cp === s[999]) { result = result + 64; }
+        if (cp === 0 / 0) { return 999; }
+        if (cp === false) { return 999; }
+        if (cp === "") { return 999; }
+        return result;
+    }"#;
+    let cases = [
+        ("A🦀B", 0.0, 30.0),
+        ("A🦀B", 1.0, 26.0),
+        ("A🦀B", 3.0, 99.0),
+        ("ABC", -1.0, 99.0),
+        ("ABC", f64::INFINITY, 99.0),
+        ("", 0.0, 99.0),
+        ("\0", 0.0, 10.0),
+    ]
+    .into_iter()
+    .map(|(s, i, n)| {
+        (
+            vec![Val::String(s.into()), Val::Float64(i)],
+            Val::Float64(n),
+        )
+    })
+    .collect::<Vec<_>>();
+    run_cases(source, &cases).await
+}

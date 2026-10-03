@@ -5,6 +5,7 @@
 //! overhead for primitive values.
 
 mod arrays;
+mod optional;
 mod requirements;
 mod string_ops;
 mod types;
@@ -495,6 +496,11 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Bool(b) => {
                 let v = if *b { 1 } else { 0 };
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
+            }
+            Expr::Compare { op, left, right }
+                if self.is_optional_number(left) || self.is_optional_number(right) =>
+            {
+                self.optional_number_comparison(*op, left, right)
             }
             Expr::Compare { op, left, right }
                 if self.is_string_or_undefined(left) || self.is_string_or_undefined(right) =>
