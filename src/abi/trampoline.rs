@@ -70,13 +70,11 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                 function_type_indices.extend(reader.into_iter().collect::<Result<Vec<_>, _>>()?);
             }
             Payload::GlobalSection(reader) => {
-                let mut g_idx = num_imported_globals;
-                for g in reader {
+                for (g_idx, g) in (num_imported_globals..).zip(reader) {
                     let g = g?;
                     if g.ty.content_type == wasmparser::ValType::I64 {
                         i64_globals.insert(g_idx);
                     }
-                    g_idx += 1;
                 }
             }
             Payload::ExportSection(reader) => {
@@ -126,10 +124,10 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                         },
                         ExternalKind::Global
                             if exp.name.starts_with("__wasm_global_")
-                                && i64_globals.contains(&exp.index)
-                            => {
-                                exports.user_i64_globals.push(exp.index);
-                            }
+                                && i64_globals.contains(&exp.index) =>
+                        {
+                            exports.user_i64_globals.push(exp.index);
+                        }
                         _ => {}
                     }
                 }

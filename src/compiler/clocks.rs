@@ -1,8 +1,6 @@
 //! AST pass rewriting performance.now() to (undefined).performance_now().
 
-use perry_parser::swc_ecma_ast::{
-    CallExpr, Callee, Expr, IdentName, MemberProp, Module,
-};
+use perry_parser::swc_ecma_ast::{CallExpr, Callee, Expr, IdentName, MemberProp, Module};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 pub(super) fn rewrite_performance_now(module: &mut Module) {

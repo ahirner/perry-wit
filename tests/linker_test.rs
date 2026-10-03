@@ -152,11 +152,13 @@ fn test_merge_core_modules() {
     let ts_source = r#"
         console.log("merging core modules test");
     "#;
-    let (ts_wasm, exported_functions, functions) =
-        perry_wit::compiler::compile_typescript_raw(ts_source, "merge_docs.ts")
-            .expect("compile raw ts");
-    let rt_wasm =
-        perry_wit::runtime::resolve_guest_runtime_bytes(None).expect("resolve runtime");
+    let perry_wit::compiler::RawCompiled {
+        core: ts_wasm,
+        exported_functions,
+        functions,
+    } = perry_wit::compiler::compile_typescript_raw(ts_source, "merge_docs.ts")
+        .expect("compile raw ts");
+    let rt_wasm = perry_wit::runtime::resolve_guest_runtime_bytes(None).expect("resolve runtime");
 
     let merged = merge_core_modules(&ts_wasm, &rt_wasm).expect("merge core modules");
 
@@ -209,9 +211,8 @@ fn test_merge_core_modules() {
     );
 
     // 3. Test componentization and stripping after synthesizing trampolines
-    let wit_exports =
-        perry_wit::abi::extract_world_exports(Path::new("wit"), Some("merge-docs"))
-            .expect("extract world exports");
+    let wit_exports = perry_wit::abi::extract_world_exports(Path::new("wit"), Some("merge-docs"))
+        .expect("extract world exports");
     let ready_core = perry_wit::abi::synthesize_trampolines(
         &merged,
         &wit_exports,

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use perry_codegen_wasm::compile_modules_to_wasm;
+use perry_hir::ir::Function;
 use perry_hir::lower_module;
 use perry_parser::parse_typescript;
 
@@ -51,6 +52,14 @@ pub struct Compiled {
     pub stripped: Option<Vec<u8>>,
 }
 
+/// Unlinked code and the HIR metadata needed by export adapters.
+#[derive(Debug)]
+pub struct RawCompiled {
+    pub core: Vec<u8>,
+    pub exported_functions: Vec<(String, u32)>,
+    pub functions: Vec<Function>,
+}
+
 /// Compiles a TypeScript file according to the provided compile options.
 pub fn compile_file(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
     let ts_content = fs::read_to_string(input_file)
@@ -63,10 +72,7 @@ pub fn compile_file(input_file: &Path, options: &CompileOptions) -> Result<Compi
 }
 
 /// Compiles TypeScript source to an unlinked raw WebAssembly module and its function metadata.
-pub fn compile_typescript_raw(
-    ts_source: &str,
-    file_name: &str,
-) -> Result<(Vec<u8>, Vec<(String, u32)>, Vec<perry_hir::ir::Function>)> {
+pub fn compile_typescript_raw(ts_source: &str, file_name: &str) -> Result<RawCompiled> {
     let mut ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
     fetch::preserve_calls(&mut ast);
@@ -93,7 +99,11 @@ pub fn compile_typescript_raw(
     let raw_wasm = wat::parse_str(&wat)
         .map_err(|e| anyhow::anyhow!("re-parsing raw wasm with adjusted memory failed: {e}"))?;
 
-    Ok((raw_wasm, exported_functions, functions))
+    Ok(RawCompiled {
+        core: raw_wasm,
+        exported_functions,
+        functions,
+    })
 }
 
 /// Compiles TypeScript source text according to the provided compile options.
@@ -102,7 +112,11 @@ pub fn compile_typescript(
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let (raw_wasm, exported_functions, functions) = compile_typescript_raw(ts_source, file_name)?;
+    let RawCompiled {
+        core: raw_wasm,
+        exported_functions,
+        functions,
+    } = compile_typescript_raw(ts_source, file_name)?;
 
     let rt_bytes = runtime::resolve_guest_runtime_bytes(options.runtime_path.as_deref())?;
 

@@ -15,9 +15,15 @@ fn probe_string_literals_and_escapes() -> Result<()> {
         ("reversed_surrogates", r#"let s = "\uDE00\uD83D";"#),
         ("double_high_surrogate", r#"let s = "\uD83D\uD83D";"#),
         ("braced_lone_surrogate", r#"let s = "\u{D800}";"#),
-        ("lone_surrogate_with_ascii", r#"let s = "prefix\uD83Dsuffix";"#),
+        (
+            "lone_surrogate_with_ascii",
+            r#"let s = "prefix\uD83Dsuffix";"#,
+        ),
         ("template_lone_surrogate", r#"let s = `template\uD83D`;"#),
-        ("property_key_lone_surrogate", r#"let obj = { "\uD83D": 123 };"#),
+        (
+            "property_key_lone_surrogate",
+            r#"let obj = { "\uD83D": 123 };"#,
+        ),
         ("combining_sequence", r#"let s = "e\u0301";"#),
         ("empty_string", r#"let s = "";"#),
         ("embedded_nul", r#"let s = "a\0b";"#),
@@ -52,19 +58,58 @@ fn probe_string_literals_and_escapes() -> Result<()> {
 #[test]
 fn probe_string_operations_hir() -> Result<()> {
     let cases = [
-        ("length", r#"export function run(s: string): number { return s.length; }"#),
-        ("index_access", r#"export function run(s: string): string { return s[0]; }"#),
-        ("char_at", r#"export function run(s: string): string { return s.charAt(0); }"#),
-        ("char_code_at", r#"export function run(s: string): number { return s.charCodeAt(0); }"#),
-        ("code_point_at", r#"export function run(s: string): number { return s.codePointAt(0); }"#),
-        ("from_code_point", r#"export function run(n: number): string { return String.fromCodePoint(n); }"#),
-        ("from_char_code", r#"export function run(n: number): string { return String.fromCharCode(n); }"#),
-        ("slice", r#"export function run(s: string): string { return s.slice(1, 3); }"#),
-        ("index_of", r#"export function run(s: string): number { return s.indexOf("x"); }"#),
-        ("split", r#"export function run(s: string): any { return s.split(""); }"#),
-        ("concat", r#"export function run(a: string, b: string): string { return a + b; }"#),
-        ("comparison", r#"export function run(a: string, b: string): boolean { return a < b; }"#),
-        ("template", r#"export function run(a: string): string { return `val: ${a}`; }"#),
+        (
+            "length",
+            r#"export function run(s: string): number { return s.length; }"#,
+        ),
+        (
+            "index_access",
+            r#"export function run(s: string): string { return s[0]; }"#,
+        ),
+        (
+            "char_at",
+            r#"export function run(s: string): string { return s.charAt(0); }"#,
+        ),
+        (
+            "char_code_at",
+            r#"export function run(s: string): number { return s.charCodeAt(0); }"#,
+        ),
+        (
+            "code_point_at",
+            r#"export function run(s: string): number { return s.codePointAt(0); }"#,
+        ),
+        (
+            "from_code_point",
+            r#"export function run(n: number): string { return String.fromCodePoint(n); }"#,
+        ),
+        (
+            "from_char_code",
+            r#"export function run(n: number): string { return String.fromCharCode(n); }"#,
+        ),
+        (
+            "slice",
+            r#"export function run(s: string): string { return s.slice(1, 3); }"#,
+        ),
+        (
+            "index_of",
+            r#"export function run(s: string): number { return s.indexOf("x"); }"#,
+        ),
+        (
+            "split",
+            r#"export function run(s: string): any { return s.split(""); }"#,
+        ),
+        (
+            "concat",
+            r#"export function run(a: string, b: string): string { return a + b; }"#,
+        ),
+        (
+            "comparison",
+            r#"export function run(a: string, b: string): boolean { return a < b; }"#,
+        ),
+        (
+            "template",
+            r#"export function run(a: string): string { return `val: ${a}`; }"#,
+        ),
     ];
 
     for (name, ts) in cases {
@@ -72,7 +117,10 @@ fn probe_string_operations_hir() -> Result<()> {
         let hir = lower_module(&ast, "main", "probe_ops.ts")?;
         println!("=== OP CASE: {name} ===");
         for func in &hir.functions {
-            println!("  func {}: params={:?}, return_type={:?}", func.name, func.params, func.return_type);
+            println!(
+                "  func {}: params={:?}, return_type={:?}",
+                func.name, func.params, func.return_type
+            );
             for stmt in &func.body {
                 println!("    body stmt: {stmt:?}");
             }
@@ -155,4 +203,3 @@ fn probe_component_model_string_abi() -> Result<()> {
 
     Ok(())
 }
-

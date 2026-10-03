@@ -4,8 +4,8 @@
 //! ensuring that control-flow joins maintain consistent SSA forms without
 //! requiring access to the entire mutable lowerer or redundant cloning.
 
-use std::collections::BTreeMap;
 use perry_hir::types::LocalId;
+use std::collections::BTreeMap;
 use waffle::{Block, BlockTarget, FunctionBody, Terminator, Value};
 
 /// Creates SSA block parameters on `block` corresponding to the given local bindings.
@@ -48,10 +48,7 @@ impl JoinPoint {
 
     /// Computes branch arguments from the current local environment in parameter order.
     pub(crate) fn branch_args(&self, current_locals: &BTreeMap<LocalId, Value>) -> Vec<Value> {
-        self.bindings
-            .keys()
-            .map(|id| current_locals[id])
-            .collect()
+        self.bindings.keys().map(|id| current_locals[id]).collect()
     }
 
     /// Emits an unconditional branch from `from_block` to this join point.

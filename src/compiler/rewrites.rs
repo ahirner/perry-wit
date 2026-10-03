@@ -521,65 +521,66 @@ impl Rewriter {
             args,
             ..
         } = expr
-            && (module == "fs" || module == "node:fs") {
-                if method == "readFileSync" {
-                    self.needs_fs = true;
-                    *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
-                    return;
-                } else if method == "writeFileSync" {
-                    self.needs_fs = true;
-                    let path = if !args.is_empty() {
-                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
-                    } else {
-                        perry_hir::ir::Expr::Undefined
-                    };
-                    let content = if args.len() >= 2 {
-                        std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
-                    } else {
-                        perry_hir::ir::Expr::Undefined
-                    };
-                    let options = if args.len() >= 3 {
-                        std::mem::replace(&mut args[2], Expr::Undefined)
-                    } else {
-                        Expr::Undefined
-                    };
-                    *expr = perry_hir::ir::Expr::Call {
-                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
-                            object: Box::new(perry_hir::ir::Expr::Undefined),
-                            property: "fs_write_file_sync".into(),
-                            byte_offset: 0,
-                        }),
-                        args: vec![path, content, options],
-                        type_args: Vec::new(),
+            && (module == "fs" || module == "node:fs")
+        {
+            if method == "readFileSync" {
+                self.needs_fs = true;
+                *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
+                return;
+            } else if method == "writeFileSync" {
+                self.needs_fs = true;
+                let path = if !args.is_empty() {
+                    std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                } else {
+                    perry_hir::ir::Expr::Undefined
+                };
+                let content = if args.len() >= 2 {
+                    std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
+                } else {
+                    perry_hir::ir::Expr::Undefined
+                };
+                let options = if args.len() >= 3 {
+                    std::mem::replace(&mut args[2], Expr::Undefined)
+                } else {
+                    Expr::Undefined
+                };
+                *expr = perry_hir::ir::Expr::Call {
+                    callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                        object: Box::new(perry_hir::ir::Expr::Undefined),
+                        property: "fs_write_file_sync".into(),
                         byte_offset: 0,
-                    };
-                    return;
-                } else if method == "readdirSync" {
-                    self.needs_fs = true;
-                    *expr = runtime_method_call("fs_readdir_sync", std::mem::take(args));
-                    return;
-                } else if method == "statSync" {
-                    self.needs_fs = true;
-                    *expr = runtime_method_call("fs_stat_sync", std::mem::take(args));
-                    return;
-                } else if method == "unlinkSync" {
-                    self.needs_fs = true;
-                    *expr = runtime_method_call("fs_unlink_sync", std::mem::take(args));
-                    return;
-                } else if method == "mkdirSync" {
-                    self.needs_fs = true;
-                    *expr = runtime_method_call("fs_mkdir_sync", std::mem::take(args));
-                    return;
-                } else if method == "rmdirSync" {
-                    self.needs_fs = true;
-                    *expr = runtime_method_call("fs_rmdir_sync", std::mem::take(args));
-                    return;
-                } else if method == "existsSync" {
-                    self.needs_fs = true;
-                    *expr = runtime_method_call("fs_exists_sync", std::mem::take(args));
-                    return;
-                }
+                    }),
+                    args: vec![path, content, options],
+                    type_args: Vec::new(),
+                    byte_offset: 0,
+                };
+                return;
+            } else if method == "readdirSync" {
+                self.needs_fs = true;
+                *expr = runtime_method_call("fs_readdir_sync", std::mem::take(args));
+                return;
+            } else if method == "statSync" {
+                self.needs_fs = true;
+                *expr = runtime_method_call("fs_stat_sync", std::mem::take(args));
+                return;
+            } else if method == "unlinkSync" {
+                self.needs_fs = true;
+                *expr = runtime_method_call("fs_unlink_sync", std::mem::take(args));
+                return;
+            } else if method == "mkdirSync" {
+                self.needs_fs = true;
+                *expr = runtime_method_call("fs_mkdir_sync", std::mem::take(args));
+                return;
+            } else if method == "rmdirSync" {
+                self.needs_fs = true;
+                *expr = runtime_method_call("fs_rmdir_sync", std::mem::take(args));
+                return;
+            } else if method == "existsSync" {
+                self.needs_fs = true;
+                *expr = runtime_method_call("fs_exists_sync", std::mem::take(args));
+                return;
             }
+        }
         if let perry_hir::ir::Expr::New {
             class_name, args, ..
         } = expr
@@ -724,65 +725,66 @@ impl Rewriter {
                     self.needs_random = true;
                 }
                 if let perry_hir::ir::Expr::NativeModuleRef(module) = object.as_ref()
-                    && (module == "fs" || module == "node:fs") {
-                        if property == "readFileSync" {
-                            self.needs_fs = true;
-                            *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
-                            return;
-                        } else if property == "writeFileSync" {
-                            self.needs_fs = true;
-                            let path = if !args.is_empty() {
-                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
-                            } else {
-                                perry_hir::ir::Expr::Undefined
-                            };
-                            let content = if args.len() >= 2 {
-                                std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
-                            } else {
-                                perry_hir::ir::Expr::Undefined
-                            };
-                            let options = if args.len() >= 3 {
-                                std::mem::replace(&mut args[2], Expr::Undefined)
-                            } else {
-                                Expr::Undefined
-                            };
-                            *expr = perry_hir::ir::Expr::Call {
-                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
-                                    object: Box::new(perry_hir::ir::Expr::Undefined),
-                                    property: "fs_write_file_sync".into(),
-                                    byte_offset: 0,
-                                }),
-                                args: vec![path, content, options],
-                                type_args: Vec::new(),
+                    && (module == "fs" || module == "node:fs")
+                {
+                    if property == "readFileSync" {
+                        self.needs_fs = true;
+                        *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
+                        return;
+                    } else if property == "writeFileSync" {
+                        self.needs_fs = true;
+                        let path = if !args.is_empty() {
+                            std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
+                        } else {
+                            perry_hir::ir::Expr::Undefined
+                        };
+                        let content = if args.len() >= 2 {
+                            std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
+                        } else {
+                            perry_hir::ir::Expr::Undefined
+                        };
+                        let options = if args.len() >= 3 {
+                            std::mem::replace(&mut args[2], Expr::Undefined)
+                        } else {
+                            Expr::Undefined
+                        };
+                        *expr = perry_hir::ir::Expr::Call {
+                            callee: Box::new(perry_hir::ir::Expr::PropertyGet {
+                                object: Box::new(perry_hir::ir::Expr::Undefined),
+                                property: "fs_write_file_sync".into(),
                                 byte_offset: 0,
-                            };
-                            return;
-                        } else if property == "readdirSync" {
-                            self.needs_fs = true;
-                            *expr = runtime_method_call("fs_readdir_sync", std::mem::take(args));
-                            return;
-                        } else if property == "statSync" {
-                            self.needs_fs = true;
-                            *expr = runtime_method_call("fs_stat_sync", std::mem::take(args));
-                            return;
-                        } else if property == "unlinkSync" {
-                            self.needs_fs = true;
-                            *expr = runtime_method_call("fs_unlink_sync", std::mem::take(args));
-                            return;
-                        } else if property == "mkdirSync" {
-                            self.needs_fs = true;
-                            *expr = runtime_method_call("fs_mkdir_sync", std::mem::take(args));
-                            return;
-                        } else if property == "rmdirSync" {
-                            self.needs_fs = true;
-                            *expr = runtime_method_call("fs_rmdir_sync", std::mem::take(args));
-                            return;
-                        } else if property == "existsSync" {
-                            self.needs_fs = true;
-                            *expr = runtime_method_call("fs_exists_sync", std::mem::take(args));
-                            return;
-                        }
+                            }),
+                            args: vec![path, content, options],
+                            type_args: Vec::new(),
+                            byte_offset: 0,
+                        };
+                        return;
+                    } else if property == "readdirSync" {
+                        self.needs_fs = true;
+                        *expr = runtime_method_call("fs_readdir_sync", std::mem::take(args));
+                        return;
+                    } else if property == "statSync" {
+                        self.needs_fs = true;
+                        *expr = runtime_method_call("fs_stat_sync", std::mem::take(args));
+                        return;
+                    } else if property == "unlinkSync" {
+                        self.needs_fs = true;
+                        *expr = runtime_method_call("fs_unlink_sync", std::mem::take(args));
+                        return;
+                    } else if property == "mkdirSync" {
+                        self.needs_fs = true;
+                        *expr = runtime_method_call("fs_mkdir_sync", std::mem::take(args));
+                        return;
+                    } else if property == "rmdirSync" {
+                        self.needs_fs = true;
+                        *expr = runtime_method_call("fs_rmdir_sync", std::mem::take(args));
+                        return;
+                    } else if property == "existsSync" {
+                        self.needs_fs = true;
+                        *expr = runtime_method_call("fs_exists_sync", std::mem::take(args));
+                        return;
                     }
+                }
                 if matches!(
                     property.as_str(),
                     "fs_read_file_sync"
@@ -812,11 +814,12 @@ impl Rewriter {
             }
             if let perry_hir::ir::Expr::ExternFuncRef { name, .. } = callee.as_ref()
                 && name == "js_native_module_named_esm_export_value"
-                    && let Some(perry_hir::ir::Expr::String(mod_name)) = args.first()
-                        && (mod_name == "fs" || mod_name == "node:fs") {
-                            *expr = perry_hir::ir::Expr::Undefined;
-                            return;
-                        }
+                && let Some(perry_hir::ir::Expr::String(mod_name)) = args.first()
+                && (mod_name == "fs" || mod_name == "node:fs")
+            {
+                *expr = perry_hir::ir::Expr::Undefined;
+                return;
+            }
             if let perry_hir::ir::Expr::Closure { body, .. } = callee.as_mut() {
                 let mut sources = Vec::new();
                 let mut is_spread_iife = !body.is_empty();
