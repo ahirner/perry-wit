@@ -4,6 +4,7 @@
 //! typed basic blocks, SSA values, and block parameters without linear memory
 //! overhead for primitive values.
 
+mod arrays;
 mod string_ops;
 mod types;
 
@@ -638,23 +639,7 @@ impl<'a> FunctionLowerer<'a> {
                         &[Type::I32],
                     ))
                 } else {
-                    let arr_ptr = self.expression(object)?;
-                    let elements_ptr = self.op(
-                        Operator::I32Load {
-                            memory: MemoryArg {
-                                align: 2,
-                                offset: 0,
-                                memory: self.registry.memory,
-                            },
-                        },
-                        &[arr_ptr],
-                        &[Type::I32],
-                    );
-                    let idx_val = self.expression(index)?;
-                    let idx_i32 = self.op(Operator::I32TruncF64U, &[idx_val], &[Type::I32]);
-                    let twelve = self.op(Operator::I32Const { value: 12 }, &[], &[Type::I32]);
-                    let offset = self.op(Operator::I32Mul, &[idx_i32, twelve], &[Type::I32]);
-                    Ok(self.op(Operator::I32Add, &[elements_ptr, offset], &[Type::I32]))
+                    self.array_index(object, index)
                 }
             }
             Expr::Compare { .. } => self.condition(expr),
@@ -1128,7 +1113,9 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
         Expr::Await(inner) => {
             scan_expr_requirements(inner, reqs);
         }
-        Expr::PropertyGet { object, property, .. } => {
+        Expr::PropertyGet {
+            object, property, ..
+        } => {
             if property == "length" {
                 reqs.needs_strings = true;
             }
@@ -1144,4 +1131,3 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
         _ => {}
     }
 }
-

@@ -872,11 +872,26 @@ async fn test_string_code_point_at() -> Result<()> {
         return s.codePointAt(pos);
     }"#;
     let cases = vec![
-        (vec![Val::String("A🦀B".into()), Val::Float64(0.0)], Val::Float64(65.0)),
-        (vec![Val::String("A🦀B".into()), Val::Float64(1.0)], Val::Float64(129408.0)), // 0x1F980
-        (vec![Val::String("A🦀B".into()), Val::Float64(2.0)], Val::Float64(66.0)),
-        (vec![Val::String("A🦀B".into()), Val::Float64(3.0)], Val::Float64(f64::NAN)),
-        (vec![Val::String("A🦀B".into()), Val::Float64(-1.0)], Val::Float64(f64::NAN)),
+        (
+            vec![Val::String("A🦀B".into()), Val::Float64(0.0)],
+            Val::Float64(65.0),
+        ),
+        (
+            vec![Val::String("A🦀B".into()), Val::Float64(1.0)],
+            Val::Float64(129408.0),
+        ), // 0x1F980
+        (
+            vec![Val::String("A🦀B".into()), Val::Float64(2.0)],
+            Val::Float64(66.0),
+        ),
+        (
+            vec![Val::String("A🦀B".into()), Val::Float64(3.0)],
+            Val::Float64(f64::NAN),
+        ),
+        (
+            vec![Val::String("A🦀B".into()), Val::Float64(-1.0)],
+            Val::Float64(f64::NAN),
+        ),
     ];
     // Custom runner to handle NaN comparison
     let compiled =
@@ -938,7 +953,10 @@ async fn test_string_case_conversion() -> Result<()> {
     run_cases(
         to_lower_src,
         &[
-            (vec![Val::String("Hello, WORLD!".into())], Val::String("hello, world!".into())),
+            (
+                vec![Val::String("Hello, WORLD!".into())],
+                Val::String("hello, world!".into()),
+            ),
             (vec![Val::String("CAFÉ".into())], Val::String("café".into())),
             (vec![Val::String("🦀".into())], Val::String("🦀".into())),
         ],
@@ -951,10 +969,16 @@ async fn test_string_case_conversion() -> Result<()> {
     run_cases(
         to_upper_src,
         &[
-            (vec![Val::String("hello, world!".into())], Val::String("HELLO, WORLD!".into())),
+            (
+                vec![Val::String("hello, world!".into())],
+                Val::String("HELLO, WORLD!".into()),
+            ),
             (vec![Val::String("café".into())], Val::String("CAFÉ".into())),
             // German sharp S expands to SS
-            (vec![Val::String("weiß".into())], Val::String("WEISS".into())),
+            (
+                vec![Val::String("weiß".into())],
+                Val::String("WEISS".into()),
+            ),
             (vec![Val::String("🦀".into())], Val::String("🦀".into())),
         ],
     )
@@ -973,15 +997,27 @@ async fn test_string_split_and_join() -> Result<()> {
         split_index_src,
         &[
             (
-                vec![Val::String("one,two,three".into()), Val::String(",".into()), Val::Float64(0.0)],
+                vec![
+                    Val::String("one,two,three".into()),
+                    Val::String(",".into()),
+                    Val::Float64(0.0),
+                ],
                 Val::String("one".into()),
             ),
             (
-                vec![Val::String("one,two,three".into()), Val::String(",".into()), Val::Float64(1.0)],
+                vec![
+                    Val::String("one,two,three".into()),
+                    Val::String(",".into()),
+                    Val::Float64(1.0),
+                ],
                 Val::String("two".into()),
             ),
             (
-                vec![Val::String("one,two,three".into()), Val::String(",".into()), Val::Float64(2.0)],
+                vec![
+                    Val::String("one,two,three".into()),
+                    Val::String(",".into()),
+                    Val::Float64(2.0),
+                ],
                 Val::String("three".into()),
             ),
         ],
@@ -1017,15 +1053,27 @@ async fn test_string_split_and_join() -> Result<()> {
         split_join_src,
         &[
             (
-                vec![Val::String("a,b,c".into()), Val::String(",".into()), Val::String("-".into())],
+                vec![
+                    Val::String("a,b,c".into()),
+                    Val::String(",".into()),
+                    Val::String("-".into()),
+                ],
                 Val::String("a-b-c".into()),
             ),
             (
-                vec![Val::String("hello".into()), Val::String("".into()), Val::String(".".into())],
+                vec![
+                    Val::String("hello".into()),
+                    Val::String("".into()),
+                    Val::String(".".into()),
+                ],
                 Val::String("h.e.l.l.o".into()),
             ),
             (
-                vec![Val::String("🦀🌲🦀".into()), Val::String("".into()), Val::String("~".into())],
+                vec![
+                    Val::String("🦀🌲🦀".into()),
+                    Val::String("".into()),
+                    Val::String("~".into()),
+                ],
                 Val::String("🦀~🌲~🦀".into()),
             ),
         ],
@@ -1037,7 +1085,10 @@ async fn test_string_split_and_join() -> Result<()> {
     }"#;
     run_cases(
         default_join_src,
-        &[(vec![Val::String("x,y,z".into())], Val::String("x,y,z".into()))],
+        &[(
+            vec![Val::String("x,y,z".into())],
+            Val::String("x,y,z".into()),
+        )],
     )
     .await?;
 
@@ -1050,8 +1101,11 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
     let source = r#"export function run(s: string): string {
         return s.toUpperCase().split(",").join(" - ");
     }"#;
-    let compiled =
-        compile_typescript_waffle(source, "boundary_audit.ts", &WaffleCompileOptions::default())?;
+    let compiled = compile_typescript_waffle(
+        source,
+        "boundary_audit.ts",
+        &WaffleCompileOptions::default(),
+    )?;
 
     // Inspect core wasm imports via wasmparser
     let mut import_count = 0;
@@ -1071,11 +1125,15 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
         }
     }
     // String-only task without host capabilities must have 0 external core imports
-    assert_eq!(import_count, 0, "Core module has unexpected external imports");
+    assert_eq!(
+        import_count, 0,
+        "Core module has unexpected external imports"
+    );
 
     // 2. Measure compiler memory stability over repeated compilations (proves absence of compiler memory leak)
-    let net_before_compiles =
-        ALLOCATED.load(Ordering::SeqCst).saturating_sub(DEALLOCATED.load(Ordering::SeqCst));
+    let net_before_compiles = ALLOCATED
+        .load(Ordering::SeqCst)
+        .saturating_sub(DEALLOCATED.load(Ordering::SeqCst));
     for _ in 0..200 {
         let _ = compile_typescript_waffle(
             source,
@@ -1083,8 +1141,9 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
             &WaffleCompileOptions::default(),
         )?;
     }
-    let net_after_compiles =
-        ALLOCATED.load(Ordering::SeqCst).saturating_sub(DEALLOCATED.load(Ordering::SeqCst));
+    let net_after_compiles = ALLOCATED
+        .load(Ordering::SeqCst)
+        .saturating_sub(DEALLOCATED.load(Ordering::SeqCst));
     let compiler_leak = net_after_compiles.saturating_sub(net_before_compiles);
     // If every compilation leaked copied function bodies, 200 compilations would leak hundreds of kilobytes.
     assert!(
@@ -1178,7 +1237,10 @@ fn test_unused_helpers_are_not_embedded_for_numeric_and_simple_tasks() -> Result
         }
     }
     assert_eq!(numeric_import_count, 0, "Numeric task must have 0 imports");
-    assert_eq!(numeric_data_count, 0, "Numeric task must have 0 data segments");
+    assert_eq!(
+        numeric_data_count, 0,
+        "Numeric task must have 0 data segments"
+    );
     assert_eq!(numeric_table_count, 0, "Numeric task must have 0 tables");
     assert!(
         numeric_func_count <= 2,
@@ -1209,7 +1271,10 @@ fn test_unused_helpers_are_not_embedded_for_numeric_and_simple_tasks() -> Result
             _ => {}
         }
     }
-    assert_eq!(simple_import_count, 0, "Simple string task must have 0 external imports");
+    assert_eq!(
+        simple_import_count, 0,
+        "Simple string task must have 0 external imports"
+    );
 
     // 3. Search-only string task: needs SEARCH helper, but NOT TEXT helper.
     let search_src = r#"
@@ -1279,4 +1344,46 @@ fn test_unused_helpers_are_not_embedded_for_numeric_and_simple_tasks() -> Result
     );
 
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_split_indices_preserve_undefined() -> Result<()> {
+    let source = r#"export async function run(s: string, sep: string, index: number): Promise<number> {
+        let parts = s.split(sep);
+        let value = await parts[index];
+        if (value === undefined) { return 1; }
+        if (value === "") { return 2; }
+        if (value === "🦀") { return 3; }
+        return 4;
+    }"#;
+    let cases = [
+        ("A,🦀,", ",", 0.0, 4.0),
+        ("A,🦀,", ",", 1.0, 3.0),
+        ("A,🦀,", ",", 2.0, 2.0),
+        ("A,B", ",", 2.0, 1.0),
+        ("A,B", ",", -0.0, 4.0),
+        ("A,B", ",", -1.0, 1.0),
+        ("A,B", ",", -0.5, 1.0),
+        ("A,B", ",", 0.5, 1.0),
+        ("A,B", ",", f64::NAN, 1.0),
+        ("A,B", ",", f64::INFINITY, 1.0),
+        ("A,B", ",", f64::NEG_INFINITY, 1.0),
+        ("A,B", ",", 1e20, 1.0),
+        ("A,B", ",", 65536.0, 1.0),
+        ("", "", 0.0, 1.0),
+        ("", ",", 0.0, 2.0),
+    ]
+    .into_iter()
+    .map(|(s, sep, i, n)| {
+        (
+            vec![
+                Val::String(s.into()),
+                Val::String(sep.into()),
+                Val::Float64(i),
+            ],
+            Val::Float64(n),
+        )
+    })
+    .collect::<Vec<_>>();
+    run_cases(source, &cases).await
 }

@@ -63,6 +63,28 @@ pub(super) enum CharacterAccess {
     Index,
 }
 
+/// Tests numeric property indices before narrowing or computing an element address.
+pub(crate) fn valid_index(
+    body: &mut FunctionBody,
+    block: Block,
+    index: Value,
+    length: Value,
+) -> Value {
+    let length = body.add_op(block, Operator::F64ConvertI32U, &[length], &[Type::F64]);
+    let zero = body.add_op(block, Operator::F64Const { value: 0 }, &[], &[Type::F64]);
+    let integer = body.add_op(block, Operator::F64Trunc, &[index], &[Type::F64]);
+    let integral = body.add_op(block, Operator::F64Eq, &[index, integer], &[Type::I32]);
+    let nonnegative = body.add_op(block, Operator::F64Ge, &[index, zero], &[Type::I32]);
+    let in_range = body.add_op(block, Operator::F64Lt, &[index, length], &[Type::I32]);
+    let valid = body.add_op(
+        block,
+        Operator::I32And,
+        &[integral, nonnegative],
+        &[Type::I32],
+    );
+    body.add_op(block, Operator::I32And, &[valid, in_range], &[Type::I32])
+}
+
 /// Bracket access uses integral property indices and a null descriptor for undefined.
 /// charAt truncates positions and returns an allocated empty string outside the bounds.
 pub(super) fn emit_character_access(
@@ -92,20 +114,12 @@ pub(super) fn emit_character_access(
         &[desc],
         &[Type::I32],
     );
-    let length = body.add_op(entry, Operator::F64ConvertI32U, &[length], &[Type::F64]);
     let zero = body.add_op(entry, Operator::F64Const { value: 0 }, &[], &[Type::F64]);
-    let nonnegative = body.add_op(entry, Operator::F64Ge, &[index, zero], &[Type::I32]);
-    let in_range = body.add_op(entry, Operator::F64Lt, &[index, length], &[Type::I32]);
-    let mut valid = body.add_op(
-        entry,
-        Operator::I32And,
-        &[nonnegative, in_range],
-        &[Type::I32],
-    );
-    if matches!(access, CharacterAccess::Index) {
-        let integral = body.add_op(entry, Operator::F64Eq, &[position, index], &[Type::I32]);
-        valid = body.add_op(entry, Operator::I32And, &[valid, integral], &[Type::I32]);
-    }
+    let checked_position = match access {
+        CharacterAccess::Index => position,
+        CharacterAccess::CharAt => index,
+    };
+    let valid = valid_index(&mut body, entry, checked_position, length);
     let found = body.add_block();
     let missing = body.add_block();
     body.set_terminator(
