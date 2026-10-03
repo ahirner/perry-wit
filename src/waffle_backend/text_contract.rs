@@ -15,8 +15,9 @@ mod source;
 pub(crate) use source::validate_ast_text;
 pub use source::validate_source_text;
 
+use super::visit;
 use anyhow::{Result, bail};
-use perry_hir::ir::{Expr, Function, Module as HirModule, Stmt};
+use perry_hir::ir::{Expr, Module as HirModule};
 
 /// The indexing and measurement unit of a text operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,10 +130,18 @@ impl TextContractMatrix {
             node_difference: "Both search position and returned offset count Unicode scalar values",
         },
         TextOperationEntry {
+            operation: "for_of",
+            unit: IndexUnit::ScalarValue,
+            status: OperationStatus::SupportedScalar,
+            coercion: "Iterated value must be a string; evaluated once before entering the loop",
+            boundary_behavior: "Yields complete scalars in order; combining marks remain separate; empty strings yield nothing",
+            node_difference: "Identical to Node string iteration for valid text; custom iterator protocols remain unsupported",
+        },
+        TextOperationEntry {
             operation: "split",
             unit: IndexUnit::ScalarValue,
             status: OperationStatus::SupportedScalar,
-            coercion: "Separator coerced to String",
+            coercion: "Separator must be a string",
             boundary_behavior: "Empty separator splits into individual Unicode scalar value strings",
             node_difference: "Empty separator splits by scalar values; Node splits into UTF-16 code units (isolating surrogates)",
         },
@@ -186,88 +195,22 @@ impl TextContractMatrix {
 /// Validates that Perry HIR contains no lone surrogate or WTF-8 representations,
 /// and diagnoses disallowed UTF-16 operations.
 pub fn validate_hir_text(hir: &HirModule) -> Result<()> {
-    for stmt in &hir.init {
-        validate_stmt(stmt)?;
-    }
-    for func in &hir.functions {
-        validate_function(func)?;
+    let mut result = Ok(());
+    let mut validate = |expr: &Expr| {
+        if result.is_ok() {
+            result = validate_expr(expr);
+        }
+    };
+    visit::visit_statements(&hir.init, &mut validate);
+    for function in &hir.functions {
+        visit::visit_function_expressions(function, &mut validate);
     }
     for global in &hir.globals {
         if let Some(init) = &global.init {
-            validate_expr(init)?;
+            visit::visit_expression(init, &mut validate);
         }
     }
-    Ok(())
-}
-
-fn validate_function(func: &Function) -> Result<()> {
-    for stmt in &func.body {
-        validate_stmt(stmt)?;
-    }
-    Ok(())
-}
-
-fn validate_stmt(stmt: &Stmt) -> Result<()> {
-    match stmt {
-        Stmt::Expr(e) => validate_expr(e),
-        Stmt::Let { init, .. } => {
-            if let Some(init_expr) = init {
-                validate_expr(init_expr)?;
-            }
-            Ok(())
-        }
-        Stmt::Return(e) => {
-            if let Some(expr) = e {
-                validate_expr(expr)?;
-            }
-            Ok(())
-        }
-        Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            validate_expr(condition)?;
-            for s in then_branch {
-                validate_stmt(s)?;
-            }
-            if let Some(else_stmts) = else_branch {
-                for s in else_stmts {
-                    validate_stmt(s)?;
-                }
-            }
-            Ok(())
-        }
-        Stmt::While { condition, body } => {
-            validate_expr(condition)?;
-            for s in body {
-                validate_stmt(s)?;
-            }
-            Ok(())
-        }
-        Stmt::Try {
-            body,
-            catch,
-            finally,
-        } => {
-            for s in body {
-                validate_stmt(s)?;
-            }
-            if let Some(c) = catch {
-                for s in &c.body {
-                    validate_stmt(s)?;
-                }
-            }
-            if let Some(f) = finally {
-                for s in f {
-                    validate_stmt(s)?;
-                }
-            }
-            Ok(())
-        }
-        Stmt::Throw(e) => validate_expr(e),
-        _ => Ok(()),
-    }
+    result
 }
 
 fn validate_expr(expr: &Expr) -> Result<()> {
@@ -282,7 +225,7 @@ fn validate_expr(expr: &Expr) -> Result<()> {
                 "String.fromCharCode is disallowed under the UTF-8 scalar contract; use String.fromCodePoint instead"
             );
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call { callee, .. } => {
             if let Expr::PropertyGet { property, .. } = callee.as_ref()
                 && property == "charCodeAt"
             {
@@ -290,52 +233,8 @@ fn validate_expr(expr: &Expr) -> Result<()> {
                     "String.prototype.charCodeAt is disallowed under the UTF-8 scalar contract; use codePointAt instead"
                 );
             }
-            validate_expr(callee)?;
-            for arg in args {
-                validate_expr(arg)?;
-            }
             Ok(())
         }
-        Expr::Binary { left, right, .. } => {
-            validate_expr(left)?;
-            validate_expr(right)
-        }
-        Expr::Unary { operand, .. } => validate_expr(operand),
-        Expr::Compare { left, right, .. } => {
-            validate_expr(left)?;
-            validate_expr(right)
-        }
-        Expr::LocalSet(_, value) => validate_expr(value),
-        Expr::GlobalSet(_, value) => validate_expr(value),
-        Expr::Await(inner) => validate_expr(inner),
-        Expr::PropertyGet { object, .. } => validate_expr(object),
-        Expr::PropertySet { object, value, .. } => {
-            validate_expr(object)?;
-            validate_expr(value)
-        }
-        Expr::IndexGet { object, index } => {
-            validate_expr(object)?;
-            validate_expr(index)
-        }
-        Expr::IndexSet {
-            object,
-            index,
-            value,
-        } => {
-            validate_expr(object)?;
-            validate_expr(index)?;
-            validate_expr(value)
-        }
-        Expr::StringCoerce(e) | Expr::TemplateStringCoerce(e) => validate_expr(e),
-        Expr::StringAt { string, index } | Expr::StringCodePointAt { string, index } => {
-            validate_expr(string)?;
-            validate_expr(index)
-        }
-        Expr::StringSplit(a, b) => {
-            validate_expr(a)?;
-            validate_expr(b)
-        }
-        Expr::StringFromCodePoint(e) => validate_expr(e),
         _ => Ok(()),
     }
 }

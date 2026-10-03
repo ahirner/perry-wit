@@ -178,6 +178,10 @@ core return values after consuming the result and before the next invocation.
 Traps and cancelled calls still require discarding the instance. Arena storage
 is bounded across repeated calls; reclaiming dead temporaries within a long
 invocation and values escaping into pending operations remains roadmap work.
+String `for…of` iteration evaluates its input once and yields complete Unicode
+scalars, including separate combining marks. It supports nested `for`/`while`
+loops, numeric updates, `break`/`continue`, and `finally` cleanup across P3 waits.
+Custom iterator protocols and labeled loop exits remain unsupported.
 Stored Promises from named async functions and the supported async imports retain
 number, boolean, string, or void outcomes and numeric rejections. Starting a task
 runs it up to suspension; aliases preserve identity and repeated awaits reuse its

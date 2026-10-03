@@ -4,6 +4,7 @@ use anyhow::Result;
 use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
@@ -100,6 +101,181 @@ async fn run_cases(source: &str, cases: &[(Vec<Val>, Val)]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_scalar_iteration_preserves_complete_characters() -> Result<()> {
+    run_cases(
+        r#"export function run(input: string): string {
+            let result = "";
+            for (const scalar of input) { result = result + "[" + scalar + "]"; }
+            return result;
+        }"#,
+        &[
+            (vec![Val::String("".into())], Val::String("".into())),
+            (
+                vec![Val::String("Aé😀e\u{301}\0".into())],
+                Val::String("[A][é][😀][e][\u{301}][\0]".into()),
+            ),
+        ],
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_scalar_iteration_and_loop_cleanup_match_node() -> Result<()> {
+    let source = r#"export function run(mode: number): string {
+        let result = "";
+        if (mode === 0) {
+            let input = "A😀é";
+            for (const scalar of input) {
+                input = "changed";
+                result = result + scalar.toUpperCase();
+            }
+        } else if (mode === 1) {
+            for (const scalar of "a😀bé") {
+                try {
+                    if (scalar === "a") continue;
+                    if (scalar === "b") break;
+                    result = result + scalar;
+                } finally { result = result + "!"; }
+            }
+        } else if (mode === 2) {
+            try {
+                for (const outer of "ab") {
+                    for (const inner of "😀xy") {
+                        try {
+                            if (inner === "x") break;
+                            result = result + outer + inner;
+                        } finally { result = result + "i"; }
+                    }
+                    result = result + "o";
+                }
+            } finally { result = result + "f"; }
+        } else if (mode === 3) {
+            try {
+                for (const scalar of "ab") {
+                    try { throw 7; }
+                    finally { result = result + scalar; }
+                }
+            } catch (e) { result = result + "c"; }
+            finally { result = result + "f"; }
+        } else if (mode === 4) {
+            for (const scalar of "abc") {
+                try { break; }
+                finally {
+                    result = result + scalar;
+                    if (scalar === "b") break;
+                    continue;
+                }
+            }
+        } else if (mode === 5) {
+            for (const scalar of "😀") {
+                try { return "wrong"; }
+                finally { result = scalar; break; }
+            }
+        } else if (mode === 6) {
+            for (let i = 0; i < 3; i = i + 1) { result = result + "x"; }
+        } else if (mode === 7) {
+            let i = 0;
+            while (i < 5) {
+                ++i;
+                try {
+                    if (i === 1) continue;
+                    if (i === 3) break;
+                    result = result + "x";
+                } finally { result = result + "f"; }
+            }
+        } else if (mode === 8) {
+            for (;;) { result = "once"; break; }
+        } else if (mode === 9) {
+            try { return "preserved"; }
+            finally { for (const scalar of "ab") { break; } }
+        } else if (mode === 10) {
+            for (const scalar of "ab") {
+                try {
+                    try { continue; }
+                    finally { result = result + scalar; }
+                } finally { result = result + "f"; }
+            }
+        } else {
+            let i = 3;
+            for (; i-- > 0;) {
+                if (i === 1) continue;
+                result = result + "x";
+            }
+            if (i !== -1) return "wrong update ordering";
+        }
+        return result;
+    }"#;
+    let expected = [
+        "A😀É",
+        "!😀!!",
+        "a😀iiob😀iiof",
+        "acf",
+        "ab",
+        "😀",
+        "xxx",
+        "fxff",
+        "once",
+        "preserved",
+        "afbf",
+        "xx",
+    ];
+    let cases = expected
+        .iter()
+        .enumerate()
+        .map(|(mode, result)| {
+            (
+                vec![Val::Float64(mode as f64)],
+                Val::String((*result).into()),
+            )
+        })
+        .collect::<Vec<_>>();
+    run_cases(source, &cases).await?;
+    let scratch = tempfile::tempdir()?;
+    let fixture = scratch.path().join("iteration.mts");
+    std::fs::write(
+        &fixture,
+        format!(
+            "{source}\nconsole.log(JSON.stringify(Array.from({{length: {}}}, (_, i) => run(i))));",
+            expected.len()
+        ),
+    )?;
+    let node = Command::new("node").arg(fixture).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&node.stdout)?,
+        expected
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_scalar_iteration_retains_state_across_p3_waits() -> Result<()> {
+    run_cases(
+        r#"import { waitFor } from "perry:clocks";
+        export async function run(input: string): Promise<string> {
+            let result = "";
+            for (const scalar of input) {
+                try {
+                    await waitFor(1);
+                    if (scalar === "x") continue;
+                    result = result + scalar.toUpperCase();
+                } finally { result = result + "."; }
+            }
+            return result;
+        }"#,
+        &[(
+            vec![Val::String("ßx😀".into())],
+            Val::String("SS..😀.".into()),
+        )],
+    )
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]

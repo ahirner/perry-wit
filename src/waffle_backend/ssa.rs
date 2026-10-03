@@ -5,6 +5,7 @@
 //! overhead for primitive values.
 
 mod arrays;
+mod loops;
 mod optional;
 mod requirements;
 mod string_ops;
@@ -13,7 +14,9 @@ mod types;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
-use perry_hir::ir::{BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt};
+use perry_hir::ir::{
+    BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt, UpdateOp,
+};
 use perry_hir::types::{LocalId, Type as HirType};
 use waffle::{
     Block, BlockTarget, Export, ExportKind, FunctionBody, MemoryArg, Module, Operator, Terminator,
@@ -22,7 +25,9 @@ use waffle::{
 
 use crate::waffle_backend::abi::{self, CompletionStatus};
 use crate::waffle_backend::control_flow::{JoinPoint, create_block_parameters};
-use crate::waffle_backend::exceptions::{self, TryClauseBlocks, TryScope, UnwindContext};
+use crate::waffle_backend::exceptions::{
+    self, ExitReason, TryClauseBlocks, TryScope, UnwindContext,
+};
 use crate::waffle_backend::registry::{FunctionInfo, ModuleRegistry};
 use crate::waffle_backend::resolve::ResolvedContract;
 use crate::waffle_backend::strings::StringPool;
@@ -133,6 +138,7 @@ struct FunctionLowerer<'a> {
     stream_parameter: Option<LocalId>,
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
+    loops: Vec<loops::LoopScope>,
 }
 
 fn lower_function_body(
@@ -173,6 +179,7 @@ fn lower_function_body(
         stream_parameter,
         awaited_calls: 0,
         unwind_ctx: UnwindContext::new(),
+        loops: Vec::new(),
     };
 
     // If stream parameter is present and an initialize helper exists, call it at entry
@@ -224,20 +231,8 @@ impl<'a> FunctionLowerer<'a> {
                         id
                     );
                 }
-                Stmt::Expr(Expr::LocalSet(id, expr)) => {
-                    let inferred = self.infer_expr_type(expr);
-                    if let Some(previous) = self.local_types.get(id)
-                        && (matches!(previous, HirType::Promise(_))
-                            || matches!(inferred, HirType::Promise(_)))
-                    {
-                        ensure!(
-                            previous == &inferred,
-                            "A stored Promise binding cannot change its logical type"
-                        );
-                    }
-                    self.local_types.insert(*id, inferred);
-                    let val = self.expression(expr)?;
-                    self.locals.insert(*id, val);
+                Stmt::Expr(expr @ Expr::LocalSet(..)) => {
+                    self.expression(expr)?;
                 }
                 Stmt::Expr(Expr::Await(expr)) => {
                     self.await_expression(expr, true)?;
@@ -305,8 +300,21 @@ impl<'a> FunctionLowerer<'a> {
                     )?;
                 }
                 Stmt::While { condition, body } => {
-                    self.while_loop(condition, body)?;
+                    self.loop_statement(Some(condition), body, None)?;
                 }
+                Stmt::For {
+                    init,
+                    condition,
+                    update,
+                    body,
+                } => {
+                    if let Some(init) = init {
+                        self.statements(std::slice::from_ref(init))?;
+                    }
+                    self.loop_statement(condition.as_ref(), body, update.as_ref())?;
+                }
+                Stmt::Break => self.loop_exit(ExitReason::Break)?,
+                Stmt::Continue => self.loop_exit(ExitReason::Continue)?,
                 _ => bail!("Unsupported statement in WAFFLE lowering: {stmt:?}"),
             }
         }
@@ -362,43 +370,6 @@ impl<'a> FunctionLowerer<'a> {
         }
         self.block = join.block;
         self.locals = join.bindings;
-        Ok(())
-    }
-
-    fn while_loop(&mut self, condition: &Expr, body: &[Stmt]) -> Result<()> {
-        let header = JoinPoint::new(&mut self.body, "loop header", &self.locals);
-        header.emit_branch(&mut self.body, self.block, &self.locals);
-
-        self.block = header.block;
-        self.locals = header.bindings.clone();
-
-        let cond_val = self.condition(condition)?;
-        let body_block = self.body.add_block();
-        let exit = JoinPoint::new(&mut self.body, "loop exit", &self.locals);
-
-        self.body.set_terminator(
-            self.block,
-            Terminator::CondBr {
-                cond: cond_val,
-                if_true: BlockTarget {
-                    block: body_block,
-                    args: vec![],
-                },
-                if_false: BlockTarget {
-                    block: exit.block,
-                    args: exit.branch_args(&self.locals),
-                },
-            },
-        );
-
-        self.block = body_block;
-        self.statements(body)?;
-        if self.body.blocks[self.block].terminator == Terminator::None {
-            header.emit_branch(&mut self.body, self.block, &self.locals);
-        }
-
-        self.block = exit.block;
-        self.locals = exit.bindings;
         Ok(())
     }
 
@@ -748,6 +719,47 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
             }
             Expr::Undefined => Ok(self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])),
+            Expr::ForOfToArray(input) => self.string_receiver(input),
+            Expr::Update { id, op, prefix } => {
+                let previous = *self
+                    .locals
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("Uninitialized update binding {id}"))?;
+                ensure!(
+                    self.body.values[previous].ty(&self.body.type_pool) == Some(Type::F64),
+                    "Update operands must be numeric"
+                );
+                let one = self.op(
+                    Operator::F64Const {
+                        value: 1f64.to_bits(),
+                    },
+                    &[],
+                    &[Type::F64],
+                );
+                let operator = match op {
+                    UpdateOp::Increment => Operator::F64Add,
+                    UpdateOp::Decrement => Operator::F64Sub,
+                };
+                let updated = self.op(operator, &[previous, one], &[Type::F64]);
+                self.locals.insert(*id, updated);
+                Ok(if *prefix { updated } else { previous })
+            }
+            Expr::LocalSet(id, expr) => {
+                let inferred = self.infer_expr_type(expr);
+                if let Some(previous) = self.local_types.get(id)
+                    && (matches!(previous, HirType::Promise(_))
+                        || matches!(inferred, HirType::Promise(_)))
+                {
+                    ensure!(
+                        previous == &inferred,
+                        "A stored Promise binding cannot change its logical type"
+                    );
+                }
+                let value = self.expression(expr)?;
+                self.local_types.insert(*id, inferred);
+                self.locals.insert(*id, value);
+                Ok(value)
+            }
             Expr::LocalGet(id) => self
                 .locals
                 .get(id)
@@ -782,8 +794,12 @@ impl<'a> FunctionLowerer<'a> {
                     !matches!(self.infer_expr_type(object), HirType::Promise(_)),
                     "Promise properties are unsupported; await the retained outcome"
                 );
-                if self.is_string(object) {
-                    let desc = self.string_receiver(object)?;
+                if self.is_string(object) || self.is_scalar_iteration(object) {
+                    let desc = if self.is_scalar_iteration(object) {
+                        self.expression(object)?
+                    } else {
+                        self.string_receiver(object)?
+                    };
                     let scalar_len = self.string_length(desc);
                     Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
                 } else {
@@ -807,8 +823,13 @@ impl<'a> FunctionLowerer<'a> {
                     !matches!(self.infer_expr_type(object), HirType::Promise(_)),
                     "Promise indexing is unsupported; await the retained outcome"
                 );
-                if self.is_string(object) {
-                    let desc = self.string_receiver(object)?;
+                if self.is_string(object) || self.is_scalar_iteration(object) {
+                    let iteration = self.is_scalar_iteration(object);
+                    let desc = if iteration {
+                        self.expression(object)?
+                    } else {
+                        self.string_receiver(object)?
+                    };
                     let idx = self.position_argument(Some(index), f64::NAN)?;
                     let helpers = self
                         .registry
@@ -817,7 +838,11 @@ impl<'a> FunctionLowerer<'a> {
                         .expect("string helpers available");
                     Ok(self.op(
                         Operator::Call {
-                            function_index: helpers.str_index,
+                            function_index: if iteration {
+                                helpers.str_char_at
+                            } else {
+                                helpers.str_index
+                            },
                         },
                         &[desc, idx],
                         &[Type::I32],
@@ -922,24 +947,24 @@ impl<'a> FunctionLowerer<'a> {
 
     fn emit_return(&mut self, ret_val: Option<Value>) {
         let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
-        if exceptions::route_return(
+        if exceptions::route_cleanup(
             &mut self.body,
             self.block,
-            &self.unwind_ctx,
+            self.unwind_ctx.target_for_exit(0),
             &self.locals,
-            payload,
+            (ExitReason::Return, payload),
         ) {
             self.emit_terminal_return(ret_val);
         }
     }
 
     fn emit_finally_return(&mut self, payload: Value) {
-        if exceptions::route_return(
+        if exceptions::route_cleanup(
             &mut self.body,
             self.block,
-            &self.unwind_ctx,
+            self.unwind_ctx.target_for_exit(0),
             &self.locals,
-            payload,
+            (ExitReason::Return, payload),
         ) {
             self.emit_terminal_return(Some(payload));
         }
@@ -1011,7 +1036,7 @@ impl<'a> FunctionLowerer<'a> {
             self.statements(f_stmts)?;
 
             if self.body.blocks[self.block].terminator == Terminator::None {
-                let (on_return, on_throw) = exceptions::emit_finally_dispatcher(
+                let exits = exceptions::emit_finally_dispatcher(
                     &mut self.body,
                     self.block,
                     environment.exit_reason,
@@ -1020,14 +1045,17 @@ impl<'a> FunctionLowerer<'a> {
                     &self.locals,
                 );
                 join_reached = true;
-
-                // on_return:
-                self.block = on_return;
-                self.emit_finally_return(environment.payload);
-
-                // on_throw:
-                self.block = on_throw;
-                self.emit_throw(environment.payload);
+                for (reason, block) in exits {
+                    self.block = block;
+                    match reason {
+                        ExitReason::Return => self.emit_finally_return(environment.payload),
+                        ExitReason::Throw => self.emit_throw(environment.payload),
+                        ExitReason::Break | ExitReason::Continue if !self.loops.is_empty() => {
+                            self.loop_exit(reason)?
+                        }
+                        _ => self.body.set_terminator(block, Terminator::Unreachable),
+                    }
+                }
             }
         }
 
@@ -1059,98 +1087,13 @@ impl<'a> FunctionLowerer<'a> {
 fn collect_strings_in_module(hir: &HirModule, pool: &mut StringPool) {
     pool.intern("");
     pool.intern(",");
-    for func in &hir.functions {
-        for stmt in &func.body {
-            collect_strings_stmt(stmt, pool);
+    let mut intern = |expr: &Expr| {
+        if let Expr::String(text) = expr {
+            pool.intern(text);
         }
+    };
+    for function in &hir.functions {
+        super::visit::visit_function_expressions(function, &mut intern);
     }
-    for stmt in &hir.init {
-        collect_strings_stmt(stmt, pool);
-    }
-}
-
-fn collect_strings_stmt(stmt: &Stmt, pool: &mut StringPool) {
-    match stmt {
-        Stmt::Expr(expr) | Stmt::Throw(expr) => collect_strings_expr(expr, pool),
-        Stmt::Return(Some(expr)) => collect_strings_expr(expr, pool),
-        Stmt::Let {
-            init: Some(expr), ..
-        } => collect_strings_expr(expr, pool),
-        Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            collect_strings_expr(condition, pool);
-            for s in then_branch {
-                collect_strings_stmt(s, pool);
-            }
-            if let Some(eb) = else_branch {
-                for s in eb {
-                    collect_strings_stmt(s, pool);
-                }
-            }
-        }
-        Stmt::While { condition, body } => {
-            collect_strings_expr(condition, pool);
-            for s in body {
-                collect_strings_stmt(s, pool);
-            }
-        }
-        Stmt::Try {
-            body,
-            catch,
-            finally,
-        } => {
-            for s in body {
-                collect_strings_stmt(s, pool);
-            }
-            if let Some(c) = catch {
-                for s in &c.body {
-                    collect_strings_stmt(s, pool);
-                }
-            }
-            if let Some(f) = finally {
-                for s in f {
-                    collect_strings_stmt(s, pool);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_strings_expr(expr: &Expr, pool: &mut StringPool) {
-    match expr {
-        Expr::String(s) => {
-            pool.intern(s);
-        }
-        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } => {
-            collect_strings_expr(left, pool);
-            collect_strings_expr(right, pool);
-        }
-        Expr::Unary { operand, .. } => {
-            collect_strings_expr(operand, pool);
-        }
-        Expr::Await(expr) | Expr::TemplateStringCoerce(expr) | Expr::StringFromCodePoint(expr) => {
-            collect_strings_expr(expr, pool);
-        }
-        Expr::Call { callee, args, .. } => {
-            collect_strings_expr(callee, pool);
-            for arg in args {
-                collect_strings_expr(arg, pool);
-            }
-        }
-        Expr::PropertyGet { object, .. } => {
-            collect_strings_expr(object, pool);
-        }
-        Expr::IndexGet { object, index, .. } => {
-            collect_strings_expr(object, pool);
-            collect_strings_expr(index, pool);
-        }
-        Expr::LocalSet(_, expr) => {
-            collect_strings_expr(expr, pool);
-        }
-        _ => {}
-    }
+    super::visit::visit_statements(&hir.init, &mut intern);
 }

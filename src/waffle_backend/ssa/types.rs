@@ -6,6 +6,10 @@ use perry_hir::{
     types::Type as HirType,
 };
 
+/// Perry's private for-of holder keeps a string snapshot with scalar indexing.
+/// It cannot be named by a TypeScript type annotation or cross a call boundary.
+const SCALAR_ITERATION: &str = "perry:scalar-iteration";
+
 /// Descriptor zero represents undefined only within the string-or-undefined union.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum StringKind {
@@ -34,6 +38,8 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::LocalSet(_, value) => self.infer_expr_type(value),
+            Expr::ForOfToArray(_) => HirType::Named(SCALAR_ITERATION.into()),
             Expr::String(_)
             | Expr::TemplateStringCoerce(_)
             | Expr::StringCoerce(_)
@@ -42,9 +48,10 @@ impl FunctionLowerer<'_> {
                 HirType::Promise(result) => *result,
                 result => result,
             },
-            Expr::Number(_) | Expr::Integer(_) => HirType::Number,
+            Expr::Number(_) | Expr::Integer(_) | Expr::Update { .. } => HirType::Number,
             Expr::Bool(_) | Expr::Compare { .. } => HirType::Boolean,
             Expr::LocalGet(id) => self.local_types.get(id).cloned().unwrap_or(HirType::Any),
+            Expr::IndexGet { object, .. } if self.is_scalar_iteration(object) => HirType::String,
             Expr::IndexGet { .. } => HirType::Union(vec![HirType::String, HirType::Void]),
             Expr::Undefined => HirType::Void,
             Expr::Call { callee, .. } => {
@@ -90,6 +97,10 @@ impl FunctionLowerer<'_> {
             }
             _ => HirType::Any,
         }
+    }
+
+    pub(super) fn is_scalar_iteration(&self, expr: &Expr) -> bool {
+        self.infer_expr_type(expr) == HirType::Named(SCALAR_ITERATION.into())
     }
 
     pub(super) fn is_string(&self, expr: &Expr) -> bool {

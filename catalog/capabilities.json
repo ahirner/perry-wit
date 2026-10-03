@@ -21,6 +21,27 @@
   ],
   "capabilities": [
     {
+      "id": "compiler.p3_text",
+      "name": "Scalar UTF-8 Text",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: UTF-8 text operations and component string boundaries",
+      "invariants": [
+        "Length, indexing, slicing, search positions, and string iteration count Unicode scalars",
+        "String for-of evaluates its input once and retains that snapshot across mutation and P3 waits",
+        "Nested loops preserve update effects and route break/continue through crossed finally clauses",
+        "Unicode case conversions, code-point construction, split, and join preserve valid UTF-8",
+        "Canonical boundaries retain byte lengths; completed serial calls reclaim their invocation storage"
+      ],
+      "differences": [
+        "The default CLI remains on the legacy pipeline until R9",
+        "Unpaired surrogate escapes and UTF-16 code-unit APIs are diagnosed",
+        "Custom iterator protocols, labeled loop exits, JSON, and regex operations remain unsupported on this path",
+        "Implicit string coercions are restricted; dead temporaries within long invocations are not yet reclaimed"
+      ],
+      "conformance": ["tests/waffle_string_test.rs", "tests/text_contract_test.rs", "tests/utf8_probe_test.rs"]
+    },
+    {
       "id": "compiler.p3_promises",
       "name": "Stored P3 Promise Outcomes",
       "tier": "tier-1-web-primaries",

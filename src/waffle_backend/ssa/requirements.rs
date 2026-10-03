@@ -1,8 +1,8 @@
 //! String runtime dependencies from function signatures and expressions.
 
-use crate::waffle_backend::strings::RequiredStringHelpers;
+use crate::waffle_backend::{strings::RequiredStringHelpers, visit};
 use perry_hir::{
-    ir::{Expr, Module as HirModule, Stmt},
+    ir::{Expr, Module as HirModule},
     types::Type as HirType,
 };
 
@@ -18,83 +18,29 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
         if type_has_string(&func.return_type) {
             reqs.needs_strings = true;
         }
-        for stmt in &func.body {
-            scan_stmt_requirements(stmt, &mut reqs);
-        }
+        visit::visit_function_expressions(func, &mut |expr| {
+            scan_expr_requirements(expr, &mut reqs)
+        });
     }
-    for stmt in &hir.init {
-        scan_stmt_requirements(stmt, &mut reqs);
-    }
-
+    visit::visit_statements(&hir.init, &mut |expr| {
+        scan_expr_requirements(expr, &mut reqs)
+    });
     reqs
-}
-
-fn scan_stmt_requirements(stmt: &Stmt, reqs: &mut RequiredStringHelpers) {
-    match stmt {
-        Stmt::Expr(expr) | Stmt::Throw(expr) => scan_expr_requirements(expr, reqs),
-        Stmt::Return(Some(expr)) => scan_expr_requirements(expr, reqs),
-        Stmt::Let {
-            init: Some(expr), ..
-        } => scan_expr_requirements(expr, reqs),
-        Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            scan_expr_requirements(condition, reqs);
-            for s in then_branch {
-                scan_stmt_requirements(s, reqs);
-            }
-            if let Some(eb) = else_branch {
-                for s in eb {
-                    scan_stmt_requirements(s, reqs);
-                }
-            }
-        }
-        Stmt::While { condition, body } => {
-            scan_expr_requirements(condition, reqs);
-            for s in body {
-                scan_stmt_requirements(s, reqs);
-            }
-        }
-        Stmt::Try {
-            body,
-            catch,
-            finally,
-        } => {
-            for s in body {
-                scan_stmt_requirements(s, reqs);
-            }
-            if let Some(c) = catch {
-                for s in &c.body {
-                    scan_stmt_requirements(s, reqs);
-                }
-            }
-            if let Some(f) = finally {
-                for s in f {
-                    scan_stmt_requirements(s, reqs);
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
     match expr {
-        Expr::String(_) => {
+        Expr::String(_) | Expr::ForOfToArray(_) => {
             reqs.needs_strings = true;
         }
-        Expr::StringFromCodePoint(arg) => {
+        Expr::StringFromCodePoint(_) => {
             reqs.needs_strings = true;
             reqs.from_code_point = true;
-            scan_expr_requirements(arg, reqs);
         }
-        Expr::TemplateStringCoerce(arg) => {
+        Expr::TemplateStringCoerce(_) => {
             reqs.needs_strings = true;
-            scan_expr_requirements(arg, reqs);
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call { callee, .. } => {
             if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                 match property.as_str() {
                     "indexOf" => {
@@ -123,36 +69,8 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
                     _ => {}
                 }
             }
-            scan_expr_requirements(callee, reqs);
-            for arg in args {
-                scan_expr_requirements(arg, reqs);
-            }
         }
-        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } => {
-            scan_expr_requirements(left, reqs);
-            scan_expr_requirements(right, reqs);
-        }
-        Expr::Unary { operand, .. } => {
-            scan_expr_requirements(operand, reqs);
-        }
-        Expr::Await(inner) => {
-            scan_expr_requirements(inner, reqs);
-        }
-        Expr::PropertyGet {
-            object, property, ..
-        } => {
-            if property == "length" {
-                reqs.needs_strings = true;
-            }
-            scan_expr_requirements(object, reqs);
-        }
-        Expr::IndexGet { object, index, .. } => {
-            scan_expr_requirements(object, reqs);
-            scan_expr_requirements(index, reqs);
-        }
-        Expr::LocalSet(_, inner) => {
-            scan_expr_requirements(inner, reqs);
-        }
+        Expr::PropertyGet { property, .. } if property == "length" => reqs.needs_strings = true,
         _ => {}
     }
 }

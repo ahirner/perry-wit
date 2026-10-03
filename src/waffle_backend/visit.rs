@@ -12,7 +12,7 @@ pub(crate) fn visit_function_expressions(function: &Function, visitor: &mut impl
     visit_statements(&function.body, visitor);
 }
 
-fn visit_statements(statements: &[Stmt], visitor: &mut dyn FnMut(&Expr)) {
+pub(crate) fn visit_statements(statements: &[Stmt], visitor: &mut dyn FnMut(&Expr)) {
     for statement in statements {
         match statement {
             Stmt::Expr(expression) | Stmt::Throw(expression) => {
@@ -89,7 +89,7 @@ fn visit_statements(statements: &[Stmt], visitor: &mut dyn FnMut(&Expr)) {
     }
 }
 
-fn visit_expression(expression: &Expr, visitor: &mut dyn FnMut(&Expr)) {
+pub(crate) fn visit_expression(expression: &Expr, visitor: &mut dyn FnMut(&Expr)) {
     visitor(expression);
     walk_expr_children(expression, &mut |child| visit_expression(child, visitor));
     if let Expr::Closure { body, .. } = expression {

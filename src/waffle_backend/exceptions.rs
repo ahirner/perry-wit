@@ -17,6 +17,8 @@ pub(crate) enum ExitReason {
     Return = 1,
     /// Explicit `throw` statement or propagated callee exception out of the protected block.
     Throw = 2,
+    Break = 3,
+    Continue = 4,
 }
 
 impl ExitReason {
@@ -43,16 +45,16 @@ pub(crate) enum UnwindTarget<'a> {
     FunctionExit,
 }
 
-/// Destination for an explicit `return`.
+/// Next cleanup crossed by a return, break, or continue.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ReturnTarget<'a> {
+pub(crate) enum CleanupTarget<'a> {
     /// Finally block that must run before the return completes.
     Finally {
         block: Block,
         scope_locals: &'a [LocalId],
     },
-    /// No finally blocks remain; return directly out of the function.
-    FunctionExit,
+    /// No crossed finally blocks remain; complete the original exit.
+    Complete,
 }
 
 /// An active `try` scope in the function lowerer.
@@ -117,17 +119,21 @@ impl UnwindContext {
         UnwindTarget::FunctionExit
     }
 
-    /// Finds the immediate destination for an explicit `return`, borrowing scope locals.
-    pub(crate) fn target_for_return(&self) -> ReturnTarget<'_> {
-        for scope in self.scopes.iter().rev() {
+    pub(crate) fn depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Finds the next cleanup crossed by an exit. Loops exclude surrounding try scopes.
+    pub(crate) fn target_for_exit(&self, enclosing_depth: usize) -> CleanupTarget<'_> {
+        for scope in self.scopes[enclosing_depth..].iter().rev() {
             if let Some(finally_block) = scope.finally_target {
-                return ReturnTarget::Finally {
+                return CleanupTarget::Finally {
                     block: finally_block,
                     scope_locals: &scope.scope_locals,
                 };
             }
         }
-        ReturnTarget::FunctionExit
+        CleanupTarget::Complete
     }
 }
 
@@ -299,12 +305,7 @@ pub(crate) struct FinallyEnvironment {
     pub(crate) payload: Value,
 }
 
-/// Dispatches the exit reason from a finally block:
-/// - ExitReason::Normal (0) -> branches to join_block with current scope locals
-/// - ExitReason::Return (1) -> branches to `on_return` block
-/// - ExitReason::Throw (2)  -> branches to `on_throw` block
-///
-/// Returns `(on_return_block, on_throw_block)`.
+/// Dispatches normal completion and each abrupt exit after a finally clause.
 pub(crate) fn emit_finally_dispatcher(
     body: &mut FunctionBody,
     finally_exit_block: Block,
@@ -312,108 +313,65 @@ pub(crate) fn emit_finally_dispatcher(
     join_block: Block,
     scope_locals: &[LocalId],
     current_locals: &BTreeMap<LocalId, Value>,
-) -> (Block, Block) {
-    let on_normal = body.add_block();
-    body.blocks[on_normal].desc = "finally dispatch normal".into();
-    let on_not_normal = body.add_block();
-    body.blocks[on_not_normal].desc = "finally dispatch non-normal".into();
-
-    let is_normal = body.add_op(
-        finally_exit_block,
-        Operator::I32Eqz,
-        &[exit_reason],
-        &[Type::I32],
-    );
+) -> [(ExitReason, Block); 4] {
+    let exits = [
+        ExitReason::Return,
+        ExitReason::Throw,
+        ExitReason::Break,
+        ExitReason::Continue,
+    ]
+    .map(|reason| {
+        let block = body.add_block();
+        body.blocks[block].desc = format!("finally dispatch {reason:?}");
+        (reason, block)
+    });
+    let invalid = body.add_block();
+    body.set_terminator(invalid, Terminator::Unreachable);
+    let mut targets = vec![BlockTarget {
+        block: join_block,
+        args: scope_locals.iter().map(|id| current_locals[id]).collect(),
+    }];
+    targets.extend(exits.iter().map(|(_, block)| BlockTarget {
+        block: *block,
+        args: vec![],
+    }));
     body.set_terminator(
         finally_exit_block,
-        Terminator::CondBr {
-            cond: is_normal,
-            if_true: BlockTarget {
-                block: on_normal,
-                args: vec![],
-            },
-            if_false: BlockTarget {
-                block: on_not_normal,
+        Terminator::Select {
+            value: exit_reason,
+            targets,
+            default: BlockTarget {
+                block: invalid,
                 args: vec![],
             },
         },
     );
-
-    // on_normal branches to join_block
-    let join_args = scope_locals.iter().map(|id| current_locals[id]).collect();
-    body.set_terminator(
-        on_normal,
-        Terminator::Br {
-            target: BlockTarget {
-                block: join_block,
-                args: join_args,
-            },
-        },
-    );
-
-    // on_not_normal: check return vs throw
-    let on_return = body.add_block();
-    body.blocks[on_return].desc = "finally dispatch return".into();
-    let on_throw = body.add_block();
-    body.blocks[on_throw].desc = "finally dispatch throw".into();
-
-    let one = body.add_op(
-        on_not_normal,
-        Operator::I32Const { value: 1 },
-        &[],
-        &[Type::I32],
-    );
-    let is_return = body.add_op(
-        on_not_normal,
-        Operator::I32Eq,
-        &[exit_reason, one],
-        &[Type::I32],
-    );
-    body.set_terminator(
-        on_not_normal,
-        Terminator::CondBr {
-            cond: is_return,
-            if_true: BlockTarget {
-                block: on_return,
-                args: vec![],
-            },
-            if_false: BlockTarget {
-                block: on_throw,
-                args: vec![],
-            },
-        },
-    );
-
-    (on_return, on_throw)
+    exits
 }
 
-/// Routes an explicit return or return exit from finally:
-/// - If enclosed by a finally block, branches to finally with `(ExitReason::Return, payload, ...locals)` and returns `false`.
-/// - If at function exit, returns `true` indicating the caller should emit the terminal function return.
-pub(crate) fn route_return(
+/// Runs the next crossed finally clause, or returns true when the exit may complete.
+pub(crate) fn route_cleanup(
     body: &mut FunctionBody,
     block: Block,
-    unwind_ctx: &UnwindContext,
+    target: CleanupTarget<'_>,
     current_locals: &BTreeMap<LocalId, Value>,
-    payload: Value,
+    (reason, payload): (ExitReason, Value),
 ) -> bool {
-    match unwind_ctx.target_for_return() {
-        ReturnTarget::Finally {
+    match target {
+        CleanupTarget::Finally {
             block: finally_block,
             scope_locals,
         } => {
             let reason_val = body.add_op(
                 block,
                 Operator::I32Const {
-                    value: ExitReason::Return.tag(),
+                    value: reason.tag(),
                 },
                 &[],
                 &[Type::I32],
             );
             let mut args = vec![reason_val, payload];
-            for id in scope_locals {
-                args.push(current_locals[id]);
-            }
+            args.extend(scope_locals.iter().map(|id| current_locals[id]));
             body.set_terminator(
                 block,
                 Terminator::Br {
@@ -425,7 +383,7 @@ pub(crate) fn route_return(
             );
             false
         }
-        ReturnTarget::FunctionExit => true,
+        CleanupTarget::Complete => true,
     }
 }
 
