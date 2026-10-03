@@ -37,6 +37,12 @@ fn guest_function_values_and_captures_match_node() {
         function namedVoid(value) { console.log(value); }
         const voidAlias = namedVoid;
         console.log(voidAlias("named-void"));
+        const counter = {count: "2"};
+        let receivers = 0;
+        function receiver() { receivers++; return counter; }
+        console.log([receiver().count++, ++receiver().count, receiver().count--, --receiver().count].join("|"));
+        console.log(counter.count + ":" + receivers);
+        console.log([5000 % 256, -5 % 3, 5 % -3, "5" % 3, 1 % 0, Infinity % 3].join("|"));
     "#;
     let expected = Command::new("node")
         .args(["--eval", source])

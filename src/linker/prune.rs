@@ -30,7 +30,7 @@ pub(crate) struct PruningPlan {
 pub(crate) fn preserve_runtime_export(name: &str, needs_http: bool, needs_timers: bool) -> bool {
     name.starts_with("cabi_")
         || (needs_http && name == "http_reclaim_responses")
-        || (needs_timers && name == "timers_drain")
+        || (needs_timers && name == "timers_step")
 }
 
 pub(crate) fn module_needs_timers(a: &ParsedModuleA) -> bool {

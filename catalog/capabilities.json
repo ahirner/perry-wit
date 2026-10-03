@@ -30,13 +30,13 @@
         "Calls arrow/function expressions and aliases of named functions through the TypeScript table while preserving Rust's separate table",
         "Evaluates the callee and arguments once in source order, pads missing parameters with undefined, and evaluates excess arguments",
         "Captured strings, objects, and byte views retain identity and remain alive when a callback survives across invocations",
-        "Captured object mutation is visible to callbacks; released callback graphs, including cycles, are reclaimed at invocation cleanup",
+        "Captured object mutation is visible to callbacks; released callback graphs, including cycles, are reclaimed at invocation cleanup or between timer callbacks",
         "Guest callback exceptions propagate to surrounding try/catch blocks"
       ],
       "differences": [
         "Shared mutable lexical captures, this/new.target, async/generator function values, and rest/default/arguments parameters report compiler diagnostics",
         "Named function values with captures and calls with spread arguments report compiler diagnostics",
-        "One-shot timers retain callback graphs until delivery or cancellation; bound functions and array callback methods remain separate work",
+        "Timers retain callback graphs until delivery or cancellation; bound functions and array callback methods remain separate work",
         "Guest callbacks do not change WIT export types; SDK declarations continue to describe selected WIT contracts"
       ],
       "conformance": [
@@ -46,15 +46,17 @@
     },
     {
       "id": "web.timers",
-      "name": "One-Shot Timers",
+      "name": "Timers",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "Direct setTimeout/clearTimeout calls with synchronous guest callbacks and retained arguments",
+      "domain": "Direct setTimeout/setInterval and clearTimeout/clearInterval calls with synchronous guest callbacks and retained arguments",
       "invariants": [
         "Evaluates callback, delay, and extra arguments once in source order; passes the extra arguments to the callback without copying referenced values",
-        "Uses monotonic clock subscriptions and invokes callbacks once in deadline order, with registration order breaking equal-deadline ties",
+        "Uses monotonic clock subscriptions in deadline order, with registration order breaking equal-deadline ties; each timeout fires once",
         "Retains captures and arguments until delivery or cancellation, including shared objects and byte views",
         "Clearing a pending timer releases its subscription; unknown or expired numeric IDs cannot cancel later work",
+        "Intervals keep the same numeric ID while running; either clear API can cancel a timeout or interval, including from its callback",
+        "Reclaims temporary guest values between completed callbacks while preserving captures, arguments, globals, and the enclosing function's result",
         "An empty queue returns without polling; uncaught guest exceptions, including initialization failures, cancel pending timers before reaching the existing invocation error path",
         "Timer-only components retain monotonic-clock and poll interfaces without wall-clock, HTTP, filesystem, randomness, or environment imports"
       ],
@@ -62,7 +64,8 @@
         "CLI and exported component invocations drive pending timers to completion before returning to the host; the synchronous function's return value is computed before callbacks run",
         "Timer IDs are instance-local numbers and never repeat; Node Timeout objects, unref/ref, globalThis timer methods, and timer functions used as values are outside this subset",
         "Delays use Node-style whole milliseconds: values below 1, nonfinite values, or values above 2147483647 become 1; other values are truncated",
-        "setInterval and timer function values report compiler diagnostics; callback forms follow the guest-function subset",
+        "Intervals rearm from the actual callback start plus the original delay; late delivery does not replay missed ticks, and an uncleared interval keeps the invocation running",
+        "Timer function values report compiler diagnostics; callback forms follow the guest-function subset",
         "Promises, microtasks, and general guest async execution remain separate work; WIT export types and generated SDK contracts are unchanged"
       ],
       "conformance": [

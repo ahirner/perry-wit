@@ -19,6 +19,9 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
         r#"
         let trace = "";
         let previousId = 0;
+        let intervalCount = 0;
+        let latest = "";
+        let previousInterval = 0;
         export function runTask(input: string): string {
             trace = "";
             const owner: any = {text: input, bytes: Uint8Array.from([17, 128, 255])};
@@ -68,6 +71,46 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
             }
             return "checked";
         }
+        export function intervalTask(input: string, ticks: number): string {
+            intervalCount = 0;
+            latest = "";
+            const owner: any = {text: input, bytes: Uint8Array.from([17, 128]), id: 0};
+            const callback = bytes => {
+                intervalCount++;
+                bytes[0] = intervalCount % 256;
+                const temporary: any = {
+                    text: JSON.stringify({input: owner.text, count: intervalCount}),
+                    bytes: new Uint8Array(2048)
+                };
+                temporary.self = temporary;
+                if (temporary.bytes.length !== 2048 || bytes !== owner.bytes) { throw "lost view"; }
+                try { throw temporary.text; }
+                catch (error) {
+                    if (!error.startsWith("{\"input\":")) { throw "lost temporary"; }
+                }
+                latest = owner.text + ":" + intervalCount + ":" + owner.bytes[0];
+                if (input === "component") { console.log(latest); }
+                if (input.startsWith("interval-fail:") && intervalCount === 2) { throw owner.text; }
+                if (intervalCount === ticks) { clearTimeout(owner.id); }
+            };
+            owner.callback = callback;
+            owner.self = owner;
+            owner.id = setInterval(callback, 2, owner.bytes);
+            clearInterval(previousInterval);
+            previousInterval = owner.id;
+            if (input.startsWith("interval-fail:")) {
+                setTimeout(() => { latest = "unreachable"; }, 1000);
+            }
+            return "returned:" + input;
+        }
+        export function intervalSnapshot(): string { return latest; }
+        export function intervalResult(input: string, ticks: number): any {
+            intervalTask(input, ticks);
+            return {ok: true, value: "result:" + input};
+        }
+        export function intervalVoid(ticks: number): void {
+            intervalTask("void", ticks);
+        }
     "#,
         Some(
             r#"
@@ -83,6 +126,10 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
             export snapshot: func() -> string;
             export idle: func() -> string;
             export delay-cases: func() -> string;
+            export interval-task: func(input: string, ticks: u32) -> string;
+            export interval-snapshot: func() -> string;
+            export interval-result: func(input: string, ticks: u32) -> result<string, string>;
+            export interval-void: func(ticks: u32);
         }
     "#,
         ),
@@ -108,6 +155,8 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
         const module_ = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
         const imports = {};
         let now = 0n, nextPollable = 0, blocked = 0, created = 0, dropped = 0, peak = 0;
+        let late = false, memoryLimit;
+        let deliveryBudget = 10;
         const pending = new Map();
         const delays = [];
         for (const {module, name} of WebAssembly.Module.imports(module_)) {
@@ -128,7 +177,12 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
                 if (name === '[method]pollable.block') {
                     implementation = id => {
                         assert.ok(pending.has(id));
+                        assert.ok(deliveryBudget-- > 0, 'timer delivery must terminate within its expected callback count');
                         if (pending.get(id) > now) { now = pending.get(id); }
+                        if (late) { now += 5_000_000n; }
+                        if (memoryLimit !== undefined) {
+                            assert.equal(e.memory.buffer.byteLength, memoryLimit, 'memory must stay bounded within a long-running interval');
+                        }
                         blocked++;
                     };
                 } else if (name === '[resource-drop]pollable') {
@@ -144,14 +198,18 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
             (imports[module] ??= {})[name] = implementation;
         }
         let e = new WebAssembly.Instance(module_, imports).exports;
-        function call(name, input, post = true) {
+        function call(name, input, post = true, ticks) {
+            deliveryBudget = ticks === undefined ? 10 : ticks + 2;
             const bytes = input === undefined ? null : new TextEncoder().encode(input);
             const ptr = bytes ? e.cabi_realloc(0, 0, 1, bytes.length) : 0;
             if (bytes) { new Uint8Array(e.memory.buffer, ptr, bytes.length).set(bytes); }
             try {
-                const ret = bytes ? e[name](ptr, bytes.length) : e[name]();
-                const words = new Uint32Array(e.memory.buffer, ret, 2);
-                const result = new TextDecoder().decode(new Uint8Array(e.memory.buffer, words[0], words[1]));
+                const ret = bytes ? (ticks === undefined ? e[name](ptr, bytes.length) : e[name](ptr, bytes.length, ticks)) : e[name]();
+                const isResult = name === 'interval-result';
+                const words = new Uint32Array(e.memory.buffer, ret, isResult ? 3 : 2);
+                if (isResult) { assert.equal(words[0], 0); }
+                const offset = isResult ? 1 : 0;
+                const result = new TextDecoder().decode(new Uint8Array(e.memory.buffer, words[offset], words[offset + 1]));
                 if (post) { e[`cabi_post_${name}`](ret); }
                 return result;
             } finally { if (bytes) { e.cabi_realloc(ptr, bytes.length, 1, 0); } }
@@ -184,6 +242,37 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
         const memory = e.memory.buffer.byteLength;
         for (let index = 0; index < 1000; index++) { cycle(index); }
         assert.equal(e.memory.buffer.byteLength, memory, 'timer/capture cycles must stop growing after warm-up');
+
+        const text = 'interval😀'.repeat(100);
+        assert.equal(call('interval-task', text, true, 100), 'returned:' + text);
+        memoryLimit = e.memory.buffer.byteLength;
+        for (let index = 0; index < 10; index++) {
+            const start = now, blocks = blocked;
+            assert.equal(call('interval-task', text, index % 3 !== 0, 5000), 'returned:' + text);
+            assert.equal(blocked - blocks, 5000);
+            assert.equal(now - start, 10_000_000_000n);
+            assert.equal(call('interval-snapshot'), text + ':5000:136');
+            assert.equal(pending.size, 0);
+        }
+        assert.equal(call('interval-result', text, true, 3), 'result:' + text);
+        deliveryBudget = 3;
+        e['interval-void'](3);
+        assert.equal(call('interval-snapshot'), 'void:3:3');
+        delays.length = 0;
+        late = true;
+        const start = now;
+        assert.equal(call('interval-task', text, true, 3), 'returned:' + text);
+        assert.equal(now - start, 21_000_000n);
+        assert.deepEqual(delays, [2_000_000, 2_000_000, 2_000_000], 'late intervals rearm from callback start without missed-tick bursts');
+        late = false;
+        for (let index = 0; index < 100; index++) {
+            const failed = 'interval-fail:' + text;
+            assert.throws(() => call('interval-task', failed, true, 3), WebAssembly.RuntimeError);
+            assert.equal(pending.size, 0, 'interval failure releases the active interval and other subscriptions');
+            assert.equal(call('interval-snapshot'), failed + ':2:2');
+            assert.equal(call('interval-task', text, true, 3), 'returned:' + text);
+        }
+        assert.equal(e.memory.buffer.byteLength, memoryLimit);
         assert.equal(created, dropped);
         assert.ok(peak <= 5, `pollables must remain bounded, observed ${peak}`);
         const initModule = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[2]));
@@ -216,6 +305,21 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
     assert_eq!(
         support::stdout(&output),
         "component:first:128;\ncomponent:first:128;component:second:128;\ncomponent:first:128;component:second:128;component:nested:128;\ncomponent:first:128;component:second:128;component:nested:128;component:caught:128;\n\"scheduled\"\n"
+    );
+    let output = get_wasmtime_cmd()
+        .args([
+            "run",
+            "-C",
+            "cache=n",
+            "--invoke",
+            "interval-task(\"component\",3)",
+        ])
+        .arg(scratch.0.join("component.wasm"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        support::stdout(&output),
+        "component:1:1\ncomponent:2:2\ncomponent:3:3\n\"returned:component\"\n"
     );
 }
 

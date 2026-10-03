@@ -26,8 +26,9 @@ pub struct DiscoveredExports {
     pub cabi_reset_invocation_state: Option<u32>,
     pub cabi_register_global_root: Option<u32>,
     pub cabi_reclaim_temporaries: Option<u32>,
+    pub cabi_reclaim_callback_temporaries: Option<u32>,
     pub http_reclaim_responses: Option<u32>,
-    pub timers_drain: Option<u32>,
+    pub timers_step: Option<u32>,
     pub user_i64_globals: Vec<u32>,
 }
 
@@ -108,10 +109,13 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                             "cabi_reclaim_temporaries" => {
                                 exports.cabi_reclaim_temporaries = Some(exp.index)
                             }
+                            "cabi_reclaim_callback_temporaries" => {
+                                exports.cabi_reclaim_callback_temporaries = Some(exp.index)
+                            }
                             "http_reclaim_responses" => {
                                 exports.http_reclaim_responses = Some(exp.index)
                             }
-                            "timers_drain" => exports.timers_drain = Some(exp.index),
+                            "timers_step" => exports.timers_step = Some(exp.index),
                             name => {
                                 exports.user_functions.insert(name.to_string(), exp.index);
                             }
@@ -255,11 +259,6 @@ pub fn synthesize_trampolines(
         .map(|idx| format!("call {idx}\n    "))
         .unwrap_or_default();
 
-    let drain_timers_call = discovered
-        .timers_drain
-        .map(|idx| format!("call {idx}\n    "))
-        .unwrap_or_default();
-
     let mut scan_globals_body = String::new();
     if let Some(reg) = discovered.cabi_register_global_root {
         for gidx in &discovered.user_i64_globals {
@@ -296,6 +295,42 @@ pub fn synthesize_trampolines(
     )
     .unwrap();
 
+    if let Some(step) = discovered.timers_step {
+        let register = discovered
+            .cabi_register_global_root
+            .context("timer driver requires cabi_register_global_root")?;
+        let reclaim = discovered
+            .cabi_reclaim_callback_temporaries
+            .context("timer driver requires cabi_reclaim_callback_temporaries")?;
+        // No TypeScript frame is live here, except its raw result awaiting ABI lowering.
+        write!(
+            snippets,
+            r#"
+  (func $perry_drain_timers (param $value i64) (result i64)
+    block $finished
+      loop $pending
+        call {step}
+        i32.eqz
+        br_if $finished
+        local.get $value
+        call {register}
+        call $perry_scan_globals
+        call {reclaim}
+        {reclaim_http_call}br $pending
+      end
+    end
+    local.get $value
+  )
+"#
+        )
+        .unwrap();
+    }
+    let drain_void_timers_call = if discovered.timers_step.is_some() {
+        "i64.const 0x7ffc000000000001\n    call $perry_drain_timers\n    drop\n    "
+    } else {
+        ""
+    };
+
     // Synthesize CLI entry if world expects it
     if wit_exports.has_cli_command {
         write!(
@@ -304,7 +339,7 @@ pub fn synthesize_trampolines(
   (func $wasi_cli_run (result i32)
     call $perry_ensure_init
     call $perry_safe_reset
-    {drain_timers_call}call {check_exception}
+    {drain_void_timers_call}call {check_exception}
     call $perry_scan_globals
     {reclaim_temporaries_call}{reclaim_http_call}i32.const 0
   )
@@ -424,6 +459,15 @@ pub fn synthesize_trampolines(
         };
 
         let import_body = import_calls.join("\n    ");
+        let drain_timers_call = if discovered.timers_step.is_some() {
+            match discovered.function_types[target_func as usize].results() {
+                [] => drain_void_timers_call,
+                [wasmparser::ValType::I64] => "call $perry_drain_timers\n    ",
+                _ => anyhow::bail!("unsupported timer result layout for export '{kebab_name}'"),
+            }
+        } else {
+            ""
+        };
 
         write!(
             snippets,

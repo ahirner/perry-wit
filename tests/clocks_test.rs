@@ -38,6 +38,53 @@ fn one_shot_timers_match_node_for_order_arguments_and_cancellation() {
 }
 
 #[test]
+fn intervals_match_node_for_captures_arguments_and_cancellation() {
+    let source = r#"
+        const ids = {other: 0};
+        let evaluations = "";
+        function argument(value) { evaluations += value; return value; }
+        function create(prefix) {
+            const state = {id: 0, count: 0, bytes: Uint8Array.from([17, 128])};
+            state.id = setInterval((suffix, bytes) => {
+                state.count++;
+                bytes[0]++;
+                console.log(prefix + suffix + ":" + state.count + ":" + state.bytes[0]);
+                if (state.count === 3) {
+                    clearTimeout(state.id);
+                    setTimeout(() => { clearInterval(ids.other); console.log("done"); }, 1);
+                }
+            }, 10, argument("captured"), state.bytes);
+        }
+        const canceled = setInterval(() => console.log("unreachable"), 100);
+        clearInterval(canceled);
+        clearInterval(canceled);
+        create("tick:");
+        ids.other = setInterval(() => console.log("unreachable"), 1000000);
+        const timeout = setTimeout(() => console.log("unreachable"), 100);
+        clearInterval(timeout);
+        console.log("sync:" + evaluations);
+    "#;
+    let expected = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    let scratch = support::Scratch::new();
+    let wasm = scratch.compile(source, None);
+    let actual = Command::new(support::get_wasmtime_path())
+        .args(["run", "-C", "cache=n", "-W", "fuel=5000000"])
+        .arg(wasm)
+        .output()
+        .unwrap();
+    assert!(
+        actual.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&actual.stdout),
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(support::stdout(&actual), support::stdout(&expected));
+}
+
+#[test]
 fn timer_validation_unwinds_and_shadowed_names_keep_their_behavior() {
     let scratch = support::Scratch::new();
     let wasm = scratch.compile(
@@ -46,11 +93,16 @@ fn timer_validation_unwinds_and_shadowed_names_keep_their_behavior() {
         for (let index = 0; index < values.length; index++) {
             try { setTimeout(values[index], 1); console.log("unreachable"); }
             catch (error) { console.log(error); }
+            try { setInterval(values[index], 1); console.log("unreachable"); }
+            catch (error) { console.log(error); }
         }
         function local() {
             function setTimeout(value) { console.log(value); return 7; }
             function clearTimeout(value) { console.log(value); }
+            function setInterval(value) { console.log(value); return 8; }
+            function clearInterval(value) { console.log(value); }
             clearTimeout(setTimeout("local"));
+            clearInterval(setInterval("local interval"));
         }
         local();
         setTimeout(() => console.log("recovered"));
@@ -71,16 +123,9 @@ fn timer_validation_unwinds_and_shadowed_names_keep_their_behavior() {
     assert_eq!(
         support::stdout(&output),
         format!(
-            "{}local\n7\nrecovered\n",
-            "TypeError: setTimeout requires a guest function\n".repeat(4)
+            "{}local\n7\nlocal interval\n8\nrecovered\n",
+            "TypeError: setTimeout requires a guest function\nTypeError: setInterval requires a guest function\n".repeat(4)
         )
-    );
-    let error =
-        perry_wit::compiler::compile_typescript_raw("setInterval(() => {}, 1);", "interval.ts")
-            .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "setInterval is not supported yet; use one-shot setTimeout callbacks"
     );
     let error = perry_wit::compiler::compile_typescript_raw(
         "const schedule = setTimeout; schedule(() => {}, 1);",

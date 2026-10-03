@@ -35,8 +35,9 @@ mod timers;
 pub use cabi::{
     cabi_check_exception, cabi_debug_state, cabi_export_json, cabi_export_result_string,
     cabi_export_string, cabi_import_json, cabi_import_string, cabi_post_cleanup,
-    cabi_post_result_cleanup, cabi_realloc, cabi_reclaim_temporaries, cabi_record_init_checkpoint,
-    cabi_register_global_root, cabi_reset_invocation_state,
+    cabi_post_result_cleanup, cabi_realloc, cabi_reclaim_callback_temporaries,
+    cabi_reclaim_temporaries, cabi_record_init_checkpoint, cabi_register_global_root,
+    cabi_reset_invocation_state,
 };
 pub use date::{
     date_get_date, date_get_day, date_get_full_year, date_get_hours, date_get_milliseconds,

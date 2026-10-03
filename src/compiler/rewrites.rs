@@ -4,7 +4,12 @@ use perry_hir::ir::{Expr, Stmt};
 
 pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) -> anyhow::Result<()> {
     // Perry emits these dispatcher calls but omits their names from its string pool.
-    for name in ["js_loose_eq", "string_char_at", "string_char_code_at"] {
+    for name in [
+        "js_loose_eq",
+        "js_mod",
+        "string_char_at",
+        "string_char_code_at",
+    ] {
         program.init.push(Stmt::Expr(Expr::String(name.into())));
     }
     let mut rewriter = Rewriter {
@@ -285,16 +290,50 @@ impl Rewriter {
     }
 
     fn rewrite_current_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
+        if let Expr::PropertyUpdate {
+            object,
+            property,
+            op,
+            prefix,
+            ..
+        } = expr
+        {
+            let delta = if *op == perry_hir::ir::BinaryOp::Sub {
+                -1.0
+            } else {
+                1.0
+            };
+            *expr = Expr::Call {
+                callee: Box::new(Expr::PropertyGet {
+                    object: Box::new(std::mem::replace(object.as_mut(), Expr::Undefined)),
+                    property: "object_update".into(),
+                    byte_offset: 0,
+                }),
+                args: vec![
+                    Expr::String(std::mem::take(property)),
+                    Expr::Number(delta),
+                    Expr::Bool(*prefix),
+                ],
+                type_args: Vec::new(),
+                byte_offset: 0,
+            };
+            return;
+        }
         if let Expr::Call { callee, args, .. } = expr
             && let Expr::ExternFuncRef { name, .. } = callee.as_ref()
         {
             match name.as_str() {
-                "setTimeout" => {
+                "setTimeout" | "setInterval" => {
+                    let bridge = if name == "setInterval" {
+                        "timer_interval"
+                    } else {
+                        "timer_schedule"
+                    };
                     let mut arguments = std::mem::take(args).into_iter();
                     let callback = arguments.next().unwrap_or(Expr::Undefined);
                     let delay = arguments.next().unwrap_or(Expr::Undefined);
                     *expr = runtime_method_call(
-                        "timer_schedule",
+                        bridge,
                         vec![callback, delay, Expr::Array(arguments.collect())],
                     );
                     return;
@@ -302,11 +341,6 @@ impl Rewriter {
                 "clearTimeout" | "clearInterval" => {
                     *expr = runtime_method_call("timer_cancel", std::mem::take(args));
                     return;
-                }
-                "setInterval" => {
-                    self.compatibility_error = self.compatibility_error.or(Some(
-                        "setInterval is not supported yet; use one-shot setTimeout callbacks",
-                    ));
                 }
                 _ => {}
             }

@@ -7,7 +7,7 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 
 1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
 2. HTTP metadata/methods (**10.1**) and buffered binary bodies (**10.2**) are complete. Use those client paths and fixtures as the baseline for handlers and streaming.
-3. One-shot timers (**11.1**) establish callback execution (**B.1**) and retained lifetimes (**E.2**). Develop guest async execution (**B.2**) around an awaited timer or handler, extending these paths where the consumer needs it.
+3. One-shot timers and intervals (**11.1**, **11.2**) establish callback execution (**B.1**) and retained lifetimes (**E.2**), including reclamation between callbacks. Develop guest async execution (**B.2**) around an awaited timer or handler, extending these paths where the consumer needs it.
 4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
 
 ## Tracking Completion
@@ -32,7 +32,7 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ## Verification Baseline (2026-10-03)
 
-- `nix develop -c cargo test --locked --package perry-wit`: 146 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
+- `nix develop -c cargo test --locked --package perry-wit`: 147 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
 - The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
 - Scoped formatting passed. Project and WebAssembly guest Clippy checks completed with existing warnings. Automatic approval review rejected parent `make format-rs` because it could rewrite the broader workspace; parent `make lint-rs` fails because `monty-bench` is outside this workspace. The pinned, scoped Nix checks are the applicable checks here.
 - SDK generation describes selected WIT contracts, not ambient JavaScript/Node API compatibility. These runtime slices do not change WIT export types; supported API subsets and limits belong in the capability catalog and tests.
@@ -274,12 +274,19 @@ Extend that mechanism where it fits each consumer; timers and stream readiness n
 
 Verification:
 
-- `nix develop -c cargo test --locked --package perry-wit --test clocks_test --test repeated_task_calls_test`: all 11 clock/timer and 7 repeated-call tests pass in the full baseline run. A Node comparison checks callback order, delayed captures, once-only argument evaluation, and extra arguments; the controlled clock host checks deadline ties, delay coercion, nested scheduling, cancellation, idle termination, stale IDs, and bounded resources/memory. Timers also run through actual Wasmtime CLI and component exports.
+- `nix develop -c cargo test --locked --package perry-wit --test clocks_test --test repeated_task_calls_test`: all 12 clock/timer and 7 repeated-call tests pass in the full baseline run. A Node comparison checks callback order, delayed captures, once-only argument evaluation, and extra arguments; the controlled clock host checks deadline ties, delay coercion, nested scheduling, cancellation, idle termination, stale IDs, and bounded resources/memory. Timers also run through actual Wasmtime CLI and component exports.
 - `timers.rs` owns pending work and subscriptions. Direct timer call specialization retains only monotonic-clock/poll imports for timer-only tasks; the pure and mixed-capability pruning suites remain green. Invocations drain pending callbacks before returning; the synchronous function computes its return value before that drain. Post-return never performs host polling or resource drops.
-- The catalog records direct global calls, numeric IDs, Node-style whole-millisecond delays, and the existing supported callback forms. Timer function values and intervals currently report diagnostics. Promise timers, microtasks, Node Timeout objects, and broader timer API forms belong to subsequent consumers; WIT export types and SDK contracts are unchanged. Validation uses indexed array iteration; a heterogeneous inline `for…of` probe currently hangs and remains a separate compiler limitation.
-- [ ] **11.2. Intervals** — Builds on 11.1 when recurring work is needed.
-    - [ ] Add `setInterval` / `clearInterval` with defined rescheduling and cancellation behavior compatible with the supported timer subset.
-    - [ ] Verify repeated callbacks, clearing during execution, and bounded memory/resources over many cycles.
+- The catalog records direct global calls, numeric IDs, Node-style whole-millisecond delays, and the existing supported callback forms. Timer function values report diagnostics; intervals are covered in 11.2. Promise timers, microtasks, Node Timeout objects, and broader timer API forms belong to subsequent consumers; WIT export types and SDK contracts are unchanged. Validation uses indexed array iteration; a heterogeneous inline `for…of` probe currently hangs and remains a separate compiler limitation.
+- [x] **11.2. Intervals** — Builds on 11.1 when recurring work is needed.
+    - [x] Add `setInterval` / `clearInterval` with defined rescheduling and cancellation behavior compatible with the supported timer subset.
+    - [x] Verify repeated callbacks, clearing during execution, and bounded memory/resources over many cycles.
+
+Verification (11.2):
+
+- `nix develop -c cargo test --locked --package perry-wit --test clocks_test --test repeated_task_calls_test --test runtime_regression_test`: all 29 tests passed. The Node comparison covers captures, extra arguments evaluated once, self-cancellation, cancellation before delivery and from another callback, interchangeable clear APIs, validation, and shadowed names. Property increment/decrement and numeric remainder bridges restore the recurring callback's state updates; the existing callback comparison checks coercion, prefix/postfix results, and receiver evaluation once.
+- The existing controlled-clock lifetime test performs 50,000 interval callbacks after a 100-callback warm-up and checks linear memory stays at its warmed high-water mark during delivery. It verifies cyclic captures/views, globals, fresh string/result return values, void exports, stale IDs, skipped post-return, 100 failure/recovery cycles, and subscription release. A late clock checks rescheduling from callback start without replaying missed ticks. Timer-only components still prune unrelated capability imports, and an interval task also runs through a real Wasmtime component invocation.
+- The ABI driver reclaims completed callback allocations with no live TypeScript frames, rooting the enclosing raw result and globals alongside pending timer graphs. Runtime hooks own and release subscriptions at ordinary invocation boundaries; post-return makes no host calls. Uncleared intervals keep the invocation running. SDK WIT contracts are unchanged; the capability catalog records the timer subset and rescheduling behavior.
+- The full `cargo test --locked --package perry-wit` suite passed all 147 tests under Nix, including local HTTP fixtures. Scoped formatting and compiler/guest Clippy checks passed with existing warnings; the parent Makefile limitations remain as recorded in the baseline.
 - [ ] **11.3. Stream Readiness** — Build with the first async I/O consumer and its lifetime requirements.
     - [ ] Resume that consumer when input/output is ready, handling partial progress and ownership on completion/error/cancellation; reuse HTTP polling infrastructure where suitable.
     - [ ] Verify progress with slow or blocked peers, mixed pending operations, and cleanup without busy-waiting or unbounded buffering.

@@ -324,6 +324,7 @@ fn bridge_events(
             "throw_value" => (BridgeKind::Throwing, 5),
             "date_to_iso_string"
             | "timer_schedule"
+            | "timer_interval"
             | "json_stringify"
             | "closure_new"
             | "closure_set_capture"

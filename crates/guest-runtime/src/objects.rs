@@ -24,6 +24,14 @@ pub(crate) extern "C" fn object_set(target: i64, key: i64, value: i64) -> i64 {
     value
 }
 
+/// Persists a numeric increment/decrement and returns the prefix or postfix result.
+pub(crate) fn object_update(target: i64, key: i64, delta: f64, prefix: bool) -> i64 {
+    let previous = get_state().to_number(object_get(target, key));
+    let next = previous + delta;
+    object_set(target, key, next.to_bits() as i64);
+    (if prefix { next } else { previous }).to_bits() as i64
+}
+
 #[no_mangle]
 pub(crate) extern "C" fn object_get(target: i64, key: i64) -> i64 {
     let state = get_state();

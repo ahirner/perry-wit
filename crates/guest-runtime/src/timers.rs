@@ -1,4 +1,4 @@
-//! One-shot timers own their callbacks and clock subscriptions until delivery or cancellation.
+//! Timers own their callbacks and clock subscriptions until delivery or cancellation.
 
 use crate::bindings::wasi::clocks::monotonic_clock;
 use crate::bindings::wasi::io::poll::Pollable;
@@ -18,9 +18,33 @@ pub(crate) struct Timers {
 /// The pollable drops at an ordinary invocation boundary, never during post-return.
 struct PendingTimer {
     id: u64,
-    deadline: u64,
     callback: i64,
     arguments: i64,
+    mode: TimerMode,
+    delay_ns: u64,
+    status: TimerStatus,
+}
+
+/// Controls whether delivery removes the entry or rearms its original delay.
+#[derive(Clone, Copy)]
+enum TimerMode {
+    Timeout,
+    Interval,
+}
+
+/// A firing interval retains its identity and captures, but owns no subscription.
+enum TimerStatus {
+    Waiting { deadline: u64, pollable: Pollable },
+    Running,
+}
+
+/// Moves the subscription out of the queue while retaining the delivery's raw values.
+struct TimerDelivery {
+    id: u64,
+    callback: i64,
+    arguments: i64,
+    mode: TimerMode,
+    delay_ns: u64,
     pollable: Pollable,
 }
 
@@ -37,14 +61,36 @@ impl Timers {
         self.pending.clear();
     }
 
-    fn take_next(&mut self) -> Option<PendingTimer> {
+    /// Removes one-shots and leaves firing intervals discoverable by cancellation.
+    fn take_next(&mut self) -> Option<TimerDelivery> {
         let index = self
             .pending
             .iter()
             .enumerate()
-            .min_by_key(|(_, timer)| (timer.deadline, timer.id))
-            .map(|(index, _)| index)?;
-        Some(self.pending.swap_remove(index))
+            .filter_map(|(index, timer)| match timer.status {
+                TimerStatus::Waiting { deadline, .. } => Some(((deadline, timer.id), index)),
+                TimerStatus::Running => None,
+            })
+            .min_by_key(|(order, _)| *order)
+            .map(|(_, index)| index)?;
+        let timer = &mut self.pending[index];
+        let TimerStatus::Waiting { pollable, .. } =
+            std::mem::replace(&mut timer.status, TimerStatus::Running)
+        else {
+            return None;
+        };
+        let delivery = TimerDelivery {
+            id: timer.id,
+            callback: timer.callback,
+            arguments: timer.arguments,
+            mode: timer.mode,
+            delay_ns: timer.delay_ns,
+            pollable,
+        };
+        if matches!(delivery.mode, TimerMode::Timeout) {
+            self.pending.swap_remove(index);
+        }
+        Some(delivery)
     }
 }
 
@@ -62,7 +108,8 @@ fn dispatch_call(name: &str, args: &[i64]) -> Option<i64> {
     };
     let argument = |index| args.get(index).copied().unwrap_or(TAG_UNDEFINED as i64);
     Some(match name {
-        "timer_schedule" => schedule(argument(0), argument(1), argument(2)),
+        "timer_schedule" => schedule(argument(0), argument(1), argument(2), TimerMode::Timeout),
+        "timer_interval" => schedule(argument(0), argument(1), argument(2), TimerMode::Interval),
         "timer_cancel" => {
             cancel(argument(0));
             TAG_UNDEFINED as i64
@@ -72,10 +119,14 @@ fn dispatch_call(name: &str, args: &[i64]) -> Option<i64> {
 }
 
 /// Validates before allocating a subscription and retains raw callback argument values.
-fn schedule(callback: i64, delay: i64, arguments: i64) -> i64 {
+fn schedule(callback: i64, delay: i64, arguments: i64, mode: TimerMode) -> i64 {
     let state = get_state();
     if !matches!(state.get_handle(callback), Some(JsHandle::Closure(_))) {
-        state.current_exception = Some("TypeError: setTimeout requires a guest function".into());
+        let name = match mode {
+            TimerMode::Timeout => "setTimeout",
+            TimerMode::Interval => "setInterval",
+        };
+        state.current_exception = Some(format!("TypeError: {name} requires a guest function"));
         return TAG_UNDEFINED as i64;
     }
     if !matches!(state.get_handle(arguments), Some(JsHandle::Array(_))) {
@@ -92,16 +143,18 @@ fn schedule(callback: i64, delay: i64, arguments: i64) -> i64 {
     } else {
         1
     };
-    let deadline = monotonic_clock::now().saturating_add(milliseconds * 1_000_000);
+    let delay_ns = milliseconds * 1_000_000;
+    let deadline = monotonic_clock::now().saturating_add(delay_ns);
     let pollable = monotonic_clock::subscribe_instant(deadline);
     state.timers.next_id += 1;
     let id = state.timers.next_id;
     state.timers.pending.push(PendingTimer {
         id,
-        deadline,
         callback,
         arguments,
-        pollable,
+        mode,
+        delay_ns,
+        status: TimerStatus::Waiting { deadline, pollable },
     });
     (id as f64).to_bits() as i64
 }
@@ -122,25 +175,56 @@ fn cancel(value: i64) {
     }
 }
 
-/// Drives timers in deadline/registration order before the host invocation returns.
-/// An uncaught callback error cancels all remaining work and reaches the normal ABI error path.
+/// Delivers one timer; the ABI driver reclaims temporaries between successful callbacks.
+/// A running interval remains cancellable and is rearmed from this callback's start time.
 #[no_mangle]
-pub(crate) extern "C" fn timers_drain() {
-    while get_state().current_exception.is_none() {
-        let Some(timer) = get_state().timers.take_next() else {
-            return;
-        };
-        timer.pollable.block();
-        drop(timer.pollable);
-        guest_callback_invoke(timer.callback, timer.arguments);
+pub(crate) extern "C" fn timers_step() -> i32 {
+    if get_state().current_exception.is_some() {
+        get_state().timers.cancel_all();
+        return 0;
     }
-    get_state().timers.cancel_all();
+    let Some(timer) = get_state().timers.take_next() else {
+        return 0;
+    };
+    timer.pollable.block();
+    drop(timer.pollable);
+    let started = if matches!(timer.mode, TimerMode::Interval) {
+        monotonic_clock::now()
+    } else {
+        0
+    };
+    guest_callback_invoke(timer.callback, timer.arguments);
+    if get_state().current_exception.is_some() {
+        get_state().timers.cancel_all();
+        return 0;
+    }
+    if matches!(timer.mode, TimerMode::Interval) {
+        if let Some(pending) = get_state()
+            .timers
+            .pending
+            .iter_mut()
+            .find(|pending| pending.id == timer.id)
+        {
+            let deadline = started.saturating_add(timer.delay_ns);
+            pending.status = TimerStatus::Waiting {
+                deadline,
+                pollable: monotonic_clock::subscribe_instant(deadline),
+            };
+        }
+    }
+    1
 }
 
 #[no_mangle]
 pub(crate) extern "C" fn set_timeout(callback: i64, delay: i64) -> i64 {
     let arguments = nanbox_pointer(get_state().alloc_handle(JsHandle::Array(Vec::new())));
-    schedule(callback, delay, arguments)
+    schedule(callback, delay, arguments, TimerMode::Timeout)
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn set_interval(callback: i64, delay: i64) -> i64 {
+    let arguments = nanbox_pointer(get_state().alloc_handle(JsHandle::Array(Vec::new())));
+    schedule(callback, delay, arguments, TimerMode::Interval)
 }
 
 #[no_mangle]

@@ -166,6 +166,14 @@ pub extern "C" fn cabi_reclaim_temporaries() {
     get_state().reclaim_temporaries();
 }
 
+/// Reclaims completed callback allocations while keeping the enclosing invocation active.
+#[no_mangle]
+pub extern "C" fn cabi_reclaim_callback_temporaries() {
+    let state = get_state();
+    state.reclaim_temporaries();
+    state.invocation_in_progress = true;
+}
+
 /// Canonical ABI allocator with proper deallocation on zero size.
 #[no_mangle]
 pub unsafe extern "C" fn cabi_realloc(

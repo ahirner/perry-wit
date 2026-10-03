@@ -36,7 +36,7 @@ pub(super) fn specialize_timer_calls(bytes: &[u8]) -> Result<Vec<u8>> {
     let calls: Vec<BTreeSet<usize>> = operators.iter().map(|operators| {
         operators.iter().enumerate().filter_map(|(index, operator)| {
             (matches!(operator, Operator::Call { function_index } if *function_index == mem_call as u32)
-                && matches!(memory_call_name(operators, index, &names), Some(("timer_schedule" | "timer_cancel", _))))
+                && matches!(memory_call_name(operators, index, &names), Some(("timer_schedule" | "timer_interval" | "timer_cancel", _))))
                 .then_some(index)
         }).collect()
     }).collect();

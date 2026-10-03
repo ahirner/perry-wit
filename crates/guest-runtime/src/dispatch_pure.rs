@@ -142,6 +142,15 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             crate::objects::object_set(*target, *key, *value);
             result_i64 = *target;
         }
+    } else if name == "object_update" {
+        if let [target, key, delta, prefix, ..] = raw_args.as_slice() {
+            result_i64 = crate::objects::object_update(
+                *target,
+                *key,
+                state.to_number(*delta),
+                *prefix == TAG_TRUE as i64,
+            );
+        }
     } else if matches!(name.as_str(), "object_set_dynamic" | "array_set") {
         if let [target, key, value, ..] = raw_args.as_slice() {
             crate::objects::object_set_dynamic(*target, *key, *value);
@@ -186,6 +195,10 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
     } else if name == "js_typeof" {
         let arg = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
         result_i64 = crate::stubs::js_typeof(arg);
+    } else if name == "js_mod" {
+        if let [left, right, ..] = raw_args.as_slice() {
+            result_i64 = crate::stubs::js_mod(*left, *right);
+        }
     } else if name == "console_log" || name == "log" {
         let arg = raw_args.last().copied().unwrap_or(0);
         let msg = state.get_string(arg);
