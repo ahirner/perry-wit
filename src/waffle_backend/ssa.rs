@@ -37,10 +37,7 @@ pub(crate) fn lower_module(
                 params, returns, ..
             } => (params.clone(), returns.clone()),
         };
-        let signature = module.signatures.push(SignatureData {
-            params,
-            returns,
-        });
+        let signature = module.signatures.push(SignatureData { params, returns });
         let func = module.funcs.push(FuncDecl::Import(signature, name.clone()));
         module.imports.push(Import {
             module: "host".into(),
@@ -120,7 +117,10 @@ pub(crate) fn lower_module(
         func_decls.insert(func.id, func_decl);
 
         if func.is_exported || func.id == contract.entry_func_id {
-            let export_name = if func.name == "main" || func.name == "experiment" || func.id == contract.entry_func_id {
+            let export_name = if func.name == "main"
+                || func.name == "experiment"
+                || func.id == contract.entry_func_id
+            {
                 "run"
             } else {
                 &func.name
@@ -220,22 +220,25 @@ fn lower_function_body(
     if lowerer.body.blocks[lowerer.block].terminator == Terminator::None {
         let ret_types = &module.signatures[sig].returns;
         if ret_types.is_empty() {
-            lowerer.body.set_terminator(
-                lowerer.block,
-                Terminator::Return { values: vec![] },
-            );
+            lowerer
+                .body
+                .set_terminator(lowerer.block, Terminator::Return { values: vec![] });
         } else if ret_types.len() == 1 && ret_types[0] == Type::F64 {
             let zero = lowerer.op(
-                Operator::F64Const { value: 0f64.to_bits() },
+                Operator::F64Const {
+                    value: 0f64.to_bits(),
+                },
                 &[],
                 &[Type::F64],
             );
-            lowerer.body.set_terminator(
-                lowerer.block,
-                Terminator::Return { values: vec![zero] },
-            );
+            lowerer
+                .body
+                .set_terminator(lowerer.block, Terminator::Return { values: vec![zero] });
         } else {
-            bail!("Unterminated block in function '{}' with non-void return", func.name);
+            bail!(
+                "Unterminated block in function '{}' with non-void return",
+                func.name
+            );
         }
     }
 
@@ -286,10 +289,8 @@ impl<'a> FunctionLowerer<'a> {
                             );
                         }
                     }
-                    self.body.set_terminator(
-                        self.block,
-                        Terminator::Return { values: vec![val] },
-                    );
+                    self.body
+                        .set_terminator(self.block, Terminator::Return { values: vec![val] });
                     let dead = self.body.add_block();
                     self.block = dead;
                 }
@@ -307,10 +308,8 @@ impl<'a> FunctionLowerer<'a> {
                             );
                         }
                     }
-                    self.body.set_terminator(
-                        self.block,
-                        Terminator::Return { values: vec![] },
-                    );
+                    self.body
+                        .set_terminator(self.block, Terminator::Return { values: vec![] });
                     let dead = self.body.add_block();
                     self.block = dead;
                 }
@@ -319,7 +318,11 @@ impl<'a> FunctionLowerer<'a> {
                     then_branch,
                     else_branch,
                 } => {
-                    self.if_statement(condition, then_branch, else_branch.as_deref().unwrap_or(&[]))?;
+                    self.if_statement(
+                        condition,
+                        then_branch,
+                        else_branch.as_deref().unwrap_or(&[]),
+                    )?;
                 }
                 Stmt::While { condition, body } => {
                     self.while_loop(condition, body)?;
@@ -375,7 +378,7 @@ impl<'a> FunctionLowerer<'a> {
         self.locals = incoming_locals;
         self.statements(else_branch)?;
         if self.body.blocks[self.block].terminator == Terminator::None {
-            let args = self.locals.keys().map(|id| self.locals[id]).collect();
+            let args = joined_locals.keys().map(|id| self.locals[id]).collect();
             self.branch(join_block, args);
         }
 
@@ -514,13 +517,9 @@ impl<'a> FunctionLowerer<'a> {
 
     fn expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
-            Expr::Number(n) => Ok(self.op(
-                Operator::F64Const {
-                    value: n.to_bits(),
-                },
-                &[],
-                &[Type::F64],
-            )),
+            Expr::Number(n) => {
+                Ok(self.op(Operator::F64Const { value: n.to_bits() }, &[], &[Type::F64]))
+            }
             Expr::Integer(i) => Ok(self.op(
                 Operator::F64Const {
                     value: (*i as f64).to_bits(),
@@ -564,7 +563,8 @@ impl<'a> FunctionLowerer<'a> {
                     for a in args {
                         arg_vals.push(self.expression(a)?);
                     }
-                    let ret_types = &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
+                    let ret_types =
+                        &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
                     Ok(self.op(
                         Operator::Call {
                             function_index: func_idx,
@@ -581,7 +581,8 @@ impl<'a> FunctionLowerer<'a> {
                     for a in args {
                         arg_vals.push(self.expression(a)?);
                     }
-                    let ret_types = &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
+                    let ret_types =
+                        &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
                     Ok(self.op(
                         Operator::Call {
                             function_index: func_idx,

@@ -51,7 +51,8 @@ async fn test_waffle_primitive_assignments_and_arithmetic() -> Result<()> {
         }
     "#;
 
-    let compiled = compile_typescript_waffle(source, "arithmetic.ts", &WaffleCompileOptions::default())?;
+    let compiled =
+        compile_typescript_waffle(source, "arithmetic.ts", &WaffleCompileOptions::default())?;
     assert!(!compiled.core.is_empty());
     assert!(compiled.waffle_ir.contains("f64add"));
     assert!(compiled.waffle_ir.contains("f64mul"));
@@ -80,15 +81,24 @@ async fn test_waffle_branches_and_joins() -> Result<()> {
         export function run(input: number): number {
             let result = input;
             if (input > 10) {
-                result = result * 2;
+                let doubled = result * 2;
+                result = doubled;
             } else {
-                result = result + 100;
+                let offset = 100;
+                if (input > 0) {
+                    let adjusted = result + offset;
+                    result = adjusted;
+                } else {
+                    let fallback = offset;
+                    result = fallback;
+                }
             }
             return result + 1;
         }
     "#;
 
-    let compiled = compile_typescript_waffle(source, "branches.ts", &WaffleCompileOptions::default())?;
+    let compiled =
+        compile_typescript_waffle(source, "branches.ts", &WaffleCompileOptions::default())?;
     assert!(compiled.waffle_ir.contains("branch join"));
 
     let engine = make_async_engine()?;
@@ -106,6 +116,9 @@ async fn test_waffle_branches_and_joins() -> Result<()> {
     // input = 5 <= 10 => result = 105 + 1 = 106
     let (res_else,) = run.call_async(&mut store, (5.0,)).await?;
     assert_eq!(res_else, 106.0);
+
+    let (res_nested_else,) = run.call_async(&mut store, (-1.0,)).await?;
+    assert_eq!(res_nested_else, 101.0);
 
     Ok(())
 }
@@ -159,7 +172,8 @@ async fn test_waffle_intra_module_function_calls() -> Result<()> {
         }
     "#;
 
-    let compiled = compile_typescript_waffle(source, "intra_call.ts", &WaffleCompileOptions::default())?;
+    let compiled =
+        compile_typescript_waffle(source, "intra_call.ts", &WaffleCompileOptions::default())?;
     assert!(!compiled.core.is_empty());
 
     let engine = make_async_engine()?;
@@ -189,7 +203,8 @@ async fn test_waffle_evaluation_order_and_multi_arg_calls() -> Result<()> {
         }
     "#;
 
-    let compiled = compile_typescript_waffle(source, "eval_order.ts", &WaffleCompileOptions::default())?;
+    let compiled =
+        compile_typescript_waffle(source, "eval_order.ts", &WaffleCompileOptions::default())?;
     let engine = make_async_engine()?;
     let component = Component::new(&engine, compiled.component.unwrap())?;
     let linker = make_wasi_linker(&engine)?;
@@ -218,7 +233,8 @@ async fn test_waffle_shadowing_and_binding_resolution() -> Result<()> {
             return waitFor + 1;
         }
     "#;
-    let err1 = compile_typescript_waffle(bad_shadow, "bad_param.ts", &WaffleCompileOptions::default());
+    let err1 =
+        compile_typescript_waffle(bad_shadow, "bad_param.ts", &WaffleCompileOptions::default());
     assert!(err1.is_err());
     let err_msg1 = err1.unwrap_err().to_string();
     assert!(err_msg1.contains("shadows declared intrinsic"));
@@ -231,7 +247,8 @@ async fn test_waffle_shadowing_and_binding_resolution() -> Result<()> {
             return waitFor;
         }
     "#;
-    let err2 = compile_typescript_waffle(bad_local, "bad_local.ts", &WaffleCompileOptions::default());
+    let err2 =
+        compile_typescript_waffle(bad_local, "bad_local.ts", &WaffleCompileOptions::default());
     assert!(err2.is_err());
     let err_msg2 = err2.unwrap_err().to_string();
     assert!(err_msg2.contains("illegally shadows declared intrinsic"));
@@ -248,7 +265,11 @@ async fn test_waffle_rejects_uncovered_hir_explicitly() -> Result<()> {
             return obj.x;
         }
     "#;
-    let res = compile_typescript_waffle(unsupported, "unsupported.ts", &WaffleCompileOptions::default());
+    let res = compile_typescript_waffle(
+        unsupported,
+        "unsupported.ts",
+        &WaffleCompileOptions::default(),
+    );
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();
     assert!(err.contains("Unsupported"));
@@ -278,7 +299,8 @@ async fn test_waffle_async_p3_wait_and_suspension() -> Result<()> {
         }
     "#;
 
-    let compiled = compile_typescript_waffle(source, "async_task.ts", &WaffleCompileOptions::default())?;
+    let compiled =
+        compile_typescript_waffle(source, "async_task.ts", &WaffleCompileOptions::default())?;
     assert!(compiled.uses_p3_clocks);
     assert!(compiled.waffle_ir.contains("await continuation"));
 
@@ -298,7 +320,11 @@ async fn test_waffle_async_p3_wait_and_suspension() -> Result<()> {
 
     let mut invocation = Box::pin(run.call_async(&mut store, (2.0,)));
     // Should take longer than 10ms because it waits 3 * 15ms = 45ms
-    assert!(timeout(Duration::from_millis(10), &mut invocation).await.is_err());
+    assert!(
+        timeout(Duration::from_millis(10), &mut invocation)
+            .await
+            .is_err()
+    );
 
     let (res,) = timeout(Duration::from_secs(5), invocation).await??;
     assert_eq!(res, 31.0);
