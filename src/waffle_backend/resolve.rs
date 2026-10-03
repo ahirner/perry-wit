@@ -15,6 +15,8 @@ use waffle::Type as WaffleType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvedInputKind {
     Number,
+    Boolean,
+    String,
     ByteStream,
 }
 
@@ -195,6 +197,8 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
         match &first_param.ty {
             HirType::Named(name) if name == "ByteStream" => ResolvedInputKind::ByteStream,
             HirType::Number | HirType::Any => ResolvedInputKind::Number,
+            HirType::Boolean => ResolvedInputKind::Boolean,
+            HirType::String => ResolvedInputKind::String,
             other => bail!("Unsupported entry function parameter type: {other:?}"),
         }
     } else {

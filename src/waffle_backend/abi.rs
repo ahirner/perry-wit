@@ -10,6 +10,7 @@ use waffle::{
     Block, BlockTarget, FunctionBody, Module, Operator, Terminator, Type, Value, ValueDef,
 };
 
+use perry_hir::types::Type as HirType;
 use crate::waffle_backend::registry::{
     ExportConvention, FunctionExport, FunctionInfo, PrimitivePayload,
 };
@@ -27,14 +28,31 @@ pub(crate) fn build_export_wrapper(
     callee: &FunctionInfo,
     export: &FunctionExport,
     memory: waffle::Memory,
+    lift_canonical: Option<waffle::Func>,
 ) -> Result<FunctionBody> {
     let mut body = FunctionBody::new(module, export.sig);
     let entry = body.entry;
-    let args: Vec<_> = body.blocks[entry]
-        .params
-        .iter()
-        .map(|&(_, value)| value)
-        .collect();
+    let mut args = Vec::new();
+    let mut param_cursor = 0;
+    for param_ty in &callee.param_types {
+        if matches!(param_ty, HirType::String) {
+            let ptr = body.blocks[entry].params[param_cursor].1;
+            let byte_len = body.blocks[entry].params[param_cursor + 1].1;
+            param_cursor += 2;
+            let lift_fn = lift_canonical.ok_or_else(|| anyhow::anyhow!("lift_canonical required for string parameter"))?;
+            let desc = body.add_op(
+                entry,
+                Operator::Call { function_index: lift_fn },
+                &[ptr, byte_len],
+                &[Type::I32],
+            );
+            args.push(desc);
+        } else {
+            let val = body.blocks[entry].params[param_cursor].1;
+            param_cursor += 1;
+            args.push(val);
+        }
+    }
     let outcome = emit_internal_call(&mut body, entry, callee, &args);
     match export.convention {
         ExportConvention::Direct => {
@@ -168,29 +186,88 @@ fn emit_retptr_store(
         &[addr, status_val],
         &[],
     );
-    let (payload, store) = match payload_type {
-        PrimitivePayload::Number => (
-            payload_f64,
-            Operator::F64Store {
-                memory: waffle::MemoryArg {
-                    align: 3,
-                    offset: 8,
-                    memory,
+    match payload_type {
+        PrimitivePayload::Number => {
+            body.add_op(
+                block,
+                Operator::F64Store {
+                    memory: waffle::MemoryArg {
+                        align: 3,
+                        offset: 8,
+                        memory,
+                    },
                 },
-            },
-        ),
-        PrimitivePayload::Boolean => (
-            decode_payload(body, block, payload_f64, true),
-            Operator::I32Store8 {
-                memory: waffle::MemoryArg {
-                    align: 0,
-                    offset: 8,
-                    memory,
+                &[addr, payload_f64],
+                &[],
+            );
+        }
+        PrimitivePayload::Boolean => {
+            let payload = decode_payload(body, block, payload_f64, true);
+            body.add_op(
+                block,
+                Operator::I32Store8 {
+                    memory: waffle::MemoryArg {
+                        align: 0,
+                        offset: 8,
+                        memory,
+                    },
                 },
-            },
-        ),
-    };
-    body.add_op(block, store, &[addr, payload], &[]);
+                &[addr, payload],
+                &[],
+            );
+        }
+        PrimitivePayload::String => {
+            let desc_ptr = decode_payload(body, block, payload_f64, true);
+            let str_ptr = body.add_op(
+                block,
+                Operator::I32Load {
+                    memory: waffle::MemoryArg {
+                        align: 2,
+                        offset: 0,
+                        memory,
+                    },
+                },
+                &[desc_ptr],
+                &[Type::I32],
+            );
+            let str_len = body.add_op(
+                block,
+                Operator::I32Load {
+                    memory: waffle::MemoryArg {
+                        align: 2,
+                        offset: 4,
+                        memory,
+                    },
+                },
+                &[desc_ptr],
+                &[Type::I32],
+            );
+            body.add_op(
+                block,
+                Operator::I32Store {
+                    memory: waffle::MemoryArg {
+                        align: 2,
+                        offset: 8,
+                        memory,
+                    },
+                },
+                &[addr, str_ptr],
+                &[],
+            );
+            body.add_op(
+                block,
+                Operator::I32Store {
+                    memory: waffle::MemoryArg {
+                        align: 2,
+                        offset: 12,
+                        memory,
+                    },
+                },
+                &[addr, str_len],
+                &[],
+            );
+        }
+    }
 
     addr
 }

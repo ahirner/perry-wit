@@ -18,6 +18,7 @@ use crate::waffle_backend::control_flow::{JoinPoint, create_block_parameters};
 use crate::waffle_backend::exceptions::{self, TryClauseBlocks, TryScope, UnwindContext};
 use crate::waffle_backend::registry::{FunctionInfo, ModuleRegistry};
 use crate::waffle_backend::resolve::ResolvedContract;
+use crate::waffle_backend::strings::StringPool;
 
 /// Compiles a resolved HIR module into a validated WAFFLE module.
 pub(crate) fn lower_module(
@@ -37,17 +38,30 @@ pub(crate) fn lower_module(
         kind: ExportKind::Memory(memory),
     });
 
-    // 2. Build complete module declarations registry
-    let registry = ModuleRegistry::build(&mut module, hir, contract, None, memory)?;
+    // 2. Build string pool and intern all string literals
+    let mut string_pool = StringPool::new();
+    collect_strings_in_module(hir, &mut string_pool);
+    string_pool.populate_memory_segments(&mut module.memories[memory]);
 
-    // 3. Lower each function body using the established registry contracts
+    // 3. Build complete module declarations registry
+    let registry = ModuleRegistry::build(
+        &mut module,
+        hir,
+        contract,
+        None,
+        Some(string_pool.next_free_address()),
+        memory,
+    )?;
+
+    // 5. Lower each function body using the established registry contracts
     for func in &hir.functions {
         let info = &registry.functions[&func.id];
-        let body = lower_function_body(func, info, &registry, &module, contract)?;
+        let body = lower_function_body(func, info, &registry, &module, &string_pool, contract)?;
         module.funcs[info.func_index] = waffle::FuncDecl::Body(info.sig, func.name.clone(), body);
 
         if let Some(export) = &info.export {
-            let wrapper = abi::build_export_wrapper(&module, info, export, registry.memory)?;
+            let lift_fn = registry.string_helpers.as_ref().map(|h| h.lift_canonical);
+            let wrapper = abi::build_export_wrapper(&module, info, export, registry.memory, lift_fn)?;
             module.funcs[export.func_index] =
                 waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
             module.exports.push(Export {
@@ -65,9 +79,11 @@ struct FunctionLowerer<'a> {
     module: &'a Module<'static>,
     registry: &'a ModuleRegistry,
     _contract: &'a ResolvedContract,
+    string_pool: &'a StringPool,
     body: FunctionBody,
     block: Block,
     locals: BTreeMap<LocalId, Value>,
+    local_types: BTreeMap<LocalId, HirType>,
     stream_parameter: Option<LocalId>,
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
@@ -78,17 +94,20 @@ fn lower_function_body(
     info: &FunctionInfo,
     registry: &ModuleRegistry,
     module: &Module<'static>,
+    string_pool: &StringPool,
     contract: &ResolvedContract,
 ) -> Result<FunctionBody> {
     let body = FunctionBody::new(module, info.sig);
     let entry = body.entry;
     let mut locals = BTreeMap::new();
+    let mut local_types = BTreeMap::new();
     let mut stream_parameter = None;
 
     // Map entry block parameters to function parameters
     for (i, param) in func.params.iter().enumerate() {
         let val = body.blocks[entry].params[i].1;
         locals.insert(param.id, val);
+        local_types.insert(param.id, param.ty.clone());
         if matches!(&param.ty, HirType::Named(n) if n == "ByteStream") {
             stream_parameter = Some(param.id);
         }
@@ -98,9 +117,11 @@ fn lower_function_body(
         module,
         registry,
         _contract: contract,
+        string_pool,
         body,
         block: entry,
         locals,
+        local_types,
         stream_parameter,
         awaited_calls: 0,
         unwind_ctx: UnwindContext::new(),
@@ -146,6 +167,8 @@ impl<'a> FunctionLowerer<'a> {
                     init: Some(expr),
                     ..
                 } => {
+                    let inferred = self.infer_expr_type(expr);
+                    self.local_types.insert(*id, inferred);
                     let val = self.expression(expr)?;
                     ensure!(
                         self.locals.insert(*id, val).is_none(),
@@ -154,6 +177,8 @@ impl<'a> FunctionLowerer<'a> {
                     );
                 }
                 Stmt::Expr(Expr::LocalSet(id, expr)) => {
+                    let inferred = self.infer_expr_type(expr);
+                    self.local_types.insert(*id, inferred);
                     let val = self.expression(expr)?;
                     self.locals.insert(*id, val);
                 }
@@ -295,6 +320,57 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::PropertyGet { object, property, .. } = callee {
+            if property == "slice" {
+                let desc = self.expression(object)?;
+                let start = self.expression(&args[0])?;
+                let end = if args.len() > 1 {
+                    self.expression(&args[1])?
+                } else {
+                    let scalar_len = self.op(
+                        Operator::I32Load {
+                            memory: waffle::MemoryArg { align: 2, offset: 8, memory: self.registry.memory },
+                        },
+                        &[desc],
+                        &[Type::I32],
+                    );
+                    self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64])
+                };
+                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                let res = self.op(
+                    Operator::Call { function_index: helpers.str_slice },
+                    &[desc, start, end],
+                    &[Type::I32],
+                );
+                return Ok(Some(res));
+            } else if property == "charAt" {
+                let desc = self.expression(object)?;
+                let idx = self.expression(&args[0])?;
+                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                let res = self.op(
+                    Operator::Call { function_index: helpers.str_char_at },
+                    &[desc, idx],
+                    &[Type::I32],
+                );
+                return Ok(Some(res));
+            } else if property == "indexOf" {
+                let desc = self.expression(object)?;
+                let search = self.expression(&args[0])?;
+                let pos = if args.len() > 1 {
+                    self.expression(&args[1])?
+                } else {
+                    self.op(Operator::F64Const { value: 0f64.to_bits() }, &[], &[Type::F64])
+                };
+                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                let res = self.op(
+                    Operator::Call { function_index: helpers.str_index_of },
+                    &[desc, search, pos],
+                    &[Type::F64],
+                );
+                return Ok(Some(res));
+            }
+        }
+
         let mut arg_vals = Vec::with_capacity(args.len());
         for a in args {
             arg_vals.push(self.expression(a)?);
@@ -345,7 +421,7 @@ impl<'a> FunctionLowerer<'a> {
                     &mut self.body,
                     self.block,
                     outcome.payload,
-                    matches!(callee_info.success_type(), HirType::Boolean),
+                    matches!(callee_info.success_type(), HirType::Boolean | HirType::String),
                 );
                 Ok(Some(return_val))
             }
@@ -394,6 +470,26 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Bool(b) => {
                 let v = if *b { 1 } else { 0 };
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
+            }
+            Expr::Compare { op, left, right } if self.is_string(left) || self.is_string(right) => {
+                let left_val = self.expression(left)?;
+                let right_val = self.expression(right)?;
+                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                let cmp_res = self.op(
+                    Operator::Call { function_index: helpers.str_compare },
+                    &[left_val, right_val],
+                    &[Type::I32],
+                );
+                let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+                let operator = match op {
+                    CompareOp::Eq | CompareOp::LooseEq => Operator::I32Eq,
+                    CompareOp::Ne | CompareOp::LooseNe => Operator::I32Ne,
+                    CompareOp::Lt => Operator::I32LtS,
+                    CompareOp::Le => Operator::I32LeS,
+                    CompareOp::Gt => Operator::I32GtS,
+                    CompareOp::Ge => Operator::I32GeS,
+                };
+                Ok(self.op(operator, &[cmp_res, zero], &[Type::I32]))
             }
             Expr::Compare { op, left, right } => {
                 let left_val = self.expression(left)?;
@@ -446,6 +542,16 @@ impl<'a> FunctionLowerer<'a> {
 
     fn expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::String(s) => {
+                let offset = self
+                    .string_pool
+                    .get(s)
+                    .unwrap_or_else(|| panic!("String literal {s:?} was not interned in string pool"));
+                Ok(self.op(Operator::I32Const { value: offset }, &[], &[Type::I32]))
+            }
+            Expr::TemplateStringCoerce(inner) => {
+                self.expression(inner)
+            }
             Expr::Number(n) => {
                 Ok(self.op(Operator::F64Const { value: n.to_bits() }, &[], &[Type::F64]))
             }
@@ -465,6 +571,40 @@ impl<'a> FunctionLowerer<'a> {
                 .get(id)
                 .copied()
                 .ok_or_else(|| anyhow::anyhow!("Uninitialized local {:?}", id)),
+            Expr::PropertyGet { object, property, .. } if property == "length" => {
+                let desc = self.expression(object)?;
+                let scalar_len = self.op(
+                    Operator::I32Load {
+                        memory: waffle::MemoryArg { align: 2, offset: 8, memory: self.registry.memory },
+                    },
+                    &[desc],
+                    &[Type::I32],
+                );
+                Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
+            }
+            Expr::IndexGet { object, index, .. } => {
+                let desc = self.expression(object)?;
+                let idx = self.expression(index)?;
+                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                Ok(self.op(
+                    Operator::Call { function_index: helpers.str_char_at },
+                    &[desc, idx],
+                    &[Type::I32],
+                ))
+            }
+            Expr::Compare { .. } => {
+                self.condition(expr)
+            }
+            Expr::Binary { op, left, right } if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) => {
+                let left_val = self.expression(left)?;
+                let right_val = self.expression(right)?;
+                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                Ok(self.op(
+                    Operator::Call { function_index: helpers.str_concat },
+                    &[left_val, right_val],
+                    &[Type::I32],
+                ))
+            }
             Expr::Binary { op, left, right } => {
                 let left_val = self.expression(left)?;
                 let right_val = self.expression(right)?;
@@ -666,5 +806,137 @@ impl<'a> FunctionLowerer<'a> {
 
     fn op(&mut self, operator: Operator, args: &[Value], returns: &[Type]) -> Value {
         self.body.add_op(self.block, operator, args, returns)
+    }
+
+    fn infer_expr_type(&self, expr: &Expr) -> HirType {
+        match expr {
+            Expr::String(_) | Expr::TemplateStringCoerce(_) => HirType::String,
+            Expr::Number(_) | Expr::Integer(_) => HirType::Number,
+            Expr::Bool(_) | Expr::Compare { .. } => HirType::Boolean,
+            Expr::LocalGet(id) => self.local_types.get(id).cloned().unwrap_or(HirType::Any),
+            Expr::IndexGet { .. } => HirType::String,
+            Expr::Call { callee, .. } => {
+                if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                    if property == "slice" || property == "charAt" {
+                        return HirType::String;
+                    } else if property == "indexOf" {
+                        return HirType::Number;
+                    }
+                } else if let Expr::FuncRef(fid) = callee.as_ref()
+                    && let Some(info) = self.registry.functions.get(fid)
+                {
+                    return info.success_type().clone();
+                }
+                HirType::Any
+            }
+            Expr::Binary { op, left, right } => {
+                if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) {
+                    HirType::String
+                } else {
+                    HirType::Number
+                }
+            }
+            _ => HirType::Any,
+        }
+    }
+
+    fn is_string(&self, expr: &Expr) -> bool {
+        matches!(self.infer_expr_type(expr), HirType::String)
+    }
+}
+
+fn collect_strings_in_module(hir: &HirModule, pool: &mut StringPool) {
+    pool.intern("");
+    for func in &hir.functions {
+        for stmt in &func.body {
+            collect_strings_stmt(stmt, pool);
+        }
+    }
+    for stmt in &hir.init {
+        collect_strings_stmt(stmt, pool);
+    }
+}
+
+fn collect_strings_stmt(stmt: &Stmt, pool: &mut StringPool) {
+    match stmt {
+        Stmt::Expr(expr) | Stmt::Throw(expr) => collect_strings_expr(expr, pool),
+        Stmt::Return(Some(expr)) => collect_strings_expr(expr, pool),
+        Stmt::Let { init: Some(expr), .. } => collect_strings_expr(expr, pool),
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_strings_expr(condition, pool);
+            for s in then_branch {
+                collect_strings_stmt(s, pool);
+            }
+            if let Some(eb) = else_branch {
+                for s in eb {
+                    collect_strings_stmt(s, pool);
+                }
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_strings_expr(condition, pool);
+            for s in body {
+                collect_strings_stmt(s, pool);
+            }
+        }
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            for s in body {
+                collect_strings_stmt(s, pool);
+            }
+            if let Some(c) = catch {
+                for s in &c.body {
+                    collect_strings_stmt(s, pool);
+                }
+            }
+            if let Some(f) = finally {
+                for s in f {
+                    collect_strings_stmt(s, pool);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_strings_expr(expr: &Expr, pool: &mut StringPool) {
+    match expr {
+        Expr::String(s) => {
+            pool.intern(s);
+        }
+        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } => {
+            collect_strings_expr(left, pool);
+            collect_strings_expr(right, pool);
+        }
+        Expr::Unary { operand, .. } => {
+            collect_strings_expr(operand, pool);
+        }
+        Expr::Await(expr) | Expr::TemplateStringCoerce(expr) => {
+            collect_strings_expr(expr, pool);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_strings_expr(callee, pool);
+            for arg in args {
+                collect_strings_expr(arg, pool);
+            }
+        }
+        Expr::PropertyGet { object, .. } => {
+            collect_strings_expr(object, pool);
+        }
+        Expr::IndexGet { object, index, .. } => {
+            collect_strings_expr(object, pool);
+            collect_strings_expr(index, pool);
+        }
+        Expr::LocalSet(_, expr) => {
+            collect_strings_expr(expr, pool);
+        }
+        _ => {}
     }
 }

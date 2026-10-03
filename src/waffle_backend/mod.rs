@@ -8,6 +8,7 @@ pub(crate) mod exceptions;
 pub(crate) mod registry;
 pub(crate) mod resolve;
 pub(crate) mod ssa;
+pub(crate) mod strings;
 pub mod text_contract;
 
 use anyhow::{Context, Result};

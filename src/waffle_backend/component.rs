@@ -77,7 +77,16 @@ pub(crate) fn frame_component(
         }
     }
 
-    let memory_option = if contract.entry_returns_wit_result() {
+    let has_string_or_realloc = contract.entry_params.iter().any(|ty| matches!(ty, HirType::String))
+        || matches!(contract.entry_return_type, HirType::String)
+        || if let HirType::Generic { base, type_args } = &contract.entry_return_type {
+            base == "Result" && type_args.iter().any(|ty| matches!(ty, HirType::String))
+        } else {
+            false
+        };
+    let memory_option = if has_string_or_realloc {
+        r#" (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))"#
+    } else if contract.entry_returns_wit_result() {
         r#" (memory (core memory $guest "memory"))"#
     } else {
         ""
@@ -128,6 +137,7 @@ fn component_value_type(ty: &HirType) -> Result<String> {
     match ty {
         HirType::Number | HirType::Any => Ok("f64".into()),
         HirType::Boolean => Ok("bool".into()),
+        HirType::String => Ok("string".into()),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             let ok = component_value_type(&type_args[0])?;
             let err = component_value_type(&type_args[1])?;

@@ -27,6 +27,7 @@ pub(crate) enum ExportConvention {
 pub(crate) enum PrimitivePayload {
     Number,
     Boolean,
+    String,
 }
 
 /// Complete, immutable metadata for a function declaration.
@@ -35,6 +36,7 @@ pub(crate) struct FunctionInfo {
     pub(crate) name: String,
     pub(crate) func_index: Func,
     pub(crate) sig: waffle::Signature,
+    pub(crate) param_types: Vec<HirType>,
     pub(crate) return_type: HirType,
     pub(crate) export: Option<FunctionExport>,
 }
@@ -70,6 +72,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
     pub(crate) stream_helpers: Option<(Func, Func)>,
+    pub(crate) string_helpers: Option<crate::waffle_backend::strings::StringHelperFuncs>,
     pub(crate) memory: waffle::Memory,
 }
 
@@ -80,6 +83,7 @@ impl ModuleRegistry {
         hir: &HirModule,
         contract: &ResolvedContract,
         stream_helpers: Option<(Func, Func)>,
+        string_heap_base: Option<u32>,
         memory: waffle::Memory,
     ) -> Result<Self> {
         // 1. Declare async intrinsics as imports
@@ -157,7 +161,16 @@ impl ModuleRegistry {
             None
         };
 
-        // 2. Pre-declare all functions and establish complete FunctionInfo records
+        // 2. Emit string runtime helpers ($rt_cabi_realloc, etc.) after all imports are declared
+        let string_helpers = if let Some(base) = string_heap_base {
+            Some(crate::waffle_backend::strings::emit_string_runtime(
+                module, memory, base,
+            )?)
+        } else {
+            None
+        };
+
+        // 3. Pre-declare all functions and establish complete FunctionInfo records
         let mut functions = BTreeMap::new();
         for func in &hir.functions {
             let is_exported = func.is_exported || (func.id == contract.entry_func_id);
@@ -180,6 +193,7 @@ impl ModuleRegistry {
                 Some(match &type_args[0] {
                     HirType::Number | HirType::Any => PrimitivePayload::Number,
                     HirType::Boolean => PrimitivePayload::Boolean,
+                    HirType::String => PrimitivePayload::String,
                     other => bail!("Unsupported WIT Result success payload: {other:?}"),
                 })
             } else {
@@ -217,8 +231,17 @@ impl ModuleRegistry {
                 } else {
                     ExportConvention::Direct
                 };
+                let mut export_params = Vec::new();
+                for p in &func.params {
+                    if matches!(p.ty, HirType::String) {
+                        export_params.push(Type::I32);
+                        export_params.push(Type::I32);
+                    } else {
+                        export_params.push(map_type_to_waffle(&p.ty)?);
+                    }
+                }
                 let sig = module.signatures.push(SignatureData {
-                    params,
+                    params: export_params,
                     returns: host_returns,
                 });
                 let mut body = FunctionBody::new(module, sig);
@@ -243,6 +266,7 @@ impl ModuleRegistry {
                     name: func.name.clone(),
                     func_index,
                     sig,
+                    param_types: func.params.iter().map(|p| p.ty.clone()).collect(),
                     return_type: func.return_type.clone(),
                     export,
                 },
@@ -253,6 +277,7 @@ impl ModuleRegistry {
             functions,
             intrinsics,
             stream_helpers,
+            string_helpers,
             memory,
         })
     }
@@ -262,6 +287,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
     match ty {
         HirType::Number | HirType::Any => Ok(Type::F64),
         HirType::Boolean => Ok(Type::I32),
+        HirType::String => Ok(Type::I32),
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
     }
@@ -272,6 +298,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::Void => Ok(vec![]),
         HirType::Number | HirType::Any => Ok(vec![Type::F64]),
         HirType::Boolean => Ok(vec![Type::I32]),
+        HirType::String => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             Ok(vec![Type::I32])
         }
