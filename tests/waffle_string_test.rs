@@ -893,6 +893,36 @@ async fn test_string_code_point_at() -> Result<()> {
             Val::Float64(f64::NAN),
         ),
     ];
+    let cases = cases.into_iter().chain([
+        (
+            vec![Val::String("ABC".into()), Val::Float64(f64::NAN)],
+            Val::Float64(65.0),
+        ),
+        (
+            vec![Val::String("ABC".into()), Val::Float64(-0.5)],
+            Val::Float64(65.0),
+        ),
+        (
+            vec![Val::String("ABC".into()), Val::Float64(-0.0)],
+            Val::Float64(65.0),
+        ),
+        (
+            vec![Val::String("ABC".into()), Val::Float64(1.9)],
+            Val::Float64(66.0),
+        ),
+        (
+            vec![Val::String("ABC".into()), Val::Float64(1e20)],
+            Val::Float64(f64::NAN),
+        ),
+        (
+            vec![Val::String("ABC".into()), Val::Float64(f64::INFINITY)],
+            Val::Float64(f64::NAN),
+        ),
+        (
+            vec![Val::String("ABC".into()), Val::Float64(f64::NEG_INFINITY)],
+            Val::Float64(f64::NAN),
+        ),
+    ]);
     // Custom runner to handle NaN comparison
     let compiled =
         compile_typescript_waffle(source, "code_point_at.ts", &WaffleCompileOptions::default())?;

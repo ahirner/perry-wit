@@ -7,7 +7,8 @@ pub extern "C" fn str_code_point_at(
     haystack_byte_len: u32,
     position: f64,
 ) -> f64 {
-    if position.is_nan() || position.is_infinite() || position < 0.0 {
+    // Rust's saturating cast maps NaN and (-1, 0) to zero, as ToIntegerOrInfinity requires.
+    if position <= -1.0 || position >= (u32::MAX as f64) + 1.0 {
         return f64::NAN;
     }
     let target_scalar = position as u32;
