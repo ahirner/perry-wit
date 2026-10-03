@@ -6,6 +6,31 @@ use perry_hir::{
     types::Type as HirType,
 };
 
+/// Descriptor zero represents undefined only within the string-or-undefined union.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum StringKind {
+    Present,
+    Optional,
+    Undefined,
+}
+
+impl StringKind {
+    pub(super) fn of(ty: &HirType) -> Option<Self> {
+        match ty {
+            HirType::String => Some(Self::Present),
+            HirType::Void => Some(Self::Undefined),
+            HirType::Union(types)
+                if types.len() == 2
+                    && types.contains(&HirType::String)
+                    && types.contains(&HirType::Void) =>
+            {
+                Some(Self::Optional)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
@@ -19,7 +44,8 @@ impl FunctionLowerer<'_> {
             Expr::Number(_) | Expr::Integer(_) => HirType::Number,
             Expr::Bool(_) | Expr::Compare { .. } => HirType::Boolean,
             Expr::LocalGet(id) => self.local_types.get(id).cloned().unwrap_or(HirType::Any),
-            Expr::IndexGet { .. } => HirType::String,
+            Expr::IndexGet { .. } => HirType::Union(vec![HirType::String, HirType::Void]),
+            Expr::Undefined => HirType::Void,
             Expr::Call { callee, .. } => {
                 if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                     if property == "slice" || property == "charAt" {
@@ -50,6 +76,13 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn is_string(&self, expr: &Expr) -> bool {
-        matches!(self.infer_expr_type(expr), HirType::String)
+        matches!(
+            StringKind::of(&self.infer_expr_type(expr)),
+            Some(StringKind::Present | StringKind::Optional)
+        )
+    }
+
+    pub(super) fn is_string_or_undefined(&self, expr: &Expr) -> bool {
+        StringKind::of(&self.infer_expr_type(expr)).is_some()
     }
 }

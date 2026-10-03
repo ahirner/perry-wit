@@ -5,19 +5,74 @@ use perry_hir::{
     ir::{CompareOp, Expr},
     types::Type as HirType,
 };
-use waffle::{Operator, Type, Value};
+use waffle::{BlockTarget, Operator, Terminator, Type, Value};
 
 use super::FunctionLowerer;
+use super::types::StringKind;
 
 impl FunctionLowerer<'_> {
     /// Rejects unsupported coercions before a primitive can become a descriptor address.
     pub(super) fn string_operand(&mut self, expr: &Expr) -> Result<Value> {
         ensure!(
-            self.is_string(expr),
+            self.infer_expr_type(expr) == HirType::String,
             "String coercion is unsupported for {:?}",
             self.infer_expr_type(expr)
         );
         self.expression(expr)
+    }
+
+    /// String-only operations trap on undefined instead of reading address zero as a descriptor.
+    pub(super) fn string_receiver(&mut self, expr: &Expr) -> Result<Value> {
+        ensure!(
+            self.is_string(expr),
+            "Expected a string, got {:?}",
+            self.infer_expr_type(expr)
+        );
+        let value = self.expression(expr)?;
+        let present = self.body.add_block();
+        let missing = self.body.add_block();
+        self.body.set_terminator(
+            self.block,
+            Terminator::CondBr {
+                cond: value,
+                if_true: BlockTarget {
+                    block: present,
+                    args: vec![],
+                },
+                if_false: BlockTarget {
+                    block: missing,
+                    args: vec![],
+                },
+            },
+        );
+        self.body.set_terminator(missing, Terminator::Unreachable);
+        self.block = present;
+        Ok(value)
+    }
+
+    pub(super) fn string_truthiness(&mut self, desc: Value) -> Value {
+        let present = self.body.add_block();
+        let join = self.body.add_block();
+        let result = self.body.add_blockparam(join, Type::I32);
+        self.body.set_terminator(
+            self.block,
+            Terminator::CondBr {
+                cond: desc,
+                if_true: BlockTarget {
+                    block: present,
+                    args: vec![],
+                },
+                if_false: BlockTarget {
+                    block: join,
+                    args: vec![desc],
+                },
+            },
+        );
+        self.block = present;
+        let length = self.string_length(desc);
+        self.branch(join, vec![length]);
+        self.block = join;
+        result
     }
 
     /// Reads scalar length for properties and truthiness of a known string.
@@ -44,19 +99,17 @@ impl FunctionLowerer<'_> {
     ) -> Result<Value> {
         let left_type = self.infer_expr_type(left);
         let right_type = self.infer_expr_type(right);
+        let left_kind = StringKind::of(&left_type);
+        let right_kind = StringKind::of(&right_type);
         let left_val = self.expression(left)?;
         let right_val = self.expression(right)?;
-        if left_type != HirType::String || right_type != HirType::String {
+        if left_kind.is_none() || right_kind.is_none() {
             ensure!(
                 matches!(op, CompareOp::Eq | CompareOp::Ne)
-                    && matches!(
-                        left_type,
-                        HirType::String | HirType::Number | HirType::Boolean
-                    )
-                    && matches!(
-                        right_type,
-                        HirType::String | HirType::Number | HirType::Boolean
-                    ),
+                    && (left_kind.is_some()
+                        || matches!(left_type, HirType::Number | HirType::Boolean))
+                    && (right_kind.is_some()
+                        || matches!(right_type, HirType::Number | HirType::Boolean)),
                 "Unsupported mixed string comparison: {left_type:?} {op:?} {right_type:?}"
             );
             return Ok(self.op(
@@ -67,6 +120,14 @@ impl FunctionLowerer<'_> {
                 &[Type::I32],
             ));
         }
+        ensure!(
+            matches!(
+                op,
+                CompareOp::Eq | CompareOp::Ne | CompareOp::LooseEq | CompareOp::LooseNe
+            ) || (left_kind == Some(StringKind::Present)
+                && right_kind == Some(StringKind::Present)),
+            "Ordering string-or-undefined values requires an unsupported coercion"
+        );
         let helpers = self
             .registry
             .string_helpers
@@ -116,7 +177,7 @@ impl FunctionLowerer<'_> {
             .registry
             .string_helpers
             .expect("String runtime is registered");
-        let desc = self.expression(receiver)?;
+        let desc = self.string_receiver(receiver)?;
         let (function_index, values, result_type) = match method {
             "slice" => {
                 let start = self.position_argument(args.first(), 0.0)?;
@@ -132,7 +193,7 @@ impl FunctionLowerer<'_> {
                     self.is_string(&args[0]),
                     "indexOf requires a string search operand"
                 );
-                let search = self.expression(&args[0])?;
+                let search = self.string_receiver(&args[0])?;
                 let position = self.position_argument(args.get(1), 0.0)?;
                 (
                     helpers.str_index_of,
@@ -146,7 +207,7 @@ impl FunctionLowerer<'_> {
     }
 
     /// Supplies omitted/undefined defaults without silently coercing other argument types.
-    fn position_argument(&mut self, arg: Option<&Expr>, default: f64) -> Result<Value> {
+    pub(super) fn position_argument(&mut self, arg: Option<&Expr>, default: f64) -> Result<Value> {
         let value = match arg {
             None | Some(Expr::Undefined) => self.op(
                 Operator::F64Const {

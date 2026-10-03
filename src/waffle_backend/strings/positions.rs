@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use waffle::{
-    Block, Func, FuncDecl, FunctionBody, Memory, MemoryArg, Module, Operator, SignatureData,
-    Terminator, Type, Value,
+    Block, BlockTarget, Func, FuncDecl, FunctionBody, Memory, MemoryArg, Module, Operator,
+    SignatureData, Terminator, Type, Value,
 };
 
 pub(super) enum PositionMode {
@@ -58,11 +58,18 @@ pub(super) fn bounded_position(
     body.add_op(block, Operator::I32TruncF64U, &[bounded], &[Type::I32])
 }
 
-/// Character access checks absolute bounds before invoking the relative slice operation.
-pub(super) fn emit_char_at(
+pub(super) enum CharacterAccess {
+    CharAt,
+    Index,
+}
+
+/// Bracket access uses integral property indices and a null descriptor for undefined.
+/// charAt truncates positions and returns an allocated empty string outside the bounds.
+pub(super) fn emit_character_access(
     module: &mut Module<'static>,
     memory: Memory,
     slice: Func,
+    access: CharacterAccess,
 ) -> Result<Func> {
     let sig = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::F64],
@@ -71,8 +78,8 @@ pub(super) fn emit_char_at(
     let mut body = FunctionBody::new(module, sig);
     let entry = body.entry;
     let desc = body.blocks[entry].params[0].1;
-    let index = body.blocks[entry].params[1].1;
-    let index = integer_position(&mut body, entry, index);
+    let position = body.blocks[entry].params[1].1;
+    let index = integer_position(&mut body, entry, position);
     let length = body.add_op(
         entry,
         Operator::I32Load {
@@ -89,40 +96,79 @@ pub(super) fn emit_char_at(
     let zero = body.add_op(entry, Operator::F64Const { value: 0 }, &[], &[Type::F64]);
     let nonnegative = body.add_op(entry, Operator::F64Ge, &[index, zero], &[Type::I32]);
     let in_range = body.add_op(entry, Operator::F64Lt, &[index, length], &[Type::I32]);
-    let valid = body.add_op(
+    let mut valid = body.add_op(
         entry,
         Operator::I32And,
         &[nonnegative, in_range],
         &[Type::I32],
     );
-    let one = body.add_op(
+    if matches!(access, CharacterAccess::Index) {
+        let integral = body.add_op(entry, Operator::F64Eq, &[position, index], &[Type::I32]);
+        valid = body.add_op(entry, Operator::I32And, &[valid, integral], &[Type::I32]);
+    }
+    let found = body.add_block();
+    let missing = body.add_block();
+    body.set_terminator(
         entry,
+        Terminator::CondBr {
+            cond: valid,
+            if_true: BlockTarget {
+                block: found,
+                args: vec![],
+            },
+            if_false: BlockTarget {
+                block: missing,
+                args: vec![],
+            },
+        },
+    );
+    let missing_result = match access {
+        CharacterAccess::Index => {
+            body.add_op(missing, Operator::I32Const { value: 0 }, &[], &[Type::I32])
+        }
+        CharacterAccess::CharAt => body.add_op(
+            missing,
+            Operator::Call {
+                function_index: slice,
+            },
+            &[desc, zero, zero],
+            &[Type::I32],
+        ),
+    };
+    body.set_terminator(
+        missing,
+        Terminator::Return {
+            values: vec![missing_result],
+        },
+    );
+    let one = body.add_op(
+        found,
         Operator::F64Const {
             value: 1f64.to_bits(),
         },
         &[],
         &[Type::F64],
     );
-    let end = body.add_op(entry, Operator::F64Add, &[index, one], &[Type::F64]);
-    let start = body.add_op(entry, Operator::Select, &[index, zero, valid], &[Type::F64]);
-    let end = body.add_op(entry, Operator::Select, &[end, zero, valid], &[Type::F64]);
+    let end = body.add_op(found, Operator::F64Add, &[index, one], &[Type::F64]);
     let result = body.add_op(
-        entry,
+        found,
         Operator::Call {
             function_index: slice,
         },
-        &[desc, start, end],
+        &[desc, index, end],
         &[Type::I32],
     );
     body.set_terminator(
-        entry,
+        found,
         Terminator::Return {
             values: vec![result],
         },
     );
     body.validate()?;
     body.verify_reducible()?;
-    Ok(module
-        .funcs
-        .push(FuncDecl::Body(sig, "$rt_str_char_at".into(), body)))
+    let name = match access {
+        CharacterAccess::CharAt => "$rt_str_char_at",
+        CharacterAccess::Index => "$rt_str_index",
+    };
+    Ok(module.funcs.push(FuncDecl::Body(sig, name.into(), body)))
 }

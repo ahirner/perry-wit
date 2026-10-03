@@ -756,3 +756,70 @@ async fn test_string_mixed_comparisons() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_indexing_preserves_undefined() -> Result<()> {
+    run_cases(
+        r#"export function run(input: string): boolean { return input[99] === ""; }"#,
+        &[(vec![Val::String("abc".into())], Val::Bool(false))],
+    )
+    .await?;
+    let source = r#"
+        export async function run(input: string, index: number): Promise<number> {
+            let character = await input[index];
+            let result = 0;
+            if (character === undefined) { result = result + 1; }
+            if (character === "") { result = result + 2; }
+            if (character !== input.charAt(index)) { result = result + 4; }
+            if (character) { result = result + 8; }
+            if (character === input[index]) { result = result + 16; }
+            if (character === false) { return 99; }
+            if (character === 0) { return 98; }
+            if (character == undefined) {
+                if (undefined !== character) { return 97; }
+            }
+            return result;
+        }
+    "#;
+    let cases = [
+        ("A🦀B", 0.0, 24.0),
+        ("A🦀B", 1.0, 24.0),
+        ("A🦀B", 2.0, 24.0),
+        ("A🦀B", -0.0, 24.0),
+        ("A🦀B", 99.0, 21.0),
+        ("A🦀B", -2.0, 21.0),
+        ("A🦀B", 1.5, 21.0),
+        ("A🦀B", -0.5, 21.0),
+        ("A🦀B", f64::NAN, 21.0),
+        ("A🦀B", f64::INFINITY, 21.0),
+        ("A🦀B", f64::NEG_INFINITY, 21.0),
+        ("", 0.0, 21.0),
+    ]
+    .into_iter()
+    .map(|(s, i, n)| {
+        (
+            vec![Val::String(s.into()), Val::Float64(i)],
+            Val::Float64(n),
+        )
+    })
+    .collect::<Vec<_>>();
+    run_cases(source, &cases).await?;
+
+    for expression in ["input[99]", "input[99].slice()", "echo(input[99])"] {
+        let source = format!(
+            "function echo(s: string): string {{ return s; }}
+             export function run(input: string): string {{ return {expression}; }}"
+        );
+        let error = run_cases(
+            &source,
+            &[(vec![Val::String("abc".into())], Val::String("".into()))],
+        )
+        .await
+        .expect_err("Undefined must not cross a string-only boundary as an empty string");
+        assert!(
+            format!("{error:#}").contains("unreachable"),
+            "{expression}: {error:#}"
+        );
+    }
+    Ok(())
+}

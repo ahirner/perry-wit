@@ -84,6 +84,7 @@ struct FunctionLowerer<'a> {
     registry: &'a ModuleRegistry,
     _contract: &'a ResolvedContract,
     string_pool: &'a StringPool,
+    return_type: &'a HirType,
     body: FunctionBody,
     block: Block,
     locals: BTreeMap<LocalId, Value>,
@@ -122,6 +123,7 @@ fn lower_function_body(
         registry,
         _contract: contract,
         string_pool,
+        return_type: info.success_type(),
         body,
         block: entry,
         locals,
@@ -195,7 +197,19 @@ impl<'a> FunctionLowerer<'a> {
                 Stmt::Return(expr) => {
                     let ret_val = expr
                         .as_ref()
-                        .map(|expr| self.expression(expr))
+                        .map(|expr| {
+                            if self.return_type == &HirType::String {
+                                self.string_receiver(expr)
+                            } else {
+                                ensure!(
+                                    !self.is_string_or_undefined(expr)
+                                        || self.return_type == &HirType::Void,
+                                    "Cannot return a string-or-undefined value as {:?}",
+                                    self.return_type
+                                );
+                                self.expression(expr)
+                            }
+                        })
                         .transpose()?;
                     self.emit_return(ret_val);
                 }
@@ -332,8 +346,25 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         let mut arg_vals = Vec::with_capacity(args.len());
-        for a in args {
-            arg_vals.push(self.expression(a)?);
+        for (index, arg) in args.iter().enumerate() {
+            let expected = match callee {
+                Expr::FuncRef(fid) => self
+                    .registry
+                    .functions
+                    .get(fid)
+                    .and_then(|info| info.param_types.get(index)),
+                _ => None,
+            };
+            let value = if expected == Some(&HirType::String) {
+                self.string_receiver(arg)?
+            } else {
+                ensure!(
+                    !matches!(self.infer_expr_type(arg), HirType::Union(_) | HirType::Void),
+                    "String-or-undefined arguments require a string parameter"
+                );
+                self.expression(arg)?
+            };
+            arg_vals.push(value);
         }
 
         if let Expr::ExternFuncRef { name, .. } = callee {
@@ -434,7 +465,9 @@ impl<'a> FunctionLowerer<'a> {
                 let v = if *b { 1 } else { 0 };
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
             }
-            Expr::Compare { op, left, right } if self.is_string(left) || self.is_string(right) => {
+            Expr::Compare { op, left, right }
+                if self.is_string_or_undefined(left) || self.is_string_or_undefined(right) =>
+            {
                 self.string_comparison(*op, left, right)
             }
             Expr::Compare { op, left, right } => {
@@ -469,7 +502,7 @@ impl<'a> FunctionLowerer<'a> {
                 let val = self.expression(expr)?;
                 let ty = self.body.values[val].ty(&self.body.type_pool);
                 if self.is_string(expr) {
-                    Ok(self.string_length(val))
+                    Ok(self.string_truthiness(val))
                 } else if ty == Some(Type::I32) {
                     Ok(val)
                 } else {
@@ -513,6 +546,7 @@ impl<'a> FunctionLowerer<'a> {
                 let v = if *b { 1 } else { 0 };
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
             }
+            Expr::Undefined => Ok(self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])),
             Expr::LocalGet(id) => self
                 .locals
                 .get(id)
@@ -521,13 +555,13 @@ impl<'a> FunctionLowerer<'a> {
             Expr::PropertyGet {
                 object, property, ..
             } if property == "length" => {
-                let desc = self.expression(object)?;
+                let desc = self.string_receiver(object)?;
                 let scalar_len = self.string_length(desc);
                 Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
             }
             Expr::IndexGet { object, index, .. } => {
-                let desc = self.expression(object)?;
-                let idx = self.expression(index)?;
+                let desc = self.string_receiver(object)?;
+                let idx = self.position_argument(Some(index), f64::NAN)?;
                 let helpers = self
                     .registry
                     .string_helpers
@@ -535,7 +569,7 @@ impl<'a> FunctionLowerer<'a> {
                     .expect("string helpers available");
                 Ok(self.op(
                     Operator::Call {
-                        function_index: helpers.str_char_at,
+                        function_index: helpers.str_index,
                     },
                     &[desc, idx],
                     &[Type::I32],
@@ -563,6 +597,13 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Binary { op, left, right } => {
                 let left_val = self.expression(left)?;
                 let right_val = self.expression(right)?;
+                ensure!(
+                    [left_val, right_val]
+                        .into_iter()
+                        .all(|value| self.body.values[value].ty(&self.body.type_pool)
+                            == Some(Type::F64)),
+                    "Arithmetic operands must be numeric"
+                );
                 let operator = match op {
                     BinaryOp::Add => Operator::F64Add,
                     BinaryOp::Sub => Operator::F64Sub,

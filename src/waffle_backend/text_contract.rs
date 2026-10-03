@@ -68,7 +68,7 @@ impl TextContractMatrix {
             operation: "index_access",
             unit: IndexUnit::ScalarValue,
             status: OperationStatus::SupportedScalar,
-            coercion: "Numeric index coerced to integer scalar offset",
+            coercion: "Finite, nonnegative integer numeric index; other numeric positions yield undefined",
             boundary_behavior: "Returns single-scalar string; out-of-range yields undefined",
             node_difference: "Returns complete scalar ('😀'[0] === '😀'); Node returns lone surrogate half ('\\uD83D')",
         },
