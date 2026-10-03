@@ -1,7 +1,7 @@
 //! WebAssembly Component Model framing for WAFFLE core modules, supporting WASI 0.3 (P3).
 
-use anyhow::{Context, Result};
 use crate::waffle_backend::resolve::{ResolvedContract, ResolvedInputKind, TypedIntrinsic};
+use anyhow::{Context, Result, ensure};
 
 /// The WASI 0.3 monotonic clock adapter for async stack suspension.
 pub(crate) const P3_CLOCK_ADAPTER: &str = r#"
@@ -24,8 +24,11 @@ pub(crate) fn frame_component(
     core_wasm: &[u8],
     contract: &ResolvedContract,
 ) -> Result<(String, Vec<u8>)> {
-    let core_wat = wasmprinter::print_bytes(core_wasm)
-        .context("Printing core Wasm to WAT")?;
+    ensure!(
+        contract.input_kind != ResolvedInputKind::ByteStream,
+        "ByteStream componentization is unsupported until its canonical ABI adapter is implemented"
+    );
+    let core_wat = wasmprinter::print_bytes(core_wasm).context("Printing core Wasm to WAT")?;
     let core_body = core_wat
         .strip_prefix("(module")
         .and_then(|b| b.trim_end().strip_suffix(')'))
@@ -68,9 +71,8 @@ pub(crate) fn frame_component(
         }
     }
 
-    let component_wat = match contract.input_kind {
-        ResolvedInputKind::Number => format!(
-            r#"(component
+    let component_wat = format!(
+        r#"(component
 {clock_import}
 {host_imports}
   (core module $guest {core_body})
@@ -80,23 +82,9 @@ pub(crate) fn frame_component(
       {clock_wire}))))
   (func (export "run") async (param "input" f64) (result f64)
     (canon lift (core func $guest "run"))))"#
-        ),
-        ResolvedInputKind::ByteStream => format!(
-            r#"(component
-{clock_import}
-{host_imports}
-  (core module $guest {core_body})
-  (core instance $guest (instantiate $guest
-    (with "host" (instance
-{host_wires}
-      {clock_wire}))))
-  (func (export "run") async (param "input" i32) (result f64)
-    (canon lift (core func $guest "run"))))"#
-        ),
-    };
-
-    let component_bytes = wat::parse_str(&component_wat)
-        .context("Encoding component WAT to binary")?;
+    );
+    let component_bytes =
+        wat::parse_str(&component_wat).context("Encoding component WAT to binary")?;
 
     Ok((component_wat, component_bytes))
 }

@@ -485,3 +485,25 @@ fn test_waffle_boolean_comparisons() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_waffle_stream_componentization_is_explicitly_unsupported() -> Result<()> {
+    let source = "export function run(input: ByteStream): number { return 42; }";
+    let error = compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ByteStream componentization is unsupported")
+    );
+
+    let options = WaffleCompileOptions {
+        componentize: false,
+        ..Default::default()
+    };
+    let compiled = compile_typescript_waffle(source, "stream.ts", &options)?;
+    let engine = Engine::default();
+    Module::new(&engine, compiled.core)?;
+    assert!(compiled.component.is_none());
+    Ok(())
+}
