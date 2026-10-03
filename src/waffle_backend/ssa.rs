@@ -8,16 +8,18 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
 use perry_hir::ir::{BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt};
-use perry_hir::types::{FuncId, LocalId, Type as HirType};
+use perry_hir::types::{LocalId, Type as HirType};
 use waffle::{
-    Block, BlockTarget, Export, ExportKind, Func, FuncDecl, FunctionBody, Import, ImportKind,
-    Module, Operator, SignatureData, Terminator, Type, Value, ValueDef,
+    Block, BlockTarget, Export, ExportKind, FunctionBody, Module,
+    Operator, Terminator, Type, Value,
 };
 
+use crate::waffle_backend::abi;
 use crate::waffle_backend::exceptions::{
     ExitReason, ReturnTarget, TryScope, UnwindContext, UnwindTarget,
 };
-use crate::waffle_backend::resolve::{ResolvedContract, ResolvedInputKind, TypedIntrinsic};
+use crate::waffle_backend::registry::{CallingConvention, FunctionInfo, ModuleRegistry};
+use crate::waffle_backend::resolve::ResolvedContract;
 
 /// Compiles a resolved HIR module into a validated WAFFLE module.
 pub(crate) fn lower_module(
@@ -26,68 +28,7 @@ pub(crate) fn lower_module(
 ) -> Result<Module<'static>> {
     let mut module = Module::empty();
 
-    // 1. Register imports for declared intrinsics
-    let mut intrinsic_funcs = BTreeMap::new();
-    for (name, intrinsic) in &contract.intrinsics {
-        let (params, returns) = match intrinsic {
-            TypedIntrinsic::WaitFor => (vec![Type::F64], vec![]),
-            TypedIntrinsic::HostDouble => (vec![Type::F64], vec![Type::F64]),
-            TypedIntrinsic::ReadChunk => (vec![Type::I32], vec![Type::F64]),
-            TypedIntrinsic::ByteAt => (vec![Type::F64], vec![Type::F64]),
-            TypedIntrinsic::StreamDrop => (vec![Type::I32], vec![]),
-            TypedIntrinsic::StreamReset => (vec![], vec![]),
-            TypedIntrinsic::Custom {
-                params, returns, ..
-            } => (params.clone(), returns.clone()),
-        };
-        let signature = module.signatures.push(SignatureData { params, returns });
-        let func = module.funcs.push(FuncDecl::Import(signature, name.clone()));
-        module.imports.push(Import {
-            module: "host".into(),
-            name: name.clone(),
-            kind: ImportKind::Func(func),
-        });
-        intrinsic_funcs.insert(name.clone(), func);
-    }
-
-    // Add stream reset/drop imports if byte stream contract
-    let stream_helpers = if contract.input_kind == ResolvedInputKind::ByteStream {
-        let drop = if let Some(&f) = intrinsic_funcs.get("drop") {
-            f
-        } else {
-            let sig = module.signatures.push(SignatureData {
-                params: vec![Type::I32],
-                returns: vec![],
-            });
-            let f = module.funcs.push(FuncDecl::Import(sig, "drop".into()));
-            module.imports.push(Import {
-                module: "host".into(),
-                name: "drop".into(),
-                kind: ImportKind::Func(f),
-            });
-            f
-        };
-        let reset = if let Some(&f) = intrinsic_funcs.get("reset") {
-            f
-        } else {
-            let sig = module.signatures.push(SignatureData {
-                params: vec![],
-                returns: vec![],
-            });
-            let f = module.funcs.push(FuncDecl::Import(sig, "reset".into()));
-            module.imports.push(Import {
-                module: "host".into(),
-                name: "reset".into(),
-                kind: ImportKind::Func(f),
-            });
-            f
-        };
-        Some((drop, reset))
-    } else {
-        None
-    };
-
-    // 1.5. Declare and export linear memory for Canonical ABI options and component framing
+    // 1. Declare and export linear memory for Canonical ABI options and component framing
     let memory = module.memories.push(waffle::MemoryData {
         initial_pages: 1,
         maximum_pages: None,
@@ -98,64 +39,19 @@ pub(crate) fn lower_module(
         kind: ExportKind::Memory(memory),
     });
 
-    // 2. Pre-declare all module functions to allow mutual / intra-module calls
-    let mut func_decls = BTreeMap::new();
-    let mut func_is_exported = BTreeMap::new();
-    let mut func_return_types = BTreeMap::new();
+    // 2. Build complete module declarations registry
+    let registry = ModuleRegistry::build(&mut module, hir, contract, None, memory)?;
 
+    // 3. Lower each function body using the established registry contracts
     for func in &hir.functions {
-        let is_exported = func.is_exported || (func.id == contract.entry_func_id);
-        func_is_exported.insert(func.id, is_exported);
-        func_return_types.insert(func.id, func.return_type.clone());
-        let params = func
-            .params
-            .iter()
-            .map(|p| map_type_to_waffle(&p.ty))
-            .collect::<Result<Vec<_>>>()?;
-        let returns = if is_exported {
-            map_return_type_to_waffle(&func.return_type)?
-        } else {
-            vec![Type::I32, Type::F64]
-        };
-        let sig = module.signatures.push(SignatureData { params, returns });
-        let mut body = FunctionBody::new(&module, sig);
-        body.set_terminator(body.entry, Terminator::Unreachable);
-        let declaration = module
-            .funcs
-            .push(FuncDecl::Body(sig, func.name.clone(), body));
-        func_decls.insert(func.id, declaration);
-    }
+        let info = &registry.functions[&func.id];
+        let body = lower_function_body(func, info, &registry, &module, contract)?;
+        module.funcs[info.func_index] = waffle::FuncDecl::Body(info.sig, func.name.clone(), body);
 
-    // 3. Lower each function body
-    for func in &hir.functions {
-        let func_decl = func_decls[&func.id];
-        let sig = module.funcs[func_decl].sig();
-        let body = lower_function_body(
-            func,
-            sig,
-            &module,
-            contract,
-            &intrinsic_funcs,
-            &func_decls,
-            &func_is_exported,
-            &func_return_types,
-            stream_helpers,
-            memory,
-        )?;
-        module.funcs[func_decl] = FuncDecl::Body(sig, func.name.clone(), body);
-
-        if func.is_exported || func.id == contract.entry_func_id {
-            let export_name = if func.name == "main"
-                || func.name == "experiment"
-                || func.id == contract.entry_func_id
-            {
-                "run"
-            } else {
-                &func.name
-            };
+        if let Some(export_name) = &info.export_name {
             module.exports.push(Export {
-                name: export_name.into(),
-                kind: ExportKind::Func(func_decl),
+                name: export_name.clone(),
+                kind: ExportKind::Func(info.func_index),
             });
         }
     }
@@ -163,62 +59,28 @@ pub(crate) fn lower_module(
     Ok(module)
 }
 
-fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
-    match ty {
-        HirType::Number | HirType::Any => Ok(Type::F64),
-        HirType::Boolean => Ok(Type::I32),
-        HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
-        _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
-    }
-}
-
-fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
-    match ty {
-        HirType::Void => Ok(vec![]),
-        HirType::Number | HirType::Any => Ok(vec![Type::F64]),
-        HirType::Boolean => Ok(vec![Type::I32]),
-        HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
-            Ok(vec![Type::I32])
-        }
-        HirType::Promise(inner) => map_return_type_to_waffle(inner),
-        _ => bail!("Unsupported return type in WAFFLE lowering: {ty:?}"),
-    }
-}
-
 /// Function body lowerer.
 struct FunctionLowerer<'a> {
     module: &'a Module<'static>,
+    registry: &'a ModuleRegistry,
+    current_func: &'a FunctionInfo,
     _contract: &'a ResolvedContract,
     body: FunctionBody,
     block: Block,
     locals: BTreeMap<LocalId, Value>,
-    intrinsic_funcs: &'a BTreeMap<String, Func>,
-    func_decls: &'a BTreeMap<FuncId, Func>,
-    func_is_exported: &'a BTreeMap<FuncId, bool>,
-    func_return_types: &'a BTreeMap<FuncId, HirType>,
-    stream_helpers: Option<(Func, Func)>,
     stream_parameter: Option<LocalId>,
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
-    is_exported: bool,
-    returns_wit_result: bool,
-    memory: waffle::Memory,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn lower_function_body(
     func: &Function,
-    sig: waffle::Signature,
+    info: &FunctionInfo,
+    registry: &ModuleRegistry,
     module: &Module<'static>,
     contract: &ResolvedContract,
-    intrinsic_funcs: &BTreeMap<String, Func>,
-    func_decls: &BTreeMap<FuncId, Func>,
-    func_is_exported: &BTreeMap<FuncId, bool>,
-    func_return_types: &BTreeMap<FuncId, HirType>,
-    stream_helpers: Option<(Func, Func)>,
-    memory: waffle::Memory,
 ) -> Result<FunctionBody> {
-    let body = FunctionBody::new(module, sig);
+    let body = FunctionBody::new(module, info.sig);
     let entry = body.entry;
     let mut locals = BTreeMap::new();
     let mut stream_parameter = None;
@@ -232,37 +94,20 @@ fn lower_function_body(
         }
     }
 
-    let is_exported = func_is_exported[&func.id];
-    let mut ret_ty = &func.return_type;
-    while let HirType::Promise(inner) = ret_ty {
-        ret_ty = inner;
-    }
-    let returns_wit_result = if func.id == contract.entry_func_id {
-        contract.entry_returns_wit_result()
-    } else {
-        matches!(ret_ty, HirType::Generic { base, .. } if base == "Result")
-    };
-
     let mut lowerer = FunctionLowerer {
         module,
+        registry,
+        current_func: info,
         _contract: contract,
         body,
         block: entry,
         locals,
-        intrinsic_funcs,
-        func_decls,
-        func_is_exported,
-        func_return_types,
-        stream_helpers,
         stream_parameter,
         awaited_calls: 0,
         unwind_ctx: UnwindContext::new(),
-        is_exported,
-        returns_wit_result,
-        memory,
     };
 
-    if let Some((_, reset)) = lowerer.stream_helpers {
+    if let Some((_, reset)) = registry.stream_helpers {
         lowerer.op(
             Operator::Call {
                 function_index: reset,
@@ -277,49 +122,15 @@ fn lower_function_body(
     // If the block is not terminated, emit default return or ensure proper termination
     if lowerer.body.blocks[lowerer.block].terminator == Terminator::None {
         lowerer.cleanup_resources();
-        let ret_types = &module.signatures[sig].returns;
-        if ret_types.is_empty() {
-            lowerer
-                .body
-                .set_terminator(lowerer.block, Terminator::Return { values: vec![] });
-        } else if ret_types.len() == 1 && ret_types[0] == Type::F64 {
-            let zero = lowerer.op(
-                Operator::F64Const {
-                    value: 0f64.to_bits(),
-                },
-                &[],
-                &[Type::F64],
-            );
-            lowerer
-                .body
-                .set_terminator(lowerer.block, Terminator::Return { values: vec![zero] });
-        } else if ret_types.len() == 1 && ret_types[0] == Type::I32 {
-            let zero = lowerer.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-            lowerer
-                .body
-                .set_terminator(lowerer.block, Terminator::Return { values: vec![zero] });
-        } else if ret_types.len() == 2 && ret_types[0] == Type::I32 && ret_types[1] == Type::F64 {
-            let zero_i32 = lowerer.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-            let zero_f64 = lowerer.op(
-                Operator::F64Const {
-                    value: 0f64.to_bits(),
-                },
-                &[],
-                &[Type::F64],
-            );
-            lowerer.body.set_terminator(
-                lowerer.block,
-                Terminator::Return {
-                    values: vec![zero_i32, zero_f64],
-                },
-            );
-        } else {
-            bail!(
-                "Unterminated block in function '{}' with non-void return signature {:?}",
-                func.name,
-                ret_types
-            );
-        }
+        let expected_rets = &module.signatures[info.sig].returns;
+        abi::emit_function_return(
+            &mut lowerer.body,
+            lowerer.block,
+            registry.memory,
+            info.calling_convention,
+            expected_rets,
+            None,
+        );
     }
 
     lowerer.body.validate()?;
@@ -368,25 +179,7 @@ impl<'a> FunctionLowerer<'a> {
                             block: finally_block,
                             scope_locals,
                         } => {
-                            let payload = if let Some(val) = ret_val {
-                                let ty = self.body.values[val]
-                                    .ty(&self.body.type_pool)
-                                    .unwrap_or(Type::F64);
-                                if ty == Type::I32 {
-                                    self.op(Operator::F64ConvertI32U, &[val], &[Type::F64])
-                                } else {
-                                    val
-                                }
-                            } else {
-                                self.op(
-                                    Operator::F64Const {
-                                        value: 0f64.to_bits(),
-                                    },
-                                    &[],
-                                    &[Type::F64],
-                                )
-                            };
-
+                            let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
                             let reason_val = self.op(
                                 Operator::I32Const {
                                     value: ExitReason::Return.tag(),
@@ -403,147 +196,22 @@ impl<'a> FunctionLowerer<'a> {
                         }
                         ReturnTarget::FunctionExit => {
                             self.cleanup_resources();
-                            if self.is_exported {
-                                if self.returns_wit_result {
-                                    let addr = self.op(
-                                        Operator::I32Const { value: 8 },
-                                        &[],
-                                        &[Type::I32],
-                                    );
-                                    let status_0 = self.op(
-                                        Operator::I32Const { value: 0 },
-                                        &[],
-                                        &[Type::I32],
-                                    );
-                                    let val = ret_val.unwrap_or_else(|| {
-                                        self.op(
-                                            Operator::F64Const {
-                                                value: 0f64.to_bits(),
-                                            },
-                                            &[],
-                                            &[Type::F64],
-                                        )
-                                    });
-                                    let val_f64 = {
-                                        let ty = self.body.values[val]
-                                            .ty(&self.body.type_pool)
-                                            .unwrap_or(Type::F64);
-                                        if ty == Type::I32 {
-                                            self.op(Operator::F64ConvertI32U, &[val], &[Type::F64])
-                                        } else {
-                                            val
-                                        }
-                                    };
-                                    self.op(
-                                        Operator::I32Store {
-                                            memory: waffle::MemoryArg {
-                                                align: 2,
-                                                offset: 0,
-                                                memory: self.memory,
-                                            },
-                                        },
-                                        &[addr, status_0],
-                                        &[],
-                                    );
-                                    self.op(
-                                        Operator::F64Store {
-                                            memory: waffle::MemoryArg {
-                                                align: 3,
-                                                offset: 8,
-                                                memory: self.memory,
-                                            },
-                                        },
-                                        &[addr, val_f64],
-                                        &[],
-                                    );
-                                    self.body.set_terminator(
-                                        self.block,
-                                        Terminator::Return {
-                                            values: vec![addr],
-                                        },
-                                    );
-                                } else {
-                                    let expected_ret_types = &self.body.rets;
-                                    let values = if let Some(val) = ret_val {
-                                        if expected_ret_types.len() == 1 {
-                                            let ty = self.body.values[val]
-                                                .ty(&self.body.type_pool)
-                                                .unwrap_or(Type::F64);
-                                            if expected_ret_types[0] == Type::I32 && ty == Type::F64
-                                            {
-                                                vec![self.op(
-                                                    Operator::I32TruncF64U,
-                                                    &[val],
-                                                    &[Type::I32],
-                                                )]
-                                            } else if expected_ret_types[0] == Type::F64
-                                                && ty == Type::I32
-                                            {
-                                                vec![self.op(
-                                                    Operator::F64ConvertI32U,
-                                                    &[val],
-                                                    &[Type::F64],
-                                                )]
-                                            } else {
-                                                vec![val]
-                                            }
-                                        } else {
-                                            vec![val]
-                                        }
-                                    } else {
-                                        vec![]
-                                    };
-                                    self.body
-                                        .set_terminator(self.block, Terminator::Return { values });
-                                }
-                            } else {
-                                let ok_status = self.op(
-                                    Operator::I32Const { value: 0 },
-                                    &[],
-                                    &[Type::I32],
-                                );
-                                let val = ret_val.unwrap_or_else(|| {
-                                    self.op(
-                                        Operator::F64Const {
-                                            value: 0f64.to_bits(),
-                                        },
-                                        &[],
-                                        &[Type::F64],
-                                    )
-                                });
-                                let val_f64 = {
-                                    let ty = self.body.values[val]
-                                        .ty(&self.body.type_pool)
-                                        .unwrap_or(Type::F64);
-                                    if ty == Type::I32 {
-                                        self.op(Operator::F64ConvertI32U, &[val], &[Type::F64])
-                                    } else {
-                                        val
-                                    }
-                                };
-                                self.body.set_terminator(
-                                    self.block,
-                                    Terminator::Return {
-                                        values: vec![ok_status, val_f64],
-                                    },
-                                );
-                            }
+                            let expected_rets =
+                                &self.module.signatures[self.current_func.sig].returns;
+                            abi::emit_function_return(
+                                &mut self.body,
+                                self.block,
+                                self.registry.memory,
+                                self.current_func.calling_convention,
+                                expected_rets,
+                                ret_val,
+                            );
                         }
                     }
                 }
                 Stmt::Throw(expr) => {
                     let err_val = self.expression(expr)?;
-                    let err_val_f64 = {
-                        let ty = self.body.values[err_val]
-                            .ty(&self.body.type_pool)
-                            .unwrap_or(Type::F64);
-                        if ty == Type::I32 {
-                            self.op(Operator::F64ConvertI32U, &[err_val], &[Type::F64])
-                        } else {
-                            err_val
-                        }
-                    };
-
+                    let err_val_f64 = abi::encode_payload(&mut self.body, self.block, Some(err_val));
                     self.emit_throw(err_val_f64);
                 }
                 Stmt::Try {
@@ -676,16 +344,6 @@ impl<'a> FunctionLowerer<'a> {
         Ok(())
     }
 
-    fn is_func_return_bool(&self, fid: &FuncId) -> bool {
-        self.func_return_types.get(fid).map_or(false, |ty| {
-            let mut t = ty;
-            while let HirType::Promise(inner) = t {
-                t = inner.as_ref();
-            }
-            matches!(t, HirType::Boolean)
-        })
-    }
-
     fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
         let Expr::Call { callee, args, .. } = expr else {
             // Awaiting an immediate value / non-call expression:
@@ -697,10 +355,10 @@ impl<'a> FunctionLowerer<'a> {
 
         match callee.as_ref() {
             Expr::ExternFuncRef { name, .. } => {
-                let intrinsic_func = self
-                    .intrinsic_funcs
+                let &intrinsic_func = self
+                    .registry
+                    .intrinsics
                     .get(name)
-                    .copied()
                     .ok_or_else(|| anyhow::anyhow!("Unknown async intrinsic: {name}"))?;
 
                 // Evaluate arguments left-to-right
@@ -730,95 +388,60 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(self.continuation(result_val))
             }
             Expr::FuncRef(fid) => {
-                let &func_idx = self
-                    .func_decls
+                let callee_info = self
+                    .registry
+                    .functions
                     .get(fid)
                     .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
-                let is_exported = *self.func_is_exported.get(fid).unwrap_or(&false);
 
                 let mut arg_vals = Vec::new();
                 for a in args {
                     arg_vals.push(self.expression(a)?);
                 }
 
-                if !is_exported {
-                    let call_val = self.body.add_op(
-                        self.block,
-                        Operator::Call {
-                            function_index: func_idx,
-                        },
-                        &arg_vals,
-                        &[Type::I32, Type::F64],
-                    );
-                    let status = self.body.add_value(ValueDef::PickOutput(
-                        call_val,
-                        0,
-                        Type::I32,
-                    ));
-                    self.body.append_to_block(self.block, status);
-                    let payload = self.body.add_value(ValueDef::PickOutput(
-                        call_val,
-                        1,
-                        Type::F64,
-                    ));
-                    self.body.append_to_block(self.block, payload);
-
-                    let is_ok = self.op(Operator::I32Eqz, &[status], &[Type::I32]);
-                    let ok_block = self.body.add_block();
-                    self.body.blocks[ok_block].desc = "await call ok".into();
-                    let err_block = self.body.add_block();
-                    self.body.blocks[err_block].desc = "await call err".into();
-
-                    self.body.set_terminator(
-                        self.block,
-                        Terminator::CondBr {
-                            cond: is_ok,
-                            if_true: BlockTarget {
-                                block: ok_block,
-                                args: vec![],
-                            },
-                            if_false: BlockTarget {
-                                block: err_block,
-                                args: vec![],
-                            },
-                        },
-                    );
-
-                    // Rejection enters guest exception path at the await
-                    self.block = err_block;
-                    self.emit_throw(payload);
-
-                    self.block = ok_block;
-                    let result_val = if is_statement {
-                        None
-                    } else if self.is_func_return_bool(fid) {
-                        let payload_i32 = self.op(
-                            Operator::I32TruncF64U,
-                            &[payload],
-                            &[Type::I32],
+                match callee_info.calling_convention {
+                    CallingConvention::Internal => {
+                        let outcome = abi::emit_internal_call(
+                            &mut self.body,
+                            self.block,
+                            callee_info,
+                            &arg_vals,
                         );
-                        Some(payload_i32)
-                    } else {
-                        Some(payload)
-                    };
-                    Ok(self.continuation(result_val))
-                } else {
-                    let ret_types =
-                        &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
-                    let returns = ret_types.clone();
-                    let call_res = self.op(
-                        Operator::Call {
-                            function_index: func_idx,
-                        },
-                        &arg_vals,
-                        &returns,
-                    );
-                    let result_val = if returns.is_empty() || is_statement {
-                        None
-                    } else {
-                        Some(call_res)
-                    };
-                    Ok(self.continuation(result_val))
+
+                        // Rejection enters guest exception path at the await
+                        self.block = outcome.err_block;
+                        self.emit_throw(outcome.payload);
+
+                        self.block = outcome.ok_block;
+                        let result_val = if is_statement {
+                            None
+                        } else {
+                            Some(abi::decode_payload(
+                                &mut self.body,
+                                self.block,
+                                outcome.payload,
+                                callee_info.is_boolean_return(),
+                            ))
+                        };
+                        Ok(self.continuation(result_val))
+                    }
+                    CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult => {
+                        let ret_types = &self.module.signatures[callee_info.sig].returns;
+                        let returns = ret_types.clone();
+                        let call_res = self.op(
+                            Operator::Call {
+                                function_index: callee_info.func_index,
+                            },
+                            &arg_vals,
+                            &returns,
+                        );
+                        let result_val = if returns.is_empty() || is_statement {
+                            None
+                        } else {
+                            Some(call_res)
+                        };
+                        Ok(self.continuation(result_val))
+                    }
                 }
             }
             _ => bail!("Await callee must be a declared intrinsic or function, got: {callee:?}"),
@@ -925,7 +548,8 @@ impl<'a> FunctionLowerer<'a> {
                 // Check if calling an intrinsic or module function
                 if let Expr::ExternFuncRef { name, .. } = callee.as_ref() {
                     let &func_idx = self
-                        .intrinsic_funcs
+                        .registry
+                        .intrinsics
                         .get(name)
                         .ok_or_else(|| anyhow::anyhow!("Unknown extern function: {name}"))?;
                     let mut arg_vals = Vec::new();
@@ -942,84 +566,49 @@ impl<'a> FunctionLowerer<'a> {
                         ret_types,
                     ))
                 } else if let Expr::FuncRef(fid) = callee.as_ref() {
-                    let &func_idx = self
-                        .func_decls
+                    let callee_info = self
+                        .registry
+                        .functions
                         .get(fid)
                         .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
-                    let is_exported = *self.func_is_exported.get(fid).unwrap_or(&false);
 
                     let mut arg_vals = Vec::new();
                     for a in args {
                         arg_vals.push(self.expression(a)?);
                     }
 
-                    if !is_exported {
-                        let call_val = self.body.add_op(
-                            self.block,
-                            Operator::Call {
-                                function_index: func_idx,
-                            },
-                            &arg_vals,
-                            &[Type::I32, Type::F64],
-                        );
-                        let status = self.body.add_value(ValueDef::PickOutput(
-                            call_val,
-                            0,
-                            Type::I32,
-                        ));
-                        self.body.append_to_block(self.block, status);
-                        let payload = self.body.add_value(ValueDef::PickOutput(
-                            call_val,
-                            1,
-                            Type::F64,
-                        ));
-                        self.body.append_to_block(self.block, payload);
-
-                        let is_ok = self.op(Operator::I32Eqz, &[status], &[Type::I32]);
-                        let ok_block = self.body.add_block();
-                        self.body.blocks[ok_block].desc = "call ok".into();
-                        let err_block = self.body.add_block();
-                        self.body.blocks[err_block].desc = "call err".into();
-
-                        self.body.set_terminator(
-                            self.block,
-                            Terminator::CondBr {
-                                cond: is_ok,
-                                if_true: BlockTarget {
-                                    block: ok_block,
-                                    args: vec![],
-                                },
-                                if_false: BlockTarget {
-                                    block: err_block,
-                                    args: vec![],
-                                },
-                            },
-                        );
-
-                        self.block = err_block;
-                        self.emit_throw(payload);
-
-                        self.block = ok_block;
-                        if self.is_func_return_bool(fid) {
-                            let payload_i32 = self.op(
-                                Operator::I32TruncF64U,
-                                &[payload],
-                                &[Type::I32],
+                    match callee_info.calling_convention {
+                        CallingConvention::Internal => {
+                            let outcome = abi::emit_internal_call(
+                                &mut self.body,
+                                self.block,
+                                callee_info,
+                                &arg_vals,
                             );
-                            Ok(payload_i32)
-                        } else {
-                            Ok(payload)
+
+                            self.block = outcome.err_block;
+                            self.emit_throw(outcome.payload);
+
+                            self.block = outcome.ok_block;
+                            let return_val = abi::decode_payload(
+                                &mut self.body,
+                                self.block,
+                                outcome.payload,
+                                callee_info.is_boolean_return(),
+                            );
+                            Ok(return_val)
                         }
-                    } else {
-                        let ret_types =
-                            &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
-                        Ok(self.op(
-                            Operator::Call {
-                                function_index: func_idx,
-                            },
-                            &arg_vals,
-                            ret_types,
-                        ))
+                        CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult => {
+                            let ret_types =
+                                &self.module.signatures[callee_info.sig].returns;
+                            Ok(self.op(
+                                Operator::Call {
+                                    function_index: callee_info.func_index,
+                                },
+                                &arg_vals,
+                                ret_types,
+                            ))
+                        }
                     }
                 } else {
                     bail!("Unsupported call callee in WAFFLE lowering: {callee:?}");
@@ -1031,7 +620,7 @@ impl<'a> FunctionLowerer<'a> {
 
     fn cleanup_resources(&mut self) {
         if let (Some(stream_id), Some((drop, _))) =
-            (self.stream_parameter, self.stream_helpers)
+            (self.stream_parameter, self.registry.stream_helpers)
             && let Some(&stream_val) = self.locals.get(&stream_id)
         {
             self.op(
@@ -1076,62 +665,13 @@ impl<'a> FunctionLowerer<'a> {
             }
             UnwindTarget::FunctionExit => {
                 self.cleanup_resources();
-                if self.is_exported {
-                    if self.returns_wit_result {
-                        let addr = self.op(
-                            Operator::I32Const { value: 8 },
-                            &[],
-                            &[Type::I32],
-                        );
-                        let err_status = self.op(
-                            Operator::I32Const { value: 1 },
-                            &[],
-                            &[Type::I32],
-                        );
-                        self.op(
-                            Operator::I32Store {
-                                memory: waffle::MemoryArg {
-                                    align: 2,
-                                    offset: 0,
-                                    memory: self.memory,
-                                },
-                            },
-                            &[addr, err_status],
-                            &[],
-                        );
-                        self.op(
-                            Operator::F64Store {
-                                memory: waffle::MemoryArg {
-                                    align: 3,
-                                    offset: 8,
-                                    memory: self.memory,
-                                },
-                            },
-                            &[addr, err_val_f64],
-                            &[],
-                        );
-                        self.body.set_terminator(
-                            self.block,
-                            Terminator::Return {
-                                values: vec![addr],
-                            },
-                        );
-                    } else {
-                        self.body.set_terminator(self.block, Terminator::Unreachable);
-                    }
-                } else {
-                    let err_status = self.op(
-                        Operator::I32Const { value: 1 },
-                        &[],
-                        &[Type::I32],
-                    );
-                    self.body.set_terminator(
-                        self.block,
-                        Terminator::Return {
-                            values: vec![err_status, err_val_f64],
-                        },
-                    );
-                }
+                abi::emit_function_throw(
+                    &mut self.body,
+                    self.block,
+                    self.registry.memory,
+                    self.current_func.calling_convention,
+                    err_val_f64,
+                );
             }
         }
     }
@@ -1369,75 +909,16 @@ impl<'a> FunctionLowerer<'a> {
                     }
                     ReturnTarget::FunctionExit => {
                         self.cleanup_resources();
-                        if self.is_exported {
-                            if self.returns_wit_result {
-                                let addr = self.op(
-                                    Operator::I32Const { value: 8 },
-                                    &[],
-                                    &[Type::I32],
-                                );
-                                let status_0 = self.op(
-                                    Operator::I32Const { value: 0 },
-                                    &[],
-                                    &[Type::I32],
-                                );
-                                self.op(
-                                    Operator::I32Store {
-                                        memory: waffle::MemoryArg {
-                                            align: 2,
-                                            offset: 0,
-                                            memory: self.memory,
-                                        },
-                                    },
-                                    &[addr, status_0],
-                                    &[],
-                                );
-                                self.op(
-                                    Operator::F64Store {
-                                        memory: waffle::MemoryArg {
-                                            align: 3,
-                                            offset: 8,
-                                            memory: self.memory,
-                                        },
-                                    },
-                                    &[addr, payload],
-                                    &[],
-                                );
-                                self.body.set_terminator(
-                                    self.block,
-                                    Terminator::Return {
-                                        values: vec![addr],
-                                    },
-                                );
-                            } else {
-                                let expected_ret_types = &self.body.rets;
-                                let return_val = if expected_ret_types.len() == 1
-                                    && expected_ret_types[0] == Type::I32
-                                {
-                                    self.op(Operator::I32TruncF64U, &[payload], &[Type::I32])
-                                } else {
-                                    payload
-                                };
-                                self.body.set_terminator(
-                                    self.block,
-                                    Terminator::Return {
-                                        values: vec![return_val],
-                                    },
-                                );
-                            }
-                        } else {
-                            let ok_status = self.op(
-                                Operator::I32Const { value: 0 },
-                                &[],
-                                &[Type::I32],
-                            );
-                            self.body.set_terminator(
-                                self.block,
-                                Terminator::Return {
-                                    values: vec![ok_status, payload],
-                                },
-                            );
-                        }
+                        let expected_rets =
+                            &self.module.signatures[self.current_func.sig].returns;
+                        abi::emit_function_return(
+                            &mut self.body,
+                            self.block,
+                            self.registry.memory,
+                            self.current_func.calling_convention,
+                            expected_rets,
+                            Some(payload),
+                        );
                     }
                 }
 

@@ -201,6 +201,10 @@ its existence does not require preserving today's runtime bridge.
 - Loops and branches with multiple awaits (`test_waffle_async_multiple_awaits_in_loop_and_branch`) compile into verifiable reducible SSA with block parameters.
 - Async cancellation via early future drop (`test_waffle_async_cancellation_and_repeated_calls`) proves safe interruption without stale state poisoning across subsequent invocations on the instance.
 - Verified in `tests/waffle_pipeline_test.rs` (23 integration tests passing).
+- *Modular Architecture Refactoring (God-Function Elimination in `ssa.rs`):*
+  - **Tier 1 (Module Declarations):** Extracted `src/waffle_backend/registry.rs` with `ModuleRegistry`, `FunctionInfo`, and explicit `CallingConvention` enum (`Internal`, `ExportedDirect`, `ExportedWitResult`). Pre-declares and registers all module functions and host intrinsics immutably before body lowering begins, eliminating parallel function maps (`func_decls`, `func_is_exported`, `func_return_types`, `intrinsic_funcs`).
+  - **Tier 2 (Call and Exit ABI):** Extracted `src/waffle_backend/abi.rs` owning payload encoding/decoding (`encode_payload`, `decode_payload`), retptr memory stores, terminal function returns/throws for all conventions (`emit_function_return`, `emit_function_throw`), and internal call split routing (`emit_internal_call`). Eliminates duplicate ABI encoding and type-erasure conversions across statements and try/finally exits.
+  - **Tier 3 (Function Control Flow):** `src/waffle_backend/ssa.rs` reduced by over 600 lines, with `FunctionLowerer` strictly focused on block generation, local bindings, and control-flow joins/unwinding.
 
 **Retire:** P2 polling/readiness bridges and synchronous task-driving loops for
 migrated direct-await consumers. Keep only the shared task/event adapter required
