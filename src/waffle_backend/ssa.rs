@@ -109,8 +109,15 @@ pub(crate) fn lower_module(
 
         if let Some(export) = &info.export {
             let lift_fn = registry.string_helpers.as_ref().map(|h| h.lift_canonical);
-            let wrapper =
-                abi::build_export_wrapper(&module, info, export, registry.memory, lift_fn)?;
+            let lift_bytes = registry.byte_helpers.as_ref().map(|h| h.lift_canonical);
+            let wrapper = abi::build_export_wrapper(
+                &module,
+                info,
+                export,
+                registry.memory,
+                lift_fn,
+                lift_bytes,
+            )?;
             module.funcs[export.func_index] =
                 waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
             module.exports.push(Export {

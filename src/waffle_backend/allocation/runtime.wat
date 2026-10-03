@@ -5,7 +5,7 @@
   ;; Block headers: next, span, payload offset, payload size, kind, mark, reserved.
   ;; The word immediately before every payload points back to its block header.
   ;; Kinds: 0 bytes, 1 string, 2 string array, 3 scalar Promise, 4 string Promise,
-  ;; 5 observer, 6 root frame; -1 free. Marks: 0 white, 1 gray, 2 black.
+  ;; 5 observer, 6 root frame, 7 byte view; -1 free. Marks: 0 white, 1 gray, 2 black.
 
   (func $aligned (param $value i32) (param $alignment i32) (result i32)
     (local $result i64)

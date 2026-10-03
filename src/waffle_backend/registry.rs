@@ -29,6 +29,7 @@ pub(crate) enum PrimitivePayload {
     Number,
     Boolean,
     String,
+    Bytes,
 }
 
 /// Complete, immutable metadata for a function declaration.
@@ -227,6 +228,7 @@ impl ModuleRegistry {
                     HirType::Number | HirType::Any => PrimitivePayload::Number,
                     HirType::Boolean => PrimitivePayload::Boolean,
                     HirType::String => PrimitivePayload::String,
+                    ty if super::bytes::is_byte_view(ty) => PrimitivePayload::Bytes,
                     other => bail!("Unsupported WIT Result success payload: {other:?}"),
                 })
             } else {
@@ -354,7 +356,7 @@ pub(crate) fn canonical_param_types(params: &[HirType]) -> Result<Vec<Type>> {
             "Promise parameters cannot cross the public component boundary"
         );
         flat.push(map_type_to_waffle(ty)?);
-        if matches!(ty, HirType::String) {
+        if matches!(ty, HirType::String) || super::bytes::is_byte_view(ty) {
             flat.push(Type::I32);
         }
     }

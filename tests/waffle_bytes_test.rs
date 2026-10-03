@@ -150,6 +150,137 @@ fn unsupported_byte_forms_fail_before_emission() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn canonical_bytes_round_trip_arbitrary_data_and_reclaim_all_outcomes() -> Result<()> {
+    let source = r#"
+    export async function run(input: Uint8Array, fail: boolean): Promise<Result<Uint8Array, number>> {
+        const copy = new Uint8Array(input);
+        copy[0] = 99;
+        if (fail) { throw 17; }
+        return copy.subarray(1, -1);
+    }"#;
+    let compiled =
+        compile_typescript_waffle(source, "byte-boundary.ts", &WaffleCompileOptions::default())?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_more_async_builtins(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    assert_eq!(component.component_type().imports(&engine).count(), 0);
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(Vec<u8>, bool), (std::result::Result<Vec<u8>, f64>,)>(
+        &mut store, "run",
+    )?;
+    for size in [0usize, 1, 2, 8193] {
+        let input: Vec<u8> = (0..size)
+            .map(|index| (index * 37 + index / 251) as u8)
+            .collect();
+        for cycle in 0..30 {
+            let fail = cycle % 3 == 1;
+            let result = run.call_async(&mut store, (input.clone(), fail)).await?.0;
+            let expected = if fail {
+                Err(17.0)
+            } else if input.len() <= 2 {
+                Ok(vec![])
+            } else {
+                Ok(input[1..input.len() - 1].to_vec())
+            };
+            assert_eq!(result, expected);
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_byte_results_and_mixed_text_parameters_use_distinct_descriptors() -> Result<()> {
+    let source = r#"
+    export function run(text: string, input: Uint8Array): Uint8Array {
+        input[0] = text.length;
+        return input;
+    }"#;
+    let compiled =
+        compile_typescript_waffle(source, "mixed-bytes.ts", &WaffleCompileOptions::default())?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_more_async_builtins(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(String, Vec<u8>), (Vec<u8>,)>(&mut store, "run")?;
+    for _ in 0..5 {
+        assert_eq!(
+            run.call_async(&mut store, ("😀é".into(), vec![255, 128, 0]))
+                .await?
+                .0,
+            [2, 128, 0]
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn byte_entry_outcomes_survive_stored_primitive_tasks() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_more_async_builtins(true);
+    config.wasm_component_model_async_stackful(true);
+    config.wasm_component_model_threading(true);
+    let engine = Engine::new(&config)?;
+    for result_type in ["Uint8Array", "Result<Uint8Array, number>"] {
+        let source = format!(
+            r#"
+        async function work(): Promise<number> {{ await 0; return 7; }}
+        export async function run(input: Uint8Array): Promise<{result_type}> {{
+            const view = input.subarray(1);
+            const pending = work();
+            view[0] = await pending;
+            return view;
+        }}"#
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "async-byte-boundary.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(
+            &engine,
+            StoreLimitsBuilder::new().memory_size(65536).build(),
+        );
+        store.limiter(|limits| limits);
+        let instance = Linker::new(&engine)
+            .instantiate_async(&mut store, &component)
+            .await?;
+        for _ in 0..30 {
+            let input = vec![255, 128, 0, 254];
+            let result = if result_type == "Uint8Array" {
+                let run = instance.get_typed_func::<(Vec<u8>,), (Vec<u8>,)>(&mut store, "run")?;
+                run.call_async(&mut store, (input,)).await?.0
+            } else {
+                let run = instance
+                    .get_typed_func::<(Vec<u8>,), (std::result::Result<Vec<u8>, f64>,)>(
+                        &mut store, "run",
+                    )?;
+                run.call_async(&mut store, (input,)).await?.0.unwrap()
+            };
+            assert_eq!(result, [7, 0, 254]);
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}
+
 async fn run(source: &str, inputs: &[f64]) -> Result<Vec<f64>> {
     let compiled = compile_typescript_waffle(source, "bytes.ts", &WaffleCompileOptions::default())?;
     let mut config = Config::new();

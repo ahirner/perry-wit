@@ -250,13 +250,13 @@ fn entry_adapter(contract: &ResolvedContract) -> Result<String> {
         HirType::Void => ("", String::new()),
         HirType::Number | HirType::Any => ("f64", "(local.get $result)".into()),
         HirType::Boolean => ("i32", "(local.get $result)".into()),
-        HirType::String => (
+        ty if ty == &HirType::String || crate::waffle_backend::bytes::is_byte_view(ty) => (
             "i32 i32",
             "(i32.load (local.get $result)) (i32.load offset=4 (local.get $result))".into(),
         ),
         HirType::Generic { base, type_args } if base == "Result" => {
             let tag = "(i32.load8_u (local.get $result))";
-            match type_args[0] {
+            match &type_args[0] {
                 HirType::Number | HirType::Any => (
                     "i32 f64",
                     format!("{tag} (f64.load offset=8 (local.get $result))"),
@@ -267,7 +267,7 @@ fn entry_adapter(contract: &ResolvedContract) -> Result<String> {
                         "{tag} (if (result i64) {tag} (then (i64.load offset=8 (local.get $result))) (else (i64.extend_i32_u (i32.load8_u offset=8 (local.get $result)))))"
                     ),
                 ),
-                HirType::String => (
+                ty if ty == &HirType::String || crate::waffle_backend::bytes::is_byte_view(ty) => (
                     "i32 i64 i32",
                     format!(
                         "{tag} (if (result i64) {tag} (then (i64.load offset=8 (local.get $result))) (else (i64.extend_i32_u (i32.load offset=8 (local.get $result))))) (if (result i32) {tag} (then (i32.const 0)) (else (i32.load offset=12 (local.get $result))))"

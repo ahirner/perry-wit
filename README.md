@@ -183,14 +183,17 @@ Traps and cancellation require store disposal. Stored async tasks, multiple inpu
 returned streams, and source stream writes remain unsupported. The filesystem tests
 compose a source scanner with a real P3 producer and verify native file forwarding
 against independent bindings. Filesystem source APIs remain part of R8.
-Internal `Uint8Array` values support numeric lengths, literal element arrays,
+`Uint8Array` values support numeric lengths, literal element arrays,
 copy construction, indexed reads/writes, `subarray`, `slice`, `length`, `byteLength`,
 and `byteOffset`. Views have distinct identity and retain their shared backing
 allocation; `slice` and copy construction make independent bytes. Invalid indices
 read as undefined and ignore writes. Invalid lengths throw numeric payload `1`
 through the current exception ABI; allocation exhaustion traps. String coercions,
-ArrayBuffer overloads, public byte-list parameters/results, and stored byte-valued
-Promises still require further lowering. Byte-only tasks import no host capability.
+ArrayBuffer overloads and stored byte-valued Promises still require further
+lowering. Component parameters and results use `list<u8>`, preserve arbitrary
+bytes, and share canonical allocation and post-return cleanup with text results.
+Byte entry results also work after stored primitive tasks settle. Byte-only tasks
+import no host capability.
 WAFFLE string storage belongs to a serial invocation. Canonical post-return
 reclaims its arena after the host copies the result, including recoverable WIT
 errors. Raw core callers must invoke the matching `cabi_post_<export>` with the

@@ -21,6 +21,7 @@ pub enum ResolvedInputKind {
     Boolean,
     String,
     ByteStream,
+    Bytes,
 }
 
 /// Known typed intrinsics with explicit signatures.
@@ -253,6 +254,7 @@ pub(crate) fn resolve_contract(
             HirType::Number | HirType::Any => ResolvedInputKind::Number,
             HirType::Boolean => ResolvedInputKind::Boolean,
             HirType::String => ResolvedInputKind::String,
+            ty if super::bytes::is_byte_view(ty) => ResolvedInputKind::Bytes,
             other => bail!("Unsupported entry function parameter type: {other:?}"),
         }
     } else {

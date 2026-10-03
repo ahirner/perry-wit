@@ -29,18 +29,29 @@ pub(crate) fn build_export_wrapper(
     export: &FunctionExport,
     memory: waffle::Memory,
     lift_canonical: Option<waffle::Func>,
+    lift_bytes: Option<waffle::Func>,
 ) -> Result<FunctionBody> {
     let mut body = FunctionBody::new(module, export.sig);
     let entry = body.entry;
     let mut args = Vec::new();
     let mut param_cursor = 0;
     for param_ty in &callee.param_types {
-        if matches!(param_ty, HirType::String) {
+        let lift = match param_ty {
+            HirType::String => {
+                Some(lift_canonical.ok_or_else(|| {
+                    anyhow::anyhow!("String parameters require canonical lifting")
+                })?)
+            }
+            ty if super::bytes::is_byte_view(ty) => Some(
+                lift_bytes
+                    .ok_or_else(|| anyhow::anyhow!("Byte parameters require canonical lifting"))?,
+            ),
+            _ => None,
+        };
+        if let Some(lift_fn) = lift {
             let ptr = body.blocks[entry].params[param_cursor].1;
             let byte_len = body.blocks[entry].params[param_cursor + 1].1;
             param_cursor += 2;
-            let lift_fn = lift_canonical
-                .ok_or_else(|| anyhow::anyhow!("lift_canonical required for string parameter"))?;
             let desc = body.add_op(
                 entry,
                 Operator::Call {
@@ -219,9 +230,9 @@ fn emit_retptr_store(
                 &[],
             );
         }
-        PrimitivePayload::String => {
+        PrimitivePayload::String | PrimitivePayload::Bytes => {
             let desc_ptr = decode_payload(body, block, payload_f64, true);
-            let str_ptr = body.add_op(
+            let data_ptr = body.add_op(
                 block,
                 Operator::I32Load {
                     memory: waffle::MemoryArg {
@@ -233,7 +244,7 @@ fn emit_retptr_store(
                 &[desc_ptr],
                 &[Type::I32],
             );
-            let str_len = body.add_op(
+            let data_len = body.add_op(
                 block,
                 Operator::I32Load {
                     memory: waffle::MemoryArg {
@@ -254,7 +265,7 @@ fn emit_retptr_store(
                         memory,
                     },
                 },
-                &[addr, str_ptr],
+                &[addr, data_ptr],
                 &[],
             );
             body.add_op(
@@ -266,7 +277,7 @@ fn emit_retptr_store(
                         memory,
                     },
                 },
-                &[addr, str_len],
+                &[addr, data_len],
                 &[],
             );
         }

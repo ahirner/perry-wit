@@ -85,17 +85,9 @@ pub(crate) fn frame_component(
         return Ok((wat, bytes));
     }
 
-    let has_string_or_realloc = contract
-        .entry_params
-        .iter()
-        .any(|ty| matches!(ty, HirType::String))
-        || matches!(contract.entry_result_type(), HirType::String)
-        || if let HirType::Generic { base, type_args } = contract.entry_result_type() {
-            base == "Result" && type_args.iter().any(|ty| matches!(ty, HirType::String))
-        } else {
-            false
-        };
-    let memory_option = if has_string_or_realloc {
+    let needs_allocation = contract.entry_params.iter().any(requires_allocation)
+        || requires_allocation(contract.entry_result_type());
+    let memory_option = if needs_allocation {
         r#" (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))"#
     } else if contract.entry_returns_wit_result() {
         r#" (memory (core memory $guest "memory"))"#
@@ -149,6 +141,7 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
         HirType::Number | HirType::Any => Ok("f64".into()),
         HirType::Boolean => Ok("bool".into()),
         HirType::String => Ok("string".into()),
+        ty if super::bytes::is_byte_view(ty) => Ok("(list u8)".into()),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             let ok = component_value_type(&type_args[0])?;
             let err = component_value_type(&type_args[1])?;
@@ -156,5 +149,15 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
         }
         HirType::Named(name) if name == "ByteStream" => Ok("(stream u8)".into()),
         _ => bail!("Unsupported component entry type: {ty:?}"),
+    }
+}
+
+fn requires_allocation(ty: &HirType) -> bool {
+    match ty {
+        HirType::String => true,
+        HirType::Generic { base, type_args } if base == "Result" => {
+            type_args.iter().any(requires_allocation)
+        }
+        ty => super::bytes::is_byte_view(ty),
     }
 }

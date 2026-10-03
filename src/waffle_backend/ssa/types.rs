@@ -60,6 +60,15 @@ impl FunctionLowerer<'_> {
             Expr::Uint8ArrayLength(_) => HirType::Number,
             Expr::PropertyGet {
                 object, property, ..
+            } if property == "length"
+                && (self.is_string(object)
+                    || self.is_scalar_iteration(object)
+                    || matches!(self.infer_expr_type(object), HirType::Array(_))) =>
+            {
+                HirType::Number
+            }
+            Expr::PropertyGet {
+                object, property, ..
             } if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
                 && matches!(property.as_str(), "length" | "byteLength" | "byteOffset") =>
             {

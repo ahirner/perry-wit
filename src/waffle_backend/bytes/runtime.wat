@@ -17,6 +17,8 @@
       (if (result i32) (local.get $length) (then (local.get $length)) (else (i32.const 1)))))
     (memory.fill (local.get $owner) (i32.const 0) (local.get $length))
     (call $view (local.get $owner) (i32.const 0) (local.get $length)))
+  (func (export "bytes.lift") (param $data i32) (param $length i32) (result i32)
+    (call $view (local.get $data) (i32.const 0) (local.get $length)))
   (func (export "bytes.new") (param $size f64) (result i32 f64)
     (if (f64.ne (local.get $size) (local.get $size)) (then (local.set $size (f64.const 0))))
     (local.set $size (f64.trunc (local.get $size)))
