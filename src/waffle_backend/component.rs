@@ -77,6 +77,12 @@ pub(crate) fn frame_component(
         }
     }
 
+    let memory_option = if contract.entry_returns_wit_result() {
+        r#" (memory (core memory $guest "memory"))"#
+    } else {
+        ""
+    };
+
     let component_wat = format!(
         r#"(component
 {clock_import}
@@ -87,7 +93,7 @@ pub(crate) fn frame_component(
 {host_wires}
       {clock_wire}))))
   (func (export "run") async {entry_signature}
-    (canon lift (core func $guest "run"))))"#
+    (canon lift (core func $guest "run"){memory_option})))"#
     );
     let component_bytes =
         wat::parse_str(&component_wat).context("Encoding component WAT to binary")?;
@@ -118,10 +124,15 @@ fn entry_signature(contract: &ResolvedContract) -> Result<String> {
 }
 
 /// Map supported entry values without confusing core handles with component streams.
-fn component_value_type(ty: &HirType) -> Result<&'static str> {
+fn component_value_type(ty: &HirType) -> Result<String> {
     match ty {
-        HirType::Number | HirType::Any => Ok("f64"),
-        HirType::Boolean => Ok("bool"),
+        HirType::Number | HirType::Any => Ok("f64".into()),
+        HirType::Boolean => Ok("bool".into()),
+        HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
+            let ok = component_value_type(&type_args[0])?;
+            let err = component_value_type(&type_args[1])?;
+            Ok(format!("(result {ok} (error {err}))"))
+        }
         HirType::Named(name) if name == "ByteStream" => bail!(
             "ByteStream componentization is unsupported until its canonical ABI adapter is implemented"
         ),

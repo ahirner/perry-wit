@@ -633,3 +633,219 @@ fn test_waffle_rejects_intrinsics_without_component_wiring() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_try_catch_finally_ordering() -> Result<()> {
+    // 1. Basic try-catch
+    let source1 = r#"
+        export function run(input: number): number {
+            let val = input;
+            try {
+                if (val > 10) {
+                    throw val * 2;
+                }
+                val = val + 1;
+            } catch (err) {
+                val = err + 5;
+            }
+            return val;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+
+    let compiled1 =
+        compile_typescript_waffle(source1, "try_catch.ts", &WaffleCompileOptions::default())?;
+    let component1 = Component::new(&engine, compiled1.component.unwrap())?;
+    let mut store1 = Store::new(&engine, WasiHostState::default());
+    let instance1 = linker.instantiate_async(&mut store1, &component1).await?;
+    let run1 = instance1.get_typed_func::<(f64,), (f64,)>(&mut store1, "run")?;
+
+    // input = 5: no throw -> 5 + 1 = 6
+    let (res_ok,) = run1.call_async(&mut store1, (5.0,)).await?;
+    assert_eq!(res_ok, 6.0);
+    // input = 20: throw 40 -> catch: 40 + 5 = 45
+    let (res_err,) = run1.call_async(&mut store1, (20.0,)).await?;
+    assert_eq!(res_err, 45.0);
+
+    // 2. Return inside try with finally execution
+    let source2 = r#"
+        export function run(input: number): number {
+            try {
+                return input + 10;
+            } finally {
+                let dummy = 999;
+            }
+        }
+    "#;
+    let compiled2 =
+        compile_typescript_waffle(source2, "try_finally.ts", &WaffleCompileOptions::default())?;
+    let component2 = Component::new(&engine, compiled2.component.unwrap())?;
+    let mut store2 = Store::new(&engine, WasiHostState::default());
+    let instance2 = linker.instantiate_async(&mut store2, &component2).await?;
+    let run2 = instance2.get_typed_func::<(f64,), (f64,)>(&mut store2, "run")?;
+
+    let (res_fin,) = run2.call_async(&mut store2, (7.0,)).await?;
+    assert_eq!(res_fin, 17.0);
+
+    // 3. Nested try-catch-finally with re-throw
+    let source3 = r#"
+        export function run(input: number): number {
+            let result = input;
+            try {
+                result = result + 1;
+                try {
+                    result = result + 10;
+                    throw 5;
+                    result = result + 100;
+                } catch (e) {
+                    result = result + e;
+                    throw 20;
+                } finally {
+                    result = result + 1000;
+                }
+            } catch (e) {
+                result = result + e;
+            } finally {
+                result = result + 10000;
+            }
+            return result;
+        }
+    "#;
+    let compiled3 =
+        compile_typescript_waffle(source3, "nested_try.ts", &WaffleCompileOptions::default())?;
+    let component3 = Component::new(&engine, compiled3.component.unwrap())?;
+    let mut store3 = Store::new(&engine, WasiHostState::default());
+    let instance3 = linker.instantiate_async(&mut store3, &component3).await?;
+    let run3 = instance3.get_typed_func::<(f64,), (f64,)>(&mut store3, "run")?;
+
+    // input = 0:
+    // outer try: result = 1
+    // inner try: result = 11, throw 5
+    // inner catch: result = 11 + 5 = 16, throw 20
+    // inner finally: result = 16 + 1000 = 1016, rethrows 20
+    // outer catch: result = 1016 + 20 = 1036
+    // outer finally: result = 1036 + 10000 = 11036
+    // return 11036
+    let (res_nested,) = run3.call_async(&mut store3, (0.0,)).await?;
+    assert_eq!(res_nested, 11036.0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_multi_frame_unwinding() -> Result<()> {
+    let source = r#"
+        function stepC(val: number): number {
+            throw val + 1;
+        }
+        function stepB(val: number): number {
+            return stepC(val * 2);
+        }
+        function stepA(val: number): number {
+            return stepB(val + 3);
+        }
+        export function run(input: number): number {
+            try {
+                return stepA(input);
+            } catch (err) {
+                return err * 10;
+            }
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+
+    let compiled =
+        compile_typescript_waffle(source, "unwind.ts", &WaffleCompileOptions::default())?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+
+    // input = 5:
+    // stepA(5) -> stepB(8) -> stepC(16) -> throw 17
+    // caught in run -> err * 10 = 170
+    let (res,) = run.call_async(&mut store, (5.0,)).await?;
+    assert_eq!(res, 170.0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_infallible_uncaught_throw_traps() -> Result<()> {
+    let source = r#"
+        export function run(input: number): number {
+            if (input < 0) {
+                throw 500;
+            }
+            return input * 2;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+
+    let compiled =
+        compile_typescript_waffle(source, "uncaught.ts", &WaffleCompileOptions::default())?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+
+    // Normal invocation succeeds
+    let (res,) = run.call_async(&mut store, (10.0,)).await?;
+    assert_eq!(res, 20.0);
+
+    // Uncaught exception MUST trap and NOT return dummy value (e.g. 0.0)
+    let err = run.call_async(&mut store, (-1.0,)).await.unwrap_err();
+    let err_str = format!("{err:?}");
+    assert!(
+        err_str.contains("unreachable") || err_str.contains("Trap"),
+        "Expected host trap on uncaught throw, got: {err_str}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_wit_domain_errors_and_instance_reuse() -> Result<()> {
+    let source = r#"
+        export function run(input: number): Result<number, number> {
+            if (input < 0) {
+                throw 404;
+            }
+            return input * 2;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+
+    let compiled =
+        compile_typescript_waffle(source, "domain_error.ts", &WaffleCompileOptions::default())?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+
+    let run = instance
+        .get_typed_func::<(f64,), (std::result::Result<f64, f64>,)>(&mut store, "run")?;
+
+    // 1. Success returns Ok
+    let (res_ok,) = run.call_async(&mut store, (21.0,)).await?;
+    assert_eq!(res_ok, Ok(42.0));
+
+    // 2. Exception mapped to declared WIT domain error returns Err without trapping host
+    let (res_err,) = run.call_async(&mut store, (-5.0,)).await?;
+    assert_eq!(res_err, Err(404.0));
+
+    // 3. Repeated invocations on the SAME instance demonstrate full instance reusability
+    for i in 1..=5 {
+        let (res_loop_ok,) = run.call_async(&mut store, (i as f64,)).await?;
+        assert_eq!(res_loop_ok, Ok((i * 2) as f64));
+
+        let (res_loop_err,) = run.call_async(&mut store, (-(i as f64),)).await?;
+        assert_eq!(res_loop_err, Err(404.0));
+    }
+
+    Ok(())
+}
+

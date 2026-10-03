@@ -72,6 +72,16 @@ pub(crate) struct ResolvedContract {
     pub(crate) entry_return_type: HirType,
 }
 
+impl ResolvedContract {
+    pub(crate) fn entry_returns_wit_result(&self) -> bool {
+        let mut ret = &self.entry_return_type;
+        while let HirType::Promise(inner) = ret {
+            ret = inner;
+        }
+        matches!(ret, HirType::Generic { base, .. } if base == "Result")
+    }
+}
+
 /// Resolves module bindings, shadowing, and contracts for WAFFLE lowering.
 pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
     ensure!(
@@ -270,6 +280,22 @@ fn check_stmts_shadowing(
                     for_names.insert(name.clone());
                 }
                 check_stmts_shadowing(body, &for_names, intrinsics)?;
+            }
+            Stmt::Try { body, catch, finally } => {
+                check_stmts_shadowing(body, &current_names, intrinsics)?;
+                if let Some(c) = catch {
+                    let mut catch_names = current_names.clone();
+                    if let Some((_, param_name)) = &c.param {
+                        if intrinsics.contains_key(param_name) {
+                            bail!("Catch parameter '{param_name}' illegally shadows declared intrinsic");
+                        }
+                        catch_names.insert(param_name.clone());
+                    }
+                    check_stmts_shadowing(&c.body, &catch_names, intrinsics)?;
+                }
+                if let Some(f) = finally {
+                    check_stmts_shadowing(f, &current_names, intrinsics)?;
+                }
             }
             _ => {}
         }

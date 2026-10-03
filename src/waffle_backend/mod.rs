@@ -2,6 +2,7 @@
 
 pub(crate) mod audit;
 pub(crate) mod component;
+pub(crate) mod exceptions;
 pub(crate) mod resolve;
 pub(crate) mod ssa;
 

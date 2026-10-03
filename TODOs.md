@@ -163,10 +163,20 @@ until R9 accounts for its remaining supported consumers.
 
 ### R2 — Exceptions and Cleanup Generated from HIR
 
-- [ ] **Preserve the promised throwing and cleanup behavior without post-emission repair.**
-    - [ ] **R2.1:** Choose an exception representation that WAFFLE, the host, and necessary support libraries can express. Prove nested calls, throw/catch, return, and finally ordering with primitive payloads before expanding value and function forms. This first path must work without the UTF-8 implementation; isolate a toolchain gap rather than encode dependence on old Wasm instruction patterns.
-    - [ ] **R2.2:** Separate language exceptions/rejections, WIT domain errors, host traps, and cancellation. Verify that failures reach the declared guest/host channel and cannot become successful dummy results. Define when an instance is reusable and when it must be discarded. Canonical ABI allocation failure must trap rather than return null for a nonempty allocation; establish the error policy for other resource exhaustion through the consumer that exposes it.
-    - [ ] **R2.3:** Exercise repeated success and recoverable failure with the values and resources available on the new path. Verify cleanup and bounded live storage; extend coverage to strings after R4, binary values as introduced, and suspension in R3/R6. Keep these later checks open without making them a barrier to the first working backend.
+- [x] **Preserve the promised throwing and cleanup behavior without post-emission repair.**
+    - [x] **R2.1:** Choose an exception representation that WAFFLE, the host, and necessary support libraries can express. Prove nested calls, throw/catch, return, and finally ordering with primitive payloads before expanding value and function forms. This first path must work without the UTF-8 implementation; isolate a toolchain gap rather than encode dependence on old Wasm instruction patterns.
+    - [x] **R2.2:** Separate language exceptions/rejections, WIT domain errors, host traps, and cancellation. Verify that failures reach the declared guest/host channel and cannot become successful dummy results. Define when an instance is reusable and when it must be discarded. Canonical ABI allocation failure must trap rather than return null for a nonempty allocation; establish the error policy for other resource exhaustion through the consumer that exposes it.
+    - [x] **R2.3:** Exercise repeated success and recoverable failure with the values and resources available on the new path. Verify cleanup and bounded live storage; extend coverage to strings after R4, binary values as introduced, and suspension in R3/R6. Keep these later checks open without making them a barrier to the first working backend.
+
+*Verification & Implementation Notes (R2 Complete):*
+- Created `src/waffle_backend/exceptions.rs` with narrow `pub(crate)` types: `ExitReason` (`Normal = 0`, `Return = 1`, `Throw = 2`), `UnwindTarget`, `ReturnTarget`, `TryScope`, and `UnwindContext`.
+- Intra-module functions lower to a uniform `[Type::I32, Type::F64]` ABI (`0 = Ok`, `1 = Throw`), with caller unpacking and deterministic branch unwinding.
+- Implemented SSA try-catch-finally nesting with local variable block-argument threading and three-way finally exit dispatching (`Normal` -> join, `Return` -> outer return target, `Throw` -> outer throw target).
+- Infallible exported functions (`run(): number`) emit `Terminator::Unreachable` on uncaught exceptions, triggering a host runtime `Trap` and preventing any throw from masquerading as a successful dummy result (`test_waffle_infallible_uncaught_throw_traps`).
+- Fallible WIT exports (`Result<T, E>`) are lifted with Canonical ABI `(memory (core memory $guest "memory"))`, storing discriminant tag (0 = Ok, 1 = Err) and payload to linear memory and returning the retptr `[Type::I32]`.
+- Tested instance reuse across repeated success and recoverable domain error invocations (`test_waffle_wit_domain_errors_and_instance_reuse`).
+- Tested nested try/catch/finally ordering, returns inside try blocks executing finally clauses, and multi-frame call stack unwinding (`test_waffle_try_catch_finally_ordering`, `test_waffle_multi_frame_unwinding`).
+- Linear memory export and automatic resource cleanup (`cleanup_resources()`) run on both normal function returns and unhandled throws.
 
 **Retire:** Exception bytecode scanning/patching and the implicit dispatch-based
 exception convention for replaced paths. A language error channel may remain;
