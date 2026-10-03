@@ -38,7 +38,7 @@ pub(crate) extern "C" fn object_get(target: i64, key: i64) -> i64 {
     let key = state.get_string(key);
     match state.get_handle(target) {
         Some(JsHandle::Object(properties)) => properties.get(&key).unwrap_or(TAG_UNDEFINED as i64),
-        Some(JsHandle::BufferedHttp(message)) => message
+        Some(JsHandle::HttpMessage(message)) => message
             .properties()
             .get(&key)
             .unwrap_or(TAG_UNDEFINED as i64),
@@ -56,7 +56,7 @@ pub(crate) extern "C" fn object_get_dynamic(target: i64, key: i64) -> i64 {
     let state = get_state();
     let index = state.element_index(key);
     match state.get_handle(target) {
-        Some(JsHandle::Object(_) | JsHandle::BufferedHttp(_)) => object_get(target, key),
+        Some(JsHandle::Object(_) | JsHandle::HttpMessage(_)) => object_get(target, key),
         Some(JsHandle::Array(items)) => index
             .and_then(|index| items.get(index).copied())
             .unwrap_or(TAG_UNDEFINED as i64),
@@ -141,7 +141,7 @@ pub(crate) extern "C" fn object_has_property(target: i64, key: i64) -> i32 {
     let key = state.get_string(key);
     i32::from(match state.get_handle(target) {
         Some(JsHandle::Object(properties)) => properties.get(&key).is_some(),
-        Some(JsHandle::BufferedHttp(message)) => message.properties().get(&key).is_some(),
+        Some(JsHandle::HttpMessage(message)) => message.properties().get(&key).is_some(),
         _ => false,
     })
 }

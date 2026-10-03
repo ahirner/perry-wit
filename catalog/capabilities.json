@@ -163,25 +163,28 @@
     },
     {
       "id": "web.incoming_handler",
-      "name": "Buffered WASI HTTP incoming handler",
+      "name": "WASI HTTP incoming handler",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "Serving buffered requests through wasi:http/incoming-handler@0.2.6",
+      "domain": "Serving buffered bodies and forwarding request streams through wasi:http/incoming-handler@0.2.6",
       "invariants": [
         "The http-server world maps exported incomingHandlerHandle(request) to the generated resource ABI; synchronous Responses and timer-backed guest Promise<Response> results complete through the same boundary",
-        "Request method, absolute URL, read-only headers.get()/has(), and buffered text()/json()/bytes() are available across guest awaits and retained references",
-        "Direct global new Response accepts a string, Uint8Array, null, or omitted body; status and headers options are validated before acquiring outgoing resources",
+        "Request method, absolute URL, read-only headers.get()/has(), body forwarding, and bounded text()/json()/bytes() are available across guest awaits",
+        "Direct global new Response accepts a string, Uint8Array, supported body stream, null, or omitted body; status and headers options are validated before acquiring outgoing resources",
         "String bodies preserve UTF-8 and binary bodies copy the visible view; headers preserve Latin-1 bytes, validate names/values, and trim surrounding HTTP whitespace",
-        "Responses are published before blocking output; request children, streams, bodies, pollables, and outparams are released on success and recoverable failures",
-        "Repeated calls in one instance have bounded memory after warm-up, including retained/released requests, rejections, stalled guest Promises, and body read/write failures"
+        "new Response(request.body) forwards at most one 8192-byte input chunk at a time, respects output permits and flush completion, and can transmit more than the materialized-body limit",
+        "Responses are published before output; stream waits poll alongside guest timers and allow queued microtasks to run at safe frame boundaries",
+        "Request children, streams, bodies, pollables, and outparams are released on success, recoverable failures, and peer cancellation; canceled I/O also releases pending guest work",
+        "Repeated buffered/streaming calls in one instance have bounded memory after warm-up, including retained/released values, rejection, read/write/flush failures, and cancellation"
       ],
       "differences": [
-        "Incoming and constructed outgoing bodies are limited to 1048576 bytes and buffered before their consumer runs; streaming and abort signals remain outside this subset",
-        "Body methods expose already-buffered results through the guest await bridge and may read repeatedly; single-use bodyUsed semantics and general Promise chaining are not provided",
+        "Materializing Request bodies or constructing byte/string Response bodies is limited to 1048576 bytes; streamed forwarding does not impose that total-size limit",
+        "Body methods materialize and cache bytes through the guest await bridge and may read repeatedly; retained materialized values remain readable, but unread incoming resources close when their invocation ends",
+        "Forwarding consumes its shared body source; stale or consumed sources raise guest exceptions. Response.body can also forward a constructed byte body. General ReadableStream readers, stream constructors, transforms, abort signals, and bodyUsed compatibility remain outside this subset",
         "Response statusText is empty; custom statusText options, ArrayBuffer, Blob, FormData, cloning, and unsupported body methods raise diagnostics",
         "Only the documented direct constructor/method subset is supported; ambient DOM declarations describe a broader API than this runtime implements",
-        "Guest work drains before the handler returns; uncleared intervals keep that invocation running, and a Promise without runnable work reports an error",
-        "Errors use the WASI response outparam; the tested Wasmtime host maps failures to HTTP 500. A failed module initializer is not retried in that instance",
+        "Awaited guest work settles before publishing the response; remaining work runs between stream readiness waits and drains before the handler returns. Uncleared intervals keep successful invocations running; failed I/O cancels them. A Promise without runnable work reports an error",
+        "Failures before response publication use the WASI outparam and become HTTP 500 in the tested host; later body failures close the stream. A failed module initializer is not retried in that instance",
         "The pinned wasmtime serve command needs -S cli=y and -O pooling-max-tables-per-module=2 for the current runtime interfaces and TypeScript/Rust tables"
       ],
       "conformance": [

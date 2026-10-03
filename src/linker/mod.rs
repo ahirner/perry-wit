@@ -79,6 +79,18 @@ pub(crate) fn merge_with_runtime_exports(
     let needs_fs = prune::module_needs_fs(&a);
     let needs_timers = prune::module_needs_timers(&a);
     let needs_async = prune::module_needs_async(&a);
+    let incoming = runtime_exports.contains(&"wasi:http/incoming-handler@0.2.6#handle");
+    let runtime_exports: Vec<_> = runtime_exports
+        .iter()
+        .map(|&name| {
+            if name == "guest_stream_step" && needs_timers {
+                "guest_stream_step_timers"
+            } else {
+                name
+            }
+        })
+        .collect();
+    let mut incoming_fallback = None;
 
     let mut resolved_imports_a = Vec::with_capacity(a.imports.len());
     for &(mod_name, name, _ty) in &a.imports {
@@ -86,7 +98,7 @@ pub(crate) fn merge_with_runtime_exports(
             mod_name == "rt",
             "Module A contains unexpected import module '{mod_name}' (expected 'rt')"
         );
-        let target_name = if name == "mem_call" {
+        let default_target = if name == "mem_call" {
             if needs_http {
                 "mem_call"
             } else {
@@ -112,6 +124,20 @@ pub(crate) fn merge_with_runtime_exports(
         } else {
             name
         };
+        let target_name = if incoming && name == "mem_call" {
+            let fallback = *b
+                .export_funcs
+                .get(default_target)
+                .with_context(|| format!("Missing incoming fallback: {default_target}"))?;
+            let hook = *b
+                .export_funcs
+                .get("guest_incoming_fallback")
+                .context("Missing incoming dispatch hook")?;
+            incoming_fallback = Some((hook, fallback));
+            "mem_call_incoming"
+        } else {
+            default_target
+        };
         let b_func_idx = b.export_funcs.get(target_name).copied().with_context(|| {
             format!("Runtime import 'rt:{target_name}' not found in guest-runtime exports")
         })?;
@@ -123,7 +149,10 @@ pub(crate) fn merge_with_runtime_exports(
         .as_ref()
         .map(|bridge| bridge.dependencies().to_vec())
         .unwrap_or_default();
-    for name in runtime_exports {
+    if let Some((_, fallback)) = incoming_fallback {
+        synthesized_roots.push(fallback);
+    }
+    for name in &runtime_exports {
         synthesized_roots.push(
             *b.export_funcs
                 .get(name)
@@ -259,7 +288,12 @@ pub(crate) fn merge_with_runtime_exports(
                     || runtime_exports.contains(&exp.name)
                 {
                     let merged_f = func_map_b[exp.index as usize];
-                    export_sec.export(exp.name, ExportKind::Func, merged_f);
+                    let name = if exp.name == "guest_stream_step_timers" {
+                        "guest_stream_step"
+                    } else {
+                        exp.name
+                    };
+                    export_sec.export(name, ExportKind::Func, merged_f);
                 }
             }
             ExternalKind::Global => {
@@ -363,6 +397,20 @@ pub(crate) fn merge_with_runtime_exports(
     };
     for (j, &opt_new_idx) in plan.b_def_old_to_new.iter().enumerate() {
         if opt_new_idx.is_some() {
+            if let Some((hook, fallback)) = incoming_fallback
+                && j + b.wasi_imports.len() == hook as usize
+            {
+                let mut function = wasm_encoder::Function::new([]);
+                for parameter in 0..3 {
+                    function.instruction(&wasm_encoder::Instruction::LocalGet(parameter));
+                }
+                function.instruction(&wasm_encoder::Instruction::Call(
+                    func_map_b[fallback as usize],
+                ));
+                function.instruction(&wasm_encoder::Instruction::End);
+                code_sec.function(&function);
+                continue;
+            }
             if let Some(bridge) = &callback_bridge
                 && j + b.wasi_imports.len() == bridge.invoke as usize
             {

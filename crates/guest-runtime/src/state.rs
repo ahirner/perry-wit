@@ -19,7 +19,8 @@ pub(crate) enum JsHandle {
     Cell(i64),
     Promise(crate::promises::Promise),
     PromiseResolver(crate::promises::Resolver),
-    BufferedHttp(crate::http_handler::BufferedMessage),
+    HttpMessage(crate::http_handler::HttpMessage),
+    ReadableBody(crate::http_handler::ReadableBody),
 }
 
 pub(crate) struct RuntimeState {
@@ -139,9 +140,7 @@ impl RuntimeState {
                             JsHandle::PromiseResolver(resolver) => {
                                 self.worklist.push(resolver.result)
                             }
-                            JsHandle::BufferedHttp(message) => self
-                                .worklist
-                                .extend(message.properties().entries().map(|(_, value)| *value)),
+                            JsHandle::HttpMessage(message) => message.trace(&mut self.worklist),
                             JsHandle::Closure(closure) => {
                                 self.worklist.extend_from_slice(&closure.captures);
                             }
@@ -404,9 +403,9 @@ impl RuntimeState {
                         .collect();
                     serde_json::Value::Object(items)
                 }
-                Some(JsHandle::Headers(_) | JsHandle::BufferedHttp(_)) => {
-                    serde_json::Value::Object(serde_json::Map::new())
-                }
+                Some(
+                    JsHandle::Headers(_) | JsHandle::HttpMessage(_) | JsHandle::ReadableBody(_),
+                ) => serde_json::Value::Object(serde_json::Map::new()),
                 _ => serde_json::Value::Null,
             };
             ancestors.pop();
@@ -542,7 +541,8 @@ impl RuntimeState {
                     JsHandle::Closure(_) | JsHandle::PromiseResolver(_) => "[function]".to_string(),
                     JsHandle::Cell(_) => "[cell]".to_string(),
                     JsHandle::Promise(_) => "[object Promise]".to_string(),
-                    JsHandle::BufferedHttp(_) => "[object Object]".to_string(),
+                    JsHandle::HttpMessage(_) => "[object Object]".to_string(),
+                    JsHandle::ReadableBody(_) => "[object ReadableStream]".into(),
                     JsHandle::Date(ts) => {
                         crate::date::format_iso(*ts).unwrap_or_else(|| "Invalid Date".to_string())
                     }

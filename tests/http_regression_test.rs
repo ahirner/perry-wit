@@ -92,6 +92,117 @@ fn incoming_component_serves_awaited_text_binary_and_error_paths() {
 }
 
 #[test]
+fn incoming_component_streams_before_upload_completion_and_recovers_after_disconnect() {
+    let scratch = support::Scratch::new();
+    let compiled = perry_wit::compiler::compile_typescript(
+        r#"
+        let tracker = {count:0};
+        export async function incomingHandlerHandle(request: any): Promise<any> {
+            if (request.url.endsWith("/state")) { return new Response("" + tracker.count); }
+            if (request.url.endsWith("/static")) {
+                const response = new Response(Uint8Array.from([0, 255, 128, 7]));
+                return new Response(response.body);
+            }
+            tracker.count = 0;
+            setTimeout(() => {tracker.count++;}, 1);
+            await 0;
+            return new Response(request.body, {status:201, headers:{"x-flow":"stream"}});
+        }
+    "#,
+        "streaming.ts",
+        &perry_wit::compiler::CompileOptions {
+            world: Some("http-server".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let path = scratch.0.join("streaming.wasm");
+    fs::write(&path, compiled.component.unwrap()).unwrap();
+    let host = ServingComponent::new(&path, &support::get_wasmtime_path());
+    let script = r#"
+        import assert from 'node:assert/strict';
+        import http from 'node:http';
+        import {once} from 'node:events';
+        const base = process.argv[1];
+        const bytes = Buffer.alloc(2097153);
+        for (let i = 0; i < bytes.length; i++) {bytes[i] = i;}
+        await new Promise((resolve, reject) => {
+            let uploaded = false, first = true;
+            const chunks = [];
+            const request = http.request(base + '/forward', {
+                method:'POST', headers:{'content-length':bytes.length}, agent:false
+            }, response => {
+                assert.equal(response.statusCode, 201);
+                assert.equal(response.headers['x-flow'], 'stream');
+                response.on('error', reject);
+                response.on('data', chunk => {
+                    chunks.push(chunk);
+                    if (first) {
+                        first = false;
+                        assert.equal(uploaded, false, 'first response bytes must precede upload completion');
+                        (async () => {
+                            for (let offset = 16384; offset < bytes.length; offset += 16384) {
+                                if (!request.write(bytes.subarray(offset, offset + 16384))) {await once(request, 'drain');}
+                                await new Promise(resolve => setTimeout(resolve, 1));
+                            }
+                            uploaded = true;
+                            request.end();
+                        })().catch(reject);
+                    }
+                    response.pause();
+                    setTimeout(() => response.resume(), 2);
+                });
+                response.on('end', () => {
+                    clearTimeout(deadline);
+                    assert.equal(uploaded, true);
+                    assert.deepEqual(Buffer.concat(chunks), bytes);
+                    resolve();
+                });
+            });
+            const deadline = setTimeout(() => request.destroy(new Error('stream did not make progress')), 10000);
+            request.on('error', error => {clearTimeout(deadline); reject(error);});
+            // Hold the rest of the upload until the server returns its first body chunk.
+            request.write(bytes.subarray(0, 16384));
+        });
+        const delivered = await fetch(base + '/state', {signal:AbortSignal.timeout(5000)});
+        assert.equal(await delivered.text(), '1', 'blocked I/O permits timer delivery');
+        for (let i = 0; i < 3; i++) {
+            await new Promise((resolve, reject) => {
+                let canceled = false;
+                const request = http.request(base + '/cancel', {
+                    method:'POST', headers:{'content-length':bytes.length}, agent:false
+                }, response => {
+                    response.on('error', error => {if (!canceled) {reject(error);}});
+                    response.once('data', () => {
+                        canceled = true;
+                        clearTimeout(deadline);
+                        response.destroy(); request.destroy(); resolve();
+                    });
+                });
+                const deadline = setTimeout(() => request.destroy(new Error('cancel did not make progress')), 5000);
+                request.on('error', error => {clearTimeout(deadline); if (!canceled) {reject(error);}});
+                request.write(bytes.subarray(0, 16384));
+            });
+            const state = await fetch(base + '/state', {signal:AbortSignal.timeout(5000)});
+            assert.match(await state.text(), /^[01]$/, 'server recovers after cancellation');
+        }
+        const fixed = await fetch(base + '/static', {signal:AbortSignal.timeout(5000)});
+        assert.deepEqual(new Uint8Array(await fixed.arrayBuffer()), Uint8Array.from([0, 255, 128, 7]));
+    "#;
+    let output = Command::new("node")
+        .args(["--input-type=module", "-e", script])
+        .arg(format!("http://{}", host.address))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(path.with_extension("serve.log")).unwrap()
+    );
+}
+
+#[test]
 fn response_construction_preserves_bytes_and_reports_unsupported_forms() {
     let source = r#"
         async function report() {
@@ -103,6 +214,8 @@ fn response_construction_preserves_bytes_and_reports_unsupported_forms() {
             console.log(JSON.stringify(await response.bytes()));
             console.log(await new Response(null, {status:204}).text());
             console.log(await new Response("hé😀").text());
+            const forwarded = new Response(new Response(Uint8Array.from([0, 255, 128])).body);
+            console.log(JSON.stringify(await forwarded.bytes()));
         }
         report();
     "#;
@@ -128,13 +241,14 @@ fn response_construction_preserves_bytes_and_reports_unsupported_forms() {
         try { new Response([1, 2]); } catch (error) { console.log(error); }
         try { new Response(new Uint8Array(1048577)); } catch (error) { console.log(error); }
         try { text.arrayBuffer(); } catch (error) { console.log(error); }
+        try { text.body.getReader(); } catch (error) { console.log(error); }
     "#,
         None,
         None,
     );
     assert_eq!(
         support::stdout(&output),
-        "201\ntrue\nsample\n{}\ntrue\n{\"0\":0,\"1\":255}\n\nhé😀\nTypeError: Response status cannot have a body\nRangeError: Invalid Response status\nTypeError: Unsupported Response option: statusText\nTypeError: Response body must be a string or Uint8Array\nRangeError: Response body exceeds the 1048576 byte limit\nTypeError: Unsupported buffered HTTP method: arrayBuffer\n"
+        "201\ntrue\nsample\n{}\ntrue\n{\"0\":0,\"1\":255}\n\nhé😀\nTypeError: Response status cannot have a body\nRangeError: Invalid Response status\nTypeError: Unsupported Response option: statusText\nTypeError: Response body must be a string or Uint8Array\nRangeError: Response body exceeds the 1048576 byte limit\nTypeError: Unsupported buffered HTTP method: arrayBuffer\nTypeError: Body streams currently support forwarding through Response; reader methods are not implemented\n"
     );
 }
 
@@ -190,11 +304,60 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
     }).unwrap();
     let failed_path = scratch.0.join("failed.core.wasm");
     fs::write(&failed_path, failed.core).unwrap();
+    let streaming = perry_wit::compiler::compile_typescript(r#"
+        let saved: any = null;
+        let oldRequest: any = null;
+        let tracker = {count:0};
+        async function bump() { await 0; tracker.count++; }
+        export async function incomingHandlerHandle(request: any): Promise<any> {
+            if (request.url.endsWith("/stale")) {
+                try { return new Response(saved, {status:201}); }
+                catch (error) { return new Response("" + error, {status:201}); }
+            }
+            if (request.url.endsWith("/stale-message")) {
+                try { return new Response(await oldRequest.text(), {status:201}); }
+                catch (error) { return new Response("" + error, {status:201}); }
+            }
+            if (request.url.endsWith("/retain-unread")) {
+                saved = request.body;
+                oldRequest = request;
+                return new Response("unread", {status:201});
+            }
+            if (request.url.endsWith("/marker")) { return new Response("" + tracker.count, {status:201}); }
+            if (request.url.endsWith("/retain-stream")) { saved = request.body; }
+            tracker.count = 0;
+            if (request.url.endsWith("/cancel")) {
+                setInterval(() => {tracker.count++;}, 1);
+            } else if (request.url.endsWith("/throw")) {
+                setTimeout(() => {throw "callback failed";}, 1);
+            } else {
+                setTimeout(() => {
+                    bump();
+                    setTimeout(() => {tracker.count++;}, 1);
+                }, 1);
+            }
+            await 0;
+            return new Response(request.body, {status:201});
+        }
+    "#, "streaming.ts", &perry_wit::compiler::CompileOptions {
+        world:Some("http-server".into()), ..Default::default()
+    }).unwrap();
+    let streaming_path = scratch.0.join("streaming.core.wasm");
+    fs::write(&streaming_path, streaming.core).unwrap();
+    let timer_free = perry_wit::compiler::compile_typescript(
+        "export function incomingHandlerHandle(request: any): any { return new Response(request.body, {status:201}); }",
+        "forward.ts", &perry_wit::compiler::CompileOptions {
+            world:Some("http-server".into()), ..Default::default()
+        }
+    ).unwrap();
+    let timer_free_path = scratch.0.join("timer-free.core.wasm");
+    fs::write(&timer_free_path, timer_free.core).unwrap();
     let script = r#"
         const assert = require('node:assert/strict');
         const fs = require('node:fs');
-        const module = new WebAssembly.Module(fs.readFileSync(process.argv[1]));
-        let exports, next = 1, now = 0n, current, failRead = false, failWrite = false;
+        const modules = process.argv.slice(1).map(path => new WebAssembly.Module(fs.readFileSync(path)));
+        const module = modules[0];
+        let exports, next = 1, now = 0n, current, failRead = false, failWrite = false, streaming = false;
         const resources = new Map();
         const view = () => new DataView(exports.memory.buffer);
         function resource(type, properties = {}) {
@@ -219,9 +382,13 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
             view().setUint8(ptr, 1); view().setUint32(ptr + 4, data, true); view().setUint32(ptr + 8, length, true);
         }
         const imports = {};
-        for (const {module: namespace, name} of WebAssembly.Module.imports(module)) {
+        for (const {module: namespace, name} of modules.flatMap(module => WebAssembly.Module.imports(module))) {
             const host = (...args) => {
-                if (name.startsWith('[resource-drop]')) {take(args[0], name.slice('[resource-drop]'.length)); return;}
+                if (name.startsWith('[resource-drop]')) {
+                    const value = take(args[0], name.slice('[resource-drop]'.length));
+                    if (value.type === 'input-stream') {current.readBytes = value.offset;}
+                    return;
+                }
                 switch (name) {
                     case '[method]incoming-request.method': view().setUint8(args[1], 2); return;
                     case '[method]incoming-request.scheme': view().setUint8(args[1], 1); view().setUint8(args[1] + 4, 0); return;
@@ -237,9 +404,17 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
                         view().setUint32(args[1], list, true); view().setUint32(args[1] + 4, 1, true); return;
                     }
                     case '[method]incoming-request.consume': result(args[1], resource('incoming-body', {parent:args[0]})); return;
-                    case '[method]incoming-body.stream': result(args[1], resource('input-stream', {parent:args[0], offset:0})); return;
+                    case '[method]incoming-body.stream': result(args[1], resource('input-stream', {parent:args[0], offset:0, ready:false})); return;
+                    case '[method]input-stream.subscribe':
+                    case '[method]output-stream.subscribe': return resource('pollable', {parent:args[0]});
+                    case '[method]input-stream.read':
                     case '[method]input-stream.blocking-read': {
                         const stream = resources.get(args[0]);
+                        if (streaming && name.endsWith('.blocking-read')) {throw new Error('streaming used a blocking read');}
+                        if (streaming && !stream.ready) {
+                            result(args[2], 0); view().setUint32(args[2] + 8, 0, true); return;
+                        }
+                        stream.ready = false;
                         if (failRead && stream.offset > 0) {
                             view().setUint8(args[2], 1); view().setUint8(args[2] + 4, 0);
                             view().setUint32(args[2] + 8, resource('error'), true); return;
@@ -247,19 +422,53 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
                         if (stream.offset === current.input.length) {
                             view().setUint8(args[2], 1); view().setUint8(args[2] + 4, 1); return;
                         }
-                        const chunk = current.input.subarray(stream.offset, stream.offset + Math.min(Number(args[1]), 4096));
+                        if (streaming) {
+                            assert.ok(current.responded, 'publish before consuming streamed input');
+                            assert.ok(Number(args[1]) <= 8192, 'bounded input request');
+                            assert.equal(current.writtenBytes, stream.offset, 'output backpressure prevents input read-ahead');
+                            assert.ok(!Array.from(resources.values()).some(resource => resource.type === 'output-stream' && resource.flushing), 'flush completes before the next input read');
+                        }
+                        const chunk = current.input.subarray(stream.offset, stream.offset + Math.min(Number(args[1]), streaming ? 8192 : 4096));
                         const [data, length] = bytes(chunk);
                         result(args[2], data); view().setUint32(args[2] + 8, length, true);
                         stream.offset += length; return;
                     }
                     case 'now': return now;
-                    case 'subscribe-instant': return resource('pollable', {deadline:args[0]});
+                    case 'subscribe-instant':
+                        if (streaming && current.responded && Array.from(resources.values()).some(resource => resource.type === 'pollable' && resource.parent)) {
+                            current.timerDuringWait++;
+                        }
+                        return resource('pollable', {deadline:args[0]});
                     case '[method]pollable.block': now = resources.get(args[0]).deadline; return;
+                    case 'poll': {
+                        assert.ok(streaming);
+                        assert.ok(++current.polls < 50000, 'no readiness busy loop');
+                        const ids = Array.from({length:args[1]}, (_, index) => view().getUint32(args[0] + index * 4, true));
+                        const pending = ids.map(id => resources.get(id));
+                        let ready = pending.findIndex(pollable => pollable.deadline !== undefined);
+                        if (ready >= 0 && current.timerPolls < 2) {
+                            now = pending[ready].deadline;
+                            current.timerPolls++;
+                        } else {
+                            ready = pending.findIndex(pollable => pollable.parent !== undefined);
+                            assert.ok(ready >= 0, 'an I/O subscription must own this wait');
+                            const stream = resources.get(pending[ready].parent);
+                            if (stream.type === 'input-stream') {stream.ready = true;}
+                            else {
+                                assert.equal(stream.type, 'output-stream');
+                                stream.permit = ++current.grants % 2 ? 257 : 4093;
+                                stream.flushing = false;
+                            }
+                        }
+                        const data = exports.cabi_realloc(0, 0, 4, 4);
+                        view().setUint32(data, ready, true);
+                        view().setUint32(args[2], data, true); view().setUint32(args[2] + 4, 1, true); return;
+                    }
                     case '[static]fields.from-list': result(args[2], resource('fields')); return;
                     case '[constructor]outgoing-response': take(args[0], 'fields'); return resource('outgoing-response');
                     case '[method]outgoing-response.set-status-code': resources.get(args[0]).status = args[1]; result(args[2]); return;
                     case '[method]outgoing-response.body': result(args[1], resource('outgoing-body')); return;
-                    case '[method]outgoing-body.write': result(args[1], resource('output-stream', {parent:args[0]})); return;
+                    case '[method]outgoing-body.write': result(args[1], resource('output-stream', {parent:args[0], permit:streaming ? 0 : 8192, flushing:false})); return;
                     case '[static]response-outparam.set':
                         take(args[0], 'response-outparam');
                         current.responded = true;
@@ -273,7 +482,40 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
                             view().setUint32(args[3] + 8, resource('error'), true); return;
                         }
                         current.chunks.push(Buffer.from(new Uint8Array(exports.memory.buffer, args[1], args[2])));
+                        current.writtenBytes += args[2];
                         result(args[3]); return;
+                    case '[method]output-stream.check-write': {
+                        if (current.path === '/cancel' && current.chunks.length > 0) {
+                            view().setUint8(args[1], 1); view().setUint8(args[1] + 4, 1); return;
+                        }
+                        const stream = resources.get(args[0]);
+                        view().setUint8(args[1], 0); view().setBigUint64(args[1] + 8, BigInt(stream.permit), true); return;
+                    }
+                    case '[method]output-stream.write':
+                        assert.ok(current.responded, 'publish response before output');
+                        if (failWrite) {
+                            view().setUint8(args[3], 1); view().setUint8(args[3] + 4, 0);
+                            view().setUint32(args[3] + 8, resource('error'), true); return;
+                        }
+                        if (streaming) {
+                            const stream = resources.get(args[0]);
+                            assert.ok(!stream.flushing && args[2] > 0 && args[2] <= stream.permit && args[2] <= 8192, 'respect partial write permits');
+                            stream.permit = 0;
+                        }
+                        current.chunks.push(Buffer.from(new Uint8Array(exports.memory.buffer, args[1], args[2])));
+                        current.writtenBytes += args[2];
+                        result(args[3]); return;
+                    case '[method]output-stream.flush': {
+                        if (current.path === '/flush-error') {
+                            view().setUint8(args[1], 1); view().setUint8(args[1] + 4, 0);
+                            view().setUint32(args[1] + 8, resource('error'), true); return;
+                        }
+                        if (streaming) {
+                            const stream = resources.get(args[0]); stream.flushing = true; stream.permit = 0;
+                            current.flushes++;
+                        }
+                        result(args[1]); return;
+                    }
                     case '[static]outgoing-body.finish': take(args[0], 'outgoing-body'); current.finished = true; result(args.at(-1)); return;
                     default: throw new Error(`unexpected host call: ${namespace} ${name} ${args}`);
                 }
@@ -282,14 +524,15 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
         }
         exports = new WebAssembly.Instance(module, imports).exports;
         const payload = Uint8Array.from({length:131073}, (_, index) => index);
-        function invoke(path, input = payload) {
-            current = {path, input, chunks:[], responded:false, error:false, finished:false};
+        function invoke(path, input = payload, expected = input) {
+            current = {path, input, chunks:[], responded:false, error:false, finished:false,
+                polls:0, grants:0, timerPolls:0, timerDuringWait:0, flushes:0, readBytes:0, writtenBytes:0};
             exports['wasi:http/incoming-handler@0.2.6#handle'](resource('incoming-request'), resource('response-outparam'));
             assert.equal(resources.size, 0, `resources remaining after ${path}: ${JSON.stringify(Array.from(resources.values()))}`);
             assert.ok(current.responded);
-            if (!current.error && !failWrite) {
+            if (!current.error && !failWrite && !(streaming && (failRead || ['/cancel', '/flush-error', '/throw'].includes(path)))) {
                 assert.equal(current.status, 201); assert.ok(current.finished);
-                assert.deepEqual(Buffer.concat(current.chunks), Buffer.from(input));
+                assert.deepEqual(Buffer.concat(current.chunks), Buffer.from(expected));
             }
             return current;
         }
@@ -309,17 +552,53 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
         assert.equal(invoke('/body').error, false);
         failWrite = true; assert.equal(invoke('/body').finished, false); failWrite = false;
         assert.equal(invoke('/body').error, false);
-        const failedModule = new WebAssembly.Module(fs.readFileSync(process.argv[2]));
+        const failedModule = modules[1];
         exports = new WebAssembly.Instance(failedModule, imports).exports;
         assert.equal(invoke('/failed').error, true);
         const failedBaseline = exports.memory.buffer.byteLength;
         for (let i = 0; i < 100; i++) {assert.equal(invoke('/failed').error, true);}
         assert.equal(exports.memory.buffer.byteLength, failedBaseline);
+        streaming = true;
+        exports = new WebAssembly.Instance(modules[2], imports).exports;
+        const first = invoke('/retain-stream');
+        assert.ok(first.timerDuringWait > 0, 'timers execute while an I/O peer remains blocked');
+        assert.ok(first.polls > 0 && first.grants > 0 && first.flushes > 1);
+        invoke('/marker', new Uint8Array(), Buffer.from('2'));
+        invoke('/stale', new Uint8Array(), Buffer.from('TypeError: Response body stream has already been consumed'));
+        const unread = invoke('/retain-unread', payload, Buffer.from('unread'));
+        assert.equal(unread.readBytes, 0, 'unused incoming body closes without buffering');
+        invoke('/stale', payload, Buffer.from('TypeError: Response body stream has already been consumed'));
+        invoke('/stale-message', payload, Buffer.from('TypeError: Body stream has already been consumed'));
+        for (let i = 0; i < 20; i++) {invoke('/stream');}
+        const streamBaseline = exports.memory.buffer.byteLength;
+        const large = Uint8Array.from({length:4194305}, (_, index) => index);
+        invoke('/stream', large);
+        assert.equal(exports.memory.buffer.byteLength, streamBaseline, 'streamed total size must not raise the guest buffer high-water mark');
+        for (let i = 0; i < 50; i++) {
+            const canceled = invoke('/cancel', large);
+            assert.equal(canceled.finished, false);
+            assert.ok(canceled.readBytes < large.length, 'early close cancels the unread source');
+            assert.equal(invoke('/flush-error').finished, false);
+            assert.equal(invoke('/throw').finished, false);
+            failRead = true; assert.equal(invoke('/stream').finished, false); failRead = false;
+            failWrite = true; assert.equal(invoke('/stream').finished, false); failWrite = false;
+            invoke('/stream');
+        }
+        assert.equal(exports.memory.buffer.byteLength, streamBaseline, 'stream completion/failure/cancellation cycles release guest values');
+        for (const {module: namespace} of WebAssembly.Module.imports(modules[3])) {
+            assert.ok(!/wasi:(clocks|random|filesystem)|outgoing-handler/.test(namespace), `unused capability: ${namespace}`);
+        }
+        exports = new WebAssembly.Instance(modules[3], imports).exports;
+        invoke('/stream', large);
+        invoke('/stream', new Uint8Array());
+        console.log(`Streaming: <=8192 buffered body bytes; ${streamBaseline} guest memory bytes after warm-up, 4 MiB transfer, and 50 failure/cancellation/recovery cycles`);
     "#;
     let output = Command::new("node")
         .args(["-e", script])
         .arg(path)
         .arg(failed_path)
+        .arg(streaming_path)
+        .arg(timer_free_path)
         .output()
         .unwrap();
     assert!(
@@ -327,6 +606,7 @@ fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
 }
 
 #[test]

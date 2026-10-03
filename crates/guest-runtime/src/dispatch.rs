@@ -312,6 +312,17 @@ pub(crate) fn mem_call_sync(
     base_addr: i32,
     dispatch: impl FnOnce(&str, &[i64]) -> Option<i64>,
 ) -> f64 {
+    try_mem_call(func_name_id, arg_count, base_addr, dispatch)
+        .unwrap_or_else(|| crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr))
+}
+
+/// Attempts a capability bridge while leaving unhandled calls for a selected fallback.
+pub(crate) fn try_mem_call(
+    func_name_id: f64,
+    arg_count: f64,
+    base_addr: i32,
+    dispatch: impl FnOnce(&str, &[i64]) -> Option<i64>,
+) -> Option<f64> {
     let state = get_state();
     let name_idx = func_name_id as usize;
     let name = state
@@ -331,9 +342,9 @@ pub(crate) fn mem_call_sync(
         unsafe {
             *(base_addr as *mut i64) = result;
         }
-        return 0.0;
+        return Some(0.0);
     }
-    crate::dispatch_pure::mem_call_pure(func_name_id, arg_count, base_addr)
+    None
 }
 
 #[no_mangle]

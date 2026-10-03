@@ -350,6 +350,17 @@ pub(crate) extern "C" fn guest_async_step() -> i32 {
     1
 }
 
+/// Reports whether an exported task still needs a producer to settle its result.
+#[no_mangle]
+pub(crate) extern "C" fn guest_async_pending(value: i64) -> i32 {
+    i32::from(matches!(
+        get_state().get_handle(value),
+        Some(JsHandle::Promise(
+            Promise::Pending(_) | Promise::Adopting(_)
+        ))
+    ))
+}
+
 /// Projects a settled guest task Promise onto the synchronous Preview 2 boundary.
 #[no_mangle]
 pub(crate) extern "C" fn guest_async_result(value: i64) -> i64 {

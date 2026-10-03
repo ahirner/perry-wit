@@ -31,6 +31,7 @@ mod objects;
 mod promises;
 mod random;
 mod state;
+mod streams;
 mod stubs;
 mod timers;
 

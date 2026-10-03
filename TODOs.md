@@ -7,8 +7,8 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 
 1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
 2. HTTP metadata/methods (**10.1**) and buffered binary bodies (**10.2**) are complete. Use those client paths and fixtures as the baseline for handlers and streaming.
-3. One-shot timers and intervals (**11.1**, **11.2**) establish callback execution (**B.1**) and retained lifetimes (**E.2**), including reclamation between callbacks. Guest async execution (**B.2**) and the buffered incoming handler (**10.3**) complete timer-backed requests through the component ABI. Build readiness (**11.3**) with a concrete streaming or socket consumer.
-4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
+3. One-shot timers and intervals (**11.1**, **11.2**) establish callback execution (**B.1**) and retained lifetimes (**E.2**), including reclamation between callbacks. Guest async execution (**B.2**) and incoming handlers (**10.3**, **10.4**) complete timer-backed requests and streamed body forwarding through the component ABI. Readiness (**11.3**) now serves that forwarding consumer.
+4. Use the verified readiness and ownership paths for the first TCP client (**12.1**). Rust host contracts (**A.1**) and Component Model async feasibility (**13.1**) remain open; wider stream compatibility follows a consumer needing it.
 
 ## Tracking Completion
 
@@ -32,10 +32,10 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ## Verification Baseline (2026-10-03)
 
-- `nix develop -c cargo test --locked --package perry-wit`: 160 tests passed, including 25 filesystem tests and 16 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
+- `nix develop -c cargo test --locked --package perry-wit`: 161 tests passed, including 25 filesystem tests and 17 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
 - The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
 - Scoped formatting passed. Project and WebAssembly guest Clippy checks completed with existing warnings. Automatic approval review rejected parent `make format-rs` because it could rewrite the broader workspace; parent `make lint-rs` fails because `monty-bench` is outside this workspace. The pinned, scoped Nix checks are the applicable checks here.
-- SDK generation describes selected WIT contracts and guest implementation signatures, not ambient JavaScript/Node API compatibility. The incoming-handler adapter supplies resource ownership and its buffered Request/Response implementation contract; supported API subsets and limits belong in the capability catalog and tests.
+- SDK generation describes selected WIT contracts and guest implementation signatures, not ambient JavaScript/Node API compatibility. The incoming-handler adapter supplies resource ownership and its Request/Response implementation contract; supported buffered/streaming subsets and limits belong in the capability catalog and tests.
 - Catalog `conformance` references can identify TypeScript differential cases or Rust integration suites. The differential report executes only TypeScript cases; integration-only entries remain `MISSING` in that report and are verified separately by Cargo.
 
 ## Runtime Foundations
@@ -84,12 +84,13 @@ Verification:
 - `guest_async_timer_producers_settle_once_and_resume_in_microtask_order` compares genuinely pending timers, microtasks between timer callbacks, executor failures, first-settlement/adoption behavior, and self-resolution rejection with Node. Wasmtime invokes both a named async export and a synchronous export returning a pending Promise; each returns the resolved WIT string. Constructor rewriting respects lexical bindings and remains correct when `undefined` is shadowed.
 - The existing scheduled-callback fixture also runs 1,000 pending-task success/rejection/cancellation/recovery cycles after warm-up and a 5,000-await allocating loop. Captured cyclic objects and byte views survive, memory stays at its warmed high-water mark, and all subscriptions are released. Wasmtime verifies resolved strings, handled WIT errors, and uncaught rejection from timer-backed exports. A canceled producer with no runnable work reports an error instead of polling indefinitely.
 - SDK implementation contracts accept synchronous results or `Promise` results while retaining the WIT host signatures and rejecting wrong resolved types. Async expressions/class methods, generators, captured named functions, and advanced parameters report diagnostics. Direct global `new Promise(executor)` uses the guest callback subset; static methods in programs using native async or constructors are diagnosed, and instance methods raise a guest exception.
-- B.2 completes for the timer-backed task subset. General Promise APIs, arbitrary thenables, and discarded-task rejection reporting remain outside that subset. Legacy top-level synchronous await does not drive pending timer Promises; use named async functions or return the Promise from an export. HTTP producer readiness and incoming-handler resource ownership remain in 10.3/11.3. Pure async jobs make no host poll calls; shared runtime cleanup still retains `wasi:io/poll`, so broader import minimization remains an integration concern.
+- B.2 completes for the timer-backed task subset. General Promise APIs, arbitrary thenables, and discarded-task rejection reporting remain outside that subset. Legacy top-level synchronous await does not drive pending timer Promises; use named async functions or return the Promise from an export. Incoming handlers and body forwarding own their additional resource/readiness checks in 10.3/10.4/11.3; outgoing HTTP guest Promise producers need their own integration. Pure async jobs make no host poll calls; shared runtime cleanup still retains `wasi:io/poll`, so broader import minimization remains an integration concern.
 
 ### Item C: Safe Runtime Pruning
 
 Pure operations use `mem_call_pure`; the linker selects specialized dispatch for all 16 combinations of clocks, randomness, environment, and filesystem access.
-HTTP uses the broader dispatcher; minimal imports for mixed HTTP capability combinations have not been established.
+Outgoing HTTP uses the broader dispatcher; minimal imports for mixed outgoing HTTP capability combinations have not been established.
+Incoming handlers wrap the selected dispatcher with their own body methods; timer-free forwarding retains no clock or outgoing-handler imports.
 
 - [x] **C.1. Separable Capability Dispatch**
     - [x] Give statically known pure operations a path that does not reach HTTP, using direct calls or dispatcher specialization according to what the backend exposes.
@@ -276,10 +277,18 @@ Verification (10.3):
 - `http-server` selects the generated resource adapter before runtime pruning. `incomingHandlerHandle(request)` accepts the buffered request and returns a Response or guest Promise<Response>; existing task and CLI contracts remain compatible. SDK generation accepts the buffered implementation signature and rejects wrong input/resolved result types.
 - The existing HTTP regression suite runs an actual Wasmtime server with reused instances. It verifies awaited timers, UTF-8 and binary requests/responses, headers including Latin-1, URL/method metadata, caught JSON failures, rejected/wrong results, body limits, and recovery. The fixture uses `-S cli=y -O pooling-max-tables-per-module=2` for the current runtime requirements.
 - A resource-counting host exercises 300 success/rejection/pending-task calls in one instance after warm-up without memory growth. It checks retained/released request values, exactly 1 MiB and oversized bodies, partial reads, failed writes, recovery, and 100 calls after initializer failure. Every invocation releases its host resources; initialization failure permanently prevents guest execution in that instance.
-- Request bodies buffer before guest execution; response bodies buffer before sending and are published before blocking writes. The initial 1 MiB subset supports direct body methods, repeat reads, strings/views, status, and read-only headers. General streams, aborts, broader DOM/Promise APIs, and single-use bodies remain for concrete consumers. Unsupported constructor options/body methods report guest exceptions, and the capability catalog records the subset. A Node comparison covers construction, copied subviews, metadata, header normalization, JSON shape, and text/binary decoding.
-- [ ] **10.4. Streaming Bodies** — Needs guest async execution, binary values, and stream readiness from 11.3.
-    - [ ] Expose incremental reads/writes for one Request/Response use case, defining backpressure, cancellation, and close/error ownership at that boundary.
-    - [ ] Verify multi-chunk transfer, a slow consumer, and early cancellation; measure peak buffering before expanding stream compatibility.
+- At 10.3 closure, request bodies buffered before guest execution and response bodies before sending, with a 1 MiB limit. Slice 10.4 replaces eager request buffering with owned sources while preserving bounded, cached text/json/bytes methods and their repeat reads. Unsupported constructor options/body methods report guest exceptions; the catalog records the subset. A Node comparison covers construction, copied subviews, metadata, header normalization, JSON shape, and text/binary decoding.
+
+- [x] **10.4. Streaming Bodies** — Needs guest async execution, binary values, and stream readiness from 11.3.
+    - [x] Expose incremental reads/writes for one Request/Response use case, defining backpressure, cancellation, and close/error ownership at that boundary.
+    - [x] Verify multi-chunk transfer, a slow consumer, and early cancellation; measure peak buffering before expanding stream compatibility.
+
+Verification (10.4):
+
+- The full `cargo test --locked --package perry-wit` suite passed 161 tests under Nix, including all 17 HTTP tests and local fixtures. Scoped formatting and compiler/guest Clippy checks passed with existing warnings. SDK checks accept `return new Response(request.body)`; the catalog records the supported surface.
+- `incoming_component_streams_before_upload_completion_and_recovers_after_disconnect` exercises that consumer through an actual Wasmtime component server. It holds a 2 MiB upload after its first chunk until response bytes arrive, checks exact bytes with a slow consumer, disconnects early three times, and verifies subsequent requests work. Constructed `Response.body` forwarding also preserves binary bytes; the existing Node comparison covers that pure path.
+- The existing resource-counting host now checks blocked reads, partial output permits, flush completion, and no input read-ahead. A 4 MiB transfer leaves guest memory at the warmed 2,162,688-byte high-water mark; forwarding owns at most one 8,192-byte body chunk. Fifty read/write/flush failure, callback failure, cancellation, and recovery cycles also leave memory stable and every host resource released.
+- Forwarding consumes its shared source. Retained consumed or unread sources cannot alias a later request; unsupported reader methods raise guest exceptions. Materialized body methods retain the 1 MiB cached subset. General readers, user-created streams, transforms, abort signals, and full single-use/bodyUsed compatibility remain deferred to a concrete consumer; this slice establishes body forwarding rather than broader DOM compatibility.
 
 ### Phase 11: Polling & Timers (`wasi:io/poll`)
 
@@ -306,9 +315,15 @@ Verification (11.2):
 - The existing controlled-clock lifetime test performs 50,000 interval callbacks after a 100-callback warm-up and checks linear memory stays at its warmed high-water mark during delivery. It verifies cyclic captures/views, globals, fresh string/result return values, void exports, stale IDs, skipped post-return, 100 failure/recovery cycles, and subscription release. A late clock checks rescheduling from callback start without replaying missed ticks. Timer-only components still prune unrelated capability imports, and an interval task also runs through a real Wasmtime component invocation.
 - The ABI driver reclaims completed callback allocations with no live TypeScript frames, rooting the enclosing raw result and globals alongside pending timer graphs. Runtime hooks own and release subscriptions at ordinary invocation boundaries; post-return makes no host calls. Uncleared intervals keep the invocation running. SDK WIT contracts are unchanged; the capability catalog records the timer subset and rescheduling behavior.
 - The full `cargo test --locked --package perry-wit` suite passed all 147 tests under Nix, including local HTTP fixtures. Scoped formatting and compiler/guest Clippy checks passed with existing warnings; the parent Makefile limitations remain as recorded in the baseline.
-- [ ] **11.3. Stream Readiness** — Build with the first async I/O consumer and its lifetime requirements.
-    - [ ] Resume that consumer when input/output is ready, handling partial progress and ownership on completion/error/cancellation; reuse HTTP polling infrastructure where suitable.
-    - [ ] Verify progress with slow or blocked peers, mixed pending operations, and cleanup without busy-waiting or unbounded buffering.
+- [x] **11.3. Stream Readiness** — Build with the first async I/O consumer and its lifetime requirements.
+    - [x] Resume that consumer when input/output is ready, handling partial progress and ownership on completion/error/cancellation; reuse HTTP polling infrastructure where suitable.
+    - [x] Verify progress with slow or blocked peers, mixed pending operations, and cleanup without busy-waiting or unbounded buffering.
+
+Verification (11.3):
+
+- Slice 10.4's body forwarder uses nonblocking stream calls and owned subscriptions. An empty read, zero write permit, or pending flush waits through `wasi:io/poll`; the next step respects available capacity. Polling shares the earliest timer subscription, and queued microtasks run before returning to I/O. Completed guest frames allow reclamation while the response and pending work remain rooted.
+- The extended HTTP host proves a timer can schedule another timer and an async continuation while its I/O peer stays blocked. It enforces partial permits and completed flushes before another input chunk, and checks child-before-parent resource release on completion, read/write/flush errors, callback failure, and early close. A canceled transfer with an active interval terminates and releases pending work instead of draining indefinitely. See 10.4 for live-host and bounded-memory evidence.
+- Timer-free forwarding prunes clocks, randomness, filesystem, and the outgoing-handler interface. The full baseline also verifies all synchronous capability combinations, existing outgoing HTTP behavior, and timer ordering. `streams.rs` keeps the shared I/O interface limited to bounded writes/forwarding and an owned readiness callback; further producers or socket consumers must establish their own progress and lifetime evidence.
 
 ### Phase 12: TCP Client Sockets (`wasi:sockets`)
 

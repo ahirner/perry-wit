@@ -28,6 +28,10 @@ fn incoming_handler_contract_accepts_request_response_and_async_results() {
             true,
         ),
         (
+            "export function incomingHandlerHandle(request: Request): Response { return new Response(request.body); }",
+            true,
+        ),
+        (
             "export async function incomingHandlerHandle(request: Request): Promise<string> { return request.method; }",
             false,
         ),

@@ -113,6 +113,8 @@ pub fn compile_typescript(
             handler.core_name.as_str(),
             "guest_async_step",
             "guest_async_result",
+            "guest_async_pending",
+            "guest_stream_step",
         ]
     });
     let merged_core = linker::merge_with_runtime_exports(

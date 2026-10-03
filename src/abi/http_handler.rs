@@ -11,7 +11,7 @@ use wasmparser::{ExportSectionReader, FunctionBody, Parser, TypeRef};
 
 use super::trampoline::{DiscoveredExports, discover_module_exports};
 
-const BRIDGES: [&str; 3] = ["begin", "invoke", "end"];
+const BRIDGES: [&str; 5] = ["begin", "invoke", "end", "step", "drain"];
 
 /// Emits ordinary guest boundaries without trapping before Rust releases HTTP resources.
 pub(super) fn append_bridge(
@@ -41,6 +41,30 @@ pub(super) fn append_bridge(
         .http_reclaim_responses
         .map(|index| format!("call {index}"))
         .unwrap_or_default();
+    let pending = discovered
+        .user_functions
+        .get("guest_async_pending")
+        .context("missing guest Promise state helper")?;
+    let async_step = discovered
+        .guest_async_step
+        .context("missing guest async step")?;
+    let async_result = discovered
+        .guest_async_result
+        .context("missing guest async result")?;
+    let stream_step = discovered
+        .user_functions
+        .get("guest_stream_step")
+        .context("missing stream readiness helper")?;
+    let timer_step = discovered
+        .timers_step
+        .map(|index| format!("call {index}"))
+        .unwrap_or_else(|| "i32.const 0".into());
+    let register = discovered
+        .cabi_register_global_root
+        .context("missing stream root registration")?;
+    let reclaim_step = discovered
+        .cabi_reclaim_callback_temporaries
+        .context("missing callback reclamation")?;
     write!(
         snippets,
         r#"
@@ -71,9 +95,57 @@ pub(super) fn append_bridge(
     i32.const 1
   )
   (func $perry_http_invoke (param i64) (result i64)
+    (local $result i64)
     local.get 0
     call {target}
+    local.set $result
+    block $settled
+      loop $resolve
+        call {async_step}
+        i32.eqz
+        if
+          local.get $result
+          call {pending}
+          i32.eqz
+          br_if $settled
+          {timer_step}
+          i32.eqz
+          br_if $settled
+        end
+        local.get $result
+        call {register}
+        call $perry_scan_globals
+        call {reclaim_step}
+        {reclaim_http}
+        br $resolve
+      end
+    end
+    local.get $result
+    call {async_result}
+  )
+  (func $perry_http_step (param $root i64) (result i32)
+    (local $progress i32)
+    call {async_step}
+    i32.eqz
+    if (result i32)
+      call {stream_step}
+    else
+      i32.const 1
+    end
+    local.tee $progress
+    if
+      local.get $root
+      call {register}
+      call $perry_scan_globals
+      call {reclaim_step}
+      {reclaim_http}
+    end
+    local.get $progress
+  )
+  (func $perry_http_drain (param i64)
+    local.get 0
     call $perry_drain_work
+    drop
   )
   (func $perry_http_end
     call $perry_scan_globals

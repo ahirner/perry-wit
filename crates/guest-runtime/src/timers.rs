@@ -61,10 +61,9 @@ impl Timers {
         self.pending.clear();
     }
 
-    /// Removes one-shots and leaves firing intervals discoverable by cancellation.
-    fn take_next(&mut self) -> Option<TimerDelivery> {
-        let index = self
-            .pending
+    /// Orders waiting timers by deadline and registration identity.
+    fn next_index(&self) -> Option<usize> {
+        self.pending
             .iter()
             .enumerate()
             .filter_map(|(index, timer)| match timer.status {
@@ -72,7 +71,20 @@ impl Timers {
                 TimerStatus::Running => None,
             })
             .min_by_key(|(order, _)| *order)
-            .map(|(_, index)| index)?;
+            .map(|(_, index)| index)
+    }
+
+    /// Stream waits share the earliest timer subscription without moving its captures.
+    pub(crate) fn next_pollable(&self) -> Option<&Pollable> {
+        match &self.pending[self.next_index()?].status {
+            TimerStatus::Waiting { pollable, .. } => Some(pollable),
+            TimerStatus::Running => None,
+        }
+    }
+
+    /// Removes one-shots and leaves firing intervals discoverable by cancellation.
+    fn take_next(&mut self) -> Option<TimerDelivery> {
+        let index = self.next_index()?;
         let timer = &mut self.pending[index];
         let TimerStatus::Waiting { pollable, .. } =
             std::mem::replace(&mut timer.status, TimerStatus::Running)
