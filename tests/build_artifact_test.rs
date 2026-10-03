@@ -10,8 +10,9 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
         .unwrap_or_else(|| std::path::PathBuf::from("target"));
     let build_dir = target_dir.join("debug/build");
     let mut newest_script: Option<(std::path::PathBuf, Option<std::time::SystemTime>)> = None;
-    if build_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&build_dir) {
+    if build_dir.exists()
+        && let Ok(entries) = fs::read_dir(&build_dir)
+    {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 if name.to_string_lossy().starts_with("perry-wit-") {
@@ -31,7 +32,6 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
                 }
             }
         }
-    }
 
     if let Some((existing, _)) = newest_script {
         fs::copy(existing, &script).unwrap();

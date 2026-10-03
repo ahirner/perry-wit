@@ -164,8 +164,10 @@ impl FunctionLowerer<'_> {
         );
         let arity = match method {
             "slice" => 0..=2,
-            "charAt" => 0..=1,
+            "charAt" | "codePointAt" => 0..=1,
             "indexOf" => 1..=2,
+            "toLowerCase" | "toUpperCase" => 0..=0,
+            "split" => 1..=1,
             _ => bail!("Unsupported string method: {method}"),
         };
         ensure!(
@@ -188,6 +190,26 @@ impl FunctionLowerer<'_> {
                 let position = self.position_argument(args.first(), 0.0)?;
                 (helpers.str_char_at, vec![desc, position], Type::I32)
             }
+            "codePointAt" => {
+                let position = self.position_argument(args.first(), 0.0)?;
+                (helpers.str_code_point_at, vec![desc, position], Type::F64)
+            }
+            "toLowerCase" => {
+                let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+                (helpers.str_case_convert, vec![desc, zero], Type::I32)
+            }
+            "toUpperCase" => {
+                let one = self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]);
+                (helpers.str_case_convert, vec![desc, one], Type::I32)
+            }
+            "split" => {
+                ensure!(
+                    self.is_string(&args[0]),
+                    "split requires a string separator operand"
+                );
+                let sep = self.string_receiver(&args[0])?;
+                (helpers.str_split, vec![desc, sep], Type::I32)
+            }
             "indexOf" => {
                 ensure!(
                     self.is_string(&args[0]),
@@ -204,6 +226,41 @@ impl FunctionLowerer<'_> {
             _ => unreachable!("Method checked above"),
         };
         Ok(self.op(Operator::Call { function_index }, &values, &[result_type]))
+    }
+
+    /// Lowers Array.prototype.join for array of string descriptors.
+    pub(super) fn array_join(&mut self, receiver: &Expr, args: &[Expr]) -> Result<Value> {
+        let helpers = self
+            .registry
+            .string_helpers
+            .expect("String runtime is registered");
+        let arr_ptr = self.expression(receiver)?;
+        let sep_desc = if let Some(arg) = args.first() {
+            ensure!(
+                self.is_string(arg),
+                "join requires a string separator operand"
+            );
+            self.string_receiver(arg)?
+        } else {
+            let comma_offset = self
+                .string_pool
+                .get(",")
+                .expect("Comma string literal is pre-interned");
+            self.op(
+                Operator::I32Const {
+                    value: comma_offset,
+                },
+                &[],
+                &[Type::I32],
+            )
+        };
+        Ok(self.op(
+            Operator::Call {
+                function_index: helpers.str_join,
+            },
+            &[arr_ptr, sep_desc],
+            &[Type::I32],
+        ))
     }
 
     /// Supplies omitted/undefined defaults without silently coercing other argument types.

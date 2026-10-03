@@ -9,14 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, FunctionSection, ImportSection, Module,
-    TypeSection,
+    CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
+    ImportSection, Module, TypeSection,
 };
 use wasmparser::{
     ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator,
 };
 
-use super::libraries::{Library, LibraryId, Relocations, SEARCH};
+use super::libraries::{Global, Library, LibraryId, Relocations, SEARCH, TEXT};
 
 pub(crate) const HELPER_MODULE: &str = "__perry_helper";
 
@@ -151,6 +151,13 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     for (_, entry_name, _) in &helper_imports {
         let lib_id = match entry_name.as_str() {
             "str_find_substring" | "str_scalar_to_byte" => LibraryId::Search,
+            "str_code_point_at"
+            | "str_from_code_point"
+            | "str_case_convert"
+            | "str_split_count"
+            | "str_split_populate"
+            | "str_join_total_len"
+            | "str_join" => LibraryId::Text,
             _ => anyhow::bail!("unknown helper entry {entry_name}"),
         };
         requested_by_lib.entry(lib_id).or_default().insert(entry_name.clone());
@@ -206,6 +213,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     for (lib_id, entries) in requested_by_lib {
         let lib_bytes = match lib_id {
             LibraryId::Search => SEARCH,
+            LibraryId::Text => TEXT,
         };
         let lib = Library::parse(lib_bytes)?;
         let entry_refs: Vec<&str> = entries.iter().map(|s| s.as_str()).collect();
@@ -286,6 +294,11 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
         new_code.function(&rewritten);
     }
 
+    let needs_stack = prepared_libs.iter().any(|prep| {
+        prep.lib.globals.iter().any(|g| matches!(g, Global::Stack))
+    });
+    let stack_global_index = core_globals.len() as u32;
+
     // Emit helper functions
     for prep in prepared_libs {
         let mut relocation = Relocations {
@@ -293,7 +306,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
             globals: &prep.lib.globals,
             type_base: prep.type_base,
             memory_base: 0,
-            stack_global: 0,
+            stack_global: stack_global_index,
             table_base: 0,
         };
 
@@ -367,8 +380,8 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     }
 
     // Globals
-    if !core_globals.is_empty() {
-        let mut new_globs = wasm_encoder::GlobalSection::new();
+    if !core_globals.is_empty() || needs_stack {
+        let mut new_globs = GlobalSection::new();
         for glob in core_globals {
             let val_type = roundtrip.val_type(glob.ty.content_type).map_err(|e| anyhow::anyhow!("{e}"))?;
             let init = roundtrip.const_expr(glob.init_expr).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -379,6 +392,16 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                     shared: glob.ty.shared,
                 },
                 &init,
+            );
+        }
+        if needs_stack {
+            new_globs.global(
+                wasm_encoder::GlobalType {
+                    val_type: wasm_encoder::ValType::I32,
+                    mutable: true,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(65_536),
             );
         }
         module.section(&new_globs);

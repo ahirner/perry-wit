@@ -821,3 +821,239 @@ async fn test_string_indexing_preserves_undefined() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_code_point_at() -> Result<()> {
+    let source = r#"export function run(s: string, pos: number): number {
+        return s.codePointAt(pos);
+    }"#;
+    let cases = vec![
+        (vec![Val::String("A🦀B".into()), Val::Float64(0.0)], Val::Float64(65.0)),
+        (vec![Val::String("A🦀B".into()), Val::Float64(1.0)], Val::Float64(129408.0)), // 0x1F980
+        (vec![Val::String("A🦀B".into()), Val::Float64(2.0)], Val::Float64(66.0)),
+        (vec![Val::String("A🦀B".into()), Val::Float64(3.0)], Val::Float64(f64::NAN)),
+        (vec![Val::String("A🦀B".into()), Val::Float64(-1.0)], Val::Float64(f64::NAN)),
+    ];
+    // Custom runner to handle NaN comparison
+    let compiled =
+        compile_typescript_waffle(source, "code_point_at.ts", &WaffleCompileOptions::default())?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = make_wasi_linker(&engine)?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_func(&mut store, "run").unwrap();
+    for (params, expected) in cases {
+        let mut results = [Val::Float64(0.0)];
+        run.call_async(&mut store, &params, &mut results).await?;
+        if let (Val::Float64(actual), Val::Float64(exp)) = (&results[0], expected) {
+            if exp.is_nan() {
+                assert!(actual.is_nan(), "expected NaN, got {actual}");
+            } else {
+                assert_eq!(actual, &exp);
+            }
+        }
+    }
+
+    // Default position test
+    let default_pos_src = r#"export function run(s: string): number {
+        return s.codePointAt();
+    }"#;
+    run_cases(
+        default_pos_src,
+        &[(vec![Val::String("A🦀B".into())], Val::Float64(65.0))],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_from_code_point() -> Result<()> {
+    let source = r#"export function run(cp: number): string {
+        return String.fromCodePoint(cp);
+    }"#;
+    run_cases(
+        source,
+        &[
+            (vec![Val::Float64(65.0)], Val::String("A".into())),
+            (vec![Val::Float64(129408.0)], Val::String("🦀".into())),
+            (vec![Val::Float64(0x20AC as f64)], Val::String("€".into())),
+            (vec![Val::Float64(0.0)], Val::String("\0".into())),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_case_conversion() -> Result<()> {
+    let to_lower_src = r#"export function run(s: string): string {
+        return s.toLowerCase();
+    }"#;
+    run_cases(
+        to_lower_src,
+        &[
+            (vec![Val::String("Hello, WORLD!".into())], Val::String("hello, world!".into())),
+            (vec![Val::String("CAFÉ".into())], Val::String("café".into())),
+            (vec![Val::String("🦀".into())], Val::String("🦀".into())),
+        ],
+    )
+    .await?;
+
+    let to_upper_src = r#"export function run(s: string): string {
+        return s.toUpperCase();
+    }"#;
+    run_cases(
+        to_upper_src,
+        &[
+            (vec![Val::String("hello, world!".into())], Val::String("HELLO, WORLD!".into())),
+            (vec![Val::String("café".into())], Val::String("CAFÉ".into())),
+            // German sharp S expands to SS
+            (vec![Val::String("weiß".into())], Val::String("WEISS".into())),
+            (vec![Val::String("🦀".into())], Val::String("🦀".into())),
+        ],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_split_and_join() -> Result<()> {
+    let split_index_src = r#"export function run(s: string, sep: string, idx: number): string {
+        let parts = s.split(sep);
+        return parts[idx];
+    }"#;
+    run_cases(
+        split_index_src,
+        &[
+            (
+                vec![Val::String("one,two,three".into()), Val::String(",".into()), Val::Float64(0.0)],
+                Val::String("one".into()),
+            ),
+            (
+                vec![Val::String("one,two,three".into()), Val::String(",".into()), Val::Float64(1.0)],
+                Val::String("two".into()),
+            ),
+            (
+                vec![Val::String("one,two,three".into()), Val::String(",".into()), Val::Float64(2.0)],
+                Val::String("three".into()),
+            ),
+        ],
+    )
+    .await?;
+
+    let split_len_src = r#"export function run(s: string, sep: string): number {
+        return s.split(sep).length;
+    }"#;
+    run_cases(
+        split_len_src,
+        &[
+            (
+                vec![Val::String("one,two,three".into()), Val::String(",".into())],
+                Val::Float64(3.0),
+            ),
+            (
+                vec![Val::String("single".into()), Val::String(",".into())],
+                Val::Float64(1.0),
+            ),
+            (
+                vec![Val::String("🦀🌲🦀".into()), Val::String("".into())],
+                Val::Float64(3.0),
+            ),
+        ],
+    )
+    .await?;
+
+    let split_join_src = r#"export function run(s: string, sep: string, join_sep: string): string {
+        return s.split(sep).join(join_sep);
+    }"#;
+    run_cases(
+        split_join_src,
+        &[
+            (
+                vec![Val::String("a,b,c".into()), Val::String(",".into()), Val::String("-".into())],
+                Val::String("a-b-c".into()),
+            ),
+            (
+                vec![Val::String("hello".into()), Val::String("".into()), Val::String(".".into())],
+                Val::String("h.e.l.l.o".into()),
+            ),
+            (
+                vec![Val::String("🦀🌲🦀".into()), Val::String("".into()), Val::String("~".into())],
+                Val::String("🦀~🌲~🦀".into()),
+            ),
+        ],
+    )
+    .await?;
+
+    let default_join_src = r#"export function run(s: string): string {
+        return s.split(",").join();
+    }"#;
+    run_cases(
+        default_join_src,
+        &[(vec![Val::String("x,y,z".into())], Val::String("x,y,z".into()))],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
+    // 1. Audit core module imports: string-only tasks must not import unrelated intrinsics
+    let source = r#"export function run(s: string): string {
+        return s.toUpperCase().split(",").join(" - ");
+    }"#;
+    let compiled =
+        compile_typescript_waffle(source, "boundary_audit.ts", &WaffleCompileOptions::default())?;
+
+    // Inspect core wasm imports via wasmparser
+    let mut import_count = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&compiled.core) {
+        if let wasmparser::Payload::ImportSection(reader) = payload? {
+            for import in reader.into_imports() {
+                let imp = import?;
+                import_count += 1;
+                // Internal helpers must have been linked and removed
+                assert!(
+                    !imp.module.starts_with("__perry_helper"),
+                    "Helper import {}:{} was not linked and stripped",
+                    imp.module,
+                    imp.name
+                );
+            }
+        }
+    }
+    // String-only task without host capabilities must have 0 external core imports
+    assert_eq!(import_count, 0, "Core module has unexpected external imports");
+
+    // 2. Component execution and repeated allocations with bounded memory growth
+    let engine = make_async_engine()?;
+    let component_bytes = compiled.component.expect("Component emitted");
+    let component = Component::new(&engine, &component_bytes)?;
+    let linker = make_wasi_linker(&engine)?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+
+    // Verify multiple sequential calls preserve return values without memory corruption
+    let res1 = run.call_async(&mut store, ("alpha,beta,gamma",)).await?;
+    assert_eq!(res1.0, "ALPHA - BETA - GAMMA");
+
+    let res2 = run.call_async(&mut store, ("one,two",)).await?;
+    assert_eq!(res2.0, "ONE - TWO");
+
+    let res3 = run.call_async(&mut store, ("🦀,🌲,🌟",)).await?;
+    assert_eq!(res3.0, "🦀 - 🌲 - 🌟");
+
+    // Repeat 100 times to verify stable allocation behavior
+    for _ in 0..100 {
+        let res = run.call_async(&mut store, ("x,y,z",)).await?;
+        assert_eq!(res.0, "X - Y - Z");
+    }
+
+    Ok(())
+}

@@ -18,6 +18,7 @@ mod descriptor;
 mod positions;
 mod search;
 mod slicing;
+mod text_ops;
 
 use std::collections::BTreeMap;
 
@@ -31,6 +32,10 @@ use concat::emit_concat;
 use positions::{CharacterAccess, emit_character_access};
 use search::{declare_index_of_import, emit_index_of};
 use slicing::emit_slice;
+use text_ops::{
+    declare_text_imports, emit_case_convert, emit_code_point_at, emit_from_code_point,
+    emit_join, emit_split,
+};
 
 /// Base memory address where static string descriptors and data are placed.
 pub(crate) const STATIC_STRING_BASE: u32 = 1024;
@@ -136,6 +141,13 @@ pub(crate) struct StringHelperFuncs {
     pub(crate) str_index_of: Func,
     pub(crate) str_concat: Func,
     pub(crate) str_compare: Func,
+    #[allow(dead_code)]
+    pub(crate) cabi_realloc: Func,
+    pub(crate) str_code_point_at: Func,
+    pub(crate) str_from_code_point: Func,
+    pub(crate) str_case_convert: Func,
+    pub(crate) str_split: Func,
+    pub(crate) str_join: Func,
 }
 
 /// Synthesizes runtime helper functions for strings and memory into the WAFFLE module.
@@ -144,7 +156,10 @@ pub(crate) fn emit_string_runtime(
     memory: Memory,
     initial_heap_base: u32,
 ) -> Result<StringHelperFuncs> {
+    // Declare all helper imports before defining function bodies
     let str_find_helper = declare_index_of_import(module)?;
+    let text_imports = declare_text_imports(module)?;
+
     let cabi_realloc = emit_allocator(module, memory, initial_heap_base)?;
     let lift_canonical = emit_lift(module, memory, cabi_realloc)?;
     let str_slice = emit_slice(module, memory, cabi_realloc)?;
@@ -154,6 +169,27 @@ pub(crate) fn emit_string_runtime(
     let str_index_of = emit_index_of(module, memory, str_find_helper)?;
     let str_compare = emit_compare(module, memory)?;
 
+    let str_code_point_at =
+        emit_code_point_at(module, memory, text_imports.str_code_point_at)?;
+    let str_from_code_point =
+        emit_from_code_point(module, memory, cabi_realloc, text_imports.str_from_code_point)?;
+    let str_case_convert =
+        emit_case_convert(module, memory, cabi_realloc, text_imports.str_case_convert)?;
+    let str_split = emit_split(
+        module,
+        memory,
+        cabi_realloc,
+        text_imports.str_split_count,
+        text_imports.str_split_populate,
+    )?;
+    let str_join = emit_join(
+        module,
+        memory,
+        cabi_realloc,
+        text_imports.str_join_total_len,
+        text_imports.str_join,
+    )?;
+
     Ok(StringHelperFuncs {
         lift_canonical,
         str_slice,
@@ -162,5 +198,11 @@ pub(crate) fn emit_string_runtime(
         str_index_of,
         str_concat,
         str_compare,
+        cabi_realloc,
+        str_code_point_at,
+        str_from_code_point,
+        str_case_convert,
+        str_split,
+        str_join,
     })
 }

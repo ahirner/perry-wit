@@ -14,10 +14,12 @@ use wasmparser::{
 };
 
 pub(crate) const SEARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/search.wasm"));
+pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {
     Search,
+    Text,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +389,22 @@ mod tests {
         assert!(lib.exports.contains_key("str_scalar_to_byte"));
         let reachable = lib
             .reachable(&["str_find_substring"])
+            .expect("reachability check");
+        assert!(!reachable.is_empty());
+    }
+
+    #[test]
+    fn test_text_library_parse() {
+        let lib = Library::parse(TEXT).expect("parse text helper");
+        assert!(lib.exports.contains_key("str_code_point_at"));
+        assert!(lib.exports.contains_key("str_from_code_point"));
+        assert!(lib.exports.contains_key("str_case_convert"));
+        assert!(lib.exports.contains_key("str_split_count"));
+        assert!(lib.exports.contains_key("str_split_populate"));
+        assert!(lib.exports.contains_key("str_join_total_len"));
+        assert!(lib.exports.contains_key("str_join"));
+        let reachable = lib
+            .reachable(&["str_code_point_at", "str_from_code_point"])
             .expect("reachability check");
         assert!(!reachable.is_empty());
     }

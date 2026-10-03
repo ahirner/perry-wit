@@ -13,7 +13,8 @@ use anyhow::{Result, bail, ensure};
 use perry_hir::ir::{BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt};
 use perry_hir::types::{LocalId, Type as HirType};
 use waffle::{
-    Block, BlockTarget, Export, ExportKind, FunctionBody, Module, Operator, Terminator, Type, Value,
+    Block, BlockTarget, Export, ExportKind, FunctionBody, MemoryArg, Module, Operator, Terminator,
+    Type, Value,
 };
 
 use crate::waffle_backend::abi::{self, CompletionStatus};
@@ -342,6 +343,9 @@ impl<'a> FunctionLowerer<'a> {
             object, property, ..
         } = callee
         {
+            if property == "join" {
+                return self.array_join(object, args).map(Some);
+            }
             return self.string_method(object, property, args).map(Some);
         }
 
@@ -552,16 +556,8 @@ impl<'a> FunctionLowerer<'a> {
                 .get(id)
                 .copied()
                 .ok_or_else(|| anyhow::anyhow!("Uninitialized local {:?}", id)),
-            Expr::PropertyGet {
-                object, property, ..
-            } if property == "length" => {
-                let desc = self.string_receiver(object)?;
-                let scalar_len = self.string_length(desc);
-                Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
-            }
-            Expr::IndexGet { object, index, .. } => {
-                let desc = self.string_receiver(object)?;
-                let idx = self.position_argument(Some(index), f64::NAN)?;
+            Expr::StringFromCodePoint(arg) => {
+                let cp = self.expression(arg)?;
                 let helpers = self
                     .registry
                     .string_helpers
@@ -569,11 +565,70 @@ impl<'a> FunctionLowerer<'a> {
                     .expect("string helpers available");
                 Ok(self.op(
                     Operator::Call {
-                        function_index: helpers.str_index,
+                        function_index: helpers.str_from_code_point,
                     },
-                    &[desc, idx],
+                    &[cp],
                     &[Type::I32],
                 ))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if property == "length" => {
+                if self.is_string(object) {
+                    let desc = self.string_receiver(object)?;
+                    let scalar_len = self.string_length(desc);
+                    Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
+                } else {
+                    let arr_ptr = self.expression(object)?;
+                    let count = self.op(
+                        Operator::I32Load {
+                            memory: MemoryArg {
+                                align: 2,
+                                offset: 4,
+                                memory: self.registry.memory,
+                            },
+                        },
+                        &[arr_ptr],
+                        &[Type::I32],
+                    );
+                    Ok(self.op(Operator::F64ConvertI32U, &[count], &[Type::F64]))
+                }
+            }
+            Expr::IndexGet { object, index, .. } => {
+                if self.is_string(object) {
+                    let desc = self.string_receiver(object)?;
+                    let idx = self.position_argument(Some(index), f64::NAN)?;
+                    let helpers = self
+                        .registry
+                        .string_helpers
+                        .as_ref()
+                        .expect("string helpers available");
+                    Ok(self.op(
+                        Operator::Call {
+                            function_index: helpers.str_index,
+                        },
+                        &[desc, idx],
+                        &[Type::I32],
+                    ))
+                } else {
+                    let arr_ptr = self.expression(object)?;
+                    let elements_ptr = self.op(
+                        Operator::I32Load {
+                            memory: MemoryArg {
+                                align: 2,
+                                offset: 0,
+                                memory: self.registry.memory,
+                            },
+                        },
+                        &[arr_ptr],
+                        &[Type::I32],
+                    );
+                    let idx_val = self.expression(index)?;
+                    let idx_i32 = self.op(Operator::I32TruncF64U, &[idx_val], &[Type::I32]);
+                    let twelve = self.op(Operator::I32Const { value: 12 }, &[], &[Type::I32]);
+                    let offset = self.op(Operator::I32Mul, &[idx_i32, twelve], &[Type::I32]);
+                    Ok(self.op(Operator::I32Add, &[elements_ptr, offset], &[Type::I32]))
+                }
             }
             Expr::Compare { .. } => self.condition(expr),
             Expr::Binary { op, left, right }
@@ -807,6 +862,7 @@ impl<'a> FunctionLowerer<'a> {
 
 fn collect_strings_in_module(hir: &HirModule, pool: &mut StringPool) {
     pool.intern("");
+    pool.intern(",");
     for func in &hir.functions {
         for stmt in &func.body {
             collect_strings_stmt(stmt, pool);
@@ -880,7 +936,7 @@ fn collect_strings_expr(expr: &Expr, pool: &mut StringPool) {
         Expr::Unary { operand, .. } => {
             collect_strings_expr(operand, pool);
         }
-        Expr::Await(expr) | Expr::TemplateStringCoerce(expr) => {
+        Expr::Await(expr) | Expr::TemplateStringCoerce(expr) | Expr::StringFromCodePoint(expr) => {
             collect_strings_expr(expr, pool);
         }
         Expr::Call { callee, args, .. } => {

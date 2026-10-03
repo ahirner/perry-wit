@@ -34,9 +34,10 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
-            Expr::String(_) | Expr::TemplateStringCoerce(_) | Expr::StringCoerce(_) => {
-                HirType::String
-            }
+            Expr::String(_)
+            | Expr::TemplateStringCoerce(_)
+            | Expr::StringCoerce(_)
+            | Expr::StringFromCodePoint(_) => HirType::String,
             Expr::Await(inner) => match self.infer_expr_type(inner) {
                 HirType::Promise(result) => *result,
                 result => result,
@@ -48,10 +49,17 @@ impl FunctionLowerer<'_> {
             Expr::Undefined => HirType::Void,
             Expr::Call { callee, .. } => {
                 if let Expr::PropertyGet { property, .. } = callee.as_ref() {
-                    if property == "slice" || property == "charAt" {
+                    if property == "slice"
+                        || property == "charAt"
+                        || property == "toLowerCase"
+                        || property == "toUpperCase"
+                        || property == "join"
+                    {
                         return HirType::String;
-                    } else if property == "indexOf" {
+                    } else if property == "indexOf" || property == "codePointAt" {
                         return HirType::Number;
+                    } else if property == "split" {
+                        return HirType::Array(Box::new(HirType::String));
                     }
                 } else if let Expr::FuncRef(fid) = callee.as_ref()
                     && let Some(info) = self.registry.functions.get(fid)
