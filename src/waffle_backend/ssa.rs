@@ -432,18 +432,14 @@ impl<'a> FunctionLowerer<'a> {
                 .get(fid)
                 .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
 
-            let outcome =
-                abi::emit_internal_call(&mut self.body, self.block, callee_info, &arg_vals);
-            self.block = outcome.err_block;
-            self.emit_throw(outcome.payload);
-            self.block = outcome.ok_block;
+            let payload = self.call_completion(callee_info.func_index, &arg_vals);
             if matches!(callee_info.success_type(), HirType::Void) {
                 Ok(None)
             } else {
                 let return_val = abi::decode_payload(
                     &mut self.body,
                     self.block,
-                    outcome.payload,
+                    payload,
                     matches!(
                         callee_info.success_type(),
                         HirType::Boolean | HirType::String
@@ -454,6 +450,14 @@ impl<'a> FunctionLowerer<'a> {
         } else {
             bail!("Unsupported call callee in WAFFLE lowering: {callee:?}");
         }
+    }
+
+    fn call_completion(&mut self, function: waffle::Func, args: &[Value]) -> Value {
+        let outcome = abi::emit_fallible_call(&mut self.body, self.block, function, args);
+        self.block = outcome.err_block;
+        self.emit_throw(outcome.payload);
+        self.block = outcome.ok_block;
+        outcome.payload
     }
 
     fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
@@ -599,12 +603,16 @@ impl<'a> FunctionLowerer<'a> {
                 let func = helpers
                     .str_from_code_point
                     .expect("from_code_point helper available");
-                Ok(self.op(
-                    Operator::Call {
-                        function_index: func,
-                    },
-                    &[cp],
-                    &[Type::I32],
+                ensure!(
+                    self.body.values[cp].ty(&self.body.type_pool) == Some(Type::F64),
+                    "fromCodePoint requires a numeric argument"
+                );
+                let payload = self.call_completion(func, &[cp]);
+                Ok(abi::decode_payload(
+                    &mut self.body,
+                    self.block,
+                    payload,
+                    true,
                 ))
             }
             Expr::PropertyGet {

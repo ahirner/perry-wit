@@ -101,8 +101,8 @@ impl TextContractMatrix {
             unit: IndexUnit::ScalarValue,
             status: OperationStatus::SupportedScalar,
             coercion: "Each argument coerced to Number and checked against 0..0x10FFFF excluding 0xD800..0xDFFF",
-            boundary_behavior: "Constructs valid UTF-8 string; throws RangeError on surrogate or out-of-range",
-            node_difference: "Rejects surrogate code points eagerly rather than producing WTF-16",
+            boundary_behavior: "Constructs valid UTF-8; invalid code points enter catch/finally through the guest exception ABI",
+            node_difference: "Rejects surrogates; range failures carry the rejected number until Error objects are supported",
         },
         TextOperationEntry {
             operation: "fromCharCode",

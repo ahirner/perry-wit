@@ -1520,3 +1520,39 @@ async fn test_code_points_preserve_number_or_undefined() -> Result<()> {
     .collect::<Vec<_>>();
     run_cases(source, &cases).await
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_from_code_point_unwinds_guest_handlers() -> Result<()> {
+    let source = r#"
+        export async function run(cp: number): Promise<string> {
+            let result = "start";
+            try {
+                try { result = await helper(cp); }
+                finally { result = result + "!"; }
+            } catch (e) { result = result + "caught"; }
+            finally { result = result + "done"; }
+            return result;
+        }
+        export function helper(cp: number): string { return String.fromCodePoint(cp); }
+    "#;
+    let mut cases = vec![(vec![Val::Float64(65.0)], Val::String("A!done".into()))];
+    for cp in [
+        -1.0,
+        -0.5,
+        1.5,
+        0xD800 as f64,
+        0xDFFF as f64,
+        0x110000 as f64,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        cases.push((
+            vec![Val::Float64(cp)],
+            Val::String("start!caughtdone".into()),
+        ));
+    }
+    run_cases(source, &cases).await?;
+    run_cases(r#"export function run(cp: number): string { try { return String.fromCodePoint(cp); } catch (e) { return "caught"; } }"#,
+        &[(vec![Val::Float64(-1.0)], Val::String("caught".into()))]).await
+}

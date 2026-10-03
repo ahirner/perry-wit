@@ -7,13 +7,13 @@
 
 use anyhow::Result;
 use waffle::{
-    Block, BlockTarget, FunctionBody, Module, Operator, Terminator, Type, Value, ValueDef,
+    Block, BlockTarget, Func, FunctionBody, Module, Operator, Terminator, Type, Value, ValueDef,
 };
 
-use perry_hir::types::Type as HirType;
 use crate::waffle_backend::registry::{
     ExportConvention, FunctionExport, FunctionInfo, PrimitivePayload,
 };
+use perry_hir::types::Type as HirType;
 
 /// Completion tags shared by guest calls and WIT result discriminants.
 #[derive(Clone, Copy)]
@@ -39,10 +39,13 @@ pub(crate) fn build_export_wrapper(
             let ptr = body.blocks[entry].params[param_cursor].1;
             let byte_len = body.blocks[entry].params[param_cursor + 1].1;
             param_cursor += 2;
-            let lift_fn = lift_canonical.ok_or_else(|| anyhow::anyhow!("lift_canonical required for string parameter"))?;
+            let lift_fn = lift_canonical
+                .ok_or_else(|| anyhow::anyhow!("lift_canonical required for string parameter"))?;
             let desc = body.add_op(
                 entry,
-                Operator::Call { function_index: lift_fn },
+                Operator::Call {
+                    function_index: lift_fn,
+                },
                 &[ptr, byte_len],
                 &[Type::I32],
             );
@@ -53,7 +56,7 @@ pub(crate) fn build_export_wrapper(
             args.push(val);
         }
     }
-    let outcome = emit_internal_call(&mut body, entry, callee, &args);
+    let outcome = emit_fallible_call(&mut body, entry, callee.func_index, &args);
     match export.convention {
         ExportConvention::Direct => {
             let values = module.signatures[export.sig]
@@ -280,16 +283,16 @@ pub(crate) struct InternalCallOutcome {
 }
 
 /// Emits an internal call with `(status: i32, payload: f64)` splitting into `ok_block` and `err_block`.
-pub(crate) fn emit_internal_call(
+pub(crate) fn emit_fallible_call(
     body: &mut FunctionBody,
     current_block: Block,
-    callee: &FunctionInfo,
+    callee: Func,
     args: &[Value],
 ) -> InternalCallOutcome {
     let call_val = body.add_op(
         current_block,
         Operator::Call {
-            function_index: callee.func_index,
+            function_index: callee,
         },
         args,
         &[Type::I32, Type::F64],
@@ -301,9 +304,9 @@ pub(crate) fn emit_internal_call(
 
     let is_ok = body.add_op(current_block, Operator::I32Eqz, &[status], &[Type::I32]);
     let ok_block = body.add_block();
-    body.blocks[ok_block].desc = format!("call {} ok", callee.name);
+    body.blocks[ok_block].desc = format!("call {callee} ok");
     let err_block = body.add_block();
-    body.blocks[err_block].desc = format!("call {} err", callee.name);
+    body.blocks[err_block].desc = format!("call {callee} err");
 
     body.set_terminator(
         current_block,

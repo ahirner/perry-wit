@@ -1,6 +1,7 @@
 //! UTF-8 text operations backed by guest helpers.
 
 use super::descriptor::StringDescriptor;
+use crate::waffle_backend::abi::{self, CompletionStatus};
 use crate::waffle_backend::link::HELPER_MODULE;
 use anyhow::Result;
 use waffle::{
@@ -171,7 +172,7 @@ pub(super) fn emit_code_point_at(
         .push(FuncDecl::Body(sig, "$rt_str_code_point_at".into(), body)))
 }
 
-/// Emits wrapper for fromCodePoint: (code_point: f64) -> i32 (string descriptor)
+/// Returns a descriptor or the rejected numeric input through the guest completion ABI.
 pub(super) fn emit_from_code_point(
     module: &mut Module<'static>,
     memory: Memory,
@@ -180,7 +181,7 @@ pub(super) fn emit_from_code_point(
 ) -> Result<Func> {
     let sig = module.signatures.push(SignatureData {
         params: vec![Type::F64],
-        returns: vec![Type::I32],
+        returns: vec![Type::I32, Type::F64],
     });
     let mut body = FunctionBody::new(module, sig);
     let entry = body.entry;
@@ -217,14 +218,14 @@ pub(super) fn emit_from_code_point(
     let is_err = body.add_op(entry, Operator::I32Eq, &[byte_len, err_val], &[Type::I32]);
 
     let ok_block = body.add_block();
-    let trap_block = body.add_block();
+    let err_block = body.add_block();
 
     body.set_terminator(
         entry,
         Terminator::CondBr {
             cond: is_err,
             if_true: BlockTarget {
-                block: trap_block,
+                block: err_block,
                 args: vec![],
             },
             if_false: BlockTarget {
@@ -234,7 +235,7 @@ pub(super) fn emit_from_code_point(
         },
     );
 
-    body.set_terminator(trap_block, Terminator::Unreachable);
+    abi::emit_completion(&mut body, err_block, CompletionStatus::Threw, code_point);
 
     let one = body.add_op(ok_block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
     let desc = StringDescriptor {
@@ -244,7 +245,8 @@ pub(super) fn emit_from_code_point(
     }
     .allocate(&mut body, ok_block, memory, cabi_realloc);
 
-    body.set_terminator(ok_block, Terminator::Return { values: vec![desc] });
+    let payload = abi::encode_payload(&mut body, ok_block, Some(desc));
+    abi::emit_completion(&mut body, ok_block, CompletionStatus::Returned, payload);
 
     body.validate()?;
     body.verify_reducible()?;
@@ -298,7 +300,12 @@ pub(super) fn emit_case_convert(
     let two = body.add_op(entry, Operator::I32Const { value: 2 }, &[], &[Type::I32]);
     let double_len = body.add_op(entry, Operator::I32Mul, &[src_byte_len, two], &[Type::I32]);
     let sixteen = body.add_op(entry, Operator::I32Const { value: 16 }, &[], &[Type::I32]);
-    let alloc_size = body.add_op(entry, Operator::I32Add, &[double_len, sixteen], &[Type::I32]);
+    let alloc_size = body.add_op(
+        entry,
+        Operator::I32Add,
+        &[double_len, sixteen],
+        &[Type::I32],
+    );
 
     let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
     let align = body.add_op(entry, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
@@ -333,7 +340,12 @@ pub(super) fn emit_case_convert(
     }
     .allocate(&mut body, entry, memory, cabi_realloc);
 
-    body.set_terminator(entry, Terminator::Return { values: vec![new_desc] });
+    body.set_terminator(
+        entry,
+        Terminator::Return {
+            values: vec![new_desc],
+        },
+    );
 
     body.validate()?;
     body.verify_reducible()?;
@@ -473,7 +485,12 @@ pub(super) fn emit_split(
         &[],
     );
 
-    body.set_terminator(entry, Terminator::Return { values: vec![arr_ptr] });
+    body.set_terminator(
+        entry,
+        Terminator::Return {
+            values: vec![arr_ptr],
+        },
+    );
 
     body.validate()?;
     body.verify_reducible()?;
@@ -591,7 +608,12 @@ pub(super) fn emit_join(
     }
     .allocate(&mut body, entry, memory, cabi_realloc);
 
-    body.set_terminator(entry, Terminator::Return { values: vec![new_desc] });
+    body.set_terminator(
+        entry,
+        Terminator::Return {
+            values: vec![new_desc],
+        },
+    );
 
     body.validate()?;
     body.verify_reducible()?;

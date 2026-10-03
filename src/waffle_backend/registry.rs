@@ -33,7 +33,6 @@ pub(crate) enum PrimitivePayload {
 /// Complete, immutable metadata for a function declaration.
 #[derive(Debug, Clone)]
 pub(crate) struct FunctionInfo {
-    pub(crate) name: String,
     pub(crate) func_index: Func,
     pub(crate) sig: waffle::Signature,
     pub(crate) param_types: Vec<HirType>,
@@ -165,7 +164,10 @@ impl ModuleRegistry {
         // 2. Emit string runtime helpers ($rt_cabi_realloc, etc.) after all imports are declared
         let string_helpers = if let Some(base) = string_heap_base {
             Some(crate::waffle_backend::strings::emit_string_runtime(
-                module, memory, base, string_reqs,
+                module,
+                memory,
+                base,
+                string_reqs,
             )?)
         } else {
             None
@@ -257,7 +259,6 @@ impl ModuleRegistry {
             functions.insert(
                 func.id,
                 FunctionInfo {
-                    name: func.name.clone(),
                     func_index,
                     sig,
                     param_types: func.params.iter().map(|p| p.ty.clone()).collect(),
