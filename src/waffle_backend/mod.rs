@@ -57,11 +57,9 @@ pub fn compile_typescript(
             .context("LLVM audit verification failed")?;
     }
 
-    text_contract::validate_source_text(ts_source)
-        .context("Source text contract validation failed")?;
-
     let ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
+    text_contract::validate_ast_text(&ast).context("Source text contract validation failed")?;
     let hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
 
@@ -69,12 +67,8 @@ pub fn compile_typescript(
 }
 
 /// Compiles Perry HIR by taking ownership, avoiding redundant cloning of the HIR.
-pub fn compile_hir_owned(
-    hir: HirModule,
-    options: &WaffleCompileOptions,
-) -> Result<WaffleCompiled> {
-    text_contract::validate_hir_text(&hir)
-        .context("HIR text contract validation failed")?;
+pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
+    text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
     let (waffle_mod, contract) = lower_hir_to_waffle(&hir)?;
     let waffle_ir = format!("{}", waffle_mod.display());
@@ -101,10 +95,7 @@ pub fn compile_hir_owned(
 }
 
 /// Compiles Perry HIR using the pure WAFFLE SSA backend.
-pub fn compile_hir(
-    hir: &HirModule,
-    options: &WaffleCompileOptions,
-) -> Result<WaffleCompiled> {
+pub fn compile_hir(hir: &HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
     compile_hir_owned(hir.clone(), options)
 }
 

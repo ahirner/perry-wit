@@ -10,6 +10,11 @@
 //! - Unpaired surrogate escapes and WTF-8 representations are rejected at the input boundary.
 //! - Lossy conversions (such as U+FFFD substitution) are forbidden.
 
+mod source;
+
+pub(crate) use source::validate_ast_text;
+pub use source::validate_source_text;
+
 use anyhow::{Result, bail};
 use perry_hir::ir::{Expr, Function, Module as HirModule, Stmt};
 
@@ -178,148 +183,6 @@ impl TextContractMatrix {
     }
 }
 
-/// Scans source text for unpaired surrogate escapes in string and template literals.
-///
-/// Rejects lone high surrogates (`\uD800`..`\uDBFF`) that are not immediately paired with
-/// a low surrogate (`\uDC00`..`\uDFFF`), lone low surrogates, and braced surrogate escapes (`\u{D800}`).
-pub fn validate_source_text(source: &str) -> Result<()> {
-    let bytes = source.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        let b = bytes[i];
-
-        // Single-line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            i += 2;
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Multi-line comment
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i += 2;
-            continue;
-        }
-
-        // String literals: "..." or '...' or template `...`
-        if b == b'"' || b == b'\'' || b == b'`' {
-            let quote = b;
-            i += 1;
-            while i < len {
-                let cur = bytes[i];
-                if cur == b'\\' {
-                    // Escape sequence inside string
-                    if i + 1 >= len {
-                        break;
-                    }
-                    if bytes[i + 1] == b'\\' {
-                        // Escaped backslash
-                        i += 2;
-                        continue;
-                    }
-                    if bytes[i + 1] == b'u' {
-                        // Check for braced escape: \u{XXXX}
-                        if i + 2 < len && bytes[i + 2] == b'{' {
-                            let mut j = i + 3;
-                            let mut hex_val = 0u32;
-                            let mut valid_hex = false;
-                            while j < len && bytes[j] != b'}' {
-                                if let Some(d) = hex_digit(bytes[j]) {
-                                    hex_val = hex_val.saturating_mul(16).saturating_add(d);
-                                    valid_hex = true;
-                                } else {
-                                    valid_hex = false;
-                                    break;
-                                }
-                                j += 1;
-                            }
-                            if valid_hex && j < len && bytes[j] == b'}' {
-                                if (0xD800..=0xDFFF).contains(&hex_val) {
-                                    bail!(
-                                        "Surrogate code point escape '\\u{{{hex_val:X}}}' at offset {i} is rejected under the UTF-8 scalar contract"
-                                    );
-                                }
-                                i = j + 1;
-                                continue;
-                            }
-                        }
-
-                        // Check for 4-digit hex escape: \uXXXX
-                        if i + 5 < len
-                            && let (Some(d1), Some(d2), Some(d3), Some(d4)) = (
-                                hex_digit(bytes[i + 2]),
-                                hex_digit(bytes[i + 3]),
-                                hex_digit(bytes[i + 4]),
-                                hex_digit(bytes[i + 5]),
-                            )
-                        {
-                            let code = (d1 << 12) | (d2 << 8) | (d3 << 4) | d4;
-                            if (0xD800..=0xDBFF).contains(&code) {
-                                // High surrogate: check if immediately followed by low surrogate \uDC00..=DFFF
-                                if i + 11 < len
-                                    && bytes[i + 6] == b'\\'
-                                    && bytes[i + 7] == b'u'
-                                    && let (Some(l1), Some(l2), Some(l3), Some(l4)) = (
-                                        hex_digit(bytes[i + 8]),
-                                        hex_digit(bytes[i + 9]),
-                                        hex_digit(bytes[i + 10]),
-                                        hex_digit(bytes[i + 11]),
-                                    )
-                                {
-                                    let low = (l1 << 12) | (l2 << 8) | (l3 << 4) | l4;
-                                    if (0xDC00..=0xDFFF).contains(&low) {
-                                        // Valid paired surrogate escape: skip both
-                                        i += 12;
-                                        continue;
-                                    }
-                                }
-                                bail!(
-                                    "Unpaired high surrogate escape '\\u{code:04X}' at offset {i} is rejected under the UTF-8 scalar contract"
-                                );
-                            } else if (0xDC00..=0xDFFF).contains(&code) {
-                                bail!(
-                                    "Unpaired low surrogate escape '\\u{code:04X}' at offset {i} is rejected under the UTF-8 scalar contract"
-                                );
-                            }
-                            i += 6;
-                            continue;
-                        }
-                    }
-                    i += 2;
-                    continue;
-                }
-                if cur == quote {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-
-        i += 1;
-    }
-
-    Ok(())
-}
-
-fn hex_digit(b: u8) -> Option<u32> {
-    match b {
-        b'0'..=b'9' => Some((b - b'0') as u32),
-        b'a'..=b'f' => Some((b - b'a' + 10) as u32),
-        b'A'..=b'F' => Some((b - b'A' + 10) as u32),
-        _ => None,
-    }
-}
-
 /// Validates that Perry HIR contains no lone surrogate or WTF-8 representations,
 /// and diagnoses disallowed UTF-16 operations.
 pub fn validate_hir_text(hir: &HirModule) -> Result<()> {
@@ -479,8 +342,7 @@ fn validate_expr(expr: &Expr) -> Result<()> {
 
 /// Validates raw bytes at a Canonical ABI or I/O boundary as well-formed UTF-8.
 pub fn validate_utf8_boundary(bytes: &[u8]) -> Result<&str> {
-    std::str::from_utf8(bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid UTF-8 at boundary: {e}"))
+    std::str::from_utf8(bytes).map_err(|e| anyhow::anyhow!("Invalid UTF-8 at boundary: {e}"))
 }
 
 /// Count Unicode scalar values in a UTF-8 string.

@@ -110,22 +110,10 @@ fn test_valid_text_and_paired_escapes_accepted() {
 #[test]
 fn test_unpaired_surrogates_eagerly_rejected() {
     let invalid_cases = [
-        (
-            r#"let s = "\uD800";"#,
-            "Unpaired high surrogate escape",
-        ),
-        (
-            r#"let s = "\uD83D";"#,
-            "Unpaired high surrogate escape",
-        ),
-        (
-            r#"let s = "\uDC00";"#,
-            "Unpaired low surrogate escape",
-        ),
-        (
-            r#"let s = "\uDE00";"#,
-            "Unpaired low surrogate escape",
-        ),
+        (r#"let s = "\uD800";"#, "Unpaired high surrogate escape"),
+        (r#"let s = "\uD83D";"#, "Unpaired high surrogate escape"),
+        (r#"let s = "\uDC00";"#, "Unpaired low surrogate escape"),
+        (r#"let s = "\uDE00";"#, "Unpaired low surrogate escape"),
         (
             r#"let s = "\uDE00\uD83D";"#, // Reversed pair
             "Unpaired low surrogate escape",
@@ -197,9 +185,10 @@ fn test_compiler_pipeline_rejects_template_unpaired_surrogates() {
 #[test]
 fn test_hir_validator_rejects_wtf_strings() {
     let mut hir = perry_hir::ir::Module::new("test");
-    hir.init.push(perry_hir::ir::Stmt::Expr(
-        perry_hir::ir::Expr::WtfString(vec![0xED, 0xA0, 0x80]),
-    ));
+    hir.init
+        .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::WtfString(
+            vec![0xED, 0xA0, 0x80],
+        )));
 
     let res = validate_hir_text(&hir);
     assert!(res.is_err());
@@ -210,8 +199,8 @@ fn test_hir_validator_rejects_wtf_strings() {
 #[test]
 fn test_hir_validator_diagnoses_char_code_at() {
     let mut hir = perry_hir::ir::Module::new("test");
-    hir.init.push(perry_hir::ir::Stmt::Expr(
-        perry_hir::ir::Expr::Call {
+    hir.init
+        .push(perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::Call {
             callee: Box::new(perry_hir::ir::Expr::PropertyGet {
                 object: Box::new(perry_hir::ir::Expr::String("test".into())),
                 property: "charCodeAt".into(),
@@ -220,8 +209,7 @@ fn test_hir_validator_diagnoses_char_code_at() {
             args: vec![perry_hir::ir::Expr::Integer(0)],
             type_args: vec![],
             byte_offset: 0,
-        },
-    ));
+        }));
 
     let res = validate_hir_text(&hir);
     assert!(res.is_err());
@@ -269,4 +257,25 @@ fn test_scalar_operations_semantics() {
 
     let invalid_bytes = &[0xFF, 0xFE, 0xFD];
     assert!(validate_utf8_boundary(invalid_bytes).is_err());
+}
+
+#[test]
+fn test_template_interpolation_boundaries() {
+    for source in [
+        r#"let s = `outer${`\uD800`}`;"#,
+        r#"let s = `outer${`inner${"\uDC00"}`}`;"#,
+        r#"let s = `outer${{ value: `\u{D800}` }.value}`;"#,
+        r#"let s = `\uD83D${"ok"}\uDE00`;"#,
+    ] {
+        assert!(validate_source_text(source).is_err(), "{source}");
+    }
+    for source in [
+        r#"let s = `outer${/* \uD800 ` ${ } */ `\uD83D\uDE00`}`;"#,
+        "let s = `outer${// \\uD800 ` ${ }\n `ok`}`;",
+        r#"let s = `outer${{ value: `nested${"ok"}` }.value}`;"#,
+        r#"let s = `escaped \${text} \\uD800 \` end`;"#,
+        r#"let s = `outer${/\uD800/.source}`;"#,
+    ] {
+        validate_source_text(source).unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
 }
