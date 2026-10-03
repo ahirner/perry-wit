@@ -8,6 +8,7 @@ default-run = "perry-wit"
 members = [
     ".",
     "crates/guest-runtime",
+    "crates/json-helper",
 ]
 
 [profile.release]
@@ -44,3 +45,4 @@ wasmtime = { version = "49.0.2", default-features = false, features = ["componen
 wasmtime-wasi = { version = "49.0.2", default-features = false, features = ["p2", "p3"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
 tempfile = "3.27.0"
+perry-json-helper = { path = "crates/json-helper" }

@@ -138,6 +138,45 @@ struct CapabilityCalls {
 }
 
 impl CapabilityCalls {
+    fn validate_json_call(&self, call: &ast::CallExpr, callee: &ast::Expr) -> Result<()> {
+        let ast::Expr::Member(member) = callee else {
+            return Ok(());
+        };
+        if !matches!(member.obj.as_ref(), ast::Expr::Ident(name) if name.sym == "JSON" && name.ctxt == self.unresolved)
+        {
+            return Ok(());
+        }
+        let name = match &member.prop {
+            ast::MemberProp::Ident(name) => name.sym.as_ref(),
+            ast::MemberProp::Computed(key) => match key.expr.as_ref() {
+                ast::Expr::Lit(ast::Lit::Str(text)) => text.value.as_str().unwrap_or(""),
+                _ => bail!("Dynamic JSON member lookup is unsupported"),
+            },
+            _ => bail!("Private JSON member lookup is unsupported"),
+        };
+        let maximum = match name {
+            "parse" => 2,
+            "stringify" => 3,
+            _ => bail!("Unsupported JSON method '{name}'"),
+        };
+        ensure!(
+            (1..=maximum).contains(&call.args.len()),
+            "JSON.{name} has an unsupported argument count"
+        );
+        ensure!(
+            call.args.iter().all(|arg| arg.spread.is_none()),
+            "Spread JSON arguments are unsupported"
+        );
+        for argument in call.args.iter().skip(1) {
+            ensure!(
+                matches!(argument.expr.as_ref(), ast::Expr::Lit(ast::Lit::Null(_)))
+                    || matches!(argument.expr.as_ref(), ast::Expr::Ident(name) if name.sym == "undefined" && name.ctxt == self.unresolved),
+                "JSON revivers, replacers, and indentation are unsupported"
+            );
+        }
+        Ok(())
+    }
+
     fn reject_regexp_constructor(&mut self, callee: &ast::Expr) -> bool {
         if matches!(callee, ast::Expr::Ident(name) if name.sym == "RegExp" && name.ctxt == self.unresolved)
         {
@@ -208,6 +247,12 @@ impl CapabilityCalls {
 impl VisitMut for CapabilityCalls {
     fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
         call.ctxt = SyntaxContext::empty();
+        if let ast::Callee::Expr(callee) = &call.callee
+            && let Err(error) = self.validate_json_call(call, callee)
+        {
+            self.error.get_or_insert(error);
+            return;
+        }
         if let ast::Callee::Expr(callee) = &mut call.callee {
             // Perry may fold constructors before argument effects are retained.
             if self.reject_regexp_constructor(callee) {
@@ -270,7 +315,8 @@ impl VisitMut for CapabilityCalls {
     }
 
     fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
-        if matches!(ident.sym.as_ref(), "Math" | "RegExp") && ident.ctxt != self.unresolved {
+        if matches!(ident.sym.as_ref(), "Math" | "RegExp" | "JSON") && ident.ctxt != self.unresolved
+        {
             let id = ident.to_id();
             let name = if let Some(name) = self.shadow_names.get(&id) {
                 name.clone()
