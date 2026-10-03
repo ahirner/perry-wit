@@ -1,43 +1,69 @@
-use std::{fs, process::Command};
+use std::{fs, path::PathBuf, process::Command};
 
 #[test]
 fn selected_runtime_artifacts_are_watched_and_copied() {
     let scratch = std::env::temp_dir().join(format!("perry-build-artifact-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(scratch.join("out")).unwrap();
-    let script = scratch.join("build-script");
+    fs::create_dir_all(scratch.join("src/helpers")).unwrap();
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::copy(
+        repo_root.join("src/helpers/search.rs"),
+        scratch.join("src/helpers/search.rs"),
+    )
+    .unwrap();
+    fs::copy(
+        repo_root.join("src/helpers/text.rs"),
+        scratch.join("src/helpers/text.rs"),
+    )
+    .unwrap();
+
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("target"));
-    let build_dir = target_dir.join("debug/build");
-    let mut newest_script: Option<(std::path::PathBuf, Option<std::time::SystemTime>)> = None;
-    if build_dir.exists()
-        && let Ok(entries) = fs::read_dir(&build_dir)
-    {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if name.to_string_lossy().starts_with("perry-wit-") {
-                    let candidate = entry.path().join("build-script-build");
-                    if candidate.exists() {
-                        let mtime = candidate.metadata().and_then(|m| m.modified()).ok();
-                        match &newest_script {
-                            Some((_, best_mtime)) if mtime > *best_mtime => {
-                                newest_script = Some((candidate, mtime));
-                            }
-                            None => {
-                                newest_script = Some((candidate, mtime));
-                            }
-                            _ => {}
-                        }
-                    }
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("target"));
+    let deps_dir = target_dir.join("debug/deps");
+
+    let script = scratch.join("build-script");
+    let rustc_bin = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+
+    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&deps_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
+                if file_name.starts_with("libwasmparser-") && file_name.ends_with(".rlib") {
+                    let mtime = path
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    candidates.push((path, mtime));
                 }
             }
         }
-
-    if let Some((existing, _)) = newest_script {
-        fs::copy(existing, &script).unwrap();
-    } else {
-        panic!("Precompiled Cargo build-script binary not found in target/debug/build");
     }
+    candidates.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
+
+    let mut compiled = false;
+    for (rlib, _) in candidates {
+        let mut rustc_cmd = Command::new(&rustc_bin);
+        rustc_cmd
+            .arg("build.rs")
+            .arg("--crate-type=bin")
+            .arg("-o")
+            .arg(&script)
+            .arg("-L")
+            .arg(format!("dependency={}", deps_dir.display()))
+            .arg("--extern")
+            .arg(format!("wasmparser={}", rlib.display()));
+        if let Ok(status) = rustc_cmd.status() {
+            if status.success() {
+                compiled = true;
+                break;
+            }
+        }
+    }
+    assert!(compiled, "Failed to compile build.rs with rustc");
 
     for relative in [
         "override.wasm",
@@ -52,21 +78,49 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
             command
                 .env("OUT_DIR", scratch.join("out"))
                 .env("CARGO_MANIFEST_DIR", &scratch)
+                .env("RUSTC", &rustc_bin)
                 .env_remove("GUEST_RUNTIME_PATH");
             if relative == "override.wasm" {
                 command.env("GUEST_RUNTIME_PATH", &artifact);
             }
             let output = command.output().unwrap();
-            assert!(output.status.success());
             assert!(
-                String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                output.status.success(),
+                "build-script failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout_str.lines().any(|line| {
                     line == format!("cargo:rerun-if-changed={}", artifact.display())
-                })
+                }),
+                "missing rerun-if-changed for {}",
+                artifact.display()
+            );
+            assert!(
+                stdout_str.lines().any(|line| {
+                    line == format!(
+                        "cargo:rerun-if-changed={}",
+                        scratch.join("src/helpers/search.rs").display()
+                    )
+                }),
+                "missing rerun-if-changed for search.rs"
+            );
+            assert!(
+                stdout_str.lines().any(|line| {
+                    line == format!(
+                        "cargo:rerun-if-changed={}",
+                        scratch.join("src/helpers/text.rs").display()
+                    )
+                }),
+                "missing rerun-if-changed for text.rs"
             );
             assert_eq!(
                 fs::read(scratch.join("out/guest_runtime.wasm")).unwrap(),
                 bytes
             );
+            assert!(scratch.join("out/search.wasm").exists());
+            assert!(scratch.join("out/text.wasm").exists());
         }
     }
     fs::remove_dir_all(scratch).unwrap();
