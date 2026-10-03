@@ -5,6 +5,8 @@ pub(crate) mod audit;
 pub(crate) mod component;
 pub(crate) mod control_flow;
 pub(crate) mod exceptions;
+pub(crate) mod libraries;
+pub(crate) mod link;
 pub(crate) mod registry;
 pub(crate) mod resolve;
 pub(crate) mod ssa;
@@ -75,6 +77,7 @@ pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Resu
     let core = waffle_mod
         .to_wasm_bytes()
         .context("Emitting core Wasm bytes from WAFFLE")?;
+    let core = link::link_helpers(&core).context("Linking guest helpers into core Wasm")?;
 
     let (component_wat, component) = if options.componentize {
         let (wat, bytes) = component::frame_component(&core, &contract)?;

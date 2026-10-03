@@ -29,7 +29,7 @@ use canonical::emit_lift;
 use comparison::emit_compare;
 use concat::emit_concat;
 use positions::{CharacterAccess, emit_character_access};
-use search::emit_index_of;
+use search::{declare_index_of_import, emit_index_of};
 use slicing::emit_slice;
 
 /// Base memory address where static string descriptors and data are placed.
@@ -144,13 +144,14 @@ pub(crate) fn emit_string_runtime(
     memory: Memory,
     initial_heap_base: u32,
 ) -> Result<StringHelperFuncs> {
+    let str_find_helper = declare_index_of_import(module)?;
     let cabi_realloc = emit_allocator(module, memory, initial_heap_base)?;
     let lift_canonical = emit_lift(module, memory, cabi_realloc)?;
     let str_slice = emit_slice(module, memory, cabi_realloc)?;
     let str_char_at = emit_character_access(module, memory, str_slice, CharacterAccess::CharAt)?;
     let str_index = emit_character_access(module, memory, str_slice, CharacterAccess::Index)?;
     let str_concat = emit_concat(module, memory, cabi_realloc)?;
-    let str_index_of = emit_index_of(module, memory)?;
+    let str_index_of = emit_index_of(module, memory, str_find_helper)?;
     let str_compare = emit_compare(module, memory)?;
 
     Ok(StringHelperFuncs {

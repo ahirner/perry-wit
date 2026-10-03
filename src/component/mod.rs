@@ -19,7 +19,7 @@ pub fn embed_and_encode(
         .with_context(|| format!("selecting world {:?}", world_name))?;
 
     let mut core = core_wasm.to_vec();
-    embed_component_metadata(&mut core, &resolve, world_id, StringEncoding::UTF8)
+    embed_component_metadata(&mut core, &resolve, world_id, StringEncoding::UTF8, false)
         .context("embedding component metadata")?;
 
     let component = ComponentEncoder::default()
