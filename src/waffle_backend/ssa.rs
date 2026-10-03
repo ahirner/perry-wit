@@ -22,7 +22,7 @@ use crate::waffle_backend::control_flow::{JoinPoint, create_block_parameters};
 use crate::waffle_backend::exceptions::{self, TryClauseBlocks, TryScope, UnwindContext};
 use crate::waffle_backend::registry::{FunctionInfo, ModuleRegistry};
 use crate::waffle_backend::resolve::ResolvedContract;
-use crate::waffle_backend::strings::StringPool;
+use crate::waffle_backend::strings::{RequiredStringHelpers, StringPool};
 
 /// Compiles a resolved HIR module into a validated WAFFLE module.
 pub(crate) fn lower_module(
@@ -42,10 +42,33 @@ pub(crate) fn lower_module(
         kind: ExportKind::Memory(memory),
     });
 
-    // 2. Build string pool and intern all string literals
+    // 2. Scan module for string requirements and build string pool if needed
+    let reqs = scan_module_string_requirements(hir);
     let mut string_pool = StringPool::new();
-    collect_strings_in_module(hir, &mut string_pool);
-    string_pool.populate_memory_segments(&mut module.memories[memory]);
+    let string_heap_base = if reqs.needs_strings {
+        collect_strings_in_module(hir, &mut string_pool);
+        string_pool.populate_memory_segments(&mut module.memories[memory]);
+        let next_free = string_pool.next_free_address();
+        let needs_helper_library = reqs.find_substring
+            || reqs.code_point_at
+            || reqs.from_code_point
+            || reqs.case_convert
+            || reqs.split
+            || reqs.join;
+        if needs_helper_library {
+            let raw_base = next_free + 65_536 + 4096;
+            let aligned_heap_base = (raw_base + 65_535) & !65_535;
+            let needed_pages = (aligned_heap_base / 65_536) as usize + 1;
+            if module.memories[memory].initial_pages < needed_pages {
+                module.memories[memory].initial_pages = needed_pages;
+            }
+            Some(aligned_heap_base)
+        } else {
+            Some(next_free)
+        }
+    } else {
+        None
+    };
 
     // 3. Build complete module declarations registry
     let registry = ModuleRegistry::build(
@@ -53,8 +76,9 @@ pub(crate) fn lower_module(
         hir,
         contract,
         None,
-        Some(string_pool.next_free_address()),
+        string_heap_base,
         memory,
+        reqs,
     )?;
 
     // 5. Lower each function body using the established registry contracts
@@ -563,9 +587,12 @@ impl<'a> FunctionLowerer<'a> {
                     .string_helpers
                     .as_ref()
                     .expect("string helpers available");
+                let func = helpers
+                    .str_from_code_point
+                    .expect("from_code_point helper available");
                 Ok(self.op(
                     Operator::Call {
-                        function_index: helpers.str_from_code_point,
+                        function_index: func,
                     },
                     &[cp],
                     &[Type::I32],
@@ -958,3 +985,163 @@ fn collect_strings_expr(expr: &Expr, pool: &mut StringPool) {
         _ => {}
     }
 }
+
+fn type_has_string(ty: &HirType) -> bool {
+    match ty {
+        HirType::String => true,
+        HirType::Promise(inner) => type_has_string(inner),
+        HirType::Array(inner) => type_has_string(inner),
+        HirType::Union(types) => types.iter().any(type_has_string),
+        _ => false,
+    }
+}
+
+fn scan_module_string_requirements(hir: &HirModule) -> RequiredStringHelpers {
+    let mut reqs = RequiredStringHelpers::default();
+
+    for func in &hir.functions {
+        for param in &func.params {
+            if type_has_string(&param.ty) {
+                reqs.needs_strings = true;
+            }
+        }
+        if type_has_string(&func.return_type) {
+            reqs.needs_strings = true;
+        }
+        for stmt in &func.body {
+            scan_stmt_requirements(stmt, &mut reqs);
+        }
+    }
+    for stmt in &hir.init {
+        scan_stmt_requirements(stmt, &mut reqs);
+    }
+
+    reqs
+}
+
+fn scan_stmt_requirements(stmt: &Stmt, reqs: &mut RequiredStringHelpers) {
+    match stmt {
+        Stmt::Expr(expr) | Stmt::Throw(expr) => scan_expr_requirements(expr, reqs),
+        Stmt::Return(Some(expr)) => scan_expr_requirements(expr, reqs),
+        Stmt::Let {
+            init: Some(expr), ..
+        } => scan_expr_requirements(expr, reqs),
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            scan_expr_requirements(condition, reqs);
+            for s in then_branch {
+                scan_stmt_requirements(s, reqs);
+            }
+            if let Some(eb) = else_branch {
+                for s in eb {
+                    scan_stmt_requirements(s, reqs);
+                }
+            }
+        }
+        Stmt::While { condition, body } => {
+            scan_expr_requirements(condition, reqs);
+            for s in body {
+                scan_stmt_requirements(s, reqs);
+            }
+        }
+        Stmt::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            for s in body {
+                scan_stmt_requirements(s, reqs);
+            }
+            if let Some(c) = catch {
+                for s in &c.body {
+                    scan_stmt_requirements(s, reqs);
+                }
+            }
+            if let Some(f) = finally {
+                for s in f {
+                    scan_stmt_requirements(s, reqs);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
+    match expr {
+        Expr::String(_) => {
+            reqs.needs_strings = true;
+        }
+        Expr::StringFromCodePoint(arg) => {
+            reqs.needs_strings = true;
+            reqs.from_code_point = true;
+            scan_expr_requirements(arg, reqs);
+        }
+        Expr::TemplateStringCoerce(arg) => {
+            reqs.needs_strings = true;
+            scan_expr_requirements(arg, reqs);
+        }
+        Expr::Call { callee, args, .. } => {
+            if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                match property.as_str() {
+                    "indexOf" => {
+                        reqs.needs_strings = true;
+                        reqs.find_substring = true;
+                    }
+                    "codePointAt" => {
+                        reqs.needs_strings = true;
+                        reqs.code_point_at = true;
+                    }
+                    "toLowerCase" | "toUpperCase" => {
+                        reqs.needs_strings = true;
+                        reqs.case_convert = true;
+                    }
+                    "split" => {
+                        reqs.needs_strings = true;
+                        reqs.split = true;
+                    }
+                    "join" => {
+                        reqs.needs_strings = true;
+                        reqs.join = true;
+                    }
+                    "slice" | "charAt" | "charCodeAt" => {
+                        reqs.needs_strings = true;
+                    }
+                    _ => {}
+                }
+            }
+            scan_expr_requirements(callee, reqs);
+            for arg in args {
+                scan_expr_requirements(arg, reqs);
+            }
+        }
+        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } => {
+            scan_expr_requirements(left, reqs);
+            scan_expr_requirements(right, reqs);
+        }
+        Expr::Unary { operand, .. } => {
+            scan_expr_requirements(operand, reqs);
+        }
+        Expr::Await(inner) => {
+            scan_expr_requirements(inner, reqs);
+        }
+        Expr::PropertyGet { object, property, .. } => {
+            if property == "length" {
+                reqs.needs_strings = true;
+            }
+            scan_expr_requirements(object, reqs);
+        }
+        Expr::IndexGet { object, index, .. } => {
+            scan_expr_requirements(object, reqs);
+            scan_expr_requirements(index, reqs);
+        }
+        Expr::LocalSet(_, inner) => {
+            scan_expr_requirements(inner, reqs);
+        }
+        _ => {}
+    }
+}
+

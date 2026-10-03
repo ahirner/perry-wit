@@ -60,7 +60,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     let mut next_import_func_idx = 0u32;
 
     let mut core_function_type_indices = Vec::new();
-    let mut core_bodies: Vec<FunctionBody<'static>> = Vec::new();
+    let mut core_bodies: Vec<FunctionBody<'_>> = Vec::new();
     let mut core_exports = Vec::new();
     let mut core_tables = Vec::new();
     let mut core_memories = Vec::new();
@@ -129,9 +129,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                 }
             }
             Payload::CodeSectionEntry(body) => {
-                // Parse body and clone its static bytes
-                let binary = body.as_bytes().to_vec().leak();
-                core_bodies.push(FunctionBody::new(wasmparser::BinaryReader::new(binary, 0)));
+                core_bodies.push(body);
             }
             Payload::DataSection(data) => {
                 for seg in data {
@@ -294,20 +292,76 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
         new_code.function(&rewritten);
     }
 
+    fn align_to(value: u32, alignment: u32) -> u32 {
+        if alignment <= 1 {
+            value
+        } else {
+            (value + alignment - 1) & !(alignment - 1)
+        }
+    }
+
+    // Determine existing static data extent from core module
+    let mut existing_data_end = 1024u32;
+    for seg in &core_data {
+        if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
+            let mut reader = offset_expr.get_operators_reader();
+            if let Ok(wasmparser::Operator::I32Const { value }) = reader.read() {
+                let end = (value as u32).saturating_add(seg.data.len() as u32);
+                existing_data_end = existing_data_end.max(end);
+            }
+        }
+    }
+
+    // Allocate memory and table placements for each helper library
+    struct LibPlacement {
+        memory_base: u32,
+        table_base: u32,
+    }
+    let mut current_memory_base = existing_data_end;
+    let mut current_table_size = if !core_tables.is_empty() {
+        core_tables[0].ty.initial as u32
+    } else {
+        0
+    };
+    let mut lib_placements = Vec::new();
+    for prep in &prepared_libs {
+        let memory_base = align_to(current_memory_base, prep.lib.data_alignment);
+        current_memory_base = memory_base + prep.lib.data_size;
+
+        let table_base = align_to(current_table_size, prep.lib.table_alignment);
+        current_table_size = table_base + prep.lib.table_size;
+
+        lib_placements.push(LibPlacement {
+            memory_base,
+            table_base,
+        });
+    }
+
     let needs_stack = prepared_libs.iter().any(|prep| {
         prep.lib.globals.iter().any(|g| matches!(g, Global::Stack))
     });
     let stack_global_index = core_globals.len() as u32;
 
+    // Stack is placed above helper static data, growing downwards
+    let stack_bottom = align_to(current_memory_base, 16);
+    let stack_top = stack_bottom + if needs_stack { 65_536 } else { 0 };
+
+    if needs_stack && !core_memories.is_empty() {
+        let needed_pages = ((stack_top + 65_535) / 65_536) as u64;
+        if core_memories[0].initial < needed_pages {
+            core_memories[0].initial = needed_pages;
+        }
+    }
+
     // Emit helper functions
-    for prep in prepared_libs {
+    for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
         let mut relocation = Relocations {
             functions: &prep.helper_defined_indices,
             globals: &prep.lib.globals,
             type_base: prep.type_base,
-            memory_base: 0,
+            memory_base: placement.memory_base,
             stack_global: stack_global_index,
-            table_base: 0,
+            table_base: placement.table_base,
         };
 
         for &orig in &prep.reachable {
@@ -332,6 +386,45 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
+    // Helper initialization
+    let mut helper_inits = Vec::new();
+    for prep in &prepared_libs {
+        let candidates = [
+            prep.lib.start,
+            prep.lib.exports.get("__wasm_apply_data_relocs").copied(),
+            prep.lib.exports.get("__wasm_call_ctors").copied(),
+            prep.lib.exports.get("_initialize").copied(),
+        ];
+        for orig in candidates.into_iter().flatten() {
+            if let Some(&new_idx) = prep.helper_defined_indices.get(&orig) {
+                if !helper_inits.contains(&new_idx) {
+                    helper_inits.push(new_idx);
+                }
+            }
+        }
+    }
+
+    let init_func_idx = if !helper_inits.is_empty() {
+        let empty_ty_idx = new_types.len();
+        new_types.ty().function(vec![], vec![]);
+        new_functions.function(empty_ty_idx);
+        let mut init_fn = wasm_encoder::Function::new(vec![]);
+        for &fn_idx in &helper_inits {
+            init_fn.instruction(&wasm_encoder::Instruction::Call(fn_idx));
+        }
+        if let Some(start_func) = core_start {
+            let new_start_func = old_to_new_func_index.get(&start_func).copied().unwrap_or(start_func);
+            init_fn.instruction(&wasm_encoder::Instruction::Call(new_start_func));
+            core_start = None;
+        }
+        init_fn.instruction(&wasm_encoder::Instruction::End);
+        new_code.function(&init_fn);
+        let total_funcs = external_imports.len() as u32 + new_functions.len();
+        Some(total_funcs - 1)
+    } else {
+        None
+    };
+
     // 5. Construct final linked module
     let mut module = Module::new();
     module.section(&new_types);
@@ -347,18 +440,34 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     module.section(&new_functions);
 
     // Tables
-    if !core_tables.is_empty() {
+    let has_helper_tables = current_table_size as u64 > (if !core_tables.is_empty() { core_tables[0].ty.initial } else { 0 });
+    if !core_tables.is_empty() || has_helper_tables {
         let mut new_tables = wasm_encoder::TableSection::new();
-        for table in core_tables {
+        if !core_tables.is_empty() {
+            for (idx, table) in core_tables.iter().enumerate() {
+                let initial = if idx == 0 {
+                    table.ty.initial.max(current_table_size as u64)
+                } else {
+                    table.ty.initial
+                };
+                new_tables.table(wasm_encoder::TableType {
+                    element_type: match table.ty.element_type {
+                        wasmparser::RefType::FUNCREF => wasm_encoder::RefType::FUNCREF,
+                        _ => wasm_encoder::RefType::EXTERNREF,
+                    },
+                    minimum: initial,
+                    maximum: table.ty.maximum,
+                    table64: table.ty.table64,
+                    shared: table.ty.shared,
+                });
+            }
+        } else if has_helper_tables {
             new_tables.table(wasm_encoder::TableType {
-                element_type: match table.ty.element_type {
-                    wasmparser::RefType::FUNCREF => wasm_encoder::RefType::FUNCREF,
-                    _ => wasm_encoder::RefType::EXTERNREF,
-                },
-                minimum: table.ty.initial,
-                maximum: table.ty.maximum,
-                table64: table.ty.table64,
-                shared: table.ty.shared,
+                element_type: wasm_encoder::RefType::FUNCREF,
+                minimum: current_table_size as u64,
+                maximum: None,
+                table64: false,
+                shared: false,
             });
         }
         module.section(&new_tables);
@@ -401,7 +510,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                     mutable: true,
                     shared: false,
                 },
-                &ConstExpr::i32_const(65_536),
+                &ConstExpr::i32_const(stack_top as i32),
             );
         }
         module.section(&new_globs);
@@ -426,7 +535,11 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     module.section(&new_exports);
 
     // Start
-    if let Some(start_func) = core_start {
+    if let Some(init_idx) = init_func_idx {
+        module.section(&wasm_encoder::StartSection {
+            function_index: init_idx,
+        });
+    } else if let Some(start_func) = core_start {
         let new_start_func = old_to_new_func_index.get(&start_func).copied().unwrap_or(start_func);
         module.section(&wasm_encoder::StartSection {
             function_index: new_start_func,
@@ -434,8 +547,8 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     }
 
     // Elements
+    let mut new_elems = wasm_encoder::ElementSection::new();
     if !core_elements.is_empty() {
-        let mut new_elems = wasm_encoder::ElementSection::new();
         for elem in core_elements {
             if let wasmparser::ElementItems::Functions(funcs) = elem.items {
                 let remapped_funcs: Vec<u32> = funcs
@@ -461,6 +574,19 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                 }
             }
         }
+    }
+    for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
+        for &(slot, orig_func) in &prep.lib.elements {
+            if let Some(&target) = prep.helper_defined_indices.get(&orig_func) {
+                new_elems.active(
+                    Some(0),
+                    &ConstExpr::i32_const((placement.table_base + slot) as i32),
+                    wasm_encoder::Elements::Functions(std::borrow::Cow::Owned(vec![target])),
+                );
+            }
+        }
+    }
+    if !new_elems.is_empty() {
         module.section(&new_elems);
     }
 
@@ -468,8 +594,8 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     module.section(&new_code);
 
     // Data
+    let mut new_data = wasm_encoder::DataSection::new();
     if !core_data.is_empty() {
-        let mut new_data = wasm_encoder::DataSection::new();
         for seg in core_data {
             match seg.kind {
                 wasmparser::DataKind::Active { memory_index, offset_expr } => {
@@ -481,6 +607,17 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                 }
             }
         }
+    }
+    for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
+        for (offset, contents) in &prep.lib.data {
+            new_data.active(
+                0,
+                &ConstExpr::i32_const((placement.memory_base + offset) as i32),
+                contents.iter().copied(),
+            );
+        }
+    }
+    if !new_data.is_empty() {
         module.section(&new_data);
     }
 

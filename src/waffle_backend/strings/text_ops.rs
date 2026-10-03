@@ -8,18 +8,7 @@ use waffle::{
     Operator, SignatureData, Terminator, Type,
 };
 
-pub(crate) struct TextImports {
-    pub(crate) str_code_point_at: Func,
-    pub(crate) str_from_code_point: Func,
-    pub(crate) str_case_convert: Func,
-    pub(crate) str_split_count: Func,
-    pub(crate) str_split_populate: Func,
-    pub(crate) str_join_total_len: Func,
-    pub(crate) str_join: Func,
-}
-
-pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextImports> {
-    // 1. str_code_point_at: (i32, i32, f64) -> f64
+pub(super) fn declare_code_point_at_import(module: &mut Module<'static>) -> Result<Func> {
     let sig_cpa = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::I32, Type::F64],
         returns: vec![Type::F64],
@@ -32,8 +21,10 @@ pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextI
         name: "str_code_point_at".into(),
         kind: ImportKind::Func(func_cpa),
     });
+    Ok(func_cpa)
+}
 
-    // 2. str_from_code_point: (f64, i32) -> i32
+pub(super) fn declare_from_code_point_import(module: &mut Module<'static>) -> Result<Func> {
     let sig_fcp = module.signatures.push(SignatureData {
         params: vec![Type::F64, Type::I32],
         returns: vec![Type::I32],
@@ -46,8 +37,10 @@ pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextI
         name: "str_from_code_point".into(),
         kind: ImportKind::Func(func_fcp),
     });
+    Ok(func_fcp)
+}
 
-    // 3. str_case_convert: (i32, i32, i32, i32) -> i64
+pub(super) fn declare_case_convert_import(module: &mut Module<'static>) -> Result<Func> {
     let sig_cc = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::I32, Type::I32, Type::I32],
         returns: vec![Type::I64],
@@ -60,8 +53,10 @@ pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextI
         name: "str_case_convert".into(),
         kind: ImportKind::Func(func_cc),
     });
+    Ok(func_cc)
+}
 
-    // 4. str_split_count: (i32, i32, i32, i32) -> i32
+pub(super) fn declare_split_imports(module: &mut Module<'static>) -> Result<(Func, Func)> {
     let sig_sc = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::I32, Type::I32, Type::I32],
         returns: vec![Type::I32],
@@ -75,7 +70,6 @@ pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextI
         kind: ImportKind::Func(func_sc),
     });
 
-    // 5. str_split_populate: (i32, i32, i32, i32, i32) -> i32
     let sig_sp = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::I32, Type::I32, Type::I32, Type::I32],
         returns: vec![Type::I32],
@@ -88,8 +82,10 @@ pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextI
         name: "str_split_populate".into(),
         kind: ImportKind::Func(func_sp),
     });
+    Ok((func_sc, func_sp))
+}
 
-    // 6. str_join_total_len: (i32, i32, i32) -> i32
+pub(super) fn declare_join_imports(module: &mut Module<'static>) -> Result<(Func, Func)> {
     let sig_jtl = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::I32, Type::I32],
         returns: vec![Type::I32],
@@ -103,7 +99,6 @@ pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextI
         kind: ImportKind::Func(func_jtl),
     });
 
-    // 7. str_join: (i32, i32, i32, i32, i32) -> i64
     let sig_sj = module.signatures.push(SignatureData {
         params: vec![Type::I32, Type::I32, Type::I32, Type::I32, Type::I32],
         returns: vec![Type::I64],
@@ -116,16 +111,7 @@ pub(super) fn declare_text_imports(module: &mut Module<'static>) -> Result<TextI
         name: "str_join".into(),
         kind: ImportKind::Func(func_sj),
     });
-
-    Ok(TextImports {
-        str_code_point_at: func_cpa,
-        str_from_code_point: func_fcp,
-        str_case_convert: func_cc,
-        str_split_count: func_sc,
-        str_split_populate: func_sp,
-        str_join_total_len: func_jtl,
-        str_join: func_sj,
-    })
+    Ok((func_jtl, func_sj))
 }
 
 /// Emits wrapper for codePointAt: (desc: i32, pos: f64) -> f64

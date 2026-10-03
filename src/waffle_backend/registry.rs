@@ -85,6 +85,7 @@ impl ModuleRegistry {
         stream_helpers: Option<(Func, Func)>,
         string_heap_base: Option<u32>,
         memory: waffle::Memory,
+        string_reqs: crate::waffle_backend::strings::RequiredStringHelpers,
     ) -> Result<Self> {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
@@ -164,7 +165,7 @@ impl ModuleRegistry {
         // 2. Emit string runtime helpers ($rt_cabi_realloc, etc.) after all imports are declared
         let string_helpers = if let Some(base) = string_heap_base {
             Some(crate::waffle_backend::strings::emit_string_runtime(
-                module, memory, base,
+                module, memory, base, string_reqs,
             )?)
         } else {
             None

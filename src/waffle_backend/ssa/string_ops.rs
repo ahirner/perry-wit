@@ -192,15 +192,33 @@ impl FunctionLowerer<'_> {
             }
             "codePointAt" => {
                 let position = self.position_argument(args.first(), 0.0)?;
-                (helpers.str_code_point_at, vec![desc, position], Type::F64)
+                (
+                    helpers
+                        .str_code_point_at
+                        .expect("codePointAt helper available"),
+                    vec![desc, position],
+                    Type::F64,
+                )
             }
             "toLowerCase" => {
                 let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-                (helpers.str_case_convert, vec![desc, zero], Type::I32)
+                (
+                    helpers
+                        .str_case_convert
+                        .expect("case_convert helper available"),
+                    vec![desc, zero],
+                    Type::I32,
+                )
             }
             "toUpperCase" => {
                 let one = self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]);
-                (helpers.str_case_convert, vec![desc, one], Type::I32)
+                (
+                    helpers
+                        .str_case_convert
+                        .expect("case_convert helper available"),
+                    vec![desc, one],
+                    Type::I32,
+                )
             }
             "split" => {
                 ensure!(
@@ -208,7 +226,11 @@ impl FunctionLowerer<'_> {
                     "split requires a string separator operand"
                 );
                 let sep = self.string_receiver(&args[0])?;
-                (helpers.str_split, vec![desc, sep], Type::I32)
+                (
+                    helpers.str_split.expect("split helper available"),
+                    vec![desc, sep],
+                    Type::I32,
+                )
             }
             "indexOf" => {
                 ensure!(
@@ -218,7 +240,7 @@ impl FunctionLowerer<'_> {
                 let search = self.string_receiver(&args[0])?;
                 let position = self.position_argument(args.get(1), 0.0)?;
                 (
-                    helpers.str_index_of,
+                    helpers.str_index_of.expect("indexOf helper available"),
                     vec![desc, search, position],
                     Type::F64,
                 )
@@ -256,7 +278,7 @@ impl FunctionLowerer<'_> {
         };
         Ok(self.op(
             Operator::Call {
-                function_index: helpers.str_join,
+                function_index: helpers.str_join.expect("join helper available"),
             },
             &[arr_ptr, sep_desc],
             &[Type::I32],
