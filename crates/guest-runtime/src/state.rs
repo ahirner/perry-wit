@@ -11,7 +11,8 @@ pub(crate) enum JsHandle {
     Null,
     Json(serde_json::Value),
     Array(Vec<i64>),
-    Response(usize),
+    Response { id: usize, headers: Option<i64> },
+    Headers(Vec<(String, String)>),
     Date(f64),
     Uint8Array(crate::buffer::Uint8ArrayView),
 }
@@ -127,6 +128,10 @@ impl RuntimeState {
                                     self.worklist.push(item);
                                 }
                             }
+                            JsHandle::Response {
+                                headers: Some(headers),
+                                ..
+                            } => self.worklist.push(*headers),
                             _ => {}
                         }
                     }
@@ -321,6 +326,7 @@ impl RuntimeState {
                         .collect();
                     serde_json::Value::Object(items)
                 }
+                Some(JsHandle::Headers(_)) => serde_json::Value::Object(serde_json::Map::new()),
                 _ => serde_json::Value::Null,
             }
         } else {
@@ -445,7 +451,8 @@ impl RuntimeState {
                     JsHandle::Json(serde_json::Value::String(s)) => s.clone(),
                     JsHandle::Json(other) => serde_json::to_string(other).unwrap_or_default(),
                     JsHandle::Array(arr) => format!("[array len {}]", arr.len()),
-                    JsHandle::Response(_) => "[Response]".to_string(),
+                    JsHandle::Response { .. } => "[Response]".to_string(),
+                    JsHandle::Headers(_) => "[object Headers]".to_string(),
                     JsHandle::Null => "null".to_string(),
                     JsHandle::Date(ts) => {
                         crate::date::format_iso(*ts).unwrap_or_else(|| "Invalid Date".to_string())

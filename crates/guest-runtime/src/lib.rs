@@ -19,6 +19,7 @@ mod dispatch_pure;
 mod environment;
 mod equality;
 mod filesystem;
+mod headers;
 mod http;
 mod http_options;
 mod http_url;

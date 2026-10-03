@@ -82,12 +82,18 @@
       "support": "partial",
       "domain": "Asynchronous HTTP network requests using wasi:http/outgoing-handler",
       "invariants": [
-        "Dispatches HTTP GET and POST requests to valid absolute URLs",
+        "Dispatches GET, POST, HEAD, PUT, PATCH, DELETE, OPTIONS, and valid custom method tokens to absolute HTTP(S) URLs",
         "Returns a Promise resolving to a Response handle",
-        "Rejects on connection refusal, DNS failure, or network timeout without crashing host"
+        "Rejects on connection refusal, DNS failure, or network timeout without crashing host",
+        "Response status, ok, url, and read-only headers.get()/has() remain available after buffered body consumption",
+        "Header lookup is case-insensitive; repeated fields are joined with comma and space, and missing fields return null",
+        "Invalid or forbidden methods and bodies on GET/HEAD fail before requests are dispatched"
       ],
       "differences": [
-        "Does not support loopback redirects, custom CA stores, or WebSocket upgrades"
+        "Does not support loopback redirects, custom CA stores, or WebSocket upgrades",
+        "WASI Preview 2 does not expose a reason phrase; Response.statusText is always an empty string",
+        "Response headers support get and has; mutation and iteration APIs report unsupported methods",
+        "Method, metadata, and header behavior is exercised by tests/http_regression_test.rs"
       ],
       "conformance": [
         "tests/conformance/cases/04_fetch_json.ts",

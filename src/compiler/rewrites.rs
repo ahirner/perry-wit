@@ -416,7 +416,10 @@ impl Rewriter {
                 module.as_str(),
                 "fetch" | "fetchWithAuth" | "fetchPostWithAuth"
             )
-            && matches!(method.as_str(), "status" | "ok")
+            && matches!(
+                method.as_str(),
+                "status" | "ok" | "headers" | "statusText" | "url"
+            )
             && args.is_empty()
         {
             *expr = perry_hir::ir::Expr::PropertyGet {

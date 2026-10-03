@@ -11,6 +11,67 @@ use std::{
 };
 
 #[test]
+fn response_headers_and_methods_survive_body_consumption() {
+    let fixture = HttpFixture::new(|request| {
+        Reply::WithHeaders(
+            202,
+            vec![
+                ("X-Result".into(), request.method.clone()),
+                ("X-List".into(), "one".into()),
+                ("X-List".into(), "two".into()),
+            ],
+            "accepted".into(),
+        )
+    });
+    let output = support::run(
+        &format!(
+            r#"
+        const methods = ["put", "PATCH", "patch", "PaTcH", "DELETE", "HEAD", "OPTIONS", "custom"];
+        for (let i = 0; i < methods.length; i++) {{
+            const response = await fetch("http://{0}/metadata", {{method: methods[i]}});
+            console.log(response.status);
+            console.log(response.statusText === "");
+            const headers = response.headers;
+            console.log(headers === response.headers);
+            console.log(headers.get("X-RESULT"));
+            console.log(headers.has("x-result"));
+            console.log(headers.get("missing") === null);
+            console.log(headers.get("x-list"));
+            console.log(await response.text());
+            console.log(response.headers.get("x-result"));
+        }}
+    "#,
+            fixture.address
+        ),
+        None,
+        None,
+    );
+    let methods = [
+        "PUT", "PATCH", "patch", "PaTcH", "DELETE", "HEAD", "OPTIONS", "custom",
+    ];
+    let expected: String = methods
+        .iter()
+        .map(|method| {
+            format!(
+                "202\ntrue\ntrue\n{method}\ntrue\ntrue\none, two\n{}\n{method}\n",
+                if *method == "HEAD" { "" } else { "accepted" }
+            )
+        })
+        .collect();
+    assert_eq!(support::stdout(&output), expected);
+    assert_eq!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect::<Vec<_>>(),
+        methods
+    );
+}
+
+#[test]
 fn fetch_in_class_method_selects_http_dispatch() {
     let fixture = HttpFixture::new(|_| Reply::Body(200, "class response".into()));
     let output = support::run(
@@ -164,7 +225,8 @@ fn unsupported_fetch_options_fail_before_sending_a_request() {
             "Unsupported fetch option: redirect",
         ),
         ("{ signal: null }", "Unsupported fetch option: signal"),
-        (r#"{ method: "PUT" }"#, "only GET and POST"),
+        (r#"{ method: "CONNECT" }"#, "Forbidden fetch method"),
+        (r#"{ method: "bad method" }"#, "Invalid fetch method"),
         (r#"{ method: "POST", body: 42 }"#, "body must be a string"),
         (
             "{ headers: { wrong: 42 } }",
@@ -172,7 +234,11 @@ fn unsupported_fetch_options_fail_before_sending_a_request() {
         ),
         (
             r#"{ body: "invalid GET body" }"#,
-            "GET requests cannot have a body",
+            "GET and HEAD requests cannot have a body",
+        ),
+        (
+            r#"{ method: "HEAD", body: "" }"#,
+            "GET and HEAD requests cannot have a body",
         ),
     ] {
         let output = support::run(

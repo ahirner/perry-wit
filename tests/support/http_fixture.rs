@@ -19,6 +19,7 @@ pub struct Request {
 
 pub enum Reply {
     Body(u16, String),
+    WithHeaders(u16, Vec<(String, String)>, String),
     Disconnect,
     Stall,
     StallBody,
@@ -54,6 +55,16 @@ impl HttpFixture {
                         Reply::Body(status, body) => {
                             let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                             let _ = stream.write_all(body.as_bytes());
+                        }
+                        Reply::WithHeaders(status, headers, body) => {
+                            let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                            for (name, value) in headers {
+                                let _ = write!(stream, "{name}: {value}\r\n");
+                            }
+                            let _ = stream.write_all(b"\r\n");
+                            if request.method != "HEAD" {
+                                let _ = stream.write_all(body.as_bytes());
+                            }
                         }
                         Reply::Disconnect => {}
                         reply @ (Reply::Stall | Reply::StallBody) => {

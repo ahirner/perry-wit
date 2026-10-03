@@ -392,7 +392,7 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             let response_ids: Vec<_> = items
                 .iter()
                 .filter_map(|&item| match state.get_handle(item) {
-                    Some(JsHandle::Response(id)) => Some(*id),
+                    Some(JsHandle::Response { id, .. }) => Some(*id),
                     _ => None,
                 })
                 .collect();
@@ -400,7 +400,7 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
                 .unwrap_or_else(|error| fail_with_error(&error));
         }
     } else if name == "await_promise" {
-        if let Some(JsHandle::Response(id)) =
+        if let Some(JsHandle::Response { id, .. }) =
             raw_args.first().and_then(|&arg| state.get_handle(arg))
         {
             crate::http::get_responses()[*id]
@@ -429,8 +429,9 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
 
     if matches!(name.as_str(), "object_get" | "class_get_field") && raw_args.len() >= 2 {
         let target_handle = raw_args[0];
-        if let Some(JsHandle::Response(id)) = state.get_handle(target_handle) {
+        if let Some(JsHandle::Response { id, headers }) = state.get_handle(target_handle) {
             let id = *id;
+            let cached_headers = *headers;
             let key_str = state.get_string(raw_args[1]);
             let responses = crate::http::get_responses();
             let status = responses[id]
@@ -444,6 +445,31 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
                     } else {
                         TAG_FALSE
                     }) as i64
+                }
+                "statusText" => state.alloc_string(""),
+                "url" => {
+                    let metadata = responses[id]
+                        .metadata()
+                        .unwrap_or_else(|error| fail_with_error(&error));
+                    state.alloc_string(metadata.url.split('#').next().unwrap_or_default())
+                }
+                "headers" => {
+                    if let Some(headers) = cached_headers {
+                        headers
+                    } else {
+                        let metadata = responses[id]
+                            .metadata()
+                            .unwrap_or_else(|error| fail_with_error(&error));
+                        let headers =
+                            nanbox_pointer(state.alloc_handle(JsHandle::Headers(metadata.headers)));
+                        if let Some(JsHandle::Response {
+                            headers: cached, ..
+                        }) = state.get_handle_mut(target_handle)
+                        {
+                            *cached = Some(headers);
+                        }
+                        headers
+                    }
                 }
                 _ => TAG_UNDEFINED as i64,
             };
@@ -495,7 +521,7 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
                         url: url.clone(),
                         future_resp: fut,
                     });
-                    let h_id = state.alloc_handle(JsHandle::Response(id));
+                    let h_id = state.alloc_handle(JsHandle::Response { id, headers: None });
                     return nanbox_pointer(h_id);
                 }
                 Err(e) => {
@@ -506,7 +532,7 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
     } else if name == "response_json" || name == "json" {
         let handle = raw_args.first().copied().unwrap_or(0);
         let resp_id = match state.get_handle(handle) {
-            Some(JsHandle::Response(id)) => Some(*id),
+            Some(JsHandle::Response { id, .. }) => Some(*id),
             _ => get_pointer_id(handle),
         };
         if let Some(id) = resp_id {
@@ -527,7 +553,7 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
     } else if name == "response_text" || name == "text" {
         let handle = raw_args.first().copied().unwrap_or(0);
         let resp_id = match state.get_handle(handle) {
-            Some(JsHandle::Response(id)) => Some(*id),
+            Some(JsHandle::Response { id, .. }) => Some(*id),
             _ => get_pointer_id(handle),
         };
         if let Some(id) = resp_id {

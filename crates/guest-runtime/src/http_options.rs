@@ -5,6 +5,12 @@ use serde_json::Value;
 pub(crate) enum RequestMethod {
     Get,
     Post,
+    Head,
+    Put,
+    Patch,
+    Delete,
+    Options,
+    Other(String),
 }
 
 pub(crate) struct RequestOptions {
@@ -24,16 +30,33 @@ pub(crate) fn parse_options(value: Value) -> Result<RequestOptions, String> {
         Value::Object(map) => map,
         _ => return Err("fetch options must be an object".into()),
     };
+    let mut has_body = false;
     for (key, value) in map {
         match key.as_str() {
             "method" => {
                 options.method = match value.as_str() {
                     Some(method) if method.eq_ignore_ascii_case("GET") => RequestMethod::Get,
                     Some(method) if method.eq_ignore_ascii_case("POST") => RequestMethod::Post,
-                    _ => return Err("fetch supports only GET and POST methods".into()),
+                    Some(method) if method.eq_ignore_ascii_case("HEAD") => RequestMethod::Head,
+                    Some(method) if method.eq_ignore_ascii_case("PUT") => RequestMethod::Put,
+                    Some("PATCH") => RequestMethod::Patch,
+                    Some(method) if method.eq_ignore_ascii_case("DELETE") => RequestMethod::Delete,
+                    Some(method) if method.eq_ignore_ascii_case("OPTIONS") => {
+                        RequestMethod::Options
+                    }
+                    Some(method)
+                        if ["CONNECT", "TRACE", "TRACK"]
+                            .iter()
+                            .any(|forbidden| method.eq_ignore_ascii_case(forbidden)) =>
+                    {
+                        return Err("Forbidden fetch method".into())
+                    }
+                    Some(method) if valid_token(method) => RequestMethod::Other(method.into()),
+                    _ => return Err("Invalid fetch method".into()),
                 };
             }
             "body" => {
+                has_body = !value.is_null();
                 options.body = match value {
                     Value::Null => Vec::new(),
                     Value::String(body) => body.into_bytes(),
@@ -69,8 +92,15 @@ pub(crate) fn parse_options(value: Value) -> Result<RequestOptions, String> {
             _ => return Err(format!("Unsupported fetch option: {key}")),
         }
     }
-    if matches!(options.method, RequestMethod::Get) && !options.body.is_empty() {
-        return Err("GET requests cannot have a body".into());
+    if matches!(options.method, RequestMethod::Get | RequestMethod::Head) && has_body {
+        return Err("GET and HEAD requests cannot have a body".into());
     }
     Ok(options)
+}
+
+pub(crate) fn valid_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }

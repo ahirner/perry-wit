@@ -214,7 +214,7 @@ Use that baseline when extending the client.
 
 - [ ] **10.1. Client Metadata & Methods**
     - [x] Send outgoing headers and string request bodies through the existing HTTP path.
-    - [ ] Add the response header access and additional methods required by a client use case, with validation and documented status-text behavior supported by the host.
+    - [x] Add the response header access and additional methods required by a client use case, with validation and documented status-text behavior supported by the host.
     - [ ] Verify the new behavior alongside existing GET/POST, status, and error-response behavior using a controlled fixture.
 - [ ] **10.2. Buffered Binary Bodies** — Needs D.1.
     - [ ] Support binary request/response bodies through the shared byte representation and verify byte-exact round-trips and cleanup.

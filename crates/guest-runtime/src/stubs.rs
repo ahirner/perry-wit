@@ -150,7 +150,7 @@ pub(crate) extern "C" fn js_typeof(val: i64) -> i64 {
             Some(JsHandle::Json(_)) => "object",
             Some(JsHandle::Array(_)) => "object",
             Some(JsHandle::Uint8Array(_)) => "object",
-            Some(JsHandle::Response(_)) => "object",
+            Some(JsHandle::Response { .. } | JsHandle::Headers(_)) => "object",
             Some(JsHandle::Date(_)) => "object",
             Some(JsHandle::Null) => "object",
             None => "undefined",

@@ -17,8 +17,15 @@ pub(crate) enum ResponseEntry {
     },
     Ready {
         body: String,
-        status: u16,
+        metadata: ResponseMetadata,
     },
+}
+
+#[derive(Clone)]
+pub(crate) struct ResponseMetadata {
+    pub(crate) url: String,
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
 }
 
 static mut RESPONSES: Option<Vec<ResponseEntry>> = None;
@@ -68,9 +75,8 @@ impl ResponseEntry {
     }
 
     pub(crate) fn resolve(&mut self) -> Result<&str, String> {
-        self.wait()?;
+        let metadata = self.metadata()?;
         if let Self::Headers { url, response } = self {
-            let status = response.status();
             let body = response
                 .consume()
                 .map_err(|_| format!("Failed to consume response body for {url}"))?;
@@ -95,7 +101,7 @@ impl ResponseEntry {
             drop(body);
             *self = Self::Ready {
                 body: body_str,
-                status,
+                metadata,
             };
         }
         match self {
@@ -108,7 +114,30 @@ impl ResponseEntry {
         self.wait()?;
         match self {
             Self::Headers { response, .. } => Ok(response.status()),
-            Self::Ready { status, .. } => Ok(*status),
+            Self::Ready { metadata, .. } => Ok(metadata.status),
+            Self::InFlight { .. } => unreachable!(),
+        }
+    }
+
+    pub(crate) fn metadata(&mut self) -> Result<ResponseMetadata, String> {
+        self.wait()?;
+        match self {
+            Self::Headers { url, response } => Ok(ResponseMetadata {
+                url: url.clone(),
+                status: response.status(),
+                headers: response
+                    .headers()
+                    .entries()
+                    .into_iter()
+                    .map(|(name, value)| {
+                        (
+                            name.to_ascii_lowercase(),
+                            value.into_iter().map(char::from).collect(),
+                        )
+                    })
+                    .collect(),
+            }),
+            Self::Ready { metadata, .. } => Ok(metadata.clone()),
             Self::InFlight { .. } => unreachable!(),
         }
     }
@@ -170,6 +199,12 @@ pub(crate) fn start_http_request(
     let method = match options.method {
         crate::http_options::RequestMethod::Get => Method::Get,
         crate::http_options::RequestMethod::Post => Method::Post,
+        crate::http_options::RequestMethod::Head => Method::Head,
+        crate::http_options::RequestMethod::Put => Method::Put,
+        crate::http_options::RequestMethod::Patch => Method::Patch,
+        crate::http_options::RequestMethod::Delete => Method::Delete,
+        crate::http_options::RequestMethod::Options => Method::Options,
+        crate::http_options::RequestMethod::Other(method) => Method::Other(method),
     };
     request
         .set_method(&method)

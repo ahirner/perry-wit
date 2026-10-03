@@ -28,7 +28,9 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
 
     let mut result_i64: i64 = 0;
 
-    if name == "get_exception" {
+    if let Some(value) = crate::headers::dispatch_call(&name, &raw_args) {
+        result_i64 = value;
+    } else if name == "get_exception" {
         result_i64 = crate::stubs::get_exception();
     } else if name == "throw_value" {
         crate::stubs::throw_value(raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64));
