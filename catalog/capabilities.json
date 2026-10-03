@@ -21,6 +21,31 @@
   ],
   "capabilities": [
     {
+      "id": "compiler.p3_primitives",
+      "name": "Typed P3 Clock and Random Calls",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: waitFor, randomNumber, and zero-argument Math.random",
+      "invariants": [
+        "Clocks and randomness use typed shared lowering plans and WASI 0.3 canonical adapters",
+        "Named and namespace imports from perry:clocks and perry:random preserve binding aliases and distinguish local shadows",
+        "Arguments execute once in source order, with clock durations converted from milliseconds to nanoseconds",
+        "Unused declarations add no component imports; all emitted function bodies retain their referenced dependencies",
+        "UTF-8 values, exceptions, and async invocation ownership remain shared across capabilities",
+        "Host failures trap independently of guest exception handlers"
+      ],
+      "differences": [
+        "The default CLI and generated WIT SDK still target the legacy pipeline; types/p3.d.ts describes these migration imports",
+        "Only direct calls and literal namespace member names are supported; dynamic lookup, capability function values, and spread arguments are diagnosed",
+        "Invalid or overflowing wait durations trap before the host call",
+        "Instances support serial calls; cancellation discards the store"
+      ],
+      "conformance": [
+        "tests/waffle_pipeline_test.rs",
+        "tests/waffle_string_test.rs"
+      ]
+    },
+    {
       "id": "web.guest_callbacks",
       "name": "Guest Function Values",
       "tier": "tier-1-web-primaries",

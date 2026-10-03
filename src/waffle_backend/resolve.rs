@@ -4,14 +4,15 @@
 //! classification loses binding identity. Carries typed operation identity into
 //! lowering, preserving receiver and argument evaluation order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail, ensure};
-use perry_hir::ir::{Function, Module as HirModule, Stmt};
+use perry_hir::ir::{Expr, Function, Module as HirModule, Stmt};
 use perry_hir::types::{FuncId, Type as HirType};
 use waffle::Type as WaffleType;
 
 use super::capabilities::{CapabilityOperation, LowerCapability};
+use super::visit::visit_function_expressions;
 
 /// The nature of input accepted by the module entry point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,7 +126,10 @@ impl ResolvedContract {
 }
 
 /// Resolves module bindings, shadowing, and contracts for WAFFLE lowering.
-pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
+pub(crate) fn resolve_contract(
+    hir: &HirModule,
+    capabilities: &BTreeMap<String, CapabilityOperation>,
+) -> Result<ResolvedContract> {
     ensure!(
         hir.init.is_empty(),
         "Module initialization is unsupported by the WAFFLE backend"
@@ -134,9 +138,19 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
         !hir.functions.is_empty(),
         "Module must declare at least one function"
     );
+    ensure!(
+        hir.classes.is_empty(),
+        "Unsupported class initialization in the WAFFLE backend"
+    );
 
     let mut functions_by_name = BTreeMap::new();
     for func in &hir.functions {
+        ensure!(
+            func.params
+                .iter()
+                .all(|param| param.default.is_none() && !param.is_rest),
+            "Unsupported default or rest parameters in the WAFFLE backend"
+        );
         ensure!(
             functions_by_name
                 .insert(func.name.clone(), func.id)
@@ -148,10 +162,13 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
 
     // Resolve extern functions into typed intrinsics
     let mut intrinsics = BTreeMap::new();
-    let mut uses_p3_clocks = false;
 
     for (name, params, ret) in &hir.extern_funcs {
-        if let Some(operation) = CapabilityOperation::from_declaration(name) {
+        if let Some(operation) = capabilities
+            .get(name)
+            .copied()
+            .or_else(|| CapabilityOperation::from_declaration(name))
+        {
             let plan = operation.lower();
             ensure!(
                 *params == plan.params && *ret == plan.result,
@@ -159,7 +176,6 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
                 plan.params,
                 plan.result
             );
-            uses_p3_clocks |= matches!(operation, CapabilityOperation::Clock(_));
             intrinsics.insert(name.clone(), TypedIntrinsic::Capability(operation));
             continue;
         }
@@ -249,6 +265,22 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
     for func in &hir.functions {
         audit_scope_and_shadowing(func, &intrinsics)?;
     }
+
+    let mut referenced = BTreeSet::new();
+    for function in &hir.functions {
+        visit_function_expressions(function, &mut |expression| {
+            if let Expr::ExternFuncRef { name, .. } = expression {
+                referenced.insert(name.clone());
+            }
+        });
+    }
+    intrinsics.retain(|name, _| referenced.contains(name));
+    let uses_p3_clocks = intrinsics.values().any(|intrinsic| {
+        matches!(
+            intrinsic,
+            TypedIntrinsic::Capability(CapabilityOperation::Clock(_))
+        )
+    });
 
     Ok(ResolvedContract {
         input_kind,

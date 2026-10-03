@@ -2,6 +2,7 @@
 
 mod clocks;
 mod random;
+pub(crate) mod source;
 
 use perry_hir::types::Type as HirType;
 

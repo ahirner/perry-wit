@@ -92,6 +92,10 @@ It eliminates in-Wasm JavaScript interpreters (such as QuickJS, SpiderMonkey, or
 - Language constructs (functions, expressions, statements) are transformed into structured HIR items.
 
 ### Stage 2: Binding & Identity Resolution (`src/waffle_backend/resolve.rs`)
+- SWC resolves source binding identities before Perry lowers builtin names.
+  Capability aliases become collision-free extern bindings with a separate typed operation map.
+  `LowerCapability` supplies one pure plan for source validation, core signatures, and canonical import wiring.
+  Clock and random implementations contain no invocation state; SSA, exceptions, values, and suspension remain shared.
 - Before capability classification or code emission, module bindings are resolved:
   - Intrinsic signatures are validated (`waitFor`, `hostDouble`, `readChunk`, `byteAt`).
   - Module functions are registered to allow mutual and nested intra-module function calls.
@@ -164,6 +168,7 @@ The compiler is organized into decoupled functional Rust modules with narrow int
 - `src/waffle_backend/mod.rs`: Top-level orchestration module coordinating parsing, resolution, SSA lowering, and componentization. Retains inspectable artifacts (`hir`, `waffle_ir`, `core`, `component_wat`, `component`).
 - `src/waffle_backend/audit.rs`: `pub(crate)` dependency auditor verifying that the compiler build and dependency graph contains zero LLVM or inkwell libraries.
 - `src/waffle_backend/resolve.rs`: `pub(crate)` contract and binding resolution module. Classifies typed intrinsics, checks shadowing, and enforces function contracts.
+- `src/waffle_backend/capabilities/`: Binding-aware source normalization and typed capability plans, grouped by clock and random responsibility.
 - `src/waffle_backend/ssa.rs`: `pub(crate)` direct HIR-to-WAFFLE SSA lowering engine. Constructs basic blocks, SSA values, loop headers, branch joins, and continuation blocks.
 - `src/waffle_backend/component.rs`: `pub(crate)` component model framing engine synthesizing WASI 0.3 / P3 async adapters and canonical ABI lift/lower bindings.
 

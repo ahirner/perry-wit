@@ -299,7 +299,7 @@ Use contract-specific Unicode expectations while retaining matching Node compari
 ### R5 — Typed Capability Lowering with a Small Rust Trait
 
 
-- [ ] **Lower resolved capability operations through a shared, consumer-shaped compiler contract.**
+- [x] **Lower resolved capability operations through a shared, consumer-shaped compiler contract.**
     - [x] **R5.1:** Derive the trait from two concrete consumers, such as clocks and the first filesystem operation. Group typed operations by responsibility and carry the operands, result/error behavior, and imports their lowering needs. Choose methods and context from those implementations; defer registration, dynamic loading, packages, and feature combinations until a consumer demonstrates a need.
       - `LowerCapability` describes typed clock and random operations with source parameters/results and canonical import adapters. Declaration validation, core signatures, and component wiring consume the same plan; call arity and core operand types are checked before emission.
       - `waitFor` preserves real P3 suspension. `randomNumber` converts the high 53 bits of `get-random-u64` to `[0, 1)` without allocation. These operations have no WIT domain errors; host failures trap independently of guest catch handlers.
@@ -308,7 +308,12 @@ Use contract-specific Unicode expectations while retaining matching Node compari
       - A real P3 clock/random task retains and transforms large UTF-8 strings across suspension, returns `Result<string, number>`, and runs `finally` for both success and recoverable guest failure. Forty-eight calls reuse one instance; cancellation discards the store and never delivers stale cleanup into a new instance.
       - Capability plans contain no runtime state. Calls, exception completions, await continuations, canonical text allocation, and linked Unicode helpers remain shared. The serial-invocation/store-disposal lifecycle remains explicit; native stream consumers extend this boundary in R7.
       - Verified 66 pipeline/string tests and Clippy under the pinned Nix toolchain.
-    - [ ] **R5.3:** Verify bound aliases, shadowed built-ins, unrelated member names, dynamic forms that are exposed, and argument side effects. Inspect pure and mixed tasks' component imports and instantiate with only the requested interfaces. Retain ABI, indirect-call/global references, and initialization dependencies correctly; add finer pruning only when measured output needs it.
+    - [x] **R5.3:** Verify bound aliases, shadowed built-ins, unrelated member names, dynamic forms that are exposed, and argument side effects. Inspect pure and mixed tasks' component imports and instantiate with only the requested interfaces. Retain ABI, indirect-call/global references, and initialization dependencies correctly; add finer pruning only when measured output needs it.
+      - SWC binding identities distinguish `perry:clocks` / `perry:random` imports, named aliases, namespace literal members, builtin `Math.random`, and local shadows before Perry lowering. A typed side map connects collision-free generated bindings to capability plans; source names do not select capabilities after normalization.
+      - Capability function values, dynamic member names, spread calls, default/rest parameters, and class initialization are explicitly diagnosed. Plain unrelated functions retain their behavior; unrelated member names never acquire capability imports.
+      - HIR expression traversal keeps references from all emitted functions and prunes unused extern declarations. Canonical roots and linked helper data/global/table/initialization dependencies remain handled by the existing shared linker; helper and mixed-string regressions pass.
+      - Added `types/p3.d.ts`, catalog support scoped to the WAFFLE Rust API, and source-contract documentation. Independently typed host callbacks verify duration conversion and shared adapters; an identical task under Node verifies argument/start/await order.
+      - Verified the complete `cargo test` suite, `cargo clippy --lib --tests -- -D warnings`, and `nix flake check --no-update-lock-file` on aarch64-darwin. Other platforms were not executed locally.
 
 **Retire:** String capability markers, generic `mem_call` capability routing,
 and dispatcher-combination specialization for replaced operations. Conservative

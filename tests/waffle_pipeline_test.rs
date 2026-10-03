@@ -1,10 +1,11 @@
 //! Comprehensive integration test suite for the LLVM-free Perry HIR → WAFFLE SSA backend.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Duration;
+use std::{fs, process::Command};
 
 use anyhow::Result;
 use perry_wit::compile_typescript_waffle;
@@ -41,6 +42,208 @@ fn make_wasi_linker(engine: &Engine) -> Result<Linker<WasiHostState>> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     Ok(linker)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_capability_aliases_builtins_and_shadowing() -> Result<()> {
+    let engine = make_async_engine()?;
+    for source in [
+        "import { randomNumber as sample } from 'perry:random'; export function run(): number { return sample(); }",
+        "import * as numbers from 'perry:random'; export function run(): number { return numbers.randomNumber(); }",
+        "import * as numbers from 'perry:random'; export function run(): number { return numbers['randomNumber'](); }",
+        "export function run(): number { return Math.random(); }",
+        "export function run(): number { return Math['random'](); }",
+        "declare function randomNumber(): number; export function run(): number { return (randomNumber() + Math.random()) / 2; }",
+    ] {
+        let compiled =
+            compile_typescript_waffle(source, "aliases.ts", &WaffleCompileOptions::default())?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        assert_eq!(
+            component
+                .component_type()
+                .imports(&engine)
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["wasi:random/random@0.3.0"]
+        );
+        let mut linker = Linker::new(&engine);
+        linker
+            .instance("wasi:random/random@0.3.0")?
+            .func_wrap("get-random-u64", |_: StoreContextMut<'_, ()>, (): ()| {
+                Ok((1u64 << 63,))
+            })?;
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 0.5);
+    }
+
+    for source in [
+        "import { randomNumber as sample } from 'perry:random'; export function run(sample: number): number { return sample + 1; }",
+        "import * as Math from 'perry:random'; export function run(Math: number): number { return Math + 1; }",
+        "export function run(Math: number): number { return Math + 1; }",
+        "function randomNumber(value: number): number { return value + 1; } export function run(value: number): number { return randomNumber(value); }",
+        "declare function waitFor(milliseconds: number): Promise<void>; declare function randomNumber(): number; declare function readChunk(stream: ByteStream): Promise<number>; export function run(value: number): number { return value + 1; }",
+    ] {
+        let compiled =
+            compile_typescript_waffle(source, "shadowing.ts", &WaffleCompileOptions::default())?;
+        assert!(!compiled.uses_p3_clocks);
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        assert_eq!(component.component_type().imports(&engine).count(), 0);
+        let linker = Linker::new(&engine);
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+        assert_eq!(run.call_async(&mut store, (41.0,)).await?.0, 42.0);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result<()> {
+    let source = r#"
+        import { waitFor as pause } from 'perry:clocks';
+        import { randomNumber as sample, randomNumber as again } from 'perry:random';
+        function helper(sample: number): number { return sample + 1; }
+        export async function run(): Promise<number> {
+            let before = helper(2);
+            await pause(sample() + again());
+            return before + Math.random();
+        }
+        "#;
+    let compiled =
+        compile_typescript_waffle(source, "effects.ts", &WaffleCompileOptions::default())?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    assert_eq!(component.component_type().imports(&engine).count(), 2);
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let random_trace = trace.clone();
+    let wait_trace = trace.clone();
+    let mut linker = Linker::new(&engine);
+    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+        "get-random-u64",
+        move |mut store: StoreContextMut<'_, u64>, (): ()| {
+            random_trace.lock().unwrap().push("random".to_string());
+            *store.data_mut() += 1;
+            Ok((*store.data() << 61,))
+        },
+    )?;
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
+            let trace = wait_trace.clone();
+            Box::pin(async move {
+                trace.lock().unwrap().push(format!("wait:{duration}"));
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                trace.lock().unwrap().push("resume".to_string());
+                Ok(())
+            })
+        })?;
+    let mut store = Store::new(&engine, 0u64);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    let result = run.call_async(&mut store, ()).await?.0;
+    assert_eq!(result, 3.375);
+    assert_eq!(
+        *trace.lock().unwrap(),
+        ["random", "random", "wait:375000", "resume", "random"]
+    );
+    let scratch = tempfile::tempdir()?;
+    let source_path = scratch.path().join("effects.ts");
+    fs::write(&source_path, source)?;
+    let checked = Command::new("tsc")
+        .current_dir(scratch.path())
+        .args([
+            "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
+        ])
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
+        .arg(&source_path)
+        .output()?;
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8(checked.stdout)?
+    );
+    let node_source = source.replace(
+        "import { waitFor as pause } from 'perry:clocks';",
+        "const pause = async (ms: number) => { trace.push(`wait:${ms * 1000000}`); await new Promise(resolve => setTimeout(resolve, 1)); trace.push('resume'); };"
+    ).replace(
+        "import { randomNumber as sample, randomNumber as again } from 'perry:random';",
+        "let calls = 0; const sample = () => { trace.push('random'); return ++calls / 8; }; const again = sample; Math.random = sample;"
+    );
+    let node_path = scratch.path().join("effects.mts");
+    fs::write(
+        &node_path,
+        format!(
+            "const trace: string[] = [];\n{node_source}\nconsole.log(JSON.stringify([await run(), trace]));"
+        ),
+    )?;
+    let node = Command::new("node").arg(&node_path).output()?;
+    assert!(node.status.success(), "{}", String::from_utf8(node.stderr)?);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&node.stdout)?,
+        serde_json::json!([result, *trace.lock().unwrap()])
+    );
+    Ok(())
+}
+
+#[test]
+fn test_waffle_capability_dynamic_forms_and_initialization_are_diagnosed() {
+    for (source, expected) in [
+        (
+            "import * as numbers from 'perry:random'; export function run(key: string): number { return numbers[key](); }",
+            "Dynamic capability member lookup is unsupported",
+        ),
+        (
+            "import { randomNumber as sample } from 'perry:random'; export function run(): number { const alias = sample; return alias(); }",
+            "Capability functions are only supported as direct calls",
+        ),
+        (
+            "import * as numbers from 'perry:random'; export function run(): number { const alias = numbers; return 1; }",
+            "Capability namespaces cannot be used as values",
+        ),
+        (
+            "import { randomNumber as sample } from 'perry:random'; export function run(): number { return sample(...[]); }",
+            "Spread capability arguments are unsupported",
+        ),
+        (
+            "import { missing } from 'perry:random'; export function run(): number { return 1; }",
+            "Unknown capability member 'missing'",
+        ),
+        (
+            "import 'perry:clocks'; export function run(): number { return 1; }",
+            "Capability imports cannot run module initialization",
+        ),
+        (
+            "declare function randomNumber(): number; export function run(value: number = randomNumber()): number { return value; }",
+            "Unsupported default or rest parameters in the WAFFLE backend",
+        ),
+        (
+            "class Example { static value = Math.random(); } export function run(): number { return 1; }",
+            "Module initialization is unsupported by the WAFFLE backend",
+        ),
+        (
+            "class Example {} export function run(): number { return 1; }",
+            "Unsupported class initialization in the WAFFLE backend",
+        ),
+        (
+            "export function run(input: string): number { return input.randomNumber(); }",
+            "Unsupported string method: randomNumber",
+        ),
+        (
+            "export function run(Math: string): number { return Math.random(); }",
+            "Unsupported string method: random",
+        ),
+        (
+            "import { randomNumber as sample } from 'perry:random'; export function run(): number { return sample(1); }",
+            "Intrinsic 'randomNumber' expects 0 arguments, got 1",
+        ),
+    ] {
+        let error =
+            compile_typescript_waffle(source, "unsupported.ts", &WaffleCompileOptions::default())
+                .unwrap_err();
+        assert_eq!(error.root_cause().to_string(), expected);
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -793,18 +996,13 @@ fn test_waffle_rejects_intrinsics_without_component_wiring() -> Result<()> {
         ),
         (
             "declare function unused(): void;",
-            "return input;",
+            "unused(); return input;",
             "unused",
         ),
         (
             "declare function byteAt(index: number): number;",
             "return byteAt(input);",
             "byteAt",
-        ),
-        (
-            "declare function readChunk(stream: ByteStream): Promise<number>;",
-            "return input;",
-            "readChunk",
         ),
     ] {
         let source = format!(

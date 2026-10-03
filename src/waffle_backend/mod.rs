@@ -13,11 +13,14 @@ pub(crate) mod resolve;
 pub(crate) mod ssa;
 pub(crate) mod strings;
 pub mod text_contract;
+mod visit;
 
 use anyhow::{Context, Result};
+use capabilities::CapabilityOperation;
 use perry_hir::ir::Module as HirModule;
 use perry_hir::lower_module;
 use perry_parser::parse_typescript;
+use std::collections::BTreeMap;
 
 pub use resolve::ResolvedInputKind;
 
@@ -60,20 +63,30 @@ pub fn compile_typescript(
             .context("LLVM audit verification failed")?;
     }
 
-    let ast = parse_typescript(ts_source, file_name)
+    let mut ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
     text_contract::validate_ast_text(&ast).context("Source text contract validation failed")?;
+    let capabilities = capabilities::source::resolve_capabilities(&mut ast)?;
     let hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
 
-    compile_hir_owned(hir, options)
+    compile_resolved_hir(hir, options, &capabilities)
 }
 
 /// Compiles Perry HIR by taking ownership, avoiding redundant cloning of the HIR.
 pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
+    compile_resolved_hir(hir, options, &BTreeMap::new())
+}
+
+fn compile_resolved_hir(
+    hir: HirModule,
+    options: &WaffleCompileOptions,
+    capabilities: &BTreeMap<String, CapabilityOperation>,
+) -> Result<WaffleCompiled> {
     text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
-    let (waffle_mod, contract) = lower_hir_to_waffle(&hir)?;
+    let contract = resolve::resolve_contract(&hir, capabilities)?;
+    let waffle_mod = ssa::lower_module(&hir, &contract)?;
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
         .to_wasm_bytes()
@@ -101,13 +114,4 @@ pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Resu
 /// Compiles Perry HIR using the pure WAFFLE SSA backend.
 pub fn compile_hir(hir: &HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
     compile_hir_owned(hir.clone(), options)
-}
-
-/// Lower Perry HIR to a validated WAFFLE module.
-pub(crate) fn lower_hir_to_waffle(
-    hir: &HirModule,
-) -> Result<(waffle::Module<'static>, resolve::ResolvedContract)> {
-    let contract = resolve::resolve_contract(hir)?;
-    let module = ssa::lower_module(hir, &contract)?;
-    Ok((module, contract))
 }

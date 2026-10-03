@@ -162,6 +162,15 @@ It accepts `declare function waitFor(milliseconds: number): Promise<void>` and
 `randomNumber()` uses the high 53 bits of a host random word to produce a number
 in `[0, 1)`. Host failures trap; these operations have no WIT domain-error result.
 Negative, nonfinite, and overflowing wait durations trap before calling the clock.
+Named and namespace imports from `perry:clocks` (`waitFor`) and `perry:random`
+(`randomNumber`) support import aliases and literal member names.
+Include [types/p3.d.ts](types/p3.d.ts) when type-checking these source tasks.
+The zero-argument builtin `Math.random()` uses the same random operation.
+Binding resolution distinguishes local shadows from the builtin and imported functions.
+Dynamic member names, capability function values, spread arguments, parameter
+defaults, and class initialization currently produce diagnostics.
+Unused declarations introduce no component imports; dependencies of all emitted
+function bodies are retained conservatively.
 The default CLI and SDK still describe the legacy pipeline until the R9 cutover.
 The Rust `compile_typescript_raw` API returns a `RawCompiled` value containing
 `core`, `exported_functions`, and `functions` for legacy linker consumers.

@@ -111,7 +111,7 @@ pub(crate) fn lower_module(
 struct FunctionLowerer<'a> {
     module: &'a Module<'static>,
     registry: &'a ModuleRegistry,
-    _contract: &'a ResolvedContract,
+    contract: &'a ResolvedContract,
     string_pool: &'a StringPool,
     return_type: &'a HirType,
     body: FunctionBody,
@@ -150,7 +150,7 @@ fn lower_function_body(
     let mut lowerer = FunctionLowerer {
         module,
         registry,
-        _contract: contract,
+        contract,
         string_pool,
         return_type: info.success_type(),
         body,
@@ -406,6 +406,7 @@ impl<'a> FunctionLowerer<'a> {
                 .get(name)
                 .ok_or_else(|| anyhow::anyhow!("Unknown extern function: {name}"))?;
             let signature = &self.module.signatures[self.module.funcs[func_idx].sig()];
+            let name = self.contract.intrinsics[name].name();
             ensure!(
                 arg_vals.len() == signature.params.len(),
                 "Intrinsic '{name}' expects {} arguments, got {}",
