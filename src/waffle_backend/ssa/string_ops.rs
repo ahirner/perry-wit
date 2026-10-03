@@ -252,11 +252,15 @@ impl FunctionLowerer<'_> {
 
     /// Lowers Array.prototype.join for array of string descriptors.
     pub(super) fn array_join(&mut self, receiver: &Expr, args: &[Expr]) -> Result<Value> {
+        ensure!(
+            args.len() <= 1,
+            "join accepts at most one separator argument"
+        );
+        let arr_ptr = self.array_receiver(receiver)?;
         let helpers = self
             .registry
             .string_helpers
             .expect("String runtime is registered");
-        let arr_ptr = self.expression(receiver)?;
         let sep_desc = if let Some(arg) = args.first() {
             ensure!(
                 self.is_string(arg),

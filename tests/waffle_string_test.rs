@@ -1387,3 +1387,32 @@ async fn test_split_indices_preserve_undefined() -> Result<()> {
     .collect::<Vec<_>>();
     run_cases(source, &cases).await
 }
+
+#[test]
+fn test_join_rejects_nonarray_receivers_and_extra_arguments() {
+    for receiver in [r#""ABC""#, "false", "42", "undefined"] {
+        let source = format!(
+            "export function run(): string {{ let value: any = {receiver}; return value.join(\"-\"); }}"
+        );
+        let error = compile_typescript_waffle(
+            &source,
+            "join_receiver.ts",
+            &WaffleCompileOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("string-array receiver"),
+            "{error:#}"
+        );
+    }
+    let error = compile_typescript_waffle(
+        r#"export function run(s: string): string { return s.split(",").join("-", "extra"); }"#,
+        "join_arity.ts",
+        &WaffleCompileOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("at most one separator"),
+        "{error:#}"
+    );
+}
