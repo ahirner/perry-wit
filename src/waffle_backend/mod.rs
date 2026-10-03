@@ -3,6 +3,7 @@
 pub(crate) mod abi;
 pub(crate) mod audit;
 pub(crate) mod component;
+pub(crate) mod control_flow;
 pub(crate) mod exceptions;
 pub(crate) mod registry;
 pub(crate) mod resolve;
@@ -59,15 +60,15 @@ pub fn compile_typescript(
     let hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
 
-    compile_hir(&hir, options)
+    compile_hir_owned(hir, options)
 }
 
-/// Compiles Perry HIR using the pure WAFFLE SSA backend.
-pub fn compile_hir(
-    hir: &HirModule,
+/// Compiles Perry HIR by taking ownership, avoiding redundant cloning of the HIR.
+pub fn compile_hir_owned(
+    hir: HirModule,
     options: &WaffleCompileOptions,
 ) -> Result<WaffleCompiled> {
-    let (waffle_mod, contract) = lower_hir_to_waffle(hir)?;
+    let (waffle_mod, contract) = lower_hir_to_waffle(&hir)?;
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
         .to_wasm_bytes()
@@ -81,7 +82,7 @@ pub fn compile_hir(
     };
 
     Ok(WaffleCompiled {
-        hir: hir.clone(),
+        hir,
         waffle_ir,
         core,
         component_wat,
@@ -89,6 +90,14 @@ pub fn compile_hir(
         uses_p3_clocks: contract.uses_p3_clocks,
         input_kind: contract.input_kind,
     })
+}
+
+/// Compiles Perry HIR using the pure WAFFLE SSA backend.
+pub fn compile_hir(
+    hir: &HirModule,
+    options: &WaffleCompileOptions,
+) -> Result<WaffleCompiled> {
+    compile_hir_owned(hir.clone(), options)
 }
 
 /// Lower Perry HIR to a validated WAFFLE module.

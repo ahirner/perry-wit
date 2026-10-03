@@ -4,7 +4,7 @@
 //! classification loses binding identity. Carries typed operation identity into
 //! lowering, preserving receiver and argument evaluation order.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
 use perry_hir::ir::{Function, Module as HirModule, Stmt};
@@ -226,7 +226,6 @@ fn audit_scope_and_shadowing(
     func: &Function,
     intrinsics: &BTreeMap<String, TypedIntrinsic>,
 ) -> Result<()> {
-    let mut declared_names = BTreeSet::new();
     for param in &func.params {
         if intrinsics.contains_key(&param.name) {
             bail!(
@@ -235,66 +234,57 @@ fn audit_scope_and_shadowing(
                 func.name
             );
         }
-        declared_names.insert(param.name.clone());
     }
 
-    check_stmts_shadowing(&func.body, &declared_names, intrinsics)?;
+    check_stmts_shadowing(&func.body, intrinsics)?;
     Ok(())
 }
 
 fn check_stmts_shadowing(
     stmts: &[Stmt],
-    outer_names: &BTreeSet<String>,
     intrinsics: &BTreeMap<String, TypedIntrinsic>,
 ) -> Result<()> {
-    let mut current_names = outer_names.clone();
     for stmt in stmts {
         match stmt {
             Stmt::Let { name, .. } => {
                 if intrinsics.contains_key(name) {
                     bail!("Local variable '{name}' illegally shadows declared intrinsic");
                 }
-                current_names.insert(name.clone());
             }
             Stmt::If {
                 then_branch,
                 else_branch,
                 ..
             } => {
-                check_stmts_shadowing(then_branch, &current_names, intrinsics)?;
+                check_stmts_shadowing(then_branch, intrinsics)?;
                 if let Some(else_b) = else_branch {
-                    check_stmts_shadowing(else_b, &current_names, intrinsics)?;
+                    check_stmts_shadowing(else_b, intrinsics)?;
                 }
             }
             Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                check_stmts_shadowing(body, &current_names, intrinsics)?;
+                check_stmts_shadowing(body, intrinsics)?;
             }
             Stmt::For { init, body, .. } => {
-                let mut for_names = current_names.clone();
                 if let Some(init_stmt) = init
                     && let Stmt::Let { name, .. } = init_stmt.as_ref()
+                    && intrinsics.contains_key(name)
                 {
-                    if intrinsics.contains_key(name) {
-                        bail!("For loop local '{name}' illegally shadows declared intrinsic");
-                    }
-                    for_names.insert(name.clone());
+                    bail!("For loop local '{name}' illegally shadows declared intrinsic");
                 }
-                check_stmts_shadowing(body, &for_names, intrinsics)?;
+                check_stmts_shadowing(body, intrinsics)?;
             }
             Stmt::Try { body, catch, finally } => {
-                check_stmts_shadowing(body, &current_names, intrinsics)?;
+                check_stmts_shadowing(body, intrinsics)?;
                 if let Some(c) = catch {
-                    let mut catch_names = current_names.clone();
-                    if let Some((_, param_name)) = &c.param {
-                        if intrinsics.contains_key(param_name) {
-                            bail!("Catch parameter '{param_name}' illegally shadows declared intrinsic");
-                        }
-                        catch_names.insert(param_name.clone());
+                    if let Some((_, param_name)) = &c.param
+                        && intrinsics.contains_key(param_name)
+                    {
+                        bail!("Catch parameter '{param_name}' illegally shadows declared intrinsic");
                     }
-                    check_stmts_shadowing(&c.body, &catch_names, intrinsics)?;
+                    check_stmts_shadowing(&c.body, intrinsics)?;
                 }
                 if let Some(f) = finally {
-                    check_stmts_shadowing(f, &current_names, intrinsics)?;
+                    check_stmts_shadowing(f, intrinsics)?;
                 }
             }
             _ => {}

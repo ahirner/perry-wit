@@ -15,8 +15,9 @@ use waffle::{
 };
 
 use crate::waffle_backend::abi;
+use crate::waffle_backend::control_flow::{create_block_parameters, JoinPoint};
 use crate::waffle_backend::exceptions::{
-    ExitReason, ReturnTarget, TryScope, UnwindContext, UnwindTarget,
+    self, TryClauseBlocks, TryScope, UnwindContext,
 };
 use crate::waffle_backend::registry::{CallingConvention, FunctionInfo, ModuleRegistry};
 use crate::waffle_backend::resolve::ResolvedContract;
@@ -107,11 +108,20 @@ fn lower_function_body(
         unwind_ctx: UnwindContext::new(),
     };
 
-    if let Some((_, reset)) = registry.stream_helpers {
+    // If stream parameter is present and an initialize helper exists, call it at entry
+    if let (Some(stream_id), Some((_, init))) = (stream_parameter, registry.stream_helpers) {
+        let stream_val = lowerer.locals[&stream_id];
         lowerer.op(
             Operator::Call {
-                function_index: reset,
+                function_index: init,
             },
+            &[stream_val],
+            &[],
+        );
+    } else if stream_parameter.is_some() {
+        // Fallback dummy op
+        lowerer.op(
+            Operator::I32Const { value: 0 },
             &[],
             &[],
         );
@@ -121,16 +131,7 @@ fn lower_function_body(
 
     // If the block is not terminated, emit default return or ensure proper termination
     if lowerer.body.blocks[lowerer.block].terminator == Terminator::None {
-        lowerer.cleanup_resources();
-        let expected_rets = &module.signatures[info.sig].returns;
-        abi::emit_function_return(
-            &mut lowerer.body,
-            lowerer.block,
-            registry.memory,
-            info.calling_convention,
-            expected_rets,
-            None,
-        );
+        lowerer.emit_return(None);
     }
 
     lowerer.body.validate()?;
@@ -173,41 +174,7 @@ impl<'a> FunctionLowerer<'a> {
                         .as_ref()
                         .map(|expr| self.expression(expr))
                         .transpose()?;
-
-                    match self.unwind_ctx.target_for_return() {
-                        ReturnTarget::Finally {
-                            block: finally_block,
-                            scope_locals,
-                        } => {
-                            let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
-                            let reason_val = self.op(
-                                Operator::I32Const {
-                                    value: ExitReason::Return.tag(),
-                                },
-                                &[],
-                                &[Type::I32],
-                            );
-
-                            let mut args = vec![reason_val, payload];
-                            for id in &scope_locals {
-                                args.push(self.locals[id]);
-                            }
-                            self.branch(finally_block, args);
-                        }
-                        ReturnTarget::FunctionExit => {
-                            self.cleanup_resources();
-                            let expected_rets =
-                                &self.module.signatures[self.current_func.sig].returns;
-                            abi::emit_function_return(
-                                &mut self.body,
-                                self.block,
-                                self.registry.memory,
-                                self.current_func.calling_convention,
-                                expected_rets,
-                                ret_val,
-                            );
-                        }
-                    }
+                    self.emit_return(ret_val);
                 }
                 Stmt::Throw(expr) => {
                     let err_val = self.expression(expr)?;
@@ -252,10 +219,7 @@ impl<'a> FunctionLowerer<'a> {
 
         let then_block = self.body.add_block();
         let else_block = self.body.add_block();
-        let join_block = self.body.add_block();
-        self.body.blocks[join_block].desc = "branch join".into();
-
-        let joined_locals = self.block_parameters(join_block, &incoming_locals);
+        let join = JoinPoint::new(&mut self.body, "branch join", &incoming_locals);
 
         self.body.set_terminator(
             self.block,
@@ -272,50 +236,41 @@ impl<'a> FunctionLowerer<'a> {
             },
         );
 
-        // Lower then branch
+        // Lower then branch (self.locals is already incoming_locals)
         self.block = then_block;
-        self.locals = incoming_locals.clone();
         self.statements(then_branch)?;
         if self.body.blocks[self.block].terminator == Terminator::None {
-            let args = incoming_locals.keys().map(|id| self.locals[id]).collect();
-            self.branch(join_block, args);
+            join.emit_branch(&mut self.body, self.block, &self.locals);
         }
 
-        // Lower else branch
+        // Lower else branch (move incoming_locals)
         self.block = else_block;
         self.locals = incoming_locals;
         self.statements(else_branch)?;
         if self.body.blocks[self.block].terminator == Terminator::None {
-            let args = joined_locals.keys().map(|id| self.locals[id]).collect();
-            self.branch(join_block, args);
+            join.emit_branch(&mut self.body, self.block, &self.locals);
         }
 
-        if self.body.blocks[join_block].preds.is_empty() {
+        if self.body.blocks[join.block].preds.is_empty() {
             self.body
-                .set_terminator(join_block, Terminator::Unreachable);
+                .set_terminator(join.block, Terminator::Unreachable);
         }
-        self.block = join_block;
-        self.locals = joined_locals;
+        self.block = join.block;
+        self.locals = join.bindings;
         Ok(())
     }
 
     fn while_loop(&mut self, condition: &Expr, body: &[Stmt]) -> Result<()> {
         let incoming_locals = self.locals.clone();
-        let header = self.body.add_block();
-        self.body.blocks[header].desc = "loop header".into();
+        let header = JoinPoint::new(&mut self.body, "loop header", &incoming_locals);
+        header.emit_branch(&mut self.body, self.block, &self.locals);
 
-        let header_locals = self.block_parameters(header, &incoming_locals);
-        let header_args = incoming_locals.values().copied().collect();
-        self.branch(header, header_args);
-
-        self.block = header;
-        self.locals = header_locals;
+        self.block = header.block;
+        self.locals = header.bindings.clone();
 
         let cond_val = self.condition(condition)?;
-        let condition_locals = self.locals.clone();
-
         let body_block = self.body.add_block();
-        let exit_block = self.body.add_block();
+        let exit = JoinPoint::new(&mut self.body, "loop exit", &self.locals);
 
         self.body.set_terminator(
             self.block,
@@ -326,8 +281,8 @@ impl<'a> FunctionLowerer<'a> {
                     args: vec![],
                 },
                 if_false: BlockTarget {
-                    block: exit_block,
-                    args: vec![],
+                    block: exit.block,
+                    args: exit.branch_args(&self.locals),
                 },
             },
         );
@@ -335,124 +290,125 @@ impl<'a> FunctionLowerer<'a> {
         self.block = body_block;
         self.statements(body)?;
         if self.body.blocks[self.block].terminator == Terminator::None {
-            let loop_args = incoming_locals.keys().map(|id| self.locals[id]).collect();
-            self.branch(header, loop_args);
+            header.emit_branch(&mut self.body, self.block, &self.locals);
         }
 
-        self.block = exit_block;
-        self.locals = condition_locals;
+        self.block = exit.block;
+        self.locals = exit.bindings;
         Ok(())
     }
 
-    fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
-        let Expr::Call { callee, args, .. } = expr else {
-            // Awaiting an immediate value / non-call expression:
-            // Settle immediately and resume continuation with the evaluated value.
-            let val = self.expression(expr)?;
-            let result_val = if is_statement { None } else { Some(val) };
-            return Ok(self.continuation(result_val));
-        };
+    fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        let mut arg_vals = Vec::with_capacity(args.len());
+        for a in args {
+            arg_vals.push(self.expression(a)?);
+        }
 
-        match callee.as_ref() {
-            Expr::ExternFuncRef { name, .. } => {
-                let &intrinsic_func = self
-                    .registry
-                    .intrinsics
-                    .get(name)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown async intrinsic: {name}"))?;
-
-                // Evaluate arguments left-to-right
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.expression(arg)?);
-                }
-
-                let ret_types =
-                    &self.module.signatures[self.module.funcs[intrinsic_func].sig()].returns;
-                let returns = ret_types.clone();
-
+        if let Expr::ExternFuncRef { name, .. } = callee {
+            let &func_idx = self
+                .registry
+                .intrinsics
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("Unknown extern function: {name}"))?;
+            let ret_types = &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
+            if ret_types.is_empty() {
+                self.op(
+                    Operator::Call {
+                        function_index: func_idx,
+                    },
+                    &arg_vals,
+                    &[],
+                );
+                Ok(None)
+            } else {
                 let call_res = self.op(
                     Operator::Call {
-                        function_index: intrinsic_func,
+                        function_index: func_idx,
                     },
-                    &arg_values,
-                    &returns,
+                    &arg_vals,
+                    ret_types,
                 );
-
-                let result_val = if returns.is_empty() || is_statement {
-                    None
-                } else {
-                    Some(call_res)
-                };
-
-                Ok(self.continuation(result_val))
+                Ok(Some(call_res))
             }
-            Expr::FuncRef(fid) => {
-                let callee_info = self
-                    .registry
-                    .functions
-                    .get(fid)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
+        } else if let Expr::FuncRef(fid) = callee {
+            let callee_info = self
+                .registry
+                .functions
+                .get(fid)
+                .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
 
-                let mut arg_vals = Vec::new();
-                for a in args {
-                    arg_vals.push(self.expression(a)?);
-                }
+            match callee_info.calling_convention {
+                CallingConvention::Internal => {
+                    let outcome = abi::emit_internal_call(
+                        &mut self.body,
+                        self.block,
+                        callee_info,
+                        &arg_vals,
+                    );
 
-                match callee_info.calling_convention {
-                    CallingConvention::Internal => {
-                        let outcome = abi::emit_internal_call(
+                    self.block = outcome.err_block;
+                    self.emit_throw(outcome.payload);
+
+                    self.block = outcome.ok_block;
+                    if callee_info.return_type == HirType::Void {
+                        Ok(None)
+                    } else {
+                        let return_val = abi::decode_payload(
                             &mut self.body,
                             self.block,
-                            callee_info,
-                            &arg_vals,
+                            outcome.payload,
+                            callee_info.is_boolean_return(),
                         );
-
-                        // Rejection enters guest exception path at the await
-                        self.block = outcome.err_block;
-                        self.emit_throw(outcome.payload);
-
-                        self.block = outcome.ok_block;
-                        let result_val = if is_statement {
-                            None
-                        } else {
-                            Some(abi::decode_payload(
-                                &mut self.body,
-                                self.block,
-                                outcome.payload,
-                                callee_info.is_boolean_return(),
-                            ))
-                        };
-                        Ok(self.continuation(result_val))
+                        Ok(Some(return_val))
                     }
-                    CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult => {
-                        let ret_types = &self.module.signatures[callee_info.sig].returns;
-                        let returns = ret_types.clone();
+                }
+                CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult => {
+                    let ret_types = &self.module.signatures[callee_info.sig].returns;
+                    if ret_types.is_empty() {
+                        self.op(
+                            Operator::Call {
+                                function_index: callee_info.func_index,
+                            },
+                            &arg_vals,
+                            &[],
+                        );
+                        Ok(None)
+                    } else {
                         let call_res = self.op(
                             Operator::Call {
                                 function_index: callee_info.func_index,
                             },
                             &arg_vals,
-                            &returns,
+                            ret_types,
                         );
-                        let result_val = if returns.is_empty() || is_statement {
-                            None
-                        } else {
-                            Some(call_res)
-                        };
-                        Ok(self.continuation(result_val))
+                        Ok(Some(call_res))
                     }
                 }
             }
-            _ => bail!("Await callee must be a declared intrinsic or function, got: {callee:?}"),
+        } else {
+            bail!("Unsupported call callee in WAFFLE lowering: {callee:?}");
         }
+    }
+
+    fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
+        let result_val = match expr {
+            Expr::Call { callee, args, .. } => {
+                let res = self.call_operation(callee, args)?;
+                if is_statement { None } else { res }
+            }
+            _ => {
+                let val = self.expression(expr)?;
+                if is_statement { None } else { Some(val) }
+            }
+        };
+        Ok(self.continuation(result_val))
     }
 
     fn continuation(&mut self, result: Option<Value>) -> Option<Value> {
         self.awaited_calls += 1;
         let resumed = self.body.add_block();
         self.body.blocks[resumed].desc = "await continuation".into();
-        let resumed_locals = self.block_parameters(resumed, &self.locals.clone());
+        let resumed_locals = create_block_parameters(&mut self.body, resumed, &self.locals);
         let mut args: Vec<_> = self.locals.values().copied().collect();
 
         let resumed_result = result.map(|value| {
@@ -503,15 +459,34 @@ impl<'a> FunctionLowerer<'a> {
                 };
                 Ok(self.op(operator, &[left_val, right_val], &[Type::I32]))
             }
-            _ => bail!("Unsupported condition expression: {expr:?}"),
+            _ => {
+                let val = self.expression(expr)?;
+                let ty = self.body.values[val].ty(&self.body.type_pool);
+                if ty == Some(Type::I32) {
+                    Ok(val)
+                } else {
+                    let zero = self.op(
+                        Operator::F64Const {
+                            value: 0f64.to_bits(),
+                        },
+                        &[],
+                        &[Type::F64],
+                    );
+                    Ok(self.op(Operator::F64Ne, &[val, zero], &[Type::I32]))
+                }
+            }
         }
     }
 
     fn expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
-            Expr::Number(n) => {
-                Ok(self.op(Operator::F64Const { value: n.to_bits() }, &[], &[Type::F64]))
-            }
+            Expr::Number(n) => Ok(self.op(
+                Operator::F64Const {
+                    value: n.to_bits(),
+                },
+                &[],
+                &[Type::F64],
+            )),
             Expr::Integer(i) => Ok(self.op(
                 Operator::F64Const {
                     value: (*i as f64).to_bits(),
@@ -545,85 +520,27 @@ impl<'a> FunctionLowerer<'a> {
                 res.ok_or_else(|| anyhow::anyhow!("Await had no return value"))
             }
             Expr::Call { callee, args, .. } => {
-                // Check if calling an intrinsic or module function
-                if let Expr::ExternFuncRef { name, .. } = callee.as_ref() {
-                    let &func_idx = self
-                        .registry
-                        .intrinsics
-                        .get(name)
-                        .ok_or_else(|| anyhow::anyhow!("Unknown extern function: {name}"))?;
-                    let mut arg_vals = Vec::new();
-                    for a in args {
-                        arg_vals.push(self.expression(a)?);
-                    }
-                    let ret_types =
-                        &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
-                    Ok(self.op(
-                        Operator::Call {
-                            function_index: func_idx,
-                        },
-                        &arg_vals,
-                        ret_types,
-                    ))
-                } else if let Expr::FuncRef(fid) = callee.as_ref() {
-                    let callee_info = self
-                        .registry
-                        .functions
-                        .get(fid)
-                        .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
-
-                    let mut arg_vals = Vec::new();
-                    for a in args {
-                        arg_vals.push(self.expression(a)?);
-                    }
-
-                    match callee_info.calling_convention {
-                        CallingConvention::Internal => {
-                            let outcome = abi::emit_internal_call(
-                                &mut self.body,
-                                self.block,
-                                callee_info,
-                                &arg_vals,
-                            );
-
-                            self.block = outcome.err_block;
-                            self.emit_throw(outcome.payload);
-
-                            self.block = outcome.ok_block;
-                            let return_val = abi::decode_payload(
-                                &mut self.body,
-                                self.block,
-                                outcome.payload,
-                                callee_info.is_boolean_return(),
-                            );
-                            Ok(return_val)
-                        }
-                        CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult => {
-                            let ret_types =
-                                &self.module.signatures[callee_info.sig].returns;
-                            Ok(self.op(
-                                Operator::Call {
-                                    function_index: callee_info.func_index,
-                                },
-                                &arg_vals,
-                                ret_types,
-                            ))
-                        }
-                    }
-                } else {
-                    bail!("Unsupported call callee in WAFFLE lowering: {callee:?}");
-                }
+                let res = self.call_operation(callee, args)?;
+                Ok(res.unwrap_or_else(|| {
+                    self.op(Operator::F64Const { value: 0f64.to_bits() }, &[], &[Type::F64])
+                }))
             }
             _ => bail!("Unsupported expression in WAFFLE lowering: {expr:?}"),
         }
     }
 
-    fn cleanup_resources(&mut self) {
-        if let (Some(stream_id), Some((drop, _))) =
-            (self.stream_parameter, self.registry.stream_helpers)
-            && let Some(&stream_val) = self.locals.get(&stream_id)
+    fn cleanup_resources_impl(
+        body: &mut FunctionBody,
+        block: Block,
+        stream_parameter: Option<LocalId>,
+        stream_helpers: Option<(waffle::Func, waffle::Func)>,
+        locals: &BTreeMap<LocalId, Value>,
+    ) {
+        if let (Some(stream_id), Some((drop, _))) = (stream_parameter, stream_helpers)
+            && let Some(&stream_val) = locals.get(&stream_id)
         {
-            self.op(
+            body.add_op(
+                block,
                 Operator::Call {
                     function_index: drop,
                 },
@@ -633,47 +550,82 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
 
+    fn emit_return(&mut self, ret_val: Option<Value>) {
+        let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
+        let memory = self.registry.memory;
+        let conv = self.current_func.calling_convention;
+        let sig = self.current_func.sig;
+        let module = self.module;
+        let stream_param = self.stream_parameter;
+        let stream_helpers = self.registry.stream_helpers;
+        let locals = &self.locals;
+        exceptions::route_return(
+            &mut self.body,
+            self.block,
+            &self.unwind_ctx,
+            locals,
+            payload,
+            |body, block, _payload| {
+                Self::cleanup_resources_impl(body, block, stream_param, stream_helpers, locals);
+                let expected_rets = &module.signatures[sig].returns;
+                abi::emit_function_return(
+                    body,
+                    block,
+                    memory,
+                    conv,
+                    expected_rets,
+                    ret_val,
+                );
+            },
+        );
+    }
+
+    fn emit_finally_return(&mut self, payload: Value) {
+        let memory = self.registry.memory;
+        let conv = self.current_func.calling_convention;
+        let sig = self.current_func.sig;
+        let module = self.module;
+        let stream_param = self.stream_parameter;
+        let stream_helpers = self.registry.stream_helpers;
+        let locals = &self.locals;
+        exceptions::route_return(
+            &mut self.body,
+            self.block,
+            &self.unwind_ctx,
+            locals,
+            payload,
+            |body, block, pl| {
+                Self::cleanup_resources_impl(body, block, stream_param, stream_helpers, locals);
+                let expected_rets = &module.signatures[sig].returns;
+                abi::emit_function_return(
+                    body,
+                    block,
+                    memory,
+                    conv,
+                    expected_rets,
+                    Some(pl),
+                );
+            },
+        );
+    }
+
     fn emit_throw(&mut self, err_val_f64: Value) {
-        match self.unwind_ctx.target_for_throw() {
-            UnwindTarget::Catch {
-                block: catch_block,
-                param: _param,
-                scope_locals,
-            } => {
-                let mut args = vec![err_val_f64];
-                for id in &scope_locals {
-                    args.push(self.locals[id]);
-                }
-                self.branch(catch_block, args);
-            }
-            UnwindTarget::Finally {
-                block: finally_block,
-                scope_locals,
-            } => {
-                let reason_val = self.op(
-                    Operator::I32Const {
-                        value: ExitReason::Throw.tag(),
-                    },
-                    &[],
-                    &[Type::I32],
-                );
-                let mut args = vec![reason_val, err_val_f64];
-                for id in &scope_locals {
-                    args.push(self.locals[id]);
-                }
-                self.branch(finally_block, args);
-            }
-            UnwindTarget::FunctionExit => {
-                self.cleanup_resources();
-                abi::emit_function_throw(
-                    &mut self.body,
-                    self.block,
-                    self.registry.memory,
-                    self.current_func.calling_convention,
-                    err_val_f64,
-                );
-            }
-        }
+        let conv = self.current_func.calling_convention;
+        let memory = self.registry.memory;
+        let stream_param = self.stream_parameter;
+        let stream_helpers = self.registry.stream_helpers;
+        let locals = &self.locals;
+        exceptions::route_throw(
+            &mut self.body,
+            self.block,
+            &self.unwind_ctx,
+            locals,
+            err_val_f64,
+            |body, block, err_f64| {
+                Self::cleanup_resources_impl(body, block, stream_param, stream_helpers, locals);
+                abi::emit_function_throw(body, block, memory, conv, err_f64);
+            },
+        );
     }
 
     fn try_statement(
@@ -682,137 +634,54 @@ impl<'a> FunctionLowerer<'a> {
         catch: Option<&CatchClause>,
         finally: Option<&[Stmt]>,
     ) -> Result<()> {
-        let incoming_scope_locals: Vec<LocalId> = self.locals.keys().copied().collect();
-        let join_block = self.body.add_block();
-        self.body.blocks[join_block].desc = "try-finally join".into();
+        let blocks = TryClauseBlocks::build(
+            &mut self.body,
+            &self.locals,
+            catch.is_some(),
+            catch.and_then(|c| c.param.as_ref().map(|(id, _)| *id)),
+            finally.is_some(),
+        );
 
-        for &id in &incoming_scope_locals {
-            let ty = self.body.values[self.locals[&id]]
-                .ty(&self.body.type_pool)
-                .unwrap();
-            self.body.add_blockparam(join_block, ty);
-        }
-
-        let finally_block = if finally.is_some() {
-            let fb = self.body.add_block();
-            self.body.blocks[fb].desc = "finally entry".into();
-            self.body.add_blockparam(fb, Type::I32); // exit_reason
-            self.body.add_blockparam(fb, Type::F64); // payload
-            for &id in &incoming_scope_locals {
-                let ty = self.body.values[self.locals[&id]]
-                    .ty(&self.body.type_pool)
-                    .unwrap();
-                self.body.add_blockparam(fb, ty);
-            }
-            Some(fb)
-        } else {
-            None
-        };
-
-        let catch_block = if catch.is_some() {
-            let cb = self.body.add_block();
-            self.body.blocks[cb].desc = "catch entry".into();
-            self.body.add_blockparam(cb, Type::F64); // exception payload
-            for &id in &incoming_scope_locals {
-                let ty = self.body.values[self.locals[&id]]
-                    .ty(&self.body.type_pool)
-                    .unwrap();
-                self.body.add_blockparam(cb, ty);
-            }
-            Some(cb)
-        } else {
-            None
-        };
-
-        let catch_param = catch.and_then(|c| c.param.as_ref().map(|(id, _)| *id));
         self.unwind_ctx.push_scope(TryScope {
-            catch_target: catch_block,
-            catch_param,
-            finally_target: finally_block,
-            scope_locals: incoming_scope_locals.clone(),
+            catch_target: blocks.catch_block,
+            catch_param: blocks.catch_param,
+            finally_target: blocks.finally_block,
+            scope_locals: blocks.scope_locals.clone(),
         });
 
         let mut join_reached = false;
 
         // 1. Lower try body
         self.statements(body)?;
-
         if self.body.blocks[self.block].terminator == Terminator::None {
-            if let Some(fb) = finally_block {
-                let zero_reason = self.op(
-                    Operator::I32Const {
-                        value: ExitReason::Normal.tag(),
-                    },
-                    &[],
-                    &[Type::I32],
-                );
-                let zero_payload = self.op(
-                    Operator::F64Const {
-                        value: 0f64.to_bits(),
-                    },
-                    &[],
-                    &[Type::F64],
-                );
-                let mut args = vec![zero_reason, zero_payload];
-                for id in &incoming_scope_locals {
-                    args.push(self.locals[id]);
-                }
-                self.branch(fb, args);
-            } else {
-                let args = incoming_scope_locals
-                    .iter()
-                    .map(|id| self.locals[id])
-                    .collect();
-                self.branch(join_block, args);
-                join_reached = true;
-            }
+            join_reached |= blocks.emit_normal_transition(
+                &mut self.body,
+                self.block,
+                &self.locals,
+            );
         }
 
         // 2. Lower catch clause (if present)
-        if let (Some(cb), Some(c_clause)) = (catch_block, catch) {
+        if let (Some(cb), Some(c_clause)) = (blocks.catch_block, catch) {
             self.block = cb;
             self.unwind_ctx.clear_catch_in_innermost();
 
             let exc_val = self.body.blocks[cb].params[0].1;
-            if let Some(param_id) = catch_param {
+            if let Some(param_id) = blocks.catch_param {
                 self.locals.insert(param_id, exc_val);
             }
-            for (idx, &id) in incoming_scope_locals.iter().enumerate() {
+            for (idx, &id) in blocks.scope_locals.iter().enumerate() {
                 let param_val = self.body.blocks[cb].params[idx + 1].1;
                 self.locals.insert(id, param_val);
             }
 
             self.statements(&c_clause.body)?;
-
             if self.body.blocks[self.block].terminator == Terminator::None {
-                if let Some(fb) = finally_block {
-                    let zero_reason = self.op(
-                        Operator::I32Const {
-                            value: ExitReason::Normal.tag(),
-                        },
-                        &[],
-                        &[Type::I32],
-                    );
-                    let zero_payload = self.op(
-                        Operator::F64Const {
-                            value: 0f64.to_bits(),
-                        },
-                        &[],
-                        &[Type::F64],
-                    );
-                    let mut args = vec![zero_reason, zero_payload];
-                    for id in &incoming_scope_locals {
-                        args.push(self.locals[id]);
-                    }
-                    self.branch(fb, args);
-                } else {
-                    let args = incoming_scope_locals
-                        .iter()
-                        .map(|id| self.locals[id])
-                        .collect();
-                    self.branch(join_block, args);
-                    join_reached = true;
-                }
+                join_reached |= blocks.emit_normal_transition(
+                    &mut self.body,
+                    self.block,
+                    &self.locals,
+                );
             }
         }
 
@@ -820,11 +689,11 @@ impl<'a> FunctionLowerer<'a> {
         self.unwind_ctx.pop_scope();
 
         // 3. Lower finally clause (if present)
-        if let (Some(fb), Some(f_stmts)) = (finally_block, finally) {
+        if let (Some(fb), Some(f_stmts)) = (blocks.finally_block, finally) {
             self.block = fb;
             let exit_reason = self.body.blocks[fb].params[0].1;
             let payload = self.body.blocks[fb].params[1].1;
-            for (idx, &id) in incoming_scope_locals.iter().enumerate() {
+            for (idx, &id) in blocks.scope_locals.iter().enumerate() {
                 let param_val = self.body.blocks[fb].params[idx + 2].1;
                 self.locals.insert(id, param_val);
             }
@@ -832,95 +701,19 @@ impl<'a> FunctionLowerer<'a> {
             self.statements(f_stmts)?;
 
             if self.body.blocks[self.block].terminator == Terminator::None {
-                // Emit finally dispatcher
-                let on_normal = self.body.add_block();
-                self.body.blocks[on_normal].desc = "finally dispatch normal".into();
-                let on_not_normal = self.body.add_block();
-                self.body.blocks[on_not_normal].desc = "finally dispatch non-normal".into();
-
-                let is_normal = self.op(Operator::I32Eqz, &[exit_reason], &[Type::I32]);
-                self.body.set_terminator(
+                let (on_return, on_throw) = exceptions::emit_finally_dispatcher(
+                    &mut self.body,
                     self.block,
-                    Terminator::CondBr {
-                        cond: is_normal,
-                        if_true: BlockTarget {
-                            block: on_normal,
-                            args: vec![],
-                        },
-                        if_false: BlockTarget {
-                            block: on_not_normal,
-                            args: vec![],
-                        },
-                    },
+                    exit_reason,
+                    blocks.join_block,
+                    &blocks.scope_locals,
+                    &self.locals,
                 );
-
-                // on_normal: branch to join_block
-                self.block = on_normal;
-                let join_args = incoming_scope_locals
-                    .iter()
-                    .map(|id| self.locals[id])
-                    .collect();
-                self.branch(join_block, join_args);
                 join_reached = true;
-
-                // on_not_normal: check return vs throw
-                self.block = on_not_normal;
-                let on_return = self.body.add_block();
-                self.body.blocks[on_return].desc = "finally dispatch return".into();
-                let on_throw = self.body.add_block();
-                self.body.blocks[on_throw].desc = "finally dispatch throw".into();
-
-                let one = self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]);
-                let is_return = self.op(Operator::I32Eq, &[exit_reason, one], &[Type::I32]);
-                self.body.set_terminator(
-                    self.block,
-                    Terminator::CondBr {
-                        cond: is_return,
-                        if_true: BlockTarget {
-                            block: on_return,
-                            args: vec![],
-                        },
-                        if_false: BlockTarget {
-                            block: on_throw,
-                            args: vec![],
-                        },
-                    },
-                );
 
                 // on_return:
                 self.block = on_return;
-                match self.unwind_ctx.target_for_return() {
-                    ReturnTarget::Finally {
-                        block: outer_finally,
-                        scope_locals,
-                    } => {
-                        let reason_val = self.op(
-                            Operator::I32Const {
-                                value: ExitReason::Return.tag(),
-                            },
-                            &[],
-                            &[Type::I32],
-                        );
-                        let mut args = vec![reason_val, payload];
-                        for id in &scope_locals {
-                            args.push(self.locals[id]);
-                        }
-                        self.branch(outer_finally, args);
-                    }
-                    ReturnTarget::FunctionExit => {
-                        self.cleanup_resources();
-                        let expected_rets =
-                            &self.module.signatures[self.current_func.sig].returns;
-                        abi::emit_function_return(
-                            &mut self.body,
-                            self.block,
-                            self.registry.memory,
-                            self.current_func.calling_convention,
-                            expected_rets,
-                            Some(payload),
-                        );
-                    }
-                }
+                self.emit_finally_return(payload);
 
                 // on_throw:
                 self.block = on_throw;
@@ -928,35 +721,18 @@ impl<'a> FunctionLowerer<'a> {
             }
         }
 
-        // Set current block to join_block
+        // 4. Join phase
         if !join_reached {
             self.body
-                .set_terminator(join_block, Terminator::Unreachable);
+                .set_terminator(blocks.join_block, Terminator::Unreachable);
         } else {
-            for (idx, &id) in incoming_scope_locals.iter().enumerate() {
-                let param_val = self.body.blocks[join_block].params[idx].1;
+            for (idx, &id) in blocks.scope_locals.iter().enumerate() {
+                let param_val = self.body.blocks[blocks.join_block].params[idx].1;
                 self.locals.insert(id, param_val);
             }
         }
-        self.block = join_block;
-
+        self.block = blocks.join_block;
         Ok(())
-    }
-
-    fn block_parameters(
-        &mut self,
-        block: Block,
-        bindings: &BTreeMap<LocalId, Value>,
-    ) -> BTreeMap<LocalId, Value> {
-        bindings
-            .iter()
-            .map(|(&id, &value)| {
-                let ty = self.body.values[value]
-                    .ty(&self.body.type_pool)
-                    .expect("Bindings have one primitive type");
-                (id, self.body.add_blockparam(block, ty))
-            })
-            .collect()
     }
 
     fn branch(&mut self, block: Block, args: Vec<Value>) {
