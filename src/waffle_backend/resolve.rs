@@ -75,12 +75,17 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
-    pub(crate) fn entry_returns_wit_result(&self) -> bool {
-        let mut ret = &self.entry_return_type;
-        while let HirType::Promise(inner) = ret {
-            ret = inner;
+    /// The canonical result type after unwrapping asynchronous transport.
+    pub(crate) fn entry_result_type(&self) -> &HirType {
+        let mut ty = &self.entry_return_type;
+        while let HirType::Promise(inner) = ty {
+            ty = inner;
         }
-        matches!(ret, HirType::Generic { base, .. } if base == "Result")
+        ty
+    }
+
+    pub(crate) fn entry_returns_wit_result(&self) -> bool {
+        matches!(self.entry_result_type(), HirType::Generic { base, .. } if base == "Result")
     }
 }
 
@@ -277,13 +282,19 @@ fn check_stmts_shadowing(
                 }
                 check_stmts_shadowing(body, intrinsics)?;
             }
-            Stmt::Try { body, catch, finally } => {
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
                 check_stmts_shadowing(body, intrinsics)?;
                 if let Some(c) = catch {
                     if let Some((_, param_name)) = &c.param
                         && intrinsics.contains_key(param_name)
                     {
-                        bail!("Catch parameter '{param_name}' illegally shadows declared intrinsic");
+                        bail!(
+                            "Catch parameter '{param_name}' illegally shadows declared intrinsic"
+                        );
                     }
                     check_stmts_shadowing(&c.body, intrinsics)?;
                 }

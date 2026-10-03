@@ -3,7 +3,7 @@
 use anyhow::Result;
 use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, Linker, ResourceTable, Val};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
@@ -34,6 +34,27 @@ fn make_wasi_linker(engine: &Engine) -> Result<Linker<WasiHostState>> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     Ok(linker)
+}
+
+/// Compile, validate, and execute cases on one component instance.
+async fn run_cases(source: &str, cases: &[(Vec<Val>, Val)]) -> Result<()> {
+    let compiled =
+        compile_typescript_waffle(source, "string_cases.ts", &WaffleCompileOptions::default())?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = make_wasi_linker(&engine)?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_func(&mut store, "run").unwrap();
+    for (params, expected) in cases {
+        let mut results = [Val::Bool(false)];
+        run.call_async(&mut store, params, &mut results).await?;
+        assert_eq!(
+            &results[0], expected,
+            "arguments: {params:?}; source: {source}"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -217,8 +238,7 @@ async fn test_string_slice_operations() -> Result<()> {
         }
     "#;
 
-    let compiled =
-        compile_typescript_waffle(source, "slice.ts", &WaffleCompileOptions::default())?;
+    let compiled = compile_typescript_waffle(source, "slice.ts", &WaffleCompileOptions::default())?;
     let engine = make_async_engine()?;
     let component_bytes = compiled.component.expect("Component emitted");
     let component = Component::new(&engine, &component_bytes)?;
@@ -409,7 +429,9 @@ async fn test_string_canonical_abi_component_round_trip() -> Result<()> {
     assert_eq!(res.0, "Echo: a\0b\0c");
 
     // Multibyte text
-    let res = run.call_async(&mut store, ("🦀 Rust and TypeScript 🚀",)).await?;
+    let res = run
+        .call_async(&mut store, ("🦀 Rust and TypeScript 🚀",))
+        .await?;
     assert_eq!(res.0, "Echo: 🦀 Rust and TypeScript 🚀");
 
     Ok(())
@@ -429,8 +451,11 @@ async fn test_string_result_component_round_trip() -> Result<()> {
         }
     "#;
 
-    let compiled =
-        compile_typescript_waffle(source, "result_roundtrip.ts", &WaffleCompileOptions::default())?;
+    let compiled = compile_typescript_waffle(
+        source,
+        "result_roundtrip.ts",
+        &WaffleCompileOptions::default(),
+    )?;
     assert!(!compiled.core.is_empty());
 
     let engine = make_async_engine()?;
@@ -458,5 +483,55 @@ async fn test_string_result_component_round_trip() -> Result<()> {
     let res = run.call_async(&mut store, ("🦀 🚀 ✨",)).await?;
     assert_eq!(res.0, Ok("Processed: 🦀 🚀 ✨".to_string()));
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_async_string_result_canonical_options() -> Result<()> {
+    run_cases(
+        r#"export async function run(input: number): Promise<string> { return "hello 🦀"; }"#,
+        &[(vec![Val::Float64(1.0)], Val::String("hello 🦀".into()))],
+    )
+    .await?;
+    run_cases(
+        r#"export async function run(): Promise<Result<string, number>> { return "hello 🦀"; }"#,
+        &[(
+            vec![],
+            Val::Result(Ok(Some(Box::new(Val::String("hello 🦀".into()))))),
+        )],
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_flattened_string_parameter_limit() -> Result<()> {
+    for string_count in [7, 8, 9] {
+        let params = (0..string_count)
+            .map(|i| format!("s{i}: string"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("export function run({params}): string {{ return s0; }}");
+        if string_count <= 8 {
+            run_cases(
+                &source,
+                &[(
+                    vec![Val::String("🦀".into()); string_count],
+                    Val::String("🦀".into()),
+                )],
+            )
+            .await?;
+        } else {
+            let error = compile_typescript_waffle(
+                &source,
+                "many_strings.ts",
+                &WaffleCompileOptions::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("16 flattened parameters"),
+                "{error:#}"
+            );
+        }
+    }
     Ok(())
 }

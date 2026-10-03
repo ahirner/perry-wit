@@ -564,7 +564,7 @@ async fn test_waffle_component_entry_signatures() -> Result<()> {
                 compiled
                     .unwrap_err()
                     .to_string()
-                    .contains("more than 16 parameters")
+                    .contains("more than 16 flattened parameters")
             );
         }
     }

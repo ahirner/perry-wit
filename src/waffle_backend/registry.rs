@@ -231,15 +231,8 @@ impl ModuleRegistry {
                 } else {
                     ExportConvention::Direct
                 };
-                let mut export_params = Vec::new();
-                for p in &func.params {
-                    if matches!(p.ty, HirType::String) {
-                        export_params.push(Type::I32);
-                        export_params.push(Type::I32);
-                    } else {
-                        export_params.push(map_type_to_waffle(&p.ty)?);
-                    }
-                }
+                let param_types: Vec<_> = func.params.iter().map(|p| p.ty.clone()).collect();
+                let export_params = canonical_param_types(&param_types)?;
                 let sig = module.signatures.push(SignatureData {
                     params: export_params,
                     returns: host_returns,
@@ -305,4 +298,16 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::Promise(inner) => map_return_type_to_waffle(inner),
         _ => bail!("Unsupported return type in WAFFLE lowering: {ty:?}"),
     }
+}
+
+/// Flattens primitive canonical parameters using the same layout as export wrappers.
+pub(crate) fn canonical_param_types(params: &[HirType]) -> Result<Vec<Type>> {
+    let mut flat = Vec::new();
+    for ty in params {
+        flat.push(map_type_to_waffle(ty)?);
+        if matches!(ty, HirType::String) {
+            flat.push(Type::I32);
+        }
+    }
+    Ok(flat)
 }

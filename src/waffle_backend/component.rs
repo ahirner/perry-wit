@@ -1,5 +1,6 @@
 //! WebAssembly Component Model framing for WAFFLE core modules, supporting WASI 0.3 (P3).
 
+use crate::waffle_backend::registry::canonical_param_types;
 use crate::waffle_backend::resolve::{ResolvedContract, ResolvedInputKind, TypedIntrinsic};
 use anyhow::{Context, Result, bail, ensure};
 use perry_hir::types::Type as HirType;
@@ -77,9 +78,12 @@ pub(crate) fn frame_component(
         }
     }
 
-    let has_string_or_realloc = contract.entry_params.iter().any(|ty| matches!(ty, HirType::String))
-        || matches!(contract.entry_return_type, HirType::String)
-        || if let HirType::Generic { base, type_args } = &contract.entry_return_type {
+    let has_string_or_realloc = contract
+        .entry_params
+        .iter()
+        .any(|ty| matches!(ty, HirType::String))
+        || matches!(contract.entry_result_type(), HirType::String)
+        || if let HirType::Generic { base, type_args } = contract.entry_result_type() {
             base == "Result" && type_args.iter().any(|ty| matches!(ty, HirType::String))
         } else {
             false
@@ -113,18 +117,15 @@ pub(crate) fn frame_component(
 /// Describe the entry's primitive canonical ABI, retaining booleans as component booleans.
 fn entry_signature(contract: &ResolvedContract) -> Result<String> {
     ensure!(
-        contract.entry_params.len() <= 16,
-        "Entry functions with more than 16 parameters require an unsupported canonical ABI adapter"
+        canonical_param_types(&contract.entry_params)?.len() <= 16,
+        "Entry functions with more than 16 flattened parameters require an unsupported canonical ABI adapter"
     );
     let mut signature = String::new();
     for (index, ty) in contract.entry_params.iter().enumerate() {
         let ty = component_value_type(ty)?;
         signature.push_str(&format!("(param \"arg-{index}\" {ty}) "));
     }
-    let mut return_type = &contract.entry_return_type;
-    while let HirType::Promise(inner) = return_type {
-        return_type = inner;
-    }
+    let return_type = contract.entry_result_type();
     if !matches!(return_type, HirType::Void) {
         let ty = component_value_type(return_type)?;
         signature.push_str(&format!("(result {ty})"));
