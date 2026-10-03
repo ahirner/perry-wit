@@ -43,6 +43,7 @@ impl Default for CompileOptions {
 /// Compilation result artifacts.
 #[derive(Debug, Clone)]
 pub struct Compiled {
+    pub raw_core: Vec<u8>,
     pub core: Vec<u8>,
     pub component: Option<Vec<u8>>,
     pub stripped: Option<Vec<u8>>,
@@ -59,12 +60,11 @@ pub fn compile_file(input_file: &Path, options: &CompileOptions) -> Result<Compi
     compile_typescript(&ts_content, file_name, options)
 }
 
-/// Compiles TypeScript source text according to the provided compile options.
-pub fn compile_typescript(
+/// Compiles TypeScript source to an unlinked raw WebAssembly module and its function metadata.
+pub fn compile_typescript_raw(
     ts_source: &str,
     file_name: &str,
-    options: &CompileOptions,
-) -> Result<Compiled> {
+) -> Result<(Vec<u8>, Vec<(String, u32)>, Vec<perry_hir::ir::Function>)> {
     let mut ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
     fetch::preserve_options(&mut ast);
@@ -89,6 +89,17 @@ pub fn compile_typescript(
     let raw_wasm = wat::parse_str(&wat)
         .map_err(|e| anyhow::anyhow!("re-parsing raw wasm with adjusted memory failed: {e}"))?;
 
+    Ok((raw_wasm, exported_functions, functions))
+}
+
+/// Compiles TypeScript source text according to the provided compile options.
+pub fn compile_typescript(
+    ts_source: &str,
+    file_name: &str,
+    options: &CompileOptions,
+) -> Result<Compiled> {
+    let (raw_wasm, exported_functions, functions) = compile_typescript_raw(ts_source, file_name)?;
+
     let rt_bytes = runtime::resolve_guest_runtime_bytes(options.runtime_path.as_deref())?;
 
     let merged_core = linker::merge_core_modules(&raw_wasm, &rt_bytes)
@@ -106,6 +117,7 @@ pub fn compile_typescript(
 
     if options.core_only {
         return Ok(Compiled {
+            raw_core: raw_wasm,
             core: ready_core,
             component: None,
             stripped: None,
@@ -119,6 +131,7 @@ pub fn compile_typescript(
         strip::component(&component_bytes).context("Stripping custom sections from component")?;
 
     Ok(Compiled {
+        raw_core: raw_wasm,
         core: ready_core,
         component: Some(component_bytes),
         stripped: Some(stripped_bytes),

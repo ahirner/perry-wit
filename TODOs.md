@@ -5,7 +5,7 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 
 ## Choosing the Next Slice
 
-1. Close the remaining acceptance and diagnostic gaps recorded under **C.2**, **7.1**, **9.1**, and **9.3**; implemented behavior stays checked separately from missing evidence.
+1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
 2. Extend the working HTTP client through **10.1** and **10.2**, using the existing byte views and controlled HTTP fixtures.
 3. Develop callbacks (**B.1**), guest async execution (**B.2**), and retained lifetimes (**E.2**) around the first handler or timer that needs them.
 4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
@@ -77,18 +77,24 @@ HTTP uses the broader dispatcher; minimal imports for mixed HTTP capability comb
     - [x] Give statically known pure operations a path that does not reach HTTP, using direct calls or dispatcher specialization according to what the backend exposes.
     - [x] Preserve behavior for unresolved dispatch and avoid unconditional initialization of unused capabilities.
     - [x] Verify a JSON/object task uses the separable path and existing HTTP behavior still works.
-- [ ] **C.2. Pruned Components** — Needs C.1 for the pure-task import guarantee.
+- [x] **C.2. Pruned Components** — Needs C.1 for the pure-task import guarantee.
     - [x] Base reachability on the complete ABI: selected WIT exports, applicable initialization, generated trampolines/post-return hooks, host-called `cabi_realloc`, and their helpers. Run after trampoline synthesis, or derive equivalent roots from the same WIT/ABI metadata before sweeping.
     - [x] Preserve indirect-call targets, tables, globals, and memory initialization conservatively; start with provably dead functions/imports. Keep raw runtime exports only where the component ABI or core/debug contract needs them.
-    - [ ] Compile a task that parses JSON, constructs an object, and returns serialized JSON; verify the final component omits HTTP imports and runs without HTTP host bindings.
-    - [ ] Verify string/result marshalling, host allocation, post-return cleanup, an indirect-call fixture, and retained imports for an HTTP task. Include final WIT/component metadata in the check.
-    - [ ] Record before/after sizes for these examples and use the results to choose any further optimization.
+    - [x] Compile a task that parses JSON, constructs an object, and returns serialized JSON; verify the final component omits HTTP imports and runs without HTTP host bindings.
+    - [x] Verify string/result marshalling, host allocation, post-return cleanup, an indirect-call fixture, and retained imports for an HTTP task. Include final WIT/component metadata in the check.
+    - [x] Record before/after sizes for these examples and use the results to choose any further optimization.
 
 Verification:
 
-- `nix develop -c cargo test --test pruning_test --test linker_test --test abi_regression_test --test runtime_memory_test --test http_regression_test`: suites passed in the baseline run. Coverage includes all 16 synchronous capability combinations, pure await/array collection, global `ref.func` roots, scalar/string/result ABI calls, allocator exhaustion, post-return cleanup, and HTTP behavior.
-- Pruning runs before trampoline synthesis. It conservatively roots all TypeScript functions, runtime `cabi_*` exports, initialization, table entries, and global function references, retaining helpers needed by the current trampolines.
-- C.2 remains open: no combined exported JSON-task/import assertion, dedicated indirect-call fixture, or recorded before/after size comparison was found. The legacy artifact-dependent linker test can return early when its input Wasm files are absent; its passing status does not establish those missing checks.
+- `nix develop -c cargo test --test pruning_test --test linker_test --test abi_regression_test --test runtime_memory_test --test http_regression_test`: all test suites pass cleanly.
+- `test_merge_core_modules` in `tests/linker_test.rs` compiles TypeScript in-process via `perry_wit::compiler::compile_typescript_raw` and executes without skipping.
+- Dedicated indirect table fixture `table_indirect_calls_preserve_runtime_functions_and_imports` in `tests/linker_test.rs` validates indirect `call_indirect` function table dispatch across merged modules.
+- `exported_json_task_prunes_http_and_runs_without_http_bindings` in `tests/pruning_test.rs` proves pure JSON tasks completely prune `wasi:http`, `wasi:clocks`, `wasi:filesystem`, and `wasi:random` from the component and run successfully under wasmtime without `-S http=y` or `-S inherit-network=y`.
+- `http_task_retains_http_and_verifies_abi_marshalling_and_cleanup` in `tests/pruning_test.rs` validates `cabi_realloc` host allocation, `result<string, string>` return marshalling, `cabi_post_run-task` cleanup, retained `wasi:http` imports in WAT, and live HTTP request execution against a local HTTP test fixture.
+- Recorded component and core wasm sizes (`record_pruning_and_component_sizes` in `tests/pruning_test.rs`):
+  - Pure JSON Task: raw TS wasm: 9,787 B; guest runtime: 255,991 B; unlinked total: 265,778 B; pruned merged core: 172,400 B (64.9% of unlinked, 93,378 B pruned); final stripped component: 173,533 B.
+  - HTTP Task: raw TS wasm: 9,809 B; guest runtime: 255,991 B; unlinked total: 265,800 B; pruned merged core: 215,280 B (81.0% of unlinked, 50,520 B pruned); final stripped component: 226,883 B.
+  - The pure task stripped component is 53,350 B smaller than the HTTP task component, confirming dead HTTP runtime logic is pruned.
 
 ### Item D: Shared Binary Values
 

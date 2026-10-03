@@ -10,5 +10,7 @@ pub mod runtime;
 pub mod sdk;
 pub mod strip;
 
-pub use compiler::{CompileOptions, Compiled, compile_file, compile_typescript};
+pub use compiler::{
+    CompileOptions, Compiled, compile_file, compile_typescript, compile_typescript_raw,
+};
 pub use sdk::{SdkOptions, SdkResult, generate_sdk_files};

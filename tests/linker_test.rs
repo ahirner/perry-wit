@@ -77,17 +77,86 @@ fn global_function_references_keep_runtime_functions_and_their_imports() {
 }
 
 #[test]
-fn test_merge_core_modules() {
-    let ts_wasm_path = Path::new("dist/merge_docs.core.wasm");
-    let rt_wasm_path = Path::new("target/wasm32-unknown-unknown/release/guest_runtime.wasm");
-
-    if !ts_wasm_path.exists() || !rt_wasm_path.exists() {
-        eprintln!("Skipping test: test files not present");
-        return;
+fn table_indirect_calls_preserve_runtime_functions_and_imports() {
+    let fixtures = [
+        // Table in Module A with indirect call to runtime function in Module B
+        (
+            r#"(module
+                (type $sig (func (result i32)))
+                (import "rt" "target" (func $target (result i32)))
+                (table (export "table") 1 funcref)
+                (elem (i32.const 0) $target)
+                (memory (export "memory") 1)
+                (func (export "dispatch") (result i32)
+                    i32.const 0
+                    call_indirect (type $sig)))"#,
+            r#"(module
+                (import "wasi:test" "value" (func $value (result i32)))
+                (func $dead (result i32) i32.const 0)
+                (func (export "target") (result i32) call $value))"#,
+        ),
+        // Table in Module B with indirect call to imported host function
+        (
+            r#"(module
+                (import "rt" "dispatch" (func $dispatch (result i32)))
+                (table (export "table") 1 funcref)
+                (memory (export "memory") 1)
+                (func (export "run") (result i32) call $dispatch))"#,
+            r#"(module
+                (type $sig (func (result i32)))
+                (import "wasi:test" "value" (func $value (result i32)))
+                (func $dead (result i32) i32.const 0)
+                (table (export "table") 1 funcref)
+                (elem (i32.const 0) $value)
+                (func (export "dispatch") (result i32)
+                    i32.const 0
+                    call_indirect (type $sig)))"#,
+        ),
+    ];
+    for (application, runtime) in fixtures {
+        let application = wat::parse_str(application).unwrap();
+        let runtime = wat::parse_str(runtime).unwrap();
+        let merged = merge_core_modules(&application, &runtime).unwrap();
+        Validator::new().validate_all(&merged).unwrap();
+        let scratch = support::Scratch::new();
+        let path = scratch.0.join("indirect.wasm");
+        fs::write(&path, merged).unwrap();
+        let output = Command::new("node")
+            .arg("--eval")
+            .arg(
+                r#"
+                const assert = require('node:assert/strict');
+                const bytes = require('node:fs').readFileSync(process.argv[1]);
+                const module = new WebAssembly.Module(bytes);
+                assert.deepEqual(WebAssembly.Module.imports(module), [
+                    {module: 'wasi:test', name: 'value', kind: 'function'}
+                ]);
+                const instance = new WebAssembly.Instance(module, {'wasi:test': {value: () => 99}});
+                const fnName = instance.exports.dispatch ? 'dispatch' : 'run';
+                assert.equal(instance.exports[fnName](), 99);
+            "#,
+            )
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
+}
 
-    let ts_wasm = fs::read(ts_wasm_path).expect("read ts wasm");
-    let rt_wasm = fs::read(rt_wasm_path).expect("read rt wasm");
+#[test]
+fn test_merge_core_modules() {
+    let ts_source = r#"
+        console.log("merging core modules test");
+    "#;
+    let (ts_wasm, exported_functions, functions) =
+        perry_wit::compiler::compile_typescript_raw(ts_source, "merge_docs.ts")
+            .expect("compile raw ts");
+    let rt_wasm =
+        perry_wit::runtime::resolve_guest_runtime_bytes(None).expect("resolve runtime");
 
     let merged = merge_core_modules(&ts_wasm, &rt_wasm).expect("merge core modules");
 
@@ -135,27 +204,29 @@ fn test_merge_core_modules() {
         "missing memory"
     );
     assert!(
-        export_names.contains(&"wasi:cli/run@0.2.6#run".to_string()),
-        "missing run export"
-    );
-    assert!(
         export_names.contains(&"cabi_realloc".to_string()),
         "missing cabi_realloc"
     );
 
-    // 3. Test componentization and stripping
-    let component_bytes = embed_and_encode(&merged, Path::new("wit"), Some("merge-docs"))
+    // 3. Test componentization and stripping after synthesizing trampolines
+    let wit_exports =
+        perry_wit::abi::extract_world_exports(Path::new("wit"), Some("merge-docs"))
+            .expect("extract world exports");
+    let ready_core = perry_wit::abi::synthesize_trampolines(
+        &merged,
+        &wit_exports,
+        &exported_functions,
+        &functions,
+    )
+    .expect("synthesize trampolines");
+
+    let component_bytes = embed_and_encode(&ready_core, Path::new("wit"), Some("merge-docs"))
         .expect("embed and encode component");
     assert!(!component_bytes.is_empty());
 
     let stripped_bytes = strip::component(&component_bytes).expect("strip component");
     assert!(!stripped_bytes.is_empty());
     assert!(stripped_bytes.len() < component_bytes.len());
-
-    // Write to dist/perry_merge_docs.stripped.wasm to test with wasmtime
-    fs::create_dir_all("dist").expect("create dist");
-    fs::write("dist/perry_merge_docs.stripped.wasm", &stripped_bytes)
-        .expect("write stripped component");
 
     // Validate component
     let mut comp_validator = Validator::new_with_features(WasmFeatures::all());
