@@ -535,3 +535,77 @@ async fn test_flattened_string_parameter_limit() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_memory_grows_for_large_and_repeated_allocations() -> Result<()> {
+    let large = "🦀".repeat(16_384);
+    let small = "x".repeat(20_000);
+    let cases = [large, small.clone(), small.clone(), small.clone(), small]
+        .into_iter()
+        .map(|s| (vec![Val::String(s.clone())], Val::String(s)))
+        .collect::<Vec<_>>();
+    run_cases(
+        "export function run(input: string): string { return input; }",
+        &cases,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_static_string_pool_reserves_all_pages() -> Result<()> {
+    let large = "x".repeat(65_536);
+    let multibyte = "🦀".repeat(9_000);
+    let other = "y".repeat(36_000);
+    let source = format!(
+        r#"export function run(input: number): string {{
+        if (input === 0) return "{large}";
+        if (input === 1) return "{multibyte}";
+        return "{other}";
+    }}"#
+    );
+    run_cases(
+        &source,
+        &[
+            (vec![Val::Float64(0.0)], Val::String(large)),
+            (vec![Val::Float64(1.0)], Val::String(multibyte)),
+            (vec![Val::Float64(2.0)], Val::String(other)),
+        ],
+    )
+    .await
+}
+
+#[test]
+fn test_string_allocator_failure_does_not_advance_heap() -> Result<()> {
+    let options = WaffleCompileOptions {
+        componentize: false,
+        ..Default::default()
+    };
+    let compiled = compile_typescript_waffle(
+        "export function run(input: string): string { return input; }",
+        "allocator.ts",
+        &options,
+    )?;
+    let engine = Engine::default();
+    let module = wasmtime::Module::new(&engine, compiled.core)?;
+    let limits = wasmtime::StoreLimitsBuilder::new()
+        .memory_size(65_536)
+        .build();
+    let mut store = Store::new(&engine, limits);
+    store.limiter(|limits| limits);
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+    let realloc =
+        instance.get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "cabi_realloc")?;
+    assert!(realloc.call(&mut store, (0, 0, 4, 65_536)).is_err());
+    assert!(realloc.call(&mut store, (0, 0, 4, u32::MAX)).is_err());
+    let ptr = realloc.call(&mut store, (0, 0, 4, 16))?;
+    assert!(ptr < 2048);
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    memory.write(&mut store, ptr as usize, b"saved")?;
+    let moved = realloc.call(&mut store, (ptr, 5, 8, 32))?;
+    assert_eq!(moved % 8, 0);
+    assert_eq!(
+        &memory.data(&store)[moved as usize..moved as usize + 5],
+        b"saved"
+    );
+    Ok(())
+}

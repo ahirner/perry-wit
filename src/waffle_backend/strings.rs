@@ -10,10 +10,13 @@
 //! - String operations (.length, [i], .charAt, .slice, .indexOf, +, comparisons)
 //!   operate on Unicode scalar values.
 
+mod allocation;
+
+use allocation::{PAGE_BYTES, emit_allocator};
 use std::collections::BTreeMap;
 use anyhow::Result;
 use waffle::{
-    BlockTarget, Export, ExportKind, Func, FuncDecl, FunctionBody, Memory, MemoryArg,
+    BlockTarget, Func, FuncDecl, FunctionBody, Memory, MemoryArg,
     MemoryData, MemorySegment, Module, Operator, SignatureData, Terminator, Type,
 };
 
@@ -80,6 +83,7 @@ impl StringPool {
 
     /// Build static memory data segments for all interned strings.
     pub(crate) fn populate_memory_segments(&self, memory_data: &mut MemoryData) {
+        memory_data.initial_pages = memory_data.initial_pages.max(self.next_free_address().div_ceil(PAGE_BYTES) as usize);
         for entry in self.entries.values() {
             // 1. Descriptor: [data_offset: u32, byte_len: u32, scalar_len: u32]
             let mut desc_bytes = Vec::with_capacity(12);
@@ -127,103 +131,7 @@ pub(crate) fn emit_string_runtime(
     memory: Memory,
     initial_heap_base: u32,
 ) -> Result<StringHelperFuncs> {
-    // 1. cabi_realloc(orig_ptr: i32, orig_size: i32, alignment: i32, new_size: i32) -> i32
-    let cabi_realloc = {
-        let sig = module.signatures.push(SignatureData {
-            params: vec![Type::I32, Type::I32, Type::I32, Type::I32],
-            returns: vec![Type::I32],
-        });
-        let mut body = FunctionBody::new(module, sig);
-        let entry = body.entry;
-        let alignment = body.blocks[entry].params[2].1;
-        let new_size = body.blocks[entry].params[3].1;
-
-        let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-        let old_bump = body.add_op(
-            entry,
-            Operator::I32Load {
-                memory: MemoryArg {
-                    align: 2,
-                    offset: 0,
-                    memory,
-                },
-            },
-            &[zero],
-            &[Type::I32],
-        );
-        let is_zero = body.add_op(entry, Operator::I32Eqz, &[old_bump], &[Type::I32]);
-        let default_base = body.add_op(
-            entry,
-            Operator::I32Const {
-                value: initial_heap_base,
-            },
-            &[],
-            &[Type::I32],
-        );
-        let bump_base = body.add_op(
-            entry,
-            Operator::Select,
-            &[default_base, old_bump, is_zero],
-            &[Type::I32],
-        );
-
-        let one = body.add_op(entry, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
-        let align_minus_one = body.add_op(entry, Operator::I32Sub, &[alignment, one], &[Type::I32]);
-        let sum = body.add_op(
-            entry,
-            Operator::I32Add,
-            &[bump_base, align_minus_one],
-            &[Type::I32],
-        );
-        let minus_align = body.add_op(entry, Operator::I32Sub, &[zero, alignment], &[Type::I32]);
-        let aligned_bump = body.add_op(
-            entry,
-            Operator::I32And,
-            &[sum, minus_align],
-            &[Type::I32],
-        );
-        let is_align_gt_one = body.add_op(
-            entry,
-            Operator::I32GtU,
-            &[alignment, one],
-            &[Type::I32],
-        );
-        let alloc_ptr = body.add_op(
-            entry,
-            Operator::Select,
-            &[aligned_bump, bump_base, is_align_gt_one],
-            &[Type::I32],
-        );
-
-        let new_bump = body.add_op(
-            entry,
-            Operator::I32Add,
-            &[alloc_ptr, new_size],
-            &[Type::I32],
-        );
-        body.add_op(
-            entry,
-            Operator::I32Store {
-                memory: MemoryArg {
-                    align: 2,
-                    offset: 0,
-                    memory,
-                },
-            },
-            &[zero, new_bump],
-            &[],
-        );
-
-        body.set_terminator(entry, Terminator::Return { values: vec![alloc_ptr] });
-        body.validate()?;
-        body.verify_reducible()?;
-        let f = module.funcs.push(FuncDecl::Body(sig, "cabi_realloc".into(), body));
-        module.exports.push(Export {
-            name: "cabi_realloc".to_string(),
-            kind: ExportKind::Func(f),
-        });
-        f
-    };
+    let cabi_realloc = emit_allocator(module, memory, initial_heap_base)?;
 
     // 2. lift_canonical(ptr: i32, byte_len: i32) -> desc_ptr: i32
     let lift_canonical = {
