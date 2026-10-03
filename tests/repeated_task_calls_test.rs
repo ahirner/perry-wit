@@ -122,13 +122,15 @@ assert.equal(
 
 #[test]
 fn test_retained_globals_survive_repeated_calls_and_temporaries_reclaimed() {
-    let scratch = std::env::temp_dir().join(format!("perry-retained-globals-{}", std::process::id()));
+    let scratch =
+        std::env::temp_dir().join(format!("perry-retained-globals-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).unwrap();
 
     let ts_source = r#"
 let counter = 0;
 let store: string[] = [];
+let retained: any = null;
 
 export function runTask(input: string): string {
     return "ok:" + input;
@@ -137,6 +139,10 @@ export function runTask(input: string): string {
 export function pushItem(item: string): string {
     counter++;
     store.push(item + "_" + counter);
+    const bytes = Uint8Array.from([10, 255, 128, 20]);
+    const view = bytes.subarray(1, 3);
+    retained = { child: { text: item }, bytes: { view }, alias: view };
+    retained.self = retained;
     let temp = "temporary_string_to_drop";
     for (let i = 0; i < 15; i++) {
         temp = temp + ":" + i;
@@ -145,11 +151,15 @@ export function pushItem(item: string): string {
 }
 
 export function getHistory(): string {
-    return store.join(",");
+    if (retained === null) { return store.join(","); }
+    retained.bytes.view[0] = 7;
+    return store.join(",") + "|" + retained.child.text + "|" + retained.alias[0]
+        + "|" + (retained.alias === retained.bytes.view) + "|" + (retained.self === retained);
 }
 
 export function resetHistory(): string {
     store = [];
+    retained = null;
     counter = 0;
     return "cleared";
 }
@@ -207,7 +217,7 @@ function callStringFn(funcName, postFuncName, inputStr) {
 assert.equal(callStringFn('push-item', 'cabi_post_push-item', 'alpha'), 'count:1');
 assert.equal(callStringFn('push-item', 'cabi_post_push-item', 'beta'), 'count:2');
 assert.equal(callStringFn('push-item', 'cabi_post_push-item', 'gamma'), 'count:3');
-assert.equal(callStringFn('get-history', 'cabi_post_get-history'), 'alpha_1,beta_2,gamma_3');
+assert.equal(callStringFn('get-history', 'cabi_post_get-history'), 'alpha_1,beta_2,gamma_3|gamma|7|true|true');
 
 // 2. Reset globals and verify state is cleared
 assert.equal(callStringFn('reset-history', 'cabi_post_reset-history'), 'cleared');
@@ -222,6 +232,8 @@ const baseMemory = e.memory.buffer.byteLength;
 
 for (let cycle = 0; cycle < 1000; cycle++) {
     callStringFn('push-item', 'cabi_post_push-item', 'item_' + cycle);
+    const history = callStringFn('get-history', 'cabi_post_get-history');
+    assert.ok(history.endsWith('|item_' + cycle + '|7|true|true'), history);
     if (cycle % 10 === 9) {
         callStringFn('reset-history', 'cabi_post_reset-history');
     }
@@ -251,7 +263,8 @@ assert.equal(endMemory, baseMemory, 'Memory must remain bounded during repeated 
 
 #[test]
 fn test_recoverable_failures_reclaim_temporaries_via_post_return() {
-    let scratch = std::env::temp_dir().join(format!("perry-recoverable-fail-{}", std::process::id()));
+    let scratch =
+        std::env::temp_dir().join(format!("perry-recoverable-fail-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).unwrap();
 
@@ -378,7 +391,8 @@ assert.equal(
 
 #[test]
 fn test_interrupted_cleanup_recovery_and_instance_reusability() {
-    let scratch = std::env::temp_dir().join(format!("perry-interrupted-clean-{}", std::process::id()));
+    let scratch =
+        std::env::temp_dir().join(format!("perry-interrupted-clean-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).unwrap();
 
@@ -502,18 +516,14 @@ export function runTask(input: string): string {
         core_only: false,
     };
 
-    let compiled = compile_typescript(ts_source, "repeated.ts", &options)
-        .expect("compiling component");
+    let compiled =
+        compile_typescript(ts_source, "repeated.ts", &options).expect("compiling component");
     let comp_bytes = compiled.component.expect("component bytes");
     fs::write(&wasm_path, &comp_bytes).unwrap();
 
     let mut cmd = get_wasmtime_cmd();
     let output = cmd
-        .args([
-            "run",
-            "--invoke",
-            "run-task(\"echo-payload\")",
-        ])
+        .args(["run", "--invoke", "run-task(\"echo-payload\")"])
         .arg(&wasm_path)
         .output()
         .expect("Running wasmtime");

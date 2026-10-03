@@ -5,6 +5,7 @@ use crate::nanbox::{
     nanbox_pointer, nanbox_string, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE,
     TAG_UNDEFINED,
 };
+use crate::objects::{object_get, object_get_dynamic, object_set, object_set_dynamic};
 use crate::state::{get_state, JsHandle};
 
 #[no_mangle]
@@ -143,11 +144,7 @@ pub(crate) extern "C" fn js_typeof(val: i64) -> i64 {
     } else if (bits >> 48) == POINTER_TAG {
         let id = (bits & 0xFFFF_FFFF) as usize;
         match state.handles.get(id) {
-            Some(JsHandle::Json(serde_json::Value::String(_))) => "string",
-            Some(JsHandle::Json(serde_json::Value::Number(_))) => "number",
-            Some(JsHandle::Json(serde_json::Value::Bool(_))) => "boolean",
-            Some(JsHandle::Json(serde_json::Value::Null)) => "object",
-            Some(JsHandle::Json(_)) => "object",
+            Some(JsHandle::Object(_)) => "object",
             Some(JsHandle::Array(_)) => "object",
             Some(JsHandle::Uint8Array(_)) => "object",
             Some(JsHandle::Response { .. } | JsHandle::Headers(_)) => "object",
@@ -183,210 +180,6 @@ pub(crate) extern "C" fn js_mod(_a: i64, _b: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn is_null_or_undefined(_a: i64) -> i32 {
     0
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_new() -> i64 {
-    let state = get_state();
-    let h_id = state.alloc_handle(JsHandle::Json(serde_json::Value::Object(
-        serde_json::Map::new(),
-    )));
-    nanbox_pointer(h_id)
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_set(target: i64, key: i64, val: i64) -> i64 {
-    let state = get_state();
-    let key_str = state.get_string(key);
-    let val_json = state.object_property_value(target, val);
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle_mut(target) {
-        map.insert(key_str, val_json);
-    }
-    val
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_get(target: i64, key: i64) -> i64 {
-    let state = get_state();
-    let key_str = state.get_string(key);
-    if let Some(h) = state.get_handle(target) {
-        match h {
-            JsHandle::Uint8Array(v) => match key_str.as_str() {
-                "length" | "byteLength" => return (v.byte_length as f64).to_bits() as i64,
-                "byteOffset" => return (v.byte_offset as f64).to_bits() as i64,
-                _ => {}
-            },
-            JsHandle::Json(serde_json::Value::Object(map)) => {
-                if let Some(v) = map.get(&key_str) {
-                    return state.from_js_value(v.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    TAG_UNDEFINED as i64
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_get_dynamic(target: i64, key: i64) -> i64 {
-    let state = get_state();
-    let idx_bits = key as u64;
-    let idx = if (idx_bits >> 48) < 0x7ff8 {
-        f64::from_bits(idx_bits) as usize
-    } else {
-        (idx_bits & 0xFFFF_FFFF) as usize
-    };
-    let key_str = state.get_string(key);
-    if let Some(h) = state.get_handle(target) {
-        match h {
-            JsHandle::Uint8Array(v) => {
-                if let Some(element_index) = state.element_index(key) {
-                    if let Some(byte) = v.get(element_index) {
-                        return (byte as f64).to_bits() as i64;
-                    }
-                }
-                return TAG_UNDEFINED as i64;
-            }
-            JsHandle::Array(arr) => {
-                if idx < arr.len() {
-                    return arr[idx];
-                }
-                return TAG_UNDEFINED as i64;
-            }
-            JsHandle::Json(serde_json::Value::Array(arr)) => {
-                if let Some(v) = arr.get(idx) {
-                    return state.from_js_value(v.clone());
-                }
-                return TAG_UNDEFINED as i64;
-            }
-            JsHandle::Json(serde_json::Value::Object(map)) => {
-                if let Some(v) = map.get(&key_str) {
-                    return state.from_js_value(v.clone());
-                }
-                return TAG_UNDEFINED as i64;
-            }
-            _ => {}
-        }
-    }
-    TAG_UNDEFINED as i64
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_set_dynamic(target: i64, key: i64, val: i64) {
-    let state = get_state();
-    let idx_bits = key as u64;
-    let idx = if (idx_bits >> 48) < 0x7ff8 {
-        f64::from_bits(idx_bits) as usize
-    } else {
-        (idx_bits & 0xFFFF_FFFF) as usize
-    };
-    let key_str = state.get_string(key);
-    let val_json = state.object_property_value(target, val);
-    let val_byte = state.to_uint8(val);
-    let element_index = state.element_index(key);
-    if let Some(h) = state.get_handle_mut(target) {
-        match h {
-            JsHandle::Uint8Array(v) => {
-                if let Some(index) = element_index {
-                    v.set(index, val_byte);
-                }
-            }
-            JsHandle::Array(arr) => {
-                if idx < arr.len() {
-                    arr[idx] = val;
-                } else if idx == arr.len() {
-                    arr.push(val);
-                }
-            }
-            JsHandle::Json(serde_json::Value::Object(map)) => {
-                map.insert(key_str, val_json);
-            }
-            _ => {}
-        }
-    }
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_delete(target: i64, key: i64) {
-    let state = get_state();
-    let key_str = state.get_string(key);
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle_mut(target) {
-        map.remove(&key_str);
-    }
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_delete_dynamic(target: i64, key: i64) {
-    object_delete(target, key);
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_keys(target: i64) -> i64 {
-    let state = get_state();
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned()
-    {
-        let keys: Vec<i64> = map.keys().map(|k| state.alloc_string(k)).collect();
-        let arr_id = state.alloc_handle(JsHandle::Array(keys));
-        return nanbox_pointer(arr_id);
-    }
-    let empty_arr = state.alloc_handle(JsHandle::Array(Vec::new()));
-    nanbox_pointer(empty_arr)
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_values(target: i64) -> i64 {
-    let state = get_state();
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned()
-    {
-        let values: Vec<i64> = map
-            .values()
-            .cloned()
-            .map(|v| state.from_js_value(v))
-            .collect();
-        let arr_id = state.alloc_handle(JsHandle::Array(values));
-        return nanbox_pointer(arr_id);
-    }
-    let empty_arr = state.alloc_handle(JsHandle::Array(Vec::new()));
-    nanbox_pointer(empty_arr)
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_entries(target: i64) -> i64 {
-    let state = get_state();
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target).cloned()
-    {
-        let entries: Vec<i64> = map
-            .iter()
-            .map(|(k, v)| {
-                let k_val = state.alloc_string(k);
-                let v_val = state.from_js_value(v.clone());
-                let pair_id = state.alloc_handle(JsHandle::Array(vec![k_val, v_val]));
-                nanbox_pointer(pair_id)
-            })
-            .collect();
-        let arr_id = state.alloc_handle(JsHandle::Array(entries));
-        return nanbox_pointer(arr_id);
-    }
-    let empty_arr = state.alloc_handle(JsHandle::Array(Vec::new()));
-    nanbox_pointer(empty_arr)
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_has_property(target: i64, key: i64) -> i32 {
-    let state = get_state();
-    let key_str = state.get_string(key);
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(target) {
-        if map.contains_key(&key_str) {
-            return 1;
-        }
-    }
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn object_assign(target: i64, source: i64) -> i64 {
-    let state = get_state();
-    if let serde_json::Value::Object(mut source_map) = state.to_js_value(source) {
-        if state.process_env == Some(target) {
-            for value in source_map.values_mut() {
-                *value = serde_json::Value::String(crate::state::json_string_coercion(value));
-            }
-        }
-        if let Some(JsHandle::Json(serde_json::Value::Object(target_map))) =
-            state.get_handle_mut(target)
-        {
-            target_map.extend(source_map);
-        }
-    }
-    target
 }
 #[no_mangle]
 pub(crate) extern "C" fn array_new() -> i64 {
@@ -426,7 +219,6 @@ pub(crate) extern "C" fn array_length(target: i64) -> i64 {
         let len = match h {
             JsHandle::Array(arr) => arr.len(),
             JsHandle::Uint8Array(v) => v.byte_length,
-            JsHandle::Json(serde_json::Value::Array(arr)) => arr.len(),
             _ => 0,
         };
         return (len as f64).to_bits() as i64;
@@ -475,22 +267,11 @@ pub(crate) extern "C" fn array_index_of(_a: i64, _b: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn array_includes(target: i64, search_elem: i64) -> i32 {
     let state = get_state();
-    if let Some(h) = state.get_handle(target) {
-        match h {
-            JsHandle::Array(arr) => {
-                for &item in arr {
-                    if crate::equality::equal(state, item, search_elem, false) {
-                        return 1;
-                    }
-                }
+    if let Some(JsHandle::Array(arr)) = state.get_handle(target) {
+        for &item in arr {
+            if crate::equality::equal(state, item, search_elem, false) {
+                return 1;
             }
-            JsHandle::Json(serde_json::Value::Array(arr)) => {
-                let search_val = state.to_js_value(search_elem);
-                if arr.contains(&search_val) {
-                    return 1;
-                }
-            }
-            _ => {}
         }
     }
     0
@@ -552,9 +333,7 @@ pub(crate) extern "C" fn string_trim(_a: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn string_includes(target: i64, search: i64) -> i32 {
     let state = get_state();
-    if let Some(JsHandle::Array(_)) | Some(JsHandle::Json(serde_json::Value::Array(_))) =
-        state.get_handle(target)
-    {
+    if let Some(JsHandle::Array(_)) = state.get_handle(target) {
         return array_includes(target, search);
     }
     let target = state.string_units(target);
@@ -718,9 +497,13 @@ pub(crate) extern "C" fn json_parse(val: i64) -> i64 {
 #[no_mangle]
 pub(crate) extern "C" fn json_stringify(val: i64) -> i64 {
     let state = get_state();
-    let json_val = state.to_js_value(val);
-    let json_str = serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
-    state.alloc_string(&json_str)
+    match state.try_stringify(val) {
+        Ok(json) => state.alloc_string(&json),
+        Err(error) => {
+            state.current_exception = Some(error.into());
+            TAG_UNDEFINED as i64
+        }
+    }
 }
 #[no_mangle]
 pub(crate) extern "C" fn map_new() -> i64 {
@@ -1042,13 +825,6 @@ pub(crate) extern "C" fn uint8array_from(val: i64) -> i64 {
                 bytes.reserve(arr.len());
                 for elem in arr {
                     bytes.push(state.to_uint8(elem));
-                }
-            }
-            JsHandle::Json(serde_json::Value::Array(arr)) => {
-                bytes.reserve(arr.len());
-                for item in arr {
-                    let value = state.from_js_value(item);
-                    bytes.push(state.to_uint8(value));
                 }
             }
             _ => {}

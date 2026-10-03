@@ -9,7 +9,7 @@ use crate::nanbox::{
 #[derive(Clone, Debug)]
 pub(crate) enum JsHandle {
     Null,
-    Json(serde_json::Value),
+    Object(crate::objects::ObjectProperties),
     Array(Vec<i64>),
     Response { id: usize, headers: Option<i64> },
     Headers(Vec<(String, String)>),
@@ -128,6 +128,10 @@ impl RuntimeState {
                                     self.worklist.push(item);
                                 }
                             }
+                            JsHandle::Object(properties) => {
+                                self.worklist
+                                    .extend(properties.entries().map(|(_, value)| *value));
+                            }
                             JsHandle::Response {
                                 headers: Some(headers),
                                 ..
@@ -220,20 +224,55 @@ impl RuntimeState {
     }
 
     pub(crate) fn stringify(&self, value: i64) -> String {
+        self.try_stringify(value)
+            .unwrap_or_else(|error| crate::io::fail_with_error(error))
+    }
+
+    pub(crate) fn try_stringify(&self, value: i64) -> Result<String, &'static str> {
+        self.stringify_value(value, &mut Vec::new())
+    }
+
+    fn stringify_value(
+        &self,
+        value: i64,
+        ancestors: &mut Vec<i64>,
+    ) -> Result<String, &'static str> {
         if (value as u64) >> 48 == STRING_TAG {
-            quote_utf16(&self.string_units(value))
-        } else if let Some(JsHandle::Array(items)) = self.get_handle(value) {
-            format!(
-                "[{}]",
-                items
-                    .iter()
-                    .map(|&item| self.stringify(item))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        } else {
-            serde_json::to_string(&self.to_js_value(value)).unwrap_or_else(|_| "null".into())
+            return Ok(quote_utf16(&self.string_units(value)));
         }
+        let handle = self.get_handle(value);
+        if matches!(handle, Some(JsHandle::Object(_) | JsHandle::Array(_))) {
+            if ancestors.contains(&value) {
+                return Err("TypeError: Converting circular structure to JSON");
+            }
+            ancestors.push(value);
+        }
+        let result = match handle {
+            Some(JsHandle::Array(items)) => {
+                let items = items
+                    .iter()
+                    .map(|&item| self.stringify_value(item, ancestors))
+                    .collect::<Result<Vec<_>, _>>()?;
+                format!("[{}]", items.join(","))
+            }
+            Some(JsHandle::Object(properties)) => {
+                let fields = properties
+                    .entries()
+                    .filter(|(_, value)| *value as u64 != TAG_UNDEFINED)
+                    .map(|(key, value)| {
+                        let key = quote_utf16(&key.encode_utf16().collect::<Vec<_>>());
+                        let value = self.stringify_value(*value, ancestors)?;
+                        Ok(format!("{key}:{value}"))
+                    })
+                    .collect::<Result<Vec<_>, &'static str>>()?;
+                format!("{{{}}}", fields.join(","))
+            }
+            _ => serde_json::to_string(&self.to_js_value(value)).unwrap_or_else(|_| "null".into()),
+        };
+        if matches!(handle, Some(JsHandle::Object(_) | JsHandle::Array(_))) {
+            ancestors.pop();
+        }
+        Ok(result)
     }
 
     pub(crate) fn alloc_handle(&mut self, h: JsHandle) -> usize {
@@ -257,15 +296,7 @@ impl RuntimeState {
         self.handles.get_mut(id)
     }
 
-    pub(crate) fn object_property_value(&self, target: i64, value: i64) -> serde_json::Value {
-        if self.process_env == Some(target) {
-            serde_json::Value::String(self.coerce_string(value))
-        } else {
-            self.to_js_value(value)
-        }
-    }
-
-    /// JavaScript string coercion for the runtime's primitive, array, and JSON values.
+    /// JavaScript string coercion for primitive, array, and object values.
     pub(crate) fn coerce_string(&self, value: i64) -> String {
         match self.get_handle(value) {
             Some(JsHandle::Array(items)) => items
@@ -279,7 +310,7 @@ impl RuntimeState {
                 })
                 .collect::<Vec<_>>()
                 .join(","),
-            Some(JsHandle::Json(value)) => json_string_coercion(value),
+            Some(JsHandle::Object(_)) => "[object Object]".into(),
             _ => match f64::from_bits(value as u64) {
                 f64::INFINITY => "Infinity".into(),
                 f64::NEG_INFINITY => "-Infinity".into(),
@@ -289,6 +320,14 @@ impl RuntimeState {
     }
 
     pub(crate) fn to_js_value(&self, val: i64) -> serde_json::Value {
+        self.to_js_value_with_ancestors(val, &mut Vec::new())
+    }
+
+    fn to_js_value_with_ancestors(
+        &self,
+        val: i64,
+        ancestors: &mut Vec<usize>,
+    ) -> serde_json::Value {
         let bits = val as u64;
         if bits == TAG_UNDEFINED || bits == TAG_NULL {
             serde_json::Value::Null
@@ -303,11 +342,28 @@ impl RuntimeState {
             ))
         } else if (bits >> 48) == POINTER_TAG {
             let id = (bits & 0xFFFF_FFFF) as usize;
-            match self.handles.get(id) {
-                Some(JsHandle::Json(v)) => v.clone(),
+            if ancestors.contains(&id) {
+                crate::io::fail_with_error("TypeError: Converting circular structure to JSON");
+            }
+            ancestors.push(id);
+            let value = match self.handles.get(id) {
+                Some(JsHandle::Object(properties)) => serde_json::Value::Object(
+                    properties
+                        .entries()
+                        .filter(|(_, value)| *value as u64 != TAG_UNDEFINED)
+                        .map(|(key, value)| {
+                            (
+                                key.clone(),
+                                self.to_js_value_with_ancestors(*value, ancestors),
+                            )
+                        })
+                        .collect(),
+                ),
                 Some(JsHandle::Array(arr)) => {
-                    let items: Vec<serde_json::Value> =
-                        arr.iter().map(|&elem| self.to_js_value(elem)).collect();
+                    let items: Vec<serde_json::Value> = arr
+                        .iter()
+                        .map(|&elem| self.to_js_value_with_ancestors(elem, ancestors))
+                        .collect();
                     serde_json::Value::Array(items)
                 }
                 Some(JsHandle::Date(ts)) => {
@@ -328,7 +384,9 @@ impl RuntimeState {
                 }
                 Some(JsHandle::Headers(_)) => serde_json::Value::Object(serde_json::Map::new()),
                 _ => serde_json::Value::Null,
-            }
+            };
+            ancestors.pop();
+            value
         } else {
             let f = f64::from_bits(bits);
             if f.fract() == 0.0 && f >= (i64::MIN as f64) && f <= (i64::MAX as f64) {
@@ -418,8 +476,12 @@ impl RuntimeState {
                 let id = self.alloc_handle(JsHandle::Array(items));
                 nanbox_pointer(id)
             }
-            serde_json::Value::Object(_) => {
-                let id = self.alloc_handle(JsHandle::Json(v));
+            serde_json::Value::Object(map) => {
+                let mut properties = crate::objects::ObjectProperties::default();
+                for (key, value) in map {
+                    properties.insert(key, self.from_js_value(value));
+                }
+                let id = self.alloc_handle(JsHandle::Object(properties));
                 nanbox_pointer(id)
             }
         }
@@ -448,8 +510,7 @@ impl RuntimeState {
             let id = (bits & 0xFFFF_FFFF) as usize;
             if let Some(h) = self.handles.get(id) {
                 return match h {
-                    JsHandle::Json(serde_json::Value::String(s)) => s.clone(),
-                    JsHandle::Json(other) => serde_json::to_string(other).unwrap_or_default(),
+                    JsHandle::Object(_) => self.stringify(val),
                     JsHandle::Array(arr) => format!("[array len {}]", arr.len()),
                     JsHandle::Response { .. } => "[Response]".to_string(),
                     JsHandle::Headers(_) => "[object Headers]".to_string(),
@@ -473,25 +534,6 @@ impl RuntimeState {
             }
         }
         format!("{val}")
-    }
-}
-
-pub(crate) fn json_string_coercion(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(value) => value.clone(),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(|value| {
-                if value.is_null() {
-                    String::new()
-                } else {
-                    json_string_coercion(value)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        serde_json::Value::Object(_) => "[object Object]".into(),
-        value => value.to_string(),
     }
 }
 

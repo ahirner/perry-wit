@@ -30,10 +30,12 @@
         "Evaluates object operands left-to-right",
         "Produces a new distinct object identity",
         "Overwrites keys present in earlier objects with keys from later objects",
-        "Preserves string, numeric, boolean, array, and nested object property values"
+        "Preserves string, numeric, boolean, array, and nested object property values",
+        "Shallow copies retain nested object and byte-view identity, including shared mutation"
       ],
       "differences": [
-        "Executed natively via guest runtime handle table and NaN-boxing rather than prototype lookups"
+        "Executed natively via guest runtime handle table and NaN-boxing rather than prototype lookups",
+        "Nested reference and byte-view behavior is also exercised by tests/binary_views_test.rs"
       ],
       "conformance": [
         "tests/conformance/cases/01_object_spread.ts"
@@ -226,7 +228,8 @@
         "Numeric lengths create zero-filled views; array/view inputs copy the visible bytes",
         "Construction and indexed writes apply wrapping byte conversion; invalid indices do not alias valid elements",
         "Subarrays share storage and resolve negative bounds relative to the current view",
-        "JSON serialization exposes enumerable numeric object keys"
+        "JSON serialization exposes enumerable numeric object keys",
+        "Object properties, spreads, and Object.assign preserve view identity and offset; retained object graphs keep their referenced views alive across task calls"
       ],
       "differences": [
         "Other typed-array classes, ArrayBuffer interoperability, Node Buffer compatibility, and broader Uint8Array methods are outside the tested subset",

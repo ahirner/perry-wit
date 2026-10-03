@@ -96,54 +96,9 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             let end = raw_args.get(2).copied().unwrap_or(TAG_UNDEFINED as i64);
             result_i64 = crate::stubs::buffer_slice(handle, start, end);
         }
-    } else if name == "array_get" || name == "object_get_dynamic" {
-        if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let idx_val = raw_args[1];
-            let bits = idx_val as u64;
-            let idx = if (bits >> 48) < 0x7ff8 {
-                f64::from_bits(bits) as usize
-            } else {
-                (bits & 0xFFFF_FFFF) as usize
-            };
-            if let Some(h) = state.get_handle(target_handle).cloned() {
-                match h {
-                    JsHandle::Array(arr) => {
-                        if let Some(&elem) = arr.get(idx) {
-                            result_i64 = elem;
-                        }
-                    }
-                    JsHandle::Uint8Array(v) => {
-                        if let Some(b) = state.element_index(idx_val).and_then(|index| v.get(index))
-                        {
-                            result_i64 = (b as f64).to_bits() as i64;
-                        } else {
-                            result_i64 = TAG_UNDEFINED as i64;
-                        }
-                    }
-                    JsHandle::Json(serde_json::Value::Array(arr)) => {
-                        if let Some(elem) = arr.get(idx) {
-                            result_i64 = state.from_js_value(elem.clone());
-                        }
-                    }
-                    JsHandle::Json(serde_json::Value::Object(map)) => {
-                        let key_str = state.get_string(idx_val);
-                        if let Some(v) = map.get(&key_str) {
-                            result_i64 = state.from_js_value(v.clone());
-                        } else {
-                            result_i64 = TAG_UNDEFINED as i64;
-                        }
-                    }
-                    _ => {}
-                }
-            } else if (target_handle as u64) >> 48 == STRING_TAG {
-                let unit = state
-                    .element_index(idx_val)
-                    .and_then(|index| state.string_units(target_handle).get(index).copied());
-                result_i64 = unit.map_or(TAG_UNDEFINED as i64, |unit| {
-                    state.alloc_string_units(vec![unit])
-                });
-            }
+    } else if matches!(name.as_str(), "array_get" | "object_get_dynamic") {
+        if let [target, key, ..] = raw_args.as_slice() {
+            result_i64 = crate::objects::object_get_dynamic(*target, *key);
         }
     } else if name == "string_charAt" || name == "string_char_at" {
         let value = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
@@ -169,9 +124,6 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
                 JsHandle::Uint8Array(v) => {
                     result_i64 = (v.byte_length as f64).to_bits() as i64;
                 }
-                JsHandle::Json(serde_json::Value::Array(arr)) => {
-                    result_i64 = (arr.len() as f64).to_bits() as i64;
-                }
                 _ => {
                     let len = state.string_units(arg).len();
                     result_i64 = (len as f64).to_bits() as i64;
@@ -182,135 +134,47 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
             result_i64 = (len as f64).to_bits() as i64;
         }
     } else if name == "object_new" {
-        let h_id = state.alloc_handle(JsHandle::Json(serde_json::Value::Object(
-            serde_json::Map::new(),
-        )));
-        result_i64 = nanbox_pointer(h_id);
-    } else if name == "object_set" || name == "class_set_field" {
-        if raw_args.len() >= 3 {
-            let target_handle = raw_args[0];
-            let key_str = state.get_string(raw_args[1]);
-            let val_json = state.object_property_value(target_handle, raw_args[2]);
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle_mut(target_handle)
-            {
-                map.insert(key_str, val_json);
-            }
-            result_i64 = target_handle;
+        result_i64 = crate::objects::object_new();
+    } else if matches!(name.as_str(), "object_set" | "class_set_field") {
+        if let [target, key, value, ..] = raw_args.as_slice() {
+            crate::objects::object_set(*target, *key, *value);
+            result_i64 = *target;
         }
-    } else if name == "object_set_dynamic" || name == "array_set" {
-        if raw_args.len() >= 3 {
-            let target_handle = raw_args[0];
-            let idx_val = raw_args[1];
-            let val_val = raw_args[2];
-            let idx_bits = idx_val as u64;
-            let idx = if (idx_bits >> 48) < 0x7ff8 {
-                f64::from_bits(idx_bits) as usize
-            } else {
-                (idx_bits & 0xFFFF_FFFF) as usize
-            };
-            let key_str = state.get_string(idx_val);
-            let val_json = state.object_property_value(target_handle, val_val);
-            let val_byte = state.to_uint8(val_val);
-            let element_index = state.element_index(idx_val);
-            if let Some(h) = state.get_handle_mut(target_handle) {
-                match h {
-                    JsHandle::Uint8Array(v) => {
-                        if let Some(index) = element_index {
-                            v.set(index, val_byte);
-                        }
-                    }
-                    JsHandle::Array(arr) => {
-                        if idx < arr.len() {
-                            arr[idx] = val_val;
-                        } else if idx == arr.len() {
-                            arr.push(val_val);
-                        }
-                    }
-                    JsHandle::Json(serde_json::Value::Object(map)) => {
-                        map.insert(key_str, val_json);
-                    }
-                    _ => {}
-                }
-            }
-            result_i64 = val_val;
+    } else if matches!(name.as_str(), "object_set_dynamic" | "array_set") {
+        if let [target, key, value, ..] = raw_args.as_slice() {
+            crate::objects::object_set_dynamic(*target, *key, *value);
+            result_i64 = *value;
         }
     } else if name == "object_assign" {
-        if raw_args.len() >= 2 {
-            result_i64 = crate::stubs::object_assign(raw_args[0], raw_args[1]);
+        if let [target, source, ..] = raw_args.as_slice() {
+            result_i64 = crate::objects::object_assign(*target, *source);
         }
-    } else if name == "object_get" || name == "class_get_field" {
-        if raw_args.len() >= 2 {
-            result_i64 = crate::stubs::object_get(raw_args[0], raw_args[1]);
+    } else if matches!(name.as_str(), "object_get" | "class_get_field") {
+        if let [target, key, ..] = raw_args.as_slice() {
+            result_i64 = crate::objects::object_get(*target, *key);
         }
     } else if name == "object_keys" {
-        let target_handle = raw_args.first().copied().unwrap_or(0);
-        if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-            state.get_handle(target_handle).cloned()
-        {
-            let keys: Vec<i64> = map.keys().map(|k| state.alloc_string(k)).collect();
-            let arr_id = state.alloc_handle(JsHandle::Array(keys));
-            result_i64 = nanbox_pointer(arr_id);
-        }
+        result_i64 = crate::objects::object_keys(raw_args.first().copied().unwrap_or(0));
     } else if name == "object_values" {
-        let target_handle = raw_args.first().copied().unwrap_or(0);
-        if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-            state.get_handle(target_handle).cloned()
-        {
-            let values: Vec<i64> = map
-                .values()
-                .cloned()
-                .map(|v| state.from_js_value(v))
-                .collect();
-            let arr_id = state.alloc_handle(JsHandle::Array(values));
-            result_i64 = nanbox_pointer(arr_id);
-        }
+        result_i64 = crate::objects::object_values(raw_args.first().copied().unwrap_or(0));
     } else if name == "object_entries" {
-        let target_handle = raw_args.first().copied().unwrap_or(0);
-        if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-            state.get_handle(target_handle).cloned()
-        {
-            let entries: Vec<i64> = map
-                .iter()
-                .map(|(k, v)| {
-                    let k_val = state.alloc_string(k);
-                    let v_val = state.from_js_value(v.clone());
-                    let pair_id = state.alloc_handle(JsHandle::Array(vec![k_val, v_val]));
-                    nanbox_pointer(pair_id)
-                })
-                .collect();
-            let arr_id = state.alloc_handle(JsHandle::Array(entries));
-            result_i64 = nanbox_pointer(arr_id);
-        }
+        result_i64 = crate::objects::object_entries(raw_args.first().copied().unwrap_or(0));
     } else if name == "object_has_property" {
-        if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let key_str = state.get_string(raw_args[1]);
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle(target_handle)
-            {
-                result_i64 = if map.contains_key(&key_str) {
-                    TAG_TRUE as i64
-                } else {
-                    TAG_FALSE as i64
-                };
-            }
+        if let [target, key, ..] = raw_args.as_slice() {
+            result_i64 = (if crate::objects::object_has_property(*target, *key) != 0 {
+                TAG_TRUE
+            } else {
+                TAG_FALSE
+            }) as i64;
         }
-    } else if name == "object_delete" || name == "object_delete_dynamic" {
-        if raw_args.len() >= 2 {
-            let target_handle = raw_args[0];
-            let key_str = state.get_string(raw_args[1]);
-            if let Some(JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle_mut(target_handle)
-            {
-                map.remove(&key_str);
-            }
+    } else if matches!(name.as_str(), "object_delete" | "object_delete_dynamic") {
+        if let [target, key, ..] = raw_args.as_slice() {
+            crate::objects::object_delete(*target, *key);
             result_i64 = TAG_TRUE as i64;
         }
     } else if name == "json_stringify" {
         let arg = raw_args.first().copied().unwrap_or(0);
-        let json_str = state.stringify(arg);
-        result_i64 = state.alloc_string(&json_str);
+        result_i64 = crate::stubs::json_stringify(arg);
     } else if name == "json_parse" {
         let arg = raw_args.first().copied().unwrap_or(0);
         let s = state.get_string(arg);

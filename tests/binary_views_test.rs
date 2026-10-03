@@ -186,6 +186,66 @@ fn typed_array_json_uses_numeric_object_keys_including_nested_views() {
     );
 }
 
+#[test]
+fn byte_views_keep_identity_and_aliases_through_objects_and_spreads() {
+    assert_matches_node(
+        r#"
+        const bytes = Uint8Array.from([10, 255, 128, 20]);
+        const view = bytes.subarray(1, 3);
+        const options = {method: "POST", body: view};
+        const copy = {...options};
+        const assigned = Object.assign({}, options);
+        console.log(options.body === view);
+        console.log(copy.body === view);
+        console.log(assigned.body === view);
+        console.log(options.body.byteOffset);
+        console.log(options.body.length);
+        options.body[0] = 7;
+        console.log(bytes[1]);
+        console.log(JSON.stringify(copy.body));
+        console.log(Object.values(options)[1] === view);
+        console.log(Object.entries(options)[1][1] === view);
+        const child = {value: 1};
+        const parent = {child: child, bytes: [view]};
+        parent.child.value = 2;
+        console.log(child.value);
+        console.log(parent.child === child);
+        console.log(parent.bytes[0] === view);
+        console.log(JSON.stringify(parent));
+        const fields = { b: 1, "10": 10, "2": 2, a: undefined };
+        console.log(Object.keys(fields).join(","));
+        console.log("a" in fields);
+        console.log(JSON.stringify(fields));
+        delete fields.b;
+        fields.b = 3;
+        console.log(Object.keys(fields).join(","));
+        console.log(JSON.stringify({ head: "😀".charAt(0) }));
+        console.log(JSON.stringify({ first: child, second: child }));
+    "#,
+    );
+}
+
+#[test]
+fn cyclic_objects_reject_serialization_without_losing_references() {
+    assert_matches_node(
+        r#"
+        const object = { value: 1 };
+        object.self = object;
+        const array = [object];
+        object.array = array;
+        try { JSON.stringify(object); console.log("unreachable"); }
+        catch { console.log("caught"); }
+        try { JSON.stringify(array); console.log("unreachable"); }
+        catch { console.log("caught array"); }
+        console.log(object.self === object);
+        console.log(object.array[0] === object);
+        delete object.self;
+        delete object.array;
+        console.log(JSON.stringify(object));
+    "#,
+    );
+}
+
 fn assert_matches_node(source: &str) {
     let expected = Command::new("node")
         .args(["--eval", source])

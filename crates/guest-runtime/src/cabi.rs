@@ -70,8 +70,7 @@ pub extern "C" fn cabi_import_json(ptr: i32, len: i32) -> i64 {
     let state = get_state();
     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(slice) {
-        let id = state.alloc_handle(crate::state::JsHandle::Json(json_val));
-        crate::nanbox::nanbox_pointer(id)
+        state.from_js_value(json_val)
     } else {
         let s = std::str::from_utf8(slice).unwrap_or_default();
         state.alloc_string(s)

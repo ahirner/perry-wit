@@ -17,8 +17,7 @@ pub(crate) fn process_env() -> i64 {
         map.insert(k, serde_json::Value::String(v));
     }
 
-    let handle_id = state.alloc_handle(JsHandle::Json(serde_json::Value::Object(map)));
-    let handle = nanbox_pointer(handle_id);
+    let handle = state.from_js_value(serde_json::Value::Object(map));
     state.process_env = Some(handle);
     handle
 }
@@ -36,14 +35,11 @@ pub(crate) fn process_env_get(key_val: i64) -> i64 {
     };
 
     let state = get_state();
-    if let Some(JsHandle::Json(serde_json::Value::Object(map))) = state.get_handle(env_handle) {
-        if let Some(serde_json::Value::String(s)) = map.get(&key) {
-            let s_clone = s.clone();
-            return state.alloc_string(&s_clone);
-        }
+    if let Some(JsHandle::Object(properties)) = state.get_handle(env_handle) {
+        properties.get(&key).unwrap_or(TAG_UNDEFINED as i64)
+    } else {
+        TAG_UNDEFINED as i64
     }
-
-    TAG_UNDEFINED as i64
 }
 
 /// Implements `process.argv`: returns a JS Array of strings from `wasi:cli/environment::get-arguments()`.

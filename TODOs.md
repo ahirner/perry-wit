@@ -225,7 +225,15 @@ Verification (10.1):
 - Scoped formatting and compiler/guest Clippy checks pass with existing warnings. The parent Makefile checks remain inapplicable as described in the verification baseline.
 
 - [ ] **10.2. Buffered Binary Bodies** — Needs D.1.
+    - [x] Preserve byte views through request-option objects and shallow copies, keeping identity, shared mutation, and retained references intact; adapt object storage where the binary bridge exposes value copying.
     - [ ] Support binary request/response bodies through the shared byte representation and verify byte-exact round-trips and cleanup.
+
+Verification (10.2 object-storage prerequisite):
+
+- The full `cargo test --locked --package perry-wit` suite passed 136 tests under `nix develop`, including local HTTP fixtures. Compiler and guest Clippy checks pass with existing warnings; applicable scoped formatting passes.
+- `tests/binary_views_test.rs` compares object/spread/assign identity, shared mutations, enumeration, key order, nested UTF-16 strings, and circular JSON errors against Node. `tests/repeated_task_calls_test.rs` verifies retained cyclic objects and nested byte views survive post-return, then release without memory growth after warm-up over 1,000 cycles.
+- Binary HTTP transfer and response-resource cleanup remain unchecked. This prerequisite changes guest value storage; it does not change WIT SDK contracts or establish callback/suspended-value lifetimes for E.2.
+
 - [ ] **10.3. Buffered Incoming Handler** — Needs B.2; reusable handlers need the relevant E.2 lifetime support.
     - [ ] Expose `wasi:http/incoming-handler` and map incoming requests and response outparams to the Request/Response subset needed by one handler, including resource ownership.
     - [ ] Execute an async TypeScript handler and complete its response/error through the ABI. Start with bounded UTF-8 bodies; add binary bodies when D.1 is ready.

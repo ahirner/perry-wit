@@ -657,7 +657,5 @@ pub(crate) fn fs_stat_sync(path_val: i64, options: i64) -> i64 {
     map.insert("isFile".to_string(), serde_json::Value::Bool(is_file));
     map.insert("isDirectory".to_string(), serde_json::Value::Bool(is_dir));
 
-    let obj_id =
-        get_state().alloc_handle(crate::state::JsHandle::Json(serde_json::Value::Object(map)));
-    crate::nanbox::nanbox_pointer(obj_id)
+    get_state().from_js_value(serde_json::Value::Object(map))
 }

@@ -25,6 +25,7 @@ mod http_options;
 mod http_url;
 mod io;
 mod nanbox;
+mod objects;
 mod random;
 mod state;
 mod stubs;

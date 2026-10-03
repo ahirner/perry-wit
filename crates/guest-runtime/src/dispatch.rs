@@ -229,11 +229,9 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
         "isFile" => {
             let state = crate::state::get_state();
             let target = raw_args.first().copied().unwrap_or(0);
-            if let Some(crate::state::JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle(target)
-            {
-                if let Some(serde_json::Value::Bool(b)) = map.get("isFile") {
-                    return Some(if *b {
+            if let Some(crate::state::JsHandle::Object(map)) = state.get_handle(target) {
+                if let Some(value) = map.get("isFile") {
+                    return Some(if value as u64 == crate::nanbox::TAG_TRUE {
                         crate::nanbox::TAG_TRUE as i64
                     } else {
                         crate::nanbox::TAG_FALSE as i64
@@ -245,11 +243,9 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
         "isDirectory" => {
             let state = crate::state::get_state();
             let target = raw_args.first().copied().unwrap_or(0);
-            if let Some(crate::state::JsHandle::Json(serde_json::Value::Object(map))) =
-                state.get_handle(target)
-            {
-                if let Some(serde_json::Value::Bool(b)) = map.get("isDirectory") {
-                    return Some(if *b {
+            if let Some(crate::state::JsHandle::Object(map)) = state.get_handle(target) {
+                if let Some(value) = map.get("isDirectory") {
+                    return Some(if value as u64 == crate::nanbox::TAG_TRUE {
                         crate::nanbox::TAG_TRUE as i64
                     } else {
                         crate::nanbox::TAG_FALSE as i64
@@ -645,14 +641,13 @@ pub extern "C" fn mem_call_i32(func_name_id: f64, arg_count: f64, base_addr: i32
         }
     } else if name == "object_has_property" {
         if raw_args.len() >= 2 {
-            return crate::stubs::object_has_property(raw_args[0], raw_args[1]);
+            return crate::objects::object_has_property(raw_args[0], raw_args[1]);
         }
     } else if name == "array_is_array" {
         if let Some(&arg) = raw_args.first() {
             if let Some(h) = state.get_handle(arg) {
                 return match h {
                     JsHandle::Array(_) => 1,
-                    JsHandle::Json(serde_json::Value::Array(_)) => 1,
                     _ => 0,
                 };
             }
