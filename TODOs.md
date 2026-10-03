@@ -7,7 +7,7 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 
 1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
 2. HTTP metadata/methods (**10.1**) and buffered binary bodies (**10.2**) are complete. Use those client paths and fixtures as the baseline for handlers and streaming.
-3. One-shot timers and intervals (**11.1**, **11.2**) establish callback execution (**B.1**) and retained lifetimes (**E.2**), including reclamation between callbacks. Guest async execution (**B.2**) now completes timer-backed tasks through the component ABI. Build the buffered handler (**10.3**) and readiness (**11.3**) around a concrete incoming request or I/O consumer.
+3. One-shot timers and intervals (**11.1**, **11.2**) establish callback execution (**B.1**) and retained lifetimes (**E.2**), including reclamation between callbacks. Guest async execution (**B.2**) and the buffered incoming handler (**10.3**) complete timer-backed requests through the component ABI. Build readiness (**11.3**) with a concrete streaming or socket consumer.
 4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
 
 ## Tracking Completion
@@ -32,10 +32,10 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ## Verification Baseline (2026-10-03)
 
-- `nix develop -c cargo test --locked --package perry-wit`: 154 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
+- `nix develop -c cargo test --locked --package perry-wit`: 160 tests passed, including 25 filesystem tests and 16 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
 - The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
 - Scoped formatting passed. Project and WebAssembly guest Clippy checks completed with existing warnings. Automatic approval review rejected parent `make format-rs` because it could rewrite the broader workspace; parent `make lint-rs` fails because `monty-bench` is outside this workspace. The pinned, scoped Nix checks are the applicable checks here.
-- SDK generation describes selected WIT contracts, not ambient JavaScript/Node API compatibility. These runtime slices do not change WIT export types; supported API subsets and limits belong in the capability catalog and tests.
+- SDK generation describes selected WIT contracts and guest implementation signatures, not ambient JavaScript/Node API compatibility. The incoming-handler adapter supplies resource ownership and its buffered Request/Response implementation contract; supported API subsets and limits belong in the capability catalog and tests.
 - Catalog `conformance` references can identify TypeScript differential cases or Rust integration suites. The differential report executes only TypeScript cases; integration-only entries remain `MISSING` in that report and are verified separately by Cargo.
 
 ## Runtime Foundations
@@ -265,10 +265,18 @@ Verification (10.2 binary transfer and cleanup):
 - A resource-counting WASI host runs 600 calls in one instance, including unread futures/responses, retained nested responses, and skipped post-return cleanup, with stable memory after warm-up and bounded resources. A partial body-read failure releases its stream, body, and error resource; the next invocation releases the failed response and successfully transfers bytes again. The component invocation/pruning tests verify the cleanup ABI remains valid and pure tasks retain no HTTP imports.
 - Request bodies accept strings or `Uint8Array`; `Response.bytes()` returns an independent view. Buffered reads can repeat from cached bytes. ArrayBuffer, Blob, FormData, cloning, single-use body semantics, and streaming remain outside this subset; unsupported body APIs report diagnostics. Host resource drops run at ordinary invocation boundaries because component post-return cannot call imports. SDK WIT declarations are unchanged; the capability catalog records these limits.
 
-- [ ] **10.3. Buffered Incoming Handler** — Needs B.2; reusable handlers need the relevant E.2 lifetime support.
-    - [ ] Expose `wasi:http/incoming-handler` and map incoming requests and response outparams to the Request/Response subset needed by one handler, including resource ownership.
-    - [ ] Execute an async TypeScript handler and complete its response/error through the ABI. Start with bounded UTF-8 bodies; add binary bodies when D.1 is ready.
-    - [ ] Verify a successful request, an awaited operation, rejection, body-limit behavior, and bounded memory/resources across repeated requests.
+- [x] **10.3. Buffered Incoming Handler** — Needs B.2; reusable handlers need the relevant E.2 lifetime support.
+    - [x] Expose `wasi:http/incoming-handler` and map incoming requests and response outparams to the Request/Response subset needed by one handler, including resource ownership.
+    - [x] Execute an async TypeScript handler and complete its response/error through the ABI. Start with bounded UTF-8 bodies; add binary bodies when D.1 is ready.
+    - [x] Verify a successful request, an awaited operation, rejection, body-limit behavior, and bounded memory/resources across repeated requests.
+
+Verification (10.3):
+
+- The complete `cargo test --locked --package perry-wit` suite passed all 160 tests under Nix, including local HTTP fixtures. Scoped formatting and compiler/guest Clippy checks pass with the same existing warnings; the parent Makefile limitations remain as recorded in the baseline.
+- `http-server` selects the generated resource adapter before runtime pruning. `incomingHandlerHandle(request)` accepts the buffered request and returns a Response or guest Promise<Response>; existing task and CLI contracts remain compatible. SDK generation accepts the buffered implementation signature and rejects wrong input/resolved result types.
+- The existing HTTP regression suite runs an actual Wasmtime server with reused instances. It verifies awaited timers, UTF-8 and binary requests/responses, headers including Latin-1, URL/method metadata, caught JSON failures, rejected/wrong results, body limits, and recovery. The fixture uses `-S cli=y -O pooling-max-tables-per-module=2` for the current runtime requirements.
+- A resource-counting host exercises 300 success/rejection/pending-task calls in one instance after warm-up without memory growth. It checks retained/released request values, exactly 1 MiB and oversized bodies, partial reads, failed writes, recovery, and 100 calls after initializer failure. Every invocation releases its host resources; initialization failure permanently prevents guest execution in that instance.
+- Request bodies buffer before guest execution; response bodies buffer before sending and are published before blocking writes. The initial 1 MiB subset supports direct body methods, repeat reads, strings/views, status, and read-only headers. General streams, aborts, broader DOM/Promise APIs, and single-use bodies remain for concrete consumers. Unsupported constructor options/body methods report guest exceptions, and the capability catalog records the subset. A Node comparison covers construction, copied subviews, metadata, header normalization, JSON shape, and text/binary decoding.
 - [ ] **10.4. Streaming Bodies** — Needs guest async execution, binary values, and stream readiness from 11.3.
     - [ ] Expose incremental reads/writes for one Request/Response use case, defining backpressure, cancellation, and close/error ownership at that boundary.
     - [ ] Verify multi-chunk transfer, a slow consumer, and early cancellation; measure peak buffering before expanding stream compatibility.

@@ -32,6 +32,8 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         result_i64 = value;
     } else if let Some(value) = crate::callbacks::dispatch_call(&name, &raw_args) {
         result_i64 = value;
+    } else if let Some(value) = crate::http_handler::dispatch_call(&name, &raw_args) {
+        result_i64 = value;
     } else if let Some(value) = crate::headers::dispatch_call(&name, &raw_args) {
         result_i64 = value;
     } else if name == "get_exception" {

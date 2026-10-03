@@ -441,7 +441,8 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             | "response_bytes"
             | "bytes"
     ) {
-        let result_i64 = dispatch_http(&name, &raw_args);
+        let result_i64 = crate::http_handler::dispatch_call(&name, &raw_args)
+            .unwrap_or_else(|| dispatch_http(&name, &raw_args));
         unsafe {
             *(base_addr as *mut i64) = result_i64;
         }

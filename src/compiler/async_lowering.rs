@@ -18,11 +18,17 @@ pub(super) fn rewrite_constructor(expression: &mut AstExpr, unresolved: SyntaxCo
     let AstExpr::New(constructor) = expression else {
         return;
     };
-    if !matches!(constructor.callee.as_ref(), AstExpr::Ident(identifier)
-        if identifier.sym == "Promise" && identifier.ctxt == unresolved)
-    {
+    let AstExpr::Ident(identifier) = constructor.callee.as_ref() else {
+        return;
+    };
+    if identifier.ctxt != unresolved {
         return;
     }
+    let bridge = match identifier.sym.as_ref() {
+        "Promise" => "async_promise_new",
+        "Response" => "http_response_new",
+        _ => return,
+    };
     let span = constructor.span;
     *expression = AstExpr::Call(CallExpr {
         span,
@@ -40,7 +46,7 @@ pub(super) fn rewrite_constructor(expression: &mut AstExpr, unresolved: SyntaxCo
             })),
             prop: MemberProp::Ident(IdentName {
                 span,
-                sym: "async_promise_new".into(),
+                sym: bridge.into(),
             }),
         }))),
         args: constructor.args.take().unwrap_or_default(),

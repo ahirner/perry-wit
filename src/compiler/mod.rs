@@ -106,11 +106,23 @@ pub fn compile_typescript(
 
     let rt_bytes = runtime::resolve_guest_runtime_bytes(options.runtime_path.as_deref())?;
 
-    let merged_core = linker::merge_core_modules(&raw_wasm, &rt_bytes)
-        .context("Linking TypeScript core wasm with guest runtime")?;
-
     let wit_exports =
         crate::abi::extract_world_exports(&options.wit_dir, options.world.as_deref())?;
+    let handler_exports = wit_exports.incoming_handler.as_ref().map(|handler| {
+        [
+            handler.core_name.as_str(),
+            "guest_async_step",
+            "guest_async_result",
+        ]
+    });
+    let merged_core = linker::merge_with_runtime_exports(
+        &raw_wasm,
+        &rt_bytes,
+        handler_exports
+            .as_ref()
+            .map_or(&[], |exports| exports.as_slice()),
+    )
+    .context("Linking TypeScript core wasm with guest runtime")?;
 
     let ready_core = crate::abi::synthesize_trampolines(
         &merged_core,

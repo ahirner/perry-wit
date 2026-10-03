@@ -54,6 +54,41 @@ fn promise_constructor_rewrite_respects_lexical_bindings() {
 }
 
 #[test]
+fn response_constructor_rewrite_respects_lexical_bindings() {
+    for (source, expected) in [
+        ("new Response('body');", true),
+        (
+            "function make(undefined) { return new Response('body'); }",
+            true,
+        ),
+        (
+            "class Response { constructor(value) {} } new Response('body');",
+            false,
+        ),
+        (
+            "function make(Response) { return new Response('body'); }",
+            false,
+        ),
+        (
+            "import { Response } from 'custom'; new Response('body');",
+            false,
+        ),
+    ] {
+        let mut ast = perry_parser::parse_typescript(source, "response.ts").unwrap();
+        let original = ast.clone();
+        fetch::preserve_calls(&mut ast);
+        assert_eq!(
+            format!("{ast:?}").contains("http_response_new"),
+            expected,
+            "{source}"
+        );
+        if !expected {
+            assert_eq!(ast, original);
+        }
+    }
+}
+
+#[test]
 fn unlink_rewrite_respects_import_bindings_and_lexical_scopes() {
     struct UnlinkCalls(Vec<String>);
     impl Visit for UnlinkCalls {

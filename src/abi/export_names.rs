@@ -1,6 +1,16 @@
-use wit_parser::{Function, Resolve, World, WorldItem, WorldKey};
+use wit_parser::{Function, InterfaceId, Resolve, World, WorldItem, WorldKey};
 
 use crate::sdk::codegen::to_camel_case;
+
+/// Identifies the WASI HTTP resource export served by the runtime's generated adapter.
+pub(crate) fn is_incoming_handler(resolve: &Resolve, id: InterfaceId) -> bool {
+    let interface = &resolve.interfaces[id];
+    interface.name.as_deref() == Some("incoming-handler")
+        && interface.package.is_some_and(|package| {
+            let name = &resolve.packages[package].name;
+            name.namespace == "wasi" && name.name == "http"
+        })
+}
 
 pub fn core_export_name(resolve: &Resolve, key: &WorldKey, function: &Function) -> String {
     format!("{}#{}", resolve.name_world_key(key), function.name)

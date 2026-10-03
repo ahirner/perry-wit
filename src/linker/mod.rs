@@ -31,6 +31,15 @@ use types::{FuncSig, to_func_sig};
 
 /// Merges `ts_core.wasm` (Module A) and `guest_runtime.wasm` (Module B) into a single Core Wasm module.
 pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>> {
+    merge_with_runtime_exports(ts_wasm, runtime_wasm, &[])
+}
+
+/// Roots generated adapters selected by WIT before sweeping runtime functions and imports.
+pub(crate) fn merge_with_runtime_exports(
+    ts_wasm: &[u8],
+    runtime_wasm: &[u8],
+    runtime_exports: &[&str],
+) -> Result<Vec<u8>> {
     let a = parse_module_a(ts_wasm).context("parsing TypeScript core wasm")?;
     let b = parse_module_b(runtime_wasm).context("parsing guest-runtime wasm")?;
 
@@ -110,15 +119,18 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     }
 
     let callback_bridge = callbacks::CallbackBridge::discover(&b)?;
-    let callback_dependencies = callback_bridge.as_ref().map(|bridge| bridge.dependencies());
-    let plan = compute_pruning_plan(
-        &a,
-        &b,
-        &resolved_imports_a,
-        callback_dependencies
-            .as_ref()
-            .map_or(&[], |roots| roots.as_slice()),
-    )?;
+    let mut synthesized_roots = callback_bridge
+        .as_ref()
+        .map(|bridge| bridge.dependencies().to_vec())
+        .unwrap_or_default();
+    for name in runtime_exports {
+        synthesized_roots.push(
+            *b.export_funcs
+                .get(name)
+                .with_context(|| format!("Missing selected runtime export: {name}"))?,
+        );
+    }
+    let plan = compute_pruning_plan(&a, &b, &resolved_imports_a, &synthesized_roots)?;
     let func_map_a = plan.func_map_a;
     let func_map_b = plan.func_map_b;
 
@@ -243,7 +255,9 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     for exp in &b.exports {
         match exp.kind {
             ExternalKind::Func => {
-                if prune::preserve_runtime_export(exp.name, needs_http, needs_timers, needs_async) {
+                if prune::preserve_runtime_export(exp.name, needs_http, needs_timers, needs_async)
+                    || runtime_exports.contains(&exp.name)
+                {
                     let merged_f = func_map_b[exp.index as usize];
                     export_sec.export(exp.name, ExportKind::Func, merged_f);
                 }

@@ -1,6 +1,7 @@
 //! Canonical ABI definitions, WIT metadata introspection, and trampoline synthesis.
 
 pub mod export_names;
+mod http_handler;
 pub mod trampoline;
 pub mod wit_meta;
 

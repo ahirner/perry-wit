@@ -2,7 +2,7 @@
 mod http_fixture;
 mod support;
 
-use http_fixture::{HttpFixture, Reply};
+use http_fixture::{HttpFixture, Reply, ServingComponent};
 use std::{
     fs,
     path::Path,
@@ -10,6 +10,324 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[test]
+fn incoming_component_serves_awaited_text_binary_and_error_paths() {
+    let scratch = support::Scratch::new();
+    let compiled = perry_wit::compiler::compile_typescript(r#"
+        let calls = 0;
+        export async function incomingHandlerHandle(request: any): Promise<any> {
+            calls++;
+            await new Promise(resolve => setTimeout(resolve, 1));
+            if (request.url.endsWith("/reject")) { throw "intentional rejection"; }
+            if (request.url.endsWith("/wrong")) { return "not a response"; }
+            if (request.url.endsWith("/binary")) {
+                return new Response(await request.bytes(), {status:201, headers:{"x-call":"" + calls}});
+            }
+            if (request.url.endsWith("/json")) {
+                try { const value = await request.json(); return new Response(JSON.stringify(value)); }
+                catch (error) { return new Response("caught:" + error, {status:400}); }
+            }
+            return new Response(request.method + ":" + await request.text(), {
+                status:202, headers:{"x-call":"" + calls, "x-input":request.headers.get("x-test"), "x-url":request.url}
+            });
+        }
+    "#, "handler.ts", &perry_wit::compiler::CompileOptions {
+        world:Some("http-server".into()), ..Default::default()
+    }).unwrap();
+    let path = scratch.0.join("incoming.wasm");
+    fs::write(&path, compiled.component.unwrap()).unwrap();
+    let host = ServingComponent::new(&path, &support::get_wasmtime_path());
+    let script = r#"
+        import assert from 'node:assert/strict';
+        const base = process.argv[1];
+        const options = (body) => ({method:'POST', headers:{'x-test':'sample'}, body, signal:AbortSignal.timeout(5000)});
+        const response = await fetch(base + '/text?test=1', options('hé😀'));
+        assert.equal(response.status, 202);
+        assert.equal(response.headers.get('x-call'), '1');
+        assert.equal(response.headers.get('x-input'), 'sample');
+        assert.equal(response.headers.get('x-url'), base + '/text?test=1');
+        assert.equal(await response.text(), 'POST:hé😀');
+        const latin1 = await fetch(base + '/text', {...options('header'), headers:{'x-test':'é'}});
+        assert.equal(latin1.headers.get('x-input'), 'é');
+        await latin1.text();
+        const bytes = new Uint8Array(131073);
+        for (let i = 0; i < bytes.length; i++) {bytes[i] = i;}
+        const binary = await fetch(base + '/binary', options(bytes));
+        assert.equal(binary.status, 201);
+        assert.equal(binary.headers.get('x-call'), '3');
+        assert.deepEqual(new Uint8Array(await binary.arrayBuffer()), bytes);
+        const valid = await fetch(base + '/json', options('{"text":"ok"}'));
+        assert.equal(await valid.text(), '{"text":"ok"}');
+        const invalid = await fetch(base + '/json', options('{'));
+        assert.equal(invalid.status, 400);
+        assert.match(await invalid.text(), /^caught:SyntaxError:/);
+        for (const path of ['/reject', '/wrong']) {
+            const failed = await fetch(base + path, options('body'));
+            assert.equal(failed.status, 500);
+            await failed.text();
+        }
+        const tooLarge = await fetch(base + '/binary', options(new Uint8Array(1048577)));
+        assert.equal(tooLarge.status, 500);
+        await tooLarge.text();
+        const recovered = await fetch(base + '/text', options('again'));
+        assert.equal(recovered.status, 202);
+        assert.equal(await recovered.text(), 'POST:again');
+        for (let i = 0; i < 30; i++) {
+            const response = await fetch(base + '/text', options('repeat'));
+            assert.equal(await response.text(), 'POST:repeat');
+        }
+    "#;
+    let output = Command::new("node")
+        .args(["--input-type=module", "-e", script])
+        .arg(format!("http://{}", host.address))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(path.with_extension("serve.log")).unwrap()
+    );
+}
+
+#[test]
+fn response_construction_preserves_bytes_and_reports_unsupported_forms() {
+    let source = r#"
+        async function report() {
+            const bytes = Uint8Array.from([7, 0, 255, 8]);
+            const response = new Response(bytes.subarray(1, -1), {status:201, headers:{"X-Test":" é "}});
+            bytes[1] = 99;
+            console.log(response.status); console.log(response.ok); console.log(response.headers.get("x-test"));
+            console.log(JSON.stringify(response)); console.log("status" in response);
+            console.log(JSON.stringify(await response.bytes()));
+            console.log(await new Response(null, {status:204}).text());
+            console.log(await new Response("hé😀").text());
+        }
+        report();
+    "#;
+    let reference = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    let output = support::run(source, None, None);
+    assert_eq!(support::stdout(&output), support::stdout(&reference));
+    let output = support::run(
+        r#"
+        const source = Uint8Array.from([7, 0, 255, 8]);
+        const response = new Response(source.subarray(1, -1), {status:201, headers:{"X-Test":"sample"}});
+        source[1] = 99;
+        console.log(response.status); console.log(response.ok); console.log(response.headers.get("x-test"));
+        console.log(JSON.stringify(response)); console.log("status" in response);
+        console.log(JSON.stringify(response.bytes()));
+        const empty = new Response(null, {status:204}); console.log(empty.text());
+        const text = new Response("hé😀"); console.log(text.text());
+        try { new Response("bad", {status:204}); } catch (error) { console.log(error); }
+        try { new Response("bad", {status:199}); } catch (error) { console.log(error); }
+        try { new Response("bad", {statusText:"reason"}); } catch (error) { console.log(error); }
+        try { new Response([1, 2]); } catch (error) { console.log(error); }
+        try { new Response(new Uint8Array(1048577)); } catch (error) { console.log(error); }
+        try { text.arrayBuffer(); } catch (error) { console.log(error); }
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "201\ntrue\nsample\n{}\ntrue\n{\"0\":0,\"1\":255}\n\nhé😀\nTypeError: Response status cannot have a body\nRangeError: Invalid Response status\nTypeError: Unsupported Response option: statusText\nTypeError: Response body must be a string or Uint8Array\nRangeError: Response body exceeds the 1048576 byte limit\nTypeError: Unsupported buffered HTTP method: arrayBuffer\n"
+    );
+}
+
+#[test]
+fn incoming_world_diagnoses_missing_and_incompatible_implementations() {
+    for (source, diagnostic) in [
+        (
+            "export function unrelated() { return 'value'; }",
+            "missing implementation 'incomingHandlerHandle'",
+        ),
+        (
+            "export function incomingHandlerHandle(request: any, extra: any) { return new Response('body'); }",
+            "must accept one Request",
+        ),
+    ] {
+        let error = perry_wit::compiler::compile_typescript(
+            source,
+            "invalid.ts",
+            &perry_wit::compiler::CompileOptions {
+                world: Some("http-server".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(diagnostic), "{error:#}");
+    }
+}
+
+#[test]
+fn incoming_resources_and_memory_stay_bounded_in_one_instance() {
+    let scratch = support::Scratch::new();
+    let compiled = perry_wit::compiler::compile_typescript(r#"
+        let saved: any = null;
+        export async function incomingHandlerHandle(request: any): Promise<any> {
+            if (request.url.endsWith("/retain")) { saved = request; }
+            if (request.url.endsWith("/saved")) { return new Response(saved.bytes(), {status:201}); }
+            if (request.url.endsWith("/release")) { saved = null; }
+            await new Promise(resolve => setTimeout(resolve, 1));
+            if (request.url.endsWith("/reject")) { throw "intentional"; }
+            if (request.url.endsWith("/pending")) { return new Promise(() => {}); }
+            return new Response(await request.bytes(), {status:201, headers:request.headers});
+        }
+    "#, "handler.ts", &perry_wit::compiler::CompileOptions {
+        world:Some("http-server".into()), ..Default::default()
+    }).unwrap();
+    let path = scratch.0.join("incoming.core.wasm");
+    fs::write(&path, compiled.core).unwrap();
+    let failed = perry_wit::compiler::compile_typescript(r#"
+        throw "initializer failed";
+        export function incomingHandlerHandle(request: any): any { return new Response("unreachable"); }
+    "#, "failed.ts", &perry_wit::compiler::CompileOptions {
+        world:Some("http-server".into()), ..Default::default()
+    }).unwrap();
+    let failed_path = scratch.0.join("failed.core.wasm");
+    fs::write(&failed_path, failed.core).unwrap();
+    let script = r#"
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const module = new WebAssembly.Module(fs.readFileSync(process.argv[1]));
+        let exports, next = 1, now = 0n, current, failRead = false, failWrite = false;
+        const resources = new Map();
+        const view = () => new DataView(exports.memory.buffer);
+        function resource(type, properties = {}) {
+            const id = next++; resources.set(id, {type, ...properties}); return id;
+        }
+        function take(id, type) {
+            assert.equal(resources.get(id)?.type, type, `ownership: ${type} ${id}`);
+            assert.ok(!Array.from(resources.values()).some(child => child.parent === id), `live child of ${type}`);
+            const value = resources.get(id); resources.delete(id); return value;
+        }
+        function result(ptr, value) {
+            view().setUint8(ptr, 0);
+            if (value !== undefined) {view().setUint32(ptr + 4, value, true);}
+        }
+        function bytes(data) {
+            const ptr = exports.cabi_realloc(0, 0, 1, data.length);
+            new Uint8Array(exports.memory.buffer, ptr, data.length).set(data);
+            return [ptr, data.length];
+        }
+        function optionalString(ptr, string) {
+            const [data, length] = bytes(new TextEncoder().encode(string));
+            view().setUint8(ptr, 1); view().setUint32(ptr + 4, data, true); view().setUint32(ptr + 8, length, true);
+        }
+        const imports = {};
+        for (const {module: namespace, name} of WebAssembly.Module.imports(module)) {
+            const host = (...args) => {
+                if (name.startsWith('[resource-drop]')) {take(args[0], name.slice('[resource-drop]'.length)); return;}
+                switch (name) {
+                    case '[method]incoming-request.method': view().setUint8(args[1], 2); return;
+                    case '[method]incoming-request.scheme': view().setUint8(args[1], 1); view().setUint8(args[1] + 4, 0); return;
+                    case '[method]incoming-request.authority': optionalString(args[1], 'fixture.test'); return;
+                    case '[method]incoming-request.path-with-query': optionalString(args[1], current.path); return;
+                    case '[method]incoming-request.headers': return resource('fields', {parent:args[0]});
+                    case '[method]fields.entries': {
+                        const list = exports.cabi_realloc(0, 0, 4, 16);
+                        const [name, nameLen] = bytes(new TextEncoder().encode('x-test'));
+                        const [value, valueLen] = bytes(new TextEncoder().encode('sample'));
+                        view().setUint32(list, name, true); view().setUint32(list + 4, nameLen, true);
+                        view().setUint32(list + 8, value, true); view().setUint32(list + 12, valueLen, true);
+                        view().setUint32(args[1], list, true); view().setUint32(args[1] + 4, 1, true); return;
+                    }
+                    case '[method]incoming-request.consume': result(args[1], resource('incoming-body', {parent:args[0]})); return;
+                    case '[method]incoming-body.stream': result(args[1], resource('input-stream', {parent:args[0], offset:0})); return;
+                    case '[method]input-stream.blocking-read': {
+                        const stream = resources.get(args[0]);
+                        if (failRead && stream.offset > 0) {
+                            view().setUint8(args[2], 1); view().setUint8(args[2] + 4, 0);
+                            view().setUint32(args[2] + 8, resource('error'), true); return;
+                        }
+                        if (stream.offset === current.input.length) {
+                            view().setUint8(args[2], 1); view().setUint8(args[2] + 4, 1); return;
+                        }
+                        const chunk = current.input.subarray(stream.offset, stream.offset + Math.min(Number(args[1]), 4096));
+                        const [data, length] = bytes(chunk);
+                        result(args[2], data); view().setUint32(args[2] + 8, length, true);
+                        stream.offset += length; return;
+                    }
+                    case 'now': return now;
+                    case 'subscribe-instant': return resource('pollable', {deadline:args[0]});
+                    case '[method]pollable.block': now = resources.get(args[0]).deadline; return;
+                    case '[static]fields.from-list': result(args[2], resource('fields')); return;
+                    case '[constructor]outgoing-response': take(args[0], 'fields'); return resource('outgoing-response');
+                    case '[method]outgoing-response.set-status-code': resources.get(args[0]).status = args[1]; result(args[2]); return;
+                    case '[method]outgoing-response.body': result(args[1], resource('outgoing-body')); return;
+                    case '[method]outgoing-body.write': result(args[1], resource('output-stream', {parent:args[0]})); return;
+                    case '[static]response-outparam.set':
+                        take(args[0], 'response-outparam');
+                        current.responded = true;
+                        current.error = args[1] !== 0;
+                        if (!current.error) {current.status = take(args[2], 'outgoing-response').status;}
+                        return;
+                    case '[method]output-stream.blocking-write-and-flush':
+                        assert.ok(current.responded, 'publish response before blocking output');
+                        if (failWrite) {
+                            view().setUint8(args[3], 1); view().setUint8(args[3] + 4, 0);
+                            view().setUint32(args[3] + 8, resource('error'), true); return;
+                        }
+                        current.chunks.push(Buffer.from(new Uint8Array(exports.memory.buffer, args[1], args[2])));
+                        result(args[3]); return;
+                    case '[static]outgoing-body.finish': take(args[0], 'outgoing-body'); current.finished = true; result(args.at(-1)); return;
+                    default: throw new Error(`unexpected host call: ${namespace} ${name} ${args}`);
+                }
+            };
+            (imports[namespace] ??= {})[name] = host;
+        }
+        exports = new WebAssembly.Instance(module, imports).exports;
+        const payload = Uint8Array.from({length:131073}, (_, index) => index);
+        function invoke(path, input = payload) {
+            current = {path, input, chunks:[], responded:false, error:false, finished:false};
+            exports['wasi:http/incoming-handler@0.2.6#handle'](resource('incoming-request'), resource('response-outparam'));
+            assert.equal(resources.size, 0, `resources remaining after ${path}: ${JSON.stringify(Array.from(resources.values()))}`);
+            assert.ok(current.responded);
+            if (!current.error && !failWrite) {
+                assert.equal(current.status, 201); assert.ok(current.finished);
+                assert.deepEqual(Buffer.concat(current.chunks), Buffer.from(input));
+            }
+            return current;
+        }
+        assert.equal(invoke('/retain').error, false);
+        assert.equal(invoke('/saved').error, false);
+        assert.equal(invoke('/release').error, false);
+        for (let i = 0; i < 20; i++) {invoke('/body');}
+        const baseline = exports.memory.buffer.byteLength;
+        for (let i = 0; i < 300; i++) {
+            const path = ['/body', '/reject', '/pending'][i % 3];
+            assert.equal(invoke(path).error, path !== '/body');
+        }
+        assert.equal(exports.memory.buffer.byteLength, baseline, 'unbounded buffered handler memory');
+        assert.equal(invoke('/body', new Uint8Array(1048576)).error, false);
+        assert.equal(invoke('/body', new Uint8Array(1048577)).error, true);
+        failRead = true; assert.equal(invoke('/body').error, true); failRead = false;
+        assert.equal(invoke('/body').error, false);
+        failWrite = true; assert.equal(invoke('/body').finished, false); failWrite = false;
+        assert.equal(invoke('/body').error, false);
+        const failedModule = new WebAssembly.Module(fs.readFileSync(process.argv[2]));
+        exports = new WebAssembly.Instance(failedModule, imports).exports;
+        assert.equal(invoke('/failed').error, true);
+        const failedBaseline = exports.memory.buffer.byteLength;
+        for (let i = 0; i < 100; i++) {assert.equal(invoke('/failed').error, true);}
+        assert.equal(exports.memory.buffer.byteLength, failedBaseline);
+    "#;
+    let output = Command::new("node")
+        .args(["-e", script])
+        .arg(path)
+        .arg(failed_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[test]
 fn binary_bodies_preserve_subviews_empty_values_and_large_transfers() {

@@ -76,34 +76,7 @@ pub(crate) fn parse_options(state: &RuntimeState, value: i64) -> Result<RequestO
                 };
             }
             "headers" => {
-                let entries: Vec<_> = match state.get_handle(value) {
-                    Some(JsHandle::Object(headers)) => headers
-                        .entries()
-                        .map(|(key, value)| (key.clone(), *value))
-                        .collect(),
-                    Some(JsHandle::Array(headers)) => headers
-                        .iter()
-                        .map(|&header| match state.get_handle(header) {
-                            Some(JsHandle::Array(pair)) if pair.len() == 2 => {
-                                if (pair[0] as u64) >> 48 != STRING_TAG {
-                                    return Err("fetch header names must be strings");
-                                }
-                                Ok((state.get_string(pair[0]), pair[1]))
-                            }
-                            _ => Err("fetch headers must contain name/value pairs"),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    _ if value as u64 == TAG_NULL => Vec::new(),
-                    _ => return Err("fetch headers must be an object or name/value pairs".into()),
-                };
-                for (name, value) in entries {
-                    if (value as u64) >> 48 != STRING_TAG {
-                        return Err("fetch header values must be strings".into());
-                    }
-                    options
-                        .headers
-                        .push((name, state.get_string(value).into_bytes()));
-                }
+                options.headers = parse_headers(state, value)?;
             }
             _ => return Err(format!("Unsupported fetch option: {key}")),
         }
@@ -112,6 +85,47 @@ pub(crate) fn parse_options(state: &RuntimeState, value: i64) -> Result<RequestO
         return Err("GET and HEAD requests cannot have a body".into());
     }
     Ok(options)
+}
+
+/// Extracts shared header inputs without creating resources or mutating guest values.
+pub(crate) fn parse_headers(
+    state: &RuntimeState,
+    value: i64,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if let Some(JsHandle::Headers(headers)) = state.get_handle(value) {
+        return Ok(headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.as_bytes().to_vec()))
+            .collect());
+    }
+    let mut headers = Vec::new();
+    let entries: Vec<_> = match state.get_handle(value) {
+        Some(JsHandle::Object(headers)) => headers
+            .entries()
+            .map(|(key, value)| (key.clone(), *value))
+            .collect(),
+        Some(JsHandle::Array(headers)) => headers
+            .iter()
+            .map(|&header| match state.get_handle(header) {
+                Some(JsHandle::Array(pair)) if pair.len() == 2 => {
+                    if (pair[0] as u64) >> 48 != STRING_TAG {
+                        return Err("fetch header names must be strings");
+                    }
+                    Ok((state.get_string(pair[0]), pair[1]))
+                }
+                _ => Err("fetch headers must contain name/value pairs"),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ if value as u64 == TAG_NULL => Vec::new(),
+        _ => return Err("fetch headers must be an object or name/value pairs".into()),
+    };
+    for (name, value) in entries {
+        if (value as u64) >> 48 != STRING_TAG {
+            return Err("fetch header values must be strings".into());
+        }
+        headers.push((name, state.get_string(value).into_bytes()));
+    }
+    Ok(headers)
 }
 
 pub(crate) fn valid_token(value: &str) -> bool {

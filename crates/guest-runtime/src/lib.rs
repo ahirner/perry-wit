@@ -5,7 +5,7 @@
 mod bindings {
     wit_bindgen::generate!({
         path: "../../wit",
-        world: "runtime-adapter",
+        world: "http-server",
         generate_all,
     });
 }
@@ -22,6 +22,7 @@ mod equality;
 mod filesystem;
 mod headers;
 mod http;
+mod http_handler;
 mod http_options;
 mod http_url;
 mod io;

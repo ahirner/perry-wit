@@ -7,6 +7,52 @@ use std::process::Command;
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
 #[test]
+fn incoming_handler_contract_accepts_request_response_and_async_results() {
+    let temp_dir = std::env::temp_dir().join(format!("perry-sdk-incoming-{}", std::process::id()));
+    fs::create_dir_all(temp_dir.join("src")).unwrap();
+    generate_sdk_files(&SdkOptions {
+        wit_dir: PathBuf::from("wit"),
+        world: Some("http-server".into()),
+        out_dir: temp_dir.join(".perry/types"),
+        project_root: Some(temp_dir.clone()),
+        entry: PathBuf::from("src/index.ts"),
+    })
+    .unwrap();
+    for (source, succeeds) in [
+        (
+            "export async function incomingHandlerHandle(request: Request): Promise<Response> { return new Response(await request.text()); }",
+            true,
+        ),
+        (
+            "export function incomingHandlerHandle(request: Request): Response { return new Response(request.method); }",
+            true,
+        ),
+        (
+            "export async function incomingHandlerHandle(request: Request): Promise<string> { return request.method; }",
+            false,
+        ),
+        (
+            "export function incomingHandlerHandle(request: number): Response { return new Response('wrong'); }",
+            false,
+        ),
+    ] {
+        fs::write(temp_dir.join("src/index.ts"), source).unwrap();
+        let output = Command::new("tsc")
+            .arg("--noEmit")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            succeeds,
+            "{source}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[test]
 fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
     let temp_dir = std::env::temp_dir().join(format!("perry-sdk-async-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_dir);

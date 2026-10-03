@@ -177,6 +177,27 @@ pub fn synthesize_trampolines(
     perry_raw_ids.sort_unstable();
 
     let mut mapped_functions = Vec::new();
+    let mapped_handler = wit_exports
+        .incoming_handler
+        .as_ref()
+        .map(|handler| {
+            let (_, id) = hir_exported_functions
+                .iter()
+                .find(|(name, _)| {
+                    matches_export_name(
+                        name,
+                        &crate::abi::to_kebab_case(&handler.implementation_name),
+                    )
+                })
+                .with_context(|| {
+                    format!(
+                        "missing implementation '{}' for WIT export '{}'",
+                        handler.implementation_name, handler.core_name
+                    )
+                })?;
+            compiled_function(*id, hir_functions, &perry_raw_ids, &discovered)
+        })
+        .transpose()?;
 
     for wit_fn in &wit_exports.functions {
         let bare_is_unique = wit_exports
@@ -208,20 +229,7 @@ pub fn synthesize_trampolines(
                     wit_fn.implementation_name, wit_fn.core_name
                 )
             })?;
-        let pos = hir_functions
-            .iter()
-            .filter(|function| !function.is_async)
-            .position(|function| function.id == *fid)
-            .with_context(|| {
-                format!(
-                    "export '{}' must have a synchronous implementation",
-                    wit_fn.core_name
-                )
-            })?;
-        let raw_id = perry_raw_ids
-            .get(1 + pos)
-            .context("missing compiled function")?;
-        let wasm_func_index = discovered.user_functions[&format!("__wasm_func_{raw_id}")];
+        let wasm_func_index = compiled_function(*fid, hir_functions, &perry_raw_ids, &discovered)?;
         mapped_functions.push(MappedExportFunction {
             ts_name: ts_name.clone(),
             wit_function: wit_fn.clone(),
@@ -275,13 +283,18 @@ pub fn synthesize_trampolines(
         .start_func
         .map(|idx| idx.to_string())
         .unwrap_or_else(|| "_start".to_string());
+    let failed_init_check = if mapped_handler.is_some() {
+        "global.get $perry_init_guard\n    i32.const -1\n    i32.eq\n    if\n      unreachable\n    end\n    "
+    } else {
+        ""
+    };
 
     write!(
         snippets,
         r#"
   (global $perry_init_guard (mut i32) (i32.const 0))
   (func $perry_ensure_init
-    global.get $perry_init_guard
+    {failed_init_check}global.get $perry_init_guard
     i32.eqz
     if
       call {start_func_ref}
@@ -355,6 +368,9 @@ pub fn synthesize_trampolines(
     } else {
         ""
     };
+    if let Some(target) = mapped_handler {
+        super::http_handler::append_bridge(&mut snippets, &discovered, target)?;
+    }
 
     // Synthesize CLI entry if world expects it
     if wit_exports.has_cli_command {
@@ -540,6 +556,30 @@ pub fn synthesize_trampolines(
 
     wat.insert_str(last_paren, &snippets);
 
-    wat::parse_str(&wat)
-        .map_err(|e| anyhow::anyhow!("Failed to re-parse wat with Canonical ABI trampolines: {e}"))
+    let bytes = wat::parse_str(&wat).map_err(|e| {
+        anyhow::anyhow!("Failed to re-parse wat with Canonical ABI trampolines: {e}")
+    })?;
+    if mapped_handler.is_some() {
+        super::http_handler::connect_bridge(&bytes)
+    } else {
+        Ok(bytes)
+    }
+}
+
+/// Resolves Perry's compiled function order after async functions have been lowered.
+fn compiled_function(
+    id: u32,
+    functions: &[perry_hir::ir::Function],
+    raw_ids: &[u32],
+    exports: &DiscoveredExports,
+) -> Result<u32> {
+    let position = functions
+        .iter()
+        .filter(|function| !function.is_async)
+        .position(|function| function.id == id)
+        .context("export has no lowered guest implementation")?;
+    let raw_id = raw_ids
+        .get(1 + position)
+        .context("missing compiled function")?;
+    Ok(exports.user_functions[&format!("__wasm_func_{raw_id}")])
 }

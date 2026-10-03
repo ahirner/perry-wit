@@ -39,6 +39,14 @@ pub struct WitWorldExports {
     pub world_name: String,
     pub has_cli_command: bool,
     pub functions: Vec<ExportedWitFunction>,
+    pub incoming_handler: Option<HttpHandlerExport>,
+}
+
+/// The resource ABI stays in generated Rust bindings; TypeScript receives a buffered Request.
+#[derive(Debug, Clone)]
+pub struct HttpHandlerExport {
+    pub core_name: String,
+    pub implementation_name: String,
 }
 
 /// Resolves WIT files from `wit_dir` and extracts export definitions for `world_name`.
@@ -58,6 +66,7 @@ pub fn extract_from_world(resolve: &Resolve, world_id: WorldId) -> Result<WitWor
 
     let mut has_cli_command = false;
     let mut functions = Vec::new();
+    let mut incoming_handler = None;
 
     for (key, item) in &world.exports {
         match item {
@@ -66,6 +75,24 @@ pub fn extract_from_world(resolve: &Resolve, world_id: WorldId) -> Result<WitWor
             }
             WorldItem::Interface { id, .. } => {
                 let iface = &resolve.interfaces[*id];
+                if super::export_names::is_incoming_handler(resolve, *id) {
+                    let function = iface
+                        .functions
+                        .get("handle")
+                        .context("missing HTTP handle function")?;
+                    let core_name = super::export_names::core_export_name(resolve, key, function);
+                    anyhow::ensure!(
+                        core_name == "wasi:http/incoming-handler@0.2.6#handle",
+                        "incoming handlers require the unaliased wasi:http/incoming-handler@0.2.6 interface"
+                    );
+                    incoming_handler = Some(HttpHandlerExport {
+                        core_name,
+                        implementation_name: super::export_names::interface_implementation_name(
+                            resolve, world, key, function,
+                        ),
+                    });
+                    continue;
+                }
                 let mut is_wasi_cli = false;
                 if let Some(pkg_id) = iface.package {
                     let pkg = &resolve.packages[pkg_id];
@@ -112,6 +139,7 @@ pub fn extract_from_world(resolve: &Resolve, world_id: WorldId) -> Result<WitWor
         world_name,
         has_cli_command,
         functions,
+        incoming_handler,
     })
 }
 

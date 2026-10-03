@@ -28,6 +28,11 @@ world task-runner {
   export run-task: func(input: string) -> string;
 }
 
+world http-server {
+  include runtime-adapter;
+  export wasi:http/incoming-handler@0.2.6;
+}
+
 world merge-task {
   include runtime-adapter;
 
