@@ -1,10 +1,127 @@
 //! Integration tests for repeated task invocations, value lifetimes, and bounded memory (Item E.1).
 
+#[expect(
+    dead_code,
+    reason = "This suite shares scratch storage and stdout checks, but has its own host runners."
+)]
+mod support;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 use perry_wit::compiler::{CompileOptions, compile_typescript};
+
+#[test]
+fn retained_callback_graphs_survive_calls_and_release_on_success_and_failure() {
+    let scratch = support::Scratch::new();
+    let source = r#"
+        let callback: any = null;
+        export function retain(input: string): string {
+            const owner: any = {text: input, bytes: Uint8Array.from([17, 128, 255])};
+            const next = (suffix: string): string => {
+                if (suffix === "fail") { throw owner.text; }
+                return owner.text + ":" + suffix + ":" + owner.bytes[1];
+            };
+            owner.callback = next;
+            owner.self = owner;
+            callback = next;
+            return "retained";
+        }
+        export function invoke(input: string): any {
+            if (callback === null) { return {ok: false, error: "empty"}; }
+            try {
+                const current = callback;
+                return {ok: true, value: current(input)};
+            } catch (error) { return {ok: false, error}; }
+        }
+        export function release(): string {
+            callback = null;
+            return "released";
+        }
+        export function scenario(input: string): string {
+            retain(input);
+            const current = callback;
+            const value = current("component");
+            release();
+            return value;
+        }
+    "#;
+    let artifacts = scratch.compile_artifacts(
+        source,
+        Some(
+            r#"
+        package test:callbacks;
+        world test {
+            import wasi:cli/stdout@0.2.6;
+            import wasi:cli/stderr@0.2.6;
+            import wasi:cli/exit@0.2.6;
+            import wasi:io/poll@0.2.6;
+            import wasi:io/streams@0.2.6;
+            export retain: func(value: string) -> string;
+            export invoke: func(value: string) -> result<string, string>;
+            export release: func() -> string;
+            export scenario: func(value: string) -> string;
+        }
+    "#,
+        ),
+    );
+    let core = scratch.0.join("core.wasm");
+    fs::write(&core, artifacts.core).unwrap();
+    let output = Command::new("node").arg("--eval").arg(r#"
+        const assert = require('node:assert/strict');
+        const bytes = require('node:fs').readFileSync(process.argv[1]);
+        const module_ = new WebAssembly.Module(bytes);
+        const imports = {};
+        for (const {module, name} of WebAssembly.Module.imports(module_)) {
+            (imports[module] ??= {})[name] = () => { throw Error(`unexpected host call ${module}.${name}`); };
+        }
+        const e = new WebAssembly.Instance(module_, imports).exports;
+        function call(name, input, post = true) {
+            const bytes = input === undefined ? null : new TextEncoder().encode(input);
+            const ptr = bytes ? e.cabi_realloc(0, 0, 1, bytes.length) : 0;
+            if (bytes) { new Uint8Array(e.memory.buffer, ptr, bytes.length).set(bytes); }
+            const ret = bytes ? e[name](ptr, bytes.length) : e[name]();
+            if (bytes) { e.cabi_realloc(ptr, bytes.length, 1, 0); }
+            const result = name === 'invoke';
+            const words = new Uint32Array(e.memory.buffer, ret, result ? 3 : 2);
+            const offset = result ? 1 : 0;
+            const value = new TextDecoder().decode(new Uint8Array(e.memory.buffer, words[offset], words[offset + 1]));
+            const error = result && words[0] === 1;
+            if (post) { e[`cabi_post_${name}`](ret); }
+            return result ? {error, value} : value;
+        }
+        function cycle(index) {
+            const captured = `capture-${index}:` + 'retained😀'.repeat(100);
+            assert.equal(call('retain', captured, index % 7 !== 0), 'retained');
+            for (let invocation = 0; invocation < 4; invocation++) {
+                assert.deepEqual(call('invoke', 'success', invocation % 3 !== 0), {error: false, value: captured + ':success:128'});
+            }
+            assert.deepEqual(call('invoke', 'fail'), {error: true, value: captured});
+            assert.deepEqual(call('invoke', 'recovered'), {error: false, value: captured + ':recovered:128'});
+            assert.equal(call('release'), 'released');
+            assert.deepEqual(call('invoke', 'after-release'), {error: true, value: 'empty'});
+        }
+        for (let index = 0; index < 100; index++) { cycle(index); }
+        const memory = e.memory.buffer.byteLength;
+        for (let index = 0; index < 1000; index++) { cycle(index); }
+        assert.equal(e.memory.buffer.byteLength, memory, 'Callback/capture cycles must stop growing after warm-up');
+    "#).arg(&core).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let component = scratch.0.join("component.wasm");
+    fs::write(&component, artifacts.component.unwrap()).unwrap();
+    let output = get_wasmtime_cmd()
+        .args(["run", "-C", "cache=n", "--invoke", "scenario(\"guest\")"])
+        .arg(component)
+        .output()
+        .unwrap();
+    assert_eq!(support::stdout(&output).trim(), "\"guest:component:128\"");
+}
 
 fn get_wasmtime_cmd() -> Command {
     if let Ok(path) = std::env::var("WASMTIME") {

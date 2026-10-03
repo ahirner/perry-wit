@@ -12,6 +12,7 @@ mod bindings {
 
 mod buffer;
 mod cabi;
+mod callbacks;
 mod clocks;
 mod date;
 mod dispatch;

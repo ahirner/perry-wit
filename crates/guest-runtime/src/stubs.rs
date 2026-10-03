@@ -150,6 +150,7 @@ pub(crate) extern "C" fn js_typeof(val: i64) -> i64 {
             Some(JsHandle::Response { .. } | JsHandle::Headers(_)) => "object",
             Some(JsHandle::Date(_)) => "object",
             Some(JsHandle::Null) => "object",
+            Some(JsHandle::Closure(_)) => "function",
             None => "undefined",
         }
     } else {
@@ -392,34 +393,6 @@ pub(crate) extern "C" fn math_log2(_a: i64) -> i64 {
 }
 #[no_mangle]
 pub(crate) extern "C" fn math_log10(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn closure_new(_a: i64, _b: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn closure_set_capture(_a: i64, _b: i64, _c: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn closure_call_0(_a: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn closure_call_1(_a: i64, _b: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn closure_call_2(_a: i64, _b: i64, _c: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn closure_call_3(_a: i64, _b: i64, _c: i64, _d: i64) -> i64 {
-    0
-}
-#[no_mangle]
-pub(crate) extern "C" fn closure_call_spread(_a: i64, _b: i64) -> i64 {
     0
 }
 #[no_mangle]

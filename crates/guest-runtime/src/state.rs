@@ -15,6 +15,7 @@ pub(crate) enum JsHandle {
     Headers(Vec<(String, String)>),
     Date(f64),
     Uint8Array(crate::buffer::Uint8ArrayView),
+    Closure(crate::callbacks::Closure),
 }
 
 pub(crate) struct RuntimeState {
@@ -123,6 +124,9 @@ impl RuntimeState {
                     self.reachable_handles[id] = true;
                     if let Some(handle) = self.handles.get(id) {
                         match handle {
+                            JsHandle::Closure(closure) => {
+                                self.worklist.extend_from_slice(&closure.captures);
+                            }
                             JsHandle::Array(arr) => {
                                 for &item in arr {
                                     self.worklist.push(item);
@@ -515,6 +519,7 @@ impl RuntimeState {
                     JsHandle::Response { .. } => "[Response]".to_string(),
                     JsHandle::Headers(_) => "[object Headers]".to_string(),
                     JsHandle::Null => "null".to_string(),
+                    JsHandle::Closure(_) => "[function]".to_string(),
                     JsHandle::Date(ts) => {
                         crate::date::format_iso(*ts).unwrap_or_else(|| "Invalid Date".to_string())
                     }

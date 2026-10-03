@@ -130,7 +130,7 @@ fn class_bodies_contribute_runtime_capabilities() {
             let source = format!("class Capability {{ {} }}", member.replace("OP", operation));
             let ast = perry_parser::parse_typescript(&source, "class.ts").unwrap();
             let mut hir = perry_hir::lower_module(&ast, "main", "class.ts").unwrap();
-            rewrites::rewrite_program(&mut hir);
+            rewrites::rewrite_program(&mut hir).unwrap();
             assert!(
                 hir.init.iter().any(|statement| matches!(statement,
                     perry_hir::ir::Stmt::Expr(perry_hir::ir::Expr::String(value)) if value == marker
@@ -187,7 +187,7 @@ fn compatibility_rewrites_visit_nested_statement_bodies_and_conditions() {
     let ast = perry_parser::parse_typescript(source, "nested.ts").unwrap();
     let mut hir = perry_hir::lower_module(&ast, "main", "nested.ts").unwrap();
     assert!(format!("{hir:?}").contains("JsonStringifyFull"));
-    rewrites::rewrite_program(&mut hir);
+    rewrites::rewrite_program(&mut hir).unwrap();
     assert!(!format!("{hir:?}").contains("JsonStringifyFull"));
 
     let output = support::run(

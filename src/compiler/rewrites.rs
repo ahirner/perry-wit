@@ -2,7 +2,7 @@
 
 use perry_hir::ir::{Expr, Stmt};
 
-pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
+pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) -> anyhow::Result<()> {
     // Perry emits these dispatcher calls but omits their names from its string pool.
     for name in ["js_loose_eq", "string_char_at", "string_char_code_at"] {
         program.init.push(Stmt::Expr(Expr::String(name.into())));
@@ -28,6 +28,17 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
         needs_random: false,
         needs_env: false,
         needs_fs: false,
+        callback_error: None,
+        callback_depth: 0,
+        current_function: None,
+        function_values: Vec::new(),
+        unsupported_function_values: program
+            .functions
+            .iter()
+            .filter_map(|function| {
+                unsupported_function_value(function).map(|reason| (function.id, reason))
+            })
+            .collect(),
     };
     for stmt in &mut program.init {
         rewriter.rewrite_stmt(stmt);
@@ -68,6 +79,14 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
         if let Some(parent) = &mut class.extends_expr {
             rewriter.rewrite_expr(parent);
         }
+    }
+    if let Some(error) = rewriter.callback_error.or_else(|| {
+        rewriter
+            .function_values
+            .iter()
+            .find_map(|id| rewriter.unsupported_function_values.get(id).copied())
+    }) {
+        anyhow::bail!(error);
     }
     if rewriter.needs_clocks {
         program
@@ -134,6 +153,7 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) {
                 )));
         }
     }
+    Ok(())
 }
 
 struct Rewriter {
@@ -143,11 +163,17 @@ struct Rewriter {
     needs_random: bool,
     needs_env: bool,
     needs_fs: bool,
+    callback_error: Option<&'static str>,
+    callback_depth: usize,
+    current_function: Option<perry_hir::types::FuncId>,
+    function_values: Vec<perry_hir::types::FuncId>,
+    unsupported_function_values: std::collections::HashMap<perry_hir::types::FuncId, &'static str>,
 }
 
 impl Rewriter {
     /// Rewrites a callable's defaults and body before selecting its capabilities.
     fn rewrite_function(&mut self, function: &mut perry_hir::ir::Function) {
+        let enclosing_function = self.current_function.replace(function.id);
         for parameter in &mut function.params {
             if let Some(default) = &mut parameter.default {
                 self.rewrite_expr(default);
@@ -156,6 +182,7 @@ impl Rewriter {
         for statement in &mut function.body {
             self.rewrite_stmt(statement);
         }
+        self.current_function = enclosing_function;
     }
 
     fn rewrite_stmt(&mut self, stmt: &mut perry_hir::ir::Stmt) {
@@ -777,13 +804,97 @@ impl Rewriter {
 
     fn rewrite_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
         self.rewrite_current_expr(expr);
+        if self.callback_depth > 0 && matches!(expr, Expr::This | Expr::NewTarget) {
+            self.callback_error = self.callback_error.or(Some(
+                "Guest function values using this or new.target are not supported yet",
+            ));
+        }
+        if matches!(expr, Expr::This | Expr::NewTarget)
+            && let Some(id) = self.current_function
+        {
+            self.unsupported_function_values.insert(
+                id,
+                "Guest function values using this or new.target are not supported yet",
+            );
+        }
+        if matches!(expr, Expr::CallSpread { .. }) {
+            self.callback_error = self.callback_error.or(Some(
+                "Guest function calls with spread arguments are not supported yet",
+            ));
+        }
+        if let Expr::FuncRef(id) = expr {
+            self.function_values.push(*id);
+        }
+        if let Expr::Call { callee, args, .. } = expr
+            && matches!(
+                callee.as_ref(),
+                Expr::FuncRef(_) | Expr::ExternFuncRef { .. }
+            )
+        {
+            for argument in args {
+                self.rewrite_expr(argument);
+            }
+            return;
+        }
+        if let Expr::Call { callee, args, .. } = expr
+            && !matches!(
+                callee.as_ref(),
+                Expr::FuncRef(_) | Expr::ExternFuncRef { .. } | Expr::PropertyGet { .. }
+            )
+        {
+            let callback = std::mem::replace(callee.as_mut(), Expr::Undefined);
+            let arguments = Expr::Array(std::mem::take(args));
+            *expr = runtime_method_call("closure_call_spread", vec![callback, arguments]);
+        }
+        if let Expr::Closure {
+            mutable_captures,
+            captures_this,
+            captures_new_target,
+            is_async,
+            is_generator,
+            params,
+            ..
+        } = expr
+        {
+            self.callback_error = self.callback_error.or(if !mutable_captures.is_empty() {
+                Some("Guest closures with shared mutable captures are not supported yet")
+            } else if *captures_this || *captures_new_target {
+                Some("Guest closures capturing this or new.target are not supported yet")
+            } else if *is_async || *is_generator {
+                Some("Async and generator guest closures are not supported yet")
+            } else if unsupported_callback_parameters(params) {
+                Some("Guest closures with rest, default, or arguments parameters are not supported yet")
+            } else { None });
+        }
         if let perry_hir::ir::Expr::Closure { body, .. } = expr {
+            self.callback_depth += 1;
             for stmt in body {
                 self.rewrite_stmt(stmt);
             }
+            self.callback_depth -= 1;
         }
         perry_hir::walker::walk_expr_children_mut(expr, &mut |expr| self.rewrite_expr(expr));
     }
+}
+
+fn unsupported_function_value(function: &perry_hir::ir::Function) -> Option<&'static str> {
+    if function.is_async || function.is_generator {
+        Some("Async and generator guest function values are not supported yet")
+    } else if unsupported_callback_parameters(&function.params) {
+        Some(
+            "Guest function values with rest, default, or arguments parameters are not supported yet",
+        )
+    } else if !function.captures.is_empty() {
+        Some("Named guest function values with captures are not supported yet")
+    } else {
+        None
+    }
+}
+
+fn unsupported_callback_parameters(params: &[perry_hir::ir::Param]) -> bool {
+    params
+        .iter()
+        .any(|param| param.is_rest || param.default.is_some() || param.arguments_object.is_some())
 }
 
 /// Preserves exception-region boundaries through Perry's memory-call emission.

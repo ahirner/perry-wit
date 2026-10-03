@@ -73,7 +73,7 @@ pub fn compile_typescript_raw(
     let mut hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
 
-    rewrites::rewrite_program(&mut hir);
+    rewrites::rewrite_program(&mut hir)?;
 
     let exported_functions = hir.exported_functions.clone();
     let functions = hir.functions.clone();

@@ -333,6 +333,13 @@ fn bridge_events(
             Some(
                 "date_to_iso_string"
                 | "json_stringify"
+                | "closure_new"
+                | "closure_set_capture"
+                | "closure_call_0"
+                | "closure_call_1"
+                | "closure_call_2"
+                | "closure_call_3"
+                | "closure_call_spread"
                 | "uint8array_new"
                 | "buffer_alloc"
                 | "$$cryptoFillRandom"

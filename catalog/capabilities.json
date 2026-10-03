@@ -21,6 +21,30 @@
   ],
   "capabilities": [
     {
+      "id": "web.guest_callbacks",
+      "name": "Guest Function Values",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "Calling synchronous guest function values with retained lexical captures",
+      "invariants": [
+        "Calls arrow/function expressions and aliases of named functions through the TypeScript table while preserving Rust's separate table",
+        "Evaluates the callee and arguments once in source order, pads missing parameters with undefined, and evaluates excess arguments",
+        "Captured strings, objects, and byte views retain identity and remain alive when a callback survives across invocations",
+        "Captured object mutation is visible to callbacks; released callback graphs, including cycles, are reclaimed at invocation cleanup",
+        "Guest callback exceptions propagate to surrounding try/catch blocks"
+      ],
+      "differences": [
+        "Shared mutable lexical captures, this/new.target, async/generator function values, and rest/default/arguments parameters report compiler diagnostics",
+        "Named function values with captures and calls with spread arguments report compiler diagnostics",
+        "Function values use ordinary value references; timer scheduling, callback cancellation, bound functions, and array callback methods remain separate work",
+        "Guest callbacks do not change WIT export types; SDK declarations continue to describe selected WIT contracts"
+      ],
+      "conformance": [
+        "tests/runtime_regression_test.rs",
+        "tests/repeated_task_calls_test.rs"
+      ]
+    },
+    {
       "id": "web.object_spread",
       "name": "Object Spread Operator",
       "tier": "tier-1-web-primaries",

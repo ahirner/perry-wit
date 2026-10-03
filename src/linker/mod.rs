@@ -5,6 +5,7 @@
 //! directly to guest runtime exports, unifying memory, remapping function/type/global/table
 //! indices, and combining data segments.
 
+mod callbacks;
 mod prune;
 mod remap;
 pub(crate) mod sections;
@@ -106,7 +107,16 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
         resolved_imports_a.push(b_func_idx);
     }
 
-    let plan = compute_pruning_plan(&a, &b, &resolved_imports_a)?;
+    let callback_bridge = callbacks::CallbackBridge::discover(&b)?;
+    let callback_dependencies = callback_bridge.as_ref().map(|bridge| bridge.dependencies());
+    let plan = compute_pruning_plan(
+        &a,
+        &b,
+        &resolved_imports_a,
+        callback_dependencies
+            .as_ref()
+            .map_or(&[], |roots| roots.as_slice()),
+    )?;
     let func_map_a = plan.func_map_a;
     let func_map_b = plan.func_map_b;
 
@@ -337,6 +347,12 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     };
     for (j, &opt_new_idx) in plan.b_def_old_to_new.iter().enumerate() {
         if opt_new_idx.is_some() {
+            if let Some(bridge) = &callback_bridge
+                && j + b.wasi_imports.len() == bridge.invoke as usize
+            {
+                code_sec.function(&bridge.synthesize(&a, &func_map_b, &type_map_a)?);
+                continue;
+            }
             let body = &b.bodies[j];
             let mut func = re_b
                 .new_function_with_parsed_locals(body)

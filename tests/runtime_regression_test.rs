@@ -4,6 +4,124 @@ use std::process::Command;
 use support::{run, stdout};
 
 #[test]
+fn guest_function_values_and_captures_match_node() {
+    let source = r#"
+        const identity = value => value;
+        console.log(identity("identity"));
+        console.log(typeof identity);
+        function named(a, b, c, d) { return [a, b, c, d].join("|"); }
+        const alias = named;
+        console.log(alias(1, 2, 3, 4));
+        console.log(alias("missing"));
+        console.log(alias(1, 2, 3, 4, 5));
+        function create(prefix) {
+            const object = {value: "before"};
+            const callback = suffix => prefix + object.value + suffix;
+            object.value = "after";
+            return callback;
+        }
+        const captured = create("capture:");
+        console.log(captured("!"));
+        let evaluations = "";
+        function argument(label) { evaluations += label; return label; }
+        console.log(alias(argument("a"), argument("b"), argument("c"), argument("d")));
+        console.log(evaluations);
+        function nested(callback, value) { return callback(value); }
+        console.log(nested(identity, "nested"));
+        evaluations = "";
+        function factory() { evaluations += "callee;"; return identity; }
+        console.log(factory()(argument("argument;")));
+        console.log(evaluations);
+        const noResult = value => { console.log(value); };
+        console.log(noResult("void"));
+        function namedVoid(value) { console.log(value); }
+        const voidAlias = namedVoid;
+        console.log(voidAlias("named-void"));
+    "#;
+    let expected = Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    let actual = run(source, None, None);
+    assert!(
+        actual.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&actual.stdout),
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(stdout(&actual), stdout(&expected));
+}
+
+#[test]
+fn callback_exceptions_unwind_to_guest_catches() {
+    let source = r#"
+        const fail = value => { throw value; };
+        function invoke(callback) { return callback("failed"); }
+        try { invoke(fail); console.log("unreachable"); }
+        catch (error) { console.log(error); }
+        const notCallable: any = 42;
+        try { notCallable("ignored"); console.log("unreachable"); }
+        catch (error) { console.log(error); }
+        const identity = value => value;
+        console.log(identity("recovered"));
+    "#;
+    assert_eq!(
+        stdout(&run(source, None, None)),
+        "failed\nTypeError: Value is not a callable guest function\nrecovered\n"
+    );
+}
+
+#[test]
+fn unsupported_closure_forms_report_compiler_diagnostics() {
+    for (source, message) in [
+        (
+            "function create() { let count = 0; return () => ++count; } create();",
+            "shared mutable captures",
+        ),
+        (
+            "const callback = (value = 1) => value; callback();",
+            "rest, default, or arguments parameters",
+        ),
+        (
+            "const callback = (...values) => values.length; callback();",
+            "rest, default, or arguments parameters",
+        ),
+        (
+            "const callback = async value => value; callback(1);",
+            "Async and generator",
+        ),
+        (
+            "class Owner { value = 1; create() { return () => this.value; } }",
+            "capturing this or new.target",
+        ),
+        (
+            "const callback = function() { return this.value; }; callback();",
+            "using this or new.target",
+        ),
+        (
+            "function named() { return this.value; } const alias = named; alias();",
+            "using this or new.target",
+        ),
+        (
+            "function named(value = 1) { return value; } const alias = named; alias();",
+            "rest, default, or arguments parameters",
+        ),
+        (
+            "function named(...values) { return values.length; } const alias = named; alias();",
+            "rest, default, or arguments parameters",
+        ),
+        (
+            "const callback = value => value; callback(...[1]);",
+            "spread arguments",
+        ),
+    ] {
+        let error = perry_wit::compiler::compile_typescript_raw(source, "unsupported-callback.ts")
+            .unwrap_err();
+        assert!(error.to_string().contains(message), "{source}: {error}");
+    }
+}
+
+#[test]
 fn string_search_and_array_join_preserve_surrogate_units() {
     let source = r#"
         const emoji = "😀";

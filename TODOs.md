@@ -32,7 +32,7 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ## Verification Baseline (2026-10-03)
 
-- `nix develop -c cargo test --package perry-wit`: 120 tests passed, including 19 filesystem tests and 7 HTTP regression tests. HTTP and conformance suites use local socket fixtures.
+- `nix develop -c cargo test --locked --package perry-wit`: 143 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
 - The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
 - Scoped formatting passed. Project Clippy checks completed with existing warnings. Parent `make format-rs` / `make lint-rs` targets cannot run here because they require rustup's `+nightly` handling and the separate `monty-bench` workspace; the pinned Nix checks are the applicable checks for this workspace.
 - SDK generation describes selected WIT contracts, not ambient JavaScript/Node API compatibility. These runtime slices do not change WIT export types; supported API subsets and limits belong in the capability catalog and tests.
@@ -50,15 +50,23 @@ A custom host generator is deferred until an integration demonstrates missing re
 
 ### Item B: Guest Callbacks & Async Execution
 
-`JsHandle` currently has no closure representation, and `mem_call` has no closure creation/invocation path.
-The linker places TypeScript callbacks in table 0 and Rust indirect calls in table 1.
+`JsHandle::Closure` retains raw captured values, and the runtime creates and invokes synchronous guest function values.
+The linker generates typed callback calls into TypeScript table 0 while Rust indirect calls remain in table 1.
+Read-only lexical captures can retain mutable objects/views; shared mutable bindings and other unsupported function forms currently produce diagnostics.
 The pinned Perry backend can emit named async functions as unresolved `rt:__async_<name>` imports, while trampoline mapping excludes async functions.
 Existing HTTP polling does not establish general guest async execution.
 
 - [ ] **B.1. Guest Callback Execution** — Develop retained capture lifetimes with E.2.
-    - [ ] Make guest function values callable through a path that respects the linker's TypeScript/Rust table separation; select the bridge to match the emitted callback ABI.
+    - [x] Make guest function values callable through a path that respects the linker's TypeScript/Rust table separation; select the bridge to match the emitted callback ABI.
     - [ ] Support the captures needed by the first consumer, including their lifetime beyond the creating call; diagnose unsupported closure forms.
-    - [ ] Verify an identity callback returns its argument, a captured value survives delayed invocation, and repeated creation/invocation/release has bounded memory. Cover shared mutable captures if they are exposed.
+    - [x] Verify an identity callback returns its argument, a captured value survives delayed invocation, and repeated creation/invocation/release has bounded memory. Cover shared mutable captures if they are exposed.
+
+Verification so far:
+
+- `runtime_regression_test` compares callback values, named aliases, missing/excess parameters, evaluation order, nested invocation, and void returns with Node; it also tests exception propagation and unsupported-form diagnostics.
+- `retained_callback_graphs_survive_calls_and_release_on_success_and_failure` exercises 1,000 retained/released callback cycles after warm-up, including captured strings/views, object/closure cycles, recoverable throws, and skipped post-return; linear memory stays at its warmed high-water mark. The same callback path runs through a Wasmtime component export.
+- B.1 remains open for the first scheduled callback consumer and its capture needs; shared mutable bindings are currently rejected. E.2 still needs the consumer's stale-handle protection and cancellation behavior where exposed.
+
 - [ ] **B.2. Guest Async Execution** — Needs retained suspended state from E.2; use B.1 where the chosen lowering invokes guest callbacks.
     - [ ] Reproduce the named async export failure with a minimal `async runTask`, then make its body compile, link, and execute in the guest. Choose a backend change or upgrade based on that probe.
     - [ ] Support suspension, resumption, and rejection for the first task's `async`/`await` subset, reusing existing HTTP polling where practical.
@@ -91,7 +99,7 @@ Verification:
 - Dedicated indirect table fixture `table_indirect_calls_preserve_runtime_functions_and_imports` in `tests/linker_test.rs` validates indirect `call_indirect` function table dispatch across merged modules.
 - `exported_json_task_prunes_http_and_runs_without_http_bindings` in `tests/pruning_test.rs` proves pure JSON tasks completely prune `wasi:http`, `wasi:clocks`, `wasi:filesystem`, and `wasi:random` from the component and run successfully under wasmtime without `-S http=y` or `-S inherit-network=y`.
 - `http_task_retains_http_and_verifies_abi_marshalling_and_cleanup` in `tests/pruning_test.rs` validates `cabi_realloc` host allocation, `result<string, string>` return marshalling, `cabi_post_run-task` cleanup, retained `wasi:http` imports in WAT, and live HTTP request execution against a local HTTP test fixture.
-- Recorded component and core wasm sizes (`record_pruning_and_component_sizes` in `tests/pruning_test.rs`):
+- Component and core wasm sizes recorded at C.2 closure (`record_pruning_and_component_sizes` in `tests/pruning_test.rs`):
   - Pure JSON Task: raw TS wasm: 9,787 B; guest runtime: 255,991 B; unlinked total: 265,778 B; pruned merged core: 172,400 B (64.9% of unlinked, 93,378 B pruned); final stripped component: 173,533 B.
   - HTTP Task: raw TS wasm: 9,809 B; guest runtime: 255,991 B; unlinked total: 265,800 B; pruned merged core: 215,280 B (81.0% of unlinked, 50,520 B pruned); final stripped component: 226,883 B.
   - The pure task stripped component is 53,350 B smaller than the HTTP task component, confirming dead HTTP runtime logic is pruned.
@@ -108,7 +116,7 @@ Construction, indexed access, and subarrays serve random fills and filesystem by
 
 Verification:
 
-- `nix develop -c cargo test --test binary_views_test --test random_test --test fs_test`: 12 byte-view, 7 randomness, and 19 filesystem tests passed in the baseline run.
+- `nix develop -c cargo test --test binary_views_test --test random_test --test fs_test`: 14 byte-view, 8 randomness, and 25 filesystem tests passed in the baseline run.
 - Tests cover byte coercion, copy construction, invalid lengths/indices, shared subviews, JSON object shape, exact filesystem bytes, and random-fill identity/quota handling. The supported surface is `Uint8Array`; further view types and Node `Buffer` compatibility follow specific consumers.
 - Repeated byte I/O is exercised within an invocation. Suspended or callback-owned views need the retained-lifetime coverage in E.2.
 
@@ -125,7 +133,7 @@ Post-return hooks release ABI buffers and trigger value reclamation; callback ca
 
 Verification:
 
-- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 5 repeated-call and 2 ABI memory tests passed in the baseline run.
+- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 6 repeated-call and 2 ABI memory tests passed in the baseline run, including the callback graph test described under B.1.
 - Coverage includes stable memory after warm-up, retained global arrays/strings, recoverable result failures, skipped post-return recovery, direct component invocation, and allocation/reallocation exhaustion trapping rather than returning address zero.
 - Checkpoints, global scans, slot recycling, and return-area tracking are implemented in `state.rs`, `cabi.rs`, and ABI trampolines. Recovery claims cover the tested interrupted-cleanup paths; arbitrary traps or exhausted instances are not promised reusable.
 
@@ -200,7 +208,7 @@ Verification:
 
 Verification:
 
-- `nix develop -c cargo test --test fs_test`: 24 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, import pruning, and option validation before I/O across all fs calls.
+- `nix develop -c cargo test --test fs_test`: 25 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, import pruning, binding-aware unlink calls, and option validation before I/O across all fs calls.
 - Unsupported write modes and binary string encodings are rejected before opening files. Read options/encodings are validated before I/O: only UTF-8 and binary encodings and flag 'r' are permitted; unsupported options throw a TypeError before file opening or preopen check.
 - Directory and metadata operations (`mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`, `rmdirSync`) preserve left-to-right evaluation order and reject unsupported options before preopen checking or mutating the filesystem. Supported writes overwrite; append/exclusive modes and permission changes remain unsupported.
 - UTF-8 reads reject invalid UTF-8. Metadata is limited to size, modification time, and file/directory predicates; permissions, ownership, recursive operations, and broader Node `Stats` behavior are not implemented.

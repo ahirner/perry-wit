@@ -95,6 +95,7 @@ pub(crate) fn compute_pruning_plan(
     a: &ParsedModuleA,
     b: &ParsedModuleB,
     resolved_imports_a: &[u32],
+    synthesized_roots: &[u32],
 ) -> Result<PruningPlan> {
     let num_wasi = b.wasi_imports.len();
     let num_b_defs = b.func_types.len();
@@ -150,6 +151,16 @@ pub(crate) fn compute_pruning_plan(
     }
 
     // 2. Module B Roots
+    for &root in synthesized_roots {
+        mark_b(
+            root as usize,
+            num_wasi,
+            num_b_defs,
+            &mut worklist,
+            &mut reachable_wasi,
+            &mut reachable_b_def,
+        );
+    }
     // Module B start function (BSS zeroing)
     if let Some(s) = b.start {
         mark_b(
