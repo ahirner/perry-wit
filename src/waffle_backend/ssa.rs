@@ -5,6 +5,7 @@
 //! overhead for primitive values.
 
 mod string_ops;
+mod types;
 
 use std::collections::BTreeMap;
 
@@ -434,30 +435,7 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
             }
             Expr::Compare { op, left, right } if self.is_string(left) || self.is_string(right) => {
-                let left_val = self.expression(left)?;
-                let right_val = self.expression(right)?;
-                let helpers = self
-                    .registry
-                    .string_helpers
-                    .as_ref()
-                    .expect("string helpers available");
-                let cmp_res = self.op(
-                    Operator::Call {
-                        function_index: helpers.str_compare,
-                    },
-                    &[left_val, right_val],
-                    &[Type::I32],
-                );
-                let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-                let operator = match op {
-                    CompareOp::Eq | CompareOp::LooseEq => Operator::I32Eq,
-                    CompareOp::Ne | CompareOp::LooseNe => Operator::I32Ne,
-                    CompareOp::Lt => Operator::I32LtS,
-                    CompareOp::Le => Operator::I32LeS,
-                    CompareOp::Gt => Operator::I32GtS,
-                    CompareOp::Ge => Operator::I32GeS,
-                };
-                Ok(self.op(operator, &[cmp_res, zero], &[Type::I32]))
+                self.string_comparison(*op, left, right)
             }
             Expr::Compare { op, left, right } => {
                 let left_val = self.expression(left)?;
@@ -490,7 +468,9 @@ impl<'a> FunctionLowerer<'a> {
             _ => {
                 let val = self.expression(expr)?;
                 let ty = self.body.values[val].ty(&self.body.type_pool);
-                if ty == Some(Type::I32) {
+                if self.is_string(expr) {
+                    Ok(self.string_length(val))
+                } else if ty == Some(Type::I32) {
                     Ok(val)
                 } else {
                     let zero = self.op(
@@ -516,7 +496,9 @@ impl<'a> FunctionLowerer<'a> {
                 });
                 Ok(self.op(Operator::I32Const { value: offset }, &[], &[Type::I32]))
             }
-            Expr::TemplateStringCoerce(inner) => self.expression(inner),
+            Expr::TemplateStringCoerce(inner) | Expr::StringCoerce(inner) => {
+                self.string_operand(inner)
+            }
             Expr::Number(n) => {
                 Ok(self.op(Operator::F64Const { value: n.to_bits() }, &[], &[Type::F64]))
             }
@@ -540,17 +522,7 @@ impl<'a> FunctionLowerer<'a> {
                 object, property, ..
             } if property == "length" => {
                 let desc = self.expression(object)?;
-                let scalar_len = self.op(
-                    Operator::I32Load {
-                        memory: waffle::MemoryArg {
-                            align: 2,
-                            offset: 8,
-                            memory: self.registry.memory,
-                        },
-                    },
-                    &[desc],
-                    &[Type::I32],
-                );
+                let scalar_len = self.string_length(desc);
                 Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
             }
             Expr::IndexGet { object, index, .. } => {
@@ -573,8 +545,8 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Binary { op, left, right }
                 if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) =>
             {
-                let left_val = self.expression(left)?;
-                let right_val = self.expression(right)?;
+                let left_val = self.string_operand(left)?;
+                let right_val = self.string_operand(right)?;
                 let helpers = self
                     .registry
                     .string_helpers
@@ -789,42 +761,6 @@ impl<'a> FunctionLowerer<'a> {
 
     fn op(&mut self, operator: Operator, args: &[Value], returns: &[Type]) -> Value {
         self.body.add_op(self.block, operator, args, returns)
-    }
-
-    fn infer_expr_type(&self, expr: &Expr) -> HirType {
-        match expr {
-            Expr::String(_) | Expr::TemplateStringCoerce(_) => HirType::String,
-            Expr::Number(_) | Expr::Integer(_) => HirType::Number,
-            Expr::Bool(_) | Expr::Compare { .. } => HirType::Boolean,
-            Expr::LocalGet(id) => self.local_types.get(id).cloned().unwrap_or(HirType::Any),
-            Expr::IndexGet { .. } => HirType::String,
-            Expr::Call { callee, .. } => {
-                if let Expr::PropertyGet { property, .. } = callee.as_ref() {
-                    if property == "slice" || property == "charAt" {
-                        return HirType::String;
-                    } else if property == "indexOf" {
-                        return HirType::Number;
-                    }
-                } else if let Expr::FuncRef(fid) = callee.as_ref()
-                    && let Some(info) = self.registry.functions.get(fid)
-                {
-                    return info.success_type().clone();
-                }
-                HirType::Any
-            }
-            Expr::Binary { op, left, right } => {
-                if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) {
-                    HirType::String
-                } else {
-                    HirType::Number
-                }
-            }
-            _ => HirType::Any,
-        }
-    }
-
-    fn is_string(&self, expr: &Expr) -> bool {
-        matches!(self.infer_expr_type(expr), HirType::String)
     }
 }
 

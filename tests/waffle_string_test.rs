@@ -681,3 +681,78 @@ fn test_string_method_unsupported_arguments_are_diagnostics() {
         );
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_awaited_string_types_and_truthiness() -> Result<()> {
+    let source = r#"
+        async function getString(input: string): Promise<string> { return input; }
+        export async function run(input: string): Promise<string> {
+            let first = await getString(input);
+            let second = await first;
+            let doubled = first + second;
+            if (first === second) {
+                if (doubled) { return doubled; }
+                return "empty";
+            }
+            return "mismatch";
+        }
+    "#;
+    run_cases(
+        source,
+        &[
+            (vec![Val::String("".into())], Val::String("empty".into())),
+            (vec![Val::String("🦀".into())], Val::String("🦀🦀".into())),
+            (vec![Val::String("\0".into())], Val::String("\0\0".into())),
+        ],
+    )
+    .await?;
+    run_cases(r#"export function run(): number { let empty = ""; if (empty) return 1; while (empty) return 2; return 3; }"#,
+        &[(vec![], Val::Float64(3.0))]).await
+}
+
+#[test]
+fn test_nonstrings_are_not_used_as_string_descriptors() {
+    for expression in [r#""value:" + value"#, r#"value + "!""#, "`value:${value}`"] {
+        for initializer in ["true", "1"] {
+            let source = format!(
+                "export function run(): string {{ let value = {initializer}; return {expression}; }}"
+            );
+            let error =
+                compile_typescript_waffle(&source, "coercion.ts", &WaffleCompileOptions::default())
+                    .expect_err("unsupported coercion must be diagnosed");
+            assert!(
+                error.to_string().contains("String coercion is unsupported"),
+                "{error:#}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_mixed_comparisons() -> Result<()> {
+    for (operator, expected) in [("===", false), ("!==", true)] {
+        for initializer in ["false", "true", "0", "1"] {
+            for (left, right) in [("text", "value"), ("value", "text")] {
+                let source = format!(
+                    r#"export function run(): boolean {{ let text = ""; let value: any = {initializer}; return {left} {operator} {right}; }}"#
+                );
+                run_cases(&source, &[(vec![], Val::Bool(expected))]).await?;
+            }
+        }
+    }
+    for operator in ["==", "!=", "<", "<=", ">", ">="] {
+        let source = format!(
+            r#"export function run(): boolean {{ let text = ""; let value = false; return text {operator} value; }}"#
+        );
+        let error =
+            compile_typescript_waffle(&source, "comparison.ts", &WaffleCompileOptions::default())
+                .expect_err("mixed coercive comparison must be diagnosed");
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported mixed string comparison"),
+            "{error:#}"
+        );
+    }
+    Ok(())
+}
