@@ -45,19 +45,29 @@
           done
         '';
 
-        # Dynamic WASI 0.3 (Preview 3) WIT definitions extracted from official WASI v0.3.0
+        # The pinned 0.3 release keeps WIT under proposals, with native streams
+        # replacing the separate P2 io package.
         wasiP3Wit = pkgs.runCommand "wasi-preview3-wit" {} ''
           mkdir -p "$out"
-          for pkg in cli clocks filesystem http io random sockets; do
-            if [ -d "${wasi-p3}/wasip3/$pkg" ]; then
-              mkdir -p "$out/$pkg"
-              pkg_header=$(grep -h "^package wasi:" "${wasi-p3}/wasip3/$pkg"/*.wit | head -n 1)
-              echo "$pkg_header" > "$out/$pkg/package.wit"
-              for f in "${wasi-p3}/wasip3/$pkg"/*.wit; do
-                sed "/^package wasi:/d" "$f" >> "$out/$pkg/package.wit"
-              done
-            fi
+          for pkg in cli clocks filesystem http random sockets; do
+            mkdir -p "$out/$pkg"
+            cp "${wasi-p3}/proposals/$pkg/wit/"*.wit "$out/$pkg/"
           done
+        '';
+
+        checkP3Wit = pkgs.runCommand "check-wasi-preview3-wit" {
+          nativeBuildInputs = [ pkgs.wasm-tools ];
+        } ''
+          mkdir -p probe/deps
+          ln -s ${wasiP3Wit}/* probe/deps/
+          cat > probe/world.wit <<'WIT'
+          package perry:p3-check;
+          world probe {
+            include wasi:cli/imports@0.3.0;
+            import wasi:http/types@0.3.0;
+          }
+          WIT
+          wasm-tools component wit probe -o "$out"
         '';
 
         # Common source filter for Rust crate builds
@@ -230,6 +240,7 @@
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
           wasi-wit = wasiWit;
+          wasi-p3-wit = wasiP3Wit;
         };
 
         lib = {
@@ -237,6 +248,7 @@
         };
 
         checks = {
+          wasi-p3-wit = checkP3Wit;
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };

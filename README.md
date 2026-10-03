@@ -15,7 +15,10 @@ nix develop
 ```
 
 This supplies the Rust toolchain, Node.js, TypeScript, Wasmtime, `wasm-tools`, and
-WASI Preview 2 definitions via `$WASI_WIT_PATH`. Cargo uses the prepared guest
+WASI Preview 2 definitions via `$WASI_WIT_PATH` and WASI 0.3 definitions via
+`$WASI_P3_WIT_PATH`. The latter are also available through `nix build .#wasi-p3-wit`;
+the `wasi-p3-wit` flake check resolves their complete CLI and HTTP dependency graph.
+Cargo uses the prepared guest
 runtime through `$GUEST_RUNTIME_PATH`; use `cargo build`, `cargo run`, and
 `cargo test` to work on the compiler.
 
