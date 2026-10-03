@@ -49,7 +49,7 @@ pub(crate) fn lower_module(
     // 2. Scan module for string requirements and build string pool if needed
     let reqs = scan_module_string_requirements(hir);
     let mut string_pool = StringPool::new();
-    let string_heap_base = if reqs.needs_strings {
+    let string_heap_base = if reqs.needs_strings || contract.promises.is_some() {
         collect_strings_in_module(hir, &mut string_pool);
         string_pool.populate_memory_segments(&mut module.memories[memory]);
         let next_free = string_pool.next_free_address();
@@ -101,9 +101,17 @@ pub(crate) fn lower_module(
                 name: export.name.clone(),
                 kind: ExportKind::Func(export.func_index),
             });
-            if registry.string_helpers.is_some() {
-                crate::waffle_backend::strings::emit_post_return(&mut module, memory, export)?;
+            if registry.allocator.is_some() {
+                crate::waffle_backend::allocation::emit_post_return(&mut module, memory, export)?;
             }
+        }
+        if let Some(plan) = &contract.promises
+            && let Some(task) = plan.tasks.get(&super::promises::TaskTarget::Guest(func.id))
+        {
+            module.exports.push(Export {
+                name: task.symbol.clone(),
+                kind: ExportKind::Func(info.func_index),
+            });
         }
     }
 
@@ -117,6 +125,7 @@ struct FunctionLowerer<'a> {
     contract: &'a ResolvedContract,
     string_pool: &'a StringPool,
     return_type: &'a HirType,
+    is_async: bool,
     body: FunctionBody,
     block: Block,
     locals: BTreeMap<LocalId, Value>,
@@ -156,6 +165,7 @@ fn lower_function_body(
         contract,
         string_pool,
         return_type: info.success_type(),
+        is_async: func.is_async,
         body,
         block: entry,
         locals,
@@ -216,6 +226,15 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 Stmt::Expr(Expr::LocalSet(id, expr)) => {
                     let inferred = self.infer_expr_type(expr);
+                    if let Some(previous) = self.local_types.get(id)
+                        && (matches!(previous, HirType::Promise(_))
+                            || matches!(inferred, HirType::Promise(_)))
+                    {
+                        ensure!(
+                            previous == &inferred,
+                            "A stored Promise binding cannot change its logical type"
+                        );
+                    }
                     self.local_types.insert(*id, inferred);
                     let val = self.expression(expr)?;
                     self.locals.insert(*id, val);
@@ -224,12 +243,26 @@ impl<'a> FunctionLowerer<'a> {
                     self.await_expression(expr, true)?;
                 }
                 Stmt::Expr(expr) => {
+                    ensure!(
+                        !matches!(self.infer_expr_type(expr), HirType::Promise(_)),
+                        "Detached async calls are unsupported; store and await their outcome"
+                    );
                     self.expression(expr)?;
                 }
                 Stmt::Return(expr) => {
                     let ret_val = expr
                         .as_ref()
                         .map(|expr| {
+                            if matches!(self.infer_expr_type(expr), HirType::Promise(_)) {
+                                ensure!(
+                                    self.is_async,
+                                    "Returning a stored Promise requires an async function"
+                                );
+                                ensure!(self.infer_expr_type(expr) == HirType::Promise(Box::new(self.return_type.clone())), "Returned Promise outcome does not match the function result type");
+                                return self
+                                    .await_expression(expr, false)?
+                                    .ok_or_else(|| anyhow::anyhow!("Promise return has no value"));
+                            }
                             if self.return_type == &HirType::String {
                                 self.string_receiver(expr)
                             } else {
@@ -374,6 +407,10 @@ impl<'a> FunctionLowerer<'a> {
             object, property, ..
         } = callee
         {
+            ensure!(
+                !matches!(self.infer_expr_type(object), HirType::Promise(_)),
+                "Promise methods are unsupported; await the retained outcome"
+            );
             if property == "join" {
                 return self.array_join(object, args).map(Some);
             }
@@ -382,6 +419,10 @@ impl<'a> FunctionLowerer<'a> {
 
         let mut arg_vals = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
+            ensure!(
+                !matches!(self.infer_expr_type(arg), HirType::Promise(_)),
+                "Stored Promise arguments are unsupported until multiple observers have a shared wakeup owner"
+            );
             let expected = match callee {
                 Expr::FuncRef(fid) => self
                     .registry
@@ -400,6 +441,46 @@ impl<'a> FunctionLowerer<'a> {
                 self.expression(arg)?
             };
             arg_vals.push(value);
+        }
+
+        if let Some(runtime) = &self.registry.promises
+            && let Some(target) = super::promises::TaskTarget::from_callee(callee)
+            && let Some(&start) = runtime.starts.get(&target)
+        {
+            let signature = &self.module.signatures[self.module.funcs[start].sig()];
+            ensure!(
+                arg_vals.len() + 1 == signature.params.len(),
+                "Stored async call has incorrect argument count"
+            );
+            for (value, expected) in arg_vals.iter().zip(&signature.params[1..]) {
+                ensure!(
+                    self.body.values[*value].ty(&self.body.type_pool) == Some(*expected),
+                    "Stored async call has an incompatible argument type"
+                );
+            }
+            let record = self.op(
+                Operator::Call {
+                    function_index: runtime.new,
+                },
+                &[],
+                &[Type::I32],
+            );
+            arg_vals.insert(0, record);
+            let status = self.op(
+                Operator::Call {
+                    function_index: start,
+                },
+                &arg_vals,
+                &[Type::I32],
+            );
+            self.op(
+                Operator::Call {
+                    function_index: runtime.bind,
+                },
+                &[record, status],
+                &[],
+            );
+            return Ok(Some(record));
         }
 
         if let Expr::ExternFuncRef { name, .. } = callee {
@@ -479,6 +560,34 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
+        if let Some(runtime) = &self.registry.promises {
+            let value = self.expression(expr)?;
+            let result = if let HirType::Promise(result) = self.infer_expr_type(expr) {
+                let payload = self.call_completion(runtime.await_result, &[value]);
+                if is_statement {
+                    None
+                } else if matches!(result.as_ref(), HirType::Void) {
+                    Some(self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]))
+                } else {
+                    Some(abi::decode_payload(
+                        &mut self.body,
+                        self.block,
+                        payload,
+                        matches!(result.as_ref(), HirType::Boolean | HirType::String),
+                    ))
+                }
+            } else {
+                self.op(
+                    Operator::Call {
+                        function_index: runtime.yield_thread,
+                    },
+                    &[],
+                    &[],
+                );
+                if is_statement { None } else { Some(value) }
+            };
+            return Ok(self.continuation(result));
+        }
         let result_val = match expr {
             Expr::Call { callee, args, .. } => {
                 let res = self.call_operation(callee, args)?;
@@ -518,6 +627,34 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Bool(b) => {
                 let v = if *b { 1 } else { 0 };
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
+            }
+            Expr::Compare { op, left, right }
+                if matches!(self.infer_expr_type(left), HirType::Promise(_))
+                    || matches!(self.infer_expr_type(right), HirType::Promise(_)) =>
+            {
+                let left_promise = matches!(self.infer_expr_type(left), HirType::Promise(_));
+                let right_promise = matches!(self.infer_expr_type(right), HirType::Promise(_));
+                ensure!(
+                    matches!(op, CompareOp::Eq | CompareOp::Ne),
+                    "Promise values support strict identity comparisons only"
+                );
+                let left = self.expression(left)?;
+                let right = self.expression(right)?;
+                if left_promise && right_promise {
+                    let operator = if *op == CompareOp::Eq {
+                        Operator::I32Eq
+                    } else {
+                        Operator::I32Ne
+                    };
+                    return Ok(self.op(operator, &[left, right], &[Type::I32]));
+                }
+                Ok(self.op(
+                    Operator::I32Const {
+                        value: u32::from(*op == CompareOp::Ne),
+                    },
+                    &[],
+                    &[Type::I32],
+                ))
             }
             Expr::Compare { op, left, right }
                 if self.is_optional_number(left) || self.is_optional_number(right) =>
@@ -636,6 +773,10 @@ impl<'a> FunctionLowerer<'a> {
             Expr::PropertyGet {
                 object, property, ..
             } if property == "length" => {
+                ensure!(
+                    !matches!(self.infer_expr_type(object), HirType::Promise(_)),
+                    "Promise properties are unsupported; await the retained outcome"
+                );
                 if self.is_string(object) {
                     let desc = self.string_receiver(object)?;
                     let scalar_len = self.string_length(desc);
@@ -657,6 +798,10 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
             Expr::IndexGet { object, index, .. } => {
+                ensure!(
+                    !matches!(self.infer_expr_type(object), HirType::Promise(_)),
+                    "Promise indexing is unsupported; await the retained outcome"
+                );
                 if self.is_string(object) {
                     let desc = self.string_receiver(object)?;
                     let idx = self.position_argument(Some(index), f64::NAN)?;

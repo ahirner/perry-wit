@@ -10,8 +10,6 @@
 //! - String operations (.length, [i], .charAt, .slice, .indexOf, +, comparisons)
 //!   operate on Unicode scalar values.
 
-mod allocation;
-pub(crate) use allocation::emit_post_return;
 mod canonical;
 mod comparison;
 mod concat;
@@ -27,7 +25,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use waffle::{Func, Memory, MemoryData, MemorySegment, Module};
 
-use allocation::{PAGE_BYTES, emit_allocator};
+use super::allocation::{PAGE_BYTES, emit_allocator};
 use canonical::emit_lift;
 use comparison::emit_compare;
 use concat::emit_concat;

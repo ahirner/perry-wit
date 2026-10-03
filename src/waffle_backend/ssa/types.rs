@@ -48,6 +48,13 @@ impl FunctionLowerer<'_> {
             Expr::IndexGet { .. } => HirType::Union(vec![HirType::String, HirType::Void]),
             Expr::Undefined => HirType::Void,
             Expr::Call { callee, .. } => {
+                if let Some(plan) = &self.contract.promises
+                    && let Some(target) =
+                        crate::waffle_backend::promises::TaskTarget::from_callee(callee)
+                    && let Some(task) = plan.tasks.get(&target)
+                {
+                    return HirType::Promise(Box::new(task.result.clone()));
+                }
                 if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                     if property == "slice"
                         || property == "charAt"

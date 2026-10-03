@@ -1,6 +1,7 @@
 /** Capability imports accepted by the WAFFLE/P3 compiler API. */
 declare module "perry:clocks" {
-  /** Wait in milliseconds. Invalid or overflowing durations trap before host I/O. */
+  /** Wait in milliseconds. May be stored and awaited repeatedly within one invocation.
+   * Invalid or overflowing durations trap before host I/O. */
   export function waitFor(milliseconds: number): Promise<void>;
 }
 

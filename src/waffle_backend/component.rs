@@ -61,6 +61,18 @@ pub(crate) fn frame_component(
         }
     }
 
+    if let Some(plan) = &contract.promises {
+        let wat = super::promises::component::frame(
+            core_body,
+            &host_imports,
+            &host_wires,
+            contract,
+            plan,
+        )?;
+        let bytes = wat::parse_str(&wat).context("Encoding stored-Promise component")?;
+        return Ok((wat, bytes));
+    }
+
     let has_string_or_realloc = contract
         .entry_params
         .iter()
@@ -101,7 +113,7 @@ pub(crate) fn frame_component(
 }
 
 /// Describe the entry's primitive canonical ABI, retaining booleans as component booleans.
-fn entry_signature(contract: &ResolvedContract) -> Result<String> {
+pub(crate) fn entry_signature(contract: &ResolvedContract) -> Result<String> {
     ensure!(
         canonical_param_types(&contract.entry_params)?.len() <= 16,
         "Entry functions with more than 16 flattened parameters require an unsupported canonical ABI adapter"
@@ -120,7 +132,7 @@ fn entry_signature(contract: &ResolvedContract) -> Result<String> {
 }
 
 /// Map supported entry values without confusing core handles with component streams.
-fn component_value_type(ty: &HirType) -> Result<String> {
+pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
     match ty {
         HirType::Number | HirType::Any => Ok("f64".into()),
         HirType::Boolean => Ok("bool".into()),

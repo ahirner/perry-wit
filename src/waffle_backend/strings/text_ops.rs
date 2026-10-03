@@ -1,8 +1,8 @@
 //! UTF-8 text operations backed by guest helpers.
 
-use super::allocation::checked_allocation_size;
 use super::descriptor::StringDescriptor;
 use crate::waffle_backend::abi::{self, CompletionStatus};
+use crate::waffle_backend::allocation::checked_allocation_size;
 use crate::waffle_backend::link::HELPER_MODULE;
 use anyhow::Result;
 use waffle::{

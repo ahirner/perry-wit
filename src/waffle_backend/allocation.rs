@@ -6,7 +6,7 @@ use waffle::{
     Module, Operator, SignatureData, Terminator, Type, Value,
 };
 
-pub(super) const PAGE_BYTES: u32 = 65_536;
+pub(crate) const PAGE_BYTES: u32 = 65_536;
 
 /// Releases invocation storage after the canonical caller has copied the result.
 /// All guest frames have exited; pending or escaping values must retain their owner
@@ -47,7 +47,7 @@ pub(crate) fn emit_post_return(
 }
 
 /// Narrows only after checking sizes computed outside the allocator's i32 ABI.
-pub(super) fn checked_allocation_size(
+pub(crate) fn checked_allocation_size(
     body: &mut FunctionBody,
     block: Block,
     bytes: Value,
@@ -83,7 +83,7 @@ pub(super) fn checked_allocation_size(
 }
 
 /// Allocates only after validating address arithmetic and growing memory successfully.
-pub(super) fn emit_allocator(
+pub(crate) fn emit_allocator(
     module: &mut Module<'static>,
     memory: Memory,
     heap_base: u32,

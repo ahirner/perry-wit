@@ -21,6 +21,28 @@
   ],
   "capabilities": [
     {
+      "id": "compiler.p3_promises",
+      "name": "Stored P3 Promise Outcomes",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: stored named async calls, waitFor, and repeated await",
+      "invariants": [
+        "A source task starts eagerly and its caller continues while native P3 work is pending",
+        "Aliases preserve Promise identity and repeated awaits retain numeric, boolean, string, or void success and numeric rejection",
+        "Each native subtask result is observed and dropped once; later awaits read the retained language outcome",
+        "Promise records and retained strings share the serial invocation arena and are reclaimed after result copying",
+        "Guest rejection enters catch and finally at await; host traps remain outside the language error channel"
+      ],
+      "differences": [
+        "The default CLI remains on the legacy pipeline until R9",
+        "Stored Promises require the host's component async stackful feature",
+        "Promise parameters, concurrent observers, callbacks, constructors, and combinators are not yet supported",
+        "Detached call statements are diagnosed; unobserved pending work or overlapping entry calls trap and require instance disposal",
+        "Invocation arenas bound repeated calls but do not reclaim dead values during long-running invocations"
+      ],
+      "conformance": ["tests/p3_promise_test.rs"]
+    },
+    {
       "id": "compiler.p3_primitives",
       "name": "Typed P3 Clock and Random Calls",
       "tier": "tier-1-web-primaries",

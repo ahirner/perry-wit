@@ -4,10 +4,365 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
 use tokio::sync::Notify;
 use tokio::time::timeout;
-use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Store, StoreContextMut};
+use wasmtime::component::{Component, Linker, ResourceTable, Val};
+use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+fn make_engine() -> Result<Engine> {
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_async_stackful(true);
+    config.wasm_component_model_more_async_builtins(true);
+    Ok(Engine::new(&config)?)
+}
+
+#[derive(Default)]
+struct Host {
+    context: WasiCtx,
+    table: ResourceTable,
+    limits: StoreLimits,
+}
+
+impl WasiView for Host {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.context,
+            table: &mut self.table,
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn settled_promise_identity_adoption_and_void_are_preserved() -> Result<()> {
+    let engine = make_engine()?;
+    let linker = Linker::new(&engine);
+    for (source, expected) in [
+        (
+            r#"async function done(): Promise<boolean> { return true; }
+            export async function run(): Promise<number> {
+                const first = done(); const second = done(); const alias = first;
+                if (first !== alias) return 1;
+                if (first === second) return 2;
+                if (first === undefined) return 3;
+                if (first === true) return 4;
+                if (first === "") return 5;
+                if (await first !== await second) return 6;
+                return 7;
+            }
+            export function task_0(): number { return 99; }
+            export function task_1(): number { return 99; }
+            "#,
+            7.0,
+        ),
+        (
+            r#"async function done(): Promise<number> { return 42; }
+            async function adopt(): Promise<number> { const pending = done(); return pending; }
+            export async function run(): Promise<number> { const pending = adopt(); return await pending; }"#,
+            42.0,
+        ),
+        (
+            r#"async function done(): Promise<void> {}
+            export async function run(): Promise<number> { const pending = done(); const value = await pending; await pending; if (value === undefined) return 1; return 0; }"#,
+            1.0,
+        ),
+        (
+            r#"async function fail(): Promise<number> { throw 13; }
+            export async function run(): Promise<number> {
+                const pending = fail(); let sum = 0;
+                try { await pending; } catch (error) { sum = sum + error; }
+                try { await pending; } catch (error) { sum = sum + error; }
+                return sum;
+            }"#,
+            26.0,
+        ),
+    ] {
+        let compiled =
+            compile_typescript_waffle(source, "settled.ts", &WaffleCompileOptions::default())?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+        assert_eq!(run.call_async(&mut store, ()).await?.0, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn unsupported_promise_uses_have_source_diagnostics() {
+    for (body, expected) in [
+        ("done(); return 1;", "Detached async calls are unsupported"),
+        (
+            "const p = done(); return p.length;",
+            "Promise properties are unsupported",
+        ),
+        (
+            "const p = done(); p[0]; return 1;",
+            "Promise indexing is unsupported",
+        ),
+        (
+            "const p = done(); return consume(p);",
+            "Stored Promise arguments are unsupported",
+        ),
+        (
+            "let p: any = done(); if (flag) p = true; await p; return 1;",
+            "A stored Promise binding cannot change",
+        ),
+        (
+            "const p = done(); if (p < p) return 1; return 0;",
+            "Promise values support strict identity comparisons only",
+        ),
+    ] {
+        let source = format!(
+            "async function done(): Promise<number> {{ return 1; }} function consume(value: boolean): number {{ return 1; }} export async function run(flag: boolean): Promise<number> {{ {body} }}"
+        );
+        let error = compile_typescript_waffle(
+            &source,
+            "unsupported_promise.ts",
+            &WaffleCompileOptions::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{body}: {error:#}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_text_results_survive_repeated_observation_and_export_cleanup() -> Result<()> {
+    let engine = make_engine()?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let input = "é🦀".repeat(8192);
+    let expected = format!("{}!", "É🦀".repeat(8192));
+    for (result_type, result_expr, expected_result) in [
+        ("string", "first", Val::String(expected.clone())),
+        ("number", "first.length", Val::Float64(16385.0)),
+        ("boolean", "first === second", Val::Bool(true)),
+        (
+            "Result<string, number>",
+            "first",
+            Val::Result(Ok(Some(Box::new(Val::String(expected.clone()))))),
+        ),
+        (
+            "Result<number, number>",
+            "first.length",
+            Val::Result(Ok(Some(Box::new(Val::Float64(16385.0))))),
+        ),
+        (
+            "Result<boolean, number>",
+            "first === second",
+            Val::Result(Ok(Some(Box::new(Val::Bool(true))))),
+        ),
+    ] {
+        let source = format!(
+            r#"
+            import {{ waitFor }} from "perry:clocks";
+            async function work(s: string): Promise<string> {{
+                let retained = s.toUpperCase();
+                await waitFor(0.001);
+                return retained + "!";
+            }}
+            export async function run(s: string, fail: boolean): Promise<{result_type}> {{
+                const pending = work(s);
+                const first = await pending;
+                const second = await pending;
+                if (first !== second) throw 99;
+                if (fail) throw 7;
+                return {result_expr};
+            }}
+        "#
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "retained_text.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(
+            &engine,
+            Host {
+                limits: StoreLimitsBuilder::new().memory_size(524_288).build(),
+                ..Default::default()
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_func(&mut store, "run").unwrap();
+        for iteration in 0..40 {
+            let fail = result_type.starts_with("Result") && iteration % 2 == 0;
+            let mut results = [Val::Bool(false)];
+            run.call_async(
+                &mut store,
+                &[Val::String(input.clone()), Val::Bool(fail)],
+                &mut results,
+            )
+            .await?;
+            let expected = if fail {
+                Val::Result(Err(Some(Box::new(Val::Float64(7.0)))))
+            } else {
+                expected_result.clone()
+            };
+            assert_eq!(results[0], expected, "{result_type}, iteration {iteration}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repeated_awaits_do_not_allocate_additional_records() -> Result<()> {
+    let source = r#"
+        async function done(): Promise<number> { return 3; }
+        export async function run(count: number): Promise<number> {
+            const value = done();
+            let index = 0;
+            let sum = 0;
+            while (index < count) {
+                sum = sum + await value;
+                index = index + 1;
+            }
+            return sum;
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "retained_allocations.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    assert_eq!(component.component_type().imports(&engine).count(), 0);
+    let linker = Linker::new(&engine);
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for count in [1.0, 10000.0, 10000.0] {
+        assert_eq!(run.call_async(&mut store, (count,)).await?.0, count * 3.0);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn source_stored_promise_retains_identity_success_and_rejection() -> Result<()> {
+    let source = r#"
+        import { waitFor } from "perry:clocks";
+        import { randomNumber } from "perry:random";
+        async function work(value: number): Promise<number> {
+            randomNumber();
+            await waitFor(1);
+            randomNumber();
+            if (value < 0) throw 7;
+            return value * 2;
+        }
+        export async function run(value: number): Promise<number> {
+            const pending = work(value);
+            const alias = pending;
+            if (pending !== alias) return -1;
+            randomNumber();
+            let total = 0;
+            try { total = await pending; } catch (error) { total = error as number; }
+            try { total = total + await alias; } catch (error) { total = total + (error as number); }
+            return total;
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "stored_promise.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let release = Arc::new(Notify::new());
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let host_release = release.clone();
+    let host_trace = trace.clone();
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
+            let release = host_release.clone();
+            let trace = host_trace.clone();
+            Box::pin(async move {
+                trace.lock().unwrap().push(format!("wait:{duration}"));
+                release.notified().await;
+                Ok(())
+            })
+        })?;
+    let host_trace = trace.clone();
+    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+        "get-random-u64",
+        move |_: StoreContextMut<'_, ()>, (): ()| {
+            host_trace.lock().unwrap().push("random".into());
+            Ok((0u64,))
+        },
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    let mut observed = Vec::new();
+    for (input, expected) in [(21.0, 84.0), (-1.0, 14.0), (4.0, 16.0)] {
+        trace.lock().unwrap().clear();
+        let mut pending = Box::pin(run.call_async(&mut store, (input,)));
+        assert!(
+            timeout(Duration::from_millis(10), &mut pending)
+                .await
+                .is_err()
+        );
+        assert_eq!(*trace.lock().unwrap(), ["random", "wait:1000000", "random"]);
+        release.notify_one();
+        assert_eq!(timeout(Duration::from_secs(2), pending).await??.0, expected);
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["random", "wait:1000000", "random", "random"]
+        );
+        observed.push((expected, trace.lock().unwrap().clone()));
+    }
+    let scratch = tempfile::tempdir()?;
+    let source_path = scratch.path().join("stored.ts");
+    std::fs::write(&source_path, source)?;
+    let checked = std::process::Command::new("tsc")
+        .current_dir(scratch.path())
+        .args([
+            "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
+        ])
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
+        .arg(&source_path)
+        .output()?;
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    let node_source = source.replace(
+        "import { waitFor } from \"perry:clocks\";",
+        "const waitFor = (ms: number): Promise<void> => { trace.push(`wait:${ms * 1000000}`); return new Promise(resolve => setTimeout(resolve, 1)); };"
+    ).replace(
+        "import { randomNumber } from \"perry:random\";",
+        "const randomNumber = () => { trace.push('random'); return 0; };"
+    );
+    let node_path = scratch.path().join("stored.mts");
+    std::fs::write(
+        &node_path,
+        format!(
+            "const trace: string[] = [];\n{node_source}\nconst observed = []; for (const input of [21, -1, 4]) {{ trace.length = 0; observed.push([await run(input), [...trace]]); }} console.log(JSON.stringify(observed));"
+        ),
+    )?;
+    let node = std::process::Command::new("node").arg(node_path).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Vec<(f64, Vec<String>)>>(&node.stdout)?,
+        observed
+    );
+    Ok(())
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn nonblocking_import_returns_to_caller_before_completion() -> Result<()> {
@@ -55,11 +410,7 @@ async fn nonblocking_import_returns_to_caller_before_completion() -> Result<()> 
         (export "wait" (func $wait)) (export "drop" (func $drop))
         (export "drop-set" (func $drop-set))))))
       (func (export "run") async (result f64) (canon lift (core func $probe "run"))))"#;
-    let mut config = Config::new();
-    config.wasm_component_model_async_stackful(true);
-    config.wasm_component_model_async(true);
-    config.wasm_component_model_more_async_builtins(true);
-    let engine = Engine::new(&config)?;
+    let engine = make_engine()?;
     let component = Component::new(&engine, wat::parse_str(component)?)?;
     let release = Arc::new(Notify::new());
     let trace = Arc::new(Mutex::new(Vec::new()));
@@ -167,11 +518,7 @@ async fn named_task_starts_eagerly_and_retains_a_single_result() -> Result<()> {
       (core instance $wire (instantiate $wire (with "host" (instance
         (export "table" (table $storage "table")) (export "work" (func $start-work))))))
       (func (export "run") async (result f64) (canon lift (core func $guest "run") async)))"#;
-    let mut config = Config::new();
-    config.wasm_component_model_async_stackful(true);
-    config.wasm_component_model_async(true);
-    config.wasm_component_model_more_async_builtins(true);
-    let engine = Engine::new(&config)?;
+    let engine = make_engine()?;
     let component = Component::new(&engine, wat::parse_str(component)?)?;
     let release = Arc::new(Notify::new());
     let trace = Arc::new(Mutex::new(Vec::new()));

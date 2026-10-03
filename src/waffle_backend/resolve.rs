@@ -100,6 +100,7 @@ impl TypedIntrinsic {
 /// Validated contract containing typed operations and module signatures.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedContract {
+    pub(crate) promises: Option<super::promises::PromisePlan>,
     pub(crate) input_kind: ResolvedInputKind,
     pub(crate) uses_p3_clocks: bool,
     pub(crate) intrinsics: BTreeMap<String, TypedIntrinsic>,
@@ -282,7 +283,9 @@ pub(crate) fn resolve_contract(
         )
     });
 
+    let promises = super::promises::plan_promises(hir, &intrinsics)?;
     Ok(ResolvedContract {
+        promises,
         input_kind,
         uses_p3_clocks,
         intrinsics,

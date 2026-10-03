@@ -1,6 +1,7 @@
 //! LLVM-free Perry HIR → WAFFLE SSA → WASI 0.3 compiler backend.
 
 pub(crate) mod abi;
+pub(crate) mod allocation;
 pub(crate) mod audit;
 pub(crate) mod capabilities;
 pub(crate) mod component;
@@ -8,6 +9,7 @@ pub(crate) mod control_flow;
 pub(crate) mod exceptions;
 pub(crate) mod libraries;
 pub(crate) mod link;
+pub(crate) mod promises;
 pub(crate) mod registry;
 pub(crate) mod resolve;
 pub(crate) mod ssa;

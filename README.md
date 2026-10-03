@@ -178,6 +178,18 @@ core return values after consuming the result and before the next invocation.
 Traps and cancelled calls still require discarding the instance. Arena storage
 is bounded across repeated calls; reclaiming dead temporaries within a long
 invocation and values escaping into pending operations remains roadmap work.
+Stored Promises from named async functions and the supported async imports retain
+number, boolean, string, or void outcomes and numeric rejections. Starting a task
+runs it up to suspension; aliases preserve identity and repeated awaits reuse its
+outcome. These components require Wasmtime's `wasm_component_model_async_stackful`
+feature alongside `wasm_component_model_async` and `wasm_component_model_more_async_builtins`.
+Promise records share the invocation arena and cost 32 bytes per started async
+call; settling or repeatedly observing a record allocates no further guest bytes.
+Concurrent observers, Promise parameters, callbacks, constructors, and combinators
+remain unsupported. Detached call statements are diagnosed; returning while a
+started operation remains unobserved traps before result delivery. The host must
+discard that instance. Simultaneous entry calls are rejected; native child tasks
+may overlap within their owning invocation.
 The default CLI and SDK still describe the legacy pipeline until the R9 cutover.
 The Rust `compile_typescript_raw` API returns a `RawCompiled` value containing
 `core`, `exported_functions`, and `functions` for legacy linker consumers.

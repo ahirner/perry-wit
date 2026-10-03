@@ -72,6 +72,7 @@
 
         # Common source filter for Rust crate builds
         commonFilter = path: type:
+          (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
           (pkgs.lib.hasSuffix ".json" path) ||

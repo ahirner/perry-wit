@@ -11,6 +11,7 @@ use waffle::{
     Func, FuncDecl, FunctionBody, Import, ImportKind, Module, SignatureData, Terminator, Type,
 };
 
+use crate::waffle_backend::promises::TaskTarget;
 use crate::waffle_backend::resolve::ResolvedContract;
 
 /// Host-facing calling convention, separate from the exception-aware guest ABI.
@@ -68,11 +69,21 @@ impl FunctionInfo {
 
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
+    pub(crate) promises: Option<PromiseImports>,
+    pub(crate) allocator: Option<Func>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
     pub(crate) stream_helpers: Option<(Func, Func)>,
     pub(crate) string_helpers: Option<crate::waffle_backend::strings::StringHelperFuncs>,
     pub(crate) memory: waffle::Memory,
+}
+
+pub(crate) struct PromiseImports {
+    pub(crate) new: Func,
+    pub(crate) bind: Func,
+    pub(crate) await_result: Func,
+    pub(crate) yield_thread: Func,
+    pub(crate) starts: BTreeMap<TaskTarget, Func>,
 }
 
 impl ModuleRegistry {
@@ -140,14 +151,62 @@ impl ModuleRegistry {
             None
         };
 
-        // 2. Emit string runtime helpers ($rt_cabi_realloc, etc.) after all imports are declared
-        let string_helpers = if let Some(base) = string_heap_base {
-            Some(crate::waffle_backend::strings::emit_string_runtime(
-                module,
-                memory,
-                base,
-                string_reqs,
-            )?)
+        let promises = if let Some(plan) = &contract.promises {
+            let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
+                let sig = module.signatures.push(SignatureData { params, returns });
+                let func = module.funcs.push(FuncDecl::Import(sig, name.into()));
+                module.imports.push(Import {
+                    module: "promises".into(),
+                    name: name.into(),
+                    kind: ImportKind::Func(func),
+                });
+                func
+            };
+            let new = declare("new", vec![], vec![Type::I32]);
+            let bind = declare("bind", vec![Type::I32, Type::I32], vec![]);
+            let await_result = declare("await", vec![Type::I32], vec![Type::I32, Type::F64]);
+            let yield_thread = declare("yield", vec![], vec![]);
+            let mut starts = BTreeMap::new();
+            for (target, task) in &plan.tasks {
+                let mut params = vec![Type::I32];
+                params.extend(
+                    task.params
+                        .iter()
+                        .map(map_type_to_waffle)
+                        .collect::<Result<Vec<_>>>()?,
+                );
+                starts.insert(
+                    target.clone(),
+                    declare(&task.symbol, params, vec![Type::I32]),
+                );
+            }
+            Some(PromiseImports {
+                new,
+                bind,
+                await_result,
+                yield_thread,
+                starts,
+            })
+        } else {
+            None
+        };
+
+        // Emit storage helpers only after every function import has been declared.
+        let string_helpers =
+            if let Some(base) = string_heap_base.filter(|_| string_reqs.needs_strings) {
+                Some(crate::waffle_backend::strings::emit_string_runtime(
+                    module,
+                    memory,
+                    base,
+                    string_reqs,
+                )?)
+            } else {
+                None
+            };
+        let allocator = if let Some(helpers) = &string_helpers {
+            Some(helpers.cabi_realloc)
+        } else if let Some(base) = string_heap_base {
+            Some(super::allocation::emit_allocator(module, memory, base)?)
         } else {
             None
         };
@@ -248,6 +307,8 @@ impl ModuleRegistry {
         }
 
         Ok(Self {
+            promises,
+            allocator,
             functions,
             intrinsics,
             stream_helpers,
