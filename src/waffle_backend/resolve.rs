@@ -11,6 +11,8 @@ use perry_hir::ir::{Function, Module as HirModule, Stmt};
 use perry_hir::types::{FuncId, Type as HirType};
 use waffle::Type as WaffleType;
 
+use super::capabilities::{CapabilityOperation, LowerCapability};
+
 /// The nature of input accepted by the module entry point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvedInputKind {
@@ -24,7 +26,7 @@ pub enum ResolvedInputKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum TypedIntrinsic {
-    WaitFor,
+    Capability(CapabilityOperation),
     HostDouble,
     ReadChunk,
     ByteAt,
@@ -42,7 +44,7 @@ pub(crate) enum TypedIntrinsic {
 impl TypedIntrinsic {
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::WaitFor => "waitFor",
+            Self::Capability(operation) => operation.name(),
             Self::HostDouble => "hostDouble",
             Self::ReadChunk => "readChunk",
             Self::ByteAt => "byteAt",
@@ -54,10 +56,43 @@ impl TypedIntrinsic {
 
     pub(crate) fn is_async(&self) -> bool {
         match self {
-            Self::WaitFor | Self::HostDouble | Self::ReadChunk => true,
+            Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
+            Self::HostDouble | Self::ReadChunk => true,
             Self::ByteAt | Self::StreamDrop | Self::StreamReset => false,
             Self::Custom { is_async, .. } => *is_async,
         }
+    }
+
+    pub(crate) fn core_signature(&self) -> Result<waffle::SignatureData> {
+        let (params, returns) = match self {
+            Self::Capability(operation) => {
+                let plan = operation.lower();
+                let result = match &plan.result {
+                    HirType::Promise(inner) => inner.as_ref(),
+                    result => result,
+                };
+                let returns = if matches!(result, HirType::Void) {
+                    vec![]
+                } else {
+                    vec![map_hir_type_to_waffle(result)?]
+                };
+                (
+                    plan.params
+                        .iter()
+                        .map(map_hir_type_to_waffle)
+                        .collect::<Result<_>>()?,
+                    returns,
+                )
+            }
+            Self::HostDouble | Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
+            Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
+            Self::StreamDrop => (vec![WaffleType::I32], vec![]),
+            Self::StreamReset => (vec![], vec![]),
+            Self::Custom {
+                params, returns, ..
+            } => (params.clone(), returns.clone()),
+        };
+        Ok(waffle::SignatureData { params, returns })
     }
 }
 
@@ -116,19 +151,19 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
     let mut uses_p3_clocks = false;
 
     for (name, params, ret) in &hir.extern_funcs {
+        if let Some(operation) = CapabilityOperation::from_declaration(name) {
+            let plan = operation.lower();
+            ensure!(
+                *params == plan.params && *ret == plan.result,
+                "Invalid capability declaration '{name}': expected {:?} -> {:?}",
+                plan.params,
+                plan.result
+            );
+            uses_p3_clocks |= matches!(operation, CapabilityOperation::Clock(_));
+            intrinsics.insert(name.clone(), TypedIntrinsic::Capability(operation));
+            continue;
+        }
         match name.as_str() {
-            "waitFor" => {
-                ensure!(
-                    params.len() == 1 && matches!(params[0], HirType::Number),
-                    "waitFor signature must be (milliseconds: number) => Promise<void>"
-                );
-                ensure!(
-                    matches!(ret, HirType::Promise(inner) if matches!(**inner, HirType::Void)),
-                    "waitFor must return Promise<void>"
-                );
-                uses_p3_clocks = true;
-                intrinsics.insert(name.clone(), TypedIntrinsic::WaitFor);
-            }
             "hostDouble" => {
                 ensure!(
                     params.len() == 1 && matches!(params[0], HirType::Number),

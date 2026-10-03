@@ -7,7 +7,7 @@ use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::time::timeout;
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
-use wasmtime::{Config, Engine, Func, Instance, Module, Store};
+use wasmtime::{Config, Engine, Func, Instance, Module, Store, StoreContextMut};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 fn make_async_engine() -> Result<Engine> {
@@ -37,6 +37,105 @@ fn make_wasi_linker(engine: &Engine) -> Result<Linker<WasiHostState>> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     Ok(linker)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_typed_random_capability() -> Result<()> {
+    let compiled = compile_typescript_waffle(
+        "declare function randomNumber(): number; export function run(): number { return randomNumber(); }",
+        "random.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    assert!(!compiled.uses_p3_clocks);
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    assert_eq!(
+        component
+            .component_type()
+            .imports(&engine)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        ["wasi:random/random@0.3.0"]
+    );
+
+    let mut linker = Linker::new(&engine);
+    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+        "get-random-u64",
+        |mut store: StoreContextMut<'_, (u64, usize)>, (): ()| {
+            store.data_mut().1 += 1;
+            Ok((store.data().0,))
+        },
+    )?;
+    let mut store = Store::new(&engine, (0u64, 0usize));
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for (word, expected) in [
+        (0, 0.0),
+        (2047, 0.0),
+        (1 << 63, 0.5),
+        (u64::MAX, 1.0 - 2f64.powi(-53)),
+    ] {
+        store.data_mut().0 = word;
+        assert_eq!(run.call_async(&mut store, ()).await?.0, expected);
+    }
+    assert_eq!(store.data().1, 4);
+
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::random::add_to_linker(&mut linker)?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..32 {
+        assert!((0.0..1.0).contains(&run.call_async(&mut store, ()).await?.0));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_capability_host_failure_is_not_a_language_result() -> Result<()> {
+    let compiled = compile_typescript_waffle(
+        "declare function randomNumber(): number; export function run(): number { try { return randomNumber(); } catch { return -1; } }",
+        "random_failure.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+        "get-random-u64",
+        |_: StoreContextMut<'_, ()>, (): ()| -> wasmtime::Result<(u64,)> {
+            wasmtime::bail!("random host unavailable")
+        },
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    let error = run.call_async(&mut store, ()).await.unwrap_err();
+    assert_eq!(error.root_cause().to_string(), "random host unavailable");
+    Ok(())
+}
+
+#[test]
+fn test_waffle_capability_signatures_are_checked_before_emission() {
+    for (source, expected) in [
+        (
+            "declare function randomNumber(): boolean; export function run(): boolean { return randomNumber(); }",
+            "Invalid capability declaration 'randomNumber': expected [] -> Number",
+        ),
+        (
+            "declare function randomNumber(): number; export function run(): number { return randomNumber(1); }",
+            "Intrinsic 'randomNumber' expects 0 arguments, got 1",
+        ),
+        (
+            "declare function waitFor(milliseconds: number): Promise<void>; export async function run(): Promise<void> { await waitFor(true); }",
+            "Intrinsic 'waitFor' argument 1 must have core type F64",
+        ),
+    ] {
+        let error =
+            compile_typescript_waffle(source, "signature.ts", &WaffleCompileOptions::default())
+                .unwrap_err();
+        assert_eq!(error.root_cause().to_string(), expected);
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

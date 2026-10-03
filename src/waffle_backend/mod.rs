@@ -2,6 +2,7 @@
 
 pub(crate) mod abi;
 pub(crate) mod audit;
+pub(crate) mod capabilities;
 pub(crate) mod component;
 pub(crate) mod control_flow;
 pub(crate) mod exceptions;

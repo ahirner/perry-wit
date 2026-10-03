@@ -405,7 +405,21 @@ impl<'a> FunctionLowerer<'a> {
                 .intrinsics
                 .get(name)
                 .ok_or_else(|| anyhow::anyhow!("Unknown extern function: {name}"))?;
-            let ret_types = &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
+            let signature = &self.module.signatures[self.module.funcs[func_idx].sig()];
+            ensure!(
+                arg_vals.len() == signature.params.len(),
+                "Intrinsic '{name}' expects {} arguments, got {}",
+                signature.params.len(),
+                arg_vals.len()
+            );
+            for (index, (value, expected)) in arg_vals.iter().zip(&signature.params).enumerate() {
+                ensure!(
+                    self.body.values[*value].ty(&self.body.type_pool) == Some(*expected),
+                    "Intrinsic '{name}' argument {} must have core type {expected:?}",
+                    index + 1
+                );
+            }
+            let ret_types = &signature.returns;
             if ret_types.is_empty() {
                 self.op(
                     Operator::Call {

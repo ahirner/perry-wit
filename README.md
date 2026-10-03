@@ -156,6 +156,16 @@ Interface members use prefixed implementation names, such as `apiRunTask` for
 
 Develop inside `nix develop` to ensure matching toolchain versions across dependencies. Format all code with `cargo fmt --all` and ensure both `cargo test` and `nix flake check` pass cleanly before submitting changes.
 
+The Rust `compile_typescript_waffle` API provides the WAFFLE/P3 migration path.
+It accepts `declare function waitFor(milliseconds: number): Promise<void>` and
+`declare function randomNumber(): number` for typed P3 clock and random operations.
+`randomNumber()` uses the high 53 bits of a host random word to produce a number
+in `[0, 1)`. Host failures trap; these operations have no WIT domain-error result.
+Negative, nonfinite, and overflowing wait durations trap before calling the clock.
+The default CLI and SDK still describe the legacy pipeline until the R9 cutover.
+The Rust `compile_typescript_raw` API returns a `RawCompiled` value containing
+`core`, `exported_functions`, and `functions` for legacy linker consumers.
+
 
 Task export ABI support currently covers strings, numeric and boolean scalars,
 void results, and `result<string, string>` results. WIT record parameters and

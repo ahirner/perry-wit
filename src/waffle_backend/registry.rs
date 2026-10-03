@@ -89,28 +89,7 @@ impl ModuleRegistry {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
         for (name, intrinsic) in &contract.intrinsics {
-            let (params, returns) = match intrinsic {
-                crate::waffle_backend::resolve::TypedIntrinsic::WaitFor => {
-                    (vec![Type::F64], vec![])
-                }
-                crate::waffle_backend::resolve::TypedIntrinsic::HostDouble => {
-                    (vec![Type::F64], vec![Type::F64])
-                }
-                crate::waffle_backend::resolve::TypedIntrinsic::ReadChunk => {
-                    (vec![Type::I32], vec![Type::F64])
-                }
-                crate::waffle_backend::resolve::TypedIntrinsic::ByteAt => {
-                    (vec![Type::F64], vec![Type::F64])
-                }
-                crate::waffle_backend::resolve::TypedIntrinsic::StreamDrop => {
-                    (vec![Type::I32], vec![])
-                }
-                crate::waffle_backend::resolve::TypedIntrinsic::StreamReset => (vec![], vec![]),
-                crate::waffle_backend::resolve::TypedIntrinsic::Custom {
-                    params, returns, ..
-                } => (params.clone(), returns.clone()),
-            };
-            let signature = module.signatures.push(SignatureData { params, returns });
+            let signature = module.signatures.push(intrinsic.core_signature()?);
             let func = module.funcs.push(FuncDecl::Import(signature, name.clone()));
             module.imports.push(Import {
                 module: "host".into(),
