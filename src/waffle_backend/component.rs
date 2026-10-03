@@ -12,6 +12,7 @@ use perry_hir::types::Type as HirType;
 pub(crate) fn frame_component(
     core_wasm: &[u8],
     contract: &ResolvedContract,
+    has_post_return: bool,
 ) -> Result<(String, Vec<u8>)> {
     ensure!(
         contract.input_kind != ResolvedInputKind::ByteStream,
@@ -77,6 +78,11 @@ pub(crate) fn frame_component(
     } else {
         ""
     };
+    let post_return_option = if has_post_return {
+        r#" (post-return (core func $guest "cabi_post_run"))"#
+    } else {
+        ""
+    };
 
     let component_wat = format!(
         r#"(component
@@ -86,7 +92,7 @@ pub(crate) fn frame_component(
     (with "host" (instance
 {host_wires}))))
   (func (export "run") async {entry_signature}
-    (canon lift (core func $guest "run"){memory_option})))"#
+    (canon lift (core func $guest "run"){memory_option}{post_return_option})))"#
     );
     let component_bytes =
         wat::parse_str(&component_wat).context("Encoding component WAT to binary")?;

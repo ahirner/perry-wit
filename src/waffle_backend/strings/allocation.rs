@@ -8,6 +8,44 @@ use waffle::{
 
 pub(super) const PAGE_BYTES: u32 = 65_536;
 
+/// Releases invocation storage after the canonical caller has copied the result.
+/// All guest frames have exited; pending or escaping values must retain their owner
+/// before this serial invocation arena can support them.
+pub(crate) fn emit_post_return(
+    module: &mut Module<'static>,
+    memory: Memory,
+    export: &crate::waffle_backend::registry::FunctionExport,
+) -> Result<()> {
+    let sig = module.signatures.push(SignatureData {
+        params: module.signatures[export.sig].returns.clone(),
+        returns: vec![],
+    });
+    let mut body = FunctionBody::new(module, sig);
+    let entry = body.entry;
+    let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+    body.add_op(
+        entry,
+        Operator::I32Store {
+            memory: MemoryArg {
+                align: 2,
+                offset: 0,
+                memory,
+            },
+        },
+        &[zero, zero],
+        &[],
+    );
+    body.set_terminator(entry, Terminator::Return { values: vec![] });
+    body.validate()?;
+    let name = format!("cabi_post_{}", export.name);
+    let func = module.funcs.push(FuncDecl::Body(sig, name.clone(), body));
+    module.exports.push(Export {
+        name,
+        kind: ExportKind::Func(func),
+    });
+    Ok(())
+}
+
 /// Narrows only after checking sizes computed outside the allocator's i32 ABI.
 pub(super) fn checked_allocation_size(
     body: &mut FunctionBody,

@@ -101,6 +101,9 @@ pub(crate) fn lower_module(
                 name: export.name.clone(),
                 kind: ExportKind::Func(export.func_index),
             });
+            if registry.string_helpers.is_some() {
+                crate::waffle_backend::strings::emit_post_return(&mut module, memory, export)?;
+            }
         }
     }
 

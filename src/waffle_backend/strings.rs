@@ -11,6 +11,7 @@
 //!   operate on Unicode scalar values.
 
 mod allocation;
+pub(crate) use allocation::emit_post_return;
 mod canonical;
 mod comparison;
 mod concat;

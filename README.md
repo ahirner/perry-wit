@@ -171,6 +171,13 @@ Dynamic member names, capability function values, spread arguments, parameter
 defaults, and class initialization currently produce diagnostics.
 Unused declarations introduce no component imports; dependencies of all emitted
 function bodies are retained conservatively.
+WAFFLE string storage belongs to a serial invocation. Canonical post-return
+reclaims its arena after the host copies the result, including recoverable WIT
+errors. Raw core callers must invoke the matching `cabi_post_<export>` with the
+core return values after consuming the result and before the next invocation.
+Traps and cancelled calls still require discarding the instance. Arena storage
+is bounded across repeated calls; reclaiming dead temporaries within a long
+invocation and values escaping into pending operations remains roadmap work.
 The default CLI and SDK still describe the legacy pipeline until the R9 cutover.
 The Rust `compile_typescript_raw` API returns a `RawCompiled` value containing
 `core`, `exported_functions`, and `functions` for legacy linker consumers.

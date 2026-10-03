@@ -6,7 +6,7 @@ use perry_wit::waffle_backend::WaffleCompileOptions;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
-use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 struct TrackingAllocator;
@@ -62,6 +62,7 @@ fn make_async_engine() -> Result<Engine> {
 struct WasiHostState {
     context: WasiCtx,
     table: ResourceTable,
+    limits: StoreLimits,
 }
 
 impl WasiView for WasiHostState {
@@ -1182,12 +1183,19 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
         compiler_leak
     );
 
-    // 3. Component execution and repeated allocations with bounded memory growth
+    // The cap permits one invocation, but cannot hold all 200 invocation arenas.
     let engine = make_async_engine()?;
     let component_bytes = compiled.component.expect("Component emitted");
     let component = Component::new(&engine, &component_bytes)?;
     let linker = make_wasi_linker(&engine)?;
-    let mut store = Store::new(&engine, WasiHostState::default());
+    let mut store = Store::new(
+        &engine,
+        WasiHostState {
+            limits: StoreLimitsBuilder::new().memory_size(524_288).build(),
+            ..Default::default()
+        },
+    );
+    store.limiter(|state| &mut state.limits);
 
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
@@ -1202,14 +1210,14 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
     let res3 = run.call_async(&mut store, ("🦀,🌲,🌟",)).await?;
     assert_eq!(res3.0, "🦀 - 🌲 - 🌟");
 
-    // Repeat 200 times to verify stable allocation behavior
+    let input = format!("{},ß", "é🦀".repeat(2048));
+    let expected = format!("{} - SS", "É🦀".repeat(2048));
     for _ in 0..200 {
-        let res = run.call_async(&mut store, ("x,y,z",)).await?;
-        assert_eq!(res.0, "X - Y - Z");
+        let res = run.call_async(&mut store, (&input,)).await?;
+        assert_eq!(res.0, expected);
     }
 
-    // 4. Measure runtime linear memory: instantiate core module directly (0 imports)
-    // and verify linear memory usage is strictly bounded
+    // Inspect the same workload through the raw canonical ABI, including post-return.
     let core_engine = Engine::default();
     let core_module = Module::new(&core_engine, &compiled.core)?;
     let mut core_store = Store::new(&core_engine, ());
@@ -1217,18 +1225,41 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
     let memory = core_instance
         .get_memory(&mut core_store, "memory")
         .expect("linear memory exported");
-    let initial_pages = memory.size(&core_store);
-    let initial_bytes = memory.data_size(&core_store);
-    assert!(
-        initial_pages <= 3,
-        "Initial memory pages should be bounded (got {})",
-        initial_pages
-    );
-    assert!(
-        initial_bytes <= 196_608,
-        "Initial memory bytes should be bounded (got {})",
-        initial_bytes
-    );
+    let realloc = core_instance
+        .get_typed_func::<(u32, u32, u32, u32), u32>(&mut core_store, "cabi_realloc")?;
+    let run = core_instance.get_typed_func::<(u32, u32), u32>(&mut core_store, "run")?;
+    let post_return = core_instance.get_typed_func::<u32, ()>(&mut core_store, "cabi_post_run")?;
+    let mut first_allocation = None;
+    let mut peak_pages = None;
+    for _ in 0..200 {
+        let ptr = realloc.call(&mut core_store, (0, 0, 1, input.len() as u32))?;
+        assert_eq!(*first_allocation.get_or_insert(ptr), ptr);
+        memory.write(&mut core_store, ptr as usize, input.as_bytes())?;
+        let result = run.call(&mut core_store, (ptr, input.len() as u32))?;
+        let bytes = memory.data(&core_store);
+        let output_ptr =
+            u32::from_le_bytes(bytes[result as usize..result as usize + 4].try_into()?) as usize;
+        let output_len =
+            u32::from_le_bytes(bytes[result as usize + 4..result as usize + 8].try_into()?)
+                as usize;
+        assert_eq!(
+            &bytes[output_ptr..output_ptr + output_len],
+            expected.as_bytes()
+        );
+        assert_ne!(
+            &bytes[..4],
+            &[0; 4],
+            "result must remain allocated until post-return"
+        );
+        post_return.call(&mut core_store, result)?;
+        assert_eq!(&memory.data(&core_store)[..4], &[0; 4]);
+        let pages = memory.size(&core_store);
+        assert_eq!(
+            *peak_pages.get_or_insert(pages),
+            pages,
+            "pages must plateau after the first allocating call"
+        );
+    }
 
     Ok(())
 }
@@ -1373,6 +1404,70 @@ fn test_unused_helpers_are_not_embedded_for_numeric_and_simple_tasks() -> Result
         full_compiled.core.len()
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_post_return_reclaims_all_export_outcomes() -> Result<()> {
+    let input = "é🦀".repeat(2048);
+    let expected_string = format!("{input}🦀{input}{input}");
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+    for (result_type, return_value, expected) in [
+        ("void", "", vec![]),
+        ("boolean", "true", vec![Val::Bool(true)]),
+        ("number", "text.length", vec![Val::Float64(12289.0)]),
+        ("string", "text", vec![Val::String(expected_string.clone())]),
+        (
+            "Result<string, number>",
+            "text",
+            vec![Val::Result(Ok(Some(Box::new(Val::String(
+                expected_string.clone(),
+            )))))],
+        ),
+    ] {
+        let can_throw = result_type.starts_with("Result");
+        let source = format!(
+            r#"
+            function recurse(s: string, count: number): string {{
+                if (count === 0) return s + "🦀";
+                return recurse(s, count - 1) + s;
+            }}
+            export function run(fail: boolean): {result_type} {{
+                let text = recurse("{input}", 2);
+                {}
+                return {return_value};
+            }}"#,
+            if can_throw { "if (fail) throw 7;" } else { "" }
+        );
+        let compiled =
+            compile_typescript_waffle(&source, "post_return.ts", &WaffleCompileOptions::default())?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(
+            &engine,
+            WasiHostState {
+                limits: StoreLimitsBuilder::new().memory_size(524_288).build(),
+                ..Default::default()
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_func(&mut store, "run").unwrap();
+        for iteration in 0..100 {
+            let fail = can_throw && iteration % 2 == 0;
+            let mut result = vec![Val::Bool(false); expected.len()];
+            run.call_async(&mut store, &[Val::Bool(fail)], &mut result)
+                .await?;
+            if fail {
+                assert_eq!(
+                    result,
+                    [Val::Result(Err(Some(Box::new(Val::Float64(7.0)))))]
+                );
+            } else {
+                assert_eq!(result, expected, "{result_type} at iteration {iteration}");
+            }
+        }
+    }
     Ok(())
 }
 

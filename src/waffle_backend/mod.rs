@@ -94,7 +94,11 @@ fn compile_resolved_hir(
     let core = link::link_helpers(&core).context("Linking guest helpers into core Wasm")?;
 
     let (component_wat, component) = if options.componentize {
-        let (wat, bytes) = component::frame_component(&core, &contract)?;
+        let has_post_return = waffle_mod
+            .exports
+            .iter()
+            .any(|export| export.name == "cabi_post_run");
+        let (wat, bytes) = component::frame_component(&core, &contract, has_post_return)?;
         (Some(wat), Some(bytes))
     } else {
         (None, None)
