@@ -55,7 +55,8 @@
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",
-        "wasi": "wasi"
+        "wasi": "wasi",
+        "wasi-p3": "wasi-p3"
       }
     },
     "rust-overlay": {
@@ -106,6 +107,23 @@
       "original": {
         "owner": "WebAssembly",
         "ref": "v0.2.6",
+        "repo": "WASI",
+        "type": "github"
+      }
+    },
+    "wasi-p3": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781197377,
+        "narHash": "sha256-4HyinQe94BWhM5i2hxuO4BCetW0HyncDUjEvuYIsHEw=",
+        "owner": "WebAssembly",
+        "repo": "WASI",
+        "rev": "3ee2a590c766594ae44a54730fc74fc27da5c609",
+        "type": "github"
+      },
+      "original": {
+        "owner": "WebAssembly",
+        "ref": "v0.3.0",
         "repo": "WASI",
         "type": "github"
       }
