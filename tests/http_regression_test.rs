@@ -19,6 +19,7 @@ fn response_headers_and_methods_survive_body_consumption() {
                 ("X-Result".into(), request.method.clone()),
                 ("X-List".into(), "one".into()),
                 ("X-List".into(), "two".into()),
+                ("X-Empty".into(), "".into()),
             ],
             "accepted".into(),
         )
@@ -37,6 +38,10 @@ fn response_headers_and_methods_survive_body_consumption() {
             console.log(headers.has("x-result"));
             console.log(headers.get("missing") === null);
             console.log(headers.get("x-list"));
+            console.log(headers.has("missing"));
+            console.log(headers.has("x-empty"));
+            console.log(headers.get("x-empty") === "");
+            console.log(response.url === "http://{0}/metadata");
             console.log(await response.text());
             console.log(response.headers.get("x-result"));
         }}
@@ -53,7 +58,7 @@ fn response_headers_and_methods_survive_body_consumption() {
         .iter()
         .map(|method| {
             format!(
-                "202\ntrue\ntrue\n{method}\ntrue\ntrue\none, two\n{}\n{method}\n",
+                "202\ntrue\ntrue\n{method}\ntrue\ntrue\none, two\nfalse\ntrue\ntrue\ntrue\n{}\n{method}\n",
                 if *method == "HEAD" { "" } else { "accepted" }
             )
         })
@@ -92,7 +97,11 @@ fn fetch_in_class_method_selects_http_dispatch() {
 #[test]
 fn http_error_statuses_resolve_with_status_and_readable_body() {
     let fixture = HttpFixture::new(|request| {
-        Reply::Body(request.target[1..].parse().unwrap(), "error body".into())
+        Reply::WithHeaders(
+            request.target[1..].parse().unwrap(),
+            vec![("X-Status".into(), request.target[1..].into())],
+            "error body".into(),
+        )
     });
     for status in [200, 404, 500] {
         let output = support::run(
@@ -101,7 +110,9 @@ fn http_error_statuses_resolve_with_status_and_readable_body() {
             const response = await fetch("http://{}/{status}");
             console.log(response.status);
             console.log(response.ok);
+            console.log(response.headers.get("x-status"));
             console.log(await response.text());
+            console.log(response.headers.get("X-STATUS"));
         "#,
                 fixture.address
             ),
@@ -110,9 +121,53 @@ fn http_error_statuses_resolve_with_status_and_readable_body() {
         );
         assert_eq!(
             support::stdout(&output),
-            format!("{status}\n{}\nerror body\n", status == 200)
+            format!(
+                "{status}\n{}\n{status}\nerror body\n{status}\n",
+                status == 200
+            )
         );
     }
+}
+
+#[test]
+fn response_header_errors_report_diagnostics_instead_of_dummy_values() {
+    let fixture = HttpFixture::new(|_| Reply::Body(200, "ok".into()));
+    for (operation, diagnostic) in [
+        (r#"response.headers.get("")"#, "Invalid HTTP header name"),
+        (
+            r#"response.headers.has("bad name")"#,
+            "Invalid HTTP header name",
+        ),
+        (
+            r#"response.headers.set("x-name", "value")"#,
+            "Unsupported Headers method: set",
+        ),
+        (
+            r#"response.headers.entries()"#,
+            "Unsupported Headers method: entries",
+        ),
+    ] {
+        let output = support::run(
+            &format!(
+                r#"
+            const response = await fetch("http://{}/");
+            {operation};
+            console.log("continued");
+        "#,
+                fixture.address
+            ),
+            None,
+            None,
+        );
+        assert!(!output.status.success(), "{operation}");
+        assert!(output.stdout.is_empty(), "{operation}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{operation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(fixture.requests.lock().unwrap().len(), 4);
 }
 
 #[test]

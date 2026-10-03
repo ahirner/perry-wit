@@ -18,7 +18,19 @@ pub(crate) fn dispatch_call(name: &str, args: &[i64]) -> Option<i64> {
             fail_with_error("Invalid Headers method arguments");
         };
         (method, arguments.clone())
-    } else if matches!(name, "get" | "has") {
+    } else if matches!(
+        name,
+        "get"
+            | "has"
+            | "set"
+            | "append"
+            | "delete"
+            | "entries"
+            | "keys"
+            | "values"
+            | "forEach"
+            | "getSetCookie"
+    ) {
         (name.into(), args[1..].to_vec())
     } else {
         return None;

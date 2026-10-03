@@ -6,7 +6,7 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 ## Choosing the Next Slice
 
 1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
-2. Extend the working HTTP client through **10.1** and **10.2**, using the existing byte views and controlled HTTP fixtures.
+2. HTTP metadata/methods (**10.1**) are complete. Add buffered binary bodies (**10.2**) using the existing byte views and controlled HTTP fixtures.
 3. Develop callbacks (**B.1**), guest async execution (**B.2**), and retained lifetimes (**E.2**) around the first handler or timer that needs them.
 4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
 
@@ -212,10 +212,18 @@ Promise-based filesystem APIs need guest async execution and evidence that their
 Existing GET/POST, string-body, header, and response status/ok support is covered by `tests/http_regression_test.rs`.
 Use that baseline when extending the client.
 
-- [ ] **10.1. Client Metadata & Methods**
+- [x] **10.1. Client Metadata & Methods**
     - [x] Send outgoing headers and string request bodies through the existing HTTP path.
     - [x] Add the response header access and additional methods required by a client use case, with validation and documented status-text behavior supported by the host.
-    - [ ] Verify the new behavior alongside existing GET/POST, status, and error-response behavior using a controlled fixture.
+    - [x] Verify the new behavior alongside existing GET/POST, status, and error-response behavior using a controlled fixture.
+
+Verification (10.1):
+
+- The full `cargo test --locked --package perry-wit` suite passed 133 tests under `nix develop` with a fresh temporary directory. After adding diagnostic and error-status coverage, `cargo test --test http_regression_test` passed all 9 tests.
+- Controlled fixtures verify method spelling, GET/POST bodies, GET/HEAD body rejection, forbidden/invalid methods, header lookup and identity, absent/empty/duplicate fields, metadata after body consumption, and 200/404/500 responses. Invalid header names and unsupported mutations/iteration report diagnostics.
+- Response headers expose read-only `get` and `has`. `statusText` is empty because the pinned WASI interface does not provide a reason phrase. Redirect handling and broader Headers APIs remain outside this subset. SDK WIT declarations are unchanged; the capability catalog records these limits.
+- Scoped formatting and compiler/guest Clippy checks pass with existing warnings. The parent Makefile checks remain inapplicable as described in the verification baseline.
+
 - [ ] **10.2. Buffered Binary Bodies** — Needs D.1.
     - [ ] Support binary request/response bodies through the shared byte representation and verify byte-exact round-trips and cleanup.
 - [ ] **10.3. Buffered Incoming Handler** — Needs B.2; reusable handlers need the relevant E.2 lifetime support.
