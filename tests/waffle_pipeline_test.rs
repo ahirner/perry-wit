@@ -849,3 +849,193 @@ async fn test_waffle_wit_domain_errors_and_instance_reuse() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_await_immediate_and_internal_async() -> Result<()> {
+    let source = r#"
+        async function step(val: number): Promise<number> {
+            return val + 10;
+        }
+
+        export async function run(input: number): Promise<number> {
+            let immediate = await (input * 3);
+            let from_call = await step(immediate);
+            let literal = await 5;
+            return from_call + literal;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+
+    let compiled =
+        compile_typescript_waffle(source, "immediate_await.ts", &WaffleCompileOptions::default())?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+
+    // input = 4:
+    // immediate = 4 * 3 = 12
+    // from_call = step(12) = 22
+    // literal = 5
+    // return 22 + 5 = 27
+    let (res,) = run.call_async(&mut store, (4.0,)).await?;
+    assert_eq!(res, 27.0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_await_rejection_enters_guest_exception_path() -> Result<()> {
+    let source = r#"
+        async function fallible(val: number): Promise<number> {
+            if (val < 0) {
+                throw 88;
+            }
+            return val * 2;
+        }
+
+        export async function run(input: number): Promise<number> {
+            let tracker = 1000;
+            let result = 0;
+            try {
+                tracker = tracker + 100;
+                let val = await fallible(input);
+                result = val;
+            } catch (err) {
+                result = err + 12;
+            } finally {
+                tracker = tracker + 5000;
+            }
+            return tracker + result;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+
+    let compiled =
+        compile_typescript_waffle(source, "async_reject.ts", &WaffleCompileOptions::default())?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+
+    // 1. Success case: input = 5
+    // tracker = 1000 + 100 = 1100
+    // val = 10, result = 10
+    // finally: tracker = 1100 + 5000 = 6100
+    // return 6100 + 10 = 6110
+    let (res_ok,) = run.call_async(&mut store, (5.0,)).await?;
+    assert_eq!(res_ok, 6110.0);
+
+    // 2. Rejection case: input = -1
+    // tracker = 1000 + 100 = 1100
+    // fallible throws 88 -> caught in catch
+    // result = 88 + 12 = 100
+    // finally: tracker = 1100 + 5000 = 6100
+    // return 6100 + 100 = 6200
+    let (res_err,) = run.call_async(&mut store, (-1.0,)).await?;
+    assert_eq!(res_err, 6200.0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_async_multiple_awaits_in_loop_and_branch() -> Result<()> {
+    let source = r#"
+        declare function hostDouble(value: number): Promise<number>;
+        declare function waitFor(milliseconds: number): Promise<void>;
+
+        export async function run(input: number): Promise<number> {
+            let acc = input;
+            let i = 0;
+            while (i < 3) {
+                if (i === 1) {
+                    await waitFor(10);
+                    acc = acc + 7;
+                } else {
+                    acc = await hostDouble(acc);
+                }
+                i = i + 1;
+            }
+            return acc;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let component = Component::new(
+        &engine,
+        compile_typescript_waffle(source, "multi_await.ts", &WaffleCompileOptions::default())?
+            .component
+            .unwrap(),
+    )?;
+
+    let mut linker = make_wasi_linker(&engine)?;
+    linker
+        .root()
+        .func_wrap_concurrent("host-double", |_, (value,): (f64,)| {
+            Box::pin(async move { Ok((value * 2.0,)) })
+        })?;
+
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+
+    // input = 3:
+    // i = 0: else branch -> hostDouble(3) = 6
+    // i = 1: if branch -> waitFor(10), acc = 6 + 7 = 13
+    // i = 2: else branch -> hostDouble(13) = 26
+    // return 26
+    let (res,) = run.call_async(&mut store, (3.0,)).await?;
+    assert_eq!(res, 26.0);
+
+    // Repeated calls on same instance
+    for n in 1..=3 {
+        let (r,) = run.call_async(&mut store, (n as f64,)).await?;
+        // n -> 2n -> 2n + 7 -> (2n + 7) * 2 = 4n + 14
+        assert_eq!(r, (4 * n + 14) as f64);
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_async_cancellation_and_repeated_calls() -> Result<()> {
+    let source = r#"
+        declare function waitFor(milliseconds: number): Promise<void>;
+
+        export async function run(input: number): Promise<number> {
+            let val = input;
+            // Sleep for 200ms
+            await waitFor(200);
+            return val * 10;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+
+    let compiled =
+        compile_typescript_waffle(source, "cancel_task.ts", &WaffleCompileOptions::default())?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+
+    // 1. First invocation is cancelled early via timeout
+    {
+        let invocation = run.call_async(&mut store, (5.0,));
+        // Drop after 15ms (task is waiting 200ms)
+        let cancel_res = timeout(Duration::from_millis(15), invocation).await;
+        assert!(cancel_res.is_err(), "Expected timeout cancellation");
+    }
+
+    // 2. Subsequent invocation runs to completion without stale state poisoning
+    {
+        let invocation = run.call_async(&mut store, (7.0,));
+        let (res,) = timeout(Duration::from_secs(2), invocation).await??;
+        assert_eq!(res, 70.0);
+    }
+
+    Ok(())
+}
+
+
+

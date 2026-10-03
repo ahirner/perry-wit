@@ -676,46 +676,153 @@ impl<'a> FunctionLowerer<'a> {
         Ok(())
     }
 
+    fn is_func_return_bool(&self, fid: &FuncId) -> bool {
+        self.func_return_types.get(fid).map_or(false, |ty| {
+            let mut t = ty;
+            while let HirType::Promise(inner) = t {
+                t = inner.as_ref();
+            }
+            matches!(t, HirType::Boolean)
+        })
+    }
+
     fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
         let Expr::Call { callee, args, .. } = expr else {
-            bail!("Only awaiting a call expression is supported, got: {expr:?}");
+            // Awaiting an immediate value / non-call expression:
+            // Settle immediately and resume continuation with the evaluated value.
+            let val = self.expression(expr)?;
+            let result_val = if is_statement { None } else { Some(val) };
+            return Ok(self.continuation(result_val));
         };
 
-        let callee_name = match callee.as_ref() {
-            Expr::ExternFuncRef { name, .. } => name.as_str(),
-            _ => bail!("Await callee must be a declared intrinsic, got: {callee:?}"),
-        };
+        match callee.as_ref() {
+            Expr::ExternFuncRef { name, .. } => {
+                let intrinsic_func = self
+                    .intrinsic_funcs
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("Unknown async intrinsic: {name}"))?;
 
-        let intrinsic_func = self
-            .intrinsic_funcs
-            .get(callee_name)
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("Unknown async intrinsic: {callee_name}"))?;
+                // Evaluate arguments left-to-right
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.expression(arg)?);
+                }
 
-        // Evaluate arguments left-to-right
-        let mut arg_values = Vec::new();
-        for arg in args {
-            arg_values.push(self.expression(arg)?);
+                let ret_types =
+                    &self.module.signatures[self.module.funcs[intrinsic_func].sig()].returns;
+                let returns = ret_types.clone();
+
+                let call_res = self.op(
+                    Operator::Call {
+                        function_index: intrinsic_func,
+                    },
+                    &arg_values,
+                    &returns,
+                );
+
+                let result_val = if returns.is_empty() || is_statement {
+                    None
+                } else {
+                    Some(call_res)
+                };
+
+                Ok(self.continuation(result_val))
+            }
+            Expr::FuncRef(fid) => {
+                let &func_idx = self
+                    .func_decls
+                    .get(fid)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
+                let is_exported = *self.func_is_exported.get(fid).unwrap_or(&false);
+
+                let mut arg_vals = Vec::new();
+                for a in args {
+                    arg_vals.push(self.expression(a)?);
+                }
+
+                if !is_exported {
+                    let call_val = self.body.add_op(
+                        self.block,
+                        Operator::Call {
+                            function_index: func_idx,
+                        },
+                        &arg_vals,
+                        &[Type::I32, Type::F64],
+                    );
+                    let status = self.body.add_value(ValueDef::PickOutput(
+                        call_val,
+                        0,
+                        Type::I32,
+                    ));
+                    self.body.append_to_block(self.block, status);
+                    let payload = self.body.add_value(ValueDef::PickOutput(
+                        call_val,
+                        1,
+                        Type::F64,
+                    ));
+                    self.body.append_to_block(self.block, payload);
+
+                    let is_ok = self.op(Operator::I32Eqz, &[status], &[Type::I32]);
+                    let ok_block = self.body.add_block();
+                    self.body.blocks[ok_block].desc = "await call ok".into();
+                    let err_block = self.body.add_block();
+                    self.body.blocks[err_block].desc = "await call err".into();
+
+                    self.body.set_terminator(
+                        self.block,
+                        Terminator::CondBr {
+                            cond: is_ok,
+                            if_true: BlockTarget {
+                                block: ok_block,
+                                args: vec![],
+                            },
+                            if_false: BlockTarget {
+                                block: err_block,
+                                args: vec![],
+                            },
+                        },
+                    );
+
+                    // Rejection enters guest exception path at the await
+                    self.block = err_block;
+                    self.emit_throw(payload);
+
+                    self.block = ok_block;
+                    let result_val = if is_statement {
+                        None
+                    } else if self.is_func_return_bool(fid) {
+                        let payload_i32 = self.op(
+                            Operator::I32TruncF64U,
+                            &[payload],
+                            &[Type::I32],
+                        );
+                        Some(payload_i32)
+                    } else {
+                        Some(payload)
+                    };
+                    Ok(self.continuation(result_val))
+                } else {
+                    let ret_types =
+                        &self.module.signatures[self.module.funcs[func_idx].sig()].returns;
+                    let returns = ret_types.clone();
+                    let call_res = self.op(
+                        Operator::Call {
+                            function_index: func_idx,
+                        },
+                        &arg_vals,
+                        &returns,
+                    );
+                    let result_val = if returns.is_empty() || is_statement {
+                        None
+                    } else {
+                        Some(call_res)
+                    };
+                    Ok(self.continuation(result_val))
+                }
+            }
+            _ => bail!("Await callee must be a declared intrinsic or function, got: {callee:?}"),
         }
-
-        let ret_types = &self.module.signatures[self.module.funcs[intrinsic_func].sig()].returns;
-        let returns = ret_types.clone();
-
-        let call_res = self.op(
-            Operator::Call {
-                function_index: intrinsic_func,
-            },
-            &arg_values,
-            &returns,
-        );
-
-        let result_val = if returns.is_empty() || is_statement {
-            None
-        } else {
-            Some(call_res)
-        };
-
-        Ok(self.continuation(result_val))
     }
 
     fn continuation(&mut self, result: Option<Value>) -> Option<Value> {
@@ -893,7 +1000,7 @@ impl<'a> FunctionLowerer<'a> {
                         self.emit_throw(payload);
 
                         self.block = ok_block;
-                        if matches!(self.func_return_types.get(fid), Some(HirType::Boolean)) {
+                        if self.is_func_return_bool(fid) {
                             let payload_i32 = self.op(
                                 Operator::I32TruncF64U,
                                 &[payload],
