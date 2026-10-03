@@ -9,8 +9,12 @@ pub mod linker;
 pub mod runtime;
 pub mod sdk;
 pub mod strip;
+pub mod waffle_backend;
 
 pub use compiler::{
     CompileOptions, Compiled, compile_file, compile_typescript, compile_typescript_raw,
 };
 pub use sdk::{SdkOptions, SdkResult, generate_sdk_files};
+pub use waffle_backend::{
+    WaffleCompileOptions, WaffleCompiled, compile_typescript as compile_typescript_waffle,
+};

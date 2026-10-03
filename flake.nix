@@ -13,9 +13,13 @@
       url = "github:WebAssembly/WASI/v0.2.6";
       flake = false;
     };
+    wasi-p3 = {
+      url = "github:WebAssembly/WASI/v0.3.0";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, wasi }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, wasi, wasi-p3 }:
     let
       systemOutputs = flake-utils.lib.eachDefaultSystem (system:
         let
@@ -38,6 +42,21 @@
             for f in "${wasi}/wasip2/$pkg"/*.wit; do
               sed "/^package wasi:/d" "$f" >> "$out/$pkg/package.wit"
             done
+          done
+        '';
+
+        # Dynamic WASI 0.3 (Preview 3) WIT definitions extracted from official WASI v0.3.0
+        wasiP3Wit = pkgs.runCommand "wasi-preview3-wit" {} ''
+          mkdir -p "$out"
+          for pkg in cli clocks filesystem http io random sockets; do
+            if [ -d "${wasi-p3}/wasip3/$pkg" ]; then
+              mkdir -p "$out/$pkg"
+              pkg_header=$(grep -h "^package wasi:" "${wasi-p3}/wasip3/$pkg"/*.wit | head -n 1)
+              echo "$pkg_header" > "$out/$pkg/package.wit"
+              for f in "${wasi-p3}/wasip3/$pkg"/*.wit; do
+                sed "/^package wasi:/d" "$f" >> "$out/$pkg/package.wit"
+              done
+            fi
           done
         '';
 
@@ -238,6 +257,7 @@
           ];
 
           WASI_WIT_PATH = wasiWit;
+          WASI_P3_WIT_PATH = wasiP3Wit;
           GUEST_RUNTIME_PATH = "${guestRuntime}/lib/guest_runtime.wasm";
 
           shellHook = ''
@@ -258,6 +278,7 @@
           ];
 
           WASI_WIT_PATH = wasiWit;
+          WASI_P3_WIT_PATH = wasiP3Wit;
 
           shellHook = ''
             if [ -d wit ]; then

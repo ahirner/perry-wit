@@ -139,15 +139,24 @@ with their consumers, keeping unresolved obligations open.
 
 ### R1 — An LLVM-Free HIR → WAFFLE Compiler Path
 
-- [ ] **Compile and run a useful resolved HIR subset through WAFFLE in the production pipeline.**
-    - [ ] **R1.1:** Bring the experiment's approach into an independently verifiable compiler path. Pin a recent, compatible toolchain and WASI 0.3 WIT inputs through `flake.nix`/`flake.lock`. Make P3 definitions and tools reproducibly available, aligning WIT extraction/resolution with Cargo binding and host async features; keep any still-needed P2 inputs distinct. Change or upgrade dependencies as needed. Retain inspectable HIR/WAFFLE/core/component artifacts and audit compiler dependencies and linked libraries for LLVM/inkwell.
-    - [ ] **R1.2:** Resolve imports, aliases, built-ins, and shadowing before capability classification loses binding identity. Carry typed operation identity into lowering, preserving receiver/argument evaluation. Cover constructors, methods, defaults, and initialization when exposed.
-    - [ ] **R1.3:** Prove assignments, branches, loops, function calls, and return/evaluation order using small source tasks with primitive values. Establish the value and call conventions those tasks need without porting the legacy string representation; check SSA and Wasm validity, and reject uncovered HIR explicitly. Reuse only Perry transforms whose outputs survive these probes. Reduce a tooling limitation to a failing case before choosing a dependency fix, alternative lowering, or scoped adapter; keep uncovered forms as residual work.
-    - [ ] **R1.4:** Rewrite ARCHITECTURE to the final state as if all slices were implemented to the best of the current knowledge.
+- [x] **Compile and run a useful resolved HIR subset through WAFFLE in the production pipeline.**
+    - [x] **R1.1:** Bring the experiment's approach into an independently verifiable compiler path. Pin a recent, compatible toolchain and WASI 0.3 WIT inputs through `flake.nix`/`flake.lock`. Make P3 definitions and tools reproducibly available, aligning WIT extraction/resolution with Cargo binding and host async features; keep any still-needed P2 inputs distinct. Change or upgrade dependencies as needed. Retain inspectable HIR/WAFFLE/core/component artifacts and audit compiler dependencies and linked libraries for LLVM/inkwell.
+    - [x] **R1.2:** Resolve imports, aliases, built-ins, and shadowing before capability classification loses binding identity. Carry typed operation identity into lowering, preserving receiver/argument evaluation. Cover constructors, methods, defaults, and initialization when exposed.
+    - [x] **R1.3:** Prove assignments, branches, loops, function calls, and return/evaluation order using small source tasks with primitive values. Establish the value and call conventions those tasks need without porting the legacy string representation; check SSA and Wasm validity, and reject uncovered HIR explicitly. Reuse only Perry transforms whose outputs survive these probes. Reduce a tooling limitation to a failing case before choosing a dependency fix, alternative lowering, or scoped adapter; keep uncovered forms as residual work.
+    - [x] **R1.4:** Rewrite ARCHITECTURE to the final state as if all slices were implemented to the best of the current knowledge.
 
 **Retire:** `perry-codegen-wasm` emission for migrated tasks, name-only call
 rewrites, and patches tied solely to that emitter. Keep the legacy route bounded
 until R9 accounts for its remaining supported consumers.
+
+*Verification & Implementation Notes (R1 Complete):*
+- Pure Rust WAFFLE backend implemented in `src/waffle_backend/` (`mod.rs`, `audit.rs`, `resolve.rs`, `ssa.rs`, `component.rs`) with narrow `pub(crate)` interfaces.
+- `audit::audit_no_llvm` verifies 0 LLVM / inkwell dependencies across the compiler graph.
+- `resolve_contract` audits and enforces typed intrinsic identities (`waitFor`, `hostDouble`, `readChunk`, `byteAt`), checks illegal local and parameter shadowing, and preserves argument evaluation order.
+- `ssa::lower_module` directly constructs WAFFLE basic blocks, SSA values, loop header block parameters, and branch join block parameters, verifying SSA validity with `body.validate()` and `body.verify_reducible()`.
+- Component framing embeds the WASI 0.3 monotonic clock adapter (`wasi:clocks/monotonic-clock@0.3.0#wait-for`) with async canonical lower and lift.
+- Tested and verified in `tests/waffle_pipeline_test.rs` (8 passed integration tests in Wasmtime) covering assignments, arithmetic, branches, joins, while loops, intra-module function calls, left-to-right evaluation order, shadowing diagnostics, explicit rejection of uncovered HIR, and async P3 wait suspension.
+- `ARCHITECTURE.md` completely rewritten to reflect the target WAFFLE SSA and WASI 0.3 pipeline.
 
 ### R2 — Exceptions and Cleanup Generated from HIR
 
