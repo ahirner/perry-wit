@@ -19,16 +19,16 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
     )
     .unwrap();
 
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("target"));
-    let deps_dir = target_dir.join("debug/deps");
+    let test_binary = std::env::current_exe().expect("locate running test binary");
+    let deps_dir = test_binary
+        .parent()
+        .expect("test binary is in Cargo's deps directory");
 
     let script = scratch.join("build-script");
     let rustc_bin = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
 
     let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&deps_dir) {
+    if let Ok(entries) = fs::read_dir(deps_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
@@ -45,25 +45,40 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
     candidates.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
 
     let mut compiled = false;
+    let mut diagnostics = String::new();
     for (rlib, _) in candidates {
-        let mut rustc_cmd = Command::new(&rustc_bin);
-        rustc_cmd
-            .arg("build.rs")
-            .arg("--crate-type=bin")
-            .arg("-o")
-            .arg(&script)
-            .arg("-L")
-            .arg(format!("dependency={}", deps_dir.display()))
-            .arg("--extern")
-            .arg(format!("wasmparser={}", rlib.display()));
-        if let Ok(status) = rustc_cmd.status() {
-            if status.success() {
+        // Release dependencies may contain LLVM bitcode instead of native objects.
+        for lto in [false, true] {
+            let mut rustc_cmd = Command::new(&rustc_bin);
+            rustc_cmd
+                .arg("build.rs")
+                .arg("--crate-type=bin")
+                .arg("-Cpanic=abort")
+                .arg("-o")
+                .arg(&script)
+                .arg("-L")
+                .arg(format!("dependency={}", deps_dir.display()))
+                .arg("--extern")
+                .arg(format!("wasmparser={}", rlib.display()));
+            if lto {
+                rustc_cmd.arg("-Clto=fat");
+            }
+            let output = rustc_cmd.output().expect("run rustc for build.rs");
+            if output.status.success() {
                 compiled = true;
                 break;
             }
+            diagnostics.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+        if compiled {
+            break;
         }
     }
-    assert!(compiled, "Failed to compile build.rs with rustc");
+    assert!(
+        compiled,
+        "Failed to compile build.rs with rustc using {}: {diagnostics}",
+        deps_dir.display()
+    );
 
     for relative in [
         "override.wasm",
