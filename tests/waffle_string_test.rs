@@ -4,7 +4,7 @@ use anyhow::Result;
 use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 fn make_async_engine() -> Result<Engine> {
@@ -586,13 +586,11 @@ fn test_string_allocator_failure_does_not_advance_heap() -> Result<()> {
         &options,
     )?;
     let engine = Engine::default();
-    let module = wasmtime::Module::new(&engine, compiled.core)?;
-    let limits = wasmtime::StoreLimitsBuilder::new()
-        .memory_size(65_536)
-        .build();
+    let module = Module::new(&engine, compiled.core)?;
+    let limits = StoreLimitsBuilder::new().memory_size(65_536).build();
     let mut store = Store::new(&engine, limits);
     store.limiter(|limits| limits);
-    let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+    let instance = Instance::new(&mut store, &module, &[])?;
     let realloc =
         instance.get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "cabi_realloc")?;
     assert!(realloc.call(&mut store, (0, 0, 4, 65_536)).is_err());

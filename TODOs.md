@@ -229,14 +229,35 @@ demonstrates a gap.
     - [x] **R4.1:** Trace decoding, escapes, HIR literals, folding, and intrinsic lowering into the WAFFLE path, locating conversions that can erase invalid input. Establish a compact operation matrix recording index units, coercion, boundary behavior, and deliberate Node differences. Probe ASCII, BMP/non-BMP text, combining sequences, empty strings, paired escapes, and malformed inputs. Fix required shared frontend/transform behavior at that boundary, keeping legacy runtime conversion outside this slice.
       - **Tracing & Lossy Erasure Identification:** Located lossy conversion points where invalid input was previously erased: template literal unescaping in `perry-hir` silently converting lone surrogates to `\u{FFFD}`, and WTF-8 literals emitting `Expr::WtfString`.
       - **Compact Operation Matrix:** Established typed `TextContractMatrix` in `src/waffle_backend/text_contract.rs` defining exact indexing units (`ScalarValue`, `Utf16CodeUnit`, `Byte`), operation statuses (`SupportedScalar`, `DisallowedUtf16`, `SupportedBoundary`), coercion rules, boundary behavior, and deliberate Node differences for 15 core operations (`length`, `index_access`, `charAt`, `codePointAt`, `charCodeAt`, `fromCodePoint`, `fromCharCode`, `slice`, `indexOf`, `split`, `concat`, `comparison`, `template_literal`, `surrogate_escapes`, `canonical_abi_string`).
-      - **Shared Frontend & Transform Validation Boundary:** Created `src/waffle_backend/text_contract.rs` with `validate_source_text` (scans string and template literals, eagerly rejecting unpaired high/low/reversed/braced surrogate escapes before parser lossy substitution), `validate_hir_text` (rejects `Expr::WtfString` and diagnoses disallowed UTF-16 operations like `charCodeAt`), and `validate_utf8_boundary` (boundary byte verification).
+      - `validate_source_text` visits parsed string literals and template quasis before HIR lowering replaces invalid text.
+        Nested interpolations retain their boundaries; comments and regular expressions are excluded.
+        `validate_hir_text` rejects `Expr::WtfString` and disallowed UTF-16 operations; `validate_utf8_boundary` checks input bytes.
       - **Probe & Acceptance Verification:** Added comprehensive acceptance suites in `tests/utf8_probe_test.rs` and `tests/text_contract_test.rs` verifying ASCII, BMP, non-BMP, combining sequences, empty strings, embedded NULs, paired escapes, and rejection of malformed inputs. Verified all 8 contract tests and 29 WAFFLE pipeline integration tests pass.
     - [x] **R4.2:** Deliver a source task through WAFFLE using scalar length/index/slice/search and a UTF-8 WIT string round trip. Add simple valid-text storage and ownership to the established value/call/ABI conventions, reusing Rust facilities where suitable. Verify negative/out-of-range bounds and search-position reuse; compare literals with runtime expressions and representative function/class paths. Keep ABI pointers/lengths in the required units and test exact bytes for empty, permitted embedded-NUL, and multibyte text.
-      - **Static String Interning & Descriptor Model:** Implemented `StringPool` in `src/waffle_backend/strings.rs` providing static string interning into linear memory data segments. Defined 12-byte string descriptors `[ptr: i32, byte_len: i32, scalar_len: i32]` with 4-byte alignment, pre-computing exact UTF-8 byte length and Unicode scalar value count.
-      - **Pure Wasm SSA String Runtime:** Synthesized Wasm runtime helper functions in pure WAFFLE SSA (`$rt_lift_canonical`, `$rt_str_slice`, `$rt_str_char_at`, `$rt_str_index_of`, `$rt_str_concat`, `$rt_str_compare`, and Canonical ABI `cabi_realloc`).
-      - **Canonical ABI Integration:** String parameters map to `(i32, i32)` (ptr, byte_len) and are lifted to descriptor pointers. String return types and WIT `Result<string, number>` store `(ptr, byte_len)` into the Canonical ABI return buffer with exported `cabi_realloc` memory allocation.
-      - **Scalar Operations & Lowering:** Lowered `.length` (O(1) scalar count load), `[index]` and `.charAt()` (scalar indexing), `.slice(start, end)` (supporting negative, omitted, and out-of-range bounds with scalar-to-byte offset translation), `.indexOf(search, pos)` (scalar return index and search position reuse), `+` string concatenation, and comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`).
-      - **Verification Suite:** Added `tests/waffle_string_test.rs` covering empty strings, ASCII, embedded NULs (`"hello \0 world"`), multibyte emoji text (`"hello 🦀 😀"`), scalar bounds/search, and full component round-trips via Wasmtime for both direct strings and WIT `Result<string, number>`.
+      - String descriptors contain `[ptr: i32, byte_len: i32, scalar_len: i32]` with four-byte alignment.
+        Static memory reserves enough pages for the complete literal pool.
+        The bump allocator grows memory before returning an allocation and traps on overflow or failed growth.
+        Repeated calls retain allocated storage until the instance is dropped; reclamation remains part of R4.4.
+      - `strings/` separates allocation, descriptor construction, canonical input handling, position normalization,
+        slicing, search, concatenation, and comparison.
+        Concatenation uses `memory.copy`; slices retain the original byte storage.
+      - Canonical string parameters flatten to `(i32, i32)`; entries exceeding 16 flattened parameters are diagnosed.
+        Direct strings and `Result<string, number>` use UTF-8 byte lengths at the component boundary.
+        Promise-wrapped results use the same canonical options as their resolved types.
+      - `.length`, indexing, `charAt`, `slice`, and `indexOf` use scalar positions.
+        Numeric method positions truncate toward zero, map NaN to zero, and clamp infinities before integer conversion.
+        `slice()` and `charAt()` default to zero; `slice` defaults its end to the string length.
+        Unsupported argument types and arities are diagnosed.
+      - Bracket access returns `undefined` for nonintegral, negative, or out-of-range numeric indices.
+        That value survives locals and `await`, remains falsy, and compares unequal to empty strings and other primitives.
+        String methods and declared string argument/return boundaries trap if given `undefined`.
+        `charAt` returns an empty string outside its bounds.
+      - String truthiness tests length; strict equality distinguishes strings, numbers, booleans, and `undefined`.
+        Concatenation and template interpolation require known string operands.
+        Other conversions, mixed loose equality/ordering, and ordering string-or-undefined values are diagnosed.
+      - `tests/waffle_string_test.rs` executes component round trips for empty, ASCII, NUL, and multibyte strings,
+        including awaited values, missing indices, numeric bounds, large literals, and repeated allocating calls.
+        Allocator probes also check failed growth, address overflow, alignment, and preserved realloc contents.
     - [ ] **R4.3:** Migrate the matrix's remaining operations through combined tasks: scalar `codePointAt` / `fromCodePoint`, empty-separator and character `split` into string arrays, and scalar iteration; string templates and joins (`join`); case conversions (`toLowerCase`, `toUpperCase`) with length-changing Unicode casing; JSON text parsing and serialization; regex search positions. Build on R4.2's 12-byte descriptor model for string array representations in linear memory. Test ordering differences from UTF-16 and reject unpaired JSON escapes.
     - [ ] **R4.4:** Audit text import/export, filesystem, HTTP, environment, arguments, and logging as each boundary is introduced. Preserve arbitrary binary bytes and API-specific restrictions; reject invalid text through the proper error channel before dependent side effects. Verify literal/global/returned/retained lifetimes and repeated allocating calls, cleanup, and recoverable failures for ASCII and multibyte strings. Require bounded live storage and string-only tasks without unrelated imports; measure before adding caches or more elaborate storage.
 
