@@ -1431,3 +1431,25 @@ async fn test_string_result_signature_retains_canonical_allocator() -> Result<()
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_undefined_only_equality_without_string_helpers() -> Result<()> {
+    for (operator, expected) in [("===", true), ("==", true), ("!==", false), ("!=", false)] {
+        let source = format!(
+            "export async function run(): Promise<boolean> {{ let a = await undefined; return a {operator} undefined; }}"
+        );
+        run_cases(&source, &[(vec![], Val::Bool(expected))]).await?;
+        let compiled =
+            compile_typescript_waffle(&source, "undefined.ts", &WaffleCompileOptions::default())?;
+        for payload in wasmparser::Parser::new(0).parse_all(&compiled.core) {
+            if let wasmparser::Payload::FunctionSection(reader) = payload? {
+                assert_eq!(
+                    reader.count(),
+                    2,
+                    "Undefined comparisons must not link string helpers"
+                );
+            }
+        }
+    }
+    Ok(())
+}

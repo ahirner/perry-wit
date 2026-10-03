@@ -128,6 +128,15 @@ impl FunctionLowerer<'_> {
                 && right_kind == Some(StringKind::Present)),
             "Ordering string-or-undefined values requires an unsupported coercion"
         );
+        if left_kind == Some(StringKind::Undefined) && right_kind == Some(StringKind::Undefined) {
+            return Ok(self.op(
+                Operator::I32Const {
+                    value: u32::from(matches!(op, CompareOp::Eq | CompareOp::LooseEq)),
+                },
+                &[],
+                &[Type::I32],
+            ));
+        }
         let helpers = self
             .registry
             .string_helpers
