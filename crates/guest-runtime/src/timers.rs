@@ -121,7 +121,10 @@ fn dispatch_call(name: &str, args: &[i64]) -> Option<i64> {
 /// Validates before allocating a subscription and retains raw callback argument values.
 fn schedule(callback: i64, delay: i64, arguments: i64, mode: TimerMode) -> i64 {
     let state = get_state();
-    if !matches!(state.get_handle(callback), Some(JsHandle::Closure(_))) {
+    if !matches!(
+        state.get_handle(callback),
+        Some(JsHandle::Closure(_) | JsHandle::PromiseResolver(_))
+    ) {
         let name = match mode {
             TimerMode::Timeout => "setTimeout",
             TimerMode::Interval => "setInterval",

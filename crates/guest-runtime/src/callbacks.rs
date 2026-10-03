@@ -112,12 +112,19 @@ pub(crate) extern "C" fn guest_callback_invoke(handle: i64, arguments: i64) -> i
 }
 
 #[no_mangle]
+/// Returns a TypeScript table slot, -2 for builtin resolvers, or -1 for invalid values.
 pub(crate) extern "C" fn guest_callback_table(handle: i64, arguments: i64) -> i32 {
     let state = get_state();
     match (state.get_handle(handle), state.get_handle(arguments)) {
         (Some(JsHandle::Closure(closure)), Some(JsHandle::Array(_))) => closure.table_index as i32,
+        (Some(JsHandle::PromiseResolver(_)), Some(JsHandle::Array(_))) => -2,
         _ => -1,
     }
+}
+
+#[no_mangle]
+pub(crate) extern "C" fn guest_callback_builtin(handle: i64, arguments: i64) -> i64 {
+    crate::promises::invoke_resolver(handle, arguments)
 }
 
 #[no_mangle]

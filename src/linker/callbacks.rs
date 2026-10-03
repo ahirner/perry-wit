@@ -13,6 +13,7 @@ pub(crate) struct CallbackBridge {
     table: u32,
     argument: u32,
     invalid: u32,
+    builtin: u32,
 }
 
 impl CallbackBridge {
@@ -32,11 +33,12 @@ impl CallbackBridge {
             table: helper("guest_callback_table")?,
             argument: helper("guest_callback_argument")?,
             invalid: helper("guest_callback_invalid")?,
+            builtin: helper("guest_callback_builtin")?,
         }))
     }
 
-    pub(crate) fn dependencies(&self) -> [u32; 3] {
-        [self.table, self.argument, self.invalid]
+    pub(crate) fn dependencies(&self) -> [u32; 4] {
+        [self.table, self.argument, self.invalid, self.builtin]
     }
 
     pub(crate) fn synthesize(
@@ -50,6 +52,16 @@ impl CallbackBridge {
         function.instruction(&Instruction::LocalGet(1));
         function.instruction(&Instruction::Call(functions[self.table as usize]));
         function.instruction(&Instruction::LocalSet(2));
+
+        function.instruction(&Instruction::LocalGet(2));
+        function.instruction(&Instruction::I32Const(-2));
+        function.instruction(&Instruction::I32Eq);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::LocalGet(1));
+        function.instruction(&Instruction::Call(functions[self.builtin as usize]));
+        function.instruction(&Instruction::Return);
+        function.instruction(&Instruction::End);
 
         for element in &module.elements {
             let ElementKind::Active {

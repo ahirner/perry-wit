@@ -66,7 +66,7 @@
         "Delays use Node-style whole milliseconds: values below 1, nonfinite values, or values above 2147483647 become 1; other values are truncated",
         "Intervals rearm from the actual callback start plus the original delay; late delivery does not replay missed ticks, and an uncleared interval keeps the invocation running",
         "Timer function values report compiler diagnostics; callback forms follow the guest-function subset",
-        "Named guest async tasks have a separate continuation queue; awaiting timer completion still needs a Promise constructor or producer bridge"
+        "Direct Promise constructors can resolve or reject from timer callbacks; guest microtasks run before the next timer callback"
       ],
       "conformance": [
         "tests/clocks_test.rs",
@@ -83,15 +83,18 @@
         "Executes named async bodies in WebAssembly without rt:__async JavaScript imports, including functions without await",
         "Runs the synchronous prefix immediately and queues await continuations in order for ordinary values and guest task Promises",
         "Each async activation returns a distinct Promise and adopts a returned guest Promise's outcome",
+        "Direct global new Promise(executor) invokes the executor synchronously with callable resolve/reject functions; the first settlement wins, including while adopting another guest Promise",
+        "Timer-produced Promises resume await continuations before the next timer callback; cancellation with no runnable producer reports an error at the synchronous export boundary",
         "Selected WIT exports drive continuations to completion and marshal the resolved task value through the existing synchronous Preview 2 ABI",
         "Suspended cells, cyclic objects, and byte views survive continuation execution and are reclaimed after success or rejection",
         "Generated implementation contracts accept synchronous or Promise results and reject incompatible resolved types"
       ],
       "differences": [
-        "Initial tests cover nested pure awaits, loops, string exceptions, catch/finally, and scalar/string/result/unit ABI results; pending timer and HTTP consumers remain unfinished",
+        "Tests cover nested pure and timer-backed awaits, loops, string exceptions, catch/finally, scalar/string/result/unit ABI results, and bounded memory; native HTTP producer readiness remains unfinished",
         "Async function expressions and class methods, generators, captured named functions, and rest/default/arguments parameters report compiler diagnostics",
-        "Promise constructors and static methods in native async programs report diagnostics; Promise instance methods raise a guest exception",
+        "Promise static methods in programs using native async or guest constructors report diagnostics; Promise instance methods raise a guest exception",
         "The existing guest exception bridge uses string payloads; discarded-task rejection reporting and general Promise APIs are outside this initial subset",
+        "Only direct global Promise construction is supported; constructor aliases, subclassing, arbitrary thenables, and legacy top-level await of pending timer Promises are outside the subset",
         "Pure async continuations do not poll the host; shared cleanup still retains the WASI poll interface"
       ],
       "conformance": [

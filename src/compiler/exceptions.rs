@@ -334,6 +334,7 @@ fn bridge_events(
             | "closure_call_3"
             | "closure_call_spread"
             | "await_promise"
+            | "async_promise_new"
             | "then"
             | "catch"
             | "finally"

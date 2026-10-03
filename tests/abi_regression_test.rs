@@ -1,6 +1,83 @@
 mod support;
 
 #[test]
+fn guest_async_timer_producers_settle_once_and_resume_in_microtask_order() {
+    let source = r#"
+        const trace = {value: ""};
+        function wait(value, delay) {
+            const undefined = "shadow";
+            return new Promise((resolve, reject) => {
+                if (typeof resolve !== "function" || resolve === reject) { throw "invalid resolver"; }
+                setTimeout(resolve, delay, value);
+            });
+        }
+        async function run() {
+            const owner = {text: "kept", bytes: Uint8Array.from([7, 128])};
+            owner.self = owner;
+            const pending = wait(owner, 2);
+            trace.value += "sync;";
+            const saved = await pending;
+            trace.value += saved.text + ":" + saved.bytes[1] + ";";
+            const adoption = new Promise((resolve, reject) => {
+                resolve(wait("adopted", 2)); reject("wrong"); resolve("wrong"); throw "ignored";
+            });
+            trace.value += (await adoption) + ";";
+            try { await new Promise((resolve, reject) => setTimeout(reject, 2, "rejected")); }
+            catch (error) { trace.value += error + ";"; await wait(0, 1); }
+            try { await new Promise(() => { throw "executor"; }); }
+            catch (error) { trace.value += error + ";"; }
+            const first = new Promise((resolve, reject) => { resolve("first"); reject("wrong"); });
+            trace.value += (await first) + ";";
+            const resolver = {call: null};
+            const cyclic = new Promise(resolve => { resolver.call = resolve; });
+            const resolveCycle = resolver.call;
+            resolveCycle(cyclic);
+            try { await cyclic; trace.value += "unreachable;"; }
+            catch (error) { trace.value += "cycle;"; }
+            try { new Promise(42); trace.value += "unreachable;"; }
+            catch (error) { trace.value += "invalid;"; }
+            console.log(trace.value);
+        }
+        async function report() { try { await run(); await ordered(); } catch (error) { console.log("FAIL:" + error); } }
+        report();
+        const order = {value: ""};
+        async function ordered() {
+            await new Promise(resolve => {
+                setTimeout(() => { order.value += "first;"; resolve(); }, 10);
+                setTimeout(() => { order.value += "second;"; console.log(order.value); }, 10);
+            });
+            order.value += "resumed;";
+        }
+    "#;
+    let reference = std::process::Command::new("node")
+        .args(["--eval", source])
+        .output()
+        .unwrap();
+    let output = support::run(source, None, None);
+    assert_eq!(support::stdout(&output), support::stdout(&reference));
+    let wit = format!(
+        "package test:guest-async; world test {{ {RUNTIME_IMPORTS} export run-task: func(input: string) -> string; }}"
+    );
+    for source in [
+        r#"
+        function wait(value) { return new Promise(resolve => setTimeout(resolve, 2, value)); }
+        export async function runTask(input: string): Promise<string> {
+            const first = await wait(input);
+            return (await wait(first + ":resumed"));
+        }
+    "#,
+        r#"
+        export function runTask(input: string): any {
+            return new Promise(resolve => setTimeout(resolve, 2, input + ":resumed"));
+        }
+    "#,
+    ] {
+        let output = support::run(source, Some(&wit), Some("run-task(\"component\")"));
+        assert_eq!(support::stdout(&output).trim(), "\"component:resumed\"");
+    }
+}
+
+#[test]
 fn named_async_export_executes_and_resumes_its_guest_body() {
     let wit = format!(
         "package test:guest-async; world test {{ {RUNTIME_IMPORTS} export run-task: func(input: string) -> string; }}"
@@ -79,6 +156,12 @@ fn guest_async_ordering_loops_and_rejections_match_node() {
 
 #[test]
 fn guest_async_forms_outside_the_initial_subset_report_diagnostics() {
+    let error = perry_wit::compiler::compile_typescript_raw(
+        "const pending = new Promise(resolve => resolve(7)); Promise.resolve(pending);",
+        "constructor-subset.ts",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Promise static methods"));
     for source in [
         "class Task { static async run() { return await 1; } }",
         "class Task { async ['run']() { return await 1; } }",
@@ -97,10 +180,6 @@ fn guest_async_forms_outside_the_initial_subset_report_diagnostics() {
         (
             "const callback = async function() { return await 1; }; return await 0;",
             "Async and generator guest closures",
-        ),
-        (
-            "const pending = new Promise(resolve => resolve(1)); return await pending;",
-            "Promise constructors",
         ),
         (
             "return await Promise.all([1, 2]);",

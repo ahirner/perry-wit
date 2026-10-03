@@ -151,7 +151,7 @@ pub(crate) extern "C" fn js_typeof(val: i64) -> i64 {
             Some(JsHandle::Date(_)) => "object",
             Some(JsHandle::Cell(_) | JsHandle::Promise(_)) => "object",
             Some(JsHandle::Null) => "object",
-            Some(JsHandle::Closure(_)) => "function",
+            Some(JsHandle::Closure(_) | JsHandle::PromiseResolver(_)) => "function",
             None => "undefined",
         }
     } else {

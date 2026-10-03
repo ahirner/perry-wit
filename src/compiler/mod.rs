@@ -69,7 +69,7 @@ pub fn compile_typescript_raw(
 ) -> Result<(Vec<u8>, Vec<(String, u32)>, Vec<perry_hir::ir::Function>)> {
     let mut ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
-    fetch::preserve_options(&mut ast);
+    fetch::preserve_calls(&mut ast);
     clocks::rewrite_performance_now(&mut ast);
 
     let mut hir = lower_module(&ast, "main", file_name)

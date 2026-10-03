@@ -1,4 +1,4 @@
-//! Preserve call arguments before Perry's specialized lowering drops them.
+//! Preserve binding-sensitive calls and arguments before Perry's specialized lowering.
 
 use std::collections::HashMap;
 
@@ -11,9 +11,10 @@ use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
-pub(super) fn preserve_options(module: &mut Module) {
+pub(super) fn preserve_calls(module: &mut Module) {
     GLOBALS.set(&Globals::new(), || {
-        module.visit_mut_with(&mut resolver(Mark::new(), Mark::new(), true));
+        let unresolved = Mark::new();
+        module.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let mut filesystem_imports = HashMap::new();
         for item in &module.body {
             let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
@@ -41,7 +42,10 @@ pub(super) fn preserve_options(module: &mut Module) {
                 filesystem_imports.insert(specifier.local().to_id(), binding);
             }
         }
-        module.visit_mut_with(&mut PreservedCalls { filesystem_imports });
+        module.visit_mut_with(&mut PreservedCalls {
+            filesystem_imports,
+            unresolved: SyntaxContext::empty().apply_mark(unresolved),
+        });
         // Perry lowers lexical names; resolver contexts must not escape GLOBALS.
         module.visit_mut_with(&mut ClearContexts);
     });
@@ -54,9 +58,15 @@ enum FilesystemImport {
 
 struct PreservedCalls {
     filesystem_imports: HashMap<Id, FilesystemImport>,
+    unresolved: SyntaxContext,
 }
 
 impl VisitMut for PreservedCalls {
+    fn visit_mut_expr(&mut self, expression: &mut Expr) {
+        expression.visit_mut_children_with(self);
+        super::async_lowering::rewrite_constructor(expression, self.unresolved);
+    }
+
     fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
         call.visit_mut_children_with(self);
         let Callee::Expr(callee) = &mut call.callee else {

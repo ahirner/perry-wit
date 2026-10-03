@@ -18,6 +18,7 @@ pub(crate) enum JsHandle {
     Closure(crate::callbacks::Closure),
     Cell(i64),
     Promise(crate::promises::Promise),
+    PromiseResolver(crate::promises::Resolver),
 }
 
 pub(crate) struct RuntimeState {
@@ -134,6 +135,9 @@ impl RuntimeState {
                         match handle {
                             JsHandle::Cell(value) => self.worklist.push(*value),
                             JsHandle::Promise(promise) => promise.trace(&mut self.worklist),
+                            JsHandle::PromiseResolver(resolver) => {
+                                self.worklist.push(resolver.result)
+                            }
                             JsHandle::Closure(closure) => {
                                 self.worklist.extend_from_slice(&closure.captures);
                             }
@@ -529,7 +533,7 @@ impl RuntimeState {
                     JsHandle::Response { .. } => "[Response]".to_string(),
                     JsHandle::Headers(_) => "[object Headers]".to_string(),
                     JsHandle::Null => "null".to_string(),
-                    JsHandle::Closure(_) => "[function]".to_string(),
+                    JsHandle::Closure(_) | JsHandle::PromiseResolver(_) => "[function]".to_string(),
                     JsHandle::Cell(_) => "[cell]".to_string(),
                     JsHandle::Promise(_) => "[object Promise]".to_string(),
                     JsHandle::Date(ts) => {

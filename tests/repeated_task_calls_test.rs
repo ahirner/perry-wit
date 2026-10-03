@@ -260,6 +260,38 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
         export function intervalVoid(ticks: number): void {
             intervalTask("void", ticks);
         }
+        function waitTimer(value, failure) {
+            return new Promise((resolve, reject) => setTimeout(failure ? reject : resolve, 2, value));
+        }
+        export async function timerAsync(input: string, ticks: number): Promise<string> {
+            const owner: any = {text: input, bytes: Uint8Array.from([7, 128])};
+            owner.self = owner;
+            for (let i = 0; i < ticks; i++) {
+                const saved = await waitTimer(owner, false);
+                const temporary: any = {text: JSON.stringify({input: saved.text}), bytes: new Uint8Array(2048)};
+                temporary.self = temporary;
+                if (saved !== owner || temporary.bytes.length !== 2048) { throw "lost suspended graph"; }
+            }
+            return owner.text + ":" + owner.bytes[1];
+        }
+        export async function timerResult(input: string): Promise<any> {
+            try { await waitTimer(input, true); return {ok: true, value: "unreachable"}; }
+            catch (error) { await waitTimer(0, false); return {ok: false, error}; }
+        }
+        export async function timerFailure(input: string): Promise<string> {
+            return await waitTimer(input, true);
+        }
+        export async function timerCanceled(input: string): Promise<string> {
+            return await new Promise(resolve => {
+                const id = setTimeout(resolve, 2, input);
+                clearTimeout(id);
+            });
+        }
+        export function abortAsync(input: string): string {
+            timerAsync(input, 100);
+            setTimeout(() => { throw "abort"; }, 1);
+            return "unreachable";
+        }
     "#,
         Some(
             r#"
@@ -279,6 +311,11 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
             export interval-snapshot: func() -> string;
             export interval-result: func(input: string, ticks: u32) -> result<string, string>;
             export interval-void: func(ticks: u32);
+            export timer-async: func(input: string, ticks: u32) -> string;
+            export timer-result: func(input: string) -> result<string, string>;
+            export timer-failure: func(input: string) -> string;
+            export timer-canceled: func(input: string) -> string;
+            export abort-async: func(input: string) -> string;
         }
     "#,
         ),
@@ -354,9 +391,9 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
             if (bytes) { new Uint8Array(e.memory.buffer, ptr, bytes.length).set(bytes); }
             try {
                 const ret = bytes ? (ticks === undefined ? e[name](ptr, bytes.length) : e[name](ptr, bytes.length, ticks)) : e[name]();
-                const isResult = name === 'interval-result';
+                const isResult = name === 'interval-result' || name === 'timer-result';
                 const words = new Uint32Array(e.memory.buffer, ret, isResult ? 3 : 2);
-                if (isResult) { assert.equal(words[0], 0); }
+                if (isResult) { assert.equal(words[0], name === 'timer-result' ? 1 : 0); }
                 const offset = isResult ? 1 : 0;
                 const result = new TextDecoder().decode(new Uint8Array(e.memory.buffer, words[offset], words[offset + 1]));
                 if (post) { e[`cabi_post_${name}`](ret); }
@@ -422,6 +459,26 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
             assert.equal(call('interval-task', text, true, 3), 'returned:' + text);
         }
         assert.equal(e.memory.buffer.byteLength, memoryLimit);
+        memoryLimit = undefined;
+        function asyncCycle(index) {
+            const text = 'pending😀'.repeat(100);
+            assert.equal(call('timer-async', text, index % 7 !== 0, 3), text + ':128');
+            assert.equal(call('timer-result', text), text);
+            assert.throws(() => call('timer-failure', text), WebAssembly.RuntimeError);
+            const beforeCancellation = blocked;
+            assert.throws(() => call('timer-canceled', text), WebAssembly.RuntimeError);
+            assert.equal(blocked, beforeCancellation, 'a canceled producer must report idle without polling');
+            const beforeAbort = blocked;
+            assert.throws(() => call('abort-async', text), WebAssembly.RuntimeError);
+            assert.equal(blocked - beforeAbort, 1, 'abort must cancel the unresolved timer producer');
+            assert.equal(call('timer-async', 'recovered', true, 1), 'recovered:128');
+            assert.equal(pending.size, 0);
+        }
+        for (let index = 0; index < 100; index++) { asyncCycle(index); }
+        memoryLimit = e.memory.buffer.byteLength;
+        for (let index = 0; index < 1000; index++) { asyncCycle(index); }
+        assert.equal(call('timer-async', text, true, 5000), text + ':128');
+        assert.equal(e.memory.buffer.byteLength, memoryLimit, 'pending tasks must reclaim allocations between continuations');
         assert.equal(created, dropped);
         assert.ok(peak <= 5, `pollables must remain bounded, observed ${peak}`);
         const initModule = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[2]));
@@ -470,6 +527,38 @@ fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
         support::stdout(&output),
         "component:1:1\ncomponent:2:2\ncomponent:3:3\n\"returned:component\"\n"
     );
+    for (invocation, expected) in [
+        ("timer-async(\"component\",3)", "\"component:128\""),
+        (
+            "timer-result(\"component-rejected\")",
+            "err(\"component-rejected\")",
+        ),
+    ] {
+        let output = get_wasmtime_cmd()
+            .args(["run", "-C", "cache=n", "--invoke", invocation])
+            .arg(scratch.0.join("component.wasm"))
+            .output()
+            .unwrap();
+        assert_eq!(support::stdout(&output).trim(), expected);
+    }
+    for (invocation, error) in [
+        (
+            "timer-failure(\"component-rejected\")",
+            "component-rejected",
+        ),
+        (
+            "timer-canceled(\"component\")",
+            "Guest Promise has no runnable continuation",
+        ),
+    ] {
+        let output = get_wasmtime_cmd()
+            .args(["run", "-C", "cache=n", "--invoke", invocation])
+            .arg(scratch.0.join("component.wasm"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(error));
+    }
 }
 
 #[test]

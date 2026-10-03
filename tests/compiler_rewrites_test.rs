@@ -1,3 +1,9 @@
+#[expect(
+    dead_code,
+    reason = "Async lowering is exercised through component tests; this suite inspects its AST rewrite."
+)]
+#[path = "../src/compiler/async_lowering.rs"]
+mod async_lowering;
 #[path = "../src/compiler/fetch.rs"]
 mod fetch;
 #[path = "../src/compiler/rewrites.rs"]
@@ -6,6 +12,46 @@ mod support;
 
 use perry_parser::swc_ecma_ast::{CallExpr, Callee, Expr, Lit, MemberProp};
 use swc_ecma_visit::{Visit, VisitWith};
+
+#[test]
+fn promise_constructor_rewrite_respects_lexical_bindings() {
+    struct Constructors(usize);
+    impl Visit for Constructors {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if matches!(&call.callee, Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Member(member)
+                    if matches!(&member.prop, MemberProp::Ident(property) if property.sym == "async_promise_new")))
+            {
+                self.0 += 1;
+            }
+            call.visit_children_with(self);
+        }
+    }
+    for (source, expected) in [
+        ("new Promise(resolve => resolve(7));", 1),
+        (
+            "function create(undefined) { return new Promise(resolve => resolve(7)); }",
+            1,
+        ),
+        ("class Promise { constructor(value) {} } new Promise(7);", 0),
+        ("function create(Promise) { return new Promise(7); }", 0),
+        (
+            "{ class Promise { constructor(value) {} } new Promise(7); }",
+            0,
+        ),
+        ("import { Promise } from 'custom'; new Promise(7);", 0),
+    ] {
+        let mut ast = perry_parser::parse_typescript(source, "constructor.ts").unwrap();
+        let original = ast.clone();
+        fetch::preserve_calls(&mut ast);
+        let mut constructors = Constructors(0);
+        ast.visit_with(&mut constructors);
+        assert_eq!(constructors.0, expected, "{source}");
+        if expected == 0 {
+            assert_eq!(ast, original, "{source}");
+        }
+    }
+}
 
 #[test]
 fn unlink_rewrite_respects_import_bindings_and_lexical_scopes() {
@@ -99,7 +145,7 @@ fn unlink_rewrite_respects_import_bindings_and_lexical_scopes() {
     ] {
         let mut ast = perry_parser::parse_typescript(source, "bindings.ts").unwrap();
         let original = ast.clone();
-        fetch::preserve_options(&mut ast);
+        fetch::preserve_calls(&mut ast);
         let mut calls = UnlinkCalls(Vec::new());
         ast.visit_with(&mut calls);
         assert_eq!(calls.0, vec!["file"; expected], "{source}");

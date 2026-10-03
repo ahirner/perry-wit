@@ -9,7 +9,14 @@ use crate::state::{get_state, JsHandle};
 #[derive(Clone, Debug)]
 pub(crate) enum Promise {
     Pending(Vec<Reaction>),
+    Adopting(Vec<Reaction>),
     Settled { value: i64, rejected: bool },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Resolver {
+    pub(crate) result: i64,
+    rejected: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -44,7 +51,7 @@ pub(crate) struct Promises {
 impl Promise {
     pub(crate) fn trace(&self, roots: &mut Vec<i64>) {
         match self {
-            Self::Pending(reactions) => {
+            Self::Pending(reactions) | Self::Adopting(reactions) => {
                 for reaction in reactions {
                     reaction.trace(roots);
                 }
@@ -114,6 +121,7 @@ pub(crate) fn dispatch_call(name: &str, arguments: &[i64]) -> Option<i64> {
         return Some(TAG_UNDEFINED as i64);
     }
     Some(match name {
+        "async_promise_new" => construct(argument(0)),
         "async_cell_new" => {
             nanbox_pointer(get_state().alloc_handle(JsHandle::Cell(TAG_UNDEFINED as i64)))
         }
@@ -194,10 +202,53 @@ fn new_pending() -> i64 {
     nanbox_pointer(get_state().alloc_handle(JsHandle::Promise(Promise::Pending(Vec::new()))))
 }
 
+/// The executor runs synchronously; its exception rejects only an unresolved Promise.
+fn construct(executor: i64) -> i64 {
+    if !matches!(
+        get_state().get_handle(executor),
+        Some(JsHandle::Closure(_) | JsHandle::PromiseResolver(_))
+    ) {
+        get_state().current_exception =
+            Some("TypeError: Promise executor is not a function".into());
+        return TAG_UNDEFINED as i64;
+    }
+    let result = new_pending();
+    let state = get_state();
+    let resolve = nanbox_pointer(state.alloc_handle(JsHandle::PromiseResolver(Resolver {
+        result,
+        rejected: false,
+    })));
+    let reject = nanbox_pointer(state.alloc_handle(JsHandle::PromiseResolver(Resolver {
+        result,
+        rejected: true,
+    })));
+    let arguments = nanbox_pointer(state.alloc_handle(JsHandle::Array(vec![resolve, reject])));
+    guest_callback_invoke(executor, arguments);
+    if let Some(error) = get_state().current_exception.take() {
+        let value = get_state().alloc_string(&error);
+        settle(result, value, true);
+    }
+    result
+}
+
+/// Builtin resolver functions use the callback bridge without a Rust table cast.
+pub(crate) fn invoke_resolver(handle: i64, arguments: i64) -> i64 {
+    let state = get_state();
+    let (Some(JsHandle::PromiseResolver(resolver)), Some(JsHandle::Array(arguments))) =
+        (state.get_handle(handle), state.get_handle(arguments))
+    else {
+        return crate::callbacks::guest_callback_invalid();
+    };
+    let (result, rejected) = (resolver.result, resolver.rejected);
+    let value = arguments.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+    settle(result, value, rejected);
+    TAG_UNDEFINED as i64
+}
+
 fn attach(value: i64, reaction: Reaction) {
     let state = get_state();
     let (value, rejected) = match state.get_handle_mut(value) {
-        Some(JsHandle::Promise(Promise::Pending(reactions))) => {
+        Some(JsHandle::Promise(Promise::Pending(reactions) | Promise::Adopting(reactions))) => {
             reactions.push(reaction);
             return;
         }
@@ -212,11 +263,25 @@ fn attach(value: i64, reaction: Reaction) {
 }
 
 fn settle(result: i64, value: i64, rejected: bool) {
+    if !matches!(
+        get_state().get_handle(result),
+        Some(JsHandle::Promise(Promise::Pending(_)))
+    ) {
+        return;
+    }
     if !rejected && matches!(get_state().get_handle(value), Some(JsHandle::Promise(_))) {
         if result == value {
             let error = get_state().alloc_string("TypeError: Chaining cycle detected for promise");
             settle(result, error, true);
         } else {
+            if let Some(JsHandle::Promise(promise)) = get_state().get_handle_mut(result) {
+                let Promise::Pending(reactions) =
+                    std::mem::replace(promise, Promise::Adopting(Vec::new()))
+                else {
+                    return;
+                };
+                *promise = Promise::Adopting(reactions);
+            }
             get_state().promises.jobs.push_back(Job {
                 reaction: Reaction::Adopt { result },
                 value,
@@ -225,9 +290,15 @@ fn settle(result: i64, value: i64, rejected: bool) {
         }
         return;
     }
+    complete(result, value, rejected);
+}
+
+fn complete(result: i64, value: i64, rejected: bool) {
     let state = get_state();
-    if let Some(JsHandle::Promise(promise @ Promise::Pending(_))) = state.get_handle_mut(result) {
-        let Promise::Pending(reactions) =
+    if let Some(JsHandle::Promise(promise @ (Promise::Pending(_) | Promise::Adopting(_)))) =
+        state.get_handle_mut(result)
+    {
+        let (Promise::Pending(reactions) | Promise::Adopting(reactions)) =
             std::mem::replace(promise, Promise::Settled { value, rejected })
         else {
             return;
@@ -274,7 +345,7 @@ pub(crate) extern "C" fn guest_async_step() -> i32 {
             invoke_step(callback, job.value, job.rejected, result);
         }
         Reaction::Adopt { result } => attach(job.value, Reaction::Forward { result }),
-        Reaction::Forward { result } => settle(result, job.value, job.rejected),
+        Reaction::Forward { result } => complete(result, job.value, job.rejected),
     }
     1
 }
@@ -295,7 +366,7 @@ pub(crate) extern "C" fn guest_async_result(value: i64) -> i64 {
             state.current_exception = Some(state.get_string(*value));
             TAG_UNDEFINED as i64
         }
-        Some(JsHandle::Promise(Promise::Pending(_))) => {
+        Some(JsHandle::Promise(Promise::Pending(_) | Promise::Adopting(_))) => {
             state.current_exception =
                 Some("Error: Guest Promise has no runnable continuation".into());
             TAG_UNDEFINED as i64
@@ -308,7 +379,9 @@ pub(crate) extern "C" fn guest_async_result(value: i64) -> i64 {
 pub(crate) fn await_value(value: i64) -> i64 {
     while matches!(
         get_state().get_handle(value),
-        Some(JsHandle::Promise(Promise::Pending(_)))
+        Some(JsHandle::Promise(
+            Promise::Pending(_) | Promise::Adopting(_)
+        ))
     ) {
         if guest_async_step() == 0 {
             break;

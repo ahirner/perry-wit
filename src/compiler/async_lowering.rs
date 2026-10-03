@@ -5,12 +5,48 @@ use std::collections::{BTreeSet, HashSet};
 use anyhow::{Result, ensure};
 use perry_hir::ir::{Expr, Module, Stmt};
 use perry_hir::types::{LocalId, Type};
-use perry_hir::walker::walk_expr_children_mut;
+use perry_hir::walker::{walk_expr_children, walk_expr_children_mut};
 use perry_parser::swc_ecma_ast::{
     ArrowExpr, CallExpr, Callee, ClassMethod, Expr as AstExpr, FnExpr, Function as AstFunction,
-    MemberProp, Module as AstModule, NewExpr,
+    IdentName, Lit, MemberExpr, MemberProp, Module as AstModule, Number, UnaryExpr, UnaryOp,
 };
+use swc_common::SyntaxContext;
 use swc_ecma_visit::{Visit, VisitWith};
+
+/// Resolves the global constructor before Perry drops lexical binding identity.
+pub(super) fn rewrite_constructor(expression: &mut AstExpr, unresolved: SyntaxContext) {
+    let AstExpr::New(constructor) = expression else {
+        return;
+    };
+    if !matches!(constructor.callee.as_ref(), AstExpr::Ident(identifier)
+        if identifier.sym == "Promise" && identifier.ctxt == unresolved)
+    {
+        return;
+    }
+    let span = constructor.span;
+    *expression = AstExpr::Call(CallExpr {
+        span,
+        ctxt: constructor.ctxt,
+        callee: Callee::Expr(Box::new(AstExpr::Member(MemberExpr {
+            span,
+            obj: Box::new(AstExpr::Unary(UnaryExpr {
+                span,
+                op: UnaryOp::Void,
+                arg: Box::new(AstExpr::Lit(Lit::Num(Number {
+                    span,
+                    value: 0.0,
+                    raw: None,
+                }))),
+            })),
+            prop: MemberProp::Ident(IdentName {
+                span,
+                sym: "async_promise_new".into(),
+            }),
+        }))),
+        args: constructor.args.take().unwrap_or_default(),
+        type_args: constructor.type_args.take(),
+    });
+}
 
 /// Reuses the pinned state-machine transform without a JavaScript fallback host.
 pub(super) fn lower(module: &mut Module, ast: &AstModule) -> Result<()> {
@@ -26,13 +62,23 @@ pub(super) fn lower(module: &mut Module, ast: &AstModule) -> Result<()> {
             .all(|method| !method.is_async)),
         "Async class methods are not supported yet"
     );
-    if !module.functions.iter().any(|function| function.is_async) {
+    let mut forms = UnsupportedForms {
+        error: None,
+        constructors: false,
+    };
+    ast.visit_with(&mut forms);
+    let named_async = module.functions.iter().any(|function| function.is_async);
+    if !named_async && !forms.constructors {
         return Ok(());
     }
-    let mut forms = UnsupportedForms(None);
-    ast.visit_with(&mut forms);
-    if let Some(error) = forms.0 {
+    if let Some(error) = forms.error {
         anyhow::bail!(error);
+    }
+    if !named_async {
+        module
+            .init
+            .push(Stmt::Expr(Expr::String("__needs_async__".into())));
+        return Ok(());
     }
     for function in &module.functions {
         if function.is_async {
@@ -72,58 +118,60 @@ pub(super) fn lower(module: &mut Module, ast: &AstModule) -> Result<()> {
     Ok(())
 }
 
-struct UnsupportedForms(Option<&'static str>);
+struct UnsupportedForms {
+    error: Option<&'static str>,
+    constructors: bool,
+}
 
 impl Visit for UnsupportedForms {
     fn visit_arrow_expr(&mut self, arrow: &ArrowExpr) {
         if arrow.is_async {
-            self.0 = Some("Async and generator guest closures are not supported yet");
+            self.error = Some("Async and generator guest closures are not supported yet");
         }
         arrow.visit_children_with(self);
     }
 
     fn visit_fn_expr(&mut self, expression: &FnExpr) {
         if expression.function.is_async {
-            self.0 = Some("Async and generator guest closures are not supported yet");
+            self.error = Some("Async and generator guest closures are not supported yet");
         }
         expression.visit_children_with(self);
     }
 
     fn visit_function(&mut self, function: &AstFunction) {
         if function.is_generator {
-            self.0 = Some("Generator guest functions are not supported yet");
+            self.error = Some("Generator guest functions are not supported yet");
         }
         function.visit_children_with(self);
     }
 
     fn visit_class_method(&mut self, method: &ClassMethod) {
         if method.function.is_async {
-            self.0 = Some("Async class methods are not supported yet");
+            self.error = Some("Async class methods are not supported yet");
         }
         method.visit_children_with(self);
     }
 
-    fn visit_new_expr(&mut self, expression: &NewExpr) {
-        if matches!(expression.callee.as_ref(), AstExpr::Ident(identifier) if identifier.sym == "Promise")
-        {
-            self.0 = Some("Promise constructors in guest async programs are not supported yet");
-        }
-        expression.visit_children_with(self);
-    }
-
     fn visit_call_expr(&mut self, call: &CallExpr) {
+        if matches!(&call.callee, Callee::Expr(callee)
+            if matches!(callee.as_ref(), AstExpr::Member(member)
+                if matches!(&member.prop, MemberProp::Ident(name) if name.sym == "async_promise_new")))
+        {
+            self.constructors = true;
+        }
         if let Callee::Expr(callee) = &call.callee
             && let AstExpr::Member(member) = callee.as_ref()
             && matches!(member.obj.as_ref(), AstExpr::Ident(identifier) if identifier.sym == "Promise")
             && matches!(&member.prop, MemberProp::Ident(_))
         {
-            self.0 = Some("Promise static methods in guest async programs are not supported yet");
+            self.error =
+                Some("Promise static methods in guest async programs are not supported yet");
         }
         call.visit_children_with(self);
     }
 }
 
-/// Exposes declarations hidden inside labels/do-while to the Wasm local collector.
+/// Exposes declarations hidden from Perry's label/do-while local and closure collectors.
 fn adapt_body(
     body: &mut Vec<Stmt>,
     inherited: &HashSet<LocalId>,
@@ -131,7 +179,8 @@ fn adapt_body(
 ) -> Result<()> {
     let mut boxes = HashSet::new();
     let mut locals = BTreeSet::new();
-    collect_frame(body, &mut boxes, &mut locals);
+    let mut hidden_closures = Vec::new();
+    collect_frame(body, &mut boxes, &mut locals, &mut hidden_closures, false);
     boxes.extend(inherited);
     for parameter in parameters {
         locals.remove(&parameter);
@@ -139,6 +188,19 @@ fn adapt_body(
     locals.retain(|id| !boxes.contains(id));
     for statement in body.iter_mut() {
         adapt_statement(statement, &boxes)?;
+    }
+    for closure in &mut hidden_closures {
+        adapt_expression(closure, &boxes)?;
+    }
+    if !hidden_closures.is_empty() {
+        body.insert(
+            0,
+            Stmt::If {
+                condition: Expr::Bool(false),
+                then_branch: hidden_closures.into_iter().map(Stmt::Expr).collect(),
+                else_branch: None,
+            },
+        );
     }
     body.splice(
         0..0,
@@ -153,57 +215,116 @@ fn adapt_body(
     Ok(())
 }
 
-fn collect_frame(body: &[Stmt], boxes: &mut HashSet<LocalId>, locals: &mut BTreeSet<LocalId>) {
+fn collect_frame(
+    body: &[Stmt],
+    boxes: &mut HashSet<LocalId>,
+    locals: &mut BTreeSet<LocalId>,
+    hidden_closures: &mut Vec<Expr>,
+    hidden: bool,
+) {
     for statement in body {
         match statement {
             Stmt::PreallocateBoxes(ids) => boxes.extend(ids),
-            Stmt::Let { id, .. } => {
+            Stmt::Let { id, init, .. } => {
                 locals.insert(*id);
+                if let Some(value) = init {
+                    collect_hidden_closures(value, hidden_closures, hidden);
+                }
+            }
+            Stmt::Expr(value) | Stmt::Throw(value) | Stmt::Return(Some(value)) => {
+                collect_hidden_closures(value, hidden_closures, hidden);
             }
             Stmt::If {
                 then_branch,
                 else_branch,
-                ..
+                condition,
             } => {
-                collect_frame(then_branch, boxes, locals);
+                collect_hidden_closures(condition, hidden_closures, hidden);
+                collect_frame(then_branch, boxes, locals, hidden_closures, hidden);
                 if let Some(body) = else_branch {
-                    collect_frame(body, boxes, locals);
+                    collect_frame(body, boxes, locals, hidden_closures, hidden);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                collect_frame(body, boxes, locals)
+            Stmt::While { body, condition } => {
+                collect_hidden_closures(condition, hidden_closures, hidden);
+                collect_frame(body, boxes, locals, hidden_closures, hidden);
             }
-            Stmt::For { init, body, .. } => {
+            Stmt::DoWhile { body, condition } => {
+                collect_hidden_closures(condition, hidden_closures, true);
+                collect_frame(body, boxes, locals, hidden_closures, true);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+            } => {
+                for value in condition.iter().chain(update.iter()) {
+                    collect_hidden_closures(value, hidden_closures, hidden);
+                }
                 if let Some(statement) = init {
-                    collect_frame(std::slice::from_ref(statement), boxes, locals);
+                    collect_frame(
+                        std::slice::from_ref(statement),
+                        boxes,
+                        locals,
+                        hidden_closures,
+                        hidden,
+                    );
                 }
-                collect_frame(body, boxes, locals);
+                collect_frame(body, boxes, locals, hidden_closures, hidden);
             }
-            Stmt::Labeled { body, .. } => collect_frame(std::slice::from_ref(body), boxes, locals),
+            Stmt::Labeled { body, .. } => collect_frame(
+                std::slice::from_ref(body),
+                boxes,
+                locals,
+                hidden_closures,
+                true,
+            ),
             Stmt::Try {
                 body,
                 catch,
                 finally,
             } => {
-                collect_frame(body, boxes, locals);
+                collect_frame(body, boxes, locals, hidden_closures, hidden);
                 if let Some(catch) = catch {
                     if let Some((id, _)) = catch.param {
                         locals.insert(id);
                     }
-                    collect_frame(&catch.body, boxes, locals);
+                    collect_frame(&catch.body, boxes, locals, hidden_closures, hidden);
                 }
                 if let Some(body) = finally {
-                    collect_frame(body, boxes, locals);
+                    collect_frame(body, boxes, locals, hidden_closures, hidden);
                 }
             }
-            Stmt::Switch { cases, .. } => {
+            Stmt::Switch {
+                cases,
+                discriminant,
+            } => {
+                collect_hidden_closures(discriminant, hidden_closures, hidden);
                 for case in cases {
-                    collect_frame(&case.body, boxes, locals);
+                    if let Some(value) = &case.test {
+                        collect_hidden_closures(value, hidden_closures, hidden);
+                    }
+                    collect_frame(&case.body, boxes, locals, hidden_closures, hidden);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Registers closures hidden from Perry's label/do-while collector without executing them.
+fn collect_hidden_closures(value: &Expr, closures: &mut Vec<Expr>, hidden: bool) {
+    if !hidden {
+        return;
+    }
+    if matches!(value, Expr::Closure { .. }) {
+        closures.push(value.clone());
+        return;
+    }
+    walk_expr_children(value, &mut |child| {
+        collect_hidden_closures(child, closures, true)
+    });
 }
 
 fn adapt_statement(statement: &mut Stmt, boxes: &HashSet<LocalId>) -> Result<()> {
