@@ -8,7 +8,7 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
 2. HTTP metadata/methods (**10.1**) and buffered binary bodies (**10.2**) are complete. Use those client paths and fixtures as the baseline for handlers and streaming.
 3. One-shot timers and intervals (**11.1**, **11.2**) establish callback execution (**B.1**) and retained lifetimes (**E.2**), including reclamation between callbacks. Guest async execution (**B.2**) and incoming handlers (**10.3**, **10.4**) complete timer-backed requests and streamed body forwarding through the component ABI. Readiness (**11.3**) now serves that forwarding consumer.
-4. Use the verified readiness and ownership paths for the first TCP client (**12.1**). Rust host contracts (**A.1**) and Component Model async feasibility (**13.1**) remain open; wider stream compatibility follows a consumer needing it.
+4. Rust host contracts (**A.1**) now verify repeated typed task calls against the same WIT as the guest declarations. Use the verified readiness and ownership paths for the first TCP client (**12.1**); Component Model async feasibility (**13.1**) also remains open. Wider stream compatibility follows a consumer needing it.
 
 ## Tracking Completion
 
@@ -32,7 +32,7 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ## Verification Baseline (2026-10-03)
 
-- `nix develop -c cargo test --locked --package perry-wit`: 161 tests passed, including 25 filesystem tests and 17 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
+- `nix develop -c cargo test --locked --package perry-wit`: 162 tests passed, including 25 filesystem tests, 17 HTTP regression tests, and the generated Rust host contract test. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
 - The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
 - Scoped formatting passed. Project and WebAssembly guest Clippy checks completed with existing warnings. Automatic approval review rejected parent `make format-rs` because it could rewrite the broader workspace; parent `make lint-rs` fails because `monty-bench` is outside this workspace. The pinned, scoped Nix checks are the applicable checks here.
 - SDK generation describes selected WIT contracts and guest implementation signatures, not ambient JavaScript/Node API compatibility. The incoming-handler adapter supplies resource ownership and its Request/Response implementation contract; supported buffered/streaming subsets and limits belong in the capability catalog and tests.
@@ -42,9 +42,16 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ### Item A: Shared WIT Host/Guest Contracts
 
-- [ ] **A.1. Host/Guest Contract Parity** — Take when a Rust host integration needs it.
-    - [ ] Exercise the same resolved WIT package/world through guest declarations and Rust host bindings, starting with currently supported export types that integration uses.
-    - [ ] Verify a host invocation agrees with the generated guest contract; use existing Wasmtime binding tools for ABI marshalling where they fit.
+- [x] **A.1. Host/Guest Contract Parity** — Take when a Rust host integration needs it.
+    - [x] Exercise the same resolved WIT package/world through guest declarations and Rust host bindings, starting with currently supported export types that integration uses.
+    - [x] Verify a host invocation agrees with the generated guest contract; use existing Wasmtime binding tools for ABI marshalling where they fit.
+
+Verification (A.1):
+
+- `generated_rust_host_and_guest_declarations_share_the_task_contract` in `tests/task_invocation_test.rs` uses the existing `wit/world.wit` and `repeated-runner` world for Wasmtime's generated Rust bindings, the TypeScript SDK declarations, and compilation of the guest component. Wasmtime 48.0.1 and its Preview 2 bindings are pinned development dependencies, matching the current Nix host; production and guest dependencies are unchanged.
+- The test typechecks the implementation and invokes it through an in-process Rust component host. Sixty repeated cycles cover a named async task, retained/reset strings, WIT success/error results, empty strings, Unicode, embedded NULs, and a 160,000-byte input. Generated bindings perform marshalling and post-return; no handwritten Canonical ABI layout or custom host generator is required.
+- A changed input signature fails the TypeScript implementation check. A component compiled against the corresponding changed WIT signature is rejected by the original Rust bindings before invocation. Further export/resource types follow an integration needing them; this test verifies the string/result contract used by the first host consumer.
+- The updated Nix dependency build and full `cargo test --locked --package perry-wit` suite passed all 162 tests, including local HTTP fixtures. Scoped formatting and all-target compiler Clippy passed with existing warnings. The dependency update preserves every prior locked package identity. This verification adds no runtime API support, so the capability catalog needs no support change.
 
 A custom host generator is deferred until an integration demonstrates missing reusable glue.
 
