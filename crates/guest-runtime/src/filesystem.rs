@@ -134,8 +134,14 @@ fn format_error_code(code: ErrorCode, op: &str, path: &str) -> String {
 }
 
 pub(crate) fn fs_read_file_sync(path_val: i64, options_val: i64) -> i64 {
-    let options_js = get_state().to_js_value(options_val);
-    let as_utf8 = is_utf8_encoding(&options_js);
+    let state = get_state();
+    let as_utf8 = match supported_read_options(&state.to_js_value(options_val)) {
+        Ok(utf8) => utf8,
+        Err(err) => {
+            state.current_exception = Some(err.into());
+            return TAG_UNDEFINED as i64;
+        }
+    };
     fs_read_file_impl(path_val, as_utf8)
 }
 
@@ -143,19 +149,51 @@ pub(crate) fn fs_read_file_binary(path_val: i64) -> i64 {
     fs_read_file_impl(path_val, false)
 }
 
-fn is_utf8_encoding(options: &serde_json::Value) -> bool {
+fn supported_read_options(options: &serde_json::Value) -> Result<bool, &'static str> {
+    let is_utf8 = |s: &str| s.eq_ignore_ascii_case("utf8") || s.eq_ignore_ascii_case("utf-8");
+    let is_binary = |s: &str| s.eq_ignore_ascii_case("binary");
+
     match options {
+        serde_json::Value::Null => Ok(false),
         serde_json::Value::String(s) => {
-            s.eq_ignore_ascii_case("utf8") || s.eq_ignore_ascii_case("utf-8")
-        }
-        serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::String(s)) = map.get("encoding") {
-                s.eq_ignore_ascii_case("utf8") || s.eq_ignore_ascii_case("utf-8")
+            if is_utf8(s) {
+                Ok(true)
+            } else if is_binary(s) {
+                Ok(false)
             } else {
-                false
+                Err("TypeError: Unsupported readFileSync options; only UTF-8 and binary encodings are supported")
             }
         }
-        _ => false,
+        serde_json::Value::Object(fields) => {
+            let mut as_utf8 = false;
+            for (key, value) in fields {
+                match key.as_str() {
+                    "encoding" => {
+                        if value.is_null() {
+                            as_utf8 = false;
+                        } else if let Some(s) = value.as_str() {
+                            if is_utf8(s) {
+                                as_utf8 = true;
+                            } else if is_binary(s) {
+                                as_utf8 = false;
+                            } else {
+                                return Err("TypeError: Unsupported readFileSync options; only UTF-8 and binary encodings are supported");
+                            }
+                        } else {
+                            return Err("TypeError: Unsupported readFileSync options; only UTF-8 and binary encodings are supported");
+                        }
+                    }
+                    "flag" => {
+                        if value.as_str() != Some("r") {
+                            return Err("TypeError: Unsupported readFileSync options; only flag 'r' is supported");
+                        }
+                    }
+                    _ => return Err("TypeError: Unsupported readFileSync options"),
+                }
+            }
+            Ok(as_utf8)
+        }
+        _ => Err("TypeError: Unsupported readFileSync options"),
     }
 }
 

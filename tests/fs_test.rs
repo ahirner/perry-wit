@@ -75,6 +75,80 @@ fn mkdir_options_are_evaluated_and_rejected_before_directory_creation() {
 }
 
 #[test]
+fn read_options_are_evaluated_and_rejected_before_file_opening() {
+    for (import, read) in [
+        ("import * as fs from 'fs';", "fs.readFileSync"),
+        ("import { readFileSync } from 'node:fs';", "readFileSync"),
+    ] {
+        let scratch = support::Scratch::new();
+        let directory = scratch.0.join("sandbox");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("test.txt"), "hello world").unwrap();
+        let source = r#"
+            IMPORT
+            let evaluations = "";
+            function path(index: number) {
+                evaluations += "path;";
+                return "/sandbox/test.txt";
+            }
+            function options(index: number) {
+                evaluations += "options;";
+                return ["hex", "base64", "ascii", {encoding: "hex"}, {flag: "r+"}, {invalid: true}, 42][index];
+            }
+            for (let i = 0; i < 7; i++) {
+                try {
+                    READ(path(i), options(i));
+                    console.log("unreachable");
+                } catch (error) { console.log(error); }
+            }
+            console.log(evaluations);
+
+            // Verify supported options
+            const bin1 = READ("/sandbox/test.txt");
+            const bin2 = READ("/sandbox/test.txt", undefined);
+            const bin3 = READ("/sandbox/test.txt", null);
+            const bin4 = READ("/sandbox/test.txt", "binary");
+            const bin5 = READ("/sandbox/test.txt", { encoding: "binary" });
+            const bin6 = READ("/sandbox/test.txt", { flag: "r" });
+            console.log(bin1.length + "," + bin2.length + "," + bin3.length + "," + bin4.length + "," + bin5.length + "," + bin6.length);
+
+            const str1 = READ("/sandbox/test.txt", "utf8");
+            const str2 = READ("/sandbox/test.txt", "utf-8");
+            const str3 = READ("/sandbox/test.txt", { encoding: "utf8" });
+            const str4 = READ("/sandbox/test.txt", { encoding: "utf-8", flag: "r" });
+            console.log(str1 + "," + str2 + "," + str3 + "," + str4);
+        "#
+        .replace("IMPORT", import)
+        .replace("READ", read);
+        let wasm = scratch.compile(&source, None);
+        let output = Command::new(support::get_wasmtime_path())
+            .args(["run", "-C", "cache=n", "--dir"])
+            .arg(format!("{}::/sandbox", directory.display()))
+            .arg(wasm)
+            .output()
+            .unwrap();
+        let stdout = support::stdout(&output);
+        assert!(stdout.contains("path;options;path;options;path;options;path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(stdout.contains("11,11,11,11,11,11"), "{import}");
+        assert!(stdout.contains("hello world,hello world,hello world,hello world"), "{import}");
+    }
+    // Rejection occurs before checking preopens:
+    let output = support::run(
+        r#"
+            import { readFileSync } from "fs";
+            try { readFileSync("/no-preopen/private.txt", "hex"); console.log("unreachable"); }
+            catch (error) { console.log(error); }
+        "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: Unsupported readFileSync options; only UTF-8 and binary encodings are supported\n"
+    );
+}
+
+#[test]
 fn binary_write_encoding_requires_byte_views_and_preserves_files_on_rejection() {
     for (import, write) in [
         ("import * as fs from 'fs';", "fs.writeFileSync"),

@@ -177,10 +177,10 @@ Verification:
 
 ### Phase 9: Sandboxed Filesystem (`wasi:filesystem`)
 
-- [ ] **9.1. UTF-8 File Reads/Writes**
+- [x] **9.1. UTF-8 File Reads/Writes**
     - [x] Support `readFileSync` / `writeFileSync` within host-provided preopens, with explicit path rules and confinement through descriptor-relative operations.
     - [x] Verify round-trips, short I/O handling, missing files, denied access, path escape attempts, and resource cleanup on success/failure.
-    - [ ] Validate read encodings/options before I/O; unsupported encodings currently fall through to binary reads instead of a diagnostic.
+    - [x] Validate read encodings/options before I/O; unsupported encodings currently fall through to binary reads instead of a diagnostic.
 - [x] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
     - [x] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`. Writing with `binary` encoding requires a byte view; strings support UTF-8 and reject `binary` before opening the file.
     - [x] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
@@ -194,9 +194,9 @@ Verification:
 
 Verification:
 
-- `nix develop -c cargo test --test fs_test`: 19 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, and import pruning.
-- Unsupported write modes and binary string encodings are rejected before opening files. Supplied `mkdirSync` options other than `undefined` are evaluated and rejected before creation. Supported writes overwrite; append/exclusive modes and permission changes remain unsupported.
-- 9.1 and 9.3 remain open for the option-validation gaps above. `readFileSync` currently returns bytes for non-UTF-8 encoding options; `readdirSync`, `statSync`, and removal calls do not yet validate their options. Binary encoding on reads is a byte-view extension, not Node's Latin-1 string behavior.
+- `nix develop -c cargo test --test fs_test`: 20 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, and import pruning.
+- Unsupported write modes and binary string encodings are rejected before opening files. Read options/encodings are validated before I/O: only UTF-8 and binary encodings and flag 'r' are permitted; unsupported options throw a TypeError before file opening or preopen check. Supplied `mkdirSync` options other than `undefined` are evaluated and rejected before creation. Supported writes overwrite; append/exclusive modes and permission changes remain unsupported.
+- 9.3 remains open for the option-evaluation guarantee on directory/metadata calls: `readdirSync`, `statSync`, and removal calls do not yet validate their options. Binary encoding on reads is a byte-view extension returning `Uint8Array`, not Node's Latin-1 string behavior.
 - UTF-8 reads reject invalid UTF-8. Metadata is limited to size, modification time, and file/directory predicates; permissions, ownership, recursive operations, and broader Node `Stats` behavior are not implemented.
 
 Promise-based filesystem APIs need guest async execution and evidence that their underlying operations can make progress; they are a later slice.

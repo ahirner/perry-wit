@@ -240,11 +240,11 @@
         "UTF-8 reads/writes and raw Uint8Array reads/writes work inside supplied preopens",
         "Byte-view writes preserve offsets, lengths, and arbitrary byte values",
         "Directory listing, creation, removal, existence checks, and the tested size/time/type metadata are available",
-        "Unsupported write modes, binary string writes, and supplied mkdir options are rejected before mutation"
+        "Unsupported write modes, binary string writes, unsupported readFileSync options, and supplied mkdir options are rejected before opening or mutation"
       ],
       "differences": [
-        "UTF-8 reads reject invalid UTF-8; omitted encoding returns Uint8Array",
-        "Non-UTF-8 read options currently fall back to byte views, including binary; this differs from Node and still needs validation",
+        "UTF-8 reads reject invalid UTF-8; omitted encoding returns Uint8Array; unsupported encodings, flags, or option objects are rejected before opening files",
+        "Binary encoding on reads returns a Uint8Array byte view rather than Node's legacy Latin-1 string coercion",
         "Write support is overwrite-only; append/exclusive flags, permissions, recursive operations, and filesystem promises are unsupported",
         "mkdirSync accepts omitted options or undefined; other supplied options are evaluated and rejected",
         "Other directory/metadata rewrites currently discard options; evaluating and rejecting unsupported forms remains open",

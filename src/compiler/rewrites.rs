@@ -462,26 +462,7 @@ impl Rewriter {
             if module == "fs" || module == "node:fs" {
                 if method == "readFileSync" {
                     self.needs_fs = true;
-                    let path = if !args.is_empty() {
-                        std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
-                    } else {
-                        perry_hir::ir::Expr::Undefined
-                    };
-                    let options = if args.len() >= 2 {
-                        std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
-                    } else {
-                        perry_hir::ir::Expr::Undefined
-                    };
-                    *expr = perry_hir::ir::Expr::Call {
-                        callee: Box::new(perry_hir::ir::Expr::PropertyGet {
-                            object: Box::new(perry_hir::ir::Expr::Undefined),
-                            property: "fs_read_file_sync".into(),
-                            byte_offset: 0,
-                        }),
-                        args: vec![path, options],
-                        type_args: Vec::new(),
-                        byte_offset: 0,
-                    };
+                    *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
                     return;
                 } else if method == "writeFileSync" {
                     self.needs_fs = true;
@@ -755,26 +736,7 @@ impl Rewriter {
                     if module == "fs" || module == "node:fs" {
                         if property == "readFileSync" {
                             self.needs_fs = true;
-                            let path = if !args.is_empty() {
-                                std::mem::replace(&mut args[0], perry_hir::ir::Expr::Undefined)
-                            } else {
-                                perry_hir::ir::Expr::Undefined
-                            };
-                            let options = if args.len() >= 2 {
-                                std::mem::replace(&mut args[1], perry_hir::ir::Expr::Undefined)
-                            } else {
-                                perry_hir::ir::Expr::Undefined
-                            };
-                            *expr = perry_hir::ir::Expr::Call {
-                                callee: Box::new(perry_hir::ir::Expr::PropertyGet {
-                                    object: Box::new(perry_hir::ir::Expr::Undefined),
-                                    property: "fs_read_file_sync".into(),
-                                    byte_offset: 0,
-                                }),
-                                args: vec![path, options],
-                                type_args: Vec::new(),
-                                byte_offset: 0,
-                            };
+                            *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
                             return;
                         } else if property == "writeFileSync" {
                             self.needs_fs = true;
