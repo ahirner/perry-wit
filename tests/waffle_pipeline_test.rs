@@ -277,6 +277,29 @@ async fn test_waffle_rejects_uncovered_hir_explicitly() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_waffle_rejects_module_initialization() {
+    for initialization in ["hostDouble(123);", "let initial = hostDouble(123);"] {
+        let source = format!(
+            "declare function hostDouble(value: number): Promise<number>;\n\
+             {initialization}\n\
+             export function run(input: number): number {{ return input; }}"
+        );
+        for componentize in [false, true] {
+            let options = WaffleCompileOptions {
+                componentize,
+                ..Default::default()
+            };
+            let error = compile_typescript_waffle(&source, "init.ts", &options).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Module initialization is unsupported")
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_async_p3_wait_and_suspension() -> Result<()> {
     let source = r#"

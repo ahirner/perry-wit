@@ -73,6 +73,10 @@ pub(crate) struct ResolvedContract {
 /// Resolves module bindings, shadowing, and contracts for WAFFLE lowering.
 pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
     ensure!(
+        hir.init.is_empty(),
+        "Module initialization is unsupported by the WAFFLE backend"
+    );
+    ensure!(
         !hir.functions.is_empty(),
         "Module must declare at least one function"
     );
@@ -80,7 +84,9 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
     let mut functions_by_name = BTreeMap::new();
     for func in &hir.functions {
         ensure!(
-            functions_by_name.insert(func.name.clone(), func.id).is_none(),
+            functions_by_name
+                .insert(func.name.clone(), func.id)
+                .is_none(),
             "Duplicate function definition: {}",
             func.name
         );
@@ -117,7 +123,8 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
             }
             "readChunk" => {
                 ensure!(
-                    params.len() == 1 && matches!(&params[0], HirType::Named(n) if n == "ByteStream"),
+                    params.len() == 1
+                        && matches!(&params[0], HirType::Named(n) if n == "ByteStream"),
                     "readChunk signature must be (stream: ByteStream) => Promise<number>"
                 );
                 ensure!(
@@ -131,15 +138,15 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
                     params.len() == 1 && matches!(params[0], HirType::Number),
                     "byteAt signature must be (index: number) => number"
                 );
-                ensure!(
-                    matches!(ret, HirType::Number),
-                    "byteAt must return number"
-                );
+                ensure!(matches!(ret, HirType::Number), "byteAt must return number");
                 intrinsics.insert(name.clone(), TypedIntrinsic::ByteAt);
             }
             other => {
                 // Generic custom typed intrinsic
-                let waffle_params = params.iter().map(map_hir_type_to_waffle).collect::<Result<Vec<_>>>()?;
+                let waffle_params = params
+                    .iter()
+                    .map(map_hir_type_to_waffle)
+                    .collect::<Result<Vec<_>>>()?;
                 let (waffle_returns, is_async) = match ret {
                     HirType::Void => (vec![], false),
                     HirType::Promise(inner) => {
