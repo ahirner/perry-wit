@@ -8,6 +8,7 @@ pub(crate) mod exceptions;
 pub(crate) mod registry;
 pub(crate) mod resolve;
 pub(crate) mod ssa;
+pub mod text_contract;
 
 use anyhow::{Context, Result};
 use perry_hir::ir::Module as HirModule;
@@ -55,6 +56,9 @@ pub fn compile_typescript(
             .context("LLVM audit verification failed")?;
     }
 
+    text_contract::validate_source_text(ts_source)
+        .context("Source text contract validation failed")?;
+
     let ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
     let hir = lower_module(&ast, "main", file_name)
@@ -68,6 +72,9 @@ pub fn compile_hir_owned(
     hir: HirModule,
     options: &WaffleCompileOptions,
 ) -> Result<WaffleCompiled> {
+    text_contract::validate_hir_text(&hir)
+        .context("HIR text contract validation failed")?;
+
     let (waffle_mod, contract) = lower_hir_to_waffle(&hir)?;
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
