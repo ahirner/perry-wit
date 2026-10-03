@@ -1,6 +1,9 @@
 //! Native subtask protocol probes and stored Promise integration tests.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -34,6 +37,298 @@ impl WasiView for Host {
             table: &mut self.table,
         }
     }
+}
+
+#[derive(Default)]
+struct OperationCounts {
+    active: AtomicUsize,
+    started: AtomicUsize,
+    completed: AtomicUsize,
+    samples: AtomicUsize,
+}
+
+struct ActiveOperation(Arc<OperationCounts>);
+
+impl Drop for ActiveOperation {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn gated_linker(
+    engine: &Engine,
+    gate: Arc<Notify>,
+    counts: Arc<OperationCounts>,
+) -> Result<Linker<StoreLimits>> {
+    let mut linker = Linker::new(engine);
+    let clock_counts = counts.clone();
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (_duration,): (u64,)| {
+            let gate = gate.clone();
+            let counts = clock_counts.clone();
+            counts.started.fetch_add(1, Ordering::SeqCst);
+            counts.active.fetch_add(1, Ordering::SeqCst);
+            let operation = ActiveOperation(counts.clone());
+            Box::pin(async move {
+                let _operation = operation;
+                gate.notified().await;
+                counts.completed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        })?;
+    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+        "get-random-u64",
+        move |_: StoreContextMut<'_, StoreLimits>, (): ()| {
+            counts.samples.fetch_add(1, Ordering::SeqCst);
+            Ok((0u64,))
+        },
+    )?;
+    Ok(linker)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invocation_disposal_releases_parked_observers_and_ready_races() -> Result<()> {
+    let source = r#"
+        import { waitFor } from "perry:clocks";
+        import { randomNumber } from "perry:random";
+        async function produce(s: string, fail: boolean): Promise<string> {
+            let retained = s.toUpperCase();
+            await waitFor(1);
+            if (fail) throw 7;
+            return retained;
+        }
+        async function observe(shared: Promise<string>): Promise<string> {
+            try { return await shared; } finally { randomNumber(); }
+        }
+        export async function run(s: string, fail: boolean): Promise<Result<string, number>> {
+            const shared = produce(s, fail);
+            const first = observe(shared);
+            const second = observe(shared);
+            let error = 0;
+            let result = "";
+            try { result = await first; } catch (e) { error = e as number; }
+            try { result = result + await second; } catch (e) { error = e as number; }
+            if (error !== 0) throw error;
+            return result;
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "cancel_observers.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let input = "é🦀".repeat(4096);
+    for cycle in 0..18 {
+        let gate = Arc::new(Notify::new());
+        let counts = Arc::new(OperationCounts::default());
+        let linker = gated_linker(&engine, gate.clone(), counts.clone())?;
+        let mut store = Store::new(
+            &engine,
+            StoreLimitsBuilder::new().memory_size(524_288).build(),
+        );
+        store.limiter(|limits| limits);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(&str, bool), (std::result::Result<String, f64>,)>(
+            &mut store, "run",
+        )?;
+        let failed = cycle % 2 == 0;
+        let mut pending = Box::pin(run.call_async(&mut store, (&input, failed)));
+        assert!(
+            timeout(Duration::from_millis(5), &mut pending)
+                .await
+                .is_err()
+        );
+        assert_eq!(counts.started.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.active.load(Ordering::SeqCst), 1);
+        match cycle % 3 {
+            0 => drop(pending),
+            1 => {
+                gate.notify_one();
+                drop(pending);
+            }
+            _ => {
+                gate.notify_one();
+                let result = timeout(Duration::from_secs(2), pending).await??.0;
+                assert_eq!(
+                    result,
+                    if failed {
+                        Err(7.0)
+                    } else {
+                        Ok("É🦀".repeat(8192))
+                    }
+                );
+                assert_eq!(counts.completed.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.samples.load(Ordering::SeqCst), 2);
+                store.assert_concurrent_state_empty();
+            }
+        }
+        drop(store);
+        assert_eq!(counts.active.load(Ordering::SeqCst), 0);
+        if cycle % 3 != 2 {
+            assert_eq!(counts.completed.load(Ordering::SeqCst), 0);
+            assert_eq!(counts.samples.load(Ordering::SeqCst), 0);
+        }
+        gate.notify_waiters();
+        tokio::task::yield_now().await;
+        assert_eq!(counts.active.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn abandoned_pending_work_never_becomes_a_successful_result() -> Result<()> {
+    let engine = make_engine()?;
+    for exit in ["return 1;", "throw 8;"] {
+        let source = format!(
+            r#"import {{ waitFor }} from "perry:clocks";
+            export async function run(): Promise<Result<number, number>> {{ const pending = waitFor(1); {exit} }}"#
+        );
+        let compiled =
+            compile_typescript_waffle(&source, "abandoned.ts", &WaffleCompileOptions::default())?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let gate = Arc::new(Notify::new());
+        let counts = Arc::new(OperationCounts::default());
+        let linker = gated_linker(&engine, gate, counts.clone())?;
+        let mut store = Store::new(&engine, StoreLimits::default());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run =
+            instance.get_typed_func::<(), (std::result::Result<f64, f64>,)>(&mut store, "run")?;
+        let result = timeout(Duration::from_secs(2), run.call_async(&mut store, ())).await?;
+        assert!(result.is_err(), "{exit}: unobserved work must trap");
+        drop(store);
+        assert_eq!(counts.started.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.completed.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.active.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn one_observers_failure_does_not_cancel_the_shared_operation() -> Result<()> {
+    let source = r#"
+        import { waitFor } from "perry:clocks";
+        import { randomNumber } from "perry:random";
+        async function produce(): Promise<string> { await waitFor(1); return "A🦀"; }
+        async function observe(shared: Promise<string>, fail: boolean): Promise<string> {
+            if (fail) throw 3;
+            return await shared;
+        }
+        export async function run(): Promise<number> {
+            const shared = produce();
+            const first = observe(shared, true);
+            const second = observe(shared, false);
+            let error = 0;
+            try { await first; } catch (e) { error = e as number; }
+            randomNumber();
+            const value = await second;
+            return error + value.length;
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "observer_failure.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let gate = Arc::new(Notify::new());
+    let counts = Arc::new(OperationCounts::default());
+    let linker = gated_linker(&engine, gate.clone(), counts.clone())?;
+    let mut store = Store::new(&engine, StoreLimits::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    let mut pending = Box::pin(run.call_async(&mut store, ()));
+    assert!(
+        timeout(Duration::from_millis(10), &mut pending)
+            .await
+            .is_err()
+    );
+    assert_eq!(counts.active.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        counts.samples.load(Ordering::SeqCst),
+        1,
+        "the first observer's rejection was already caught"
+    );
+    gate.notify_one();
+    assert_eq!(timeout(Duration::from_secs(2), pending).await??.0, 5.0);
+    assert_eq!(counts.completed.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.active.load(Ordering::SeqCst), 0);
+    store.assert_concurrent_state_empty();
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn overlapping_entry_calls_trap_before_starting_another_operation() -> Result<()> {
+    let source = r#"import { waitFor } from "perry:clocks";
+        export async function run(): Promise<number> { const pending = waitFor(1); await pending; return 1; }"#;
+    let compiled =
+        compile_typescript_waffle(source, "overlapping.ts", &WaffleCompileOptions::default())?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let counts = Arc::new(OperationCounts::default());
+    let linker = gated_linker(&engine, Arc::new(Notify::new()), counts.clone())?;
+    let mut store = Store::new(&engine, StoreLimits::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    let result = timeout(
+        Duration::from_secs(2),
+        store.run_concurrent(async |accessor| {
+            let mut first = Box::pin(run.call_concurrent(accessor, ()));
+            assert!(
+                timeout(Duration::from_millis(10), &mut first)
+                    .await
+                    .is_err()
+            );
+            run.call_concurrent(accessor, ()).await
+        }),
+    )
+    .await?;
+    assert!(
+        !matches!(result, Ok(Ok(_))),
+        "overlapping public calls must trap"
+    );
+    assert_eq!(counts.started.load(Ordering::SeqCst), 1);
+    drop(store);
+    assert_eq!(counts.active.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_task_transport_releases_native_state() -> Result<()> {
+    let engine = make_engine()?;
+    let linker = Linker::new(&engine);
+    for (body, observation) in [
+        ("return 7;", "return await pending;"),
+        ("throw 7;", "return await pending;"),
+        ("await 0; return 7;", "return await pending;"),
+        ("return 7;", "return 7;"),
+    ] {
+        let source = format!(
+            "async function done(): Promise<number> {{ {body} }} export async function run(): Promise<number> {{ const pending = done(); try {{ {observation} }} catch (e) {{ return e; }} }}"
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "completed_transport.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+        for iteration in 0..4 {
+            assert_eq!(run.call_async(&mut store, ()).await?.0, 7.0);
+            assert_eq!(
+                store.concurrent_state_table_size(),
+                0,
+                "{body}, invocation {iteration}"
+            );
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -102,6 +397,10 @@ fn unsupported_promise_uses_have_source_diagnostics() {
         (
             "const p = done(); p[0]; return 1;",
             "Promise indexing is unsupported",
+        ),
+        (
+            "const p = done(); p.cancel(); return 1;",
+            "Promise methods are unsupported",
         ),
         (
             "const p = done(); return consume(p);",
@@ -403,6 +702,7 @@ async fn stored_text_results_survive_repeated_observation_and_export_cleanup() -
                 expected_result.clone()
             };
             assert_eq!(results[0], expected, "{result_type}, iteration {iteration}");
+            store.assert_concurrent_state_empty();
         }
     }
     Ok(())

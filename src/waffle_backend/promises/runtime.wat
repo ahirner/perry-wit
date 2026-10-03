@@ -96,4 +96,5 @@
       (if (i32.ne (i32.load (local.get $record)) (i32.const 2)) (then unreachable))
       (local.set $record (i32.load offset=16 (local.get $record)))
       (br $next)))
+    (drop (call $yield))
     (i32.store (i32.const 4) (i32.const 0))))

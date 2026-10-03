@@ -191,9 +191,14 @@ registration order; each additional concurrent pending observer uses 8 guest byt
 Settlement and subsequent awaits of the retained outcome allocate no guest bytes.
 Promise parameters cannot cross the public WIT boundary. Callbacks, constructors,
 and combinators remain unsupported. Detached call statements are diagnosed; returning while a
-started operation remains unobserved traps before result delivery. The host must
-discard that instance. Simultaneous entry calls are rejected; native child tasks
-may overlap within their owning invocation.
+started operation remains pending or its native completion is unconsumed traps
+before result delivery. The host must discard that instance. Simultaneous entry
+calls are rejected; native child tasks may overlap within their owning invocation.
+An observer's rejection leaves the shared operation available to other observers.
+Individual observer cancellation is not exposed. Cancelling an invocation means
+disposing of its store, which releases host operations and native task state;
+guest `finally` blocks do not run after disposal. Completed serial calls release
+native task state and reclaim the arena after copying the result.
 The default CLI and SDK still describe the legacy pipeline until the R9 cutover.
 The Rust `compile_typescript_raw` API returns a `RawCompiled` value containing
 `core`, `exported_functions`, and `functions` for legacy linker consumers.

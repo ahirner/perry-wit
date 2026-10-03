@@ -123,6 +123,7 @@ pub(crate) fn frame(
       (core module $tasks
         (import "runtime" "settle" (func $settle (param i32 i32 f64)))
         (import "native" "return" (func $return))
+        (import "native" "yield" (func $yield (result i32)))
     "#,
     );
     for (target, task) in &plan.tasks {
@@ -173,11 +174,13 @@ pub(crate) fn frame(
         } else if task.result != HirType::Void {
             wat.push_str("local.set $payload\n");
         }
-        wat.push_str("(call $settle (local.get $owner) (local.get $tag) (local.get $payload)) (call $return))\n");
+        // Wasmtime 49 needs completion consumed before the child thread exits;
+        // otherwise immediately returned async-lowered guest calls retain a task.
+        wat.push_str("(call $settle (local.get $owner) (local.get $tag) (local.get $payload)) (call $return) (drop (call $yield)))\n");
     }
     wat.push_str(r#") (core instance $tasks (instantiate $tasks
       (with "guest" (instance $guest)) (with "host" (instance $host))
-      (with "runtime" (instance $runtime)) (with "native" (instance (export "return" (func $return-task))))))
+      (with "runtime" (instance $runtime)) (with "native" (instance (export "return" (func $return-task)) (export "yield" (func $yield))))))
     "#);
     for task in plan.tasks.values() {
         write!(wat, "(func ${} async (param \"owner\" u32)", task.symbol)?;
