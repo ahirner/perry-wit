@@ -181,12 +181,16 @@ invocation and values escaping into pending operations remains roadmap work.
 Stored Promises from named async functions and the supported async imports retain
 number, boolean, string, or void outcomes and numeric rejections. Starting a task
 runs it up to suspension; aliases preserve identity and repeated awaits reuse its
-outcome. These components require Wasmtime's `wasm_component_model_async_stackful`
-feature alongside `wasm_component_model_async` and `wasm_component_model_more_async_builtins`.
+outcome. Typed Promise parameters allow named tasks to observe the same outcome
+concurrently. These components require Wasmtime's `wasm_component_model_async_stackful`
+and `wasm_component_model_threading` features alongside `wasm_component_model_async`
+and `wasm_component_model_more_async_builtins`.
 Promise records share the invocation arena and cost 32 bytes per started async
-call; settling or repeatedly observing a record allocates no further guest bytes.
-Concurrent observers, Promise parameters, callbacks, constructors, and combinators
-remain unsupported. Detached call statements are diagnosed; returning while a
+call. One observer consumes the native completion and wakes queued observers in
+registration order; each additional concurrent pending observer uses 8 guest bytes.
+Settlement and subsequent awaits of the retained outcome allocate no guest bytes.
+Promise parameters cannot cross the public WIT boundary. Callbacks, constructors,
+and combinators remain unsupported. Detached call statements are diagnosed; returning while a
 started operation remains unobserved traps before result delivery. The host must
 discard that instance. Simultaneous entry calls are rejected; native child tasks
 may overlap within their owning invocation.

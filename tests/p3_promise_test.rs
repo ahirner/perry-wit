@@ -15,6 +15,7 @@ fn make_engine() -> Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model_async(true);
     config.wasm_component_model_async_stackful(true);
+    config.wasm_component_model_threading(true);
     config.wasm_component_model_more_async_builtins(true);
     Ok(Engine::new(&config)?)
 }
@@ -104,7 +105,7 @@ fn unsupported_promise_uses_have_source_diagnostics() {
         ),
         (
             "const p = done(); return consume(p);",
-            "Stored Promise arguments are unsupported",
+            "Stored Promise arguments must match",
         ),
         (
             "let p: any = done(); if (flag) p = true; await p; return 1;",
@@ -126,6 +127,201 @@ fn unsupported_promise_uses_have_source_diagnostics() {
         .unwrap_err();
         assert!(error.to_string().contains(expected), "{body}: {error:#}");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_observers_resume_once_in_registration_order() -> Result<()> {
+    let source = r#"
+        import { waitFor } from "perry:clocks";
+        declare function hostDouble(value: number): Promise<number>;
+        async function produce(mode: number): Promise<number> {
+            if (mode === 0) await waitFor(1);
+            if (mode === 4) await waitFor(1);
+            if (mode === 1) await 1;
+            if (mode === 2) throw 7;
+            if (mode === 4) throw 7;
+            return 42;
+        }
+        async function observe(shared: Promise<number>, id: number): Promise<number> {
+            let outcome = 0;
+            try { outcome = await shared; } catch (error) { outcome = error as number; }
+            await hostDouble(id);
+            return outcome;
+        }
+        export async function run(mode: number): Promise<number> {
+            const shared = produce(mode);
+            const first = observe(shared, 1);
+            const second = observe(shared, 2);
+            const third = observe(shared, 3);
+            const a = await first;
+            await hostDouble(9);
+            const b = await second;
+            const c = await third;
+            return a + b + c;
+        }
+    "#;
+    let compiled =
+        compile_typescript_waffle(source, "observers.ts", &WaffleCompileOptions::default())?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let release = Arc::new(Notify::new());
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let mut linker = Linker::new(&engine);
+    let host_release = release.clone();
+    let host_trace = trace.clone();
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
+            let release = host_release.clone();
+            let trace = host_trace.clone();
+            Box::pin(async move {
+                trace.lock().unwrap().push(format!("wait:{duration}"));
+                release.notified().await;
+                Ok(())
+            })
+        })?;
+    let host_trace = trace.clone();
+    linker
+        .root()
+        .func_wrap_concurrent("host-double", move |_, (value,): (f64,)| {
+            let trace = host_trace.clone();
+            Box::pin(async move {
+                trace.lock().unwrap().push(format!("observe:{value}"));
+                Ok((value * 2.0,))
+            })
+        })?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    let mut observed = Vec::new();
+    for mode in [0.0, 1.0, 2.0, 3.0, 4.0] {
+        trace.lock().unwrap().clear();
+        let mut pending = Box::pin(run.call_async(&mut store, (mode,)));
+        if mode == 0.0 || mode == 4.0 {
+            assert!(
+                timeout(Duration::from_millis(10), &mut pending)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(*trace.lock().unwrap(), ["wait:1000000"]);
+            release.notify_one();
+        }
+        let result = timeout(Duration::from_secs(2), pending).await??.0;
+        assert_eq!(
+            result,
+            if mode == 2.0 || mode == 4.0 {
+                21.0
+            } else {
+                126.0
+            }
+        );
+        observed.push((result, trace.lock().unwrap().clone()));
+    }
+    let scratch = tempfile::tempdir()?;
+    let node_path = scratch.path().join("observers.mts");
+    let node_source = source.replace("import { waitFor } from \"perry:clocks\";", "const waitFor = (ms: number): Promise<void> => { trace.push(`wait:${ms * 1000000}`); return new Promise(resolve => setTimeout(resolve, 1)); };")
+        .replace("declare function hostDouble(value: number): Promise<number>;", "const hostDouble = async (value: number) => { trace.push(`observe:${value}`); return value * 2; };");
+    std::fs::write(
+        &node_path,
+        format!(
+            "const trace: string[] = [];\n{node_source}\nconst observed = []; for (const mode of [0,1,2,3,4]) {{ trace.length = 0; observed.push([await run(mode), [...trace]]); }} console.log(JSON.stringify(observed));"
+        ),
+    )?;
+    let node = std::process::Command::new("node").arg(node_path).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Vec<(f64, Vec<String>)>>(&node.stdout)?,
+        observed
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sibling_reactions_precede_an_observers_dependent_reaction() -> Result<()> {
+    let source = r#"
+        import { waitFor } from "perry:clocks";
+        import { randomNumber } from "perry:random";
+        async function produce(): Promise<number> { await waitFor(1); return 0; }
+        async function observe(shared: Promise<number>, weight: number): Promise<number> {
+            const value = await shared;
+            return value + weight * randomNumber();
+        }
+        export async function run(): Promise<number> {
+            const shared = produce();
+            const first = observe(shared, 1);
+            const second = observe(shared, 2);
+            const third = observe(shared, 4);
+            const a = await first;
+            const dependent = 100 * randomNumber();
+            return a + await second + await third + dependent;
+        }
+    "#;
+    for (source, expected_order) in [
+        (source.to_string(), 26.0625),
+        (source.replace("export async function run()", "async function adopt(shared: Promise<number>): Promise<number> { return shared; } export async function run()")
+            .replace("const first = observe(shared, 1);", "const first = observe(adopt(shared), 1);"), 25.8125),
+    ] {
+    let compiled = compile_typescript_waffle(
+        &source,
+        "reaction_dependencies.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let release = Arc::new(Notify::new());
+    let host_release = release.clone();
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (_duration,): (u64,)| {
+            let release = host_release.clone();
+            Box::pin(async move {
+                release.notified().await;
+                Ok(())
+            })
+        })?;
+    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+        "get-random-u64",
+        |mut store: StoreContextMut<'_, u64>, (): ()| {
+            *store.data_mut() += 1;
+            Ok((*store.data() << 60,))
+        },
+    )?;
+    let mut store = Store::new(&engine, 0u64);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    let mut pending = Box::pin(run.call_async(&mut store, ()));
+    assert!(
+        timeout(Duration::from_millis(10), &mut pending)
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    let actual = timeout(Duration::from_secs(2), pending).await??.0;
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("dependencies.mts");
+    let node_source = source.replace("import { waitFor } from \"perry:clocks\";", "const waitFor = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));")
+        .replace("import { randomNumber } from \"perry:random\";", "let count = 0; const randomNumber = () => ++count / 16;");
+    std::fs::write(&path, format!("{node_source}\nconsole.log(await run());"))?;
+    let node = std::process::Command::new("node").arg(path).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: f64 = String::from_utf8(node.stdout)?.trim().parse()?;
+    assert_eq!(expected, expected_order);
+    assert_eq!(actual, expected);
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -163,10 +359,13 @@ async fn stored_text_results_survive_repeated_observation_and_export_cleanup() -
                 await waitFor(0.001);
                 return retained + "!";
             }}
+            async function observe(shared: Promise<string>): Promise<string> {{ return await shared; }}
             export async function run(s: string, fail: boolean): Promise<{result_type}> {{
                 const pending = work(s);
-                const first = await pending;
-                const second = await pending;
+                const firstObserver = observe(pending);
+                const secondObserver = observe(pending);
+                const first = await firstObserver;
+                const second = await secondObserver;
                 if (first !== second) throw 99;
                 if (fail) throw 7;
                 return {result_expr};

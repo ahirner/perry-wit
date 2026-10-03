@@ -120,8 +120,9 @@ pub(crate) fn plan_promises(
         ensure!(
             task.params
                 .iter()
-                .all(|param| matches!(param, HirType::Number | HirType::Boolean | HirType::String)),
-            "Stored async task parameters currently support numbers, booleans, and strings"
+                .all(|param| matches!(param, HirType::Number | HirType::Boolean | HirType::String)
+                    || matches!(param, HirType::Promise(inner) if matches!(inner.as_ref(), HirType::Number | HirType::Boolean | HirType::String | HirType::Void))),
+            "Stored async task parameters require primitives or Promises of primitive outcomes"
         );
         ensure!(
             matches!(

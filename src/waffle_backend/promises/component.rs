@@ -103,6 +103,9 @@ pub(crate) fn frame(
       (core func $drop-task (canon subtask.drop))
       (core func $drop-set (canon waitable-set.drop))
       (core func $yield (canon thread.yield))
+      (core func $thread-index (canon thread.index))
+      (core func $suspend (canon thread.suspend))
+      (core func $resume (canon thread.resume-later))
       (core func $return-task (canon task.return))
     "#,
     );
@@ -114,7 +117,9 @@ pub(crate) fn frame(
         (with "native" (instance
           (export "new-set" (func $new-set)) (export "join" (func $join))
           (export "wait" (func $wait)) (export "drop-task" (func $drop-task))
-          (export "drop-set" (func $drop-set)) (export "yield" (func $yield))))))
+          (export "drop-set" (func $drop-set)) (export "yield" (func $yield))
+          (export "thread-index" (func $thread-index)) (export "suspend" (func $suspend))
+          (export "resume" (func $resume))))))
       (core module $tasks
         (import "runtime" "settle" (func $settle (param i32 i32 f64)))
         (import "native" "return" (func $return))

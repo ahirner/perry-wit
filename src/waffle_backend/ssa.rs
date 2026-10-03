@@ -419,10 +419,6 @@ impl<'a> FunctionLowerer<'a> {
 
         let mut arg_vals = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
-            ensure!(
-                !matches!(self.infer_expr_type(arg), HirType::Promise(_)),
-                "Stored Promise arguments are unsupported until multiple observers have a shared wakeup owner"
-            );
             let expected = match callee {
                 Expr::FuncRef(fid) => self
                     .registry
@@ -431,6 +427,15 @@ impl<'a> FunctionLowerer<'a> {
                     .and_then(|info| info.param_types.get(index)),
                 _ => None,
             };
+            let argument_type = self.infer_expr_type(arg);
+            if matches!(argument_type, HirType::Promise(_))
+                || matches!(expected, Some(HirType::Promise(_)))
+            {
+                ensure!(
+                    expected == Some(&argument_type),
+                    "Stored Promise arguments must match their declared outcome type"
+                );
+            }
             let value = if expected == Some(&HirType::String) {
                 self.string_receiver(arg)?
             } else {

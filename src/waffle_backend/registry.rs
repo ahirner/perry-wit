@@ -323,6 +323,14 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         HirType::Number | HirType::Any => Ok(Type::F64),
         HirType::Boolean => Ok(Type::I32),
         HirType::String => Ok(Type::I32),
+        HirType::Promise(inner)
+            if matches!(
+                inner.as_ref(),
+                HirType::Number | HirType::Boolean | HirType::String | HirType::Void
+            ) =>
+        {
+            Ok(Type::I32)
+        }
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
     }
@@ -346,6 +354,10 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
 pub(crate) fn canonical_param_types(params: &[HirType]) -> Result<Vec<Type>> {
     let mut flat = Vec::new();
     for ty in params {
+        ensure!(
+            !matches!(ty, HirType::Promise(_)),
+            "Promise parameters cannot cross the public component boundary"
+        );
         flat.push(map_type_to_waffle(ty)?);
         if matches!(ty, HirType::String) {
             flat.push(Type::I32);
