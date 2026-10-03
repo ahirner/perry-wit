@@ -4,8 +4,8 @@
 //! and `throw` statements without requiring post-emission bytecode patching
 //! or runtime dispatch tables.
 
-use std::collections::BTreeMap;
 use perry_hir::types::LocalId;
+use std::collections::BTreeMap;
 use waffle::{Block, BlockTarget, FunctionBody, Operator, Terminator, Type, Value};
 
 /// Exit reason passed to a finally handler block.
@@ -166,9 +166,7 @@ impl TryClauseBlocks {
             body.add_blockparam(fb, Type::I32); // exit_reason
             body.add_blockparam(fb, Type::F64); // payload
             for &id in &scope_locals {
-                let ty = body.values[locals[&id]]
-                    .ty(&body.type_pool)
-                    .unwrap();
+                let ty = body.values[locals[&id]].ty(&body.type_pool).unwrap();
                 body.add_blockparam(fb, ty);
             }
             Some(fb)
@@ -181,9 +179,7 @@ impl TryClauseBlocks {
             body.blocks[cb].desc = "catch entry".into();
             body.add_blockparam(cb, Type::F64); // exception payload
             for &id in &scope_locals {
-                let ty = body.values[locals[&id]]
-                    .ty(&body.type_pool)
-                    .unwrap();
+                let ty = body.values[locals[&id]].ty(&body.type_pool).unwrap();
                 body.add_blockparam(cb, ty);
             }
             Some(cb)
@@ -233,10 +229,7 @@ impl TryClauseBlocks {
             body.set_terminator(
                 from_block,
                 Terminator::Br {
-                    target: BlockTarget {
-                        block: fb,
-                        args,
-                    },
+                    target: BlockTarget { block: fb, args },
                 },
             );
             false
@@ -259,51 +252,51 @@ impl TryClauseBlocks {
         }
     }
 
-    /// Restores local bindings for entering the catch body from its block parameters.
-    pub(crate) fn restore_catch_environment(
-        &self,
-        body: &FunctionBody,
-        locals: &mut BTreeMap<LocalId, Value>,
-    ) {
-        let cb = self.catch_block.expect("Catch block must exist");
-        let exc_val = body.blocks[cb].params[0].1;
+    /// Rebuilds catch bindings without retaining locals declared in the try body.
+    pub(crate) fn catch_environment(&self, body: &FunctionBody) -> BTreeMap<LocalId, Value> {
+        let block = self.catch_block.expect("Catch block must exist");
+        let mut locals = self.scope_environment(body, block, 1);
         if let Some(param_id) = self.catch_param {
-            locals.insert(param_id, exc_val);
+            locals.insert(param_id, body.blocks[block].params[0].1);
         }
-        for (idx, &id) in self.scope_locals.iter().enumerate() {
-            let val = body.blocks[cb].params[idx + 1].1;
-            locals.insert(id, val);
+        locals
+    }
+
+    /// Rebuilds finally bindings and preserves its pending exit independently of locals.
+    pub(crate) fn finally_environment(&self, body: &FunctionBody) -> FinallyEnvironment {
+        let block = self.finally_block.expect("Finally block must exist");
+        FinallyEnvironment {
+            locals: self.scope_environment(body, block, 2),
+            exit_reason: body.blocks[block].params[0].1,
+            payload: body.blocks[block].params[1].1,
         }
     }
 
-    /// Restores local bindings for entering the finally body from its block parameters,
-    /// returning `(exit_reason, payload)`.
-    pub(crate) fn restore_finally_environment(
-        &self,
-        body: &FunctionBody,
-        locals: &mut BTreeMap<LocalId, Value>,
-    ) -> (Value, Value) {
-        let fb = self.finally_block.expect("Finally block must exist");
-        let exit_reason = body.blocks[fb].params[0].1;
-        let payload = body.blocks[fb].params[1].1;
-        for (idx, &id) in self.scope_locals.iter().enumerate() {
-            let val = body.blocks[fb].params[idx + 2].1;
-            locals.insert(id, val);
-        }
-        (exit_reason, payload)
+    /// Rebuilds the outer environment after normal or handled completion.
+    pub(crate) fn join_environment(&self, body: &FunctionBody) -> BTreeMap<LocalId, Value> {
+        self.scope_environment(body, self.join_block, 0)
     }
 
-    /// Restores local bindings for entering the join block after normal/handled completion.
-    pub(crate) fn restore_join_environment(
+    /// Selects only the bindings carried into this scope by block parameters.
+    fn scope_environment(
         &self,
         body: &FunctionBody,
-        locals: &mut BTreeMap<LocalId, Value>,
-    ) {
-        for (idx, &id) in self.scope_locals.iter().enumerate() {
-            let val = body.blocks[self.join_block].params[idx].1;
-            locals.insert(id, val);
-        }
+        block: Block,
+        offset: usize,
+    ) -> BTreeMap<LocalId, Value> {
+        self.scope_locals
+            .iter()
+            .enumerate()
+            .map(|(index, &id)| (id, body.blocks[block].params[index + offset].1))
+            .collect()
     }
+}
+
+/// Bindings and pending completion at a finally clause's entry.
+pub(crate) struct FinallyEnvironment {
+    pub(crate) locals: BTreeMap<LocalId, Value>,
+    pub(crate) exit_reason: Value,
+    pub(crate) payload: Value,
 }
 
 /// Dispatches the exit reason from a finally block:
@@ -347,10 +340,7 @@ pub(crate) fn emit_finally_dispatcher(
     );
 
     // on_normal branches to join_block
-    let join_args = scope_locals
-        .iter()
-        .map(|id| current_locals[id])
-        .collect();
+    let join_args = scope_locals.iter().map(|id| current_locals[id]).collect();
     body.set_terminator(
         on_normal,
         Terminator::Br {

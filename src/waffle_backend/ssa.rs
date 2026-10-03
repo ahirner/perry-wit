@@ -631,7 +631,7 @@ impl<'a> FunctionLowerer<'a> {
         if let (Some(cb), Some(c_clause)) = (blocks.catch_block, catch) {
             self.block = cb;
             self.unwind_ctx.clear_catch_in_innermost();
-            blocks.restore_catch_environment(&self.body, &mut self.locals);
+            self.locals = blocks.catch_environment(&self.body);
 
             self.statements(&c_clause.body)?;
             if self.body.blocks[self.block].terminator == Terminator::None {
@@ -646,8 +646,8 @@ impl<'a> FunctionLowerer<'a> {
         // 3. Lower finally clause (if present)
         if let (Some(fb), Some(f_stmts)) = (blocks.finally_block, finally) {
             self.block = fb;
-            let (exit_reason, payload) =
-                blocks.restore_finally_environment(&self.body, &mut self.locals);
+            let environment = blocks.finally_environment(&self.body);
+            self.locals = environment.locals;
 
             self.statements(f_stmts)?;
 
@@ -655,7 +655,7 @@ impl<'a> FunctionLowerer<'a> {
                 let (on_return, on_throw) = exceptions::emit_finally_dispatcher(
                     &mut self.body,
                     self.block,
-                    exit_reason,
+                    environment.exit_reason,
                     blocks.join_block,
                     &blocks.scope_locals,
                     &self.locals,
@@ -664,11 +664,11 @@ impl<'a> FunctionLowerer<'a> {
 
                 // on_return:
                 self.block = on_return;
-                self.emit_finally_return(payload);
+                self.emit_finally_return(environment.payload);
 
                 // on_throw:
                 self.block = on_throw;
-                self.emit_throw(payload);
+                self.emit_throw(environment.payload);
             }
         }
 
@@ -677,7 +677,7 @@ impl<'a> FunctionLowerer<'a> {
             self.body
                 .set_terminator(blocks.join_block, Terminator::Unreachable);
         } else {
-            blocks.restore_join_environment(&self.body, &mut self.locals);
+            self.locals = blocks.join_environment(&self.body);
         }
         self.block = blocks.join_block;
         Ok(())

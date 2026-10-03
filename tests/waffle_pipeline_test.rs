@@ -1076,3 +1076,50 @@ async fn test_waffle_numeric_truthiness() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_exception_clause_local_scopes() -> Result<()> {
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+    for clauses in [
+        "try { let temporary = 3; if (input < 0) throw input; result = temporary; } catch (error) { let caught = error; result = caught; }",
+        "try { let temporary = 3; if (input < 0) throw input; result = temporary; } catch (error) { let caught = await error; result = caught; } finally { let cleanup = await 10; result = result + cleanup; }",
+        "try { try { let temporary = 3; if (input < 0) throw input; result = temporary; } finally { let cleanup = await 10; result = result + cleanup; } } catch (error) { let caught = await error; result = result + caught; }",
+    ] {
+        let source = format!(
+            r#"
+            export async function run(input: number): Promise<number> {{
+                let result = 0;
+                {clauses}
+                await 1;
+                if (input > 0) {{ let increment = 1; result = result + increment; }}
+                let index = 0;
+                while (index < 2) {{ result = result + await 1; index = index + 1; }}
+                return result;
+            }}
+        "#
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "clause_scopes.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, WasiHostState::default());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+        let cleanup = if clauses.contains("finally") {
+            10.0
+        } else {
+            0.0
+        };
+        for (input, expected) in [(-2.0, cleanup), (2.0, cleanup + 6.0)] {
+            assert_eq!(
+                run.call_async(&mut store, (input,)).await?,
+                (expected,),
+                "{clauses}"
+            );
+        }
+    }
+    Ok(())
+}
