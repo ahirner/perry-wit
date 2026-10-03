@@ -431,3 +431,57 @@ fn test_waffle_boolean_await_preserves_result_and_locals() -> Result<()> {
     assert_eq!(run.call(&mut store, 1.0)?, 1);
     Ok(())
 }
+
+#[test]
+fn test_waffle_boolean_comparisons() -> Result<()> {
+    let options = WaffleCompileOptions {
+        componentize: false,
+        ..Default::default()
+    };
+    let engine = Engine::default();
+    for (operator, expected) in [
+        ("===", [1, 0, 0, 1]),
+        ("==", [1, 0, 0, 1]),
+        ("!==", [0, 1, 1, 0]),
+        ("!=", [0, 1, 1, 0]),
+        ("<", [0, 1, 0, 0]),
+        ("<=", [1, 1, 0, 1]),
+        (">", [0, 0, 1, 0]),
+        (">=", [1, 0, 1, 1]),
+    ] {
+        let source = format!(
+            "export function run(input: number, left: boolean, right: boolean): boolean {{
+                if (left {operator} right) {{ return true; }}
+                return false;
+            }}"
+        );
+        let compiled = compile_typescript_waffle(&source, "compare.ts", &options)?;
+        let module = Module::new(&engine, compiled.core)?;
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let run = instance.get_typed_func::<(f64, i32, i32), i32>(&mut store, "run")?;
+        for ((left, right), expected) in [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().zip(expected)
+        {
+            assert_eq!(
+                run.call(&mut store, (0.0, left, right))?,
+                expected,
+                "{operator}"
+            );
+        }
+    }
+    for comparison in ["true === 1", "false < 0"] {
+        let source = format!(
+            "export function run(input: number): number {{
+                if ({comparison}) {{ return 1; }}
+                return 0;
+            }}"
+        );
+        let error = compile_typescript_waffle(&source, "mixed_compare.ts", &options).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported comparison operand types")
+        );
+    }
+    Ok(())
+}

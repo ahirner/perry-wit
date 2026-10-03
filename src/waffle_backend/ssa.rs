@@ -496,13 +496,28 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Compare { op, left, right } => {
                 let left_val = self.expression(left)?;
                 let right_val = self.expression(right)?;
-                let operator = match op {
-                    CompareOp::Eq | CompareOp::LooseEq => Operator::F64Eq,
-                    CompareOp::Ne | CompareOp::LooseNe => Operator::F64Ne,
-                    CompareOp::Lt => Operator::F64Lt,
-                    CompareOp::Le => Operator::F64Le,
-                    CompareOp::Gt => Operator::F64Gt,
-                    CompareOp::Ge => Operator::F64Ge,
+                let left_type = self.body.values[left_val].ty(&self.body.type_pool);
+                let right_type = self.body.values[right_val].ty(&self.body.type_pool);
+                ensure!(
+                    left_type == right_type,
+                    "Unsupported comparison operand types: {left_type:?} and {right_type:?}"
+                );
+                let operator = match (left_type, op) {
+                    (Some(Type::F64), CompareOp::Eq | CompareOp::LooseEq) => Operator::F64Eq,
+                    (Some(Type::F64), CompareOp::Ne | CompareOp::LooseNe) => Operator::F64Ne,
+                    (Some(Type::F64), CompareOp::Lt) => Operator::F64Lt,
+                    (Some(Type::F64), CompareOp::Le) => Operator::F64Le,
+                    (Some(Type::F64), CompareOp::Gt) => Operator::F64Gt,
+                    (Some(Type::F64), CompareOp::Ge) => Operator::F64Ge,
+                    (Some(Type::I32), CompareOp::Eq | CompareOp::LooseEq) => Operator::I32Eq,
+                    (Some(Type::I32), CompareOp::Ne | CompareOp::LooseNe) => Operator::I32Ne,
+                    (Some(Type::I32), CompareOp::Lt) => Operator::I32LtU,
+                    (Some(Type::I32), CompareOp::Le) => Operator::I32LeU,
+                    (Some(Type::I32), CompareOp::Gt) => Operator::I32GtU,
+                    (Some(Type::I32), CompareOp::Ge) => Operator::I32GeU,
+                    _ => bail!(
+                        "Unsupported comparison operand types: {left_type:?} and {right_type:?}"
+                    ),
                 };
                 Ok(self.op(operator, &[left_val, right_val], &[Type::I32]))
             }
