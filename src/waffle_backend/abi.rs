@@ -2,12 +2,104 @@
 //!
 //! Encapsulates:
 //! - Canonical payload encoding and decoding between language values and f64 payloads.
-//! - Function return and throw exits across calling conventions (Internal, ExportedDirect, ExportedWitResult).
+//! - Exception-aware guest completions and host-facing export wrappers.
 //! - Internal call invocations and branch outcome dispatch.
 
-use waffle::{Block, BlockTarget, FunctionBody, Operator, Terminator, Type, Value, ValueDef};
+use anyhow::Result;
+use waffle::{
+    Block, BlockTarget, FunctionBody, Module, Operator, Terminator, Type, Value, ValueDef,
+};
 
-use crate::waffle_backend::registry::{CallingConvention, FunctionInfo, PrimitivePayload};
+use crate::waffle_backend::registry::{
+    ExportConvention, FunctionExport, FunctionInfo, PrimitivePayload,
+};
+
+/// Completion tags shared by guest calls and WIT result discriminants.
+#[derive(Clone, Copy)]
+pub(crate) enum CompletionStatus {
+    Returned = 0,
+    Threw = 1,
+}
+
+/// Converts an exception-aware guest completion at the host boundary only.
+pub(crate) fn build_export_wrapper(
+    module: &Module<'static>,
+    callee: &FunctionInfo,
+    export: &FunctionExport,
+    memory: waffle::Memory,
+) -> Result<FunctionBody> {
+    let mut body = FunctionBody::new(module, export.sig);
+    let entry = body.entry;
+    let args: Vec<_> = body.blocks[entry]
+        .params
+        .iter()
+        .map(|&(_, value)| value)
+        .collect();
+    let outcome = emit_internal_call(&mut body, entry, callee, &args);
+    match export.convention {
+        ExportConvention::Direct => {
+            let values = module.signatures[export.sig]
+                .returns
+                .iter()
+                .map(|&ty| {
+                    decode_payload(
+                        &mut body,
+                        outcome.ok_block,
+                        outcome.payload,
+                        ty == Type::I32,
+                    )
+                })
+                .collect();
+            body.set_terminator(outcome.ok_block, Terminator::Return { values });
+            body.set_terminator(outcome.err_block, Terminator::Unreachable);
+        }
+        ExportConvention::WitResult { success } => {
+            for (block, status, ty) in [
+                (outcome.ok_block, CompletionStatus::Returned, success),
+                (
+                    outcome.err_block,
+                    CompletionStatus::Threw,
+                    PrimitivePayload::Number,
+                ),
+            ] {
+                let retptr =
+                    emit_retptr_store(&mut body, block, memory, status, outcome.payload, ty);
+                body.set_terminator(
+                    block,
+                    Terminator::Return {
+                        values: vec![retptr],
+                    },
+                );
+            }
+        }
+    }
+    body.validate()?;
+    body.verify_reducible()?;
+    Ok(body)
+}
+
+/// Returns a language completion to a guest caller without host conversion.
+pub(crate) fn emit_completion(
+    body: &mut FunctionBody,
+    block: Block,
+    status: CompletionStatus,
+    payload: Value,
+) {
+    let status = body.add_op(
+        block,
+        Operator::I32Const {
+            value: status as u32,
+        },
+        &[],
+        &[Type::I32],
+    );
+    body.set_terminator(
+        block,
+        Terminator::Return {
+            values: vec![status, payload],
+        },
+    );
+}
 
 /// Canonical payload encoding: converts an optional WAFFLE value into a single f64 payload Value.
 pub(crate) fn encode_payload(body: &mut FunctionBody, block: Block, val: Option<Value>) -> Value {
@@ -46,18 +138,20 @@ pub(crate) fn decode_payload(
 
 /// Stores a WIT Result tag and its declared primitive payload at the return pointer.
 /// Numeric error payloads align the union to eight bytes, including boolean success variants.
-pub(crate) fn emit_retptr_store(
+fn emit_retptr_store(
     body: &mut FunctionBody,
     block: Block,
     memory: waffle::Memory,
-    status: u32,
+    status: CompletionStatus,
     payload_f64: Value,
     payload_type: PrimitivePayload,
 ) -> Value {
     let addr = body.add_op(block, Operator::I32Const { value: 8 }, &[], &[Type::I32]);
     let status_val = body.add_op(
         block,
-        Operator::I32Const { value: status },
+        Operator::I32Const {
+            value: status as u32,
+        },
         &[],
         &[Type::I32],
     );
@@ -99,112 +193,6 @@ pub(crate) fn emit_retptr_store(
     body.add_op(block, store, &[addr, payload], &[]);
 
     addr
-}
-
-/// Emits the terminal return exit for a function based on its calling convention.
-pub(crate) fn emit_function_return(
-    body: &mut FunctionBody,
-    block: Block,
-    memory: waffle::Memory,
-    convention: CallingConvention,
-    expected_returns: &[Type],
-    ret_val: Option<Value>,
-) {
-    match convention {
-        CallingConvention::ExportedWitResult { success } => {
-            let payload_f64 = encode_payload(body, block, ret_val);
-            let retptr = emit_retptr_store(body, block, memory, 0, payload_f64, success);
-            body.set_terminator(
-                block,
-                Terminator::Return {
-                    values: vec![retptr],
-                },
-            );
-        }
-        CallingConvention::ExportedDirect => {
-            let values = if let Some(val) = ret_val {
-                if expected_returns.len() == 1 {
-                    let ty = body.values[val].ty(&body.type_pool).unwrap_or(Type::F64);
-                    if expected_returns[0] == Type::I32 && ty == Type::F64 {
-                        vec![body.add_op(block, Operator::I32TruncF64U, &[val], &[Type::I32])]
-                    } else if expected_returns[0] == Type::F64 && ty == Type::I32 {
-                        vec![body.add_op(block, Operator::F64ConvertI32U, &[val], &[Type::F64])]
-                    } else {
-                        vec![val]
-                    }
-                } else {
-                    vec![val]
-                }
-            } else if expected_returns.len() == 1 && expected_returns[0] == Type::F64 {
-                let zero = body.add_op(
-                    block,
-                    Operator::F64Const {
-                        value: 0f64.to_bits(),
-                    },
-                    &[],
-                    &[Type::F64],
-                );
-                vec![zero]
-            } else if expected_returns.len() == 1 && expected_returns[0] == Type::I32 {
-                let zero = body.add_op(block, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-                vec![zero]
-            } else {
-                vec![]
-            };
-            body.set_terminator(block, Terminator::Return { values });
-        }
-        CallingConvention::Internal => {
-            let payload_f64 = encode_payload(body, block, ret_val);
-            let ok_status = body.add_op(block, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-            body.set_terminator(
-                block,
-                Terminator::Return {
-                    values: vec![ok_status, payload_f64],
-                },
-            );
-        }
-    }
-}
-
-/// Emits the terminal throw exit for a function based on its calling convention.
-pub(crate) fn emit_function_throw(
-    body: &mut FunctionBody,
-    block: Block,
-    memory: waffle::Memory,
-    convention: CallingConvention,
-    payload_f64: Value,
-) {
-    match convention {
-        CallingConvention::ExportedWitResult { .. } => {
-            let retptr = emit_retptr_store(
-                body,
-                block,
-                memory,
-                1,
-                payload_f64,
-                PrimitivePayload::Number,
-            );
-            body.set_terminator(
-                block,
-                Terminator::Return {
-                    values: vec![retptr],
-                },
-            );
-        }
-        CallingConvention::ExportedDirect => {
-            // Uncaught exception in infallible export traps at runtime
-            body.set_terminator(block, Terminator::Unreachable);
-        }
-        CallingConvention::Internal => {
-            let err_status = body.add_op(block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
-            body.set_terminator(
-                block,
-                Terminator::Return {
-                    values: vec![err_status, payload_f64],
-                },
-            );
-        }
-    }
 }
 
 /// Result of emitting an internal call branch.

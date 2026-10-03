@@ -13,10 +13,10 @@ use waffle::{
     Block, BlockTarget, Export, ExportKind, FunctionBody, Module, Operator, Terminator, Type, Value,
 };
 
-use crate::waffle_backend::abi;
+use crate::waffle_backend::abi::{self, CompletionStatus};
 use crate::waffle_backend::control_flow::{JoinPoint, create_block_parameters};
 use crate::waffle_backend::exceptions::{self, TryClauseBlocks, TryScope, UnwindContext};
-use crate::waffle_backend::registry::{CallingConvention, FunctionInfo, ModuleRegistry};
+use crate::waffle_backend::registry::{FunctionInfo, ModuleRegistry};
 use crate::waffle_backend::resolve::ResolvedContract;
 
 /// Compiles a resolved HIR module into a validated WAFFLE module.
@@ -46,10 +46,13 @@ pub(crate) fn lower_module(
         let body = lower_function_body(func, info, &registry, &module, contract)?;
         module.funcs[info.func_index] = waffle::FuncDecl::Body(info.sig, func.name.clone(), body);
 
-        if let Some(export_name) = &info.export_name {
+        if let Some(export) = &info.export {
+            let wrapper = abi::build_export_wrapper(&module, info, export, registry.memory)?;
+            module.funcs[export.func_index] =
+                waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
             module.exports.push(Export {
-                name: export_name.clone(),
-                kind: ExportKind::Func(info.func_index),
+                name: export.name.clone(),
+                kind: ExportKind::Func(export.func_index),
             });
         }
     }
@@ -61,7 +64,6 @@ pub(crate) fn lower_module(
 struct FunctionLowerer<'a> {
     module: &'a Module<'static>,
     registry: &'a ModuleRegistry,
-    current_func: &'a FunctionInfo,
     _contract: &'a ResolvedContract,
     body: FunctionBody,
     block: Block,
@@ -95,7 +97,6 @@ fn lower_function_body(
     let mut lowerer = FunctionLowerer {
         module,
         registry,
-        current_func: info,
         _contract: contract,
         body,
         block: entry,
@@ -332,49 +333,21 @@ impl<'a> FunctionLowerer<'a> {
                 .get(fid)
                 .ok_or_else(|| anyhow::anyhow!("Unknown internal function id: {fid:?}"))?;
 
-            match callee_info.calling_convention {
-                CallingConvention::Internal => {
-                    let outcome =
-                        abi::emit_internal_call(&mut self.body, self.block, callee_info, &arg_vals);
-
-                    self.block = outcome.err_block;
-                    self.emit_throw(outcome.payload);
-
-                    self.block = outcome.ok_block;
-                    if callee_info.return_type == HirType::Void {
-                        Ok(None)
-                    } else {
-                        let return_val = abi::decode_payload(
-                            &mut self.body,
-                            self.block,
-                            outcome.payload,
-                            callee_info.is_boolean_return(),
-                        );
-                        Ok(Some(return_val))
-                    }
-                }
-                CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult { .. } => {
-                    let ret_types = &self.module.signatures[callee_info.sig].returns;
-                    if ret_types.is_empty() {
-                        self.op(
-                            Operator::Call {
-                                function_index: callee_info.func_index,
-                            },
-                            &arg_vals,
-                            &[],
-                        );
-                        Ok(None)
-                    } else {
-                        let call_res = self.op(
-                            Operator::Call {
-                                function_index: callee_info.func_index,
-                            },
-                            &arg_vals,
-                            ret_types,
-                        );
-                        Ok(Some(call_res))
-                    }
-                }
+            let outcome =
+                abi::emit_internal_call(&mut self.body, self.block, callee_info, &arg_vals);
+            self.block = outcome.err_block;
+            self.emit_throw(outcome.payload);
+            self.block = outcome.ok_block;
+            if matches!(callee_info.success_type(), HirType::Void) {
+                Ok(None)
+            } else {
+                let return_val = abi::decode_payload(
+                    &mut self.body,
+                    self.block,
+                    outcome.payload,
+                    matches!(callee_info.success_type(), HirType::Boolean),
+                );
+                Ok(Some(return_val))
             }
         } else {
             bail!("Unsupported call callee in WAFFLE lowering: {callee:?}");
@@ -541,24 +514,21 @@ impl<'a> FunctionLowerer<'a> {
 
     fn emit_terminal_return(&mut self, ret_val: Option<Value>) {
         self.cleanup_resources();
-        let expected_rets = &self.module.signatures[self.current_func.sig].returns;
-        abi::emit_function_return(
+        let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
+        abi::emit_completion(
             &mut self.body,
             self.block,
-            self.registry.memory,
-            self.current_func.calling_convention,
-            expected_rets,
-            ret_val,
+            CompletionStatus::Returned,
+            payload,
         );
     }
 
     fn emit_terminal_throw(&mut self, err_val_f64: Value) {
         self.cleanup_resources();
-        abi::emit_function_throw(
+        abi::emit_completion(
             &mut self.body,
             self.block,
-            self.registry.memory,
-            self.current_func.calling_convention,
+            CompletionStatus::Threw,
             err_val_f64,
         );
     }

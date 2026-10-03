@@ -1196,3 +1196,95 @@ async fn test_waffle_wit_boolean_success_payloads() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_exported_guest_calls_preserve_exception_semantics() -> Result<()> {
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+    for return_type in [
+        "number",
+        "Result<number, number>",
+        "Promise<number>",
+        "Promise<Result<number, number>>",
+    ] {
+        let (async_modifier, await_modifier) = if return_type.starts_with("Promise") {
+            ("async", "await")
+        } else {
+            ("", "")
+        };
+        let source = format!(
+            r#"
+            export async function run(input: number): Promise<number> {{
+                let result = 0;
+                try {{ result = await helper(input); }}
+                catch (error) {{ result = error * 10; }}
+                finally {{ result = result + await 1000; }}
+                return result;
+            }}
+            export {async_modifier} function helper(input: number): {return_type} {{
+                try {{
+                    if (input < 0) {{ throw 7; }}
+                    if (input > 3) {{ return {await_modifier} helper(input - 1) + 1; }}
+                    return input * 2;
+                }} finally {{ if (input === -2) {{ throw 8; }} }}
+            }}
+        "#
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "export_calls.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, WasiHostState::default());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+        for (input, expected) in [(2.0, 1004.0), (-1.0, 1070.0), (-2.0, 1080.0), (5.0, 1008.0)] {
+            assert_eq!(
+                run.call_async(&mut store, (input,)).await?,
+                (expected,),
+                "{return_type}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_exported_boolean_and_void_guest_calls() -> Result<()> {
+    let source = r#"
+        export async function run(input: number): Promise<number> {
+            let result = 0;
+            try {
+                let answer = await helper(input);
+                if (answer) { result = 1; }
+                await done(input);
+            } catch (error) { result = error * 10; }
+            finally { result = result + 1000; }
+            return result;
+        }
+        export async function helper(input: number): Promise<Result<boolean, number>> {
+            if (input < 0) { throw 7; }
+            return true;
+        }
+        export async function done(input: number): Promise<void> {
+            if (input === 0) { throw 8; }
+            return;
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "export_primitives.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = make_wasi_linker(&engine)?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for (input, expected) in [(1.0, 1001.0), (-1.0, 1070.0), (0.0, 1080.0)] {
+        assert_eq!(run.call_async(&mut store, (input,)).await?, (expected,));
+    }
+    Ok(())
+}

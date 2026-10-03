@@ -13,15 +13,13 @@ use waffle::{
 
 use crate::waffle_backend::resolve::ResolvedContract;
 
-/// Calling convention used by a function declaration.
+/// Host-facing calling convention, separate from the exception-aware guest ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CallingConvention {
-    /// Internal module function returning `(status: i32, payload: f64)`.
-    Internal,
+pub(crate) enum ExportConvention {
     /// Exported function returning core Wasm values directly (`[]`, `[f64]`, `[i32]`).
-    ExportedDirect,
+    Direct,
     /// Exported function returning a WIT Result via memory retptr `[i32]`.
-    ExportedWitResult { success: PrimitivePayload },
+    WitResult { success: PrimitivePayload },
 }
 
 /// Primitive payload representations supported by WIT result adapters.
@@ -38,18 +36,32 @@ pub(crate) struct FunctionInfo {
     pub(crate) func_index: Func,
     pub(crate) sig: waffle::Signature,
     pub(crate) return_type: HirType,
-    pub(crate) calling_convention: CallingConvention,
-    pub(crate) export_name: Option<String>,
+    pub(crate) export: Option<FunctionExport>,
+}
+
+/// A host export wrapper with its own function index and ABI.
+#[derive(Debug, Clone)]
+pub(crate) struct FunctionExport {
+    pub(crate) name: String,
+    pub(crate) func_index: Func,
+    pub(crate) sig: waffle::Signature,
+    pub(crate) convention: ExportConvention,
 }
 
 impl FunctionInfo {
-    /// Returns true if the function's logical return type (unwrapping Promise) is Boolean.
-    pub(crate) fn is_boolean_return(&self) -> bool {
-        let mut t = &self.return_type;
-        while let HirType::Promise(inner) = t {
-            t = inner.as_ref();
+    /// Type returned to guest callers after Promise and WIT result transport is removed.
+    pub(crate) fn success_type(&self) -> &HirType {
+        let mut ty = &self.return_type;
+        while let HirType::Promise(inner) = ty {
+            ty = inner;
         }
-        matches!(t, HirType::Boolean)
+        if let HirType::Generic { base, type_args } = ty
+            && base == "Result"
+        {
+            &type_args[0]
+        } else {
+            ty
+        }
     }
 }
 
@@ -174,34 +186,24 @@ impl ModuleRegistry {
                 None
             };
 
-            let calling_convention = if !is_exported {
-                CallingConvention::Internal
-            } else if let Some(success) = result_success {
-                CallingConvention::ExportedWitResult { success }
-            } else {
-                CallingConvention::ExportedDirect
-            };
-
             let params = func
                 .params
                 .iter()
                 .map(|p| map_type_to_waffle(&p.ty))
                 .collect::<Result<Vec<_>>>()?;
 
-            let returns = match calling_convention {
-                CallingConvention::Internal => vec![Type::I32, Type::F64],
-                CallingConvention::ExportedWitResult { .. } => vec![Type::I32],
-                CallingConvention::ExportedDirect => map_return_type_to_waffle(&func.return_type)?,
-            };
-
-            let sig = module.signatures.push(SignatureData { params, returns });
+            let host_returns = map_return_type_to_waffle(&func.return_type)?;
+            let sig = module.signatures.push(SignatureData {
+                params: params.clone(),
+                returns: vec![Type::I32, Type::F64],
+            });
             let mut body = FunctionBody::new(module, sig);
             body.set_terminator(body.entry, Terminator::Unreachable);
             let func_index = module
                 .funcs
                 .push(FuncDecl::Body(sig, func.name.clone(), body));
 
-            let export_name = if is_exported {
+            let export = if is_exported {
                 let name = if func.name == "main"
                     || func.name == "experiment"
                     || func.id == contract.entry_func_id
@@ -210,7 +212,27 @@ impl ModuleRegistry {
                 } else {
                     func.name.clone()
                 };
-                Some(name)
+                let convention = if let Some(success) = result_success {
+                    ExportConvention::WitResult { success }
+                } else {
+                    ExportConvention::Direct
+                };
+                let sig = module.signatures.push(SignatureData {
+                    params,
+                    returns: host_returns,
+                });
+                let mut body = FunctionBody::new(module, sig);
+                body.set_terminator(body.entry, Terminator::Unreachable);
+                let func_index =
+                    module
+                        .funcs
+                        .push(FuncDecl::Body(sig, format!("{name}.export"), body));
+                Some(FunctionExport {
+                    name,
+                    func_index,
+                    sig,
+                    convention,
+                })
             } else {
                 None
             };
@@ -222,8 +244,7 @@ impl ModuleRegistry {
                     func_index,
                     sig,
                     return_type: func.return_type.clone(),
-                    calling_convention,
-                    export_name,
+                    export,
                 },
             );
         }
