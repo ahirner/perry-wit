@@ -92,7 +92,6 @@ impl ModuleRegistry {
         module: &mut Module<'static>,
         hir: &HirModule,
         contract: &ResolvedContract,
-        stream_helpers: Option<(Func, Func)>,
         string_heap_base: Option<u32>,
         memory: waffle::Memory,
         string_reqs: crate::waffle_backend::strings::RequiredStringHelpers,
@@ -110,43 +109,25 @@ impl ModuleRegistry {
             intrinsics.insert(name.clone(), func);
         }
 
-        // Add stream reset/drop imports if byte stream contract and not already passed
-        let stream_helpers = if let Some(helpers) = stream_helpers {
-            Some(helpers)
-        } else if contract.input_kind
-            == crate::waffle_backend::resolve::ResolvedInputKind::ByteStream
-        {
-            let drop = if let Some(&f) = intrinsics.get("drop") {
-                f
-            } else {
+        // Entry owns the readable end; ordinary source helpers only borrow it.
+        let stream_helpers = if contract.has_stream_input() {
+            let mut declare = |name: &str| {
                 let sig = module.signatures.push(SignatureData {
                     params: vec![Type::I32],
                     returns: vec![],
                 });
-                let f = module.funcs.push(FuncDecl::Import(sig, "drop".into()));
+                let function = module.funcs.push(FuncDecl::Import(sig, name.into()));
                 module.imports.push(Import {
                     module: "host".into(),
-                    name: "drop".into(),
-                    kind: ImportKind::Func(f),
+                    name: name.into(),
+                    kind: ImportKind::Func(function),
                 });
-                f
+                function
             };
-            let reset = if let Some(&f) = intrinsics.get("reset") {
-                f
-            } else {
-                let sig = module.signatures.push(SignatureData {
-                    params: vec![],
-                    returns: vec![],
-                });
-                let f = module.funcs.push(FuncDecl::Import(sig, "reset".into()));
-                module.imports.push(Import {
-                    module: "host".into(),
-                    name: "reset".into(),
-                    kind: ImportKind::Func(f),
-                });
-                f
-            };
-            Some((drop, reset))
+            Some((
+                declare("__perry.stream.drop"),
+                declare("__perry.stream.start"),
+            ))
         } else {
             None
         };

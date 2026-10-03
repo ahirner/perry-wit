@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use crate::waffle_backend::capabilities::LowerCapability;
 use crate::waffle_backend::registry::canonical_param_types;
-use crate::waffle_backend::resolve::{ResolvedContract, ResolvedInputKind, TypedIntrinsic};
+use crate::waffle_backend::resolve::{ResolvedContract, TypedIntrinsic};
 use anyhow::{Context, Result, bail, ensure};
 use perry_hir::types::Type as HirType;
 
@@ -14,10 +14,6 @@ pub(crate) fn frame_component(
     contract: &ResolvedContract,
     has_post_return: bool,
 ) -> Result<(String, Vec<u8>)> {
-    ensure!(
-        contract.input_kind != ResolvedInputKind::ByteStream,
-        "ByteStream componentization is unsupported until its canonical ABI adapter is implemented"
-    );
     let entry_signature = entry_signature(contract)?;
     let core_wat = wasmprinter::print_bytes(core_wasm).context("Printing core Wasm to WAT")?;
     let core_body = core_wat
@@ -28,6 +24,16 @@ pub(crate) fn frame_component(
     let mut host_imports = String::new();
     let mut host_wires = String::new();
     let mut emitted_operations = BTreeSet::new();
+
+    if contract.has_stream_input() {
+        host_imports.push_str(super::streams::COMPONENT_ADAPTER);
+        host_wires.push_str(
+            r#"
+          (export "__perry.stream.start" (func $stream-io "start"))
+          (export "__perry.stream.drop" (func $stream-io "drop"))
+        "#,
+        );
+    }
 
     for (name, intrinsic) in &contract.intrinsics {
         match intrinsic {
@@ -50,11 +56,17 @@ pub(crate) fn frame_component(
                 }
                 host_wires.push_str(&format!("      (export {name:?} {})\n", plan.core_function));
             }
-            TypedIntrinsic::ByteAt
-            | TypedIntrinsic::ReadChunk
-            | TypedIntrinsic::StreamDrop
-            | TypedIntrinsic::StreamReset
-            | TypedIntrinsic::Custom { .. } => bail!(
+            TypedIntrinsic::ByteAt | TypedIntrinsic::ReadChunk => {
+                let function = if matches!(intrinsic, TypedIntrinsic::ReadChunk) {
+                    "read-chunk"
+                } else {
+                    "byte-at"
+                };
+                host_wires.push_str(&format!(
+                    "(export {name:?} (func $stream-io {function:?}))\n"
+                ));
+            }
+            TypedIntrinsic::Custom { .. } => bail!(
                 "Intrinsic '{}' is unsupported in components until its import adapter is implemented",
                 intrinsic.name()
             ),
@@ -142,9 +154,7 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
             let err = component_value_type(&type_args[1])?;
             Ok(format!("(result {ok} (error {err}))"))
         }
-        HirType::Named(name) if name == "ByteStream" => bail!(
-            "ByteStream componentization is unsupported until its canonical ABI adapter is implemented"
-        ),
+        HirType::Named(name) if name == "ByteStream" => Ok("(stream u8)".into()),
         _ => bail!("Unsupported component entry type: {ty:?}"),
     }
 }

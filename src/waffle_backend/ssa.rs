@@ -87,15 +87,8 @@ pub(crate) fn lower_module(
     };
 
     // 3. Build complete module declarations registry
-    let registry = ModuleRegistry::build(
-        &mut module,
-        hir,
-        contract,
-        None,
-        string_heap_base,
-        memory,
-        reqs,
-    )?;
+    let registry =
+        ModuleRegistry::build(&mut module, hir, contract, string_heap_base, memory, reqs)?;
     let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
 
     // 5. Lower each function body using the established registry contracts
@@ -152,7 +145,7 @@ struct FunctionLowerer<'a> {
     block: Block,
     locals: BTreeMap<LocalId, Value>,
     local_types: BTreeMap<LocalId, HirType>,
-    stream_parameter: Option<LocalId>,
+    stream_parameter: Option<Value>,
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
     loops: Vec<loops::LoopScope>,
@@ -184,8 +177,10 @@ fn lower_function_body(
         if types::is_reference(&param.ty) {
             reference_values.insert(val);
         }
-        if matches!(&param.ty, HirType::Named(n) if n == "ByteStream") {
-            stream_parameter = Some(param.id);
+        if func.id == contract.entry_func_id
+            && matches!(&param.ty, HirType::Named(n) if n == "ByteStream")
+        {
+            stream_parameter = Some(val);
         }
     }
 
@@ -209,9 +204,7 @@ fn lower_function_body(
         collection_blocks: BTreeSet::new(),
     };
 
-    // If stream parameter is present and an initialize helper exists, call it at entry
-    if let (Some(stream_id), Some((_, init))) = (stream_parameter, registry.stream_helpers) {
-        let stream_val = lowerer.locals[&stream_id];
+    if let (Some(stream_val), Some((_, init))) = (stream_parameter, registry.stream_helpers) {
         lowerer.op(
             Operator::Call {
                 function_index: init,
@@ -219,9 +212,6 @@ fn lower_function_body(
             &[stream_val],
             &[],
         );
-    } else if stream_parameter.is_some() {
-        // Fallback dummy op
-        lowerer.op(Operator::I32Const { value: 0 }, &[], &[]);
     }
 
     lowerer.statements(&func.body)?;
@@ -970,9 +960,8 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn cleanup_resources(&mut self) {
-        if let (Some(stream_id), Some((drop, _))) =
+        if let (Some(stream_val), Some((drop, _))) =
             (self.stream_parameter, self.registry.stream_helpers)
-            && let Some(&stream_val) = self.locals.get(&stream_id)
         {
             self.op(
                 Operator::Call {

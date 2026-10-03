@@ -885,15 +885,11 @@ fn test_waffle_boolean_comparisons() -> Result<()> {
 }
 
 #[test]
-fn test_waffle_stream_componentization_is_explicitly_unsupported() -> Result<()> {
+fn test_waffle_stream_core_and_component_validate() -> Result<()> {
     let source = "export function run(input: ByteStream): number { return 42; }";
-    let error = compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("ByteStream componentization is unsupported")
-    );
+    let compiled =
+        compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())?;
+    Component::new(&make_async_engine()?, compiled.component.unwrap())?;
 
     let options = WaffleCompileOptions {
         componentize: false,
@@ -967,16 +963,12 @@ async fn test_waffle_component_entry_signatures() -> Result<()> {
         }
     }
     let error = compile_typescript_waffle(
-        "export function run(input: number, stream: ByteStream): number { return input; }",
+        "export function run(input: number, a: ByteStream, b: ByteStream): number { return input; }",
         "stream_param.ts",
         &WaffleCompileOptions::default(),
     )
     .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("ByteStream componentization is unsupported")
-    );
+    assert!(error.to_string().contains("Only one ByteStream input"));
     Ok(())
 }
 
@@ -998,11 +990,6 @@ fn test_waffle_rejects_intrinsics_without_component_wiring() -> Result<()> {
             "declare function unused(): void;",
             "unused(); return input;",
             "unused",
-        ),
-        (
-            "declare function byteAt(index: number): number;",
-            "return byteAt(input);",
-            "byteAt",
         ),
     ] {
         let source = format!(

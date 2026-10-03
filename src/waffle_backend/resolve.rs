@@ -25,14 +25,11 @@ pub enum ResolvedInputKind {
 
 /// Known typed intrinsics with explicit signatures.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum TypedIntrinsic {
     Capability(CapabilityOperation),
     HostDouble,
     ReadChunk,
     ByteAt,
-    StreamDrop,
-    StreamReset,
     Custom {
         name: String,
         params: Vec<WaffleType>,
@@ -41,7 +38,6 @@ pub(crate) enum TypedIntrinsic {
     },
 }
 
-#[allow(dead_code)]
 impl TypedIntrinsic {
     pub(crate) fn name(&self) -> &str {
         match self {
@@ -49,8 +45,6 @@ impl TypedIntrinsic {
             Self::HostDouble => "hostDouble",
             Self::ReadChunk => "readChunk",
             Self::ByteAt => "byteAt",
-            Self::StreamDrop => "drop",
-            Self::StreamReset => "reset",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -59,7 +53,7 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::HostDouble | Self::ReadChunk => true,
-            Self::ByteAt | Self::StreamDrop | Self::StreamReset => false,
+            Self::ByteAt => false,
             Self::Custom { is_async, .. } => *is_async,
         }
     }
@@ -87,8 +81,6 @@ impl TypedIntrinsic {
             }
             Self::HostDouble | Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
-            Self::StreamDrop => (vec![WaffleType::I32], vec![]),
-            Self::StreamReset => (vec![], vec![]),
             Self::Custom {
                 params, returns, ..
             } => (params.clone(), returns.clone()),
@@ -112,6 +104,11 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn has_stream_input(&self) -> bool {
+        self.entry_params
+            .iter()
+            .any(|ty| matches!(ty, HirType::Named(name) if name == "ByteStream"))
+    }
     /// The canonical result type after unwrapping asynchronous transport.
     pub(crate) fn entry_result_type(&self) -> &HirType {
         let mut ty = &self.entry_return_type;
@@ -284,6 +281,27 @@ pub(crate) fn resolve_contract(
     });
 
     let promises = super::promises::plan_promises(hir, &intrinsics)?;
+    let stream_inputs = entry_func
+        .params
+        .iter()
+        .filter(|param| matches!(&param.ty, HirType::Named(name) if name == "ByteStream"))
+        .count();
+    ensure!(
+        stream_inputs <= 1,
+        "Only one ByteStream input is supported per entry invocation"
+    );
+    ensure!(
+        stream_inputs == 0 || promises.is_none(),
+        "ByteStream inputs cannot be combined with stored async tasks until each transfer has its own buffer owner"
+    );
+    ensure!(
+        stream_inputs == 1
+            || !intrinsics.values().any(|intrinsic| matches!(
+                intrinsic,
+                TypedIntrinsic::ReadChunk | TypedIntrinsic::ByteAt
+            )),
+        "Stream operations require a ByteStream entry input"
+    );
     Ok(ResolvedContract {
         promises,
         input_kind,

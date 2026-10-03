@@ -171,6 +171,18 @@ Dynamic member names, capability function values, spread arguments, parameter
 defaults, and class initialization currently produce diagnostics.
 Unused declarations introduce no component imports; dependencies of all emitted
 function bodies are retained conservatively.
+An entry may own one `ByteStream` parameter, represented by a native `stream<u8>`.
+Immediately awaited `readChunk(input)` reads up to 8192 bytes into a reusable
+buffer; `byteAt(index)` accesses the current chunk and traps on invalid indices.
+The next read replaces that chunk. A zero count means EOF; a capability's separate
+completion future must still be checked for recoverable errors. Source helper
+functions borrow the input, and entry cleanup closes it after `finally`, including
+early returns and numeric errors. Calls are serial: the pinned host queues
+overlapping calls before entry, with an additional guest guard against reentry.
+Traps and cancellation require store disposal. Stored async tasks, multiple inputs,
+returned streams, and source byte writes remain unsupported. The filesystem tests
+compose a source scanner with a real P3 producer and verify native file forwarding
+against independent bindings. Filesystem source APIs remain part of R8.
 WAFFLE string storage belongs to a serial invocation. Canonical post-return
 reclaims its arena after the host copies the result, including recoverable WIT
 errors. Raw core callers must invoke the matching `cabi_post_<export>` with the

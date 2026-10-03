@@ -15,6 +15,7 @@ pub(crate) mod registry;
 pub(crate) mod resolve;
 mod runtime;
 pub(crate) mod ssa;
+mod streams;
 pub(crate) mod strings;
 pub mod text_contract;
 mod visit;

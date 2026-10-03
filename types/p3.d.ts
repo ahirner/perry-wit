@@ -9,3 +9,15 @@ declare module "perry:random" {
   /** A number in [0, 1) from the high 53 bits of a WASI random word. */
   export function randomNumber(): number;
 }
+
+/** Opaque readable end of a native byte stream, owned by the entry invocation. */
+interface ByteStream {
+  readonly __perryByteStream: unique symbol;
+}
+
+/** Read up to 8192 bytes. Zero means EOF, which does not imply producer success.
+ * Must be immediately awaited. The next read replaces the current chunk. */
+declare function readChunk(input: ByteStream): Promise<number>;
+
+/** Read a byte from the current chunk. Noninteger or out-of-range indices trap. */
+declare function byteAt(index: number): number;
