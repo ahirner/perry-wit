@@ -253,6 +253,9 @@ fn lower_function_body(
 impl<'a> FunctionLowerer<'a> {
     fn statements(&mut self, stmts: &[Stmt]) -> Result<()> {
         for stmt in stmts {
+            if self.body.blocks[self.block].terminator != Terminator::None {
+                break;
+            }
             match stmt {
                 Stmt::Let {
                     id,
@@ -276,44 +279,27 @@ impl<'a> FunctionLowerer<'a> {
                 Stmt::Expr(expr) => {
                     self.expression(expr)?;
                 }
-                Stmt::Return(Some(expr)) => {
-                    let val = self.expression(expr)?;
+                Stmt::Return(expr) => {
+                    let values = expr
+                        .as_ref()
+                        .map(|expr| self.expression(expr))
+                        .transpose()?
+                        .into_iter()
+                        .collect();
                     if let (Some(stream_id), Some((drop, _))) =
                         (self.stream_parameter, self.stream_helpers)
+                        && let Some(&stream_val) = self.locals.get(&stream_id)
                     {
-                        if let Some(&stream_val) = self.locals.get(&stream_id) {
-                            self.op(
-                                Operator::Call {
-                                    function_index: drop,
-                                },
-                                &[stream_val],
-                                &[],
-                            );
-                        }
+                        self.op(
+                            Operator::Call {
+                                function_index: drop,
+                            },
+                            &[stream_val],
+                            &[],
+                        );
                     }
                     self.body
-                        .set_terminator(self.block, Terminator::Return { values: vec![val] });
-                    let dead = self.body.add_block();
-                    self.block = dead;
-                }
-                Stmt::Return(None) => {
-                    if let (Some(stream_id), Some((drop, _))) =
-                        (self.stream_parameter, self.stream_helpers)
-                    {
-                        if let Some(&stream_val) = self.locals.get(&stream_id) {
-                            self.op(
-                                Operator::Call {
-                                    function_index: drop,
-                                },
-                                &[stream_val],
-                                &[],
-                            );
-                        }
-                    }
-                    self.body
-                        .set_terminator(self.block, Terminator::Return { values: vec![] });
-                    let dead = self.body.add_block();
-                    self.block = dead;
+                        .set_terminator(self.block, Terminator::Return { values });
                 }
                 Stmt::If {
                     condition,
@@ -384,6 +370,10 @@ impl<'a> FunctionLowerer<'a> {
             self.branch(join_block, args);
         }
 
+        if self.body.blocks[join_block].preds.is_empty() {
+            self.body
+                .set_terminator(join_block, Terminator::Unreachable);
+        }
         self.block = join_block;
         self.locals = joined_locals;
         Ok(())

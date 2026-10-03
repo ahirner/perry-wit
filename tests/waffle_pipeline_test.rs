@@ -7,7 +7,7 @@ use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::time::timeout;
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, Instance, Module, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 fn make_async_engine() -> Result<Engine> {
@@ -314,6 +314,39 @@ fn test_waffle_rejects_module_initialization() {
             );
         }
     }
+}
+
+#[test]
+fn test_waffle_boolean_returns_and_terminated_paths() -> Result<()> {
+    let engine = Engine::default();
+    let options = WaffleCompileOptions {
+        componentize: false,
+        ..Default::default()
+    };
+    for (body, expected) in [
+        ("return true;", [1, 1]),
+        (
+            "if (input > 0) { return true; } else { return false; }",
+            [0, 1],
+        ),
+        ("if (input > 0) { return true; } return false;", [0, 1]),
+        ("while (input > 0) { return true; } return false;", [0, 1]),
+        ("return false; let unreachable = 10;", [0, 0]),
+    ] {
+        let source = format!(
+            "function helper(input: number): boolean {{ {body} }}\n\
+             export function run(input: number): boolean {{ return helper(input); }}"
+        );
+        let compiled = compile_typescript_waffle(&source, "returns.ts", &options)?;
+        let module = Module::new(&engine, compiled.core)?;
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let run = instance.get_typed_func::<f64, i32>(&mut store, "run")?;
+        for (input, expected) in [0.0, 1.0].into_iter().zip(expected) {
+            assert_eq!(run.call(&mut store, input)?, expected, "{body}");
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
