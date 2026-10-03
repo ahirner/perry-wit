@@ -13,6 +13,7 @@ pub(crate) mod promises;
 mod regex;
 pub(crate) mod registry;
 pub(crate) mod resolve;
+mod runtime;
 pub(crate) mod ssa;
 pub(crate) mod strings;
 pub mod text_contract;

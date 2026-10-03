@@ -1,4 +1,9 @@
-//! Checked bump allocation for the string runtime and canonical ABI.
+//! Managed invocation storage, canonical allocation, and typed graph tracing.
+
+mod roots;
+pub(crate) use roots::track_roots;
+
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 use waffle::{
@@ -8,9 +13,90 @@ use waffle::{
 
 pub(crate) const PAGE_BYTES: u32 = 65_536;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AllocationFuncs {
+    pub(crate) realloc: Func,
+    pub(crate) frame_new: Func,
+    pub(crate) frame_drop: Func,
+    pub(crate) collect: Func,
+}
+
+/// Discriminants shared with allocation/runtime.wat's precise object scanner.
+pub(crate) enum AllocationKind {
+    String = 1,
+    StringArray = 2,
+    ScalarPromise = 3,
+    StringPromise = 4,
+}
+
+pub(crate) fn emit_allocator(
+    module: &mut Module<'static>,
+    memory: Memory,
+    heap_base: u32,
+) -> Result<AllocationFuncs> {
+    let bump = emit_bump_allocator(module, memory, heap_base)?;
+    let functions = super::runtime::emit_functions(
+        module,
+        memory,
+        include_str!("allocation/runtime.wat"),
+        &BTreeMap::from([("bump", bump)]),
+    )?;
+    let realloc = functions["cabi_realloc"];
+    module.exports.push(Export {
+        name: "cabi_realloc".into(),
+        kind: ExportKind::Func(realloc),
+    });
+    Ok(AllocationFuncs {
+        realloc,
+        frame_new: functions["frame-new"],
+        frame_drop: functions["frame-drop"],
+        collect: functions["collect"],
+    })
+}
+
+pub(crate) fn tag_allocation(
+    body: &mut FunctionBody,
+    block: Block,
+    memory: Memory,
+    pointer: Value,
+    kind: AllocationKind,
+) {
+    let four = body.add_op(block, Operator::I32Const { value: 4 }, &[], &[Type::I32]);
+    let backlink = body.add_op(block, Operator::I32Sub, &[pointer, four], &[Type::I32]);
+    let header = body.add_op(
+        block,
+        Operator::I32Load {
+            memory: MemoryArg {
+                align: 2,
+                offset: 0,
+                memory,
+            },
+        },
+        &[backlink],
+        &[Type::I32],
+    );
+    let kind = body.add_op(
+        block,
+        Operator::I32Const { value: kind as u32 },
+        &[],
+        &[Type::I32],
+    );
+    body.add_op(
+        block,
+        Operator::I32Store {
+            memory: MemoryArg {
+                align: 2,
+                offset: 16,
+                memory,
+            },
+        },
+        &[header, kind],
+        &[],
+    );
+}
+
 /// Releases invocation storage after the canonical caller has copied the result.
-/// All guest frames have exited; pending or escaping values must retain their owner
-/// before this serial invocation arena can support them.
+/// All source frames have exited and native completion has drained pending tasks.
 pub(crate) fn emit_post_return(
     module: &mut Module<'static>,
     memory: Memory,
@@ -83,7 +169,7 @@ pub(crate) fn checked_allocation_size(
 }
 
 /// Allocates only after validating address arithmetic and growing memory successfully.
-pub(crate) fn emit_allocator(
+fn emit_bump_allocator(
     module: &mut Module<'static>,
     memory: Memory,
     heap_base: u32,
@@ -300,10 +386,6 @@ pub(crate) fn emit_allocator(
     body.verify_reducible()?;
     let func = module
         .funcs
-        .push(FuncDecl::Body(sig, "cabi_realloc".into(), body));
-    module.exports.push(Export {
-        name: "cabi_realloc".into(),
-        kind: ExportKind::Func(func),
-    });
+        .push(FuncDecl::Body(sig, "heap.bump".into(), body));
     Ok(func)
 }

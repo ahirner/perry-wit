@@ -28,6 +28,13 @@ impl StringDescriptor {
             &[zero, zero, align, size],
             &[Type::I32],
         );
+        crate::waffle_backend::allocation::tag_allocation(
+            body,
+            block,
+            memory,
+            address,
+            crate::waffle_backend::allocation::AllocationKind::String,
+        );
         for (offset, value) in [(0, self.data_ptr), (4, self.byte_len), (8, self.scalar_len)] {
             body.add_op(
                 block,

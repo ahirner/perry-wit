@@ -104,6 +104,107 @@ async fn run_cases(source: &str, cases: &[(Vec<Val>, Val)]) -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn test_long_invocations_reclaim_dead_text_temporaries() -> Result<()> {
+    let source = r#"function transient(input: string): string {
+        return input.slice(0, 2).toUpperCase() + ".";
+    }
+    export function run(input: string, count: number, fail: boolean): number {
+        const retained = input.slice(1, 4);
+        let result = 0;
+        for (let i = 0; i < count; i++) {
+            try {
+                const temporary = transient(input).split(".").join("-");
+                if (fail) throw 7;
+                result = temporary.length;
+            } catch (e) { result = e as number; }
+            finally { const cleanup = input.toLowerCase(); result = result + cleanup.length; }
+        }
+        return result + retained.length;
+    }"#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "temporary_lifetimes.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = Linker::new(&engine);
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(524_288).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, f64, bool), (f64,)>(&mut store, "run")?;
+    let input = "aß😀z".repeat(128);
+    for count in [1.0, 20_000.0] {
+        for fail in [false, true] {
+            assert_eq!(
+                run.call_async(&mut store, (&input, count, fail)).await?.0,
+                if fail { 522.0 } else { 519.0 }
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_collection_retains_interior_views_operands_and_return_payloads() -> Result<()> {
+    let prefix = r#"
+        function churn(input: string, count: number): string {
+            for (let i = 0; i < count; i++) {
+                const temporary = input.toLowerCase().split(".").join("-");
+            }
+            return "!";
+        }
+    "#;
+    let input = "aß🦀.".repeat(128);
+    for (body, expected) in [
+        (
+            "return input.toUpperCase() + churn(input, count);",
+            format!("{}!", "ASS🦀.".repeat(128)),
+        ),
+        (
+            "try { return input.toUpperCase().slice(1); } finally { churn(input, count); }",
+            format!("SS🦀.{}", "ASS🦀.".repeat(127)),
+        ),
+        (
+            "const retained = input.toUpperCase().split(\".\")[0]; churn(input, count); return retained.slice(1);",
+            "SS🦀".into(),
+        ),
+        (
+            "let retained = input.slice(0, 4); for (let i = 0; i < count; i++) { if (i === 1) retained = input.toUpperCase().slice(1, 4); churn(input, 1); } return retained;",
+            "SS🦀".into(),
+        ),
+    ] {
+        let source = format!(
+            "{prefix} export function run(input: string, count: number): string {{ {body} }}"
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "interior_roots.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+        let engine = make_async_engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let linker = Linker::new(&engine);
+        let mut store = Store::new(
+            &engine,
+            StoreLimitsBuilder::new().memory_size(524_288).build(),
+        );
+        store.limiter(|limits| limits);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(&str, f64), (String,)>(&mut store, "run")?;
+        assert_eq!(
+            run.call_async(&mut store, (&input, 2000.0)).await?.0,
+            expected,
+            "{body}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn test_regex_search_positions_are_scalar_indices() -> Result<()> {
     run_cases(
         r#"export function run(input: string): number { return input.search(/é😀/u); }"#,
@@ -1035,6 +1136,36 @@ fn test_string_allocator_failure_does_not_advance_heap() -> Result<()> {
         &memory.data(&store)[moved as usize..moved as usize + 5],
         b"saved"
     );
+    for alignment in [0, 3, 6, u32::MAX] {
+        assert!(
+            realloc
+                .call(&mut store, (moved, 32, alignment, 48))
+                .is_err()
+        );
+    }
+    assert!(realloc.call(&mut store, (moved, 33, 8, 48)).is_err());
+    assert!(realloc.call(&mut store, (moved + 1, 5, 8, 48)).is_err());
+    assert!(realloc.call(&mut store, (moved, 32, 8, u32::MAX)).is_err());
+    assert_eq!(
+        &memory.data(&store)[moved as usize..moved as usize + 5],
+        b"saved"
+    );
+    assert_eq!(realloc.call(&mut store, (moved, 32, 8, 0))?, 0);
+    let mut previous = 0;
+    let mut previous_size = 0;
+    for iteration in 0..2000 {
+        let alignment = [1, 2, 4, 8, 64, 256, 4096][iteration % 7];
+        let size = [16, 128, 24, 256, 8][iteration % 5];
+        let next = realloc.call(&mut store, (previous, previous_size, alignment, size))?;
+        assert_eq!(next % alignment, 0);
+        if previous != 0 {
+            assert_eq!(memory.data(&store)[next as usize], 0xA5);
+        }
+        memory.write(&mut store, next as usize, &[0xA5])?;
+        previous = next;
+        previous_size = size;
+    }
+    assert_eq!(memory.size(&store), 1);
     Ok(())
 }
 

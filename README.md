@@ -175,9 +175,12 @@ WAFFLE string storage belongs to a serial invocation. Canonical post-return
 reclaims its arena after the host copies the result, including recoverable WIT
 errors. Raw core callers must invoke the matching `cabi_post_<export>` with the
 core return values after consuming the result and before the next invocation.
-Traps and cancelled calls still require discarding the instance. Arena storage
-is bounded across repeated calls; reclaiming dead temporaries within a long
-invocation and values escaping into pending operations remains roadmap work.
+Traps and cancelled calls still require discarding the instance. Typed root frames
+retain references across source calls and suspended native tasks. Loop backedges
+trace live strings, interior views, Promise outcomes, and observers, then reclaim
+and coalesce unused allocations. Storage is bounded by live values and a fixed
+number of reference slots per active source frame. Stream and callback owners
+will extend this tracing contract as their consumers land.
 String `for…of` iteration evaluates its input once and yields complete Unicode
 scalars, including separate combining marks. It supports nested `for`/`while`
 loops, numeric updates, `break`/`continue`, and `finally` cleanup across P3 waits.
@@ -196,9 +199,11 @@ outcome. Typed Promise parameters allow named tasks to observe the same outcome
 concurrently. These components require Wasmtime's `wasm_component_model_async_stackful`
 and `wasm_component_model_threading` features alongside `wasm_component_model_async`
 and `wasm_component_model_more_async_builtins`.
-Promise records share the invocation arena and cost 32 bytes per started async
-call. One observer consumes the native completion and wakes queued observers in
-registration order; each additional concurrent pending observer uses 8 guest bytes.
+Promise records share invocation storage and have 32-byte payloads. One observer
+consumes the native completion and wakes queued observers in registration order;
+each additional concurrent pending observer has an 8-byte payload. Allocations
+also carry a 32-byte tracing header and alignment padding. Completed unreferenced
+records and observer queues are reclaimed at loop collection points.
 Settlement and subsequent awaits of the retained outcome allocate no guest bytes.
 Promise parameters cannot cross the public WIT boundary. Callbacks, constructors,
 and combinators remain unsupported. Detached call statements are diagnosed; returning while a

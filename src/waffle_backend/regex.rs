@@ -11,7 +11,7 @@ use regex_automata::{
     dfa::{Automaton, dense},
     nfa::thompson,
 };
-use waffle::{Func, FuncDecl, Memory, MemorySegment, Module};
+use waffle::{Func, Memory, MemorySegment, Module};
 
 use super::visit;
 
@@ -72,38 +72,13 @@ pub(crate) fn emit_runtime(
     if programs.is_empty() {
         return Ok(None);
     }
-    // This computation-only function has no calls, globals, or data references.
-    // Parsing it through WAFFLE keeps the same validation and emission path.
-    let bytes = wat::parse_str(include_str!("regex/search.wat"))?;
-    let mut runtime = Module::from_wasm_bytes(&bytes, &Default::default())?;
-    runtime.expand_all_funcs()?;
-    let (_, declaration) = runtime
-        .funcs
-        .entries()
-        .next()
-        .context("Regex search function")?;
-    let FuncDecl::Body(signature, _, body) = declaration else {
-        anyhow::bail!("Regex search must be a function body");
-    };
-    let mut body = body.clone();
-    for (_, value) in body.values.entries_mut() {
-        if let waffle::ValueDef::Operator(
-            waffle::Operator::I32Load { memory: arg } | waffle::Operator::I32Load8U { memory: arg },
-            _,
-            _,
-        ) = value
-        {
-            arg.memory = memory;
-        }
-    }
-    body.validate()?;
-    body.verify_reducible()?;
-    let signature = module
-        .signatures
-        .push(runtime.signatures[*signature].clone());
-    let function = module
-        .funcs
-        .push(FuncDecl::Body(signature, "regex.search".into(), body));
+    let functions = super::runtime::emit_functions(
+        module,
+        memory,
+        include_str!("regex/search.wat"),
+        &BTreeMap::new(),
+    )?;
+    let function = functions["search"];
     Ok(Some(RegexSearch { programs, function }))
 }
 

@@ -11,7 +11,7 @@ mod requirements;
 mod string_ops;
 mod types;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail, ensure};
 use perry_hir::ir::{
@@ -156,6 +156,8 @@ struct FunctionLowerer<'a> {
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
     loops: Vec<loops::LoopScope>,
+    reference_values: BTreeSet<Value>,
+    collection_blocks: BTreeSet<Block>,
 }
 
 fn lower_function_body(
@@ -172,12 +174,16 @@ fn lower_function_body(
     let mut locals = BTreeMap::new();
     let mut local_types = BTreeMap::new();
     let mut stream_parameter = None;
+    let mut reference_values = BTreeSet::new();
 
     // Map entry block parameters to function parameters
     for (i, param) in func.params.iter().enumerate() {
         let val = body.blocks[entry].params[i].1;
         locals.insert(param.id, val);
         local_types.insert(param.id, param.ty.clone());
+        if types::is_reference(&param.ty) {
+            reference_values.insert(val);
+        }
         if matches!(&param.ty, HirType::Named(n) if n == "ByteStream") {
             stream_parameter = Some(param.id);
         }
@@ -199,6 +205,8 @@ fn lower_function_body(
         awaited_calls: 0,
         unwind_ctx: UnwindContext::new(),
         loops: Vec::new(),
+        reference_values,
+        collection_blocks: BTreeSet::new(),
     };
 
     // If stream parameter is present and an initialize helper exists, call it at entry
@@ -223,6 +231,15 @@ fn lower_function_body(
         lowerer.emit_return(None);
     }
 
+    if let Some(allocator) = registry.allocator {
+        super::allocation::track_roots(
+            &mut lowerer.body,
+            registry.memory,
+            allocator,
+            &lowerer.reference_values,
+            &lowerer.collection_blocks,
+        )?;
+    }
     lowerer.body.validate()?;
     lowerer.body.verify_reducible()?;
 
@@ -453,13 +470,21 @@ impl<'a> FunctionLowerer<'a> {
                     "Stored async call has an incompatible argument type"
                 );
             }
+            let task = &self.contract.promises.as_ref().unwrap().tasks[&target];
+            let kind = if task.result == HirType::String {
+                super::allocation::AllocationKind::StringPromise
+            } else {
+                super::allocation::AllocationKind::ScalarPromise
+            };
+            let kind = self.op(Operator::I32Const { value: kind as u32 }, &[], &[Type::I32]);
             let record = self.op(
                 Operator::Call {
                     function_index: runtime.new,
                 },
-                &[],
+                &[kind],
                 &[Type::I32],
             );
+            self.reference_values.insert(record);
             arg_vals.insert(0, record);
             let status = self.op(
                 Operator::Call {
@@ -713,6 +738,15 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn expression(&mut self, expr: &Expr) -> Result<Value> {
+        let reference = types::is_reference(&self.infer_expr_type(expr));
+        let value = self.lower_expression(expr)?;
+        if reference && self.body.values[value].ty(&self.body.type_pool) == Some(Type::I32) {
+            self.reference_values.insert(value);
+        }
+        Ok(value)
+    }
+
+    fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
             Expr::String(s) => {
                 let offset = self.string_pool.get(s).unwrap_or_else(|| {
@@ -739,6 +773,13 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::Undefined => Ok(self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])),
             Expr::ForOfToArray(input) => self.string_receiver(input),
+            Expr::ArrayJoin { array, separator } => self.array_join(
+                array,
+                separator
+                    .as_deref()
+                    .map(std::slice::from_ref)
+                    .unwrap_or_default(),
+            ),
             Expr::Update { id, op, prefix } => {
                 let previous = *self
                     .locals
@@ -965,6 +1006,11 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn emit_return(&mut self, ret_val: Option<Value>) {
+        if types::is_reference(self.return_type)
+            && let Some(value) = ret_val
+        {
+            self.reference_values.insert(value);
+        }
         let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
         if exceptions::route_cleanup(
             &mut self.body,

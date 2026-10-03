@@ -70,7 +70,7 @@ impl FunctionInfo {
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
     pub(crate) promises: Option<PromiseImports>,
-    pub(crate) allocator: Option<Func>,
+    pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
     pub(crate) stream_helpers: Option<(Func, Func)>,
@@ -162,7 +162,7 @@ impl ModuleRegistry {
                 });
                 func
             };
-            let new = declare("new", vec![], vec![Type::I32]);
+            let new = declare("new", vec![Type::I32], vec![Type::I32]);
             let bind = declare("bind", vec![Type::I32, Type::I32], vec![]);
             let await_result = declare("await", vec![Type::I32], vec![Type::I32, Type::F64]);
             let yield_thread = declare("yield", vec![], vec![]);
@@ -204,7 +204,7 @@ impl ModuleRegistry {
                 None
             };
         let allocator = if let Some(helpers) = &string_helpers {
-            Some(helpers.cabi_realloc)
+            Some(helpers.allocator)
         } else if let Some(base) = string_heap_base {
             Some(super::allocation::emit_allocator(module, memory, base)?)
         } else {

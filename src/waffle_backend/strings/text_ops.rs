@@ -477,6 +477,13 @@ pub(super) fn emit_split(
     );
 
     let elements_ptr = body.add_op(entry, Operator::I32Add, &[arr_ptr, eight], &[Type::I32]);
+    crate::waffle_backend::allocation::tag_allocation(
+        &mut body,
+        entry,
+        memory,
+        arr_ptr,
+        crate::waffle_backend::allocation::AllocationKind::StringArray,
+    );
 
     body.add_op(
         entry,

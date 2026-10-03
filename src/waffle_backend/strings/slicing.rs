@@ -103,63 +103,12 @@ pub(super) fn emit_slice(
         },
     );
 
-    // Empty block: allocate descriptor [ptr, 0, 0]
-    let four = body.add_op(
-        empty_block,
-        Operator::I32Const { value: 4 },
-        &[],
-        &[Type::I32],
-    );
-    let twelve = body.add_op(
-        empty_block,
-        Operator::I32Const { value: 12 },
-        &[],
-        &[Type::I32],
-    );
-    let empty_desc = body.add_op(
-        empty_block,
-        Operator::Call {
-            function_index: cabi_realloc,
-        },
-        &[zero_i32, zero_i32, four, twelve],
-        &[Type::I32],
-    );
-    body.add_op(
-        empty_block,
-        Operator::I32Store {
-            memory: MemoryArg {
-                align: 2,
-                offset: 0,
-                memory,
-            },
-        },
-        &[empty_desc, ptr],
-        &[],
-    );
-    body.add_op(
-        empty_block,
-        Operator::I32Store {
-            memory: MemoryArg {
-                align: 2,
-                offset: 4,
-                memory,
-            },
-        },
-        &[empty_desc, zero_i32],
-        &[],
-    );
-    body.add_op(
-        empty_block,
-        Operator::I32Store {
-            memory: MemoryArg {
-                align: 2,
-                offset: 8,
-                memory,
-            },
-        },
-        &[empty_desc, zero_i32],
-        &[],
-    );
+    let empty_desc = StringDescriptor {
+        data_ptr: ptr,
+        byte_len: zero_i32,
+        scalar_len: zero_i32,
+    }
+    .allocate(&mut body, empty_block, memory, cabi_realloc);
     body.set_terminator(
         empty_block,
         Terminator::Return {

@@ -36,7 +36,7 @@ pub(crate) fn frame(
     plan: &PromisePlan,
 ) -> Result<String> {
     let mut forwards = [
-        ("new", vec![], vec!["i32"]),
+        ("new", vec!["i32"], vec!["i32"]),
         ("bind", vec!["i32", "i32"], vec![]),
         ("await", vec!["i32"], vec!["i32", "f64"]),
         ("yield", vec![], vec![]),

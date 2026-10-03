@@ -88,6 +88,130 @@ fn gated_linker(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn long_invocations_reclaim_dead_promises_and_retain_shared_outcomes() -> Result<()> {
+    let source = r#"async function produce(input: string): Promise<string> { return input.toUpperCase(); }
+        export async function run(input: string, count: number): Promise<string> {
+            const retained = produce(input);
+            const alias = retained;
+            await retained;
+            for (let i = 0; i < count; i++) {
+                const temporary = produce(input);
+                await temporary;
+            }
+            if (alias !== retained) throw 11;
+            return await alias;
+        }"#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "promise_lifetimes.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = Linker::new(&engine);
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(524_288).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, f64), (String,)>(&mut store, "run")?;
+    let input = "ß🦀".repeat(512);
+    for count in [1.0, 2_000.0] {
+        assert_eq!(
+            run.call_async(&mut store, (&input, count)).await?.0,
+            "SS🦀".repeat(512)
+        );
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn collection_retains_suspended_tasks_observers_and_finally_returns() -> Result<()> {
+    let source = r#"
+        import { waitFor } from "perry:clocks";
+        import { randomNumber } from "perry:random";
+        function churn(s: string): void {
+            for (let i = 0; i < 2000; i++) {
+                const temporary = s.toLowerCase().split(".").join("-");
+            }
+        }
+        async function produce(s: string, fail: boolean): Promise<string> {
+            const retained = s.toUpperCase().slice(1).split(".");
+            await waitFor(1);
+            if (fail) throw 7;
+            return retained.join("|");
+        }
+        async function observe(shared: Promise<string>, s: string): Promise<string> {
+            try { return (await shared).slice(0); }
+            finally { churn(s); randomNumber(); }
+        }
+        export async function run(s: string, fail: boolean): Promise<Result<string, number>> {
+            const shared = produce(s, fail);
+            const first = observe(shared, s);
+            const second = observe(shared, s);
+            churn(s);
+            randomNumber();
+            let error = 0;
+            let result = "";
+            try { result = await first; } catch (e) { error = e as number; }
+            try { result = result + await second; } catch (e) { error = e as number; }
+            if (error !== 0) throw error;
+            return result;
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "suspended_roots.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let input = "ß🦀.".repeat(128);
+    let expected = format!("S🦀|{}", "SS🦀|".repeat(127)).repeat(2);
+    for (fail, dispose) in [(false, false), (true, false), (false, true), (true, true)] {
+        let gate = Arc::new(Notify::new());
+        let counts = Arc::new(OperationCounts::default());
+        let linker = gated_linker(&engine, gate.clone(), counts.clone())?;
+        let mut store = Store::new(
+            &engine,
+            StoreLimitsBuilder::new().memory_size(524_288).build(),
+        );
+        store.limiter(|limits| limits);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(&str, bool), (std::result::Result<String, f64>,)>(
+            &mut store, "run",
+        )?;
+        let mut pending = Box::pin(run.call_async(&mut store, (&input, fail)));
+        assert!(
+            timeout(Duration::from_millis(10), &mut pending)
+                .await
+                .is_err()
+        );
+        assert_eq!(counts.started.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.active.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.samples.load(Ordering::SeqCst), 1);
+        if dispose {
+            drop(pending);
+        } else {
+            gate.notify_one();
+            let result = timeout(Duration::from_secs(5), pending).await??.0;
+            assert_eq!(result, if fail { Err(7.0) } else { Ok(expected.clone()) });
+            assert_eq!(counts.samples.load(Ordering::SeqCst), 3);
+            store.assert_concurrent_state_empty();
+        }
+        drop(store);
+        assert_eq!(counts.active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            counts.samples.load(Ordering::SeqCst),
+            if dispose { 1 } else { 3 }
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn invocation_disposal_releases_parked_observers_and_ready_races() -> Result<()> {
     let source = r#"
         import { waitFor } from "perry:clocks";

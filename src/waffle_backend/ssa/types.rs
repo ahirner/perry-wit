@@ -10,6 +10,16 @@ use perry_hir::{
 /// It cannot be named by a TypeScript type annotation or cross a call boundary.
 const SCALAR_ITERATION: &str = "perry:scalar-iteration";
 
+pub(super) fn is_reference(ty: &HirType) -> bool {
+    match ty {
+        HirType::String | HirType::Promise(_) => true,
+        HirType::Array(inner) => **inner == HirType::String,
+        HirType::Named(name) => name == SCALAR_ITERATION,
+        HirType::Union(types) => types.iter().any(is_reference),
+        _ => false,
+    }
+}
+
 /// Descriptor zero represents undefined only within the string-or-undefined union.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum StringKind {
@@ -43,7 +53,8 @@ impl FunctionLowerer<'_> {
             Expr::String(_)
             | Expr::TemplateStringCoerce(_)
             | Expr::StringCoerce(_)
-            | Expr::StringFromCodePoint(_) => HirType::String,
+            | Expr::StringFromCodePoint(_)
+            | Expr::ArrayJoin { .. } => HirType::String,
             Expr::Await(inner) => match self.infer_expr_type(inner) {
                 HirType::Promise(result) => *result,
                 result => result,

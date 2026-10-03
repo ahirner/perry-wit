@@ -20,9 +20,10 @@
   ;; record holds native status, language tag/payload, next pointer, and event space.
   ;; Offset 20 is 0 before observation, 1 for the sole native reader, or the head
   ;; of its FIFO of suspended observers. Allocated pointers cannot equal 0 or 1.
-  (func (export "new") (result i32) (local $record i32)
+  (func (export "new") (param $kind i32) (result i32) (local $record i32)
     (local.set $record (call $alloc (i32.const 0) (i32.const 0) (i32.const 8) (i32.const 32)))
     (memory.fill (local.get $record) (i32.const 0) (i32.const 32))
+    (i32.store offset=16 (i32.load (i32.sub (local.get $record) (i32.const 4))) (local.get $kind))
     (i32.store offset=4 (local.get $record) (i32.const 2))
     (i32.store offset=16 (local.get $record) (i32.load (i32.const 4)))
     (i32.store (i32.const 4) (local.get $record))
@@ -49,6 +50,7 @@
         (if (local.get $head)
           (then
             (local.set $waiter (call $alloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 8)))
+            (i32.store offset=16 (i32.load (i32.sub (local.get $waiter) (i32.const 4))) (i32.const 5))
             (i32.store (local.get $waiter) (call $thread-index))
             (i32.store offset=4 (local.get $waiter) (i32.const 0))
             (if (i32.eq (local.get $head) (i32.const 1))

@@ -72,6 +72,7 @@ impl FunctionLowerer<'_> {
             if let Some(update) = update {
                 self.expression(update)?;
             }
+            self.collection_blocks.insert(self.block);
             header.emit_branch(&mut self.body, self.block, &self.locals);
         }
         self.block = scope.exit.block;

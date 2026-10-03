@@ -40,6 +40,10 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
         Expr::TemplateStringCoerce(_) => {
             reqs.needs_strings = true;
         }
+        Expr::ArrayJoin { .. } => {
+            reqs.needs_strings = true;
+            reqs.join = true;
+        }
         Expr::Call { callee, .. } => {
             if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                 match property.as_str() {

@@ -6,7 +6,7 @@
 //! - Canonical ABI compatibility:
 //!   Canonical ABI `(ptr: i32, byte_len: i32)` directly matches descriptor offsets 0 and 4.
 //! - Static string literals are interned into initial memory data segments.
-//! - Dynamic allocations use a bump allocator (`cabi_realloc`).
+//! - Dynamic allocations use traced invocation storage (`cabi_realloc`).
 //! - String operations (.length, [i], .charAt, .slice, .indexOf, +, comparisons)
 //!   operate on Unicode scalar values.
 
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use waffle::{Func, Memory, MemoryData, MemorySegment, Module};
 
-use super::allocation::{PAGE_BYTES, emit_allocator};
+use super::allocation::{AllocationFuncs, PAGE_BYTES, emit_allocator};
 use canonical::emit_lift;
 use comparison::emit_compare;
 use concat::emit_concat;
@@ -154,8 +154,7 @@ pub(crate) struct StringHelperFuncs {
     pub(crate) str_index_of: Option<Func>,
     pub(crate) str_concat: Func,
     pub(crate) str_compare: Func,
-    #[allow(dead_code)]
-    pub(crate) cabi_realloc: Func,
+    pub(crate) allocator: AllocationFuncs,
     pub(crate) str_code_point_at: Option<Func>,
     pub(crate) str_from_code_point: Option<Func>,
     pub(crate) str_case_convert: Option<Func>,
@@ -203,7 +202,8 @@ pub(crate) fn emit_string_runtime(
     };
 
     // Emit core function bodies
-    let cabi_realloc = emit_allocator(module, memory, initial_heap_base)?;
+    let allocator = emit_allocator(module, memory, initial_heap_base)?;
+    let cabi_realloc = allocator.realloc;
     let lift_canonical = emit_lift(module, memory, cabi_realloc)?;
     let str_slice = emit_slice(module, memory, cabi_realloc)?;
     let str_char_at = emit_character_access(module, memory, str_slice, CharacterAccess::CharAt)?;
@@ -255,7 +255,7 @@ pub(crate) fn emit_string_runtime(
         str_index_of,
         str_concat,
         str_compare,
-        cabi_realloc,
+        allocator,
         str_code_point_at,
         str_from_code_point,
         str_case_convert,
