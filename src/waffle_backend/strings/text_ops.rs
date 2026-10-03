@@ -297,18 +297,38 @@ pub(super) fn emit_case_convert(
         &[Type::I32],
     );
 
-    // Allocate buffer: src_byte_len * 2 + 16
-    let two = body.add_op(entry, Operator::I32Const { value: 2 }, &[], &[Type::I32]);
-    let double_len = body.add_op(entry, Operator::I32Mul, &[src_byte_len, two], &[Type::I32]);
-    let sixteen = body.add_op(entry, Operator::I32Const { value: 16 }, &[], &[Type::I32]);
-    let alloc_size = body.add_op(
-        entry,
-        Operator::I32Add,
-        &[double_len, sixteen],
-        &[Type::I32],
-    );
-
     let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+    let lengths = body.add_op(
+        entry,
+        Operator::Call {
+            function_index: helper,
+        },
+        &[src_ptr, src_byte_len, zero, to_upper],
+        &[Type::I64],
+    );
+    let mask = body.add_op(
+        entry,
+        Operator::I64Const {
+            value: u32::MAX as u64,
+        },
+        &[],
+        &[Type::I64],
+    );
+    let measured = body.add_op(entry, Operator::I64And, &[lengths, mask], &[Type::I64]);
+    let failed = body.add_op(
+        entry,
+        Operator::I64Const { value: u64::MAX },
+        &[],
+        &[Type::I64],
+    );
+    let overflow = body.add_op(entry, Operator::I64Eq, &[lengths, failed], &[Type::I32]);
+    let measured = body.add_op(
+        entry,
+        Operator::Select,
+        &[failed, measured, overflow],
+        &[Type::I64],
+    );
+    let (entry, alloc_size) = checked_allocation_size(&mut body, entry, measured);
     let align = body.add_op(entry, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
 
     let out_buf = body.add_op(

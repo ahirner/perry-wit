@@ -7,6 +7,10 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
 
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/helpers").display()
+    );
     for helper in ["search", "text"] {
         let source = manifest_dir.join(format!("src/helpers/{helper}.rs"));
         if source.exists() {
@@ -87,6 +91,7 @@ fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
             "-Cpanic=abort",
             "-Cdebuginfo=0",
             "-Crelocation-model=pic",
+            "-Clto=fat",
             "-Clink-arg=--shared",
             "-Clink-arg=--no-entry",
             "-Clink-arg=--import-memory",

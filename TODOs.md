@@ -271,8 +271,16 @@ demonstrates a gap.
         - **Robust Build Test:** `tests/build_artifact_test.rs` compiles `build.rs` directly with `rustc` supplying `wasmparser`, executes with helper fixtures, validates generated wasm, and checks `cargo:rerun-if-changed` lines.
     - [x] **R4.3:** Migrate the matrix's remaining operations through combined tasks: scalar `codePointAt` / `fromCodePoint`, empty-separator and character `split` into string arrays, and scalar iteration; string templates and joins (`join`); case conversions (`toLowerCase`, `toUpperCase`) with length-changing Unicode casing; JSON text parsing and serialization; regex search positions. Build on R4.2a's helper foundation and R4.2's 12-byte descriptor model for string array representations in linear memory. Prefer evaluated Rust implementations for substantial algorithms, adapting byte offsets, coercion, and error behavior to the scalar contract. Test ordering differences from UTF-16 and reject unpaired JSON escapes.
       - Implemented scalar `codePointAt` / `fromCodePoint` handling BMP, non-BMP (surrogate pairs / astral planes), and empty / boundary cases.
+        `codePointAt` normalizes numeric positions and retains number-or-undefined identity in guest expressions.
+        Invalid `fromCodePoint` inputs enter catch/finally through the completion ABI.
+        That ABI carries the rejected numeric input; JavaScript Error objects remain unsupported.
       - Implemented Unicode case conversion (`toLowerCase`, `toUpperCase`) supporting full length-changing transformations (e.g. German sharp S `ß` -> `SS`, ligature expansion) and multibyte scripts (Greek, Cyrillic, emoji).
+        Mapping uses Rust's Unicode case iterators and Unicode 17 casing-context properties for final sigma.
+        `scripts/generate_unicode_casing.py` regenerates the checked-in property ranges from `DerivedCoreProperties.txt`.
+        The helper measures exact output bytes before allocating, and helper linking retains data relocation initializers.
       - Implemented string `split` and `join` with array descriptors in guest linear memory, supporting empty separators, arbitrary delimiters, and default joining.
+        Split-array access returns undefined for invalid numeric indices; join requires a string-array receiver.
+        Split and join sizes are checked before narrowing to the allocator's wasm32 size argument.
       - Emitted helper routines in `src/helpers/text.rs` and compiled into embedded `text.wasm` cdylib helper library.
     - [x] **R4.4:** Audit text import/export, filesystem, HTTP, environment, arguments, and logging as each boundary is introduced. Preserve arbitrary binary bytes and API-specific restrictions; reject invalid text through the proper error channel before dependent side effects. Verify literal/global/returned/retained lifetimes and repeated allocating calls, cleanup, and recoverable failures for ASCII and multibyte strings. Require bounded live storage and string-only tasks without unrelated imports; measure before adding caches or more elaborate storage.
         - Validated UTF-8 boundary checking via `text_contract::validate_utf8_boundary` ensuring invalid input text is rejected.

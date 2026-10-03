@@ -12,9 +12,7 @@ use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
     ImportSection, Module, TypeSection,
 };
-use wasmparser::{
-    ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator,
-};
+use wasmparser::{ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator};
 
 use super::libraries::{Global, Library, LibraryId, Relocations, SEARCH, TEXT};
 
@@ -27,10 +25,9 @@ struct CoreRelocations<'a> {
 impl Reencode for CoreRelocations<'_> {
     type Error = String;
     fn function_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
-        self.functions
-            .get(&index)
-            .copied()
-            .ok_or_else(|| reencode::Error::UserError(format!("unmapped core function index {index}")))
+        self.functions.get(&index).copied().ok_or_else(|| {
+            reencode::Error::UserError(format!("unmapped core function index {index}"))
+        })
     }
 }
 
@@ -84,9 +81,17 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                             let old_func_idx = next_import_func_idx;
                             next_import_func_idx += 1;
                             if import.module == HELPER_MODULE {
-                                helper_imports.push((old_func_idx, import.name.to_string(), type_idx));
+                                helper_imports.push((
+                                    old_func_idx,
+                                    import.name.to_string(),
+                                    type_idx,
+                                ));
                             } else {
-                                external_imports.push((import.module.to_string(), import.name.to_string(), type_idx));
+                                external_imports.push((
+                                    import.module.to_string(),
+                                    import.name.to_string(),
+                                    type_idx,
+                                ));
                             }
                         }
                         _ => {
@@ -158,7 +163,10 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
             | "str_join" => LibraryId::Text,
             _ => anyhow::bail!("unknown helper entry {entry_name}"),
         };
-        requested_by_lib.entry(lib_id).or_default().insert(entry_name.clone());
+        requested_by_lib
+            .entry(lib_id)
+            .or_default()
+            .insert(entry_name.clone());
     }
 
     let mut old_to_new_func_index = BTreeMap::new();
@@ -337,9 +345,9 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
         });
     }
 
-    let needs_stack = prepared_libs.iter().any(|prep| {
-        prep.lib.globals.iter().any(|g| matches!(g, Global::Stack))
-    });
+    let needs_stack = prepared_libs
+        .iter()
+        .any(|prep| prep.lib.globals.iter().any(|g| matches!(g, Global::Stack)));
     let stack_global_index = core_globals.len() as u32;
 
     // Stack is placed above helper static data, growing downwards
@@ -347,7 +355,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     let stack_top = stack_bottom + if needs_stack { 65_536 } else { 0 };
 
     if needs_stack && !core_memories.is_empty() {
-        let needed_pages = ((stack_top + 65_535) / 65_536) as u64;
+        let needed_pages = stack_top.div_ceil(65_536) as u64;
         if core_memories[0].initial < needed_pages {
             core_memories[0].initial = needed_pages;
         }
@@ -389,17 +397,11 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     // Helper initialization
     let mut helper_inits = Vec::new();
     for prep in &prepared_libs {
-        let candidates = [
-            prep.lib.start,
-            prep.lib.exports.get("__wasm_apply_data_relocs").copied(),
-            prep.lib.exports.get("__wasm_call_ctors").copied(),
-            prep.lib.exports.get("_initialize").copied(),
-        ];
-        for orig in candidates.into_iter().flatten() {
-            if let Some(&new_idx) = prep.helper_defined_indices.get(&orig) {
-                if !helper_inits.contains(&new_idx) {
-                    helper_inits.push(new_idx);
-                }
+        for orig in prep.lib.initializers() {
+            if let Some(&new_idx) = prep.helper_defined_indices.get(&orig)
+                && !helper_inits.contains(&new_idx)
+            {
+                helper_inits.push(new_idx);
             }
         }
     }
@@ -413,7 +415,10 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
             init_fn.instruction(&wasm_encoder::Instruction::Call(fn_idx));
         }
         if let Some(start_func) = core_start {
-            let new_start_func = old_to_new_func_index.get(&start_func).copied().unwrap_or(start_func);
+            let new_start_func = old_to_new_func_index
+                .get(&start_func)
+                .copied()
+                .unwrap_or(start_func);
             init_fn.instruction(&wasm_encoder::Instruction::Call(new_start_func));
             core_start = None;
         }
@@ -431,7 +436,11 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
 
     let mut new_imports = ImportSection::new();
     for (module_name, field_name, ty_idx) in external_imports {
-        new_imports.import(&module_name, &field_name, wasm_encoder::EntityType::Function(ty_idx));
+        new_imports.import(
+            &module_name,
+            &field_name,
+            wasm_encoder::EntityType::Function(ty_idx),
+        );
     }
     if !new_imports.is_empty() {
         module.section(&new_imports);
@@ -440,7 +449,12 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     module.section(&new_functions);
 
     // Tables
-    let has_helper_tables = current_table_size as u64 > (if !core_tables.is_empty() { core_tables[0].ty.initial } else { 0 });
+    let has_helper_tables = current_table_size as u64
+        > (if !core_tables.is_empty() {
+            core_tables[0].ty.initial
+        } else {
+            0
+        });
     if !core_tables.is_empty() || has_helper_tables {
         let mut new_tables = wasm_encoder::TableSection::new();
         if !core_tables.is_empty() {
@@ -492,8 +506,12 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     if !core_globals.is_empty() || needs_stack {
         let mut new_globs = GlobalSection::new();
         for glob in core_globals {
-            let val_type = roundtrip.val_type(glob.ty.content_type).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let init = roundtrip.const_expr(glob.init_expr).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let val_type = roundtrip
+                .val_type(glob.ty.content_type)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let init = roundtrip
+                .const_expr(glob.init_expr)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             new_globs.global(
                 wasm_encoder::GlobalType {
                     val_type,
@@ -521,7 +539,10 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     for export in core_exports {
         let kind = match export.kind {
             ExternalKind::Func | ExternalKind::FuncExact => {
-                let new_idx = old_to_new_func_index.get(&export.index).copied().unwrap_or(export.index);
+                let new_idx = old_to_new_func_index
+                    .get(&export.index)
+                    .copied()
+                    .unwrap_or(export.index);
                 new_exports.export(export.name, ExportKind::Func, new_idx);
                 continue;
             }
@@ -540,7 +561,10 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
             function_index: init_idx,
         });
     } else if let Some(start_func) = core_start {
-        let new_start_func = old_to_new_func_index.get(&start_func).copied().unwrap_or(start_func);
+        let new_start_func = old_to_new_func_index
+            .get(&start_func)
+            .copied()
+            .unwrap_or(start_func);
         module.section(&wasm_encoder::StartSection {
             function_index: new_start_func,
         });
@@ -598,8 +622,13 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     if !core_data.is_empty() {
         for seg in core_data {
             match seg.kind {
-                wasmparser::DataKind::Active { memory_index, offset_expr } => {
-                    let offset = roundtrip.const_expr(offset_expr).map_err(|e| anyhow::anyhow!("{e}"))?;
+                wasmparser::DataKind::Active {
+                    memory_index,
+                    offset_expr,
+                } => {
+                    let offset = roundtrip
+                        .const_expr(offset_expr)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                     new_data.active(memory_index, &offset, seg.data.iter().copied());
                 }
                 wasmparser::DataKind::Passive => {
@@ -622,6 +651,8 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     }
 
     let result = module.finish();
-    Validator::new().validate_all(&result).context("Validating linked Wasm output")?;
+    Validator::new()
+        .validate_all(&result)
+        .context("Validating linked Wasm output")?;
     Ok(result)
 }

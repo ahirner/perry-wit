@@ -6,11 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
-use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::Instruction;
+use wasm_encoder::reencode::{self, Reencode};
 use wasmparser::{
-    Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Operator, Parser, Payload,
-    TypeRef,
+    Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Operator, Parser, Payload, TypeRef,
 };
 
 pub(crate) const SEARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/search.wasm"));
@@ -66,7 +65,9 @@ impl Library {
         for payload in Parser::new(0).parse_all(bytes) {
             match payload? {
                 Payload::TypeSection(types) => {
-                    library.types = types.into_iter_err_on_gc_types().collect::<Result<_, _>>()?;
+                    library.types = types
+                        .into_iter_err_on_gc_types()
+                        .collect::<Result<_, _>>()?;
                 }
                 Payload::ImportSection(imports) => {
                     for import in imports.into_imports() {
@@ -113,7 +114,9 @@ impl Library {
                     for export in exports {
                         let export = export?;
                         if export.kind == ExternalKind::Func {
-                            library.exports.insert(export.name.to_string(), export.index);
+                            library
+                                .exports
+                                .insert(export.name.to_string(), export.index);
                         }
                     }
                 }
@@ -161,12 +164,9 @@ impl Library {
                     }
                 }
                 Payload::CustomSection(section) if section.name() == "dylink.0" => {
-                    for subsection in
-                        wasmparser::Dylink0SectionReader::new(wasmparser::BinaryReader::new(
-                            section.data(),
-                            section.data_offset(),
-                        ))
-                    {
+                    for subsection in wasmparser::Dylink0SectionReader::new(
+                        wasmparser::BinaryReader::new(section.data(), section.data_offset()),
+                    ) {
                         match subsection? {
                             Dylink0Subsection::MemInfo(info) => {
                                 library.table_size = info.table_size;
@@ -273,7 +273,7 @@ impl Library {
                     .with_context(|| format!("missing internal helper export {entry}"))
             })
             .collect::<Result<Vec<_>>>()?;
-        pending.extend(self.start);
+        pending.extend(self.initializers());
         let mut reachable = BTreeSet::new();
         while let Some(function) = pending.pop() {
             if !reachable.insert(function) {
@@ -318,6 +318,18 @@ impl Library {
         }
         Ok(reachable)
     }
+
+    /// Relocation and constructor entry points must survive helper reachability pruning.
+    pub(crate) fn initializers(&self) -> impl Iterator<Item = u32> + '_ {
+        [
+            self.start,
+            self.exports.get("__wasm_apply_data_relocs").copied(),
+            self.exports.get("__wasm_call_ctors").copied(),
+            self.exports.get("_initialize").copied(),
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 pub(crate) struct Relocations<'a> {
@@ -332,10 +344,9 @@ pub(crate) struct Relocations<'a> {
 impl Reencode for Relocations<'_> {
     type Error = String;
     fn function_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
-        self.functions
-            .get(&index)
-            .copied()
-            .ok_or_else(|| reencode::Error::UserError(format!("unselected helper function {index}")))
+        self.functions.get(&index).copied().ok_or_else(|| {
+            reencode::Error::UserError(format!("unselected helper function {index}"))
+        })
     }
     fn type_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
         Ok(self.type_base + index)

@@ -1,5 +1,8 @@
 #![no_std]
 
+mod case_properties;
+mod casing;
+
 /// Returns scalar code point as f64, or f64::NAN if out-of-range or invalid position.
 #[unsafe(no_mangle)]
 pub extern "C" fn str_code_point_at(
@@ -75,7 +78,11 @@ pub extern "C" fn str_code_point_at(
 /// Returns byte length (1..=4), or u32::MAX (0xFFFFFFFF) if invalid / surrogate / out-of-range.
 #[unsafe(no_mangle)]
 pub extern "C" fn str_from_code_point(code_point: f64, out_ptr: u32) -> u32 {
-    if code_point.is_nan() || code_point.is_infinite() || code_point < 0.0 || code_point > 0x10FFFF as f64 {
+    if code_point.is_nan()
+        || code_point.is_infinite()
+        || code_point < 0.0
+        || code_point > 0x10FFFF as f64
+    {
         return u32::MAX;
     }
     let cp = code_point as u32;
@@ -121,8 +128,8 @@ pub extern "C" fn str_from_code_point(code_point: f64, out_ptr: u32) -> u32 {
     }
 }
 
-/// Case converts UTF-8 bytes to uppercase or lowercase.
-/// Writes to out_ptr and returns (out_byte_len as u64) | ((out_scalar_len as u64) << 32).
+/// Converts UTF-8 text, returning packed byte/scalar lengths, or u64::MAX on overflow.
+/// With out_ptr = 0, measures the exact allocation without writing output.
 #[unsafe(no_mangle)]
 pub extern "C" fn str_case_convert(
     src_ptr: u32,
@@ -130,87 +137,48 @@ pub extern "C" fn str_case_convert(
     out_ptr: u32,
     to_upper: u32,
 ) -> u64 {
-    let src = src_ptr as *const u8;
-    let out = out_ptr as *mut u8;
-    let s_len = src_byte_len as usize;
-
-    let mut in_offset = 0usize;
-    let mut out_offset = 0usize;
-    let mut scalar_count = 0u32;
-
-    while in_offset < s_len {
-        let b0 = unsafe { *src.add(in_offset) };
-        if b0 < 0x80 {
-            let converted = if to_upper != 0 {
-                if b0 >= b'a' && b0 <= b'z' { b0 - 32 } else { b0 }
-            } else {
-                if b0 >= b'A' && b0 <= b'Z' { b0 + 32 } else { b0 }
+    let input = Utf8Scalars {
+        pointer: src_ptr,
+        remaining: src_byte_len,
+    };
+    let mut byte_len = 0u32;
+    let mut scalar_len = 0u32;
+    for scalar in casing::mapped_scalars(input, to_upper != 0) {
+        let Some(next_len) = byte_len.checked_add(scalar.len_utf8() as u32) else {
+            return u64::MAX;
+        };
+        if out_ptr != 0 {
+            let Some(destination) = out_ptr.checked_add(byte_len) else {
+                return u64::MAX;
             };
-            unsafe { *out.add(out_offset) = converted };
-            out_offset += 1;
-            in_offset += 1;
-            scalar_count += 1;
-        } else if b0 == 0xC3 && in_offset + 1 < s_len {
-            // Latin-1 Supplement: e.g. German sharp S 'ß' (0xC3 0x9F) -> "SS" in uppercase!
-            let b1 = unsafe { *src.add(in_offset + 1) };
-            if to_upper != 0 && b1 == 0x9F {
-                // 'ß' -> "SS" (2 bytes, 2 scalars)
-                unsafe {
-                    *out.add(out_offset) = b'S';
-                    *out.add(out_offset + 1) = b'S';
-                }
-                out_offset += 2;
-                in_offset += 2;
-                scalar_count += 2;
-            } else if to_upper != 0 && b1 >= 0xA0 && b1 <= 0xBE && b1 != 0xB7 {
-                // à..þ (except ÷ at 0xF7 / 0xB7) -> À..Þ (subtract 32)
-                unsafe {
-                    *out.add(out_offset) = 0xC3;
-                    *out.add(out_offset + 1) = b1 - 32;
-                }
-                out_offset += 2;
-                in_offset += 2;
-                scalar_count += 1;
-            } else if to_upper == 0 && b1 >= 0x80 && b1 <= 0x9E && b1 != 0x97 {
-                // À..Þ -> à..þ (add 32)
-                unsafe {
-                    *out.add(out_offset) = 0xC3;
-                    *out.add(out_offset + 1) = b1 + 32;
-                }
-                out_offset += 2;
-                in_offset += 2;
-                scalar_count += 1;
-            } else {
-
-                // Pass-through 2-byte UTF-8
-                unsafe {
-                    *out.add(out_offset) = b0;
-                    *out.add(out_offset + 1) = b1;
-                }
-                out_offset += 2;
-                in_offset += 2;
-                scalar_count += 1;
-            }
-        } else {
-            // General multi-byte pass-through
-            let width = match b0 {
-                0xC0..=0xDF => 2,
-                0xE0..=0xEF => 3,
-                0xF0..=0xF7 => 4,
-                _ => 1,
-            };
-            let mut i = 0usize;
-            while i < width && in_offset + i < s_len {
-                unsafe { *out.add(out_offset + i) = *src.add(in_offset + i) };
-                i += 1;
-            }
-            out_offset += i;
-            in_offset += i;
-            scalar_count += 1;
+            str_from_code_point(scalar as u32 as f64, destination);
         }
+        byte_len = next_len;
+        scalar_len += 1;
     }
+    u64::from(byte_len) | (u64::from(scalar_len) << 32)
+}
 
-    (out_offset as u64) | ((scalar_count as u64) << 32)
+#[derive(Clone)]
+struct Utf8Scalars {
+    pointer: u32,
+    remaining: u32,
+}
+
+impl Iterator for Utf8Scalars {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let code_point = str_code_point_at(self.pointer, self.remaining, 0.0);
+        assert!(code_point.is_finite(), "Invalid UTF-8 in string helper");
+        let scalar = char::from_u32(code_point as u32).expect("Valid Unicode scalar");
+        self.pointer += scalar.len_utf8() as u32;
+        self.remaining -= scalar.len_utf8() as u32;
+        Some(scalar)
+    }
 }
 
 /// Returns the number of chunks produced by splitting haystack by sep.
@@ -385,11 +353,7 @@ pub extern "C" fn str_split_populate(
 
 /// Returns total byte length needed to join count descriptors with sep.
 #[unsafe(no_mangle)]
-pub extern "C" fn str_join_total_len(
-    descriptors_ptr: u32,
-    count: u32,
-    sep_byte_len: u32,
-) -> u64 {
+pub extern "C" fn str_join_total_len(descriptors_ptr: u32, count: u32, sep_byte_len: u32) -> u64 {
     if count == 0 {
         return 0;
     }

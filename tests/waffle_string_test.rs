@@ -1588,3 +1588,62 @@ async fn test_join_rejects_size_overflow_before_copying() -> Result<()> {
     )
     .await
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_unicode_casing_expansions_and_context() -> Result<()> {
+    run_cases(
+        r#"export function run(s: string): string { return s.toUpperCase(); }"#,
+        &[
+            (vec![Val::String("αяﬃ".into())], Val::String("ΑЯFFI".into())),
+            (
+                vec![Val::String("ΐ".repeat(32_768))],
+                Val::String("Ι\u{308}\u{301}".repeat(32_768)),
+            ),
+        ],
+    )
+    .await?;
+    run_cases(
+        r#"export function run(s: string): string { return s.toLowerCase(); }"#,
+        &[
+            (
+                vec![Val::String("ΣЯİ".into())],
+                Val::String("σяi\u{307}".into()),
+            ),
+            (
+                vec![Val::String("ΟΣ ΟΣΑ Σ ΑΣ\u{301} ΑΣ\u{301}Α".into())],
+                Val::String("ος οσα σ ας\u{301} ασ\u{301}α".into()),
+            ),
+        ],
+    )
+    .await?;
+    let mapped: String = (0..=0x10FFFF)
+        .filter_map(char::from_u32)
+        .filter(|&c| {
+            c.to_lowercase().ne(std::iter::once(c)) || c.to_uppercase().ne(std::iter::once(c))
+        })
+        .collect();
+    let contexts = "ΑΣ.Α ΑΣ-Α ΑΣ'Α ΑΣ' Α\u{345}Σ \u{345}Σ ǅΣ 𐐀Σ \0Σ İΣ";
+    for (method, upper) in [("toUpperCase", true), ("toLowerCase", false)] {
+        let cases = [mapped.as_str(), contexts, "აԱևᎠꭰ🦀\0"]
+            .into_iter()
+            .map(|input| {
+                let expected = if upper {
+                    input.to_uppercase()
+                } else {
+                    input.to_lowercase()
+                };
+                (vec![Val::String(input.into())], Val::String(expected))
+            })
+            .collect::<Vec<_>>();
+        run_cases(
+            &format!("export function run(s: string): string {{ return s.{method}(); }}"),
+            &cases,
+        )
+        .await?;
+    }
+    run_cases(
+        r#"export function run(s: string): number { return s.toUpperCase().length; }"#,
+        &[(vec![Val::String("αяﬃΐ".into())], Val::Float64(8.0))],
+    )
+    .await
+}

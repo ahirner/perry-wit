@@ -8,16 +8,13 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
     fs::create_dir_all(scratch.join("src/helpers")).unwrap();
 
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    fs::copy(
-        repo_root.join("src/helpers/search.rs"),
-        scratch.join("src/helpers/search.rs"),
-    )
-    .unwrap();
-    fs::copy(
-        repo_root.join("src/helpers/text.rs"),
-        scratch.join("src/helpers/text.rs"),
-    )
-    .unwrap();
+    for source in ["search.rs", "text.rs", "casing.rs", "case_properties.rs"] {
+        fs::copy(
+            repo_root.join("src/helpers").join(source),
+            scratch.join("src/helpers").join(source),
+        )
+        .unwrap();
+    }
 
     let test_binary = std::env::current_exe().expect("locate running test binary");
     let deps_dir = test_binary
@@ -31,14 +28,15 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
     if let Ok(entries) = fs::read_dir(deps_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
-                if file_name.starts_with("libwasmparser-") && file_name.ends_with(".rlib") {
-                    let mtime = path
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    candidates.push((path, mtime));
-                }
+            if let Some(file_name) = path.file_name().and_then(|f| f.to_str())
+                && file_name.starts_with("libwasmparser-")
+                && file_name.ends_with(".rlib")
+            {
+                let mtime = path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                candidates.push((path, mtime));
             }
         }
     }
