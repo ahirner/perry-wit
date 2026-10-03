@@ -3,6 +3,7 @@
 pub(crate) mod abi;
 pub(crate) mod allocation;
 pub(crate) mod audit;
+mod bytes;
 pub(crate) mod capabilities;
 pub(crate) mod component;
 pub(crate) mod control_flow;

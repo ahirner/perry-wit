@@ -74,7 +74,6 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
                 }
             }
         }
-        Expr::PropertyGet { property, .. } if property == "length" => reqs.needs_strings = true,
         _ => {}
     }
 }

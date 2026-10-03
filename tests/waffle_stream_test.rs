@@ -319,6 +319,41 @@ async fn strings_survive_stream_reads_and_repeated_allocation() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn binary_views_remain_live_across_native_reads() -> Result<()> {
+    let source = r#"
+    declare function readChunk(input: ByteStream): Promise<number>;
+    declare function byteAt(index: number): number;
+    function retained(): Uint8Array { return new Uint8Array([0, 17, 0]).subarray(1, 2); }
+    export async function run(input: ByteStream): Promise<number> {
+        const saved = retained();
+        let count = await readChunk(input);
+        let total = 0;
+        while (count > 0) {
+            let index = 0;
+            while (index < count) {
+                const scratch = new Uint8Array([byteAt(index)]);
+                total = total + scratch[0];
+                if (saved[0] !== 17) { return -1; }
+                index = index + 1;
+            }
+            count = await readChunk(input);
+        }
+        return total;
+    }"#;
+    let (mut store, instance) = instantiate(source).await?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    for _ in 0..3 {
+        let input = StreamReader::new(&mut store, vec![255u8; 16385])?;
+        assert_eq!(
+            run.call_async(&mut store, (input,)).await?.0,
+            255.0 * 16385.0
+        );
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
 async fn instantiate(source: &str) -> Result<(Store<StoreLimits>, wasmtime::component::Instance)> {
     let compiled =
         compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())?;

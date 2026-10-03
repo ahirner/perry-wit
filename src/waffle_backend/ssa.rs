@@ -5,6 +5,7 @@
 //! overhead for primitive values.
 
 mod arrays;
+mod bytes;
 mod loops;
 mod optional;
 mod requirements;
@@ -56,35 +57,36 @@ pub(crate) fn lower_module(
     let reqs = scan_module_string_requirements(hir);
     let mut string_pool = StringPool::new();
     let regex_tables = regex::compile_literals(hir)?;
-    let (string_heap_base, regex_programs) = if reqs.needs_strings || contract.promises.is_some() {
-        collect_strings_in_module(hir, &mut string_pool);
-        string_pool.populate_memory_segments(&mut module.memories[memory]);
-        let (regex_programs, next_free) = regex::emit_tables(
-            &mut module,
-            memory,
-            regex_tables,
-            string_pool.next_free_address(),
-        )?;
-        let needs_helper_library = reqs.find_substring
-            || reqs.code_point_at
-            || reqs.from_code_point
-            || reqs.case_convert
-            || reqs.split
-            || reqs.join;
-        if needs_helper_library {
-            let raw_base = next_free + 65_536 + 4096;
-            let aligned_heap_base = (raw_base + 65_535) & !65_535;
-            let needed_pages = (aligned_heap_base / 65_536) as usize + 1;
-            if module.memories[memory].initial_pages < needed_pages {
-                module.memories[memory].initial_pages = needed_pages;
+    let (string_heap_base, regex_programs) =
+        if reqs.needs_strings || contract.promises.is_some() || super::bytes::required(hir) {
+            collect_strings_in_module(hir, &mut string_pool);
+            string_pool.populate_memory_segments(&mut module.memories[memory]);
+            let (regex_programs, next_free) = regex::emit_tables(
+                &mut module,
+                memory,
+                regex_tables,
+                string_pool.next_free_address(),
+            )?;
+            let needs_helper_library = reqs.find_substring
+                || reqs.code_point_at
+                || reqs.from_code_point
+                || reqs.case_convert
+                || reqs.split
+                || reqs.join;
+            if needs_helper_library {
+                let raw_base = next_free + 65_536 + 4096;
+                let aligned_heap_base = (raw_base + 65_535) & !65_535;
+                let needed_pages = (aligned_heap_base / 65_536) as usize + 1;
+                if module.memories[memory].initial_pages < needed_pages {
+                    module.memories[memory].initial_pages = needed_pages;
+                }
+                (Some(aligned_heap_base), regex_programs)
+            } else {
+                (Some(next_free), regex_programs)
             }
-            (Some(aligned_heap_base), regex_programs)
         } else {
-            (Some(next_free), regex_programs)
-        }
-    } else {
-        (None, BTreeMap::new())
-    };
+            (None, BTreeMap::new())
+        };
 
     // 3. Build complete module declarations registry
     let registry =
@@ -286,7 +288,10 @@ impl<'a> FunctionLowerer<'a> {
                             }
                             if self.return_type == &HirType::String {
                                 self.string_receiver(expr)
+                            } else if super::bytes::is_byte_view(self.return_type) {
+                                self.byte_receiver(expr)
                             } else {
+                                ensure!(!super::bytes::is_byte_view(&self.infer_expr_type(expr)), "Cannot return a Uint8Array as {:?}", self.return_type);
                                 ensure!(
                                     !self.is_string_or_undefined(expr)
                                         || self.return_type == &HirType::Void,
@@ -404,6 +409,9 @@ impl<'a> FunctionLowerer<'a> {
             object, property, ..
         } = callee
         {
+            if super::bytes::is_byte_view(&self.infer_expr_type(object)) {
+                return self.byte_method(object, property, args).map(Some);
+            }
             ensure!(
                 !matches!(self.infer_expr_type(object), HirType::Promise(_)),
                 "Promise methods are unsupported; await the retained outcome"
@@ -425,6 +433,12 @@ impl<'a> FunctionLowerer<'a> {
                 _ => None,
             };
             let argument_type = self.infer_expr_type(arg);
+            if expected.is_some_and(super::bytes::is_byte_view) {
+                ensure!(
+                    super::bytes::is_byte_view(&argument_type),
+                    "Byte view parameters require Uint8Array arguments"
+                );
+            }
             if matches!(argument_type, HirType::Promise(_))
                 || matches!(expected, Some(HirType::Promise(_)))
             {
@@ -549,10 +563,9 @@ impl<'a> FunctionLowerer<'a> {
                     &mut self.body,
                     self.block,
                     payload,
-                    matches!(
+                    crate::waffle_backend::registry::map_type_to_waffle(
                         callee_info.success_type(),
-                        HirType::Boolean | HirType::String
-                    ),
+                    )? == Type::I32,
                 );
                 Ok(Some(return_val))
             }
@@ -639,18 +652,19 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
             }
             Expr::Compare { op, left, right }
-                if matches!(self.infer_expr_type(left), HirType::Promise(_))
-                    || matches!(self.infer_expr_type(right), HirType::Promise(_)) =>
+                if types::identity_kind(&self.infer_expr_type(left)).is_some()
+                    || types::identity_kind(&self.infer_expr_type(right)).is_some() =>
             {
-                let left_promise = matches!(self.infer_expr_type(left), HirType::Promise(_));
-                let right_promise = matches!(self.infer_expr_type(right), HirType::Promise(_));
+                let left_kind = types::identity_kind(&self.infer_expr_type(left));
+                let right_kind = types::identity_kind(&self.infer_expr_type(right));
                 ensure!(
                     matches!(op, CompareOp::Eq | CompareOp::Ne),
-                    "Promise values support strict identity comparisons only"
+                    "{} values support strict identity comparisons only",
+                    left_kind.or(right_kind).unwrap()
                 );
                 let left = self.expression(left)?;
                 let right = self.expression(right)?;
-                if left_promise && right_promise {
+                if left_kind == right_kind {
                     let operator = if *op == CompareOp::Eq {
                         Operator::I32Eq
                     } else {
@@ -738,6 +752,14 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::Uint8ArrayNew(argument) => self.new_bytes(argument.as_deref()),
+            Expr::Uint8ArrayGet { array, index } => self.byte_index(array, index),
+            Expr::Uint8ArraySet {
+                array,
+                index,
+                value,
+            } => self.byte_set(array, index, value),
+            Expr::Uint8ArrayLength(array) => self.byte_property(array, "length"),
             Expr::String(s) => {
                 let offset = self.string_pool.get(s).unwrap_or_else(|| {
                     panic!("String literal {s:?} was not interned in string pool")
@@ -839,6 +861,11 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::PropertyGet {
                 object, property, ..
+            } if super::bytes::is_byte_view(&self.infer_expr_type(object)) => {
+                self.byte_property(object, property)
+            }
+            Expr::PropertyGet {
+                object, property, ..
             } if property == "length" => {
                 ensure!(
                     !matches!(self.infer_expr_type(object), HirType::Promise(_)),
@@ -853,6 +880,10 @@ impl<'a> FunctionLowerer<'a> {
                     let scalar_len = self.string_length(desc);
                     Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
                 } else {
+                    ensure!(
+                        self.infer_expr_type(object) == HirType::Array(Box::new(HirType::String)),
+                        "Unsupported length receiver"
+                    );
                     let arr_ptr = self.expression(object)?;
                     let count = self.op(
                         Operator::I32Load {
@@ -869,6 +900,9 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
             Expr::IndexGet { object, index, .. } => {
+                if super::bytes::is_byte_view(&self.infer_expr_type(object)) {
+                    return self.byte_index(object, index);
+                }
                 ensure!(
                     !matches!(self.infer_expr_type(object), HirType::Promise(_)),
                     "Promise indexing is unsupported; await the retained outcome"

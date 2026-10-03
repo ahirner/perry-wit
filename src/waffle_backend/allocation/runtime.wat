@@ -171,6 +171,7 @@
             (if (i32.and (i32.eq (local.get $kind) (i32.const 4)) (i32.eqz (i32.load offset=4 (local.get $pointer))))
               (then (call $mark (i32.trunc_f64_u (f64.load offset=8 (local.get $pointer))))))))
           (if (i32.eq (local.get $kind) (i32.const 5)) (then (call $mark (i32.load offset=4 (local.get $pointer)))))
+          (if (i32.eq (local.get $kind) (i32.const 7)) (then (call $mark (i32.load offset=8 (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 6)) (then
             (local.set $count (i32.load offset=8 (local.get $pointer)))
             (local.set $pointer (i32.add (local.get $pointer) (i32.const 12)))

@@ -292,6 +292,14 @@ impl VisitMut for CapabilityCalls {
     }
 
     fn visit_mut_new_expr(&mut self, expression: &mut ast::NewExpr) {
+        if matches!(expression.callee.as_ref(), ast::Expr::Ident(name) if name.sym == "Uint8Array" && name.ctxt == self.unresolved)
+        {
+            let arguments = expression.args.as_deref().unwrap_or_default();
+            if arguments.len() > 1 || arguments.iter().any(|argument| argument.spread.is_some()) {
+                self.error.get_or_insert_with(|| anyhow::anyhow!("Uint8Array construction supports one non-spread argument; backing-buffer overloads are unsupported"));
+                return;
+            }
+        }
         if !self.reject_regexp_constructor(&expression.callee) {
             expression.visit_mut_children_with(self);
         }
@@ -315,7 +323,10 @@ impl VisitMut for CapabilityCalls {
     }
 
     fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
-        if matches!(ident.sym.as_ref(), "Math" | "RegExp" | "JSON") && ident.ctxt != self.unresolved
+        if matches!(
+            ident.sym.as_ref(),
+            "Math" | "RegExp" | "JSON" | "Uint8Array"
+        ) && ident.ctxt != self.unresolved
         {
             let id = ident.to_id();
             let name = if let Some(name) = self.shadow_names.get(&id) {

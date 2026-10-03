@@ -10,11 +10,19 @@ use perry_hir::{
 /// It cannot be named by a TypeScript type annotation or cross a call boundary.
 const SCALAR_ITERATION: &str = "perry:scalar-iteration";
 
+pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
+    match ty {
+        HirType::Promise(_) => Some("Promise"),
+        ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
+        _ => None,
+    }
+}
+
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
         HirType::String | HirType::Promise(_) => true,
         HirType::Array(inner) => **inner == HirType::String,
-        HirType::Named(name) => name == SCALAR_ITERATION,
+        HirType::Named(name) => name == SCALAR_ITERATION || name == "Uint8Array",
         HirType::Union(types) => types.iter().any(is_reference),
         _ => false,
     }
@@ -48,6 +56,17 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::Uint8ArrayNew(_) => HirType::Named("Uint8Array".into()),
+            Expr::Uint8ArrayLength(_) => HirType::Number,
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
+                && matches!(property.as_str(), "length" | "byteLength" | "byteOffset") =>
+            {
+                HirType::Number
+            }
+            Expr::Uint8ArrayGet { .. } => HirType::Union(vec![HirType::Number, HirType::Void]),
+            Expr::Uint8ArraySet { value, .. } => self.infer_expr_type(value),
             Expr::LocalSet(_, value) => self.infer_expr_type(value),
             Expr::ForOfToArray(_) => HirType::Named(SCALAR_ITERATION.into()),
             Expr::String(_)
@@ -63,6 +82,11 @@ impl FunctionLowerer<'_> {
             Expr::Bool(_) | Expr::Compare { .. } => HirType::Boolean,
             Expr::LocalGet(id) => self.local_types.get(id).cloned().unwrap_or(HirType::Any),
             Expr::IndexGet { object, .. } if self.is_scalar_iteration(object) => HirType::String,
+            Expr::IndexGet { object, .. }
+                if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object)) =>
+            {
+                HirType::Union(vec![HirType::Number, HirType::Void])
+            }
             Expr::IndexGet { .. } => HirType::Union(vec![HirType::String, HirType::Void]),
             Expr::Undefined => HirType::Void,
             Expr::Call { callee, .. } => {
@@ -73,7 +97,15 @@ impl FunctionLowerer<'_> {
                 {
                     return HirType::Promise(Box::new(task.result.clone()));
                 }
-                if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                if let Expr::PropertyGet {
+                    object, property, ..
+                } = callee.as_ref()
+                {
+                    if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
+                        && matches!(property.as_str(), "subarray" | "slice")
+                    {
+                        return HirType::Named("Uint8Array".into());
+                    }
                     if property == "slice"
                         || property == "charAt"
                         || property == "toLowerCase"

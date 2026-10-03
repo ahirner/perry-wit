@@ -71,6 +71,7 @@ impl FunctionInfo {
 pub(crate) struct ModuleRegistry {
     pub(crate) promises: Option<PromiseImports>,
     pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
+    pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
     pub(crate) stream_helpers: Option<(Func, Func)>,
@@ -192,6 +193,16 @@ impl ModuleRegistry {
             None
         };
 
+        let byte_helpers = if super::bytes::required(hir) {
+            Some(super::bytes::emit_runtime(
+                module,
+                memory,
+                allocator.expect("byte storage requires an allocator"),
+            )?)
+        } else {
+            None
+        };
+
         // 3. Pre-declare all functions and establish complete FunctionInfo records
         let mut functions = BTreeMap::new();
         for func in &hir.functions {
@@ -290,6 +301,7 @@ impl ModuleRegistry {
         Ok(Self {
             promises,
             allocator,
+            byte_helpers,
             functions,
             intrinsics,
             stream_helpers,
@@ -313,6 +325,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
             Ok(Type::I32)
         }
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
+        ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
     }
 }
@@ -323,6 +336,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::Number | HirType::Any => Ok(vec![Type::F64]),
         HirType::Boolean => Ok(vec![Type::I32]),
         HirType::String => Ok(vec![Type::I32]),
+        ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             Ok(vec![Type::I32])
         }

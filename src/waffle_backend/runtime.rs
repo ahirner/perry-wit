@@ -63,6 +63,7 @@ pub(crate) fn emit_functions(
                     | Operator::I32Load8U { memory: arg }
                     | Operator::I64Load { memory: arg }
                     | Operator::F64Load { memory: arg }
+                    | Operator::I32Store8 { memory: arg }
                     | Operator::I32Store { memory: arg } => arg.memory = memory,
                     Operator::MemoryFill { mem } => *mem = memory,
                     Operator::MemoryCopy { src_mem, dst_mem } => {

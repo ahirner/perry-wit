@@ -180,17 +180,26 @@ functions borrow the input, and entry cleanup closes it after `finally`, includi
 early returns and numeric errors. Calls are serial: the pinned host queues
 overlapping calls before entry, with an additional guest guard against reentry.
 Traps and cancellation require store disposal. Stored async tasks, multiple inputs,
-returned streams, and source byte writes remain unsupported. The filesystem tests
+returned streams, and source stream writes remain unsupported. The filesystem tests
 compose a source scanner with a real P3 producer and verify native file forwarding
 against independent bindings. Filesystem source APIs remain part of R8.
+Internal `Uint8Array` values support numeric lengths, literal element arrays,
+copy construction, indexed reads/writes, `subarray`, `slice`, `length`, `byteLength`,
+and `byteOffset`. Views have distinct identity and retain their shared backing
+allocation; `slice` and copy construction make independent bytes. Invalid indices
+read as undefined and ignore writes. Invalid lengths throw numeric payload `1`
+through the current exception ABI; allocation exhaustion traps. String coercions,
+ArrayBuffer overloads, public byte-list parameters/results, and stored byte-valued
+Promises still require further lowering. Byte-only tasks import no host capability.
 WAFFLE string storage belongs to a serial invocation. Canonical post-return
 reclaims its arena after the host copies the result, including recoverable WIT
 errors. Raw core callers must invoke the matching `cabi_post_<export>` with the
 core return values after consuming the result and before the next invocation.
 Traps and cancelled calls still require discarding the instance. Typed root frames
 retain references across source calls and suspended native tasks. Loop backedges
-trace live strings, interior views, Promise outcomes, and observers, then reclaim
-and coalesce unused allocations. Storage is bounded by live values and a fixed
+trace live strings, interior views, Promise outcomes, observers, byte views, and
+their backing storage, then reclaim and coalesce dead allocations. Storage is
+bounded by live values and a fixed
 number of reference slots per active source frame. Stream and callback owners
 will extend this tracing contract as their consumers land.
 String `for…of` iteration evaluates its input once and yields complete Unicode
