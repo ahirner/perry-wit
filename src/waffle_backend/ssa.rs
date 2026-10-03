@@ -261,8 +261,7 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn while_loop(&mut self, condition: &Expr, body: &[Stmt]) -> Result<()> {
-        let incoming_locals = self.locals.clone();
-        let header = JoinPoint::new(&mut self.body, "loop header", &incoming_locals);
+        let header = JoinPoint::new(&mut self.body, "loop header", &self.locals);
         header.emit_branch(&mut self.body, self.block, &self.locals);
 
         self.block = header.block;
@@ -529,18 +528,12 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
 
-    fn cleanup_resources_impl(
-        body: &mut FunctionBody,
-        block: Block,
-        stream_parameter: Option<LocalId>,
-        stream_helpers: Option<(waffle::Func, waffle::Func)>,
-        locals: &BTreeMap<LocalId, Value>,
-    ) {
-        if let (Some(stream_id), Some((drop, _))) = (stream_parameter, stream_helpers)
-            && let Some(&stream_val) = locals.get(&stream_id)
+    fn cleanup_resources(&mut self) {
+        if let (Some(stream_id), Some((drop, _))) =
+            (self.stream_parameter, self.registry.stream_helpers)
+            && let Some(&stream_val) = self.locals.get(&stream_id)
         {
-            body.add_op(
-                block,
+            self.op(
                 Operator::Call {
                     function_index: drop,
                 },
@@ -550,82 +543,65 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
 
+    fn emit_terminal_return(&mut self, ret_val: Option<Value>) {
+        self.cleanup_resources();
+        let expected_rets = &self.module.signatures[self.current_func.sig].returns;
+        abi::emit_function_return(
+            &mut self.body,
+            self.block,
+            self.registry.memory,
+            self.current_func.calling_convention,
+            expected_rets,
+            ret_val,
+        );
+    }
+
+    fn emit_terminal_throw(&mut self, err_val_f64: Value) {
+        self.cleanup_resources();
+        abi::emit_function_throw(
+            &mut self.body,
+            self.block,
+            self.registry.memory,
+            self.current_func.calling_convention,
+            err_val_f64,
+        );
+    }
+
     fn emit_return(&mut self, ret_val: Option<Value>) {
         let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
-        let memory = self.registry.memory;
-        let conv = self.current_func.calling_convention;
-        let sig = self.current_func.sig;
-        let module = self.module;
-        let stream_param = self.stream_parameter;
-        let stream_helpers = self.registry.stream_helpers;
-        let locals = &self.locals;
-        exceptions::route_return(
+        if exceptions::route_return(
             &mut self.body,
             self.block,
             &self.unwind_ctx,
-            locals,
+            &self.locals,
             payload,
-            |body, block, _payload| {
-                Self::cleanup_resources_impl(body, block, stream_param, stream_helpers, locals);
-                let expected_rets = &module.signatures[sig].returns;
-                abi::emit_function_return(
-                    body,
-                    block,
-                    memory,
-                    conv,
-                    expected_rets,
-                    ret_val,
-                );
-            },
-        );
+        ) {
+            self.emit_terminal_return(ret_val);
+        }
     }
 
     fn emit_finally_return(&mut self, payload: Value) {
-        let memory = self.registry.memory;
-        let conv = self.current_func.calling_convention;
-        let sig = self.current_func.sig;
-        let module = self.module;
-        let stream_param = self.stream_parameter;
-        let stream_helpers = self.registry.stream_helpers;
-        let locals = &self.locals;
-        exceptions::route_return(
+        if exceptions::route_return(
             &mut self.body,
             self.block,
             &self.unwind_ctx,
-            locals,
+            &self.locals,
             payload,
-            |body, block, pl| {
-                Self::cleanup_resources_impl(body, block, stream_param, stream_helpers, locals);
-                let expected_rets = &module.signatures[sig].returns;
-                abi::emit_function_return(
-                    body,
-                    block,
-                    memory,
-                    conv,
-                    expected_rets,
-                    Some(pl),
-                );
-            },
-        );
+        ) {
+            self.emit_terminal_return(Some(payload));
+        }
     }
 
     fn emit_throw(&mut self, err_val_f64: Value) {
-        let conv = self.current_func.calling_convention;
-        let memory = self.registry.memory;
-        let stream_param = self.stream_parameter;
-        let stream_helpers = self.registry.stream_helpers;
-        let locals = &self.locals;
-        exceptions::route_throw(
+        if exceptions::route_throw(
             &mut self.body,
             self.block,
             &self.unwind_ctx,
-            locals,
+            &self.locals,
             err_val_f64,
-            |body, block, err_f64| {
-                Self::cleanup_resources_impl(body, block, stream_param, stream_helpers, locals);
-                abi::emit_function_throw(body, block, memory, conv, err_f64);
-            },
-        );
+        ) {
+            self.emit_terminal_throw(err_val_f64);
+        }
     }
 
     fn try_statement(
@@ -665,15 +641,7 @@ impl<'a> FunctionLowerer<'a> {
         if let (Some(cb), Some(c_clause)) = (blocks.catch_block, catch) {
             self.block = cb;
             self.unwind_ctx.clear_catch_in_innermost();
-
-            let exc_val = self.body.blocks[cb].params[0].1;
-            if let Some(param_id) = blocks.catch_param {
-                self.locals.insert(param_id, exc_val);
-            }
-            for (idx, &id) in blocks.scope_locals.iter().enumerate() {
-                let param_val = self.body.blocks[cb].params[idx + 1].1;
-                self.locals.insert(id, param_val);
-            }
+            blocks.restore_catch_environment(&self.body, &mut self.locals);
 
             self.statements(&c_clause.body)?;
             if self.body.blocks[self.block].terminator == Terminator::None {
@@ -691,12 +659,8 @@ impl<'a> FunctionLowerer<'a> {
         // 3. Lower finally clause (if present)
         if let (Some(fb), Some(f_stmts)) = (blocks.finally_block, finally) {
             self.block = fb;
-            let exit_reason = self.body.blocks[fb].params[0].1;
-            let payload = self.body.blocks[fb].params[1].1;
-            for (idx, &id) in blocks.scope_locals.iter().enumerate() {
-                let param_val = self.body.blocks[fb].params[idx + 2].1;
-                self.locals.insert(id, param_val);
-            }
+            let (exit_reason, payload) =
+                blocks.restore_finally_environment(&self.body, &mut self.locals);
 
             self.statements(f_stmts)?;
 
@@ -726,10 +690,7 @@ impl<'a> FunctionLowerer<'a> {
             self.body
                 .set_terminator(blocks.join_block, Terminator::Unreachable);
         } else {
-            for (idx, &id) in blocks.scope_locals.iter().enumerate() {
-                let param_val = self.body.blocks[blocks.join_block].params[idx].1;
-                self.locals.insert(id, param_val);
-            }
+            blocks.restore_join_environment(&self.body, &mut self.locals);
         }
         self.block = blocks.join_block;
         Ok(())

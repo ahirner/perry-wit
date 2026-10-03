@@ -215,7 +215,7 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
                 out.push_str(&export_name);
                 out.push_str("`\n */\nexport declare function ");
                 out.push_str(&ts_func_name);
-                out.push_str("(");
+                out.push('(');
                 emit_params(&mut out, resolve, func);
                 out.push_str("): ");
                 out.push_str(&ret_ty);
@@ -261,7 +261,7 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
                     let ret_ty = wit_result_to_ts(resolve, func);
                     out.push_str("  export function ");
                     out.push_str(&ts_name);
-                    out.push_str("(");
+                    out.push('(');
                     emit_params(&mut out, resolve, func);
                     out.push_str("): ");
                     out.push_str(&ret_ty);

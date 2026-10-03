@@ -124,13 +124,12 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                                 exports.user_functions.insert(name.to_string(), exp.index);
                             }
                         },
-                        ExternalKind::Global => {
+                        ExternalKind::Global
                             if exp.name.starts_with("__wasm_global_")
                                 && i64_globals.contains(&exp.index)
-                            {
+                            => {
                                 exports.user_i64_globals.push(exp.index);
                             }
-                        }
                         _ => {}
                     }
                 }

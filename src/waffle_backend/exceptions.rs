@@ -258,6 +258,52 @@ impl TryClauseBlocks {
             true
         }
     }
+
+    /// Restores local bindings for entering the catch body from its block parameters.
+    pub(crate) fn restore_catch_environment(
+        &self,
+        body: &FunctionBody,
+        locals: &mut BTreeMap<LocalId, Value>,
+    ) {
+        let cb = self.catch_block.expect("Catch block must exist");
+        let exc_val = body.blocks[cb].params[0].1;
+        if let Some(param_id) = self.catch_param {
+            locals.insert(param_id, exc_val);
+        }
+        for (idx, &id) in self.scope_locals.iter().enumerate() {
+            let val = body.blocks[cb].params[idx + 1].1;
+            locals.insert(id, val);
+        }
+    }
+
+    /// Restores local bindings for entering the finally body from its block parameters,
+    /// returning `(exit_reason, payload)`.
+    pub(crate) fn restore_finally_environment(
+        &self,
+        body: &FunctionBody,
+        locals: &mut BTreeMap<LocalId, Value>,
+    ) -> (Value, Value) {
+        let fb = self.finally_block.expect("Finally block must exist");
+        let exit_reason = body.blocks[fb].params[0].1;
+        let payload = body.blocks[fb].params[1].1;
+        for (idx, &id) in self.scope_locals.iter().enumerate() {
+            let val = body.blocks[fb].params[idx + 2].1;
+            locals.insert(id, val);
+        }
+        (exit_reason, payload)
+    }
+
+    /// Restores local bindings for entering the join block after normal/handled completion.
+    pub(crate) fn restore_join_environment(
+        &self,
+        body: &FunctionBody,
+        locals: &mut BTreeMap<LocalId, Value>,
+    ) {
+        for (idx, &id) in self.scope_locals.iter().enumerate() {
+            let val = body.blocks[self.join_block].params[idx].1;
+            locals.insert(id, val);
+        }
+    }
 }
 
 /// Dispatches the exit reason from a finally block:
@@ -352,18 +398,15 @@ pub(crate) fn emit_finally_dispatcher(
 }
 
 /// Routes an explicit return or return exit from finally:
-/// - If enclosed by a finally block, branches to finally with `(ExitReason::Return, payload, ...locals)`.
-/// - If at function exit, invokes `on_exit()` (e.g. cleanup and terminal return emission).
-pub(crate) fn route_return<F>(
+/// - If enclosed by a finally block, branches to finally with `(ExitReason::Return, payload, ...locals)` and returns `false`.
+/// - If at function exit, returns `true` indicating the caller should emit the terminal function return.
+pub(crate) fn route_return(
     body: &mut FunctionBody,
     block: Block,
     unwind_ctx: &UnwindContext,
     current_locals: &BTreeMap<LocalId, Value>,
     payload: Value,
-    on_exit: F,
-) where
-    F: FnOnce(&mut FunctionBody, Block, Value),
-{
+) -> bool {
     match unwind_ctx.target_for_return() {
         ReturnTarget::Finally {
             block: finally_block,
@@ -390,27 +433,23 @@ pub(crate) fn route_return<F>(
                     },
                 },
             );
+            false
         }
-        ReturnTarget::FunctionExit => {
-            on_exit(body, block, payload);
-        }
+        ReturnTarget::FunctionExit => true,
     }
 }
 
 /// Routes an exception (`throw` or propagated callee exception):
-/// - If caught, branches to catch with `(payload, ...locals)`.
-/// - If enclosed by finally, branches to finally with `(ExitReason::Throw, payload, ...locals)`.
-/// - If at function exit, invokes `on_exit()` (e.g. cleanup and terminal throw emission).
-pub(crate) fn route_throw<F>(
+/// - If caught, branches to catch with `(payload, ...locals)` and returns `false`.
+/// - If enclosed by finally, branches to finally with `(ExitReason::Throw, payload, ...locals)` and returns `false`.
+/// - If at function exit, returns `true` indicating the caller should emit the terminal function throw.
+pub(crate) fn route_throw(
     body: &mut FunctionBody,
     block: Block,
     unwind_ctx: &UnwindContext,
     current_locals: &BTreeMap<LocalId, Value>,
     err_val_f64: Value,
-    on_exit: F,
-) where
-    F: FnOnce(&mut FunctionBody, Block, Value),
-{
+) -> bool {
     match unwind_ctx.target_for_throw() {
         UnwindTarget::Catch {
             block: catch_block,
@@ -430,6 +469,7 @@ pub(crate) fn route_throw<F>(
                     },
                 },
             );
+            false
         }
         UnwindTarget::Finally {
             block: finally_block,
@@ -456,9 +496,8 @@ pub(crate) fn route_throw<F>(
                     },
                 },
             );
+            false
         }
-        UnwindTarget::FunctionExit => {
-            on_exit(body, block, err_val_f64);
-        }
+        UnwindTarget::FunctionExit => true,
     }
 }

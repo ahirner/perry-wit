@@ -164,9 +164,9 @@ impl ConformanceReport {
                 SupportLevel::Partial => "partial",
                 SupportLevel::Unsupported => "unsupported",
             };
-            write!(
+            writeln!(
                 md,
-                "| `{}` | {} | {} | {} | {} |\n",
+                "| `{}` | {} | {} | {} | {} |",
                 ev.capability_id, ev.capability_name, ev.tier, support_str, status_badge
             )
             .unwrap();

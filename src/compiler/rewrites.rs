@@ -521,8 +521,7 @@ impl Rewriter {
             args,
             ..
         } = expr
-        {
-            if module == "fs" || module == "node:fs" {
+            && (module == "fs" || module == "node:fs") {
                 if method == "readFileSync" {
                     self.needs_fs = true;
                     *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
@@ -581,7 +580,6 @@ impl Rewriter {
                     return;
                 }
             }
-        }
         if let perry_hir::ir::Expr::New {
             class_name, args, ..
         } = expr
@@ -725,8 +723,8 @@ impl Rewriter {
                 ) {
                     self.needs_random = true;
                 }
-                if let perry_hir::ir::Expr::NativeModuleRef(module) = object.as_ref() {
-                    if module == "fs" || module == "node:fs" {
+                if let perry_hir::ir::Expr::NativeModuleRef(module) = object.as_ref()
+                    && (module == "fs" || module == "node:fs") {
                         if property == "readFileSync" {
                             self.needs_fs = true;
                             *expr = runtime_method_call("fs_read_file_sync", std::mem::take(args));
@@ -785,7 +783,6 @@ impl Rewriter {
                             return;
                         }
                     }
-                }
                 if matches!(
                     property.as_str(),
                     "fs_read_file_sync"
@@ -813,16 +810,13 @@ impl Rewriter {
                     return;
                 }
             }
-            if let perry_hir::ir::Expr::ExternFuncRef { name, .. } = callee.as_ref() {
-                if name == "js_native_module_named_esm_export_value" {
-                    if let Some(perry_hir::ir::Expr::String(mod_name)) = args.first() {
-                        if mod_name == "fs" || mod_name == "node:fs" {
+            if let perry_hir::ir::Expr::ExternFuncRef { name, .. } = callee.as_ref()
+                && name == "js_native_module_named_esm_export_value"
+                    && let Some(perry_hir::ir::Expr::String(mod_name)) = args.first()
+                        && (mod_name == "fs" || mod_name == "node:fs") {
                             *expr = perry_hir::ir::Expr::Undefined;
                             return;
                         }
-                    }
-                }
-            }
             if let perry_hir::ir::Expr::Closure { body, .. } = callee.as_mut() {
                 let mut sources = Vec::new();
                 let mut is_spread_iife = !body.is_empty();
