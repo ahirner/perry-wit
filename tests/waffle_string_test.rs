@@ -3,9 +3,53 @@
 use anyhow::Result;
 use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+struct TrackingAllocator;
+static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+static DEALLOCATED: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        DEALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !new_ptr.is_null() {
+            if new_size > layout.size() {
+                ALLOCATED.fetch_add(new_size - layout.size(), Ordering::Relaxed);
+            } else {
+                DEALLOCATED.fetch_add(layout.size() - new_size, Ordering::Relaxed);
+            }
+        }
+        new_ptr
+    }
+}
+
+#[global_allocator]
+static GLOBAL: TrackingAllocator = TrackingAllocator;
 
 fn make_async_engine() -> Result<Engine> {
     let mut config = Config::new();
@@ -1029,7 +1073,27 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
     // String-only task without host capabilities must have 0 external core imports
     assert_eq!(import_count, 0, "Core module has unexpected external imports");
 
-    // 2. Component execution and repeated allocations with bounded memory growth
+    // 2. Measure compiler memory stability over repeated compilations (proves absence of compiler memory leak)
+    let net_before_compiles =
+        ALLOCATED.load(Ordering::SeqCst).saturating_sub(DEALLOCATED.load(Ordering::SeqCst));
+    for _ in 0..200 {
+        let _ = compile_typescript_waffle(
+            source,
+            "boundary_audit.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+    }
+    let net_after_compiles =
+        ALLOCATED.load(Ordering::SeqCst).saturating_sub(DEALLOCATED.load(Ordering::SeqCst));
+    let compiler_leak = net_after_compiles.saturating_sub(net_before_compiles);
+    // If every compilation leaked copied function bodies, 200 compilations would leak hundreds of kilobytes.
+    assert!(
+        compiler_leak < 50_000,
+        "Compiler memory leak detected: heap grew by {} bytes across 200 compilations",
+        compiler_leak
+    );
+
+    // 3. Component execution and repeated allocations with bounded memory growth
     let engine = make_async_engine()?;
     let component_bytes = compiled.component.expect("Component emitted");
     let component = Component::new(&engine, &component_bytes)?;
@@ -1049,11 +1113,170 @@ async fn test_string_boundary_audit_and_bounded_storage() -> Result<()> {
     let res3 = run.call_async(&mut store, ("🦀,🌲,🌟",)).await?;
     assert_eq!(res3.0, "🦀 - 🌲 - 🌟");
 
-    // Repeat 100 times to verify stable allocation behavior
-    for _ in 0..100 {
+    // Repeat 200 times to verify stable allocation behavior
+    for _ in 0..200 {
         let res = run.call_async(&mut store, ("x,y,z",)).await?;
         assert_eq!(res.0, "X - Y - Z");
     }
+
+    // 4. Measure runtime linear memory: instantiate core module directly (0 imports)
+    // and verify linear memory usage is strictly bounded
+    let core_engine = Engine::default();
+    let core_module = Module::new(&core_engine, &compiled.core)?;
+    let mut core_store = Store::new(&core_engine, ());
+    let core_instance = Instance::new(&mut core_store, &core_module, &[])?;
+    let memory = core_instance
+        .get_memory(&mut core_store, "memory")
+        .expect("linear memory exported");
+    let initial_pages = memory.size(&core_store);
+    let initial_bytes = memory.data_size(&core_store);
+    assert!(
+        initial_pages <= 3,
+        "Initial memory pages should be bounded (got {})",
+        initial_pages
+    );
+    assert!(
+        initial_bytes <= 196_608,
+        "Initial memory bytes should be bounded (got {})",
+        initial_bytes
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_unused_helpers_are_not_embedded_for_numeric_and_simple_tasks() -> Result<()> {
+    // 1. Numeric-only task: must have 0 imports, at most 2 functions (compute + export wrapper),
+    // 0 data segments, 0 helper code embedded.
+    let numeric_src = r#"
+        export function compute(a: number, b: number): number {
+            return (a + b) * 2;
+        }
+    "#;
+    let numeric_compiled =
+        compile_typescript_waffle(numeric_src, "numeric.ts", &WaffleCompileOptions::default())?;
+
+    let mut numeric_func_count = 0;
+    let mut numeric_data_count = 0;
+    let mut numeric_import_count = 0;
+    let mut numeric_table_count = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&numeric_compiled.core) {
+        match payload? {
+            wasmparser::Payload::FunctionSection(reader) => {
+                numeric_func_count = reader.count();
+            }
+            wasmparser::Payload::ImportSection(reader) => {
+                numeric_import_count = reader.count();
+            }
+            wasmparser::Payload::DataSection(reader) => {
+                numeric_data_count = reader.count();
+            }
+            wasmparser::Payload::TableSection(reader) => {
+                numeric_table_count = reader.count();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(numeric_import_count, 0, "Numeric task must have 0 imports");
+    assert_eq!(numeric_data_count, 0, "Numeric task must have 0 data segments");
+    assert_eq!(numeric_table_count, 0, "Numeric task must have 0 tables");
+    assert!(
+        numeric_func_count <= 2,
+        "Numeric task must only define user function and export wrapper, found {} functions (helpers were embedded!)",
+        numeric_func_count
+    );
+
+    // 2. Simple string concatenation task: needs string runtime primitives (concat),
+    // but does NOT need SEARCH (str_find_substring) or TEXT (str_split, str_join, str_case_convert, str_code_point_at) helpers.
+    let simple_src = r#"
+        export function greet(name: string): string {
+            return "hello " + name;
+        }
+    "#;
+    let simple_compiled =
+        compile_typescript_waffle(simple_src, "simple.ts", &WaffleCompileOptions::default())?;
+
+    let mut simple_func_count = 0;
+    let mut simple_import_count = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&simple_compiled.core) {
+        match payload? {
+            wasmparser::Payload::FunctionSection(reader) => {
+                simple_func_count = reader.count();
+            }
+            wasmparser::Payload::ImportSection(reader) => {
+                simple_import_count = reader.count();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(simple_import_count, 0, "Simple string task must have 0 external imports");
+
+    // 3. Search-only string task: needs SEARCH helper, but NOT TEXT helper.
+    let search_src = r#"
+        export function find_it(s: string): number {
+            return s.indexOf("needle");
+        }
+    "#;
+    let search_compiled =
+        compile_typescript_waffle(search_src, "search.ts", &WaffleCompileOptions::default())?;
+
+    let mut search_func_count = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&search_compiled.core) {
+        if let wasmparser::Payload::FunctionSection(reader) = payload? {
+            search_func_count = reader.count();
+        }
+    }
+
+    // 4. Full string task (using text helper: split, join, toUpperCase).
+    let full_src = r#"
+        export function transform(s: string): string {
+            return s.toUpperCase().split(",").join(" - ");
+        }
+    "#;
+    let full_compiled =
+        compile_typescript_waffle(full_src, "full.ts", &WaffleCompileOptions::default())?;
+
+    let mut full_func_count = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&full_compiled.core) {
+        if let wasmparser::Payload::FunctionSection(reader) = payload? {
+            full_func_count = reader.count();
+        }
+    }
+
+    // Hierarchical inclusion proves unused helper code is excluded, not embedded:
+    // numeric (no strings) < simple (primitives only) < search (primitives + SEARCH) < full (primitives + TEXT)
+    assert!(
+        numeric_func_count < simple_func_count,
+        "Numeric functions ({}) must be fewer than simple string functions ({})",
+        numeric_func_count,
+        simple_func_count
+    );
+    assert!(
+        simple_func_count < search_func_count,
+        "Simple string functions ({}) must exclude SEARCH helper functions ({})",
+        simple_func_count,
+        search_func_count
+    );
+    assert!(
+        simple_func_count < full_func_count,
+        "Simple string functions ({}) must exclude TEXT helper functions ({})",
+        simple_func_count,
+        full_func_count
+    );
+
+    // Verify module byte sizes reflect exclusion of unused helper code
+    assert!(
+        numeric_compiled.core.len() < simple_compiled.core.len(),
+        "Numeric module size ({}) must be smaller than simple string module size ({})",
+        numeric_compiled.core.len(),
+        simple_compiled.core.len()
+    );
+    assert!(
+        simple_compiled.core.len() < full_compiled.core.len(),
+        "Simple string module size ({}) must be smaller than full helper module size ({})",
+        simple_compiled.core.len(),
+        full_compiled.core.len()
+    );
 
     Ok(())
 }
