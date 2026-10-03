@@ -581,3 +581,55 @@ async fn test_waffle_component_entry_signatures() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn test_waffle_rejects_intrinsics_without_component_wiring() -> Result<()> {
+    let engine = Engine::default();
+    for (declaration, body, name) in [
+        (
+            "declare function foo(value: number): number;",
+            "return foo(input);",
+            "foo",
+        ),
+        (
+            "declare function flag(): Promise<boolean>;",
+            "let value = await flag(); return input;",
+            "flag",
+        ),
+        (
+            "declare function unused(): void;",
+            "return input;",
+            "unused",
+        ),
+        (
+            "declare function byteAt(index: number): number;",
+            "return byteAt(input);",
+            "byteAt",
+        ),
+        (
+            "declare function readChunk(stream: ByteStream): Promise<number>;",
+            "return input;",
+            "readChunk",
+        ),
+    ] {
+        let source = format!(
+            "{declaration}\nexport async function run(input: number): Promise<number> {{ {body} }}"
+        );
+        let error =
+            compile_typescript_waffle(&source, "intrinsic.ts", &WaffleCompileOptions::default())
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("Intrinsic '{name}' is unsupported in components"))
+        );
+
+        let options = WaffleCompileOptions {
+            componentize: false,
+            ..Default::default()
+        };
+        let compiled = compile_typescript_waffle(&source, "intrinsic.ts", &options)?;
+        Module::new(&engine, compiled.core)?;
+    }
+    Ok(())
+}

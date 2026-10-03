@@ -49,7 +49,7 @@ pub(crate) fn frame_component(
     let mut host_imports = String::new();
     let mut host_wires = String::new();
 
-    for (_name, intrinsic) in &contract.intrinsics {
+    for intrinsic in contract.intrinsics.values() {
         match intrinsic {
             TypedIntrinsic::HostDouble => {
                 host_imports.push_str(
@@ -66,10 +66,14 @@ pub(crate) fn frame_component(
             TypedIntrinsic::WaitFor => {
                 // Handled via clock_wire above
             }
-            TypedIntrinsic::ByteAt => {
-                // Synchronous host export wire if needed
-            }
-            _ => {}
+            TypedIntrinsic::ByteAt
+            | TypedIntrinsic::ReadChunk
+            | TypedIntrinsic::StreamDrop
+            | TypedIntrinsic::StreamReset
+            | TypedIntrinsic::Custom { .. } => bail!(
+                "Intrinsic '{}' is unsupported in components until its import adapter is implemented",
+                intrinsic.name()
+            ),
         }
     }
 
