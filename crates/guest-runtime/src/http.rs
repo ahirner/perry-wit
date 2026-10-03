@@ -7,6 +7,7 @@ use crate::bindings::wasi::http::types::{
 };
 
 pub(crate) enum ResponseEntry {
+    Vacant,
     InFlight {
         url: String,
         future_resp: FutureIncomingResponse,
@@ -16,7 +17,7 @@ pub(crate) enum ResponseEntry {
         response: IncomingResponse,
     },
     Ready {
-        body: String,
+        body: Vec<u8>,
         metadata: ResponseMetadata,
     },
 }
@@ -40,18 +41,64 @@ pub(crate) fn get_responses() -> &'static mut Vec<ResponseEntry> {
     }
 }
 
-pub(crate) fn get_response_body(id: usize) -> Result<String, String> {
+pub(crate) fn get_response_body(id: usize) -> Result<Vec<u8>, String> {
     let responses = get_responses();
     if id < responses.len() {
-        let res = responses[id].resolve()?.to_string();
+        let res = responses[id].resolve()?.to_vec();
         Ok(res)
     } else {
         Err(format!("Invalid response id {id}"))
     }
 }
 
+pub(crate) fn decode_utf8_body(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned()
+}
+
+pub(crate) fn store_response(response: ResponseEntry) -> usize {
+    let responses = get_responses();
+    if let Some(id) = responses
+        .iter()
+        .position(|entry| matches!(entry, ResponseEntry::Vacant))
+    {
+        responses[id] = response;
+        id
+    } else {
+        let id = responses.len();
+        responses.push(response);
+        id
+    }
+}
+
+/// Releases unreferenced responses at an ordinary invocation boundary.
+/// Component post-return cannot call host imports, including resource drops.
+#[no_mangle]
+pub(crate) extern "C" fn http_reclaim_responses() {
+    let responses = get_responses();
+    let mut alive = vec![false; responses.len()];
+    for handle in &crate::state::get_state().handles {
+        if let crate::state::JsHandle::Response { id, .. } = handle {
+            if let Some(alive) = alive.get_mut(*id) {
+                *alive = true;
+            }
+        }
+    }
+    for (id, entry) in responses.iter_mut().enumerate() {
+        if !alive[id] {
+            *entry = ResponseEntry::Vacant;
+        }
+    }
+    while matches!(responses.last(), Some(ResponseEntry::Vacant)) {
+        responses.pop();
+    }
+}
+
 impl ResponseEntry {
     pub(crate) fn wait(&mut self) -> Result<(), String> {
+        if matches!(self, Self::Vacant) {
+            return Err("Response has been released".into());
+        }
         if let Self::InFlight { future_resp, .. } = self {
             let pollable = future_resp.subscribe();
             pollable.block();
@@ -74,7 +121,7 @@ impl ResponseEntry {
         Ok(())
     }
 
-    pub(crate) fn resolve(&mut self) -> Result<&str, String> {
+    pub(crate) fn resolve(&mut self) -> Result<&[u8], String> {
         let metadata = self.metadata()?;
         if let Self::Headers { url, response } = self {
             let body = response
@@ -95,12 +142,10 @@ impl ResponseEntry {
                     }
                 }
             }
-            let body_str = String::from_utf8(content)
-                .map_err(|error| format!("Response from {url} was not UTF-8: {error}"))?;
             drop(stream);
             drop(body);
             *self = Self::Ready {
-                body: body_str,
+                body: content,
                 metadata,
             };
         }
@@ -115,7 +160,7 @@ impl ResponseEntry {
         match self {
             Self::Headers { response, .. } => Ok(response.status()),
             Self::Ready { metadata, .. } => Ok(metadata.status),
-            Self::InFlight { .. } => unreachable!(),
+            Self::InFlight { .. } | Self::Vacant => unreachable!(),
         }
     }
 
@@ -138,7 +183,7 @@ impl ResponseEntry {
                     .collect(),
             }),
             Self::Ready { metadata, .. } => Ok(metadata.clone()),
-            Self::InFlight { .. } => unreachable!(),
+            Self::InFlight { .. } | Self::Vacant => unreachable!(),
         }
     }
 }

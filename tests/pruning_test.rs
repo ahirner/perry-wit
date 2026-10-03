@@ -209,8 +209,7 @@ fn exported_json_task_prunes_http_and_runs_without_http_bindings() {
         world: Some("task-runner".to_string()),
         core_only: false,
     };
-    let compiled =
-        perry_wit::compiler::compile_typescript(ts_source, "task.ts", &options).unwrap();
+    let compiled = perry_wit::compiler::compile_typescript(ts_source, "task.ts", &options).unwrap();
     let component_bytes = compiled.component.expect("component artifact");
     let wat = wasmprinter::print_bytes(&component_bytes).expect("print component wat");
 
@@ -275,7 +274,10 @@ fn exported_json_task_prunes_http_and_runs_without_http_bindings() {
 #[test]
 fn http_task_retains_http_and_verifies_abi_marshalling_and_cleanup() {
     let fixture = HttpFixture::new(|request| {
-        Reply::Body(200, format!("response-for:{}", request.body))
+        Reply::Body(
+            200,
+            format!("response-for:{}", String::from_utf8_lossy(&request.body)),
+        )
     });
     let wit = r#"package test:http-task;
         world test {
@@ -379,9 +381,13 @@ fn http_task_retains_http_and_verifies_abi_marshalling_and_cleanup() {
 
     // Verify the HTTP fixture received the request body
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1, "fixture should receive exactly 1 request");
+    assert_eq!(
+        requests.len(),
+        1,
+        "fixture should receive exactly 1 request"
+    );
     assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].body, "hello-perry");
+    assert_eq!(requests[0].body, b"hello-perry");
 }
 
 #[test]

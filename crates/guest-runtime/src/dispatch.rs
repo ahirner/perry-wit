@@ -3,8 +3,7 @@
 use crate::http::{start_http_request, ResponseEntry};
 use crate::io::{fail_with_error, print_stdout};
 use crate::nanbox::{
-    get_pointer_id, nanbox_pointer, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE,
-    TAG_UNDEFINED,
+    nanbox_pointer, POINTER_TAG, STRING_TAG, TAG_FALSE, TAG_NULL, TAG_TRUE, TAG_UNDEFINED,
 };
 use crate::state::{get_state, JsHandle};
 
@@ -405,6 +404,30 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
         }
     }
 
+    let name = if name == "class_call_method"
+        && matches!(
+            raw_args.first().and_then(|&value| state.get_handle(value)),
+            Some(JsHandle::Response { .. })
+        ) {
+        let method = state.get_string(raw_args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64));
+        if !matches!(method.as_str(), "json" | "text" | "bytes") {
+            fail_with_error(&format!("Unsupported Response method: {method}"));
+        }
+        raw_args.truncate(1);
+        method
+    } else {
+        name
+    };
+
+    if matches!(name.as_str(), "arrayBuffer" | "blob" | "formData" | "clone")
+        && matches!(
+            raw_args.first().and_then(|&value| state.get_handle(value)),
+            Some(JsHandle::Response { .. })
+        )
+    {
+        fail_with_error(&format!("Unsupported Response method: {name}"));
+    }
+
     if matches!(
         name.as_str(),
         "fetch_url"
@@ -415,6 +438,8 @@ pub extern "C" fn mem_call(func_name_id: f64, arg_count: f64, base_addr: i32) ->
             | "json"
             | "response_text"
             | "text"
+            | "response_bytes"
+            | "bytes"
     ) {
         let result_i64 = dispatch_http(&name, &raw_args);
         unsafe {
@@ -488,32 +513,28 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
         let args = if name == "fetch_request" {
             &raw_args[1..]
         } else {
-            &raw_args[..]
+            raw_args
         };
         if let Some(&url_arg) = args.first() {
             let url = state.get_string(url_arg);
             let options = if name == "fetch_with_options" {
-                let mut options = serde_json::Map::new();
+                let mut options = crate::objects::ObjectProperties::default();
                 for (index, key) in [(1, "method"), (2, "body"), (3, "headers"), (4, "redirect")] {
                     if let Some(&value) = args.get(index) {
                         if value as u64 != TAG_UNDEFINED {
-                            options.insert(key.into(), state.to_js_value(value));
+                            options.insert(key.into(), value);
                         }
                     }
                 }
-                serde_json::Value::Object(options)
+                nanbox_pointer(state.alloc_handle(JsHandle::Object(options)))
             } else {
-                args.get(1)
-                    .map(|&value| state.to_js_value(value))
-                    .unwrap_or(serde_json::Value::Null)
+                args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64)
             };
-            let options = crate::http_options::parse_options(options)
+            let options = crate::http_options::parse_options(state, options)
                 .unwrap_or_else(|error| fail_with_error(&error));
             match start_http_request(&url, options) {
                 Ok(fut) => {
-                    let responses = crate::http::get_responses();
-                    let id = responses.len();
-                    responses.push(ResponseEntry::InFlight {
+                    let id = crate::http::store_response(ResponseEntry::InFlight {
                         url: url.clone(),
                         future_resp: fut,
                     });
@@ -529,11 +550,13 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
         let handle = raw_args.first().copied().unwrap_or(0);
         let resp_id = match state.get_handle(handle) {
             Some(JsHandle::Response { id, .. }) => Some(*id),
-            _ => get_pointer_id(handle),
+            _ => None,
         };
         if let Some(id) = resp_id {
             match crate::http::get_response_body(id) {
-                Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(body) => match serde_json::from_str::<serde_json::Value>(
+                    &crate::http::decode_utf8_body(&body),
+                ) {
                     Ok(parsed) => return state.from_js_value(parsed),
                     Err(e) => {
                         fail_with_error(&format!("JSON parse error: {e}"));
@@ -546,23 +569,27 @@ fn dispatch_http(name: &str, raw_args: &[i64]) -> i64 {
         } else {
             fail_with_error("Invalid response handle passed to .json()");
         }
-    } else if name == "response_text" || name == "text" {
+    } else if matches!(name, "response_text" | "text" | "response_bytes" | "bytes") {
         let handle = raw_args.first().copied().unwrap_or(0);
         let resp_id = match state.get_handle(handle) {
             Some(JsHandle::Response { id, .. }) => Some(*id),
-            _ => get_pointer_id(handle),
+            _ => None,
         };
         if let Some(id) = resp_id {
             match crate::http::get_response_body(id) {
                 Ok(body) => {
-                    return state.alloc_string(&body);
+                    if matches!(name, "response_bytes" | "bytes") {
+                        let view = crate::buffer::Uint8ArrayView::from_bytes(body);
+                        return nanbox_pointer(state.alloc_handle(JsHandle::Uint8Array(view)));
+                    }
+                    return state.alloc_string(&crate::http::decode_utf8_body(&body));
                 }
                 Err(e) => {
                     fail_with_error(&e);
                 }
             }
         } else {
-            fail_with_error("Invalid response handle passed to .text()");
+            fail_with_error(&format!("Invalid response handle passed to .{name}()"));
         }
     }
     0

@@ -4,11 +4,287 @@ mod support;
 
 use http_fixture::{HttpFixture, Reply};
 use std::{
+    fs,
     path::Path,
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+#[test]
+fn binary_bodies_preserve_subviews_empty_values_and_large_transfers() {
+    let fixture = HttpFixture::new(|request| Reply::Bytes(200, request.body.clone()));
+    let output = support::run(
+        &format!(
+            r#"
+        const source = Uint8Array.from([10, 0, 255, 128, 20]);
+        const view = source.subarray(1, -1);
+        const options = {{ method: "POST", body: view }};
+        const response = await fetch("http://{0}/view", {{ ...options }});
+        const received = await response.bytes();
+        console.log(JSON.stringify(received));
+        console.log(received.length);
+        console.log(response.status);
+        received[0] = 7;
+        console.log(source[1]);
+        const again = await response.bytes();
+        console.log(again !== received);
+        console.log(again[0]);
+        const empty = await fetch("http://{0}/empty", {{method:"POST", body:new Uint8Array(0)}});
+        console.log((await empty.bytes()).length);
+        const large = new Uint8Array(131073);
+        for (let i = 0; i < large.length; i++) {{ large[i] = i; }}
+        const big = await fetch("http://{0}/large", {{method:"PUT", body:large}});
+        const bytes = await big.bytes();
+        console.log(bytes.length);
+        let equal = true;
+        for (let i = 0; i < bytes.length; i++) {{ if (bytes[i] !== large[i]) {{ equal = false; }} }}
+        console.log(equal);
+    "#,
+            fixture.address
+        ),
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "{\"0\":0,\"1\":255,\"2\":128}\n3\n200\n0\ntrue\n0\n0\n131073\ntrue\n"
+    );
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].body, [0, 255, 128]);
+    assert!(requests[1].body.is_empty());
+    assert_eq!(
+        requests[2].body,
+        (0..131073).map(|index| index as u8).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn text_decodes_utf8_with_replacement_without_changing_cached_bytes() {
+    let fixture = HttpFixture::new(|request| {
+        Reply::Bytes(
+            200,
+            if request.target == "/json" {
+                b"\xef\xbb\xbf{\"value\":\"\xff\"}".to_vec()
+            } else {
+                vec![239, 187, 191, 65, 255, 66]
+            },
+        )
+    });
+    let output = support::run(
+        &format!(
+            r#"
+        const response = await fetch("http://{}/text");
+        console.log(await response.text());
+        console.log(JSON.stringify(await response.bytes()));
+    "#,
+            fixture.address
+        ),
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "A�B\n{\"0\":239,\"1\":187,\"2\":191,\"3\":65,\"4\":255,\"5\":66}\n"
+    );
+    let output = support::run(
+        &format!(
+            r#"
+        const response = await fetch("http://{}/json");
+        console.log(JSON.stringify(await response.json()));
+        console.log(await response.text());
+    "#,
+            fixture.address
+        ),
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "{\"value\":\"�\"}\n{\"value\":\"�\"}\n"
+    );
+    for method in ["arrayBuffer", "blob", "formData", "clone"] {
+        let output = support::run(
+            &format!(
+                r#"
+            const response = await fetch("http://{}/unsupported");
+            response.{method}(); console.log("unreachable");
+        "#,
+                fixture.address
+            ),
+            None,
+            None,
+        );
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("Unsupported Response method: {method}")),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn repeated_http_calls_retain_live_responses_and_release_dead_resources() {
+    let scratch = support::Scratch::new();
+    let wit = format!(
+        r#"{}
+        world test {{
+            include runtime-adapter;
+            export run-task: func(mode: string) -> string;
+        }}
+    "#,
+        include_str!("../wit/world.wit")
+    );
+    let compiled = scratch.compile_artifacts(
+        r#"
+        let saved: any = null;
+        export function runTask(mode: string): string {
+            if (mode === "saved") { return JSON.stringify(saved.response.bytes()); }
+            if (mode === "release") { saved = null; return "released"; }
+            const response = fetch("https://fixture.test/binary", {
+                method: "POST", body: Uint8Array.from([0, 255, 128])
+            });
+            if (mode === "pending") { return "pending"; }
+            if (mode === "retain") { saved = { response }; return "retained:" + response.status; }
+            if (mode === "headers") { return "status:" + response.status; }
+            return JSON.stringify(response.bytes());
+        }
+    "#,
+        Some(&wit),
+    );
+    let path = scratch.0.join("http-lifetimes.wasm");
+    fs::write(&path, compiled.core).unwrap();
+    let output = Command::new("node").args(["--eval", r#"
+        const assert = require('node:assert/strict');
+        const module = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
+        let exports;
+        let next = 1;
+        let failBody = false;
+        let diagnostic = '';
+        const resources = new Map();
+        const payload = Uint8Array.from({length: 4096}, (_, index) => index % 256);
+        const expected = JSON.stringify(payload);
+        const view = () => new DataView(exports.memory.buffer);
+        function resource(type) { const id = next++; resources.set(id, {type, offset:0}); return id; }
+        function release(id, type) {
+            assert.equal(resources.get(id)?.type, type, `resource ownership: ${id} ${type}`);
+            resources.delete(id);
+        }
+        function result(ptr, id) {
+            view().setUint8(ptr, 0);
+            if (id !== undefined) { view().setUint32(ptr + 4, id, true); }
+        }
+        const imports = {};
+        for (const {module: namespace, name} of WebAssembly.Module.imports(module)) {
+            const host = (...args) => {
+                if (name.startsWith('[resource-drop]')) {
+                    release(args[0], name.slice('[resource-drop]'.length)); return;
+                }
+                switch (name) {
+                    case '[static]fields.from-list': result(args[2], resource('fields')); return;
+                    case '[constructor]outgoing-request':
+                        release(args[0], 'fields'); return resource('outgoing-request');
+                    case '[method]outgoing-request.set-method':
+                    case '[method]outgoing-request.set-scheme':
+                    case '[method]outgoing-request.set-authority':
+                    case '[method]outgoing-request.set-path-with-query': result(args.at(-1)); return;
+                    case '[method]outgoing-request.body': result(args[1], resource('outgoing-body')); return;
+                    case '[method]outgoing-body.write': result(args[1], resource('output-stream')); return;
+                    case 'handle':
+                        release(args[0], 'outgoing-request'); result(args.at(-1));
+                        view().setUint32(args.at(-1) + 8, resource('future-incoming-response'), true); return;
+                    case '[method]output-stream.blocking-write-and-flush':
+                        if (resources.get(args[0]).stderr) {
+                            diagnostic += new TextDecoder().decode(new Uint8Array(exports.memory.buffer, args[1], args[2]));
+                        } else {
+                            assert.deepEqual(Array.from(new Uint8Array(exports.memory.buffer, args[1], args[2])), [0,255,128]);
+                        }
+                        result(args[3]); return;
+                    case 'get-stderr': {
+                        const id = resource('output-stream'); resources.get(id).stderr = true; return id;
+                    }
+                    case 'exit': throw new Error('guest exit');
+                    case '[static]outgoing-body.finish': release(args[0], 'outgoing-body'); result(args.at(-1)); return;
+                    case '[method]future-incoming-response.subscribe': return resource('pollable');
+                    case '[method]pollable.block': return;
+                    case '[method]future-incoming-response.get':
+                        view().setUint8(args[1], 1);
+                        view().setUint8(args[1] + 8, 0);
+                        view().setUint8(args[1] + 16, 0);
+                        view().setUint32(args[1] + 24, resource('incoming-response'), true); return;
+                    case '[method]incoming-response.status': return 200;
+                    case '[method]incoming-response.headers': return resource('fields');
+                    case '[method]fields.entries':
+                        view().setUint32(args[1], 0, true); view().setUint32(args[1] + 4, 0, true); return;
+                    case '[method]incoming-response.consume': result(args[1], resource('incoming-body')); return;
+                    case '[method]incoming-body.stream': result(args[1], resource('input-stream')); return;
+                    case '[method]input-stream.blocking-read': {
+                        const stream = resources.get(args[0]);
+                        if (failBody && stream.offset > 0) {
+                            view().setUint8(args[2], 1); view().setUint8(args[2] + 4, 0);
+                            view().setUint32(args[2] + 8, resource('error'), true); return;
+                        }
+                        if (stream.offset === payload.length) {
+                            view().setUint8(args[2], 1); view().setUint8(args[2] + 4, 1); return;
+                        }
+                        const chunk = payload.subarray(stream.offset, stream.offset + Math.min(1024, Number(args[1])));
+                        const ptr = exports.cabi_realloc(0, 0, 1, chunk.length);
+                        new Uint8Array(exports.memory.buffer, ptr, chunk.length).set(chunk);
+                        result(args[2], ptr); view().setUint32(args[2] + 8, chunk.length, true);
+                        stream.offset += chunk.length; return;
+                    }
+                    default: throw new Error(`unexpected host import: ${namespace} ${name} ${args}`);
+                }
+            };
+            (imports[namespace] ??= {})[name] = host;
+        }
+        exports = new WebAssembly.Instance(module, imports).exports;
+        function invoke(mode, cleanup = true) {
+            const bytes = new TextEncoder().encode(mode);
+            const ptr = exports.cabi_realloc(0, 0, 1, bytes.length);
+            new Uint8Array(exports.memory.buffer, ptr, bytes.length).set(bytes);
+            let ret;
+            try { ret = exports['run-task'](ptr, bytes.length); }
+            finally { exports.cabi_realloc(ptr, bytes.length, 1, 0); }
+            const words = new Uint32Array(exports.memory.buffer, ret, 2);
+            const text = new TextDecoder().decode(new Uint8Array(exports.memory.buffer, words[0], words[1]));
+            if (cleanup) { exports['cabi_post_run-task'](ret); }
+            return text;
+        }
+        assert.equal(invoke('retain'), 'retained:200');
+        assert.ok(resources.size > 0);
+        assert.equal(invoke('binary'), expected);
+        assert.equal(invoke('saved'), expected);
+        assert.equal(invoke('release'), 'released');
+        for (let i = 0; i < 30; i++) { assert.equal(invoke('binary'), expected); }
+        const baseline = exports.memory.buffer.byteLength;
+        for (let i = 0; i < 600; i++) {
+            const mode = ['binary', 'pending', 'headers'][i % 3];
+            assert.equal(invoke(mode, i % 7 !== 0), mode === 'binary' ? expected : mode === 'pending' ? 'pending' : 'status:200');
+            assert.ok(resources.size <= 1, `unreleased HTTP resources: ${resources.size}`);
+        }
+        assert.equal(invoke('release'), 'released');
+        assert.equal(resources.size, 0);
+        assert.equal(exports.memory.buffer.byteLength, baseline, 'HTTP cycles must stop growing memory after warm-up');
+        failBody = true;
+        assert.throws(() => invoke('binary'), /guest exit/);
+        assert.match(diagnostic, /Stream error reading response/);
+        assert.deepEqual(Array.from(resources.values()).map(resource => resource.type), ['incoming-response']);
+        failBody = false;
+        assert.equal(invoke('release'), 'released');
+        assert.equal(resources.size, 0, 'the next invocation releases the failed response');
+        assert.equal(invoke('binary'), expected);
+    "#]).arg(&path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[test]
 fn response_headers_and_methods_survive_body_consumption() {
@@ -243,14 +519,14 @@ fn fetch_forwards_static_and_dynamic_options_and_complete_bodies() {
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "POST");
     assert_eq!(requests[0].target, "/submit?key=value");
-    assert_eq!(requests[0].body, body);
+    assert_eq!(requests[0].body, body.as_bytes());
     assert!(
         requests[0]
             .headers
             .contains(&("x-static".into(), "yes".into()))
     );
     assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].body, "second");
+    assert_eq!(requests[1].body, b"second");
     assert!(
         requests[1]
             .headers
@@ -284,6 +560,14 @@ fn unsupported_fetch_options_fail_before_sending_a_request() {
         (r#"{ method: "bad method" }"#, "Invalid fetch method"),
         (r#"{ method: "POST", body: 42 }"#, "body must be a string"),
         (
+            r#"{ method: "POST", body: [0,255] }"#,
+            "body must be a string or Uint8Array",
+        ),
+        (
+            r#"{ method: "POST", body: { "0": 255 } }"#,
+            "body must be a string or Uint8Array",
+        ),
+        (
             "{ headers: { wrong: 42 } }",
             "header values must be strings",
         ),
@@ -293,6 +577,14 @@ fn unsupported_fetch_options_fail_before_sending_a_request() {
         ),
         (
             r#"{ method: "HEAD", body: "" }"#,
+            "GET and HEAD requests cannot have a body",
+        ),
+        (
+            "{ body: new Uint8Array(0) }",
+            "GET and HEAD requests cannot have a body",
+        ),
+        (
+            "{ method: 'HEAD', body: Uint8Array.from([1]) }",
             "GET and HEAD requests cannot have a body",
         ),
     ] {

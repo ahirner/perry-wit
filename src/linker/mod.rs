@@ -227,11 +227,11 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
             _ => (),
         }
     }
-    // Exports from Module B (preserve only cabi_* functions and globals)
+    // Preserve ABI functions and the selected capability cleanup hooks.
     for exp in &b.exports {
         match exp.kind {
             ExternalKind::Func => {
-                if exp.name.starts_with("cabi_") {
+                if prune::preserve_runtime_export(exp.name, needs_http) {
                     let merged_f = func_map_b[exp.index as usize];
                     export_sec.export(exp.name, ExportKind::Func, merged_f);
                 }

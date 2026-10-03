@@ -6,7 +6,7 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 ## Choosing the Next Slice
 
 1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
-2. HTTP metadata/methods (**10.1**) are complete. Add buffered binary bodies (**10.2**) using the existing byte views and controlled HTTP fixtures.
+2. HTTP metadata/methods (**10.1**) and buffered binary bodies (**10.2**) are complete. Use those client paths and fixtures as the baseline for handlers and streaming.
 3. Develop callbacks (**B.1**), guest async execution (**B.2**), and retained lifetimes (**E.2**) around the first handler or timer that needs them.
 4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
 
@@ -224,15 +224,22 @@ Verification (10.1):
 - Response headers expose read-only `get` and `has`. `statusText` is empty because the pinned WASI interface does not provide a reason phrase. Redirect handling and broader Headers APIs remain outside this subset. SDK WIT declarations are unchanged; the capability catalog records these limits.
 - Scoped formatting and compiler/guest Clippy checks pass with existing warnings. The parent Makefile checks remain inapplicable as described in the verification baseline.
 
-- [ ] **10.2. Buffered Binary Bodies** — Needs D.1.
+- [x] **10.2. Buffered Binary Bodies** — Needs D.1.
     - [x] Preserve byte views through request-option objects and shallow copies, keeping identity, shared mutation, and retained references intact; adapt object storage where the binary bridge exposes value copying.
-    - [ ] Support binary request/response bodies through the shared byte representation and verify byte-exact round-trips and cleanup.
+    - [x] Support binary request/response bodies through the shared byte representation and verify byte-exact round-trips and cleanup.
 
 Verification (10.2 object-storage prerequisite):
 
 - The full `cargo test --locked --package perry-wit` suite passed 136 tests under `nix develop`, including local HTTP fixtures. Compiler and guest Clippy checks pass with existing warnings; applicable scoped formatting passes.
 - `tests/binary_views_test.rs` compares object/spread/assign identity, shared mutations, enumeration, key order, nested UTF-16 strings, and circular JSON errors against Node. `tests/repeated_task_calls_test.rs` verifies retained cyclic objects and nested byte views survive post-return, then release without memory growth after warm-up over 1,000 cycles.
-- Binary HTTP transfer and response-resource cleanup remain unchecked. This prerequisite changes guest value storage; it does not change WIT SDK contracts or establish callback/suspended-value lifetimes for E.2.
+- This prerequisite changes guest value storage; it does not change WIT SDK contracts or establish callback/suspended-value lifetimes for E.2.
+
+Verification (10.2 binary transfer and cleanup):
+
+- The full `cargo test --locked --package perry-wit` suite passed 139 tests under `nix develop`, including all 12 HTTP tests. Compiler and guest Clippy checks and scoped formatting pass with existing warnings; the parent Makefile limitations remain as recorded in the baseline.
+- `tests/http_regression_test.rs` verifies exact request/response bytes, offset subviews passed through options/spreads, empty bodies, and a 131,073-byte transfer through live HTTP fixtures. Text/JSON decoding handles a UTF-8 BOM and invalid-byte replacement without changing cached bytes. Ordinary arrays and objects are rejected as binary bodies before dispatch; GET/HEAD body validation still applies.
+- A resource-counting WASI host runs 600 calls in one instance, including unread futures/responses, retained nested responses, and skipped post-return cleanup, with stable memory after warm-up and bounded resources. A partial body-read failure releases its stream, body, and error resource; the next invocation releases the failed response and successfully transfers bytes again. The component invocation/pruning tests verify the cleanup ABI remains valid and pure tasks retain no HTTP imports.
+- Request bodies accept strings or `Uint8Array`; `Response.bytes()` returns an independent view. Buffered reads can repeat from cached bytes. ArrayBuffer, Blob, FormData, cloning, single-use body semantics, and streaming remain outside this subset; unsupported body APIs report diagnostics. Host resource drops run at ordinary invocation boundaries because component post-return cannot call imports. SDK WIT declarations are unchanged; the capability catalog records these limits.
 
 - [ ] **10.3. Buffered Incoming Handler** — Needs B.2; reusable handlers need the relevant E.2 lifetime support.
     - [ ] Expose `wasi:http/incoming-handler` and map incoming requests and response outparams to the Request/Response subset needed by one handler, including resource ownership.

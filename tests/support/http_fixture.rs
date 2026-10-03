@@ -14,12 +14,13 @@ pub struct Request {
     pub method: String,
     pub target: String,
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    pub body: Vec<u8>,
 }
 
 pub enum Reply {
     Body(u16, String),
     WithHeaders(u16, Vec<(String, String)>, String),
+    Bytes(u16, Vec<u8>),
     Disconnect,
     Stall,
     StallBody,
@@ -55,6 +56,10 @@ impl HttpFixture {
                         Reply::Body(status, body) => {
                             let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                             let _ = stream.write_all(body.as_bytes());
+                        }
+                        Reply::Bytes(status, body) => {
+                            let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                            let _ = stream.write_all(&body);
                         }
                         Reply::WithHeaders(status, headers, body) => {
                             let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
@@ -132,7 +137,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         method,
         target,
         headers,
-        body: String::from_utf8(request[header_end..header_end + length].to_vec()).unwrap(),
+        body: request[header_end..header_end + length].to_vec(),
     })
 }
 

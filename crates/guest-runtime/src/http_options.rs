@@ -1,6 +1,7 @@
 //! Supported fetch options, validated before dispatching a request.
 
-use serde_json::Value;
+use crate::nanbox::{STRING_TAG, TAG_NULL, TAG_UNDEFINED};
+use crate::state::{JsHandle, RuntimeState};
 
 pub(crate) enum RequestMethod {
     Get,
@@ -19,74 +20,89 @@ pub(crate) struct RequestOptions {
     pub(crate) body: Vec<u8>,
 }
 
-pub(crate) fn parse_options(value: Value) -> Result<RequestOptions, String> {
+pub(crate) fn parse_options(state: &RuntimeState, value: i64) -> Result<RequestOptions, String> {
     let mut options = RequestOptions {
         method: RequestMethod::Get,
         headers: Vec::new(),
         body: Vec::new(),
     };
-    let map = match value {
-        Value::Null => return Ok(options),
-        Value::Object(map) => map,
-        _ => return Err("fetch options must be an object".into()),
+    if matches!(value as u64, TAG_NULL | TAG_UNDEFINED) {
+        return Ok(options);
+    }
+    let Some(JsHandle::Object(properties)) = state.get_handle(value) else {
+        return Err("fetch options must be an object".into());
     };
     let mut has_body = false;
-    for (key, value) in map {
+    for (key, value) in properties.entries() {
+        let value = *value;
+        if value as u64 == TAG_UNDEFINED {
+            continue;
+        }
         match key.as_str() {
             "method" => {
-                options.method = match value.as_str() {
-                    Some(method) if method.eq_ignore_ascii_case("GET") => RequestMethod::Get,
-                    Some(method) if method.eq_ignore_ascii_case("POST") => RequestMethod::Post,
-                    Some(method) if method.eq_ignore_ascii_case("HEAD") => RequestMethod::Head,
-                    Some(method) if method.eq_ignore_ascii_case("PUT") => RequestMethod::Put,
-                    Some("PATCH") => RequestMethod::Patch,
-                    Some(method) if method.eq_ignore_ascii_case("DELETE") => RequestMethod::Delete,
-                    Some(method) if method.eq_ignore_ascii_case("OPTIONS") => {
-                        RequestMethod::Options
-                    }
-                    Some(method)
+                if (value as u64) >> 48 != STRING_TAG {
+                    return Err("Invalid fetch method".into());
+                }
+                let method = state.get_string(value);
+                options.method = match method.as_str() {
+                    method if method.eq_ignore_ascii_case("GET") => RequestMethod::Get,
+                    method if method.eq_ignore_ascii_case("POST") => RequestMethod::Post,
+                    method if method.eq_ignore_ascii_case("HEAD") => RequestMethod::Head,
+                    method if method.eq_ignore_ascii_case("PUT") => RequestMethod::Put,
+                    "PATCH" => RequestMethod::Patch,
+                    method if method.eq_ignore_ascii_case("DELETE") => RequestMethod::Delete,
+                    method if method.eq_ignore_ascii_case("OPTIONS") => RequestMethod::Options,
+                    method
                         if ["CONNECT", "TRACE", "TRACK"]
                             .iter()
                             .any(|forbidden| method.eq_ignore_ascii_case(forbidden)) =>
                     {
-                        return Err("Forbidden fetch method".into())
+                        return Err("Forbidden fetch method".into());
                     }
-                    Some(method) if valid_token(method) => RequestMethod::Other(method.into()),
+                    method if valid_token(method) => RequestMethod::Other(method.into()),
                     _ => return Err("Invalid fetch method".into()),
                 };
             }
             "body" => {
-                has_body = !value.is_null();
-                options.body = match value {
-                    Value::Null => Vec::new(),
-                    Value::String(body) => body.into_bytes(),
-                    _ => return Err("fetch body must be a string".into()),
+                has_body = value as u64 != TAG_NULL;
+                options.body = if value as u64 == TAG_NULL {
+                    Vec::new()
+                } else if (value as u64) >> 48 == STRING_TAG {
+                    state.get_string(value).into_bytes()
+                } else if let Some(JsHandle::Uint8Array(view)) = state.get_handle(value) {
+                    view.to_vec()
+                } else {
+                    return Err("fetch body must be a string or Uint8Array".into());
                 };
             }
             "headers" => {
-                let entries = match value {
-                    Value::Null => Vec::new(),
-                    Value::Object(headers) => headers.into_iter().collect(),
-                    Value::Array(headers) => headers
-                        .into_iter()
-                        .map(|header| match header {
-                            Value::Array(mut pair) if pair.len() == 2 => {
-                                let value = pair.pop().unwrap();
-                                match pair.pop().unwrap() {
-                                    Value::String(name) => Ok((name, value)),
-                                    _ => Err("fetch header names must be strings"),
+                let entries: Vec<_> = match state.get_handle(value) {
+                    Some(JsHandle::Object(headers)) => headers
+                        .entries()
+                        .map(|(key, value)| (key.clone(), *value))
+                        .collect(),
+                    Some(JsHandle::Array(headers)) => headers
+                        .iter()
+                        .map(|&header| match state.get_handle(header) {
+                            Some(JsHandle::Array(pair)) if pair.len() == 2 => {
+                                if (pair[0] as u64) >> 48 != STRING_TAG {
+                                    return Err("fetch header names must be strings");
                                 }
+                                Ok((state.get_string(pair[0]), pair[1]))
                             }
                             _ => Err("fetch headers must contain name/value pairs"),
                         })
                         .collect::<Result<Vec<_>, _>>()?,
+                    _ if value as u64 == TAG_NULL => Vec::new(),
                     _ => return Err("fetch headers must be an object or name/value pairs".into()),
                 };
                 for (name, value) in entries {
-                    let Value::String(value) = value else {
+                    if (value as u64) >> 48 != STRING_TAG {
                         return Err("fetch header values must be strings".into());
-                    };
-                    options.headers.push((name, value.into_bytes()));
+                    }
+                    options
+                        .headers
+                        .push((name, state.get_string(value).into_bytes()));
                 }
             }
             _ => return Err(format!("Unsupported fetch option: {key}")),

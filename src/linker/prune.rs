@@ -27,6 +27,10 @@ pub(crate) struct PruningPlan {
     pub(crate) func_map_a: Vec<u32>,
 }
 
+pub(crate) fn preserve_runtime_export(name: &str, needs_http: bool) -> bool {
+    name.starts_with("cabi_") || (needs_http && name == "http_reclaim_responses")
+}
+
 pub(crate) fn module_needs_http(a: &ParsedModuleA) -> bool {
     for d in &a.data {
         if d.data
@@ -157,9 +161,10 @@ pub(crate) fn compute_pruning_plan(
             &mut reachable_b_def,
         );
     }
-    // Module B exports: only cabi_* are preserved roots
+    // ABI dependencies include capability-specific cleanup synthesized after linking.
     for exp in &b.exports {
-        if exp.kind == ExternalKind::Func && exp.name.starts_with("cabi_") {
+        if exp.kind == ExternalKind::Func && preserve_runtime_export(exp.name, module_needs_http(a))
+        {
             mark_b(
                 exp.index as usize,
                 num_wasi,

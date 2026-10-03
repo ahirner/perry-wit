@@ -26,6 +26,7 @@ pub struct DiscoveredExports {
     pub cabi_reset_invocation_state: Option<u32>,
     pub cabi_register_global_root: Option<u32>,
     pub cabi_reclaim_temporaries: Option<u32>,
+    pub http_reclaim_responses: Option<u32>,
     pub user_i64_globals: Vec<u32>,
 }
 
@@ -78,42 +79,45 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                 for exp in reader {
                     let exp = exp?;
                     match exp.kind {
-                        ExternalKind::Func => {
-                            match exp.name {
-                                "_start" => exports.start_func = Some(exp.index),
-                                "cabi_import_string" => exports.cabi_import_string = Some(exp.index),
-                                "cabi_export_string" => exports.cabi_export_string = Some(exp.index),
-                                "cabi_export_result_string" => {
-                                    exports.cabi_export_result_string = Some(exp.index)
-                                }
-                                "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
-                                "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
-                                "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
-                                "cabi_check_exception" => {
-                                    exports.cabi_check_exception = Some(exp.index)
-                                }
-                                "cabi_post_result_cleanup" => {
-                                    exports.cabi_post_result_cleanup = Some(exp.index)
-                                }
-                                "cabi_record_init_checkpoint" => {
-                                    exports.cabi_record_init_checkpoint = Some(exp.index)
-                                }
-                                "cabi_reset_invocation_state" => {
-                                    exports.cabi_reset_invocation_state = Some(exp.index)
-                                }
-                                "cabi_register_global_root" => {
-                                    exports.cabi_register_global_root = Some(exp.index)
-                                }
-                                "cabi_reclaim_temporaries" => {
-                                    exports.cabi_reclaim_temporaries = Some(exp.index)
-                                }
-                                name => {
-                                    exports.user_functions.insert(name.to_string(), exp.index);
-                                }
+                        ExternalKind::Func => match exp.name {
+                            "_start" => exports.start_func = Some(exp.index),
+                            "cabi_import_string" => exports.cabi_import_string = Some(exp.index),
+                            "cabi_export_string" => exports.cabi_export_string = Some(exp.index),
+                            "cabi_export_result_string" => {
+                                exports.cabi_export_result_string = Some(exp.index)
                             }
-                        }
+                            "cabi_import_json" => exports.cabi_import_json = Some(exp.index),
+                            "cabi_export_json" => exports.cabi_export_json = Some(exp.index),
+                            "cabi_post_cleanup" => exports.cabi_post_cleanup = Some(exp.index),
+                            "cabi_check_exception" => {
+                                exports.cabi_check_exception = Some(exp.index)
+                            }
+                            "cabi_post_result_cleanup" => {
+                                exports.cabi_post_result_cleanup = Some(exp.index)
+                            }
+                            "cabi_record_init_checkpoint" => {
+                                exports.cabi_record_init_checkpoint = Some(exp.index)
+                            }
+                            "cabi_reset_invocation_state" => {
+                                exports.cabi_reset_invocation_state = Some(exp.index)
+                            }
+                            "cabi_register_global_root" => {
+                                exports.cabi_register_global_root = Some(exp.index)
+                            }
+                            "cabi_reclaim_temporaries" => {
+                                exports.cabi_reclaim_temporaries = Some(exp.index)
+                            }
+                            "http_reclaim_responses" => {
+                                exports.http_reclaim_responses = Some(exp.index)
+                            }
+                            name => {
+                                exports.user_functions.insert(name.to_string(), exp.index);
+                            }
+                        },
                         ExternalKind::Global => {
-                            if exp.name.starts_with("__wasm_global_") && i64_globals.contains(&exp.index) {
+                            if exp.name.starts_with("__wasm_global_")
+                                && i64_globals.contains(&exp.index)
+                            {
                                 exports.user_i64_globals.push(exp.index);
                             }
                         }
@@ -244,6 +248,11 @@ pub fn synthesize_trampolines(
         .map(|idx| format!("call {idx}\n    "))
         .unwrap_or_default();
 
+    let reclaim_http_call = discovered
+        .http_reclaim_responses
+        .map(|idx| format!("call {idx}\n    "))
+        .unwrap_or_default();
+
     let mut scan_globals_body = String::new();
     if let Some(reg) = discovered.cabi_register_global_root {
         for gidx in &discovered.user_i64_globals {
@@ -275,7 +284,7 @@ pub fn synthesize_trampolines(
     {scan_globals_body})
   (func $perry_safe_reset
     call $perry_scan_globals
-    {reset_call})
+    {reset_call}{reclaim_http_call})
 "#
     )
     .unwrap();
@@ -380,7 +389,9 @@ pub fn synthesize_trampolines(
                 );
                 let reclaim = discovered
                     .cabi_reclaim_temporaries
-                    .map(|idx| format!("call $perry_scan_globals\n    call {idx}\n    "))
+                    .map(|idx| {
+                        format!("call $perry_scan_globals\n    call {idx}\n    {reclaim_http_call}")
+                    })
                     .unwrap_or_default();
                 format!("{drops}{reclaim}")
             }
