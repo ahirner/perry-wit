@@ -6,7 +6,7 @@ use anyhow::Result;
 use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::time::timeout;
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, Linker, ResourceTable, Val};
 use wasmtime::{Config, Engine, Func, Instance, Module, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
@@ -505,5 +505,79 @@ fn test_waffle_stream_componentization_is_explicitly_unsupported() -> Result<()>
     let engine = Engine::default();
     Module::new(&engine, compiled.core)?;
     assert!(compiled.component.is_none());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_component_entry_signatures() -> Result<()> {
+    let engine = make_async_engine()?;
+    let linker = make_wasi_linker(&engine)?;
+    for (source, params, expected) in [
+        (
+            "export function run(): number { return 42; }",
+            vec![],
+            vec![Val::Float64(42.0)],
+        ),
+        (
+            "export function run(first: number, second: number): number { return first - second; }",
+            vec![Val::Float64(7.0), Val::Float64(2.0)],
+            vec![Val::Float64(5.0)],
+        ),
+        (
+            "export function run(input: number): void { return; }",
+            vec![Val::Float64(7.0)],
+            vec![],
+        ),
+        (
+            "export async function run(): Promise<void> { return; }",
+            vec![],
+            vec![],
+        ),
+        (
+            "export function run(input: number, flag: boolean): boolean { return flag; }",
+            vec![Val::Float64(7.0), Val::Bool(true)],
+            vec![Val::Bool(true)],
+        ),
+    ] {
+        let compiled =
+            compile_typescript_waffle(source, "signature.ts", &WaffleCompileOptions::default())?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, WasiHostState::default());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_func(&mut store, "run").unwrap();
+        let mut results = vec![Val::Bool(false); expected.len()];
+        run.call_async(&mut store, &params, &mut results).await?;
+        assert_eq!(results, expected, "{source}");
+    }
+    for parameter_count in [16, 17] {
+        let params = (0..parameter_count)
+            .map(|index| format!("arg{index}: number"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("export function run({params}): number {{ return arg15; }}");
+        let compiled =
+            compile_typescript_waffle(&source, "many_params.ts", &WaffleCompileOptions::default());
+        if parameter_count == 16 {
+            Component::new(&engine, compiled?.component.unwrap())?;
+        } else {
+            assert!(
+                compiled
+                    .unwrap_err()
+                    .to_string()
+                    .contains("more than 16 parameters")
+            );
+        }
+    }
+    let error = compile_typescript_waffle(
+        "export function run(input: number, stream: ByteStream): number { return input; }",
+        "stream_param.ts",
+        &WaffleCompileOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ByteStream componentization is unsupported")
+    );
     Ok(())
 }

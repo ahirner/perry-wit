@@ -68,6 +68,8 @@ pub(crate) struct ResolvedContract {
     #[allow(dead_code)]
     pub(crate) functions_by_name: BTreeMap<String, FuncId>,
     pub(crate) entry_func_id: FuncId,
+    pub(crate) entry_params: Vec<HirType>,
+    pub(crate) entry_return_type: HirType,
 }
 
 /// Resolves module bindings, shadowing, and contracts for WAFFLE lowering.
@@ -200,6 +202,12 @@ pub(crate) fn resolve_contract(hir: &HirModule) -> Result<ResolvedContract> {
         intrinsics,
         functions_by_name,
         entry_func_id: entry_func.id,
+        entry_params: entry_func
+            .params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect(),
+        entry_return_type: entry_func.return_type.clone(),
     })
 }
 
@@ -253,13 +261,13 @@ fn check_stmts_shadowing(
             }
             Stmt::For { init, body, .. } => {
                 let mut for_names = current_names.clone();
-                if let Some(init_stmt) = init {
-                    if let Stmt::Let { name, .. } = init_stmt.as_ref() {
-                        if intrinsics.contains_key(name) {
-                            bail!("For loop local '{name}' illegally shadows declared intrinsic");
-                        }
-                        for_names.insert(name.clone());
+                if let Some(init_stmt) = init
+                    && let Stmt::Let { name, .. } = init_stmt.as_ref()
+                {
+                    if intrinsics.contains_key(name) {
+                        bail!("For loop local '{name}' illegally shadows declared intrinsic");
                     }
+                    for_names.insert(name.clone());
                 }
                 check_stmts_shadowing(body, &for_names, intrinsics)?;
             }
