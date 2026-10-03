@@ -1416,3 +1416,18 @@ fn test_join_rejects_nonarray_receivers_and_extra_arguments() {
         "{error:#}"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_result_signature_retains_canonical_allocator() -> Result<()> {
+    for signature in [
+        "function run(): Result<string, number>",
+        "async function run(): Promise<Result<string, number>>",
+    ] {
+        run_cases(
+            &format!("export {signature} {{ throw 1; }}"),
+            &[(vec![], Val::Result(Err(Some(Box::new(Val::Float64(1.0))))))],
+        )
+        .await?;
+    }
+    Ok(())
+}
