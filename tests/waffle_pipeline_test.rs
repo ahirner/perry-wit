@@ -1,5 +1,9 @@
 //! Comprehensive integration test suite for the LLVM-free Perry HIR → WAFFLE SSA backend.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -136,6 +140,98 @@ fn test_waffle_capability_signatures_are_checked_before_emission() {
                 .unwrap_err();
         assert_eq!(error.root_cause().to_string(), expected);
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_mixed_capabilities_share_text_unwinding_and_invocation_lifetimes() -> Result<()>
+{
+    let compiled = compile_typescript_waffle(
+        r#"
+        declare function waitFor(milliseconds: number): Promise<void>;
+        declare function randomNumber(): number;
+        export async function run(input: string, delay: number): Promise<Result<string, number>> {
+            let text = input.toUpperCase();
+            let sample = randomNumber();
+            try {
+                await waitFor(delay);
+                if (sample < 0.5) { throw 17; }
+                return text + "!";
+            } finally {
+                randomNumber();
+            }
+        }
+        "#,
+        "mixed.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    assert_eq!(
+        component
+            .component_type()
+            .imports(&engine)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        [
+            "wasi:random/random@0.3.0",
+            "wasi:clocks/monotonic-clock@0.3.0"
+        ]
+    );
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::clocks::add_to_linker(&mut linker)?;
+    let random_word = Arc::new(AtomicU64::new(u64::MAX));
+    let samples = Arc::new(AtomicUsize::new(0));
+    let host_word = random_word.clone();
+    let host_samples = samples.clone();
+    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+        "get-random-u64",
+        move |_: StoreContextMut<'_, WasiHostState>, (): ()| {
+            host_samples.fetch_add(1, Ordering::SeqCst);
+            Ok((host_word.load(Ordering::SeqCst),))
+        },
+    )?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run =
+        instance.get_typed_func::<(String, f64), (Result<String, f64>,)>(&mut store, "run")?;
+    let input = "Straße😀\0é".repeat(12_000);
+    for index in 0..48 {
+        random_word.store(if index % 2 == 0 { u64::MAX } else { 0 }, Ordering::SeqCst);
+        let (result,) = run.call_async(&mut store, (input.clone(), 0.0)).await?;
+        assert_eq!(
+            result,
+            if index % 2 == 0 {
+                Ok(input.to_uppercase() + "!")
+            } else {
+                Err(17.0)
+            }
+        );
+    }
+    assert_eq!(samples.load(Ordering::SeqCst), 96);
+
+    let mut pending = Box::pin(run.call_async(&mut store, (input.clone(), 100.0)));
+    assert!(
+        timeout(Duration::from_millis(10), &mut pending)
+            .await
+            .is_err()
+    );
+    assert_eq!(samples.load(Ordering::SeqCst), 97);
+    drop(pending);
+    drop(store);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(samples.load(Ordering::SeqCst), 97);
+
+    random_word.store(u64::MAX, Ordering::SeqCst);
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run =
+        instance.get_typed_func::<(String, f64), (Result<String, f64>,)>(&mut store, "run")?;
+    assert_eq!(
+        run.call_async(&mut store, ("😀é".into(), 0.0)).await?.0,
+        Ok("😀É!".into())
+    );
+    assert_eq!(samples.load(Ordering::SeqCst), 99);
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
