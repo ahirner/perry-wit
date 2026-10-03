@@ -150,17 +150,17 @@ Verification:
 
 ### Phase 7: Randomness (`wasi:random`)
 
-- [ ] **7.1. UUIDs & Math.random()** — Does not need guest binary views.
+- [x] **7.1. UUIDs & Math.random()** — Does not need guest binary views.
     - [x] Expose `crypto.randomUUID()` backed by secure host randomness and `Math.random()` with values in `[0, 1)` through the pinned random interfaces.
-    - [ ] Verify UUID format/version/variant and numeric bounds with controlled edge inputs; collision sampling is not a correctness guarantee.
+    - [x] Verify UUID format/version/variant and numeric bounds with controlled edge inputs; collision sampling is not a correctness guarantee.
 - [x] **7.2. In-Place Random Fill** — Needs D.1's view behavior.
     - [x] Make `crypto.getRandomValues(view)` fill a supported integer view's byte range and return that exact view, with type/size validation; start with `Uint8Array` if sufficient.
     - [x] Verify mutation, return identity, alias visibility, nonzero offsets, unchanged bytes outside the view, empty views, and invalid arguments using controlled random input.
 
 Verification:
 
-- `nix develop -c cargo test --test random_test`: 7 tests passed in the baseline run; `tests/conformance/cases/09_random.ts` also passed the Node comparison in `conformance_test`.
-- 7.1's APIs and sampled UUID/range checks work, but controlled host-input edge tests for UUID generation and `Math.random()` are not present. Its verification item and parent remain open.
+- `nix develop -c cargo test --test random_test`: 8 tests passed in the baseline run; `tests/conformance/cases/09_random.ts` also passed the Node comparison in `conformance_test`.
+- 7.1's APIs, sampled UUID/range checks, and controlled host-input edge tests (bounds 0.0, max float < 1.0, 53-bit mantissa bit-masking, RFC 4122 v4 version and variant bits on all-0x00 and all-0xFF inputs, exact vector matching, and short host buffer padding) are verified in `tests/random_test.rs`.
 - 7.2 has controlled host-byte tests for quota/type validation before host calls, empty views, return identity, and fills restricted to subviews. `getRandomValues` supports `Uint8Array` with a 65,536-byte quota; other view types remain outside the subset.
 
 ### Phase 8: Environment & Arguments (`wasi:cli`)

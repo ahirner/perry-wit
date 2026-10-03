@@ -182,8 +182,7 @@
       ],
       "differences": [
         "Only Uint8Array is supported for getRandomValues; other integer view types are not implemented",
-        "Powered by wasi:random/random and wasi:random/insecure; controlled fill tests are in tests/random_test.rs",
-        "Controlled host-input edge tests for UUID generation and Math.random remain outstanding"
+        "Powered by wasi:random/random and wasi:random/insecure; controlled fill, boundary, and vector tests run in tests/random_test.rs"
       ],
       "conformance": [
         "tests/conformance/cases/09_random.ts"

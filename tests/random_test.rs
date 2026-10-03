@@ -233,3 +233,134 @@ fn random_component_prunes_http_and_clocks() {
         "random component should not import wasi:clocks"
     );
 }
+
+#[test]
+fn controlled_host_inputs_for_math_random_and_uuid_generation() {
+    let scratch = support::Scratch::new();
+    let wit = format!(
+        r#"{}
+        world test {{
+            include runtime-adapter;
+            export test-random: func() -> f64;
+            export test-uuid: func() -> string;
+        }}
+    "#,
+        include_str!("../wit/world.wit")
+    );
+    let compiled = scratch.compile_artifacts(
+        r#"
+        export function testRandom(): number {
+            return Math.random();
+        }
+        export function testUuid(): string {
+            return crypto.randomUUID();
+        }
+    "#,
+        Some(&wit),
+    );
+    let path = scratch.0.join("random_edges.wasm");
+    fs::write(&path, compiled.core).unwrap();
+    let output = Command::new("node")
+        .arg("--eval")
+        .arg(
+            r#"
+        const assert = require('node:assert/strict');
+        const module = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
+        let mockU64 = 0n;
+        let mockBytes = [];
+        const imports = {};
+        let rt;
+        for (const {module: mod, name} of WebAssembly.Module.imports(module)) {
+            let implementation = () => { throw new Error(`unexpected import ${mod} ${name}`); };
+            if (mod === 'wasi:random/insecure@0.2.6' && name === 'get-insecure-random-u64') {
+                implementation = () => mockU64;
+            } else if (mod === 'wasi:random/random@0.2.6' && name === 'get-random-bytes') {
+                implementation = (length, result) => {
+                    const len = mockBytes.length;
+                    const ptr = rt.cabi_realloc(0, 0, 1, len);
+                    new Uint8Array(rt.memory.buffer, ptr, len).set(mockBytes);
+                    const memory = new DataView(rt.memory.buffer);
+                    memory.setUint32(result, ptr, true);
+                    memory.setUint32(result + 4, len, true);
+                };
+            }
+            (imports[mod] ??= {})[name] = implementation;
+        }
+        rt = new WebAssembly.Instance(module, imports).exports;
+
+        function getUuid() {
+            const area = rt['test-uuid']();
+            const view = new DataView(rt.memory.buffer);
+            const ptr = view.getUint32(area, true);
+            const len = view.getUint32(area + 4, true);
+            const str = new TextDecoder().decode(new Uint8Array(rt.memory.buffer, ptr, len));
+            if (rt.cabi_post_cleanup) { rt.cabi_post_cleanup(); }
+            return str;
+        }
+
+        // Test 1: Math.random() with controlled edge values
+        // Lower bound: 0 -> exactly 0.0
+        mockU64 = 0n;
+        assert.equal(rt['test-random'](), 0.0);
+
+        // Upper bound: (1 << 53) - 1 -> (2^53 - 1) / 2^53
+        mockU64 = (1n << 53n) - 1n;
+        const maxVal = rt['test-random']();
+        assert.equal(maxVal, ((2**53) - 1) / (2**53));
+        assert.ok(maxVal < 1.0);
+        assert.ok(maxVal >= 0.0);
+
+        // Full 64-bit max: u64::MAX -> upper 11 bits ignored by mantissa mask
+        mockU64 = 0xFFFFFFFFFFFFFFFFn;
+        const max64Val = rt['test-random']();
+        assert.equal(max64Val, ((2**53) - 1) / (2**53));
+        assert.ok(max64Val < 1.0);
+
+        // Mid-point: 1 << 52 -> 0.5
+        mockU64 = 1n << 52n;
+        assert.equal(rt['test-random'](), 0.5);
+
+        // Only high bits set (> 53 bits): mantissa is 0 -> 0.0
+        mockU64 = 0xFFE0000000000000n;
+        assert.equal(rt['test-random'](), 0.0);
+
+        // Test 2: crypto.randomUUID() with controlled byte patterns
+        // Case A: All zeroes
+        mockBytes = new Array(16).fill(0);
+        const zeroUuid = getUuid();
+        assert.equal(zeroUuid, '00000000-0000-4000-8000-000000000000');
+        assert.equal(zeroUuid.length, 36);
+        assert.equal(zeroUuid.charAt(14), '4', 'RFC 4122 v4 version digit');
+        assert.equal(zeroUuid.charAt(19), '8', 'RFC 4122 variant digit (10xx)');
+
+        // Case B: All 0xFF
+        mockBytes = new Array(16).fill(0xff);
+        const ffUuid = getUuid();
+        assert.equal(ffUuid, 'ffffffff-ffff-4fff-bfff-ffffffffffff');
+        assert.equal(ffUuid.charAt(14), '4', 'RFC 4122 v4 version digit');
+        assert.equal(ffUuid.charAt(19), 'b', 'RFC 4122 variant digit (1011)');
+
+        // Case C: Exact byte sequence vector
+        // [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]
+        // byte 6: 0xcd -> (0xcd & 0x0f) | 0x40 = 0x4d
+        // byte 8: 0xfe -> (0xfe & 0x3f) | 0x80 = 0xbe
+        mockBytes = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10];
+        const vectorUuid = getUuid();
+        assert.equal(vectorUuid, '01234567-89ab-4def-bedc-ba9876543210');
+
+        // Case D: Short host response (< 16 bytes, e.g. empty)
+        // Guest runtime pads with zeroes up to 16 bytes
+        mockBytes = [];
+        const shortUuid = getUuid();
+        assert.equal(shortUuid, '00000000-0000-4000-8000-000000000000');
+    "#,
+        )
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
