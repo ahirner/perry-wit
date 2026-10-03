@@ -171,9 +171,11 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 Stmt::Throw(expr) => {
                     let err_val = self.expression(expr)?;
-                    let err_val_f64 =
-                        abi::encode_payload(&mut self.body, self.block, Some(err_val));
-                    self.emit_throw(err_val_f64);
+                    ensure!(
+                        self.body.values[err_val].ty(&self.body.type_pool) == Some(Type::F64),
+                        "Only numeric thrown payloads are supported until the exception ABI preserves primitive type tags"
+                    );
+                    self.emit_throw(err_val);
                 }
                 Stmt::Try {
                     body,

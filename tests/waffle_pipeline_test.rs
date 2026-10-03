@@ -1123,3 +1123,27 @@ async fn test_waffle_exception_clause_local_scopes() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_waffle_rejects_nonnumeric_thrown_payloads() {
+    for source in [
+        "export function run(input: number): number { try { throw true; } catch (e) { if (e === 1) return 10; return 20; } }",
+        "export function run(input: number): number { try { throw false; } finally { let cleanup = 1; } }",
+        "function fail(flag: boolean): number { throw flag; } export function run(input: number): number { return fail(true); }",
+        "async function fail(): Promise<boolean> { return true; } export async function run(input: number): Promise<number> { throw await fail(); }",
+    ] {
+        for componentize in [false, true] {
+            let options = WaffleCompileOptions {
+                componentize,
+                ..Default::default()
+            };
+            let error = compile_typescript_waffle(source, "throw_type.ts", &options).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Only numeric thrown payloads are supported"),
+                "{error:#}"
+            );
+        }
+    }
+}

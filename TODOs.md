@@ -169,6 +169,7 @@ until R9 accounts for its remaining supported consumers.
     - [x] **R2.3:** Exercise repeated success and recoverable failure with the values and resources available on the new path. Verify cleanup and bounded live storage; extend coverage to strings after R4, binary values as introduced, and suspension in R3/R6. Keep these later checks open without making them a barrier to the first working backend.
 
 *Verification & Implementation Notes (R2 Complete):*
+- Thrown payloads currently support numbers only. Boolean throws are rejected in both core-only and component output until the exception ABI carries primitive type tags; this prevents catches from observing a boolean as a number.
 - Created `src/waffle_backend/exceptions.rs` with narrow `pub(crate)` types: `ExitReason` (`Normal = 0`, `Return = 1`, `Throw = 2`), `UnwindTarget`, `ReturnTarget`, `TryScope`, and `UnwindContext`.
 - Intra-module functions lower to a uniform `[Type::I32, Type::F64]` ABI (`0 = Ok`, `1 = Throw`), with caller unpacking and deterministic branch unwinding.
 - Implemented SSA try-catch-finally nesting with local variable block-argument threading and three-way finally exit dispatching (`Normal` -> join, `Return` -> outer return target, `Throw` -> outer throw target).
