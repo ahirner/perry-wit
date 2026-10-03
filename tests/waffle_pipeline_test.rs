@@ -1147,3 +1147,52 @@ fn test_waffle_rejects_nonnumeric_thrown_payloads() {
         }
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_wit_boolean_success_payloads() -> Result<()> {
+    let source = r#"
+        export function run(input: number): Result<boolean, number> {
+            try {
+                if (input < 0) { throw 42; }
+                if (input > 0) { return true; }
+                return false;
+            } finally { let cleanup = 1; }
+        }
+    "#;
+    let compiled =
+        compile_typescript_waffle(source, "bool_result.ts", &WaffleCompileOptions::default())?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = make_wasi_linker(&engine)?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run =
+        instance.get_typed_func::<(f64,), (std::result::Result<bool, f64>,)>(&mut store, "run")?;
+    for (input, expected) in [
+        (1.0, Ok(true)),
+        (-1.0, Err(42.0)),
+        (0.0, Ok(false)),
+        (1.0, Ok(true)),
+    ] {
+        assert_eq!(run.call_async(&mut store, (input,)).await?, (expected,));
+    }
+    for ok_type in ["number", "boolean"] {
+        let source = format!(
+            "export function run(input: number): Result<{ok_type}, boolean> {{ return input; }}"
+        );
+        for componentize in [false, true] {
+            let options = WaffleCompileOptions {
+                componentize,
+                ..Default::default()
+            };
+            let error = compile_typescript_waffle(&source, "bool_error.ts", &options).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("WIT Result error payloads must be numeric"),
+                "{error:#}"
+            );
+        }
+    }
+    Ok(())
+}

@@ -353,7 +353,7 @@ impl<'a> FunctionLowerer<'a> {
                         Ok(Some(return_val))
                     }
                 }
-                CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult => {
+                CallingConvention::ExportedDirect | CallingConvention::ExportedWitResult { .. } => {
                     let ret_types = &self.module.signatures[callee_info.sig].returns;
                     if ret_types.is_empty() {
                         self.op(

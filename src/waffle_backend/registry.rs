@@ -3,13 +3,12 @@
 //! Provides an immutable registry of complete function and intrinsic metadata
 //! before body lowering begins.
 
-use std::collections::BTreeMap;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail, ensure};
 use perry_hir::ir::Module as HirModule;
 use perry_hir::types::{FuncId, Type as HirType};
+use std::collections::BTreeMap;
 use waffle::{
-    Func, FuncDecl, FunctionBody, Import, ImportKind, Module,
-    SignatureData, Terminator, Type,
+    Func, FuncDecl, FunctionBody, Import, ImportKind, Module, SignatureData, Terminator, Type,
 };
 
 use crate::waffle_backend::resolve::ResolvedContract;
@@ -22,7 +21,14 @@ pub(crate) enum CallingConvention {
     /// Exported function returning core Wasm values directly (`[]`, `[f64]`, `[i32]`).
     ExportedDirect,
     /// Exported function returning a WIT Result via memory retptr `[i32]`.
-    ExportedWitResult,
+    ExportedWitResult { success: PrimitivePayload },
+}
+
+/// Primitive payload representations supported by WIT result adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrimitivePayload {
+    Number,
+    Boolean,
 }
 
 /// Complete, immutable metadata for a function declaration.
@@ -83,9 +89,7 @@ impl ModuleRegistry {
                 crate::waffle_backend::resolve::TypedIntrinsic::StreamDrop => {
                     (vec![Type::I32], vec![])
                 }
-                crate::waffle_backend::resolve::TypedIntrinsic::StreamReset => {
-                    (vec![], vec![])
-                }
+                crate::waffle_backend::resolve::TypedIntrinsic::StreamReset => (vec![], vec![]),
                 crate::waffle_backend::resolve::TypedIntrinsic::Custom {
                     params, returns, ..
                 } => (params.clone(), returns.clone()),
@@ -103,7 +107,9 @@ impl ModuleRegistry {
         // Add stream reset/drop imports if byte stream contract and not already passed
         let stream_helpers = if let Some(helpers) = stream_helpers {
             Some(helpers)
-        } else if contract.input_kind == crate::waffle_backend::resolve::ResolvedInputKind::ByteStream {
+        } else if contract.input_kind
+            == crate::waffle_backend::resolve::ResolvedInputKind::ByteStream
+        {
             let drop = if let Some(&f) = intrinsics.get("drop") {
                 f
             } else {
@@ -148,16 +154,30 @@ impl ModuleRegistry {
             while let HirType::Promise(inner) = ret_ty {
                 ret_ty = inner;
             }
-            let returns_wit_result = if func.id == contract.entry_func_id {
-                contract.entry_returns_wit_result()
+            let result_success = if let HirType::Generic { base, type_args } = ret_ty
+                && base == "Result"
+            {
+                ensure!(
+                    type_args.len() == 2,
+                    "WIT Result requires success and error types"
+                );
+                ensure!(
+                    matches!(type_args[1], HirType::Number | HirType::Any),
+                    "WIT Result error payloads must be numeric until the exception ABI preserves primitive type tags"
+                );
+                Some(match &type_args[0] {
+                    HirType::Number | HirType::Any => PrimitivePayload::Number,
+                    HirType::Boolean => PrimitivePayload::Boolean,
+                    other => bail!("Unsupported WIT Result success payload: {other:?}"),
+                })
             } else {
-                matches!(ret_ty, HirType::Generic { base, .. } if base == "Result")
+                None
             };
 
             let calling_convention = if !is_exported {
                 CallingConvention::Internal
-            } else if returns_wit_result {
-                CallingConvention::ExportedWitResult
+            } else if let Some(success) = result_success {
+                CallingConvention::ExportedWitResult { success }
             } else {
                 CallingConvention::ExportedDirect
             };
@@ -170,7 +190,7 @@ impl ModuleRegistry {
 
             let returns = match calling_convention {
                 CallingConvention::Internal => vec![Type::I32, Type::F64],
-                CallingConvention::ExportedWitResult => vec![Type::I32],
+                CallingConvention::ExportedWitResult { .. } => vec![Type::I32],
                 CallingConvention::ExportedDirect => map_return_type_to_waffle(&func.return_type)?,
             };
 

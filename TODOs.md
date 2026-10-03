@@ -175,6 +175,7 @@ until R9 accounts for its remaining supported consumers.
 - Implemented SSA try-catch-finally nesting with local variable block-argument threading and three-way finally exit dispatching (`Normal` -> join, `Return` -> outer return target, `Throw` -> outer throw target).
 - Infallible exported functions (`run(): number`) emit `Terminator::Unreachable` on uncaught exceptions, triggering a host runtime `Trap` and preventing any throw from masquerading as a successful dummy result (`test_waffle_infallible_uncaught_throw_traps`).
 - Fallible WIT exports (`Result<T, E>`) are lifted with Canonical ABI `(memory (core memory $guest "memory"))`, storing discriminant tag (0 = Ok, 1 = Err) and payload to linear memory and returning the retptr `[Type::I32]`.
+- Supported WIT results have number or boolean success payloads and numeric error payloads. Boolean successes use byte stores at the union's aligned payload offset; nonnumeric error types and other payload layouts are rejected before emission.
 - Tested instance reuse across repeated success and recoverable domain error invocations (`test_waffle_wit_domain_errors_and_instance_reuse`).
 - Tested nested try/catch/finally ordering, returns inside try blocks executing finally clauses, and multi-frame call stack unwinding (`test_waffle_try_catch_finally_ordering`, `test_waffle_multi_frame_unwinding`).
 - Linear memory export and automatic resource cleanup (`cleanup_resources()`) run on both normal function returns and unhandled throws.

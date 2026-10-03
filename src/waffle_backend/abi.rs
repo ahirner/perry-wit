@@ -7,14 +7,10 @@
 
 use waffle::{Block, BlockTarget, FunctionBody, Operator, Terminator, Type, Value, ValueDef};
 
-use crate::waffle_backend::registry::{CallingConvention, FunctionInfo};
+use crate::waffle_backend::registry::{CallingConvention, FunctionInfo, PrimitivePayload};
 
 /// Canonical payload encoding: converts an optional WAFFLE value into a single f64 payload Value.
-pub(crate) fn encode_payload(
-    body: &mut FunctionBody,
-    block: Block,
-    val: Option<Value>,
-) -> Value {
+pub(crate) fn encode_payload(body: &mut FunctionBody, block: Block, val: Option<Value>) -> Value {
     if let Some(v) = val {
         let ty = body.values[v].ty(&body.type_pool).unwrap_or(Type::F64);
         if ty == Type::I32 {
@@ -48,23 +44,29 @@ pub(crate) fn decode_payload(
     }
 }
 
-/// Stores a WIT Result discriminant (0=Ok, 1=Err) and f64 payload into linear memory retptr.
-/// Returns the retptr address Value (i32: 8).
+/// Stores a WIT Result tag and its declared primitive payload at the return pointer.
+/// Numeric error payloads align the union to eight bytes, including boolean success variants.
 pub(crate) fn emit_retptr_store(
     body: &mut FunctionBody,
     block: Block,
     memory: waffle::Memory,
     status: u32,
     payload_f64: Value,
+    payload_type: PrimitivePayload,
 ) -> Value {
     let addr = body.add_op(block, Operator::I32Const { value: 8 }, &[], &[Type::I32]);
-    let status_val = body.add_op(block, Operator::I32Const { value: status }, &[], &[Type::I32]);
+    let status_val = body.add_op(
+        block,
+        Operator::I32Const { value: status },
+        &[],
+        &[Type::I32],
+    );
 
     body.add_op(
         block,
-        Operator::I32Store {
+        Operator::I32Store8 {
             memory: waffle::MemoryArg {
-                align: 2,
+                align: 0,
                 offset: 0,
                 memory,
             },
@@ -72,18 +74,29 @@ pub(crate) fn emit_retptr_store(
         &[addr, status_val],
         &[],
     );
-    body.add_op(
-        block,
-        Operator::F64Store {
-            memory: waffle::MemoryArg {
-                align: 3,
-                offset: 8,
-                memory,
+    let (payload, store) = match payload_type {
+        PrimitivePayload::Number => (
+            payload_f64,
+            Operator::F64Store {
+                memory: waffle::MemoryArg {
+                    align: 3,
+                    offset: 8,
+                    memory,
+                },
             },
-        },
-        &[addr, payload_f64],
-        &[],
-    );
+        ),
+        PrimitivePayload::Boolean => (
+            decode_payload(body, block, payload_f64, true),
+            Operator::I32Store8 {
+                memory: waffle::MemoryArg {
+                    align: 0,
+                    offset: 8,
+                    memory,
+                },
+            },
+        ),
+    };
+    body.add_op(block, store, &[addr, payload], &[]);
 
     addr
 }
@@ -98,10 +111,15 @@ pub(crate) fn emit_function_return(
     ret_val: Option<Value>,
 ) {
     match convention {
-        CallingConvention::ExportedWitResult => {
+        CallingConvention::ExportedWitResult { success } => {
             let payload_f64 = encode_payload(body, block, ret_val);
-            let retptr = emit_retptr_store(body, block, memory, 0, payload_f64);
-            body.set_terminator(block, Terminator::Return { values: vec![retptr] });
+            let retptr = emit_retptr_store(body, block, memory, 0, payload_f64, success);
+            body.set_terminator(
+                block,
+                Terminator::Return {
+                    values: vec![retptr],
+                },
+            );
         }
         CallingConvention::ExportedDirect => {
             let values = if let Some(val) = ret_val {
@@ -157,9 +175,21 @@ pub(crate) fn emit_function_throw(
     payload_f64: Value,
 ) {
     match convention {
-        CallingConvention::ExportedWitResult => {
-            let retptr = emit_retptr_store(body, block, memory, 1, payload_f64);
-            body.set_terminator(block, Terminator::Return { values: vec![retptr] });
+        CallingConvention::ExportedWitResult { .. } => {
+            let retptr = emit_retptr_store(
+                body,
+                block,
+                memory,
+                1,
+                payload_f64,
+                PrimitivePayload::Number,
+            );
+            body.set_terminator(
+                block,
+                Terminator::Return {
+                    values: vec![retptr],
+                },
+            );
         }
         CallingConvention::ExportedDirect => {
             // Uncaught exception in infallible export traps at runtime
