@@ -91,7 +91,7 @@ pub(super) fn lower_runtime_exceptions(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Resolves the string IDs used by Perry's statically named bridge calls.
-fn runtime_string_names<'a>(
+pub(super) fn runtime_string_names<'a>(
     bodies: &[Vec<Operator<'_>>],
     data: &[Data<'a>],
     string_new: u32,
@@ -315,48 +315,39 @@ fn bridge_events(
         if !matches!(operator, Operator::Call { function_index } if *function_index == mem_call) {
             continue;
         }
-        let [
-            Operator::F64Const { value: name },
-            Operator::F64Const { .. },
-            Operator::GlobalGet { global_index },
-            Operator::I32Const { .. },
-            Operator::I32Sub,
-        ] = &operators[index - 5..index]
-        else {
+        let Some((name, global_index)) = memory_call_name(operators, index, names) else {
             continue;
         };
-        let name = names.get(f64::from_bits(name.bits()) as usize).copied();
         let (kind, suffix_length) = match name {
-            Some("try_start") => (BridgeKind::TryStart, 5),
-            Some("try_end") => (BridgeKind::TryEnd, 5),
-            Some("throw_value") => (BridgeKind::Throwing, 5),
-            Some(
-                "date_to_iso_string"
-                | "json_stringify"
-                | "closure_new"
-                | "closure_set_capture"
-                | "closure_call_0"
-                | "closure_call_1"
-                | "closure_call_2"
-                | "closure_call_3"
-                | "closure_call_spread"
-                | "uint8array_new"
-                | "buffer_alloc"
-                | "$$cryptoFillRandom"
-                | "fs_read_file_sync"
-                | "fs_read_file_binary"
-                | "fs_write_file_sync"
-                | "fs_mkdir_sync"
-                | "fs_readdir_sync"
-                | "fs_stat_sync"
-                | "fs_unlink_sync"
-                | "fs_rmdir_sync",
-            ) => (BridgeKind::Throwing, 9),
-            Some("__perry_catch_start") => (BridgeKind::TryStart, 10),
-            Some("__perry_catch_end") => (BridgeKind::TryEnd, 10),
-            Some("__perry_finally_start") => (BridgeKind::FinallyStart, 10),
-            Some("__perry_finally_end") => (BridgeKind::FinallyEnd, 10),
-            Some("__perry_exception_resume") => (BridgeKind::Throwing, 10),
+            "try_start" => (BridgeKind::TryStart, 5),
+            "try_end" => (BridgeKind::TryEnd, 5),
+            "throw_value" => (BridgeKind::Throwing, 5),
+            "date_to_iso_string"
+            | "timer_schedule"
+            | "json_stringify"
+            | "closure_new"
+            | "closure_set_capture"
+            | "closure_call_0"
+            | "closure_call_1"
+            | "closure_call_2"
+            | "closure_call_3"
+            | "closure_call_spread"
+            | "uint8array_new"
+            | "buffer_alloc"
+            | "$$cryptoFillRandom"
+            | "fs_read_file_sync"
+            | "fs_read_file_binary"
+            | "fs_write_file_sync"
+            | "fs_mkdir_sync"
+            | "fs_readdir_sync"
+            | "fs_stat_sync"
+            | "fs_unlink_sync"
+            | "fs_rmdir_sync" => (BridgeKind::Throwing, 9),
+            "__perry_catch_start" => (BridgeKind::TryStart, 10),
+            "__perry_catch_end" => (BridgeKind::TryEnd, 10),
+            "__perry_finally_start" => (BridgeKind::FinallyStart, 10),
+            "__perry_finally_end" => (BridgeKind::FinallyEnd, 10),
+            "__perry_exception_resume" => (BridgeKind::Throwing, 10),
             _ => continue,
         };
         let restoration = if suffix_length == 10 {
@@ -369,18 +360,40 @@ fn bridge_events(
             index + suffix_length
         };
         ensure!(
-            matches!(operators.get(restoration), Some(Operator::GlobalSet { global_index: restored }) if restored == global_index),
+            matches!(operators.get(restoration), Some(Operator::GlobalSet { global_index: restored }) if *restored == global_index),
             "unsupported Perry bridge frame restoration for {name:?}"
         );
         events.insert(
             index + suffix_length,
             BridgeEvent {
                 kind,
-                stack_global: *global_index,
+                stack_global: global_index,
             },
         );
     }
     Ok(events)
+}
+
+/// Identifies statically named memory calls without interpreting their argument expressions.
+pub(super) fn memory_call_name<'a>(
+    operators: &[Operator<'_>],
+    index: usize,
+    names: &[&'a str],
+) -> Option<(&'a str, u32)> {
+    let [
+        Operator::F64Const { value: name },
+        Operator::F64Const { .. },
+        Operator::GlobalGet { global_index },
+        Operator::I32Const { .. },
+        Operator::I32Sub,
+    ] = operators.get(index.checked_sub(5)?..index)?
+    else {
+        return None;
+    };
+    Some((
+        names.get(f64::from_bits(name.bits()) as usize).copied()?,
+        *global_index,
+    ))
 }
 
 /// Maps existing branches across inserted exception blocks.

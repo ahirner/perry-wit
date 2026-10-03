@@ -36,11 +36,37 @@
       "differences": [
         "Shared mutable lexical captures, this/new.target, async/generator function values, and rest/default/arguments parameters report compiler diagnostics",
         "Named function values with captures and calls with spread arguments report compiler diagnostics",
-        "Function values use ordinary value references; timer scheduling, callback cancellation, bound functions, and array callback methods remain separate work",
+        "One-shot timers retain callback graphs until delivery or cancellation; bound functions and array callback methods remain separate work",
         "Guest callbacks do not change WIT export types; SDK declarations continue to describe selected WIT contracts"
       ],
       "conformance": [
         "tests/runtime_regression_test.rs",
+        "tests/repeated_task_calls_test.rs"
+      ]
+    },
+    {
+      "id": "web.timers",
+      "name": "One-Shot Timers",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "Direct setTimeout/clearTimeout calls with synchronous guest callbacks and retained arguments",
+      "invariants": [
+        "Evaluates callback, delay, and extra arguments once in source order; passes the extra arguments to the callback without copying referenced values",
+        "Uses monotonic clock subscriptions and invokes callbacks once in deadline order, with registration order breaking equal-deadline ties",
+        "Retains captures and arguments until delivery or cancellation, including shared objects and byte views",
+        "Clearing a pending timer releases its subscription; unknown or expired numeric IDs cannot cancel later work",
+        "An empty queue returns without polling; uncaught guest exceptions, including initialization failures, cancel pending timers before reaching the existing invocation error path",
+        "Timer-only components retain monotonic-clock and poll interfaces without wall-clock, HTTP, filesystem, randomness, or environment imports"
+      ],
+      "differences": [
+        "CLI and exported component invocations drive pending timers to completion before returning to the host; the synchronous function's return value is computed before callbacks run",
+        "Timer IDs are instance-local numbers and never repeat; Node Timeout objects, unref/ref, globalThis timer methods, and timer functions used as values are outside this subset",
+        "Delays use Node-style whole milliseconds: values below 1, nonfinite values, or values above 2147483647 become 1; other values are truncated",
+        "setInterval and timer function values report compiler diagnostics; callback forms follow the guest-function subset",
+        "Promises, microtasks, and general guest async execution remain separate work; WIT export types and generated SDK contracts are unchanged"
+      ],
+      "conformance": [
+        "tests/clocks_test.rs",
         "tests/repeated_task_calls_test.rs"
       ]
     },

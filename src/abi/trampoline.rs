@@ -27,6 +27,7 @@ pub struct DiscoveredExports {
     pub cabi_register_global_root: Option<u32>,
     pub cabi_reclaim_temporaries: Option<u32>,
     pub http_reclaim_responses: Option<u32>,
+    pub timers_drain: Option<u32>,
     pub user_i64_globals: Vec<u32>,
 }
 
@@ -110,6 +111,7 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                             "http_reclaim_responses" => {
                                 exports.http_reclaim_responses = Some(exp.index)
                             }
+                            "timers_drain" => exports.timers_drain = Some(exp.index),
                             name => {
                                 exports.user_functions.insert(name.to_string(), exp.index);
                             }
@@ -253,6 +255,11 @@ pub fn synthesize_trampolines(
         .map(|idx| format!("call {idx}\n    "))
         .unwrap_or_default();
 
+    let drain_timers_call = discovered
+        .timers_drain
+        .map(|idx| format!("call {idx}\n    "))
+        .unwrap_or_default();
+
     let mut scan_globals_body = String::new();
     if let Some(reg) = discovered.cabi_register_global_root {
         for gidx in &discovered.user_i64_globals {
@@ -291,16 +298,20 @@ pub fn synthesize_trampolines(
 
     // Synthesize CLI entry if world expects it
     if wit_exports.has_cli_command {
-        snippets.push_str(
+        write!(
+            snippets,
             r#"
   (func $wasi_cli_run (result i32)
     call $perry_ensure_init
     call $perry_safe_reset
-    i32.const 0
+    {drain_timers_call}call {check_exception}
+    call $perry_scan_globals
+    {reclaim_temporaries_call}{reclaim_http_call}i32.const 0
   )
   (export "wasi:cli/run@0.2.6#run" (func $wasi_cli_run))
 "#,
-        );
+        )
+        .unwrap();
     }
 
     // Synthesize trampolines for each mapped task export function
@@ -422,7 +433,7 @@ pub fn synthesize_trampolines(
     call $perry_safe_reset
     {import_body}
     call {target_func}
-    call {check_exception}
+    {drain_timers_call}call {check_exception}
     {result_handling}
   )
   (export "{kebab_name}" (func $cabi_trampoline_{sanitized}))

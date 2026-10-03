@@ -30,6 +30,7 @@ mod objects;
 mod random;
 mod state;
 mod stubs;
+mod timers;
 
 pub use cabi::{
     cabi_check_exception, cabi_debug_state, cabi_export_json, cabi_export_result_string,

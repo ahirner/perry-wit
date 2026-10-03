@@ -7,7 +7,7 @@ Phase numbers identify capability areas rather than a fixed implementation seque
 
 1. Slices **C.2**, **7.1**, **9.1**, and **9.3** are closed with complete test coverage, indirect-call fixtures, option validation, and recorded sizes.
 2. HTTP metadata/methods (**10.1**) and buffered binary bodies (**10.2**) are complete. Use those client paths and fixtures as the baseline for handlers and streaming.
-3. Develop callbacks (**B.1**), guest async execution (**B.2**), and retained lifetimes (**E.2**) around the first handler or timer that needs them.
+3. One-shot timers (**11.1**) establish callback execution (**B.1**) and retained lifetimes (**E.2**). Develop guest async execution (**B.2**) around an awaited timer or handler, extending these paths where the consumer needs it.
 4. Expand into streaming and TCP after a buffered or one-shot use case works. Host adapters (**A.1**) and Component Model async (**13.1**) follow concrete integration needs.
 
 ## Tracking Completion
@@ -32,9 +32,9 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ## Verification Baseline (2026-10-03)
 
-- `nix develop -c cargo test --locked --package perry-wit`: 143 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
+- `nix develop -c cargo test --locked --package perry-wit`: 146 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
 - The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
-- Scoped formatting passed. Project Clippy checks completed with existing warnings. Parent `make format-rs` / `make lint-rs` targets cannot run here because they require rustup's `+nightly` handling and the separate `monty-bench` workspace; the pinned Nix checks are the applicable checks for this workspace.
+- Scoped formatting passed. Project and WebAssembly guest Clippy checks completed with existing warnings. Automatic approval review rejected parent `make format-rs` because it could rewrite the broader workspace; parent `make lint-rs` fails because `monty-bench` is outside this workspace. The pinned, scoped Nix checks are the applicable checks here.
 - SDK generation describes selected WIT contracts, not ambient JavaScript/Node API compatibility. These runtime slices do not change WIT export types; supported API subsets and limits belong in the capability catalog and tests.
 - Catalog `conformance` references can identify TypeScript differential cases or Rust integration suites. The differential report executes only TypeScript cases; integration-only entries remain `MISSING` in that report and are verified separately by Cargo.
 
@@ -56,16 +56,16 @@ Read-only lexical captures can retain mutable objects/views; shared mutable bind
 The pinned Perry backend can emit named async functions as unresolved `rt:__async_<name>` imports, while trampoline mapping excludes async functions.
 Existing HTTP polling does not establish general guest async execution.
 
-- [ ] **B.1. Guest Callback Execution** — Develop retained capture lifetimes with E.2.
+- [x] **B.1. Guest Callback Execution** — Develop retained capture lifetimes with E.2.
     - [x] Make guest function values callable through a path that respects the linker's TypeScript/Rust table separation; select the bridge to match the emitted callback ABI.
-    - [ ] Support the captures needed by the first consumer, including their lifetime beyond the creating call; diagnose unsupported closure forms.
+    - [x] Support the captures needed by the first consumer, including their lifetime beyond the creating call; diagnose unsupported closure forms.
     - [x] Verify an identity callback returns its argument, a captured value survives delayed invocation, and repeated creation/invocation/release has bounded memory. Cover shared mutable captures if they are exposed.
 
-Verification so far:
+Verification:
 
 - `runtime_regression_test` compares callback values, named aliases, missing/excess parameters, evaluation order, nested invocation, and void returns with Node; it also tests exception propagation and unsupported-form diagnostics.
 - `retained_callback_graphs_survive_calls_and_release_on_success_and_failure` exercises 1,000 retained/released callback cycles after warm-up, including captured strings/views, object/closure cycles, recoverable throws, and skipped post-return; linear memory stays at its warmed high-water mark. The same callback path runs through a Wasmtime component export.
-- B.1 remains open for the first scheduled callback consumer and its capture needs; shared mutable bindings are currently rejected. E.2 still needs the consumer's stale-handle protection and cancellation behavior where exposed.
+- The first scheduled consumer is 11.1's one-shot timer. Its callbacks retain strings, cyclic objects, and byte views after the creating function returns, then release ownership on delivery or cancellation. Shared mutable lexical bindings and the other diagnosed function forms remain outside the supported callback subset.
 
 - [ ] **B.2. Guest Async Execution** — Needs retained suspended state from E.2; use B.1 where the chosen lowering invokes guest callbacks.
     - [ ] Reproduce the named async export failure with a minimal `async runTask`, then make its body compile, link, and execute in the guest. Choose a backend change or upgrade based on that probe.
@@ -123,7 +123,7 @@ Verification:
 ### Item E: Value Lifetimes & Bounded Memory
 
 `RuntimeState` now reclaims invocation temporaries and recycles string/handle slots while retaining initialization values, registered globals, and process-context handles.
-Post-return hooks release ABI buffers and trigger value reclamation; callback captures and suspended work still need E.2.
+Post-return hooks release ABI buffers and trigger value reclamation. Callback graphs and pending timer arguments are roots until their owner releases them; suspended async work will extend those rules with B.2.
 
 - [x] **E.1. Repeated Task Calls**
     - [x] Establish which values outlive a call, including literals, globals, returned values, and pending work; use that evidence to choose a reclamation approach.
@@ -133,14 +133,19 @@ Post-return hooks release ABI buffers and trigger value reclamation; callback ca
 
 Verification:
 
-- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 6 repeated-call and 2 ABI memory tests passed in the baseline run, including the callback graph test described under B.1.
+- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 7 repeated-call and 2 ABI memory tests passed in the baseline run, including the callback graph and timer lifecycle tests.
 - Coverage includes stable memory after warm-up, retained global arrays/strings, recoverable result failures, skipped post-return recovery, direct component invocation, and allocation/reallocation exhaustion trapping rather than returning address zero.
 - Checkpoints, global scans, slot recycling, and return-area tracking are implemented in `state.rs`, `cabi.rs`, and ABI trampolines. Recovery claims cover the tested interrupted-cleanup paths; arbitrary traps or exhausted instances are not promised reusable.
 
-- [ ] **E.2. Retained Values for the First Async/Callback Consumer** — Deliver with B.1 or B.2, extending E.1's ownership rules.
-    - [ ] Keep that consumer's captures or suspended values alive until their owner completes or releases them; choose retention/reclamation around the actual value graph, including any supported cycles.
-    - [ ] Verify survival across calls or suspension, reclamation after release, and protection against stale handles aliasing newly allocated values.
-    - [ ] Verify repeated retained-work cycles stay bounded on success and failure; include cancellation if the consumer exposes it.
+- [x] **E.2. Retained Values for the First Async/Callback Consumer** — Deliver with B.1 or B.2, extending E.1's ownership rules.
+    - [x] Keep that consumer's captures or suspended values alive until their owner completes or releases them; choose retention/reclamation around the actual value graph, including any supported cycles.
+    - [x] Verify survival across calls or suspension, reclamation after release, and protection against stale handles aliasing newly allocated values.
+    - [x] Verify repeated retained-work cycles stay bounded on success and failure; include cancellation if the consumer exposes it.
+
+Verification:
+
+- The retained callback graph test under B.1 verifies survival across component calls and reclamation after release. `scheduled_callbacks_release_captures_resources_and_stale_ids` extends that graph ownership to queued timers, including strings, cyclic objects/closures, shared byte views, and raw callback arguments.
+- The timer test runs 100 warm-up and 1,000 further cycles with delivery, cancellation, caught/uncaught guest errors, and skipped post-return cleanup. Fixed-size success/error payloads keep memory at its warmed high-water mark; every created subscription is dropped and live pollables remain bounded. Repeated expired IDs and invalid IDs leave newly scheduled work intact. Initialization and synchronous failures also release pending subscriptions. Arbitrary host traps and exhausted instances are outside the recovery guarantee.
 
 E.2 completes for its first consumer.
 Later handler, timer, and I/O slices own their additional lifetime tests; future resource types do not hold this slice open indefinitely.
@@ -262,10 +267,16 @@ Verification (10.2 binary transfer and cleanup):
 Existing HTTP `Promise.all` polls response futures together.
 Extend that mechanism where it fits each consumer; timers and stream readiness need not wait for each other.
 
-- [ ] **11.1. One-Shot Timers** — Needs B.1, retained callback lifetimes, and monotonic clocks; promise-facing behavior also needs B.2.
-    - [ ] Deliver `setTimeout` callbacks and support `clearTimeout`, using clock pollables and a pending-work representation appropriate to the runtime.
-    - [ ] Define observable callback ordering and idle termination; release captures and subscriptions when timers fire or are cancelled.
-    - [ ] Verify delivery exactly once, delayed capture survival, cancellation before firing and from another callback, idle termination, and bounded repeated allocations.
+- [x] **11.1. One-Shot Timers** — Needs B.1, retained callback lifetimes, and monotonic clocks; promise-facing behavior also needs B.2.
+    - [x] Deliver `setTimeout` callbacks and support `clearTimeout`, using clock pollables and a pending-work representation appropriate to the runtime.
+    - [x] Define observable callback ordering and idle termination; release captures and subscriptions when timers fire or are cancelled.
+    - [x] Verify delivery exactly once, delayed capture survival, cancellation before firing and from another callback, idle termination, and bounded repeated allocations.
+
+Verification:
+
+- `nix develop -c cargo test --locked --package perry-wit --test clocks_test --test repeated_task_calls_test`: all 11 clock/timer and 7 repeated-call tests pass in the full baseline run. A Node comparison checks callback order, delayed captures, once-only argument evaluation, and extra arguments; the controlled clock host checks deadline ties, delay coercion, nested scheduling, cancellation, idle termination, stale IDs, and bounded resources/memory. Timers also run through actual Wasmtime CLI and component exports.
+- `timers.rs` owns pending work and subscriptions. Direct timer call specialization retains only monotonic-clock/poll imports for timer-only tasks; the pure and mixed-capability pruning suites remain green. Invocations drain pending callbacks before returning; the synchronous function computes its return value before that drain. Post-return never performs host polling or resource drops.
+- The catalog records direct global calls, numeric IDs, Node-style whole-millisecond delays, and the existing supported callback forms. Timer function values and intervals currently report diagnostics. Promise timers, microtasks, Node Timeout objects, and broader timer API forms belong to subsequent consumers; WIT export types and SDK contracts are unchanged. Validation uses indexed array iteration; a heterogeneous inline `for…of` probe currently hangs and remains a separate compiler limitation.
 - [ ] **11.2. Intervals** — Builds on 11.1 when recurring work is needed.
     - [ ] Add `setInterval` / `clearInterval` with defined rescheduling and cancellation behavior compatible with the supported timer subset.
     - [ ] Verify repeated callbacks, clearing during execution, and bounded memory/resources over many cycles.

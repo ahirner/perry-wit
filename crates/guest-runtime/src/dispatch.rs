@@ -306,7 +306,7 @@ sync_dispatchers! {
 }
 
 /// Monomorphization leaves only each entrypoint's selected capabilities reachable.
-fn mem_call_sync(
+pub(crate) fn mem_call_sync(
     func_name_id: f64,
     arg_count: f64,
     base_addr: i32,

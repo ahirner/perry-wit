@@ -842,17 +842,9 @@ pub(crate) extern "C" fn uint8array_set(handle: i64, idx: i64, val: i64) {
     }
 }
 #[no_mangle]
-pub(crate) extern "C" fn set_timeout(_a: i64, _b: i64) -> i64 {
-    0
-}
-#[no_mangle]
 pub(crate) extern "C" fn set_interval(_a: i64, _b: i64) -> i64 {
     0
 }
-#[no_mangle]
-pub(crate) extern "C" fn clear_timeout(_a: i64) {}
-#[no_mangle]
-pub(crate) extern "C" fn clear_interval(_a: i64) {}
 #[no_mangle]
 pub(crate) extern "C" fn response_status(_a: i64) -> i64 {
     0

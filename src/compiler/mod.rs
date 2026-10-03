@@ -4,6 +4,7 @@ mod clocks;
 mod exceptions;
 mod fetch;
 mod rewrites;
+mod timers;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,6 +82,7 @@ pub fn compile_typescript_raw(
     let raw_wasm = compile_modules_to_wasm(&[("main".to_string(), hir)])
         .map_err(|e| anyhow::anyhow!("Compilation failed: {e:?}"))?;
     let raw_wasm = exceptions::lower_runtime_exceptions(&raw_wasm)?;
+    let raw_wasm = timers::specialize_timer_calls(&raw_wasm)?;
 
     // Ensure initial memory has enough pages for guest runtime
     let wat = wasmprinter::print_bytes(&raw_wasm)

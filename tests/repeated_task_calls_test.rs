@@ -13,6 +13,213 @@ use std::process::Command;
 use perry_wit::compiler::{CompileOptions, compile_typescript};
 
 #[test]
+fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
+    let scratch = support::Scratch::new();
+    let artifacts = scratch.compile_artifacts(
+        r#"
+        let trace = "";
+        let previousId = 0;
+        export function runTask(input: string): string {
+            trace = "";
+            const owner: any = {text: input, bytes: Uint8Array.from([17, 128, 255])};
+            const ids = {later: 0};
+            const record = suffix => {
+                trace += owner.text + suffix + owner.bytes[1] + ";";
+                if (input === "component") { console.log(trace); }
+            };
+            owner.callback = record;
+            owner.self = owner;
+            setTimeout(() => {
+                record(":first:");
+                clearTimeout(ids.later);
+                setTimeout(() => record(":nested:"), 1);
+            }, 10);
+            const canceled = setTimeout(() => record(":canceled:"), 5);
+            clearTimeout(canceled);
+            clearTimeout(canceled);
+            ids.later = setTimeout(() => record(":later:"), 20);
+            const live = setTimeout(record, 10, ":second:");
+            clearTimeout(live + 0.5);
+            clearTimeout(-live);
+            clearTimeout(Infinity);
+            clearTimeout(previousId);
+            previousId = live;
+            setTimeout(() => {
+                try { throw owner.text; }
+                catch (error) { record(":caught:"); }
+            }, 30);
+            if (input.startsWith("fail:")) {
+                setTimeout(() => { throw owner.text; }, 1);
+            }
+            if (input.startsWith("sync-fail:")) { throw owner.text; }
+            return "scheduled";
+        }
+        export function snapshot(): string { return trace; }
+        export function idle(): string {
+            const id = setTimeout(() => { trace = "unreachable"; }, 1000);
+            clearTimeout(id);
+            return "idle";
+        }
+        export function delayCases(): string {
+            const values: any[] = [undefined, null, NaN, Infinity, -1, 0, 1.9, "2.9", 2147483648];
+            for (let index = 0; index < values.length; index++) {
+                const id = setTimeout(() => { trace = "unreachable"; }, values[index]);
+                clearTimeout(id);
+            }
+            return "checked";
+        }
+    "#,
+        Some(
+            r#"
+        package test:timers;
+        world test {
+            import wasi:cli/stdout@0.2.6;
+            import wasi:cli/stderr@0.2.6;
+            import wasi:cli/exit@0.2.6;
+            import wasi:io/poll@0.2.6;
+            import wasi:io/streams@0.2.6;
+            import wasi:clocks/monotonic-clock@0.2.6;
+            export run-task: func(input: string) -> string;
+            export snapshot: func() -> string;
+            export idle: func() -> string;
+            export delay-cases: func() -> string;
+        }
+    "#,
+        ),
+    );
+    let core = scratch.0.join("core.wasm");
+    fs::write(&core, artifacts.core).unwrap();
+    let init_core = scratch.0.join("init-failure.wasm");
+    let init_artifacts =
+        scratch.compile_artifacts("setTimeout(() => {}, 1000); throw 'initialization';", None);
+    fs::write(&init_core, init_artifacts.core).unwrap();
+    let wat = wasmprinter::print_bytes(artifacts.component.as_ref().unwrap()).unwrap();
+    for capability in [
+        "wasi:http",
+        "wasi:filesystem",
+        "wasi:random",
+        "wasi:clocks/wall-clock",
+        "wasi:cli/environment",
+    ] {
+        assert!(!wat.contains(capability), "timer task retains {capability}");
+    }
+    let output = Command::new("node").arg("--eval").arg(r#"
+        const assert = require('node:assert/strict');
+        const module_ = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
+        const imports = {};
+        let now = 0n, nextPollable = 0, blocked = 0, created = 0, dropped = 0, peak = 0;
+        const pending = new Map();
+        const delays = [];
+        for (const {module, name} of WebAssembly.Module.imports(module_)) {
+            let implementation = () => { throw Error(`unexpected host call ${module}.${name}`); };
+            if (module.startsWith('wasi:clocks/monotonic-clock')) {
+                if (name === 'now') { implementation = () => now; }
+                if (name === 'subscribe-instant') {
+                    implementation = deadline => {
+                        const id = ++nextPollable;
+                        pending.set(id, deadline);
+                        delays.push(Number(deadline - now));
+                        peak = Math.max(peak, pending.size);
+                        created++;
+                        return id;
+                    };
+                }
+            } else if (module.startsWith('wasi:io/poll')) {
+                if (name === '[method]pollable.block') {
+                    implementation = id => {
+                        assert.ok(pending.has(id));
+                        if (pending.get(id) > now) { now = pending.get(id); }
+                        blocked++;
+                    };
+                } else if (name === '[resource-drop]pollable') {
+                    implementation = id => { assert.ok(pending.delete(id)); dropped++; };
+                }
+            } else if (module.startsWith('wasi:cli/stderr')) {
+                implementation = () => 1;
+            } else if (module.startsWith('wasi:io/streams')) {
+                if (name === '[method]output-stream.blocking-write-and-flush') {
+                    implementation = (id, ptr, len, ret) => { new Uint8Array(e.memory.buffer)[ret] = 0; };
+                } else if (name === '[resource-drop]output-stream') { implementation = () => {}; }
+            } else if (module.startsWith('wasi:cli/exit')) { implementation = () => {}; }
+            (imports[module] ??= {})[name] = implementation;
+        }
+        let e = new WebAssembly.Instance(module_, imports).exports;
+        function call(name, input, post = true) {
+            const bytes = input === undefined ? null : new TextEncoder().encode(input);
+            const ptr = bytes ? e.cabi_realloc(0, 0, 1, bytes.length) : 0;
+            if (bytes) { new Uint8Array(e.memory.buffer, ptr, bytes.length).set(bytes); }
+            try {
+                const ret = bytes ? e[name](ptr, bytes.length) : e[name]();
+                const words = new Uint32Array(e.memory.buffer, ret, 2);
+                const result = new TextDecoder().decode(new Uint8Array(e.memory.buffer, words[0], words[1]));
+                if (post) { e[`cabi_post_${name}`](ret); }
+                return result;
+            } finally { if (bytes) { e.cabi_realloc(ptr, bytes.length, 1, 0); } }
+        }
+        function cycle(index) {
+            const text = `cycle-${String(index).padStart(5, '0')}:` + 'retained😀'.repeat(40);
+            const start = now;
+            const blocks = blocked;
+            assert.equal(call('run-task', text, index % 7 !== 0), 'scheduled');
+            assert.equal(now - start, 30_000_000n);
+            assert.equal(blocked - blocks, 4);
+            assert.equal(call('snapshot'), ['first', 'second', 'nested', 'caught'].map(suffix => text + ':' + suffix + ':128;').join(''));
+            assert.equal(pending.size, 0);
+            const idleBlocks = blocked;
+            assert.equal(call('idle'), 'idle');
+            assert.equal(blocked, idleBlocks, 'a cancelled queue must terminate without polling');
+            assert.equal(pending.size, 0);
+            assert.throws(() => call('run-task', 'fail:' + text), WebAssembly.RuntimeError);
+            assert.equal(pending.size, 0, 'uncaught callback failure must cancel every subscription');
+            assert.equal(call('snapshot'), '', 'a failed callback must prevent later callbacks');
+            const beforeSyncFailure = blocked;
+            assert.throws(() => call('run-task', 'sync-fail:' + text), WebAssembly.RuntimeError);
+            assert.equal(pending.size, 0, 'a synchronous guest failure must cancel pending timers');
+            assert.equal(blocked, beforeSyncFailure);
+        }
+        assert.equal(call('delay-cases'), 'checked');
+        assert.deepEqual(delays, [1, 1, 1, 1, 1, 1, 1, 2, 1].map(value => value * 1_000_000));
+        delays.length = 0;
+        for (let index = 0; index < 100; index++) { cycle(index); }
+        const memory = e.memory.buffer.byteLength;
+        for (let index = 0; index < 1000; index++) { cycle(index); }
+        assert.equal(e.memory.buffer.byteLength, memory, 'timer/capture cycles must stop growing after warm-up');
+        assert.equal(created, dropped);
+        assert.ok(peak <= 5, `pollables must remain bounded, observed ${peak}`);
+        const initModule = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[2]));
+        e = new WebAssembly.Instance(initModule, imports).exports;
+        const beforeInitialization = blocked;
+        assert.throws(() => e['wasi:cli/run@0.2.6#run'](), WebAssembly.RuntimeError);
+        assert.equal(pending.size, 0, 'initialization failure must release queued subscriptions');
+        assert.equal(blocked, beforeInitialization);
+        assert.equal(created, dropped);
+    "#).arg(&core).arg(&init_core).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let component = scratch.0.join("component.wasm");
+    fs::write(&component, artifacts.component.unwrap()).unwrap();
+    let output = get_wasmtime_cmd()
+        .args([
+            "run",
+            "-C",
+            "cache=n",
+            "--invoke",
+            "run-task(\"component\")",
+        ])
+        .arg(component)
+        .output()
+        .unwrap();
+    assert_eq!(
+        support::stdout(&output),
+        "component:first:128;\ncomponent:first:128;component:second:128;\ncomponent:first:128;component:second:128;component:nested:128;\ncomponent:first:128;component:second:128;component:nested:128;component:caught:128;\n\"scheduled\"\n"
+    );
+}
+
+#[test]
 fn retained_callback_graphs_survive_calls_and_release_on_success_and_failure() {
     let scratch = support::Scratch::new();
     let source = r#"

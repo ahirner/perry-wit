@@ -27,8 +27,16 @@ pub(crate) struct PruningPlan {
     pub(crate) func_map_a: Vec<u32>,
 }
 
-pub(crate) fn preserve_runtime_export(name: &str, needs_http: bool) -> bool {
-    name.starts_with("cabi_") || (needs_http && name == "http_reclaim_responses")
+pub(crate) fn preserve_runtime_export(name: &str, needs_http: bool, needs_timers: bool) -> bool {
+    name.starts_with("cabi_")
+        || (needs_http && name == "http_reclaim_responses")
+        || (needs_timers && name == "timers_drain")
+}
+
+pub(crate) fn module_needs_timers(a: &ParsedModuleA) -> bool {
+    a.imports
+        .iter()
+        .any(|(module, name, _)| *module == "rt" && *name == "mem_call_timers")
 }
 
 pub(crate) fn module_needs_http(a: &ParsedModuleA) -> bool {
@@ -174,7 +182,8 @@ pub(crate) fn compute_pruning_plan(
     }
     // ABI dependencies include capability-specific cleanup synthesized after linking.
     for exp in &b.exports {
-        if exp.kind == ExternalKind::Func && preserve_runtime_export(exp.name, module_needs_http(a))
+        if exp.kind == ExternalKind::Func
+            && preserve_runtime_export(exp.name, module_needs_http(a), module_needs_timers(a))
         {
             mark_b(
                 exp.index as usize,

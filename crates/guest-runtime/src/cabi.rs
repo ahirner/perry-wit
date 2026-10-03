@@ -4,10 +4,12 @@ use core::alloc::Layout;
 
 use crate::state::get_state;
 
-/// Stops a component invocation if guest execution left an uncaught exception.
+/// Releases pending timers and stops an invocation after an uncaught guest exception.
 #[no_mangle]
 pub extern "C" fn cabi_check_exception() {
-    if let Some(error) = get_state().current_exception.as_deref() {
+    let state = get_state();
+    if let Some(error) = state.current_exception.as_deref() {
+        state.timers.cancel_all();
         crate::io::fail_with_error(error);
     }
 }

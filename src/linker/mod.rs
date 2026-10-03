@@ -68,6 +68,7 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     let needs_random = module_needs_random(&a);
     let needs_env = module_needs_env(&a);
     let needs_fs = prune::module_needs_fs(&a);
+    let needs_timers = prune::module_needs_timers(&a);
 
     let mut resolved_imports_a = Vec::with_capacity(a.imports.len());
     for &(mod_name, name, _ty) in &a.imports {
@@ -241,7 +242,7 @@ pub fn merge_core_modules(ts_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>
     for exp in &b.exports {
         match exp.kind {
             ExternalKind::Func => {
-                if prune::preserve_runtime_export(exp.name, needs_http) {
+                if prune::preserve_runtime_export(exp.name, needs_http, needs_timers) {
                     let merged_f = func_map_b[exp.index as usize];
                     export_sec.export(exp.name, ExportKind::Func, merged_f);
                 }

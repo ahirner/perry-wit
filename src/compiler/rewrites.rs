@@ -28,7 +28,7 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) -> anyhow::Re
         needs_random: false,
         needs_env: false,
         needs_fs: false,
-        callback_error: None,
+        compatibility_error: None,
         callback_depth: 0,
         current_function: None,
         function_values: Vec::new(),
@@ -80,7 +80,7 @@ pub(crate) fn rewrite_program(program: &mut perry_hir::ir::Module) -> anyhow::Re
             rewriter.rewrite_expr(parent);
         }
     }
-    if let Some(error) = rewriter.callback_error.or_else(|| {
+    if let Some(error) = rewriter.compatibility_error.or_else(|| {
         rewriter
             .function_values
             .iter()
@@ -163,7 +163,7 @@ struct Rewriter {
     needs_random: bool,
     needs_env: bool,
     needs_fs: bool,
-    callback_error: Option<&'static str>,
+    compatibility_error: Option<&'static str>,
     callback_depth: usize,
     current_function: Option<perry_hir::types::FuncId>,
     function_values: Vec<perry_hir::types::FuncId>,
@@ -285,6 +285,32 @@ impl Rewriter {
     }
 
     fn rewrite_current_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
+        if let Expr::Call { callee, args, .. } = expr
+            && let Expr::ExternFuncRef { name, .. } = callee.as_ref()
+        {
+            match name.as_str() {
+                "setTimeout" => {
+                    let mut arguments = std::mem::take(args).into_iter();
+                    let callback = arguments.next().unwrap_or(Expr::Undefined);
+                    let delay = arguments.next().unwrap_or(Expr::Undefined);
+                    *expr = runtime_method_call(
+                        "timer_schedule",
+                        vec![callback, delay, Expr::Array(arguments.collect())],
+                    );
+                    return;
+                }
+                "clearTimeout" | "clearInterval" => {
+                    *expr = runtime_method_call("timer_cancel", std::mem::take(args));
+                    return;
+                }
+                "setInterval" => {
+                    self.compatibility_error = self.compatibility_error.or(Some(
+                        "setInterval is not supported yet; use one-shot setTimeout callbacks",
+                    ));
+                }
+                _ => {}
+            }
+        }
         if let Expr::Delete(target) = expr {
             let key = match target.as_mut() {
                 Expr::EnvGet(name) => Some(Expr::String(name.clone())),
@@ -804,8 +830,18 @@ impl Rewriter {
 
     fn rewrite_expr(&mut self, expr: &mut perry_hir::ir::Expr) {
         self.rewrite_current_expr(expr);
+        if let Expr::ExternFuncRef { name, .. } = expr
+            && matches!(
+                name.as_str(),
+                "setTimeout" | "clearTimeout" | "setInterval" | "clearInterval"
+            )
+        {
+            self.compatibility_error = self.compatibility_error.or(Some(
+                "Timer functions used as values are not supported yet; call the timer global directly",
+            ));
+        }
         if self.callback_depth > 0 && matches!(expr, Expr::This | Expr::NewTarget) {
-            self.callback_error = self.callback_error.or(Some(
+            self.compatibility_error = self.compatibility_error.or(Some(
                 "Guest function values using this or new.target are not supported yet",
             ));
         }
@@ -818,7 +854,7 @@ impl Rewriter {
             );
         }
         if matches!(expr, Expr::CallSpread { .. }) {
-            self.callback_error = self.callback_error.or(Some(
+            self.compatibility_error = self.compatibility_error.or(Some(
                 "Guest function calls with spread arguments are not supported yet",
             ));
         }
@@ -856,7 +892,7 @@ impl Rewriter {
             ..
         } = expr
         {
-            self.callback_error = self.callback_error.or(if !mutable_captures.is_empty() {
+            self.compatibility_error = self.compatibility_error.or(if !mutable_captures.is_empty() {
                 Some("Guest closures with shared mutable captures are not supported yet")
             } else if *captures_this || *captures_new_target {
                 Some("Guest closures capturing this or new.target are not supported yet")

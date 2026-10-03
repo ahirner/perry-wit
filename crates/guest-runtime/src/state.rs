@@ -34,6 +34,7 @@ pub(crate) struct RuntimeState {
     pub(crate) reachable_strings: Vec<bool>,
     pub(crate) reachable_handles: Vec<bool>,
     pub(crate) pending_return_area: Option<(i32, usize)>,
+    pub(crate) timers: crate::timers::Timers,
 }
 
 impl RuntimeState {
@@ -54,6 +55,7 @@ impl RuntimeState {
             reachable_strings: Vec::new(),
             reachable_handles: Vec::new(),
             pending_return_area: None,
+            timers: crate::timers::Timers::default(),
         }
     }
 
@@ -102,6 +104,7 @@ impl RuntimeState {
             self.worklist.push(nanbox_pointer(i));
         }
         self.worklist.extend_from_slice(&self.global_roots);
+        self.worklist.extend(self.timers.roots());
         self.global_roots.clear();
         if let Some(env) = self.process_env {
             self.worklist.push(env);
