@@ -11,8 +11,10 @@
 //!   operate on Unicode scalar values.
 
 mod allocation;
+mod positions;
 
 use allocation::{PAGE_BYTES, emit_allocator};
+use positions::{PositionMode, bounded_position, emit_char_at};
 use std::collections::BTreeMap;
 use anyhow::Result;
 use waffle::{
@@ -338,48 +340,9 @@ pub(crate) fn emit_string_runtime(
             &[Type::I32],
         );
 
-        // Normalize start index:
-        // if start < 0: max(0, scalar_len + start) else min(scalar_len, start)
-        let zero_f64 = body.add_op(entry, Operator::F64Const { value: 0f64.to_bits() }, &[], &[Type::F64]);
-        let start_is_neg = body.add_op(entry, Operator::F64Lt, &[start_f64, zero_f64], &[Type::I32]);
-        let start_i32 = body.add_op(entry, Operator::I32TruncF64S, &[start_f64], &[Type::I32]);
-        let neg_start = body.add_op(entry, Operator::I32Add, &[scalar_len, start_i32], &[Type::I32]);
+        let norm_start = bounded_position(&mut body, entry, start_f64, scalar_len, PositionMode::Relative);
+        let norm_end = bounded_position(&mut body, entry, end_f64, scalar_len, PositionMode::Relative);
         let zero_i32 = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-        let neg_start_is_pos = body.add_op(entry, Operator::I32GtS, &[neg_start, zero_i32], &[Type::I32]);
-        let neg_start_clamped = body.add_op(
-            entry,
-            Operator::Select,
-            &[neg_start, zero_i32, neg_start_is_pos],
-            &[Type::I32],
-        );
-        let pos_start_exceeds = body.add_op(entry, Operator::I32GtS, &[start_i32, scalar_len], &[Type::I32]);
-        let pos_start_clamped = body.add_op(
-            entry,
-            Operator::Select,
-            &[scalar_len, start_i32, pos_start_exceeds],
-            &[Type::I32],
-        );
-        let norm_start = body.add_op(entry, Operator::Select, &[neg_start_clamped, pos_start_clamped, start_is_neg], &[Type::I32]);
-
-        // Normalize end index:
-        let end_is_neg = body.add_op(entry, Operator::F64Lt, &[end_f64, zero_f64], &[Type::I32]);
-        let end_i32 = body.add_op(entry, Operator::I32TruncF64S, &[end_f64], &[Type::I32]);
-        let neg_end = body.add_op(entry, Operator::I32Add, &[scalar_len, end_i32], &[Type::I32]);
-        let neg_end_is_pos = body.add_op(entry, Operator::I32GtS, &[neg_end, zero_i32], &[Type::I32]);
-        let neg_end_clamped = body.add_op(
-            entry,
-            Operator::Select,
-            &[neg_end, zero_i32, neg_end_is_pos],
-            &[Type::I32],
-        );
-        let pos_end_exceeds = body.add_op(entry, Operator::I32GtS, &[end_i32, scalar_len], &[Type::I32]);
-        let pos_end_clamped = body.add_op(
-            entry,
-            Operator::Select,
-            &[scalar_len, end_i32, pos_end_exceeds],
-            &[Type::I32],
-        );
-        let norm_end = body.add_op(entry, Operator::Select, &[neg_end_clamped, pos_end_clamped, end_is_neg], &[Type::I32]);
 
         // If norm_start >= norm_end: return empty string descriptor
         let is_empty = body.add_op(entry, Operator::I32GeS, &[norm_start, norm_end], &[Type::I32]);
@@ -588,32 +551,7 @@ pub(crate) fn emit_string_runtime(
         module.funcs.push(FuncDecl::Body(sig, "$rt_str_slice".into(), body))
     };
 
-    // 4. str_char_at(desc: i32, idx: f64) -> i32
-    // Calls str_slice(desc, idx, idx + 1.0)
-    let str_char_at = {
-        let sig = module.signatures.push(SignatureData {
-            params: vec![Type::I32, Type::F64],
-            returns: vec![Type::I32],
-        });
-        let mut body = FunctionBody::new(module, sig);
-        let entry = body.entry;
-        let desc = body.blocks[entry].params[0].1;
-        let idx = body.blocks[entry].params[1].1;
-        let one_f64 = body.add_op(entry, Operator::F64Const { value: 1.0f64.to_bits() }, &[], &[Type::F64]);
-        let idx_plus_one = body.add_op(entry, Operator::F64Add, &[idx, one_f64], &[Type::F64]);
-        let res = body.add_op(
-            entry,
-            Operator::Call {
-                function_index: str_slice,
-            },
-            &[desc, idx, idx_plus_one],
-            &[Type::I32],
-        );
-        body.set_terminator(entry, Terminator::Return { values: vec![res] });
-        body.validate()?;
-        body.verify_reducible()?;
-        module.funcs.push(FuncDecl::Body(sig, "$rt_str_char_at".into(), body))
-    };
+    let str_char_at = emit_char_at(module, memory, str_slice)?;
 
     // 5. str_concat(a: i32, b: i32) -> i32
     let str_concat = {
@@ -750,15 +688,12 @@ pub(crate) fn emit_string_runtime(
         let s_ptr = body.add_op(entry, Operator::I32Load { memory: MemoryArg { align: 2, offset: 0, memory } }, &[search], &[Type::I32]);
         let s_byte_len = body.add_op(entry, Operator::I32Load { memory: MemoryArg { align: 2, offset: 4, memory } }, &[search], &[Type::I32]);
 
-        let zero_f64 = body.add_op(entry, Operator::F64Const { value: 0f64.to_bits() }, &[], &[Type::F64]);
-        let neg_one_f64 = body.add_op(entry, Operator::F64Const { value: (-1.0f64).to_bits() }, &[], &[Type::F64]);
-        let pos_lt_zero = body.add_op(entry, Operator::F64Lt, &[pos_f64, zero_f64], &[Type::I32]);
-        let pos_i32 = body.add_op(entry, Operator::I32TruncF64S, &[pos_f64], &[Type::I32]);
+        let norm_pos = bounded_position(&mut body, entry, pos_f64, scalar_len, PositionMode::Clamped);
+        let neg_one_f64 = body.add_op(entry, Operator::F64Const { value: (-1f64).to_bits() }, &[], &[Type::F64]);
         let zero_i32 = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
         let one = body.add_op(entry, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
         let c0 = body.add_op(entry, Operator::I32Const { value: 0xC0 }, &[], &[Type::I32]);
         let c80 = body.add_op(entry, Operator::I32Const { value: 0x80 }, &[], &[Type::I32]);
-        let norm_pos = body.add_op(entry, Operator::Select, &[zero_i32, pos_i32, pos_lt_zero], &[Type::I32]);
 
         // If s_byte_len == 0:
         let search_is_empty = body.add_op(entry, Operator::I32Eqz, &[s_byte_len], &[Type::I32]);

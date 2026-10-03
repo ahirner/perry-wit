@@ -4,6 +4,8 @@
 //! typed basic blocks, SSA values, and block parameters without linear memory
 //! overhead for primitive values.
 
+mod string_ops;
+
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail, ensure};
@@ -61,7 +63,8 @@ pub(crate) fn lower_module(
 
         if let Some(export) = &info.export {
             let lift_fn = registry.string_helpers.as_ref().map(|h| h.lift_canonical);
-            let wrapper = abi::build_export_wrapper(&module, info, export, registry.memory, lift_fn)?;
+            let wrapper =
+                abi::build_export_wrapper(&module, info, export, registry.memory, lift_fn)?;
             module.funcs[export.func_index] =
                 waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
             module.exports.push(Export {
@@ -320,55 +323,11 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
-        if let Expr::PropertyGet { object, property, .. } = callee {
-            if property == "slice" {
-                let desc = self.expression(object)?;
-                let start = self.expression(&args[0])?;
-                let end = if args.len() > 1 {
-                    self.expression(&args[1])?
-                } else {
-                    let scalar_len = self.op(
-                        Operator::I32Load {
-                            memory: waffle::MemoryArg { align: 2, offset: 8, memory: self.registry.memory },
-                        },
-                        &[desc],
-                        &[Type::I32],
-                    );
-                    self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64])
-                };
-                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
-                let res = self.op(
-                    Operator::Call { function_index: helpers.str_slice },
-                    &[desc, start, end],
-                    &[Type::I32],
-                );
-                return Ok(Some(res));
-            } else if property == "charAt" {
-                let desc = self.expression(object)?;
-                let idx = self.expression(&args[0])?;
-                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
-                let res = self.op(
-                    Operator::Call { function_index: helpers.str_char_at },
-                    &[desc, idx],
-                    &[Type::I32],
-                );
-                return Ok(Some(res));
-            } else if property == "indexOf" {
-                let desc = self.expression(object)?;
-                let search = self.expression(&args[0])?;
-                let pos = if args.len() > 1 {
-                    self.expression(&args[1])?
-                } else {
-                    self.op(Operator::F64Const { value: 0f64.to_bits() }, &[], &[Type::F64])
-                };
-                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
-                let res = self.op(
-                    Operator::Call { function_index: helpers.str_index_of },
-                    &[desc, search, pos],
-                    &[Type::F64],
-                );
-                return Ok(Some(res));
-            }
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+        {
+            return self.string_method(object, property, args).map(Some);
         }
 
         let mut arg_vals = Vec::with_capacity(args.len());
@@ -421,7 +380,10 @@ impl<'a> FunctionLowerer<'a> {
                     &mut self.body,
                     self.block,
                     outcome.payload,
-                    matches!(callee_info.success_type(), HirType::Boolean | HirType::String),
+                    matches!(
+                        callee_info.success_type(),
+                        HirType::Boolean | HirType::String
+                    ),
                 );
                 Ok(Some(return_val))
             }
@@ -474,9 +436,15 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Compare { op, left, right } if self.is_string(left) || self.is_string(right) => {
                 let left_val = self.expression(left)?;
                 let right_val = self.expression(right)?;
-                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                let helpers = self
+                    .registry
+                    .string_helpers
+                    .as_ref()
+                    .expect("string helpers available");
                 let cmp_res = self.op(
-                    Operator::Call { function_index: helpers.str_compare },
+                    Operator::Call {
+                        function_index: helpers.str_compare,
+                    },
                     &[left_val, right_val],
                     &[Type::I32],
                 );
@@ -543,15 +511,12 @@ impl<'a> FunctionLowerer<'a> {
     fn expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
             Expr::String(s) => {
-                let offset = self
-                    .string_pool
-                    .get(s)
-                    .unwrap_or_else(|| panic!("String literal {s:?} was not interned in string pool"));
+                let offset = self.string_pool.get(s).unwrap_or_else(|| {
+                    panic!("String literal {s:?} was not interned in string pool")
+                });
                 Ok(self.op(Operator::I32Const { value: offset }, &[], &[Type::I32]))
             }
-            Expr::TemplateStringCoerce(inner) => {
-                self.expression(inner)
-            }
+            Expr::TemplateStringCoerce(inner) => self.expression(inner),
             Expr::Number(n) => {
                 Ok(self.op(Operator::F64Const { value: n.to_bits() }, &[], &[Type::F64]))
             }
@@ -571,11 +536,17 @@ impl<'a> FunctionLowerer<'a> {
                 .get(id)
                 .copied()
                 .ok_or_else(|| anyhow::anyhow!("Uninitialized local {:?}", id)),
-            Expr::PropertyGet { object, property, .. } if property == "length" => {
+            Expr::PropertyGet {
+                object, property, ..
+            } if property == "length" => {
                 let desc = self.expression(object)?;
                 let scalar_len = self.op(
                     Operator::I32Load {
-                        memory: waffle::MemoryArg { align: 2, offset: 8, memory: self.registry.memory },
+                        memory: waffle::MemoryArg {
+                            align: 2,
+                            offset: 8,
+                            memory: self.registry.memory,
+                        },
                     },
                     &[desc],
                     &[Type::I32],
@@ -585,22 +556,34 @@ impl<'a> FunctionLowerer<'a> {
             Expr::IndexGet { object, index, .. } => {
                 let desc = self.expression(object)?;
                 let idx = self.expression(index)?;
-                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                let helpers = self
+                    .registry
+                    .string_helpers
+                    .as_ref()
+                    .expect("string helpers available");
                 Ok(self.op(
-                    Operator::Call { function_index: helpers.str_char_at },
+                    Operator::Call {
+                        function_index: helpers.str_char_at,
+                    },
                     &[desc, idx],
                     &[Type::I32],
                 ))
             }
-            Expr::Compare { .. } => {
-                self.condition(expr)
-            }
-            Expr::Binary { op, left, right } if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) => {
+            Expr::Compare { .. } => self.condition(expr),
+            Expr::Binary { op, left, right }
+                if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) =>
+            {
                 let left_val = self.expression(left)?;
                 let right_val = self.expression(right)?;
-                let helpers = self.registry.string_helpers.as_ref().expect("string helpers available");
+                let helpers = self
+                    .registry
+                    .string_helpers
+                    .as_ref()
+                    .expect("string helpers available");
                 Ok(self.op(
-                    Operator::Call { function_index: helpers.str_concat },
+                    Operator::Call {
+                        function_index: helpers.str_concat,
+                    },
                     &[left_val, right_val],
                     &[Type::I32],
                 ))
@@ -861,7 +844,9 @@ fn collect_strings_stmt(stmt: &Stmt, pool: &mut StringPool) {
     match stmt {
         Stmt::Expr(expr) | Stmt::Throw(expr) => collect_strings_expr(expr, pool),
         Stmt::Return(Some(expr)) => collect_strings_expr(expr, pool),
-        Stmt::Let { init: Some(expr), .. } => collect_strings_expr(expr, pool),
+        Stmt::Let {
+            init: Some(expr), ..
+        } => collect_strings_expr(expr, pool),
         Stmt::If {
             condition,
             then_branch,

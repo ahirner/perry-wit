@@ -609,3 +609,75 @@ fn test_string_allocator_failure_does_not_advance_heap() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_string_method_defaults_and_numeric_positions() -> Result<()> {
+    run_cases(
+        r#"export function run(): string { return "A🦀B".slice() + "A🦀B".charAt(); }"#,
+        &[(vec![], Val::String("A🦀BA".into()))],
+    )
+    .await?;
+    let positions = [
+        f64::NAN,
+        -0.5,
+        -1.5,
+        -1e20,
+        1e20,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        1.9,
+    ];
+    for (operation, expected) in [
+        (
+            "slice(p)",
+            vec!["A🦀B", "A🦀B", "B", "A🦀B", "", "A🦀B", "", "🦀B"],
+        ),
+        (
+            "slice(0, p)",
+            vec!["", "", "A🦀", "", "A🦀B", "", "A🦀B", "A"],
+        ),
+        ("charAt(p)", vec!["A", "A", "", "", "", "", "", "🦀"]),
+    ] {
+        let source =
+            format!(r#"export function run(p: number): string {{ return "A🦀B".{operation}; }}"#);
+        let cases = positions
+            .into_iter()
+            .zip(expected)
+            .map(|(p, s)| (vec![Val::Float64(p)], Val::String(s.into())))
+            .collect::<Vec<_>>();
+        run_cases(&source, &cases).await?;
+    }
+    for (search, expected) in [
+        ("", [0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 3.0, 1.0]),
+        ("🦀", [1.0, 1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0]),
+    ] {
+        let source = format!(
+            r#"export function run(p: number): number {{ return "A🦀B".indexOf("{search}", p); }}"#
+        );
+        let cases = positions
+            .into_iter()
+            .zip(expected)
+            .map(|(p, n)| (vec![Val::Float64(p)], Val::Float64(n)))
+            .collect::<Vec<_>>();
+        run_cases(&source, &cases).await?;
+    }
+    Ok(())
+}
+
+#[test]
+fn test_string_method_unsupported_arguments_are_diagnostics() {
+    for expression in [
+        r#""abc".slice(1, 2, 3)"#,
+        r#""abc".charAt(1, 2)"#,
+        r#""abc".indexOf()"#,
+        r#""abc".indexOf(1)"#,
+        r#""abc".slice(true)"#,
+    ] {
+        let source = format!("export function run(): string {{ return {expression}; }}");
+        assert!(
+            compile_typescript_waffle(&source, "arguments.ts", &WaffleCompileOptions::default())
+                .is_err(),
+            "{expression}"
+        );
+    }
+}
