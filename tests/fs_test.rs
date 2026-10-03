@@ -122,7 +122,10 @@ fn readdir_options_are_evaluated_and_rejected_before_reading() {
             .output()
             .unwrap();
         let stdout = support::stdout(&output);
-        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(
+            stdout.contains("path;options;path;options;path;options;path;options;"),
+            "{import}"
+        );
         assert!(stdout.contains("1,1,1,1,1,1"), "{import}");
     }
     let output = support::run(
@@ -186,7 +189,10 @@ fn stat_options_are_evaluated_and_rejected_before_stat() {
             .output()
             .unwrap();
         let stdout = support::stdout(&output);
-        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(
+            stdout.contains("path;options;path;options;path;options;path;options;"),
+            "{import}"
+        );
         assert!(stdout.contains("5,5,5,5"), "{import}");
     }
     let output = support::run(
@@ -209,6 +215,8 @@ fn unlink_options_are_evaluated_and_rejected_before_deletion() {
     for (import, unlink) in [
         ("import * as fs from 'fs';", "fs.unlinkSync"),
         ("import { unlinkSync } from 'node:fs';", "unlinkSync"),
+        ("import { unlinkSync as remove } from 'fs';", "remove"),
+        ("import disk from 'node:fs';", "disk.unlinkSync"),
     ] {
         let scratch = support::Scratch::new();
         let directory = scratch.0.join("sandbox");
@@ -245,7 +253,15 @@ fn unlink_options_are_evaluated_and_rejected_before_deletion() {
             .output()
             .unwrap();
         let stdout = support::stdout(&output);
-        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert_eq!(
+            stdout,
+            format!(
+                "{}{}\n",
+                "TypeError: unlinkSync does not accept options\n".repeat(4),
+                "path;options;".repeat(4)
+            ),
+            "{import}"
+        );
         assert!(!target.exists(), "{import}");
     }
     let output = support::run(
@@ -260,6 +276,45 @@ fn unlink_options_are_evaluated_and_rejected_before_deletion() {
     assert_eq!(
         support::stdout(&output),
         "TypeError: unlinkSync does not accept options\n"
+    );
+}
+
+#[test]
+fn unrelated_unlink_calls_preserve_files_and_user_code() {
+    let scratch = support::Scratch::new();
+    let directory = scratch.0.join("sandbox");
+    fs::create_dir(&directory).unwrap();
+    let target = directory.join("survivor.txt");
+    fs::write(&target, "keep me").unwrap();
+    let wasm = scratch.compile(
+        r#"
+        import * as disk from 'node:fs';
+        function unlinkSync(path: string) { console.log("local:" + path); }
+        class Service {
+            static unlinkSync(path: string) { console.log("method:" + path); }
+        }
+        function path(): string { console.log("path"); return "/sandbox/survivor.txt"; }
+        unlinkSync(path());
+        Service.unlinkSync(path());
+        {
+            class disk {
+                static unlinkSync(path: string) { console.log("shadow:" + path); }
+            }
+            disk.unlinkSync(path());
+        }
+        "#,
+        None,
+    );
+    let output = Command::new(support::get_wasmtime_path())
+        .args(["run", "-C", "cache=n", "--dir"])
+        .arg(format!("{}::/sandbox", directory.display()))
+        .arg(wasm)
+        .output()
+        .unwrap();
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep me");
+    assert_eq!(
+        support::stdout(&output),
+        "path\nlocal:/sandbox/survivor.txt\npath\nmethod:/sandbox/survivor.txt\npath\nshadow:/sandbox/survivor.txt\n"
     );
 }
 
@@ -304,7 +359,10 @@ fn rmdir_options_are_evaluated_and_rejected_before_removal() {
             .output()
             .unwrap();
         let stdout = support::stdout(&output);
-        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(
+            stdout.contains("path;options;path;options;path;options;path;options;"),
+            "{import}"
+        );
         assert!(!target.exists(), "{import}");
     }
     let output = support::run(
@@ -378,7 +436,10 @@ fn read_options_are_evaluated_and_rejected_before_file_opening() {
         let stdout = support::stdout(&output);
         assert!(stdout.contains("path;options;path;options;path;options;path;options;path;options;path;options;path;options;"), "{import}");
         assert!(stdout.contains("11,11,11,11,11,11"), "{import}");
-        assert!(stdout.contains("hello world,hello world,hello world,hello world"), "{import}");
+        assert!(
+            stdout.contains("hello world,hello world,hello world,hello world"),
+            "{import}"
+        );
     }
     // Rejection occurs before checking preopens:
     let output = support::run(

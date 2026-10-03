@@ -555,6 +555,8 @@ dependencies = [
  "perry-parser",
  "serde",
  "serde_json",
+ "swc_common",
+ "swc_ecma_transforms_base",
  "swc_ecma_visit",
  "wasm-encoder 0.258.0",
  "wasmparser 0.258.0",

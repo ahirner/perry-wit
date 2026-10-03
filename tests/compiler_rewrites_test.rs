@@ -1,6 +1,116 @@
+#[path = "../src/compiler/fetch.rs"]
+mod fetch;
 #[path = "../src/compiler/rewrites.rs"]
 mod rewrites;
 mod support;
+
+use perry_parser::swc_ecma_ast::{CallExpr, Callee, Expr, Lit, MemberProp};
+use swc_ecma_visit::{Visit, VisitWith};
+
+#[test]
+fn unlink_rewrite_respects_import_bindings_and_lexical_scopes() {
+    struct UnlinkCalls(Vec<String>);
+    impl Visit for UnlinkCalls {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if let Callee::Expr(callee) = &call.callee
+                && let Expr::Member(member) = callee.as_ref()
+                && let MemberProp::Ident(property) = &member.prop
+                && property.sym == "fs_unlink_sync"
+            {
+                let Expr::Lit(Lit::Str(path)) = call.args[0].expr.as_ref() else {
+                    panic!("expected a literal test path");
+                };
+                self.0.push(path.value.to_string_lossy().into_owned());
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    for (source, expected) in [
+        ("import { unlinkSync } from 'fs'; unlinkSync('file');", 1),
+        (
+            "import { unlinkSync as remove } from 'node:fs'; remove('file');",
+            1,
+        ),
+        (
+            "import { unlinkSync as fetch } from 'fs'; fetch('file');",
+            1,
+        ),
+        (
+            "import * as disk from 'node:fs'; disk.unlinkSync('file');",
+            1,
+        ),
+        ("import disk from 'fs'; disk.unlinkSync('file');", 1),
+        (
+            "function unlinkSync(path: string) {} unlinkSync('file');",
+            0,
+        ),
+        (
+            "const disk = { unlinkSync(path: string) {} }; disk.unlinkSync('file');",
+            0,
+        ),
+        ("receiver().unlinkSync('file');", 0),
+        ("import { unlinkSync } from 'other'; unlinkSync('file');", 0),
+        (
+            "import { existsSync as unlinkSync } from 'fs'; unlinkSync('file');",
+            0,
+        ),
+        ("import disk from 'other'; disk.unlinkSync('file');", 0),
+        (
+            "import type { unlinkSync } from 'fs'; unlinkSync('file');",
+            0,
+        ),
+        (
+            "import { type unlinkSync } from 'fs'; unlinkSync('file');",
+            0,
+        ),
+        (
+            "import { unlinkSync } from 'fs'; function f(unlinkSync: any) { unlinkSync('shadow'); } unlinkSync('file');",
+            1,
+        ),
+        (
+            "import * as fs from 'fs'; function f(fs: any) { fs.unlinkSync('shadow'); } fs.unlinkSync('file');",
+            1,
+        ),
+        (
+            "import { unlinkSync } from 'fs'; { const unlinkSync = local; unlinkSync('shadow'); } unlinkSync('file');",
+            1,
+        ),
+        (
+            "import { unlinkSync } from 'fs'; function f() { unlinkSync('file'); function unlinkSync(path: string) {} }",
+            0,
+        ),
+        (
+            "import * as fs from 'fs'; function f() { fs.unlinkSync('file'); var fs = local; }",
+            0,
+        ),
+        (
+            "import * as fs from 'fs'; try {} catch (fs) { fs.unlinkSync('shadow'); } fs.unlinkSync('file');",
+            1,
+        ),
+        (
+            "import { unlinkSync as remove } from 'fs'; for (const remove of items) { remove('shadow'); } remove('file');",
+            1,
+        ),
+        (
+            "import * as fs from 'fs'; function f({ fs }: any) { fs.unlinkSync('file'); }",
+            0,
+        ),
+    ] {
+        let mut ast = perry_parser::parse_typescript(source, "bindings.ts").unwrap();
+        let original = ast.clone();
+        fetch::preserve_options(&mut ast);
+        let mut calls = UnlinkCalls(Vec::new());
+        ast.visit_with(&mut calls);
+        assert_eq!(calls.0, vec!["file"; expected], "{source}");
+        if expected == 0 {
+            assert_eq!(
+                ast, original,
+                "unrelated calls must remain unchanged: {source}"
+            );
+        }
+    }
+}
 
 #[test]
 fn class_bodies_contribute_runtime_capabilities() {
