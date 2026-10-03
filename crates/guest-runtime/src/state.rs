@@ -16,6 +16,8 @@ pub(crate) enum JsHandle {
     Date(f64),
     Uint8Array(crate::buffer::Uint8ArrayView),
     Closure(crate::callbacks::Closure),
+    Cell(i64),
+    Promise(crate::promises::Promise),
 }
 
 pub(crate) struct RuntimeState {
@@ -35,6 +37,7 @@ pub(crate) struct RuntimeState {
     pub(crate) reachable_handles: Vec<bool>,
     pub(crate) pending_return_area: Option<(i32, usize)>,
     pub(crate) timers: crate::timers::Timers,
+    pub(crate) promises: crate::promises::Promises,
 }
 
 impl RuntimeState {
@@ -56,6 +59,7 @@ impl RuntimeState {
             reachable_handles: Vec::new(),
             pending_return_area: None,
             timers: crate::timers::Timers::default(),
+            promises: crate::promises::Promises::default(),
         }
     }
 
@@ -105,6 +109,7 @@ impl RuntimeState {
         }
         self.worklist.extend_from_slice(&self.global_roots);
         self.worklist.extend(self.timers.roots());
+        self.promises.trace(&mut self.worklist);
         self.global_roots.clear();
         if let Some(env) = self.process_env {
             self.worklist.push(env);
@@ -127,6 +132,8 @@ impl RuntimeState {
                     self.reachable_handles[id] = true;
                     if let Some(handle) = self.handles.get(id) {
                         match handle {
+                            JsHandle::Cell(value) => self.worklist.push(*value),
+                            JsHandle::Promise(promise) => promise.trace(&mut self.worklist),
                             JsHandle::Closure(closure) => {
                                 self.worklist.extend_from_slice(&closure.captures);
                             }
@@ -523,6 +530,8 @@ impl RuntimeState {
                     JsHandle::Headers(_) => "[object Headers]".to_string(),
                     JsHandle::Null => "null".to_string(),
                     JsHandle::Closure(_) => "[function]".to_string(),
+                    JsHandle::Cell(_) => "[cell]".to_string(),
+                    JsHandle::Promise(_) => "[object Promise]".to_string(),
                     JsHandle::Date(ts) => {
                         crate::date::format_iso(*ts).unwrap_or_else(|| "Invalid Date".to_string())
                     }

@@ -13,6 +13,155 @@ use std::process::Command;
 use perry_wit::compiler::{CompileOptions, compile_typescript};
 
 #[test]
+fn guest_async_tasks_release_suspended_graphs_on_success_and_rejection() {
+    let scratch = support::Scratch::new();
+    let artifacts = scratch.compile_artifacts(
+        r#"
+        let retained = "";
+        async function leaf(input: string): Promise<string> {
+            const owner: any = {text: input, bytes: Uint8Array.from([7, 128, 255])};
+            owner.self = owner;
+            await 0;
+            await 1;
+            return owner.text + ":" + owner.bytes[1];
+        }
+        export async function runTask(input: string): Promise<any> {
+            try {
+                const value = await leaf(input);
+                if (input === "reject") { throw "handled"; }
+                retained = value;
+                return {ok: true, value};
+            } catch (error) { await 0; return {ok: false, error}; }
+        }
+        export async function fail(input: string): Promise<string> {
+            const value = await leaf(input);
+            throw value;
+        }
+        export async function scalar(input: number): Promise<number> { return (await input) + 1; }
+        export async function empty(): Promise<void> { await 0; retained = "void"; }
+        export async function failVoid() { await 0; throw "void-rejected"; }
+        export function snapshot(): string { return retained; }
+        "#,
+        Some(
+            r#"
+        package test:guest-async;
+        world test {
+            import wasi:cli/stdout@0.2.6;
+            import wasi:cli/stderr@0.2.6;
+            import wasi:cli/exit@0.2.6;
+            import wasi:io/streams@0.2.6;
+            export run-task: func(input: string) -> result<string, string>;
+            export fail: func(input: string) -> string;
+            export scalar: func(input: u32) -> u32;
+            export empty: func();
+            export fail-void: func();
+            export snapshot: func() -> string;
+        }
+        "#,
+        ),
+    );
+    let wat = wasmprinter::print_bytes(&artifacts.core).unwrap();
+    for capability in [
+        "wasi:http",
+        "wasi:clocks",
+        "wasi:filesystem",
+        "wasi:random",
+        "rt",
+    ] {
+        assert!(
+            !wat.contains(&format!("(import \"{capability}")),
+            "pure async task retains {capability}"
+        );
+    }
+    let core = scratch.0.join("core.wasm");
+    fs::write(&core, artifacts.core).unwrap();
+    let output = Command::new("node").arg("--eval").arg(r#"
+        const assert = require('node:assert/strict');
+        const module_ = new WebAssembly.Module(require('node:fs').readFileSync(process.argv[1]));
+        const imports = {};
+        let errorText = "";
+        for (const {module, name} of WebAssembly.Module.imports(module_)) {
+            let implementation = () => { throw Error(`unexpected host call ${module}.${name}`); };
+            if (module.startsWith('wasi:cli/stderr')) { implementation = () => 1; }
+            else if (module.startsWith('wasi:cli/exit')) { implementation = () => {}; }
+            else if (module.startsWith('wasi:io/streams')) {
+                if (name === '[method]output-stream.blocking-write-and-flush') {
+                    implementation = (id, ptr, len, ret) => {
+                        errorText += new TextDecoder().decode(new Uint8Array(e.memory.buffer, ptr, len));
+                        new Uint8Array(e.memory.buffer)[ret] = 0;
+                    };
+                } else if (name === '[resource-drop]output-stream') { implementation = () => {}; }
+            }
+            (imports[module] ??= {})[name] = implementation;
+        }
+        const e = new WebAssembly.Instance(module_, imports).exports;
+        function call(name, input, post = true) {
+            const bytes = input === undefined ? null : new TextEncoder().encode(input);
+            const ptr = bytes ? e.cabi_realloc(0, 0, 1, bytes.length) : 0;
+            if (bytes) { new Uint8Array(e.memory.buffer, ptr, bytes.length).set(bytes); }
+            errorText = "";
+            try {
+                const ret = bytes ? e[name](ptr, bytes.length) : e[name]();
+                const result = name === 'run-task';
+                const words = new Uint32Array(e.memory.buffer, ret, result ? 3 : 2);
+                const offset = result ? 1 : 0;
+                const value = new TextDecoder().decode(new Uint8Array(e.memory.buffer, words[offset], words[offset + 1]));
+                const error = result && words[0] === 1;
+                if (post) { e[`cabi_post_${name}`](ret); }
+                return result ? {error, value} : value;
+            } catch (error) {
+                error.message += `; ${name}(${input}): ${errorText}`;
+                throw error;
+            } finally {
+                if (bytes) { e.cabi_realloc(ptr, bytes.length, 1, 0); }
+            }
+        }
+        function cycle(index) {
+            const text = `async-${index}:` + 'retained😀'.repeat(100);
+            assert.deepEqual(call('run-task', text, index % 7 !== 0), {error: false, value: text + ':128'});
+            assert.equal(call('snapshot'), text + ':128');
+            assert.deepEqual(call('run-task', 'reject'), {error: true, value: 'handled'});
+            assert.throws(() => call('fail', text), WebAssembly.RuntimeError);
+            assert.throws(() => e['fail-void'](), WebAssembly.RuntimeError);
+            assert.deepEqual(call('run-task', 'recovered'), {error: false, value: 'recovered:128'});
+            assert.equal(e.scalar(index), index + 1);
+            e.empty();
+            assert.equal(call('snapshot'), 'void');
+        }
+        for (let index = 0; index < 100; index++) { cycle(index); }
+        const memory = e.memory.buffer.byteLength;
+        for (let index = 0; index < 1000; index++) { cycle(index); }
+        assert.equal(e.memory.buffer.byteLength, memory, 'async success and rejection cycles must stop growing after warm-up');
+    "#).arg(core).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let component = scratch.0.join("component.wasm");
+    fs::write(&component, artifacts.component.unwrap()).unwrap();
+    let output = get_wasmtime_cmd()
+        .args([
+            "run",
+            "-C",
+            "cache=n",
+            "--invoke",
+            "run-task(\"component\")",
+        ])
+        .arg(&component)
+        .output()
+        .unwrap();
+    assert_eq!(support::stdout(&output).trim(), "ok(\"component:128\")");
+    let output = get_wasmtime_cmd()
+        .args(["run", "-C", "cache=n", "--invoke", "fail(\"component\")"])
+        .arg(component)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("component:128"));
+}
+
+#[test]
 fn scheduled_callbacks_release_captures_resources_and_stale_ids() {
     let scratch = support::Scratch::new();
     let artifacts = scratch.compile_artifacts(

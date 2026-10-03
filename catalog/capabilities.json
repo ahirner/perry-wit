@@ -34,7 +34,7 @@
         "Guest callback exceptions propagate to surrounding try/catch blocks"
       ],
       "differences": [
-        "Shared mutable lexical captures, this/new.target, async/generator function values, and rest/default/arguments parameters report compiler diagnostics",
+        "Shared mutable lexical captures, this/new.target, async/generator function expressions, and rest/default/arguments parameters report compiler diagnostics",
         "Named function values with captures and calls with spread arguments report compiler diagnostics",
         "Timers retain callback graphs until delivery or cancellation; bound functions and array callback methods remain separate work",
         "Guest callbacks do not change WIT export types; SDK declarations continue to describe selected WIT contracts"
@@ -66,11 +66,38 @@
         "Delays use Node-style whole milliseconds: values below 1, nonfinite values, or values above 2147483647 become 1; other values are truncated",
         "Intervals rearm from the actual callback start plus the original delay; late delivery does not replay missed ticks, and an uncleared interval keeps the invocation running",
         "Timer function values report compiler diagnostics; callback forms follow the guest-function subset",
-        "Promises, microtasks, and general guest async execution remain separate work; WIT export types and generated SDK contracts are unchanged"
+        "Named guest async tasks have a separate continuation queue; awaiting timer completion still needs a Promise constructor or producer bridge"
       ],
       "conformance": [
         "tests/clocks_test.rs",
         "tests/repeated_task_calls_test.rs"
+      ]
+    },
+    {
+      "id": "web.guest_async",
+      "name": "Guest Async Tasks",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "Named guest async functions with retained locals and queued await continuations",
+      "invariants": [
+        "Executes named async bodies in WebAssembly without rt:__async JavaScript imports, including functions without await",
+        "Runs the synchronous prefix immediately and queues await continuations in order for ordinary values and guest task Promises",
+        "Each async activation returns a distinct Promise and adopts a returned guest Promise's outcome",
+        "Selected WIT exports drive continuations to completion and marshal the resolved task value through the existing synchronous Preview 2 ABI",
+        "Suspended cells, cyclic objects, and byte views survive continuation execution and are reclaimed after success or rejection",
+        "Generated implementation contracts accept synchronous or Promise results and reject incompatible resolved types"
+      ],
+      "differences": [
+        "Initial tests cover nested pure awaits, loops, string exceptions, catch/finally, and scalar/string/result/unit ABI results; pending timer and HTTP consumers remain unfinished",
+        "Async function expressions and class methods, generators, captured named functions, and rest/default/arguments parameters report compiler diagnostics",
+        "Promise constructors and static methods in native async programs report diagnostics; Promise instance methods raise a guest exception",
+        "The existing guest exception bridge uses string payloads; discarded-task rejection reporting and general Promise APIs are outside this initial subset",
+        "Pure async continuations do not poll the host; shared cleanup still retains the WASI poll interface"
+      ],
+      "conformance": [
+        "tests/abi_regression_test.rs",
+        "tests/repeated_task_calls_test.rs",
+        "tests/sdk_test.rs"
       ]
     },
     {
@@ -124,7 +151,8 @@
         "Fails fast upon the first rejected promise"
       ],
       "differences": [
-        "Cooperative polling on WASIp2 event loop via wasi:io/poll rather than a JS microtask queue"
+        "Cooperative polling on WASIp2 event loop via wasi:io/poll rather than a JS microtask queue",
+        "Promise.all inside native guest async programs remains diagnosed until guest-task combinators are implemented"
       ],
       "conformance": [
         "tests/conformance/cases/03_promise_all.ts"

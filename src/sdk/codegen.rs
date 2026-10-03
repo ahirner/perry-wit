@@ -296,7 +296,8 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
             out.push_str(": (");
             emit_params(&mut out, resolve, function);
             out.push_str(") => ");
-            out.push_str(&wit_result_to_ts(resolve, function));
+            let result = wit_result_to_ts(resolve, function);
+            out.push_str(&format!("({result}) | Promise<{result}>"));
             out.push_str(";\n");
         }
     }

@@ -7,6 +7,59 @@ use std::process::Command;
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
 #[test]
+fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
+    let temp_dir = std::env::temp_dir().join(format!("perry-sdk-async-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(temp_dir.join("src")).unwrap();
+    fs::create_dir_all(temp_dir.join("wit")).unwrap();
+    fs::write(
+        temp_dir.join("wit/test.wit"),
+        "package test:guest-async; world task { export run-task: func(input: string) -> string; }",
+    )
+    .unwrap();
+    generate_sdk_files(&SdkOptions {
+        wit_dir: temp_dir.join("wit"),
+        world: Some("task".into()),
+        out_dir: temp_dir.join(".perry/types"),
+        project_root: Some(temp_dir.clone()),
+        entry: PathBuf::from("src/index.ts"),
+    })
+    .unwrap();
+    for (source, succeeds) in [
+        (
+            "export async function runTask(input: string): Promise<string> { return await input; }",
+            true,
+        ),
+        (
+            "export function runTask(input: string): string { return input; }",
+            true,
+        ),
+        (
+            "export async function runTask(input: string): Promise<number> { return 42; }",
+            false,
+        ),
+        (
+            "export async function runTask(input: number): Promise<string> { return 'wrong'; }",
+            false,
+        ),
+    ] {
+        fs::write(temp_dir.join("src/index.ts"), source).unwrap();
+        let output = Command::new("tsc")
+            .arg("--noEmit")
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            succeeds,
+            "{source}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    fs::remove_dir_all(temp_dir).unwrap();
+}
+
+#[test]
 fn test_generate_sdk_files_for_merge_task() {
     let temp_dir = std::env::temp_dir().join("perry_sdk_test_merge_task");
     let _ = fs::remove_dir_all(&temp_dir);

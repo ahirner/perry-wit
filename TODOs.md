@@ -32,7 +32,7 @@ These are standing criteria, not checkboxes to complete once or copy under every
 
 ## Verification Baseline (2026-10-03)
 
-- `nix develop -c cargo test --locked --package perry-wit`: 147 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
+- `nix develop -c cargo test --locked --package perry-wit`: 152 tests passed, including 25 filesystem tests and 12 HTTP regression tests. HTTP and conformance suites use local socket fixtures; verification used a fresh temporary directory and a writable Cargo target directory.
 - The per-slice commands below select tests from that run. A passing suite only establishes the cases it contains; missing acceptance evidence remains unchecked.
 - Scoped formatting passed. Project and WebAssembly guest Clippy checks completed with existing warnings. Automatic approval review rejected parent `make format-rs` because it could rewrite the broader workspace; parent `make lint-rs` fails because `monty-bench` is outside this workspace. The pinned, scoped Nix checks are the applicable checks here.
 - SDK generation describes selected WIT contracts, not ambient JavaScript/Node API compatibility. These runtime slices do not change WIT export types; supported API subsets and limits belong in the capability catalog and tests.
@@ -68,13 +68,21 @@ Verification:
 - The first scheduled consumer is 11.1's one-shot timer. Its callbacks retain strings, cyclic objects, and byte views after the creating function returns, then release ownership on delivery or cancellation. Shared mutable lexical bindings and the other diagnosed function forms remain outside the supported callback subset.
 
 - [ ] **B.2. Guest Async Execution** — Needs retained suspended state from E.2; use B.1 where the chosen lowering invokes guest callbacks.
-    - [ ] Reproduce the named async export failure with a minimal `async runTask`, then make its body compile, link, and execute in the guest. Choose a backend change or upgrade based on that probe.
+    - [x] Reproduce the named async export failure with a minimal `async runTask`, then make its body compile, link, and execute in the guest. Choose a backend change or upgrade based on that probe.
     - [ ] Support suspension, resumption, and rejection for the first task's `async`/`await` subset, reusing existing HTTP polling where practical.
     - [ ] Make exported async tasks complete through the host ABI with the declared result/error behavior; a synchronous Preview 2 boundary may drive the guest operation to completion.
     - [ ] Verify named exports, nested awaits, a genuinely pending operation, rejection propagation, and release of completed/rejected state through component invocation.
 
 Start with scalar/string tasks; richer async signatures follow demonstrated consumers.
 Component Model futures/streams remain a separate experiment in Phase 13.
+
+Progress:
+
+- Verification: the 152-test baseline, project and Wasm guest Clippy checks, and scoped formatting passed. Clippy retains the existing warnings recorded above.
+- Named async bodies reuse the pinned Perry state-machine transform with guest cells and queued continuations. The minimal export formerly failed on an unresolved `rt:__async_inner`; it now returns its resolved string through Wasmtime's component invocation. Functions without `await` also execute their guest bodies and return distinct task Promises.
+- `abi_regression_test` compares continuation ordering, concurrent activations, loops, adoption, and catch/finally behavior with Node. `guest_async_tasks_release_suspended_graphs_on_success_and_rejection` covers strings, cyclic objects, byte views, scalar/result/unit exports, trapped rejection, recovery, and skipped post-return across 1,000 cycles after warm-up; memory stops growing.
+- SDK implementation contracts accept synchronous results or `Promise` results while retaining the WIT host signatures and rejecting wrong resolved types. Async expressions/class methods, generators, captured named functions, and advanced parameters report diagnostics. Promise constructors/static methods in native async programs are diagnosed; instance methods raise a guest exception until implemented.
+- Keep B.2 open for an awaited timer or HTTP operation and its pending-operation lifetime tests. General Promise APIs and discarded-task rejection reporting are not established by these pure-task probes. Pure async jobs make no host poll calls; shared runtime cleanup still retains `wasi:io/poll`, so broader import minimization remains an integration concern.
 
 ### Item C: Safe Runtime Pruning
 
@@ -123,7 +131,7 @@ Verification:
 ### Item E: Value Lifetimes & Bounded Memory
 
 `RuntimeState` now reclaims invocation temporaries and recycles string/handle slots while retaining initialization values, registered globals, and process-context handles.
-Post-return hooks release ABI buffers and trigger value reclamation. Callback graphs and pending timer arguments are roots until their owner releases them; suspended async work will extend those rules with B.2.
+Post-return hooks release ABI buffers and trigger value reclamation. Callback graphs, pending timer arguments, and queued async activations are roots until their owner releases them; B.2's pending external producers will extend those ownership tests.
 
 - [x] **E.1. Repeated Task Calls**
     - [x] Establish which values outlive a call, including literals, globals, returned values, and pending work; use that evidence to choose a reclamation approach.
@@ -133,7 +141,7 @@ Post-return hooks release ABI buffers and trigger value reclamation. Callback gr
 
 Verification:
 
-- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 7 repeated-call and 2 ABI memory tests passed in the baseline run, including the callback graph and timer lifecycle tests.
+- `nix develop -c cargo test --test repeated_task_calls_test --test runtime_memory_test`: 8 repeated-call and 2 ABI memory tests passed in the baseline run, including callback graphs, timer lifecycles, and pure async activation cleanup.
 - Coverage includes stable memory after warm-up, retained global arrays/strings, recoverable result failures, skipped post-return recovery, direct component invocation, and allocation/reallocation exhaustion trapping rather than returning address zero.
 - Checkpoints, global scans, slot recycling, and return-area tracking are implemented in `state.rs`, `cabi.rs`, and ABI trampolines. Recovery claims cover the tested interrupted-cleanup paths; arbitrary traps or exhausted instances are not promised reusable.
 

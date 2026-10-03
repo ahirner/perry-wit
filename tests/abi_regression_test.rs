@@ -1,6 +1,137 @@
 mod support;
 
 #[test]
+fn named_async_export_executes_and_resumes_its_guest_body() {
+    let wit = format!(
+        "package test:guest-async; world test {{ {RUNTIME_IMPORTS} export run-task: func(input: string) -> string; }}"
+    );
+    let output = support::run(
+        r#"
+        async function inner(input: string): Promise<string> {
+            return await ("inner:" + input);
+        }
+        export async function runTask(input: string): Promise<string> {
+            const saved = {value: input};
+            const first = await inner(saved.value);
+            return first + ":task";
+        }
+    "#,
+        Some(&wit),
+        Some("run-task(\"native\")"),
+    );
+    assert_eq!(support::stdout(&output).trim(), "\"inner:native:task\"");
+}
+
+#[test]
+fn guest_async_ordering_loops_and_rejections_match_node() {
+    let source = r#"
+        const trace = {value: ""};
+        async function immediate(value) { trace.value += "immediate;"; return value; }
+        async function failure() { await 0; throw "rejected"; }
+        async function worker() {
+            trace.value += "start;";
+            const saved = {value: "kept"};
+            const value = await immediate(saved.value);
+            trace.value += value + ";";
+            let sum = 0;
+            for (let i = 0; i < 4; i++) { sum += await i; }
+            try { await failure(); trace.value += "unreachable;"; }
+            catch (error) { trace.value += error + ";"; await 0; }
+            finally { trace.value += "finally;"; }
+            trace.value += sum + ";";
+        }
+        worker();
+        trace.value += "sync;";
+        async function report() { await worker(); console.log(trace.value); }
+        report();
+        const invoke = immediate;
+        const original = invoke("identity");
+        async function adopt() { return original; }
+        console.log(adopt() === original);
+    "#;
+    for source in [
+        source,
+        r#"
+        const trace = {value: ""};
+        async function inner() { await 0; trace.value += "inner;"; }
+        async function outer() { await inner(); trace.value += "outer;"; }
+        async function side() { await 0; await 0; trace.value += "side;"; console.log(trace.value); }
+        outer(); side();
+    "#,
+        r#"
+        const trace = {value: ""};
+        async function ready() { return 42; }
+        const value = ready();
+        async function adopt() { return value; }
+        async function consume() { await adopt(); trace.value += "adopt;"; }
+        async function side() { await 0; await 0; await 0; trace.value += "side;"; console.log(trace.value); }
+        consume(); side();
+    "#,
+    ] {
+        let reference = std::process::Command::new("node")
+            .args(["--eval", source])
+            .output()
+            .unwrap();
+        let output = support::run(source, None, None);
+        assert_eq!(support::stdout(&output), support::stdout(&reference));
+    }
+}
+
+#[test]
+fn guest_async_forms_outside_the_initial_subset_report_diagnostics() {
+    for source in [
+        "class Task { static async run() { return await 1; } }",
+        "class Task { async ['run']() { return await 1; } }",
+    ] {
+        let error = perry_wit::compiler::compile_typescript_raw(source, "methods.ts").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Async class methods"),
+            "{error:#}"
+        );
+    }
+    for (body, diagnostic) in [
+        (
+            "const callback = async () => await 1; return await 0;",
+            "Async and generator guest closures",
+        ),
+        (
+            "const callback = async function() { return await 1; }; return await 0;",
+            "Async and generator guest closures",
+        ),
+        (
+            "const pending = new Promise(resolve => resolve(1)); return await pending;",
+            "Promise constructors",
+        ),
+        (
+            "return await Promise.all([1, 2]);",
+            "Promise static methods",
+        ),
+        (
+            "function* values() { yield 1; } return await 0;",
+            "Generator guest functions",
+        ),
+    ] {
+        let source = format!("export async function runTask() {{ {body} }}");
+        let error = perry_wit::compiler::compile_typescript_raw(&source, "subset.ts").unwrap_err();
+        assert!(format!("{error:#}").contains(diagnostic), "{error:#}");
+    }
+    let output = support::run(
+        r#"
+        async function value() { return 42; }
+        const pending = value();
+        try { pending.then(result => result); console.log("unreachable"); }
+        catch (error) { console.log(error); }
+    "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: Promise instance methods are not supported yet\n"
+    );
+}
+
+#[test]
 fn interface_exports_preserve_qualified_names_and_distinct_members() {
     let wit = format!(
         r#"package test:interfaces;

@@ -1,5 +1,6 @@
 //! TypeScript compilation pipeline, HIR rewrites, linking, and component packaging.
 
+mod async_lowering;
 mod clocks;
 mod exceptions;
 mod fetch;
@@ -74,6 +75,7 @@ pub fn compile_typescript_raw(
     let mut hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
 
+    async_lowering::lower(&mut hir, &ast)?;
     rewrites::rewrite_program(&mut hir)?;
 
     let exported_functions = hir.exported_functions.clone();

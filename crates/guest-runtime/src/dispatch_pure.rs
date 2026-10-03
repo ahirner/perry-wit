@@ -28,7 +28,9 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
 
     let mut result_i64: i64 = 0;
 
-    if let Some(value) = crate::callbacks::dispatch_call(&name, &raw_args) {
+    if let Some(value) = crate::promises::dispatch_call(&name, &raw_args) {
+        result_i64 = value;
+    } else if let Some(value) = crate::callbacks::dispatch_call(&name, &raw_args) {
         result_i64 = value;
     } else if let Some(value) = crate::headers::dispatch_call(&name, &raw_args) {
         result_i64 = value;
@@ -38,7 +40,8 @@ pub extern "C" fn mem_call_pure(func_name_id: f64, arg_count: f64, base_addr: i3
         crate::stubs::throw_value(raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64));
         result_i64 = TAG_UNDEFINED as i64;
     } else if name == "await_promise" {
-        result_i64 = raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64);
+        result_i64 =
+            crate::promises::await_value(raw_args.first().copied().unwrap_or(TAG_UNDEFINED as i64));
     } else if name == "all" {
         let array = raw_args.get(1).or(raw_args.first()).copied().unwrap_or(0);
         if let Some(JsHandle::Array(items)) = state.get_handle(array).cloned() {

@@ -29,6 +29,8 @@ pub struct DiscoveredExports {
     pub cabi_reclaim_callback_temporaries: Option<u32>,
     pub http_reclaim_responses: Option<u32>,
     pub timers_step: Option<u32>,
+    pub guest_async_step: Option<u32>,
+    pub guest_async_result: Option<u32>,
     pub user_i64_globals: Vec<u32>,
 }
 
@@ -116,6 +118,8 @@ pub fn discover_module_exports(wasm_bytes: &[u8]) -> Result<DiscoveredExports> {
                                 exports.http_reclaim_responses = Some(exp.index)
                             }
                             "timers_step" => exports.timers_step = Some(exp.index),
+                            "guest_async_step" => exports.guest_async_step = Some(exp.index),
+                            "guest_async_result" => exports.guest_async_result = Some(exp.index),
                             name => {
                                 exports.user_functions.insert(name.to_string(), exp.index);
                             }
@@ -295,21 +299,41 @@ pub fn synthesize_trampolines(
     )
     .unwrap();
 
-    if let Some(step) = discovered.timers_step {
+    let has_pending_work =
+        discovered.timers_step.is_some() || discovered.guest_async_step.is_some();
+    if has_pending_work {
         let register = discovered
             .cabi_register_global_root
-            .context("timer driver requires cabi_register_global_root")?;
+            .context("guest work driver requires cabi_register_global_root")?;
         let reclaim = discovered
             .cabi_reclaim_callback_temporaries
-            .context("timer driver requires cabi_reclaim_callback_temporaries")?;
+            .context("guest work driver requires cabi_reclaim_callback_temporaries")?;
+        let async_step = discovered
+            .guest_async_step
+            .map(|step| format!("call {step}"))
+            .unwrap_or_else(|| "i32.const 0".into());
+        let timer_step = discovered
+            .timers_step
+            .map(|step| format!("call {step}"))
+            .unwrap_or_else(|| "i32.const 0".into());
+        let async_result = discovered
+            .guest_async_result
+            .map(|result| format!("call {result}"))
+            .unwrap_or_default();
         // No TypeScript frame is live here, except its raw result awaiting ABI lowering.
         write!(
             snippets,
             r#"
-  (func $perry_drain_timers (param $value i64) (result i64)
+  (func $perry_drain_work (param $value i64) (result i64)
     block $finished
       loop $pending
-        call {step}
+        {async_step}
+        i32.eqz
+        if (result i32)
+          {timer_step}
+        else
+          i32.const 1
+        end
         i32.eqz
         br_if $finished
         local.get $value
@@ -320,13 +344,14 @@ pub fn synthesize_trampolines(
       end
     end
     local.get $value
+    {async_result}
   )
 "#
         )
         .unwrap();
     }
-    let drain_void_timers_call = if discovered.timers_step.is_some() {
-        "i64.const 0x7ffc000000000001\n    call $perry_drain_timers\n    drop\n    "
+    let drain_void_work_call = if has_pending_work {
+        "i64.const 0x7ffc000000000001\n    call $perry_drain_work\n    drop\n    "
     } else {
         ""
     };
@@ -339,7 +364,7 @@ pub fn synthesize_trampolines(
   (func $wasi_cli_run (result i32)
     call $perry_ensure_init
     call $perry_safe_reset
-    {drain_void_timers_call}call {check_exception}
+    {drain_void_work_call}call {check_exception}
     call $perry_scan_globals
     {reclaim_temporaries_call}{reclaim_http_call}i32.const 0
   )
@@ -459,11 +484,13 @@ pub fn synthesize_trampolines(
         };
 
         let import_body = import_calls.join("\n    ");
-        let drain_timers_call = if discovered.timers_step.is_some() {
+        let drain_work_call = if has_pending_work {
             match discovered.function_types[target_func as usize].results() {
-                [] => drain_void_timers_call,
-                [wasmparser::ValType::I64] => "call $perry_drain_timers\n    ",
-                _ => anyhow::bail!("unsupported timer result layout for export '{kebab_name}'"),
+                [] => drain_void_work_call,
+                [wasmparser::ValType::I64] => "call $perry_drain_work\n    ",
+                _ => {
+                    anyhow::bail!("unsupported guest work result layout for export '{kebab_name}'")
+                }
             }
         } else {
             ""
@@ -477,7 +504,7 @@ pub fn synthesize_trampolines(
     call $perry_safe_reset
     {import_body}
     call {target_func}
-    {drain_timers_call}call {check_exception}
+    {drain_work_call}call {check_exception}
     {result_handling}
   )
   (export "{kebab_name}" (func $cabi_trampoline_{sanitized}))

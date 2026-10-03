@@ -27,10 +27,25 @@ pub(crate) struct PruningPlan {
     pub(crate) func_map_a: Vec<u32>,
 }
 
-pub(crate) fn preserve_runtime_export(name: &str, needs_http: bool, needs_timers: bool) -> bool {
+pub(crate) fn preserve_runtime_export(
+    name: &str,
+    needs_http: bool,
+    needs_timers: bool,
+    needs_async: bool,
+) -> bool {
     name.starts_with("cabi_")
         || (needs_http && name == "http_reclaim_responses")
         || (needs_timers && name == "timers_step")
+        || (needs_async && matches!(name, "guest_async_step" | "guest_async_result"))
+}
+
+pub(crate) fn module_needs_async(a: &ParsedModuleA) -> bool {
+    a.data.iter().any(|segment| {
+        segment
+            .data
+            .windows(b"__needs_async__".len())
+            .any(|value| value == b"__needs_async__")
+    })
 }
 
 pub(crate) fn module_needs_timers(a: &ParsedModuleA) -> bool {
@@ -183,7 +198,12 @@ pub(crate) fn compute_pruning_plan(
     // ABI dependencies include capability-specific cleanup synthesized after linking.
     for exp in &b.exports {
         if exp.kind == ExternalKind::Func
-            && preserve_runtime_export(exp.name, module_needs_http(a), module_needs_timers(a))
+            && preserve_runtime_export(
+                exp.name,
+                module_needs_http(a),
+                module_needs_timers(a),
+                module_needs_async(a),
+            )
         {
             mark_b(
                 exp.index as usize,
