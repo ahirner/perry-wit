@@ -826,8 +826,8 @@ async fn test_waffle_wit_domain_errors_and_instance_reuse() -> Result<()> {
     let mut store = Store::new(&engine, WasiHostState::default());
     let instance = linker.instantiate_async(&mut store, &component).await?;
 
-    let run = instance
-        .get_typed_func::<(f64,), (std::result::Result<f64, f64>,)>(&mut store, "run")?;
+    let run =
+        instance.get_typed_func::<(f64,), (std::result::Result<f64, f64>,)>(&mut store, "run")?;
 
     // 1. Success returns Ok
     let (res_ok,) = run.call_async(&mut store, (21.0,)).await?;
@@ -866,8 +866,11 @@ async fn test_waffle_await_immediate_and_internal_async() -> Result<()> {
     let engine = make_async_engine()?;
     let linker = make_wasi_linker(&engine)?;
 
-    let compiled =
-        compile_typescript_waffle(source, "immediate_await.ts", &WaffleCompileOptions::default())?;
+    let compiled = compile_typescript_waffle(
+        source,
+        "immediate_await.ts",
+        &WaffleCompileOptions::default(),
+    )?;
     let component = Component::new(&engine, compiled.component.unwrap())?;
     let mut store = Store::new(&engine, WasiHostState::default());
     let instance = linker.instantiate_async(&mut store, &component).await?;
@@ -1037,5 +1040,39 @@ async fn test_waffle_async_cancellation_and_repeated_calls() -> Result<()> {
     Ok(())
 }
 
-
-
+#[tokio::test(flavor = "current_thread")]
+async fn test_waffle_numeric_truthiness() -> Result<()> {
+    let source = r#"
+        export function run(input: number): number {
+            let result = 0;
+            if (input) { result = result + 1; }
+            while (input) { return result + 2; }
+            if (0 / 0) { return 99; }
+            return result;
+        }
+    "#;
+    let compiled =
+        compile_typescript_waffle(source, "truthiness.ts", &WaffleCompileOptions::default())?;
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = make_wasi_linker(&engine)?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for (input, expected) in [
+        (0.0, 0.0),
+        (-0.0, 0.0),
+        (f64::NAN, 0.0),
+        (1.0, 3.0),
+        (-1.0, 3.0),
+        (f64::INFINITY, 3.0),
+        (f64::NEG_INFINITY, 3.0),
+    ] {
+        assert_eq!(
+            run.call_async(&mut store, (input,)).await?,
+            (expected,),
+            "input: {input}"
+        );
+    }
+    Ok(())
+}

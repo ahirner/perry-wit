@@ -10,15 +10,12 @@ use anyhow::{Result, bail, ensure};
 use perry_hir::ir::{BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt};
 use perry_hir::types::{LocalId, Type as HirType};
 use waffle::{
-    Block, BlockTarget, Export, ExportKind, FunctionBody, Module,
-    Operator, Terminator, Type, Value,
+    Block, BlockTarget, Export, ExportKind, FunctionBody, Module, Operator, Terminator, Type, Value,
 };
 
 use crate::waffle_backend::abi;
-use crate::waffle_backend::control_flow::{create_block_parameters, JoinPoint};
-use crate::waffle_backend::exceptions::{
-    self, TryClauseBlocks, TryScope, UnwindContext,
-};
+use crate::waffle_backend::control_flow::{JoinPoint, create_block_parameters};
+use crate::waffle_backend::exceptions::{self, TryClauseBlocks, TryScope, UnwindContext};
 use crate::waffle_backend::registry::{CallingConvention, FunctionInfo, ModuleRegistry};
 use crate::waffle_backend::resolve::ResolvedContract;
 
@@ -120,11 +117,7 @@ fn lower_function_body(
         );
     } else if stream_parameter.is_some() {
         // Fallback dummy op
-        lowerer.op(
-            Operator::I32Const { value: 0 },
-            &[],
-            &[],
-        );
+        lowerer.op(Operator::I32Const { value: 0 }, &[], &[]);
     }
 
     lowerer.statements(&func.body)?;
@@ -178,7 +171,8 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 Stmt::Throw(expr) => {
                     let err_val = self.expression(expr)?;
-                    let err_val_f64 = abi::encode_payload(&mut self.body, self.block, Some(err_val));
+                    let err_val_f64 =
+                        abi::encode_payload(&mut self.body, self.block, Some(err_val));
                     self.emit_throw(err_val_f64);
                 }
                 Stmt::Try {
@@ -338,12 +332,8 @@ impl<'a> FunctionLowerer<'a> {
 
             match callee_info.calling_convention {
                 CallingConvention::Internal => {
-                    let outcome = abi::emit_internal_call(
-                        &mut self.body,
-                        self.block,
-                        callee_info,
-                        &arg_vals,
-                    );
+                    let outcome =
+                        abi::emit_internal_call(&mut self.body, self.block, callee_info, &arg_vals);
 
                     self.block = outcome.err_block;
                     self.emit_throw(outcome.payload);
@@ -471,7 +461,9 @@ impl<'a> FunctionLowerer<'a> {
                         &[],
                         &[Type::F64],
                     );
-                    Ok(self.op(Operator::F64Ne, &[val, zero], &[Type::I32]))
+                    let nonzero = self.op(Operator::F64Ne, &[val, zero], &[Type::I32]);
+                    let not_nan = self.op(Operator::F64Eq, &[val, val], &[Type::I32]);
+                    Ok(self.op(Operator::I32And, &[nonzero, not_nan], &[Type::I32]))
                 }
             }
         }
@@ -479,13 +471,9 @@ impl<'a> FunctionLowerer<'a> {
 
     fn expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
-            Expr::Number(n) => Ok(self.op(
-                Operator::F64Const {
-                    value: n.to_bits(),
-                },
-                &[],
-                &[Type::F64],
-            )),
+            Expr::Number(n) => {
+                Ok(self.op(Operator::F64Const { value: n.to_bits() }, &[], &[Type::F64]))
+            }
             Expr::Integer(i) => Ok(self.op(
                 Operator::F64Const {
                     value: (*i as f64).to_bits(),
@@ -521,7 +509,13 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Call { callee, args, .. } => {
                 let res = self.call_operation(callee, args)?;
                 Ok(res.unwrap_or_else(|| {
-                    self.op(Operator::F64Const { value: 0f64.to_bits() }, &[], &[Type::F64])
+                    self.op(
+                        Operator::F64Const {
+                            value: 0f64.to_bits(),
+                        },
+                        &[],
+                        &[Type::F64],
+                    )
                 }))
             }
             _ => bail!("Unsupported expression in WAFFLE lowering: {expr:?}"),
@@ -630,11 +624,7 @@ impl<'a> FunctionLowerer<'a> {
         // 1. Lower try body
         self.statements(body)?;
         if self.body.blocks[self.block].terminator == Terminator::None {
-            join_reached |= blocks.emit_normal_transition(
-                &mut self.body,
-                self.block,
-                &self.locals,
-            );
+            join_reached |= blocks.emit_normal_transition(&mut self.body, self.block, &self.locals);
         }
 
         // 2. Lower catch clause (if present)
@@ -645,11 +635,8 @@ impl<'a> FunctionLowerer<'a> {
 
             self.statements(&c_clause.body)?;
             if self.body.blocks[self.block].terminator == Terminator::None {
-                join_reached |= blocks.emit_normal_transition(
-                    &mut self.body,
-                    self.block,
-                    &self.locals,
-                );
+                join_reached |=
+                    blocks.emit_normal_transition(&mut self.body, self.block, &self.locals);
             }
         }
 
