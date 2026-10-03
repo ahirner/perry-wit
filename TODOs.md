@@ -155,7 +155,10 @@ until R9 accounts for its remaining supported consumers.
 - `resolve_contract` audits and enforces typed intrinsic identities (`waitFor`, `hostDouble`, `readChunk`, `byteAt`), checks illegal local and parameter shadowing, and preserves argument evaluation order.
 - `ssa::lower_module` directly constructs WAFFLE basic blocks, SSA values, loop header block parameters, and branch join block parameters, verifying SSA validity with `body.validate()` and `body.verify_reducible()`.
 - Component framing embeds the WASI 0.3 monotonic clock adapter (`wasi:clocks/monotonic-clock@0.3.0#wait-for`) with async canonical lower and lift.
-- Tested and verified in `tests/waffle_pipeline_test.rs` (8 passed integration tests in Wasmtime) covering assignments, arithmetic, branches, joins, while loops, intra-module function calls, left-to-right evaluation order, shadowing diagnostics, explicit rejection of uncovered HIR, and async P3 wait suspension.
+- Tested in `tests/waffle_pipeline_test.rs` (15 integration tests) with Wasmtime execution and validation covering branch-local bindings, forward and recursive calls, boolean returns and comparisons, typed await continuations, entry signatures, and async P3 wait suspension alongside the original primitive and diagnostic cases.
+- Module initialization is explicitly rejected until it is lowered. Mixed boolean/number comparisons are also rejected rather than emitting invalid Wasm.
+- Component `run` signatures follow the resolved entry's parameters and result, including zero arguments, multiple arguments, booleans, and void results. Entries with more than 16 parameters require an unimplemented canonical ABI adapter and are rejected.
+- Component import adapters currently support `waitFor` and `hostDouble`. ByteStream inputs and other intrinsics are explicitly rejected during componentization until their adapters are implemented; core-only output remains available through `WaffleCompileOptions { componentize: false, ..Default::default() }`.
 - `ARCHITECTURE.md` completely rewritten to reflect the target WAFFLE SSA and WASI 0.3 pipeline.
 
 ### R2 — Exceptions and Cleanup Generated from HIR
