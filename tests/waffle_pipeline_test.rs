@@ -7,7 +7,7 @@ use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::time::timeout;
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Instance, Module, Store};
+use wasmtime::{Config, Engine, Func, Instance, Module, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 fn make_async_engine() -> Result<Engine> {
@@ -401,5 +401,33 @@ async fn test_waffle_async_p3_wait_and_suspension() -> Result<()> {
     let (res,) = timeout(Duration::from_secs(5), invocation).await??;
     assert_eq!(res, 31.0);
 
+    Ok(())
+}
+
+#[test]
+fn test_waffle_boolean_await_preserves_result_and_locals() -> Result<()> {
+    let source = r#"
+        declare function flag(value: boolean): Promise<boolean>;
+        export async function run(input: number): Promise<boolean> {
+            let original = true;
+            let result = await flag(false);
+            let saved = await flag(original);
+            if (input > 0) { return saved; }
+            return result;
+        }
+    "#;
+    let options = WaffleCompileOptions {
+        componentize: false,
+        ..Default::default()
+    };
+    let compiled = compile_typescript_waffle(source, "await_bool.ts", &options)?;
+    let engine = Engine::default();
+    let module = Module::new(&engine, compiled.core)?;
+    let mut store = Store::new(&engine, ());
+    let flag = Func::wrap(&mut store, |value: i32| value);
+    let instance = Instance::new(&mut store, &module, &[flag.into()])?;
+    let run = instance.get_typed_func::<f64, i32>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, 0.0)?, 0);
+    assert_eq!(run.call(&mut store, 1.0)?, 1);
     Ok(())
 }

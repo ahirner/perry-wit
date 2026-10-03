@@ -475,7 +475,10 @@ impl<'a> FunctionLowerer<'a> {
 
         let resumed_result = result.map(|value| {
             args.push(value);
-            self.body.add_blockparam(resumed, Type::F64)
+            let ty = self.body.values[value]
+                .ty(&self.body.type_pool)
+                .expect("Await results have one primitive type");
+            self.body.add_blockparam(resumed, ty)
         });
 
         self.branch(resumed, args);
