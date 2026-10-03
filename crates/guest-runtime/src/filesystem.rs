@@ -401,8 +401,12 @@ pub(crate) fn fs_exists_sync(path_val: i64) -> i64 {
     }
 }
 
-pub(crate) fn fs_unlink_sync(path_val: i64) -> i64 {
+pub(crate) fn fs_unlink_sync(path_val: i64, options: i64) -> i64 {
     let state = get_state();
+    if options as u64 != TAG_UNDEFINED {
+        state.current_exception = Some("TypeError: unlinkSync does not accept options".into());
+        return TAG_UNDEFINED as i64;
+    }
     let path = state.get_string(path_val);
 
     let (dir, rel_path) = match locate_preopen(&path) {
@@ -468,8 +472,12 @@ pub(crate) fn fs_mkdir_sync(path_val: i64, options: i64) -> i64 {
     }
 }
 
-pub(crate) fn fs_rmdir_sync(path_val: i64) -> i64 {
+pub(crate) fn fs_rmdir_sync(path_val: i64, options: i64) -> i64 {
     let state = get_state();
+    if options as u64 != TAG_UNDEFINED {
+        state.current_exception = Some("TypeError: rmdirSync options are not supported".into());
+        return TAG_UNDEFINED as i64;
+    }
     let path = state.get_string(path_val);
 
     let (dir, rel_path) = match locate_preopen(&path) {
@@ -500,8 +508,29 @@ pub(crate) fn fs_rmdir_sync(path_val: i64) -> i64 {
     }
 }
 
-pub(crate) fn fs_readdir_sync(path_val: i64) -> i64 {
+pub(crate) fn fs_readdir_sync(path_val: i64, options: i64) -> i64 {
     let state = get_state();
+    let options_js = state.to_js_value(options);
+    let supported = match &options_js {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => {
+            s.eq_ignore_ascii_case("utf8") || s.eq_ignore_ascii_case("utf-8")
+        }
+        serde_json::Value::Object(map) => map.iter().all(|(k, v)| match k.as_str() {
+            "encoding" => v
+                .as_str()
+                .map(|s| s.eq_ignore_ascii_case("utf8") || s.eq_ignore_ascii_case("utf-8"))
+                .unwrap_or(v.is_null()),
+            "recursive" => v.as_bool() == Some(false),
+            "withFileTypes" => v.as_bool() == Some(false),
+            _ => false,
+        }),
+        _ => false,
+    };
+    if !supported {
+        state.current_exception = Some("TypeError: readdirSync options are not supported".into());
+        return TAG_UNDEFINED as i64;
+    }
     let path = state.get_string(path_val);
 
     let (dir, rel_path) = match locate_preopen(&path) {
@@ -571,8 +600,22 @@ pub(crate) fn fs_readdir_sync(path_val: i64) -> i64 {
     crate::nanbox::nanbox_pointer(arr_id)
 }
 
-pub(crate) fn fs_stat_sync(path_val: i64) -> i64 {
+pub(crate) fn fs_stat_sync(path_val: i64, options: i64) -> i64 {
     let state = get_state();
+    let options_js = state.to_js_value(options);
+    let supported = match &options_js {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.iter().all(|(k, v)| match k.as_str() {
+            "throwIfNoEntry" => v.as_bool() == Some(true),
+            "bigint" => v.as_bool() == Some(false),
+            _ => false,
+        }),
+        _ => false,
+    };
+    if !supported {
+        state.current_exception = Some("TypeError: statSync options are not supported".into());
+        return TAG_UNDEFINED as i64;
+    }
     let path = state.get_string(path_val);
 
     let (dir, rel_path) = match locate_preopen(&path) {

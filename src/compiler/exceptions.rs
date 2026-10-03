@@ -331,8 +331,18 @@ fn bridge_events(
             Some("try_end") => (BridgeKind::TryEnd, 5),
             Some("throw_value") => (BridgeKind::Throwing, 5),
             Some(
-                "date_to_iso_string" | "uint8array_new" | "buffer_alloc" | "$$cryptoFillRandom"
-                | "fs_read_file_sync" | "fs_write_file_sync" | "fs_mkdir_sync",
+                "date_to_iso_string"
+                    | "uint8array_new"
+                    | "buffer_alloc"
+                    | "$$cryptoFillRandom"
+                    | "fs_read_file_sync"
+                    | "fs_read_file_binary"
+                    | "fs_write_file_sync"
+                    | "fs_mkdir_sync"
+                    | "fs_readdir_sync"
+                    | "fs_stat_sync"
+                    | "fs_unlink_sync"
+                    | "fs_rmdir_sync",
             ) => (BridgeKind::Throwing, 9),
             Some("__perry_catch_start") => (BridgeKind::TryStart, 10),
             Some("__perry_catch_end") => (BridgeKind::TryEnd, 10),

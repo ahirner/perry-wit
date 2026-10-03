@@ -1200,17 +1200,17 @@ pub(crate) extern "C" fn fs_write_file_sync(path: i64, content: i64) -> i64 {
 
 #[no_mangle]
 pub(crate) extern "C" fn fs_readdir_sync(path: i64) -> i64 {
-    crate::filesystem::fs_readdir_sync(path)
+    crate::filesystem::fs_readdir_sync(path, TAG_UNDEFINED as i64)
 }
 
 #[no_mangle]
 pub(crate) extern "C" fn fs_stat_sync(path: i64) -> i64 {
-    crate::filesystem::fs_stat_sync(path)
+    crate::filesystem::fs_stat_sync(path, TAG_UNDEFINED as i64)
 }
 
 #[no_mangle]
 pub(crate) extern "C" fn fs_unlink_sync(path: i64) -> i64 {
-    crate::filesystem::fs_unlink_sync(path)
+    crate::filesystem::fs_unlink_sync(path, TAG_UNDEFINED as i64)
 }
 
 #[no_mangle]
@@ -1220,7 +1220,7 @@ pub(crate) extern "C" fn fs_mkdir_sync(path: i64) -> i64 {
 
 #[no_mangle]
 pub(crate) extern "C" fn fs_rmdir_sync(path: i64) -> i64 {
-    crate::filesystem::fs_rmdir_sync(path)
+    crate::filesystem::fs_rmdir_sync(path, TAG_UNDEFINED as i64)
 }
 
 #[no_mangle]

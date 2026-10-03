@@ -184,19 +184,19 @@ Verification:
 - [x] **9.2. Binary File Reads/Writes** — Builds directly on 9.1's descriptor preopen routing and D.1's `Uint8Array` view behavior.
     - [x] Support `fs.readFileSync(path)` (without encoding or with binary encoding) returning `Uint8Array`, and `fs.writeFileSync(path, uint8array)` streaming raw byte slices via 4096-byte chunked `blocking_write_and_flush`. Writing with `binary` encoding requires a byte view; strings support UTF-8 and reject `binary` before opening the file.
     - [x] Verify arbitrary-byte round-trips, subview writes (with non-zero byte offsets), and repeated-operation stream cleanup.
-- [ ] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
+- [x] **9.3. Directory & Metadata Operations** — Builds on 9.1's `locate_preopen` resolution.
     - [x] Support `fs.readdirSync(path)` via `Descriptor::read_directory` stream collecting child entry names, and `fs.unlinkSync(path)` via `Descriptor::unlink_file_at`.
     - [x] Support `fs.mkdirSync(path)` via `Descriptor::create_directory_at` and `fs.rmdirSync(path)` via `Descriptor::remove_directory_at`. Supplied `mkdirSync` options are evaluated and rejected before creating a directory; permission modes and recursive creation remain unsupported.
     - [x] Support `fs.existsSync(path)` via `Descriptor::stat_at` (never throws on non-existent paths).
     - [x] Support `fs.statSync(path)` via `Descriptor::stat_at(PathFlags::SYMLINK_FOLLOW, ...)`, exposing `{ isFile(): boolean, isDirectory(): boolean, size: number, mtimeMs: number }`.
     - [x] Verify listing, metadata, and removal for that subset, including failure paths (`ENOENT`, `ENOTDIR`, `EISDIR`) and descriptor cleanup.
-    - [ ] Preserve evaluation and reject unsupported options for the remaining directory/metadata calls; the current guarantee covers `mkdirSync`, while other rewrites still discard options.
+    - [x] Preserve evaluation and reject unsupported options for all directory/metadata calls (`readdirSync`, `statSync`, `unlinkSync`, `rmdirSync`, `mkdirSync`); arguments are evaluated in standard left-to-right order and unsupported options are rejected before preopen resolution or mutation.
 
 Verification:
 
-- `nix develop -c cargo test --test fs_test`: 20 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, and import pruning.
-- Unsupported write modes and binary string encodings are rejected before opening files. Read options/encodings are validated before I/O: only UTF-8 and binary encodings and flag 'r' are permitted; unsupported options throw a TypeError before file opening or preopen check. Supplied `mkdirSync` options other than `undefined` are evaluated and rejected before creation. Supported writes overwrite; append/exclusive modes and permission changes remain unsupported.
-- 9.3 remains open for the option-evaluation guarantee on directory/metadata calls: `readdirSync`, `statSync`, and removal calls do not yet validate their options. Binary encoding on reads is a byte-view extension returning `Uint8Array`, not Node's Latin-1 string behavior.
+- `nix develop -c cargo test --test fs_test`: 24 tests passed in the baseline run. Coverage includes UTF-8 and arbitrary bytes, offset views, named/namespace imports, metadata, directory operations, path confinement, failure cases, 128 KiB transfers, repeated I/O, import pruning, and option validation before I/O across all fs calls.
+- Unsupported write modes and binary string encodings are rejected before opening files. Read options/encodings are validated before I/O: only UTF-8 and binary encodings and flag 'r' are permitted; unsupported options throw a TypeError before file opening or preopen check.
+- Directory and metadata operations (`mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`, `rmdirSync`) preserve left-to-right evaluation order and reject unsupported options before preopen checking or mutating the filesystem. Supported writes overwrite; append/exclusive modes and permission changes remain unsupported.
 - UTF-8 reads reject invalid UTF-8. Metadata is limited to size, modification time, and file/directory predicates; permissions, ownership, recursive operations, and broader Node `Stats` behavior are not implemented.
 
 Promise-based filesystem APIs need guest async execution and evidence that their underlying operations can make progress; they are a later slice.

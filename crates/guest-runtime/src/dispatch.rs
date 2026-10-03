@@ -154,7 +154,8 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
                 raw_args
             };
             let path = args.first().copied().unwrap_or(0);
-            Some(crate::filesystem::fs_readdir_sync(path))
+            let options = args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::filesystem::fs_readdir_sync(path, options))
         }
         "fs_stat_sync" | "statSync" => {
             let args = if raw_args.len() >= 2
@@ -167,7 +168,8 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
                 raw_args
             };
             let path = args.first().copied().unwrap_or(0);
-            Some(crate::filesystem::fs_stat_sync(path))
+            let options = args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::filesystem::fs_stat_sync(path, options))
         }
         "fs_unlink_sync" | "unlinkSync" => {
             let args = if raw_args.len() >= 2
@@ -180,7 +182,8 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
                 raw_args
             };
             let path = args.first().copied().unwrap_or(0);
-            Some(crate::filesystem::fs_unlink_sync(path))
+            let options = args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::filesystem::fs_unlink_sync(path, options))
         }
         "fs_mkdir_sync" | "mkdirSync" => {
             let args = if raw_args.len() >= 2
@@ -207,7 +210,8 @@ fn dispatch_filesystem(name: &str, raw_args: &[i64]) -> Option<i64> {
                 raw_args
             };
             let path = args.first().copied().unwrap_or(0);
-            Some(crate::filesystem::fs_rmdir_sync(path))
+            let options = args.get(1).copied().unwrap_or(TAG_UNDEFINED as i64);
+            Some(crate::filesystem::fs_rmdir_sync(path, options))
         }
         "fs_exists_sync" | "existsSync" => {
             let args = if raw_args.len() >= 2

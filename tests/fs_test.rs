@@ -75,6 +75,254 @@ fn mkdir_options_are_evaluated_and_rejected_before_directory_creation() {
 }
 
 #[test]
+fn readdir_options_are_evaluated_and_rejected_before_reading() {
+    for (import, readdir) in [
+        ("import * as fs from 'fs';", "fs.readdirSync"),
+        ("import { readdirSync } from 'node:fs';", "readdirSync"),
+    ] {
+        let scratch = support::Scratch::new();
+        let directory = scratch.0.join("sandbox");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("f1.txt"), "1").unwrap();
+        let source = r#"
+            IMPORT
+            let evaluations = "";
+            function path(index: number) {
+                evaluations += "path;";
+                return "/sandbox";
+            }
+            function options(index: number) {
+                evaluations += "options;";
+                return [{withFileTypes: true}, {recursive: true}, "hex", 0o700][index];
+            }
+            for (let i = 0; i < 4; i++) {
+                try {
+                    READDIR(path(i), options(i));
+                    console.log("unreachable");
+                } catch (error) { console.log(error); }
+            }
+            console.log(evaluations);
+
+            // Supported options:
+            const r1 = READDIR("/sandbox");
+            const r2 = READDIR("/sandbox", undefined);
+            const r3 = READDIR("/sandbox", "utf8");
+            const r4 = READDIR("/sandbox", "utf-8");
+            const r5 = READDIR("/sandbox", { encoding: "utf8" });
+            const r6 = READDIR("/sandbox", { withFileTypes: false, recursive: false });
+            console.log(r1.length + "," + r2.length + "," + r3.length + "," + r4.length + "," + r5.length + "," + r6.length);
+        "#
+        .replace("IMPORT", import)
+        .replace("READDIR", readdir);
+        let wasm = scratch.compile(&source, None);
+        let output = Command::new(support::get_wasmtime_path())
+            .args(["run", "-C", "cache=n", "--dir"])
+            .arg(format!("{}::/sandbox", directory.display()))
+            .arg(wasm)
+            .output()
+            .unwrap();
+        let stdout = support::stdout(&output);
+        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(stdout.contains("1,1,1,1,1,1"), "{import}");
+    }
+    let output = support::run(
+        r#"
+            import { readdirSync } from "fs";
+            try { readdirSync("/no-preopen/private", { recursive: true }); console.log("unreachable"); }
+            catch (error) { console.log(error); }
+        "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: readdirSync options are not supported\n"
+    );
+}
+
+#[test]
+fn stat_options_are_evaluated_and_rejected_before_stat() {
+    for (import, stat) in [
+        ("import * as fs from 'fs';", "fs.statSync"),
+        ("import { statSync } from 'node:fs';", "statSync"),
+    ] {
+        let scratch = support::Scratch::new();
+        let directory = scratch.0.join("sandbox");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("f1.txt"), "hello").unwrap();
+        let source = r#"
+            IMPORT
+            let evaluations = "";
+            function path(index: number) {
+                evaluations += "path;";
+                return "/sandbox/f1.txt";
+            }
+            function options(index: number) {
+                evaluations += "options;";
+                return [{bigint: true}, {throwIfNoEntry: false}, 0o700, "hex"][index];
+            }
+            for (let i = 0; i < 4; i++) {
+                try {
+                    STAT(path(i), options(i));
+                    console.log("unreachable");
+                } catch (error) { console.log(error); }
+            }
+            console.log(evaluations);
+
+            // Supported options:
+            const s1 = STAT("/sandbox/f1.txt");
+            const s2 = STAT("/sandbox/f1.txt", undefined);
+            const s3 = STAT("/sandbox/f1.txt", { throwIfNoEntry: true });
+            const s4 = STAT("/sandbox/f1.txt", { bigint: false });
+            console.log(s1.size + "," + s2.size + "," + s3.size + "," + s4.size);
+        "#
+        .replace("IMPORT", import)
+        .replace("STAT", stat);
+        let wasm = scratch.compile(&source, None);
+        let output = Command::new(support::get_wasmtime_path())
+            .args(["run", "-C", "cache=n", "--dir"])
+            .arg(format!("{}::/sandbox", directory.display()))
+            .arg(wasm)
+            .output()
+            .unwrap();
+        let stdout = support::stdout(&output);
+        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(stdout.contains("5,5,5,5"), "{import}");
+    }
+    let output = support::run(
+        r#"
+            import { statSync } from "fs";
+            try { statSync("/no-preopen/private", { bigint: true }); console.log("unreachable"); }
+            catch (error) { console.log(error); }
+        "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: statSync options are not supported\n"
+    );
+}
+
+#[test]
+fn unlink_options_are_evaluated_and_rejected_before_deletion() {
+    for (import, unlink) in [
+        ("import * as fs from 'fs';", "fs.unlinkSync"),
+        ("import { unlinkSync } from 'node:fs';", "unlinkSync"),
+    ] {
+        let scratch = support::Scratch::new();
+        let directory = scratch.0.join("sandbox");
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("survivor.txt");
+        fs::write(&target, "keep me").unwrap();
+        let source = r#"
+            IMPORT
+            let evaluations = "";
+            function path(index: number) {
+                evaluations += "path;";
+                return "/sandbox/survivor.txt";
+            }
+            function options(index: number) {
+                evaluations += "options;";
+                return [{}, {recursive: true}, 0o700, "extra"][index];
+            }
+            for (let i = 0; i < 4; i++) {
+                try {
+                    UNLINK(path(i), options(i));
+                    console.log("unreachable");
+                } catch (error) { console.log(error); }
+            }
+            console.log(evaluations);
+            UNLINK("/sandbox/survivor.txt", undefined);
+        "#
+        .replace("IMPORT", import)
+        .replace("UNLINK", unlink);
+        let wasm = scratch.compile(&source, None);
+        let output = Command::new(support::get_wasmtime_path())
+            .args(["run", "-C", "cache=n", "--dir"])
+            .arg(format!("{}::/sandbox", directory.display()))
+            .arg(wasm)
+            .output()
+            .unwrap();
+        let stdout = support::stdout(&output);
+        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(!target.exists(), "{import}");
+    }
+    let output = support::run(
+        r#"
+            import { unlinkSync } from "fs";
+            try { unlinkSync("/no-preopen/private", {}); console.log("unreachable"); }
+            catch (error) { console.log(error); }
+        "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: unlinkSync does not accept options\n"
+    );
+}
+
+#[test]
+fn rmdir_options_are_evaluated_and_rejected_before_removal() {
+    for (import, rmdir) in [
+        ("import * as fs from 'fs';", "fs.rmdirSync"),
+        ("import { rmdirSync } from 'node:fs';", "rmdirSync"),
+    ] {
+        let scratch = support::Scratch::new();
+        let directory = scratch.0.join("sandbox");
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("target_dir");
+        fs::create_dir(&target).unwrap();
+        let source = r#"
+            IMPORT
+            let evaluations = "";
+            function path(index: number) {
+                evaluations += "path;";
+                return "/sandbox/target_dir";
+            }
+            function options(index: number) {
+                evaluations += "options;";
+                return [{recursive: true}, {maxRetries: 3}, 0o700, "extra"][index];
+            }
+            for (let i = 0; i < 4; i++) {
+                try {
+                    RMDIR(path(i), options(i));
+                    console.log("unreachable");
+                } catch (error) { console.log(error); }
+            }
+            console.log(evaluations);
+            RMDIR("/sandbox/target_dir", undefined);
+        "#
+        .replace("IMPORT", import)
+        .replace("RMDIR", rmdir);
+        let wasm = scratch.compile(&source, None);
+        let output = Command::new(support::get_wasmtime_path())
+            .args(["run", "-C", "cache=n", "--dir"])
+            .arg(format!("{}::/sandbox", directory.display()))
+            .arg(wasm)
+            .output()
+            .unwrap();
+        let stdout = support::stdout(&output);
+        assert!(stdout.contains("path;options;path;options;path;options;path;options;"), "{import}");
+        assert!(!target.exists(), "{import}");
+    }
+    let output = support::run(
+        r#"
+            import { rmdirSync } from "fs";
+            try { rmdirSync("/no-preopen/private", { recursive: true }); console.log("unreachable"); }
+            catch (error) { console.log(error); }
+        "#,
+        None,
+        None,
+    );
+    assert_eq!(
+        support::stdout(&output),
+        "TypeError: rmdirSync options are not supported\n"
+    );
+}
+
+#[test]
 fn read_options_are_evaluated_and_rejected_before_file_opening() {
     for (import, read) in [
         ("import * as fs from 'fs';", "fs.readFileSync"),
