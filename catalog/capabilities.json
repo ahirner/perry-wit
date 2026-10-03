@@ -31,12 +31,14 @@
         "String for-of evaluates its input once and retains that snapshot across mutation and P3 waits",
         "Nested loops preserve update effects and route break/continue through crossed finally clauses",
         "Unicode case conversions, code-point construction, split, and join preserve valid UTF-8",
+        "Literal regex search uses immutable compiled tables, returns reusable scalar positions, and allocates no guest storage",
         "Canonical boundaries retain byte lengths; completed serial calls reclaim their invocation storage"
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
         "Unpaired surrogate escapes and UTF-16 code-unit APIs are diagnosed",
-        "Custom iterator protocols, labeled loop exits, JSON, and regex operations remain unsupported on this path",
+        "Custom iterator protocols, labeled loop exits, and JSON remain unsupported on this path",
+        "Regex support is literal string.search with u/s flags; constructors, stored regex values, other flags, lookaround, backreferences, and property escapes are diagnosed",
         "Implicit string coercions are restricted; dead temporaries within long invocations are not yet reclaimed"
       ],
       "conformance": ["tests/waffle_string_test.rs", "tests/text_contract_test.rs", "tests/utf8_probe_test.rs"]

@@ -28,6 +28,7 @@ use crate::waffle_backend::control_flow::{JoinPoint, create_block_parameters};
 use crate::waffle_backend::exceptions::{
     self, ExitReason, TryClauseBlocks, TryScope, UnwindContext,
 };
+use crate::waffle_backend::regex::{self, RegexSearch};
 use crate::waffle_backend::registry::{FunctionInfo, ModuleRegistry};
 use crate::waffle_backend::resolve::ResolvedContract;
 use crate::waffle_backend::strings::StringPool;
@@ -54,10 +55,16 @@ pub(crate) fn lower_module(
     // 2. Scan module for string requirements and build string pool if needed
     let reqs = scan_module_string_requirements(hir);
     let mut string_pool = StringPool::new();
-    let string_heap_base = if reqs.needs_strings || contract.promises.is_some() {
+    let regex_tables = regex::compile_literals(hir)?;
+    let (string_heap_base, regex_programs) = if reqs.needs_strings || contract.promises.is_some() {
         collect_strings_in_module(hir, &mut string_pool);
         string_pool.populate_memory_segments(&mut module.memories[memory]);
-        let next_free = string_pool.next_free_address();
+        let (regex_programs, next_free) = regex::emit_tables(
+            &mut module,
+            memory,
+            regex_tables,
+            string_pool.next_free_address(),
+        )?;
         let needs_helper_library = reqs.find_substring
             || reqs.code_point_at
             || reqs.from_code_point
@@ -71,12 +78,12 @@ pub(crate) fn lower_module(
             if module.memories[memory].initial_pages < needed_pages {
                 module.memories[memory].initial_pages = needed_pages;
             }
-            Some(aligned_heap_base)
+            (Some(aligned_heap_base), regex_programs)
         } else {
-            Some(next_free)
+            (Some(next_free), regex_programs)
         }
     } else {
-        None
+        (None, BTreeMap::new())
     };
 
     // 3. Build complete module declarations registry
@@ -89,11 +96,20 @@ pub(crate) fn lower_module(
         memory,
         reqs,
     )?;
+    let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
 
     // 5. Lower each function body using the established registry contracts
     for func in &hir.functions {
         let info = &registry.functions[&func.id];
-        let body = lower_function_body(func, info, &registry, &module, &string_pool, contract)?;
+        let body = lower_function_body(
+            func,
+            info,
+            &registry,
+            &module,
+            &string_pool,
+            regexes.as_ref(),
+            contract,
+        )?;
         module.funcs[info.func_index] = waffle::FuncDecl::Body(info.sig, func.name.clone(), body);
 
         if let Some(export) = &info.export {
@@ -129,6 +145,7 @@ struct FunctionLowerer<'a> {
     registry: &'a ModuleRegistry,
     contract: &'a ResolvedContract,
     string_pool: &'a StringPool,
+    regexes: Option<&'a RegexSearch>,
     return_type: &'a HirType,
     is_async: bool,
     body: FunctionBody,
@@ -147,6 +164,7 @@ fn lower_function_body(
     registry: &ModuleRegistry,
     module: &Module<'static>,
     string_pool: &StringPool,
+    regexes: Option<&RegexSearch>,
     contract: &ResolvedContract,
 ) -> Result<FunctionBody> {
     let body = FunctionBody::new(module, info.sig);
@@ -170,6 +188,7 @@ fn lower_function_body(
         registry,
         contract,
         string_pool,
+        regexes,
         return_type: info.success_type(),
         is_async: func.is_async,
         body,

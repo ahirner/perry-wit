@@ -104,6 +104,215 @@ async fn run_cases(source: &str, cases: &[(Vec<Val>, Val)]) -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn test_regex_search_positions_are_scalar_indices() -> Result<()> {
+    run_cases(
+        r#"export function run(input: string): number { return input.search(/é😀/u); }"#,
+        &[
+            (vec![Val::String("x🦀é😀z".into())], Val::Float64(2.0)),
+            (vec![Val::String("é😀".into())], Val::Float64(0.0)),
+            (vec![Val::String("".into())], Val::Float64(-1.0)),
+        ],
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_regex_search_matches_node_with_scalar_positions() -> Result<()> {
+    let patterns = [
+        (r"a.*z|x", "u"),
+        (r"aba", "u"),
+        (r"(?:ab|b)+", "u"),
+        (r"(?:)", "u"),
+        (r"^", "u"),
+        (r"$", "u"),
+        (r"^$", "u"),
+        (r"a?b*?", "u"),
+        (r"[]", "u"),
+        (r"[^]", "u"),
+        (r"[^\s\S]", "u"),
+        (r"\d+", "u"),
+        (r"\D+", "u"),
+        (r"[\w-]+", "u"),
+        (r"\s", "u"),
+        (r"\S", "u"),
+        (r"\uD83D\uDE00", "u"),
+        (r".", "u"),
+        (r".", "su"),
+        (r"é|abc", "u"),
+        (r"\/\\", "u"),
+        (r"[\b]", "u"),
+        (r"\bfoo\b", "u"),
+        (r"\Bfoo", "u"),
+        (r"a$", "u"),
+        (r"[\D_]+", "u"),
+        (r"\u{1F600}", "u"),
+        (r"\xE9", "u"),
+        (r"\0", "u"),
+        (r"[()?]", "u"),
+    ];
+    let inputs = [
+        "",
+        "🦀é😀",
+        "ababa",
+        "a😀xfoo z",
+        "😀foo_foo foo",
+        "\r\n\u{2028}\u{2029}abc",
+        "\u{85}\u{FEFF}é",
+        "a\n",
+        "１２3_",
+        "/\\\0\u{8}",
+        "e\u{301}é",
+    ];
+    let branches = patterns
+        .iter()
+        .enumerate()
+        .map(|(index, (pattern, flags))| {
+            format!("if (mode === {index}) return input.search(/{pattern}/{flags});")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        "export function run(input: string, mode: number): number {{ {branches} return -1; }}"
+    );
+    let scratch = tempfile::tempdir()?;
+    let fixture = scratch.path().join("regex.mts");
+    std::fs::write(
+        &fixture,
+        format!(
+            "{source}\nconst inputs = {}; const results = []; for (let mode = 0; mode < {}; mode++) for (const input of inputs) {{ const index = run(input, mode); results.push(index < 0 ? -1 : Array.from(input.slice(0, index)).length); }} console.log(JSON.stringify(results));",
+            serde_json::to_string(&inputs)?,
+            patterns.len()
+        ),
+    )?;
+    let node = Command::new("node").arg(fixture).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: Vec<f64> = serde_json::from_slice(&node.stdout)?;
+    let cases = patterns
+        .iter()
+        .enumerate()
+        .flat_map(|(mode, _)| {
+            inputs
+                .iter()
+                .map(move |input| vec![Val::String((*input).into()), Val::Float64(mode as f64)])
+        })
+        .zip(expected.into_iter().map(Val::Float64))
+        .collect::<Vec<_>>();
+    run_cases(&source, &cases).await?;
+    run_cases(
+        r#"export function run(input: string): string { const index = input.search(/(?:é|😀)+/u); if (index < 0) return "missing"; return input.slice(index); }"#,
+        &[(vec![Val::String("x🦀é😀tail".into())], Val::String("é😀tail".into())), (vec![Val::String("abc".into())], Val::String("missing".into()))],
+    ).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_regex_tables_coexist_with_text_helpers_and_suspension() -> Result<()> {
+    run_cases(
+        r#"import { waitFor } from "perry:clocks";
+        export async function run(input: string): Promise<string> {
+            const upper = input.toUpperCase();
+            await waitFor(1);
+            const index = upper.search(/(?:É|😀)+/u);
+            if (index < 0) return "missing";
+            return upper.slice(index).split("|").join(".").toLowerCase();
+        }"#,
+        &[(
+            vec![Val::String("🦀ßé😀|Z".into())],
+            Val::String("é😀.z".into()),
+        )],
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_regex_search_has_no_per_search_guest_allocation() -> Result<()> {
+    let source = r#"export function run(input: string, count: number): number {
+        let result = 0;
+        for (let i = 0; i < count; i++) { result = result + input.search(/é😀/u); }
+        return result;
+    }"#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "regex_allocation.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    assert!(!compiled.component_wat.as_ref().unwrap().contains("wasi:"));
+    let engine = make_async_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = Linker::new(&engine);
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65_536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, f64), (f64,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        assert_eq!(
+            run.call_async(&mut store, ("🦀é😀", 20_000.0)).await?.0,
+            20_000.0
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_unsupported_regex_forms_are_diagnosed() {
+    for (expression, diagnostic) in [
+        (
+            r"input.search(/a{1000000}/u)",
+            "Unsupported or oversized literal regex",
+        ),
+        (r"input.search(/a/i)", "supports only the u and s flags"),
+        (r"input.search(/(?=a)/u)", "Regex lookaround"),
+        (r"input.search(/(a)\1/u)", "Unsupported regex escape"),
+        (r"input.search(/\uD800/u)", "Unpaired surrogate"),
+        (r"input.search(/\u{D800}/u)", "unpaired surrogate"),
+        (r"input.search(/\uDC00/u)", "unpaired surrogate"),
+        (r#"input.search("a")"#, "requires a literal regex"),
+        (
+            r"input.search(new RegExp(input))",
+            "RegExp construction is unsupported",
+        ),
+        (
+            r#"input.search(new RegExp("a", "u", input))"#,
+            "RegExp construction is unsupported",
+        ),
+        (
+            r#"input.search(RegExp("a", "u"))"#,
+            "RegExp construction is unsupported",
+        ),
+        (r"input.search(/[a&&b]/u)", "set operators are unsupported"),
+    ] {
+        let source =
+            format!("export function run(input: string): number {{ return {expression}; }}");
+        let error = compile_typescript_waffle(
+            &source,
+            "unsupported_regex.ts",
+            &WaffleCompileOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(diagnostic),
+            "{source}: {error:#}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_shadowed_regexp_is_an_ordinary_guest_function() -> Result<()> {
+    run_cases(
+        r#"function RegExp(value: string): number { return value.length; }
+        export function run(): number { return RegExp("🦀x"); }"#,
+        &[(vec![], Val::Float64(2.0))],
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn test_scalar_iteration_preserves_complete_characters() -> Result<()> {
     run_cases(
         r#"export function run(input: string): string {

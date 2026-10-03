@@ -130,6 +130,14 @@ impl TextContractMatrix {
             node_difference: "Both search position and returned offset count Unicode scalar values",
         },
         TextOperationEntry {
+            operation: "regex_search",
+            unit: IndexUnit::ScalarValue,
+            status: OperationStatus::SupportedScalar,
+            coercion: "search requires a regex literal; supports u and s flags, regular groups, alternation, repetition, classes, anchors, and ASCII word boundaries",
+            boundary_behavior: "Returns the leftmost match's scalar index or -1; empty matches remain at scalar boundaries",
+            node_difference: "Returned positions count scalars; pattern atoms use scalar semantics even without u; constructors, other flags, lookaround, and backreferences are diagnosed",
+        },
+        TextOperationEntry {
             operation: "for_of",
             unit: IndexUnit::ScalarValue,
             status: OperationStatus::SupportedScalar,

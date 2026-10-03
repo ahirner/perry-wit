@@ -10,6 +10,7 @@ pub(crate) mod exceptions;
 pub(crate) mod libraries;
 pub(crate) mod link;
 pub(crate) mod promises;
+mod regex;
 pub(crate) mod registry;
 pub(crate) mod resolve;
 pub(crate) mod ssa;

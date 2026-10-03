@@ -176,7 +176,7 @@ impl FunctionLowerer<'_> {
             "charAt" | "codePointAt" => 0..=1,
             "indexOf" => 1..=2,
             "toLowerCase" | "toUpperCase" => 0..=0,
-            "split" => 1..=1,
+            "split" | "search" => 1..=1,
             _ => bail!("Unsupported string method: {method}"),
         };
         ensure!(
@@ -190,6 +190,22 @@ impl FunctionLowerer<'_> {
             .expect("String runtime is registered");
         let desc = self.string_receiver(receiver)?;
         let (function_index, values, result_type) = match method {
+            "search" => {
+                let Expr::RegExp { pattern, flags } = &args[0] else {
+                    bail!(
+                        "String search requires a literal regex; dynamic patterns and RegExp values are unsupported"
+                    );
+                };
+                let regexes = self.regexes.expect("Regex runtime is registered");
+                let program = self.op(
+                    Operator::I32Const {
+                        value: regexes.programs[&(pattern.clone(), flags.clone())],
+                    },
+                    &[],
+                    &[Type::I32],
+                );
+                (regexes.function, vec![desc, program], Type::F64)
+            }
             "slice" => {
                 let start = self.position_argument(args.first(), 0.0)?;
                 let end = self.position_argument(args.get(1), f64::INFINITY)?;

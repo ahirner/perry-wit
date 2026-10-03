@@ -182,6 +182,13 @@ String `for…of` iteration evaluates its input once and yields complete Unicode
 scalars, including separate combining marks. It supports nested `for`/`while`
 loops, numeric updates, `break`/`continue`, and `finally` cleanup across P3 waits.
 Custom iterator protocols and labeled loop exits remain unsupported.
+`text.search(/pattern/u)` returns a scalar position suitable for indexing or
+`slice`. Literal patterns support groups, alternation, repetition, character
+classes, anchors, ASCII word boundaries, and the `u`/`s` flags. Pattern atoms
+always follow the scalar contract, including without `u`. Constructors, stored
+RegExp values, other flags, lookaround, backreferences, and Unicode property
+escapes are diagnosed. Regex tables are compiled ahead of time; searches allocate
+no guest memory. Oversized automata fail at compile time.
 Stored Promises from named async functions and the supported async imports retain
 number, boolean, string, or void outcomes and numeric rejections. Starting a task
 runs it up to suspension; aliases preserve identity and repeated awaits reuse its

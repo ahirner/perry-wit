@@ -138,6 +138,20 @@ struct CapabilityCalls {
 }
 
 impl CapabilityCalls {
+    fn reject_regexp_constructor(&mut self, callee: &ast::Expr) -> bool {
+        if matches!(callee, ast::Expr::Ident(name) if name.sym == "RegExp" && name.ctxt == self.unresolved)
+        {
+            self.error.get_or_insert_with(|| {
+                anyhow::anyhow!(
+                    "RegExp construction is unsupported; use a regex literal in string.search"
+                )
+            });
+            true
+        } else {
+            false
+        }
+    }
+
     fn operation(&self, expression: &ast::Expr) -> Result<Option<CapabilityOperation>> {
         match expression {
             ast::Expr::Ident(ident) => match self.bindings.get(&ident.to_id()) {
@@ -195,6 +209,10 @@ impl VisitMut for CapabilityCalls {
     fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
         call.ctxt = SyntaxContext::empty();
         if let ast::Callee::Expr(callee) = &mut call.callee {
+            // Perry may fold constructors before argument effects are retained.
+            if self.reject_regexp_constructor(callee) {
+                return;
+            }
             match self.operation(callee) {
                 Ok(Some(operation)) => {
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
@@ -228,6 +246,12 @@ impl VisitMut for CapabilityCalls {
         call.visit_mut_children_with(self);
     }
 
+    fn visit_mut_new_expr(&mut self, expression: &mut ast::NewExpr) {
+        if !self.reject_regexp_constructor(&expression.callee) {
+            expression.visit_mut_children_with(self);
+        }
+    }
+
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
         if !matches!(expression, ast::Expr::Call(_)) {
             match self.operation(expression) {
@@ -246,7 +270,7 @@ impl VisitMut for CapabilityCalls {
     }
 
     fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
-        if ident.sym == "Math" && ident.ctxt != self.unresolved {
+        if matches!(ident.sym.as_ref(), "Math" | "RegExp") && ident.ctxt != self.unresolved {
             let id = ident.to_id();
             let name = if let Some(name) = self.shadow_names.get(&id) {
                 name.clone()

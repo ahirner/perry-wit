@@ -72,7 +72,7 @@ impl FunctionLowerer<'_> {
                         return HirType::String;
                     } else if property == "codePointAt" {
                         return HirType::Union(vec![HirType::Number, HirType::Void]);
-                    } else if property == "indexOf" {
+                    } else if property == "indexOf" || property == "search" {
                         return HirType::Number;
                     } else if property == "split" {
                         return HirType::Array(Box::new(HirType::String));

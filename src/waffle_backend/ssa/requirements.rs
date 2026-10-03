@@ -30,7 +30,7 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
 
 fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
     match expr {
-        Expr::String(_) | Expr::ForOfToArray(_) => {
+        Expr::String(_) | Expr::ForOfToArray(_) | Expr::RegExp { .. } => {
             reqs.needs_strings = true;
         }
         Expr::StringFromCodePoint(_) => {
