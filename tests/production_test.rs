@@ -399,3 +399,136 @@ fn suspending_exports_require_async_wit_including_transitive_calls() -> Result<(
     )?;
     Ok(())
 }
+
+#[test]
+fn process_exit_uses_standard_wasi_and_matches_node_status() -> Result<()> {
+    for argument in [
+        "",
+        "undefined",
+        "0",
+        "5",
+        "-1",
+        "260",
+        "-257",
+        "9007199254740991",
+    ] {
+        let source = format!(
+            "console.log('before'); try {{ process.exit({argument}); }} finally {{ console.log('finally'); }} console.log('after');"
+        );
+        let compiled = compile_typescript(
+            &source,
+            "exit.ts",
+            &CompileOptions {
+                world: Some("command".into()),
+                ..Default::default()
+            },
+        )?;
+        let core = waffle::Module::from_wasm_bytes(&compiled.core, &Default::default())?;
+        assert!(core.imports.iter().any(
+            |import| import.module == "wasi:cli/exit@0.3.0" && import.name == "exit-with-code"
+        ));
+        let directory = tempfile::tempdir()?;
+        let component = directory.path().join("exit.wasm");
+        let script = directory.path().join("exit.ts");
+        std::fs::write(&component, compiled.stripped.unwrap())?;
+        std::fs::write(&script, source)?;
+        let node = std::process::Command::new("node").arg(script).output()?;
+        let wasm = std::process::Command::new("wasmtime")
+            .args([
+                "run",
+                "-C",
+                "cache=n",
+                "-S",
+                "p3=y",
+                "-W",
+                "component-model-async=y",
+                "-W",
+                "component-model-async-stackful=y",
+                "-W",
+                "component-model-more-async-builtins=y",
+            ])
+            .arg(component)
+            .output()?;
+        assert_eq!(node.stdout, b"before\n", "Node argument {argument}");
+        assert_eq!(
+            wasm.stdout,
+            node.stdout,
+            "argument {argument}: {}",
+            String::from_utf8_lossy(&wasm.stderr)
+        );
+        assert_eq!(
+            wasm.status.code(),
+            node.status.code(),
+            "argument {argument}: {}",
+            String::from_utf8_lossy(&wasm.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn named_exports_use_standard_wasi_exit_and_validate_its_arguments() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Engine, Store};
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:exit; world task { import wasi:cli/exit@0.3.0; export terminate:func(code:f64)->f64; }",
+    )?;
+    let options = CompileOptions {
+        wit_dir: directory.path().into(),
+        world: Some("task".into()),
+        ..Default::default()
+    };
+    let compiled = compile_typescript(
+        "export function terminate(code:number):number {process.exit(code);return 123;}",
+        "terminate.ts",
+        &options,
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    linker.instance("wasi:cli/exit@0.3.0")?.func_wrap(
+        "exit-with-code",
+        |mut store: wasmtime::StoreContextMut<'_, usize>, (code,): (u8,)| -> wasmtime::Result<()> {
+            *store.data_mut() += 1;
+            if code == 42 {
+                Ok(())
+            } else {
+                Err(wasmtime_wasi::I32Exit(i32::from(code)).into())
+            }
+        },
+    )?;
+    for (code, expected, host_calls) in [
+        (7.0, Some(7), 1),
+        (-1.0, Some(255), 1),
+        (42.0, None, 1),
+        (0.5, None, 0),
+        (f64::NAN, None, 0),
+        (f64::INFINITY, None, 0),
+        (1e100, None, 0),
+    ] {
+        let mut store = Store::new(&engine, 0usize);
+        let instance = linker.instantiate(&mut store, &component)?;
+        let terminate = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "terminate")?;
+        let error = terminate.call(&mut store, (code,)).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<wasmtime_wasi::I32Exit>()
+                .map(|exit| exit.0),
+            expected
+        );
+        assert_eq!(*store.data(), host_calls);
+    }
+    for expression in ["'7'", "true", "{}", "[]", "1,2"] {
+        let error = compile_typescript(&format!("export function terminate(code:number):number {{process.exit({expression});return 123;}}"), "invalid-exit.ts", &options).unwrap_err();
+        let diagnostic = format!("{error:#}").to_lowercase();
+        assert!(
+            diagnostic.contains("argument")
+                || diagnostic.contains("parameter")
+                || diagnostic.contains("declared static type"),
+            "{diagnostic}"
+        );
+    }
+    Ok(())
+}

@@ -26,6 +26,7 @@ pub(crate) enum CapabilityOperation {
     Filesystem(FilesystemOperation),
     FilesystemPromise(FilesystemOperation),
     HttpGet,
+    Exit,
 }
 
 /// Pure lowering metadata for source validation, core calls, and component wiring.
@@ -68,6 +69,7 @@ impl CapabilityOperation {
             Self::Stdio(operation) => operation.name(),
             Self::Filesystem(operation) | Self::FilesystemPromise(operation) => operation.name(),
             Self::HttpGet => "get",
+            Self::Exit => "process.exit",
         }
     }
 }
@@ -79,6 +81,11 @@ impl LowerCapability for CapabilityOperation {
                 params: vec![HirType::Any],
                 result: HirType::Any,
                 implementation: CapabilityImplementation::Promise,
+            },
+            Self::Exit => CapabilityPlan {
+                params: vec![HirType::Number],
+                result: HirType::Void,
+                implementation: CapabilityImplementation::Scalar,
             },
             Self::Clock(operation) => operation.lower(),
             Self::Context(operation) => operation.lower(),

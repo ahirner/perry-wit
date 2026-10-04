@@ -58,7 +58,7 @@
         "Repeated calls are tested under a 1 MiB guest memory cap using independent Wasmtime P3 bindings"
       ],
       "differences": [
-        "Explicit request/response byte caps; status 200–599, with empty bodies for 204/205/304",
+        "Explicit request/response byte caps; status 200\u2013599, with empty bodies for 204/205/304",
         "Overflow returns the corresponding WASI body-size error; invalid response metadata and request producer failures return internal-error",
         "Source exceptions and interrupted calls require store disposal; hosts must drive the P3 event loop through completion",
         "Request trailers are consumed but not exposed; source Web Streams, response trailers, and cooperative cancellation are unsupported"
@@ -420,13 +420,20 @@
       "id": "node.process_exit",
       "name": "process.exit",
       "tier": "tier-2-node-core",
-      "support": "unsupported",
-      "domain": "Process termination with an explicit numeric exit code",
-      "invariants": [],
-      "differences": [
-        "Return the command world result from runRun; arbitrary exit codes are unsupported."
+      "support": "partial",
+      "domain": "Global process.exit with an omitted, literal undefined, or numeric safe-integer code",
+      "invariants": [
+        "Maps directly to wasi:cli/exit@0.3.0#exit-with-code with an eight-bit status",
+        "Immediately terminates CLI scripts and named component exports without running subsequent statements or finally blocks",
+        "Validates numeric codes before invoking the host; a returning exit host traps"
       ],
-      "conformance": []
+      "differences": [
+        "process.exitCode and guest RangeError objects for invalid numeric codes remain required restoration work",
+        "Nonnumeric values and extra arguments are rejected at compile time; invalid runtime numeric values currently trap"
+      ],
+      "conformance": [
+        "tests/production_test.rs"
+      ]
     },
     {
       "id": "web.uint8array",

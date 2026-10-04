@@ -456,10 +456,11 @@ impl SourceCalls {
                     ensure!(name == "now", "Unsupported Date static method '{name}'");
                     Ok(Some(CapabilityOperation::Clock(ClockOperation::DateNow)))
                 } else if builtin_process {
-                    ensure!(name == "cwd", "Unsupported process operation '{name}'");
-                    Ok(Some(CapabilityOperation::Context(
-                        ContextOperation::InitialCwd,
-                    )))
+                    Ok(Some(match name {
+                        "cwd" => CapabilityOperation::Context(ContextOperation::InitialCwd),
+                        "exit" => CapabilityOperation::Exit,
+                        _ => bail!("Unsupported process operation '{name}'"),
+                    }))
                 } else if name == "random" {
                     Ok(Some(CapabilityOperation::Random(RandomOperation::Number)))
                 } else {
@@ -572,12 +573,20 @@ impl VisitMut for SourceCalls {
             }
             match self.operation(callee) {
                 Ok(Some(operation)) => {
-                    if operation == CapabilityOperation::Clock(ClockOperation::Timeout) {
+                    if matches!(
+                        operation,
+                        CapabilityOperation::Clock(ClockOperation::Timeout)
+                            | CapabilityOperation::Exit
+                    ) {
                         let default = ast::ExprOrSpread {
                             spread: None,
                             expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
                                 span: call.span,
-                                value: 1.0,
+                                value: if operation == CapabilityOperation::Exit {
+                                    0.0
+                                } else {
+                                    1.0
+                                },
                                 raw: None,
                             }))),
                         };

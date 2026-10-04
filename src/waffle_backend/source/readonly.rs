@@ -402,7 +402,7 @@ impl Aliases {
                 (Some("Object"), Some("keys" | "values"))
                     | (Some("JSON"), Some("parse" | "stringify"))
                     | (Some("Array"), Some("isArray"))
-                    | (Some("process"), Some("cwd"))
+                    | (Some("process"), Some("cwd" | "exit"))
             ) {
                 return self.object(Object::default());
             }

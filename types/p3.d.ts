@@ -35,6 +35,7 @@ declare namespace NodeJS {
     readonly argv: readonly string[];
     /** Cached initial host directory, or / if absent. A supplied empty string is retained. */
     cwd(): string;
+    exit(code?: number): never;
   }
 }
 declare var process: NodeJS.Process;
