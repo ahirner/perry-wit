@@ -156,7 +156,6 @@ pub(crate) struct ResolvedContract {
     pub(crate) input_kind: ResolvedInputKind,
     pub(crate) uses_p3_clocks: bool,
     pub(crate) intrinsics: BTreeMap<String, TypedIntrinsic>,
-    #[allow(dead_code)]
     pub(crate) functions_by_name: BTreeMap<String, FuncId>,
     pub(crate) entry_func_id: FuncId,
     pub(crate) entry_params: Vec<HirType>,

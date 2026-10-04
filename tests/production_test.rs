@@ -173,3 +173,48 @@ fn optional_json_text_guards_handle_present_undefined_and_reassignment() -> Resu
     }
     Ok(())
 }
+
+#[test]
+fn suspending_exports_require_async_wit_including_transitive_calls() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let options = CompileOptions {
+        wit_dir: directory.path().into(),
+        world: Some("task".into()),
+        core_only: false,
+    };
+    let source = r#"
+      import {readFileSync} from 'fs';
+      function read(path:string):string {return readFileSync(path,'utf8');}
+      export function run(path:string):string {return read(path);}
+      export function pure(input:string):string {return input+'!';}
+    "#;
+    for async_export in [false, true] {
+        let qualifier = if async_export { "async " } else { "" };
+        std::fs::write(
+            directory.path().join("world.wit"),
+            format!(
+                "package test:suspension; world task {{ include wasi:cli/imports@0.3.0; export run: {qualifier}func(path:string)->string; export pure:func(input:string)->string; }}"
+            ),
+        )?;
+        let result = compile_typescript(source, "suspension.ts", &options);
+        if async_export {
+            result?;
+        } else {
+            let error = format!(
+                "{:#}",
+                result.expect_err("blocking sync exports must be diagnosed")
+            );
+            assert!(error.contains("declare it as 'async func'"), "{error}");
+        }
+    }
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:suspension; world task { include wasi:cli/imports@0.3.0; export pure:func(input:string)->string; }",
+    )?;
+    compile_typescript(
+        &source.replace("export function run", "function run"),
+        "unused.ts",
+        &options,
+    )?;
+    Ok(())
+}

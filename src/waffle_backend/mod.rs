@@ -160,6 +160,11 @@ fn compile_resolved_hir(
     text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
     let mut contract = resolve::resolve_contract(&hir, bindings, exports)?;
+    if http_handler.is_none()
+        && let Some(exports) = &contract.wit
+    {
+        exports.validate_suspension(&hir, &contract)?;
+    }
     contract.http_handler = http_handler;
     if http_handler.is_some() {
         anyhow::ensure!(

@@ -3,7 +3,7 @@
 Perry-WIT compiles static TypeScript through Perry HIR and WAFFLE SSA into
 WebAssembly components targeting WASI 0.3. The production CLI and Rust API use
 this pipeline. There is no JavaScript interpreter, legacy emitter, or bundled P2
-runtime. See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation boundaries and
+runtime. See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation boundaries, [PERFORMANCE.md](PERFORMANCE.md) for cutover measurements, and
 [TODOs.md](TODOs.md) for the deferred compatibility register.
 
 ## Build and verify
@@ -114,6 +114,11 @@ multiple observers. Promise constructors, `then`/`catch`/`finally` methods,
 `Promise.all`, `Promise.race`, callback timers, and detached tasks are deferred
 under D5. Supported async execution is eager up to suspension, with single
 settlement and retained outcomes for repeated awaits.
+
+WIT exports that can reach a suspending operation must be declared `async func`,
+including synchronous-looking filesystem and console calls. The compiler checks
+reachable helpers and rejects synchronous WIT exports with those effects.
+The TypeScript implementation itself may use a synchronous filesystem spelling.
 
 Public calls are serial. Guest roots retain values across suspension and
 collection; canonical post-return releases invocation storage after results are

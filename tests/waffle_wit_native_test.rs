@@ -373,7 +373,7 @@ fn resolved_world_rejects_retained_tasks_and_missing_capabilities() {
         let source = format!("export function run():number {{{body}}}");
         let error = compile(
             &source,
-            "package test:missing; world boundary {export run:func()->f64;}",
+            "package test:missing; world boundary {export run:async func()->f64;}",
         )
         .unwrap_err();
         assert!(

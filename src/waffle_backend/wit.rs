@@ -10,7 +10,7 @@ use perry_hir::{
     types::{ObjectType, PropertyInfo, Type as HirType},
 };
 use perry_parser::swc_ecma_ast as ast;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use swc_ecma_visit::{Visit, VisitWith};
 use waffle::{SignatureData, Type as CoreType};
 use wit_parser::{Function, FunctionKind, Resolve, Type, TypeDefKind, WorldId, WorldItem};
@@ -192,6 +192,59 @@ impl WitWorld {
                 "WIT export '{name}' result must match {expected:?}, found {:?}",
                 function.return_type
             );
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_suspension(
+        &self,
+        hir: &HirModule,
+        contract: &super::resolve::ResolvedContract,
+    ) -> Result<()> {
+        use super::{capabilities::CapabilityOperation, resolve::TypedIntrinsic};
+        use perry_hir::ir::Expr;
+        let functions: BTreeMap<_, _> = hir
+            .functions
+            .iter()
+            .map(|function| (function.id, function))
+            .collect();
+        for (name, export) in &self.functions {
+            if matches!(export.function.kind, FunctionKind::AsyncFreestanding) {
+                continue;
+            }
+            let mut pending = vec![contract.functions_by_name[name]];
+            let mut visited = BTreeSet::new();
+            while let Some(id) = pending.pop() {
+                if !visited.insert(id) {
+                    continue;
+                }
+                let mut suspending = None;
+                super::visit::visit_statements(&functions[&id].body, &mut |expression| {
+                    match expression {
+                        Expr::FuncRef(callee) => pending.push(*callee),
+                        Expr::ExternFuncRef { name, .. } => {
+                            if let Some(intrinsic) = contract.intrinsics.get(name)
+                                && (intrinsic.is_async()
+                                    || matches!(
+                                        intrinsic,
+                                        TypedIntrinsic::Capability(
+                                            CapabilityOperation::Filesystem(_)
+                                                | CapabilityOperation::Stdio(_)
+                                        )
+                                    ))
+                            {
+                                suspending = Some(intrinsic.name().to_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+                if let Some(operation) = suspending {
+                    bail!(
+                        "WIT export '{name}' can suspend through '{operation}'; declare it as 'async func' in WIT"
+                    );
+                }
+            }
         }
         Ok(())
     }
