@@ -12,7 +12,9 @@ use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-use super::capabilities::{CapabilityOperation, ClockOperation, LowerCapability, RandomOperation};
+use super::capabilities::{
+    CapabilityOperation, ClockOperation, LowerCapability, RandomOperation, StdioOperation,
+};
 
 #[derive(Default)]
 pub(crate) struct SourceBindings {
@@ -41,6 +43,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             let namespace = match import.src.value.as_str() {
                 Some("perry:clocks") => CapabilityNamespace::Clocks,
                 Some("perry:random") => CapabilityNamespace::Random,
+                Some("perry:stdio") => CapabilityNamespace::Stdio,
                 _ => bail!("Unsupported capability import: {:?}", import.src.value),
             };
             ensure!(
@@ -125,6 +128,7 @@ fn source_type(ty: &HirType) -> Result<String> {
         HirType::String => Ok("string".into()),
         HirType::Void => Ok("void".into()),
         HirType::Promise(inner) => Ok(format!("Promise<{}>", source_type(inner)?)),
+        ty if super::bytes::is_byte_view(ty) => Ok("Uint8Array".into()),
         _ => bail!("Unsupported capability source type: {ty:?}"),
     }
 }
@@ -133,6 +137,7 @@ fn source_type(ty: &HirType) -> Result<String> {
 enum CapabilityNamespace {
     Clocks,
     Random,
+    Stdio,
 }
 
 impl CapabilityNamespace {
@@ -141,6 +146,12 @@ impl CapabilityNamespace {
             (Self::Clocks, "waitFor") => Ok(CapabilityOperation::Clock(ClockOperation::WaitFor)),
             (Self::Random, "randomNumber") => {
                 Ok(CapabilityOperation::Random(RandomOperation::Number))
+            }
+            (Self::Stdio, "writeStdout") => {
+                Ok(CapabilityOperation::Stdio(StdioOperation::WriteStdout))
+            }
+            (Self::Stdio, "writeStderr") => {
+                Ok(CapabilityOperation::Stdio(StdioOperation::WriteStderr))
             }
             _ => bail!("Unknown capability member '{name}'"),
         }
@@ -234,7 +245,8 @@ impl SourceCalls {
                     _ => None,
                 };
                 let builtin_math = receiver.sym == "Math" && receiver.ctxt == self.unresolved;
-                if namespace.is_none() && !builtin_math {
+                let builtin_console = receiver.sym == "console" && receiver.ctxt == self.unresolved;
+                if namespace.is_none() && !builtin_math && !builtin_console {
                     return Ok(None);
                 }
                 let name = match &member.prop {
@@ -247,6 +259,12 @@ impl SourceCalls {
                 };
                 if let Some(namespace) = namespace {
                     Ok(Some(namespace.operation(name)?))
+                } else if builtin_console {
+                    Ok(Some(CapabilityOperation::Stdio(match name {
+                        "log" => StdioOperation::Log,
+                        "error" | "warn" => StdioOperation::Error,
+                        _ => bail!("Unsupported console method '{name}'"),
+                    })))
                 } else if name == "random" {
                     Ok(Some(CapabilityOperation::Random(RandomOperation::Number)))
                 } else {
@@ -358,7 +376,7 @@ impl VisitMut for SourceCalls {
     fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
         if matches!(
             ident.sym.as_ref(),
-            "Math" | "RegExp" | "JSON" | "Uint8Array" | "TextDecoder"
+            "Math" | "RegExp" | "JSON" | "Uint8Array" | "TextDecoder" | "console"
         ) && ident.ctxt != self.unresolved
         {
             let id = ident.to_id();

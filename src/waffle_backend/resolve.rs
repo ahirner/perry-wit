@@ -11,7 +11,9 @@ use perry_hir::ir::{Expr, Function, Module as HirModule, Stmt};
 use perry_hir::types::{FuncId, Type as HirType};
 use waffle::Type as WaffleType;
 
-use super::capabilities::{CapabilityOperation, LowerCapability};
+use super::capabilities::{
+    CapabilityImplementation, CapabilityOperation, LowerCapability, StdioOperation,
+};
 use super::visit::visit_function_expressions;
 
 /// The nature of input accepted by the module entry point.
@@ -42,6 +44,13 @@ pub(crate) enum TypedIntrinsic {
 }
 
 impl TypedIntrinsic {
+    pub(crate) fn has_completion(&self) -> bool {
+        matches!(
+            self,
+            Self::Capability(CapabilityOperation::Stdio(_)) | Self::DecoderNew
+        )
+    }
+
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Capability(operation) => operation.name(),
@@ -71,7 +80,9 @@ impl TypedIntrinsic {
                     HirType::Promise(inner) => inner.as_ref(),
                     result => result,
                 };
-                let returns = if matches!(result, HirType::Void) {
+                let returns = if self.has_completion() {
+                    vec![WaffleType::I32, WaffleType::F64]
+                } else if matches!(result, HirType::Void) {
                     vec![]
                 } else {
                     vec![map_hir_type_to_waffle(result)?]
@@ -115,6 +126,22 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn output_operations(&self) -> BTreeSet<StdioOperation> {
+        self.intrinsics
+            .values()
+            .filter_map(|intrinsic| {
+                if let TypedIntrinsic::Capability(operation) = intrinsic
+                    && let CapabilityImplementation::Stdio(operation) =
+                        operation.lower().implementation
+                {
+                    Some(operation)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn has_stream_input(&self) -> bool {
         self.entry_params
             .iter()

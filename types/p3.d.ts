@@ -10,6 +10,15 @@ declare module "perry:random" {
   export function randomNumber(): number;
 }
 
+declare module "perry:stdio" {
+  /** Write the visible bytes, then await the independent P3 output completion.
+   * Must be immediately awaited. Numeric rejection codes: 1 I/O, 2 invalid
+   * byte sequence, 3 broken pipe. Already written bytes are not rolled back. */
+  export function writeStdout(bytes: Uint8Array): Promise<void>;
+  /** Same transfer and completion contract as writeStdout, directed to stderr. */
+  export function writeStderr(bytes: Uint8Array): Promise<void>;
+}
+
 /** Opaque readable end of a native byte stream, owned by the entry invocation. */
 interface ByteStream {
   readonly __perryByteStream: unique symbol;

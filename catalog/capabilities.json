@@ -21,6 +21,29 @@
   ],
   "capabilities": [
     {
+      "id": "compiler.p3_stdio",
+      "name": "Native P3 Output",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: perry:stdio byte writes and single-string console logging",
+      "invariants": [
+        "writeStdout and writeStderr preserve arbitrary bytes and visible Uint8Array ranges",
+        "Shared native writes retry partial transfers and respect host backpressure",
+        "Successful transfer still awaits the separate capability completion future",
+        "console.log routes to stdout; console.error and console.warn route to stderr, preserving UTF-8 and embedded NULs and appending a newline",
+        "Output buffers remain traced while suspended, including collection by sibling tasks",
+        "Normal and recoverable error paths close writable ends and consume and drop completion futures"
+      ],
+      "differences": [
+        "The default CLI remains on the legacy pipeline until R9",
+        "Byte writes must be immediately awaited; console calls return void but may suspend for host output",
+        "Console supports exactly one string; formatting and other argument forms are diagnosed",
+        "Output errors throw numeric codes: 1 I/O, 2 invalid byte sequence, 3 broken pipe; already written bytes remain visible",
+        "Host traps and cancellation require store disposal; returned streams and callbacks need further ownership support"
+      ],
+      "conformance": ["tests/waffle_output_test.rs"]
+    },
+    {
       "id": "compiler.p3_text",
       "name": "Scalar UTF-8 Text",
       "tier": "tier-1-web-primaries",
@@ -39,7 +62,7 @@
         "Unpaired surrogate escapes and UTF-16 code-unit APIs are diagnosed",
         "Custom iterator protocols, labeled loop exits, and JSON remain unsupported on this path",
         "Regex support is literal string.search with u/s flags; constructors, stored regex values, other flags, lookaround, backreferences, and property escapes are diagnosed",
-        "Implicit string coercions are restricted; dead temporaries within long invocations are not yet reclaimed"
+        "Implicit string coercions are restricted; traced loop collection reclaims dead temporaries, while returned-stream and callback owners remain incomplete"
       ],
       "conformance": ["tests/waffle_string_test.rs", "tests/text_contract_test.rs", "tests/utf8_probe_test.rs"]
     },
@@ -62,7 +85,7 @@
         "Stored Promises require the host's component async stackful and threading features",
         "Promise parameters are guest-internal; callbacks, constructors, and combinators are not yet supported",
         "Detached call statements are diagnosed; unobserved pending work or overlapping entry calls trap and require instance disposal",
-        "Invocation arenas bound repeated calls but do not reclaim dead values during long-running invocations"
+        "Traced loop collection reclaims dead strings and Promise outcomes; escaped captures and returned streams still need lifetime support"
       ],
       "conformance": ["tests/p3_promise_test.rs"]
     },

@@ -108,6 +108,9 @@ impl ModuleRegistry {
                     | TypedIntrinsic::ReadInto
                     | TypedIntrinsic::ByteAt
                     | TypedIntrinsic::DecoderNew
+            ) || matches!(
+                intrinsic,
+                TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Stdio(_))
             ) {
                 continue;
             }
@@ -124,6 +127,10 @@ impl ModuleRegistry {
         let stream_imports = contract
             .has_stream_input()
             .then(|| super::streams::declare_imports(module));
+
+        let output_operations = contract.output_operations();
+        let output_imports = (!output_operations.is_empty())
+            .then(|| super::streams::output::declare_imports(module, &output_operations));
 
         let promises = if let Some(plan) = &contract.promises {
             let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
@@ -225,6 +232,24 @@ impl ModuleRegistry {
         } else {
             None
         };
+
+        if let Some(imports) = output_imports {
+            let helpers = super::streams::output::emit_runtime(
+                module,
+                memory,
+                allocator.expect("output storage requires an allocator"),
+                imports,
+                &output_operations,
+            )?;
+            for (name, intrinsic) in &contract.intrinsics {
+                if let TypedIntrinsic::Capability(
+                    super::capabilities::CapabilityOperation::Stdio(operation),
+                ) = intrinsic
+                {
+                    intrinsics.insert(name.clone(), helpers[operation.name()]);
+                }
+            }
+        }
 
         // 3. Pre-declare all functions and establish complete FunctionInfo records
         let mut functions = BTreeMap::new();

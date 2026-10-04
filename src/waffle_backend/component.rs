@@ -4,7 +4,7 @@ pub(crate) mod forward;
 
 use std::collections::BTreeSet;
 
-use crate::waffle_backend::capabilities::LowerCapability;
+use crate::waffle_backend::capabilities::{CapabilityImplementation, LowerCapability};
 use crate::waffle_backend::registry::canonical_param_types;
 use crate::waffle_backend::resolve::{ResolvedContract, TypedIntrinsic};
 use anyhow::{Context, Result, bail, ensure};
@@ -43,10 +43,16 @@ pub(crate) fn frame_component(
             }
             TypedIntrinsic::Capability(operation) => {
                 let plan = operation.lower();
-                if emitted_operations.insert(operation) {
-                    host_imports.push_str(plan.adapter);
+                if let CapabilityImplementation::Standalone {
+                    adapter,
+                    core_function,
+                } = plan.implementation
+                {
+                    if emitted_operations.insert(operation) {
+                        host_imports.push_str(adapter);
+                    }
+                    host_wires.push_str(&format!("      (export {name:?} {core_function})\n"));
                 }
-                host_wires.push_str(&format!("      (export {name:?} {})\n", plan.core_function));
             }
             TypedIntrinsic::ByteAt
             | TypedIntrinsic::ReadChunk
@@ -59,6 +65,17 @@ pub(crate) fn frame_component(
         }
     }
 
+    let output_operations = contract.output_operations();
+    host_imports.push_str(&super::streams::output::declare_adapters(
+        &output_operations,
+    )?);
+    let output_adapters = super::streams::output::bind_adapters(&output_operations)?;
+    let output_imports = if output_operations.is_empty() {
+        ""
+    } else {
+        r#"(with "output" (instance $output-forward))"#
+    };
+
     if let Some(plan) = &contract.promises {
         let wat = super::promises::component::frame(
             core_body,
@@ -66,6 +83,8 @@ pub(crate) fn frame_component(
             &host_wires,
             contract,
             plan,
+            output_imports,
+            &output_adapters,
         )?;
         let bytes = wat::parse_str(&wat).context("Encoding stored-Promise component")?;
         return Ok((wat, bytes));
@@ -108,9 +127,11 @@ pub(crate) fn frame_component(
   (core module $guest {core_body})
   (core instance $guest (instantiate $guest
     {stream_imports}
+    {output_imports}
     (with "host" (instance
 {host_wires}))))
 {stream_adapters}
+{output_adapters}
   (func (export "run") async {entry_signature}
     (canon lift (core func $guest "run"){memory_option}{post_return_option})))"#
     );

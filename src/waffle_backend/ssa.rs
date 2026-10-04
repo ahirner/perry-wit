@@ -62,6 +62,7 @@ pub(crate) fn lower_module(
         || contract.promises.is_some()
         || super::bytes::required(hir)
         || contract.has_stream_input()
+        || !contract.output_operations().is_empty()
     {
         collect_strings_in_module(hir, &mut string_pool);
         if reqs.decoder {
@@ -559,7 +560,9 @@ impl<'a> FunctionLowerer<'a> {
                 .get(name)
                 .ok_or_else(|| anyhow::anyhow!("Unknown extern function: {name}"))?;
             let signature = &self.module.signatures[self.module.funcs[func_idx].sig()];
-            let name = self.contract.intrinsics[name].name();
+            let intrinsic = &self.contract.intrinsics[name];
+            let has_completion = intrinsic.has_completion();
+            let name = intrinsic.name();
             ensure!(
                 arg_vals.len() == signature.params.len(),
                 "Intrinsic '{name}' expects {} arguments, got {}",
@@ -572,6 +575,10 @@ impl<'a> FunctionLowerer<'a> {
                     "Intrinsic '{name}' argument {} must have core type {expected:?}",
                     index + 1
                 );
+            }
+            if has_completion {
+                self.call_completion(func_idx, &arg_vals);
+                return Ok(None);
             }
             let ret_types = &signature.returns;
             if ret_types.is_empty() {

@@ -2,26 +2,35 @@
 
 mod clocks;
 mod random;
+pub(crate) mod stdio;
 
 use perry_hir::types::Type as HirType;
 
 pub(crate) use clocks::ClockOperation;
 pub(crate) use random::RandomOperation;
+pub(crate) use stdio::StdioOperation;
 
 /// A resolved operation, independent of the source binding used to call it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CapabilityOperation {
     Clock(ClockOperation),
     Random(RandomOperation),
+    Stdio(StdioOperation),
 }
 
 /// Pure lowering metadata for source validation, core calls, and component wiring.
-/// Host failures trap; these primitive operations have no WIT domain-error result.
 pub(crate) struct CapabilityPlan {
     pub(crate) params: Vec<HirType>,
     pub(crate) result: HirType,
-    pub(crate) adapter: &'static str,
-    pub(crate) core_function: &'static str,
+    pub(crate) implementation: CapabilityImplementation,
+}
+
+pub(crate) enum CapabilityImplementation {
+    Standalone {
+        adapter: &'static str,
+        core_function: &'static str,
+    },
+    Stdio(StdioOperation),
 }
 
 /// Describe an operation without owning values, scheduling, or invocation state.
@@ -42,6 +51,7 @@ impl CapabilityOperation {
         match self {
             Self::Clock(ClockOperation::WaitFor) => "waitFor",
             Self::Random(RandomOperation::Number) => "randomNumber",
+            Self::Stdio(operation) => operation.name(),
         }
     }
 }
@@ -51,6 +61,7 @@ impl LowerCapability for CapabilityOperation {
         match self {
             Self::Clock(operation) => operation.lower(),
             Self::Random(operation) => operation.lower(),
+            Self::Stdio(operation) => operation.lower(),
         }
     }
 }

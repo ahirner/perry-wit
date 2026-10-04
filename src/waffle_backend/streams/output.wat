@@ -1,0 +1,27 @@
+  (func $complete-output (param $writer i32) (param $completion i32)
+    (param $owner i32) (param $newline i32) (result i32 f64)
+    (local $frame i32) (local $scratch i32) (local $short i32) (local $error i32)
+    (local.set $frame (call $frame-new (i32.const 2)))
+    (i32.store offset=12 (local.get $frame) (local.get $owner))
+    (local.set $scratch (call $realloc (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 3)))
+    (i32.store offset=16 (local.get $frame) (local.get $scratch))
+    (i32.store8 offset=2 (local.get $scratch) (i32.const 10))
+    (local.set $short (i32.ne
+      (call $write-buffer (local.get $writer) (i32.load (local.get $owner)) (i32.load offset=4 (local.get $owner)))
+      (i32.load offset=4 (local.get $owner))))
+    (if (i32.and (local.get $newline) (i32.eqz (local.get $short)))
+      (then
+        (local.set $short (i32.ne
+          (call $write-buffer (local.get $writer) (i32.add (local.get $scratch) (i32.const 2)) (i32.const 1))
+          (i32.const 1)))))
+    (call $drop-writer (local.get $writer))
+    ;; Transfer completion and capability completion are independent channels.
+    (if (call $await (local.get $completion) (local.get $scratch)) (then unreachable))
+    (call $drop-future (local.get $completion))
+    (if (i32.load8_u (local.get $scratch))
+      (then (local.set $error (i32.add (i32.load8_u offset=1 (local.get $scratch)) (i32.const 1)))))
+    (if (i32.and (i32.eqz (local.get $error)) (local.get $short))
+      (then (local.set $error (i32.const 3))))
+    (call $frame-drop (local.get $frame))
+    (i32.ne (local.get $error) (i32.const 0))
+    (f64.convert_i32_u (local.get $error)))

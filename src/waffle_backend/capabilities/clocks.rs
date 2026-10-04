@@ -1,6 +1,6 @@
 //! Millisecond source durations mapped to the P3 monotonic clock.
 
-use super::{CapabilityPlan, LowerCapability};
+use super::{CapabilityImplementation, CapabilityPlan, LowerCapability};
 use perry_hir::types::Type as HirType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -14,8 +14,10 @@ impl LowerCapability for ClockOperation {
             Self::WaitFor => CapabilityPlan {
                 params: vec![HirType::Number],
                 result: HirType::Promise(Box::new(HirType::Void)),
-                adapter: P3_CLOCK_ADAPTER,
-                core_function: "(func $delay \"wait-for\")",
+                implementation: CapabilityImplementation::Standalone {
+                    adapter: P3_CLOCK_ADAPTER,
+                    core_function: "(func $delay \"wait-for\")",
+                },
             },
         }
     }

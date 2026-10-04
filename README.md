@@ -184,9 +184,23 @@ functions borrow the input, and entry cleanup closes it after `finally`, includi
 early returns and numeric errors. Calls are serial: the pinned host queues
 overlapping calls before entry, with an additional guest guard against reentry.
 Traps and cancellation require store disposal. Stored async tasks, multiple inputs,
-returned streams, and source stream writes remain unsupported. The filesystem tests
+and returned streams remain unsupported for this input contract. The filesystem tests
 compose a source scanner with a real P3 producer and verify native file forwarding
 against independent bindings. Filesystem source APIs remain part of R8.
+`perry:stdio` exports immediately awaited `writeStdout(bytes)` and
+`writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary
+binary bytes, through shared native stream transfers and wait for the capability's
+separate completion future. Partial writes and backpressure preserve the unwritten
+suffix; empty views still check completion. `console.log(text)` writes one string
+and a newline to stdout; `console.error(text)` and `console.warn(text)` use stderr.
+These console calls return void and may suspend for host output. Formatting,
+multiple arguments, non-string coercions, and storing byte-output Promises are
+currently diagnosed. UTF-8, embedded NULs, and argument effects are preserved.
+Output errors throw numeric codes `1` (I/O), `2` (invalid byte sequence), or `3`
+(broken pipe), reaching catch/finally and numeric WIT error results. Previously
+written bytes remain visible. Writable ends and completion futures close before
+the call returns; buffers stay rooted through suspension and sibling collection.
+Returning streams that outlive the invocation still needs separate ownership.
 `Uint8Array` values support numeric lengths, literal element arrays,
 copy construction, indexed reads/writes, `subarray`, `slice`, `length`, `byteLength`,
 and `byteOffset`. Views have distinct identity and retain their shared backing
@@ -224,7 +238,8 @@ their backing storage, then reclaim and coalesce dead allocations. Storage is
 bounded by live values and a fixed
 number of reference slots per active source frame. Native input reads share this
 managed memory, retaining the chunk buffer and destination views through suspension
-and collection. Returned streams and callback owners still need lifecycle support.
+and collection. Native output calls retain their source and completion buffers until
+both channels finish. Returned streams and callback owners still need lifecycle support.
 String `for…of` iteration evaluates its input once and yields complete Unicode
 scalars, including separate combining marks. It supports nested `for`/`while`
 loops, numeric updates, `break`/`continue`, and `finally` cleanup across P3 waits.

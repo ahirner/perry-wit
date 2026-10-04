@@ -201,6 +201,14 @@ impl TextContractMatrix {
             boundary_behavior: "Memory layout is (ptr: i32, byte_len: i32)",
             node_difference: "Pure UTF-8 Canonical ABI compliance",
         },
+        TextOperationEntry {
+            operation: "console_text_output",
+            unit: IndexUnit::Byte,
+            status: OperationStatus::SupportedBoundary,
+            coercion: "Exactly one string; formatting, multiple arguments, and implicit coercions are diagnosed",
+            boundary_behavior: "Preserves UTF-8 and embedded NULs, appends a newline, and awaits P3 transfer and capability completion",
+            node_difference: "Calls return void but may suspend for host output; numeric output failures enter catch/finally",
+        },
     ];
 
     pub fn entries() -> &'static [TextOperationEntry] {

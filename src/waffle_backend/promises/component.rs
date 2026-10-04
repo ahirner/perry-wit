@@ -27,6 +27,8 @@ pub(crate) fn frame(
     host_wires: &str,
     contract: &ResolvedContract,
     plan: &PromisePlan,
+    guest_imports: &str,
+    guest_adapters: &str,
 ) -> Result<String> {
     let mut forwards = [
         ("new", vec!["i32"], vec!["i32"]),
@@ -64,8 +66,9 @@ pub(crate) fn frame(
     writeln!(wat, "(core module $guest {core_body})")?;
     writeln!(
         wat,
-        "(core instance $guest (instantiate $guest (with \"host\" (instance $host)) (with \"promises\" (instance $promises-forward))))"
+        "(core instance $guest (instantiate $guest (with \"host\" (instance $host)) (with \"promises\" (instance $promises-forward)) {guest_imports}))"
     )?;
+    wat.push_str(guest_adapters);
     wat.push_str(
         r#"
       (core func $new-set (canon waitable-set.new))

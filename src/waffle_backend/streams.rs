@@ -1,5 +1,7 @@
 //! Native byte transfers into managed buffers owned by one active entry invocation.
 
+pub(crate) mod output;
+
 use std::collections::BTreeMap;
 
 use anyhow::Result;

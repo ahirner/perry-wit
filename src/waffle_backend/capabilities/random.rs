@@ -1,6 +1,6 @@
 //! Uniform double samples using the high 53 bits of a WASI random word.
 
-use super::{CapabilityPlan, LowerCapability};
+use super::{CapabilityImplementation, CapabilityPlan, LowerCapability};
 use perry_hir::types::Type as HirType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -14,8 +14,10 @@ impl LowerCapability for RandomOperation {
             Self::Number => CapabilityPlan {
                 params: vec![],
                 result: HirType::Number,
-                adapter: P3_RANDOM_ADAPTER,
-                core_function: "(func $random-number \"sample\")",
+                implementation: CapabilityImplementation::Standalone {
+                    adapter: P3_RANDOM_ADAPTER,
+                    core_function: "(func $random-number \"sample\")",
+                },
             },
         }
     }

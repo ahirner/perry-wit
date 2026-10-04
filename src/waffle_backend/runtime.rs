@@ -1,4 +1,4 @@
-//! Append computation-only Wasm helpers as ordinary, validated WAFFLE functions.
+//! Append Wasm support helpers as ordinary, validated WAFFLE functions.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +16,7 @@ pub(crate) fn emit_functions(
     runtime.expand_all_funcs()?;
     ensure!(
         runtime.globals.len() == 0 && runtime.tables.len() == 0 && runtime.start_func.is_none(),
-        "Computation helpers cannot own globals, tables, or initialization"
+        "Support helpers cannot own globals, tables, or initialization"
     );
     ensure!(
         runtime.memories.len() == 1
@@ -24,18 +24,18 @@ pub(crate) fn emit_functions(
                 .memories
                 .iter()
                 .all(|id| runtime.memories[id].segments.is_empty()),
-        "Computation helpers use one existing memory and no data segments"
+        "Support helpers use one existing memory and no data segments"
     );
     let mut functions = BTreeMap::new();
     for import in &runtime.imports {
         if let ImportKind::Func(function) = import.kind {
             let target = *imports
                 .get(import.name.as_str())
-                .context("Missing computation helper import")?;
+                .context("Missing support helper import")?;
             ensure!(
                 runtime.signatures[runtime.funcs[function].sig()]
                     == module.signatures[module.funcs[target].sig()],
-                "Computation helper import signature mismatch"
+                "Support helper import signature mismatch"
             );
             functions.insert(function, target);
         }
