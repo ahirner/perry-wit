@@ -22,20 +22,12 @@ pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<&'static
         ("serialize", "json_serialize", 5),
     ]
     .into_iter()
-    .map(|(local, name, arity)| {
-        let signature = module.signatures.push(SignatureData {
-            params: vec![Type::I32; arity],
-            returns: vec![Type::I64],
-        });
-        let function = module.funcs.push(FuncDecl::Import(signature, name.into()));
-        module.imports.push(Import {
-            module: super::link::HELPER_MODULE.into(),
-            name: name.into(),
-            kind: ImportKind::Func(function),
-        });
-        (local, function)
-    })
+    .map(|(local, name, arity)| (local, declare_import(module, name, arity)))
     .collect()
+}
+
+pub(crate) fn declare_serializer(module: &mut Module<'static>) -> Func {
+    declare_import(module, "json_serialize", 5)
 }
 
 pub(crate) fn emit_runtime(
@@ -61,4 +53,18 @@ pub(crate) fn emit_runtime(
         parse: functions["json.parse"],
         stringify: functions["json.stringify"],
     })
+}
+
+fn declare_import(module: &mut Module<'static>, name: &str, arity: usize) -> Func {
+    let signature = module.signatures.push(SignatureData {
+        params: vec![Type::I32; arity],
+        returns: vec![Type::I64],
+    });
+    let function = module.funcs.push(FuncDecl::Import(signature, name.into()));
+    module.imports.push(Import {
+        module: super::link::HELPER_MODULE.into(),
+        name: name.into(),
+        kind: ImportKind::Func(function),
+    });
+    function
 }

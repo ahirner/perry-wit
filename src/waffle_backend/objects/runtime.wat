@@ -2,6 +2,7 @@
   (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
   (import "host" "compare" (func $compare (param i32 i32) (result i32)))
   (import "host" "box" (func $box (param i32 f64) (result i32)))
+  {{environment-string}}
   (memory 1)
   ;; Object: first, last, write policy (0 ordinary, 1 environment).
   ;; Entry: next, key, tag, padding, f64 payload.
@@ -15,18 +16,6 @@
   (func (export "object.new") (result i32) (call $new (i32.const 0)))
   (func (export "object.environment") (result i32) (call $new (i32.const 1)))
 
-  (func $environment-string (param $tag i32) (param $value f64) (result i32 f64)
-    (if (i32.eqz (local.get $tag)) (then (return (i32.const 0) (f64.const {{undefined}}))))
-    (if (i32.eq (local.get $tag) (i32.const 1)) (then (return (i32.const 0) (f64.const {{null}}))))
-    (if (i32.eq (local.get $tag) (i32.const 2)) (then
-      (return (i32.const 0) (select (f64.const {{true}}) (f64.const {{false}}) (f64.ne (local.get $value) (f64.const 0))))))
-    (if (i32.eq (local.get $tag) (i32.const 3)) (then
-      (if (f64.ne (local.get $value) (local.get $value)) (then (return (i32.const 0) (f64.const {{NaN}}))))
-      (if (f64.eq (local.get $value) (f64.const inf)) (then (return (i32.const 0) (f64.const {{Infinity}}))))
-      (if (f64.eq (local.get $value) (f64.const -inf)) (then (return (i32.const 0) (f64.const {{-Infinity}}))))))
-    (if (i32.eq (local.get $tag) (i32.const 4)) (then (return (i32.const 0) (local.get $value))))
-    (if (i32.eq (local.get $tag) (i32.const 6)) (then (return (i32.const 0) (f64.const {{[object Object]}}))))
-    (i32.const 1) (f64.const 12))
   (func $get (export "object.get") (param $object i32) (param $key i32) (result i32)
     (local $entry i32)
     (local.set $entry (i32.load (local.get $object)))

@@ -9,17 +9,6 @@ use perry_hir::{
 use std::collections::{BTreeMap, BTreeSet};
 use waffle::{Func, Memory, Module};
 
-pub(crate) const COERCION_LITERALS: [&str; 8] = [
-    "undefined",
-    "null",
-    "true",
-    "false",
-    "[object Object]",
-    "NaN",
-    "Infinity",
-    "-Infinity",
-];
-
 #[derive(Clone, Copy)]
 pub(crate) struct ObjectHelpers {
     pub(crate) new: Func,
@@ -120,7 +109,7 @@ pub(crate) fn emit_runtime(
     allocator: AllocationFuncs,
     compare: Func,
     boxed_value: Func,
-    string_pool: &super::strings::StringPool,
+    string_coercion: Option<Func>,
 ) -> Result<ObjectHelpers> {
     let mut wat = format!(
         "{} {})",
@@ -130,25 +119,19 @@ pub(crate) fn emit_runtime(
             .unwrap(),
         include_str!("objects/enumerate.wat")
     );
-    for name in COERCION_LITERALS {
-        wat = wat.replace(
-            &format!("{{{{{name}}}}}"),
-            &string_pool
-                .get(name)
-                .expect("object coercion literal")
-                .to_string(),
-        );
-    }
-    let functions = runtime::emit_functions(
-        module,
-        memory,
-        &wat,
-        &BTreeMap::from([
-            ("realloc", allocator.realloc),
-            ("compare", compare),
-            ("box", boxed_value),
-        ]),
-    )?;
+    let mut imports = BTreeMap::from([
+        ("realloc", allocator.realloc),
+        ("compare", compare),
+        ("box", boxed_value),
+    ]);
+    let coercion = if let Some(function) = string_coercion {
+        imports.insert("coerce", function);
+        "(import \"host\" \"coerce\" (func $environment-string (param i32 f64) (result i32 f64)))"
+    } else {
+        "(func $environment-string (param i32 f64) (result i32 f64) (i32.const 1) (f64.const 12))"
+    };
+    wat = wat.replace("{{environment-string}}", coercion);
+    let functions = runtime::emit_functions(module, memory, &wat, &imports)?;
     Ok(ObjectHelpers {
         new: functions["object.new"],
         environment: functions["object.environment"],

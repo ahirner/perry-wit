@@ -27,9 +27,11 @@ declare namespace NodeJS {
   }
   interface Process {
     /** Cached, guest-local environment; aliases share writes and deletions.
-     * Runtime writes through any also stringify undefined, null, booleans, NaN,
-     * infinities, and plain objects. Finite numbers and arrays currently throw 12
-     * before mutation. Object.assign uses the same policy; earlier writes remain
+     * Runtime writes through any stringify undefined, null, booleans, all numbers,
+     * plain objects, and nested arrays. Arrays join with commas; holes/nullish
+     * elements and cyclic references contribute empty text. Array nesting beyond
+     * 128 levels throws 3; unsupported kinds (including Dates/bytes/Promises) throw
+     * 12 before mutation. Object.assign uses the same policy; earlier writes remain
      * if a later property fails. Object.keys/values return ordered snapshots;
      * Object.values currently throws 12 for nonstring fields in ordinary objects.
      * JSON serialization preserves cached mutations; parsed snapshots are independent. */

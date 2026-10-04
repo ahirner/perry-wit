@@ -5,6 +5,7 @@ pub(crate) mod allocation;
 pub(crate) mod audit;
 mod bytes;
 pub(crate) mod capabilities;
+mod coercion;
 pub(crate) mod component;
 mod context;
 pub(crate) mod control_flow;

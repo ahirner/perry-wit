@@ -164,6 +164,13 @@ impl ModuleRegistry {
             .json
             .then(|| super::json::declare_imports(module));
 
+        let coercion_serializer = context_operations
+            .contains(&super::capabilities::ContextOperation::Environment)
+            .then(|| match &json_imports {
+                Some(imports) => imports["serialize"],
+                None => super::json::declare_serializer(module),
+            });
+
         let promises = if let Some(plan) = &contract.promises {
             let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
                 let sig = module.signatures.push(SignatureData { params, returns });
@@ -285,6 +292,18 @@ impl ModuleRegistry {
         } else {
             None
         };
+        let string_coercion = coercion_serializer
+            .map(|serializer| {
+                super::coercion::emit_runtime(
+                    module,
+                    memory,
+                    allocator.unwrap(),
+                    string_helpers.unwrap(),
+                    serializer,
+                    string_pool,
+                )
+            })
+            .transpose()?;
         let object_helpers = if string_reqs.objects {
             Some(super::objects::emit_runtime(
                 module,
@@ -294,7 +313,7 @@ impl ModuleRegistry {
                     .expect("objects require string keys")
                     .str_compare,
                 value_helpers.expect("objects share tagged values").new,
-                string_pool,
+                string_coercion,
             )?)
         } else {
             None

@@ -15,6 +15,202 @@ use tokio::{
 use wasmtime::StoreContextMut;
 
 #[tokio::test(flavor = "current_thread")]
+async fn environment_number_coercions_match_node_and_reclaim_temporary_storage() -> Result<()> {
+    let source = r#"
+        function write(value: any): any { return process.env.VALUE = value; }
+        export function run(value: number): string {
+            for (let index = 0; index < 20; index++) { write(value); }
+            return process.env.VALUE;
+        }
+    "#;
+    let mut values = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        1e-7,
+        1e-6,
+        1e20,
+        1e21,
+        f64::MAX,
+        f64::MIN,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        9007199254740991.0,
+        0.1,
+    ];
+    let mut bits = 7u64;
+    for _ in 0..300 {
+        bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let value = f64::from_bits(bits);
+        if value.is_finite() {
+            values.push(value);
+        }
+    }
+    let node = Command::new("node")
+        .args([
+            "-e",
+            &format!(
+                "process.stdout.write(JSON.stringify({}.map(String)))",
+                serde_json::to_string(&values)?
+            ),
+        ])
+        .output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: Vec<String> = serde_json::from_slice(&node.stdout)?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (mut store, instance) = instantiate(source, 262_144, |linker| {
+        let calls = calls.clone();
+        linker.instance("wasi:cli/environment@0.3.0")?.func_wrap(
+            "get-environment",
+            move |_: StoreContextMut<'_, Host>, (): ()| {
+                assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0);
+                Ok((Vec::<(String, String)>::new(),))
+            },
+        )?;
+        Ok(())
+    })
+    .await?;
+    let run = instance.get_typed_func::<(f64,), (String,)>(&mut store, "run")?;
+    for (value, expected) in values.into_iter().zip(expected) {
+        assert_eq!(
+            run.call_async(&mut store, (value,)).await?.0,
+            expected,
+            "{value:?}"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn environment_nested_and_cyclic_arrays_match_node() -> Result<()> {
+    let source = r#"
+        function text(value: any): string {
+            process.env.PERRY_TEST_VALUE = value;
+            return process.env.PERRY_TEST_VALUE;
+        }
+        export function run(): string {
+            const shared = ["é😀", null, undefined, true, 1e21];
+            const cycle = ["start", undefined, "end"];
+            cycle[1] = cycle;
+            const root = [shared, shared, cycle, {}, [], -0, 0/0, 1/0, -1/0];
+            root.length = 12;
+            const first = text(root);
+            const keys = text(Object.keys({b:"2", a:"1"}));
+            delete shared[0];
+            shared[3] = "changed";
+            for (let i=0; i<1000; i++) {text(root);}
+            return first + ":" + keys + ":" + text(root);
+        }
+    "#;
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("coercion.mts");
+    std::fs::write(
+        &script,
+        format!("{source}\nprocess.stdout.write(JSON.stringify(run()));"),
+    )?;
+    let node = Command::new("node")
+        .arg("--disable-warning=ExperimentalWarning")
+        .arg(script)
+        .output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: String = serde_json::from_slice(&node.stdout)?;
+    let (mut store, instance) = instantiate(source, 262_144, |linker| {
+        linker
+            .instance("wasi:cli/environment@0.3.0")?
+            .func_wrap("get-environment", |_: StoreContextMut<'_, Host>, (): ()| {
+                Ok((Vec::<(String, String)>::new(),))
+            })?;
+        Ok(())
+    })
+    .await?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, expected);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn environment_coercion_failures_preserve_values_and_allocating_cleanup() -> Result<()> {
+    let source = r#"
+        function write(value:any):any {return process.env.VALUE=value;}
+        export function run():Result<string,number> {
+            process.env.VALUE="unchanged";
+            let deep:any=[];
+            for(let i=0;i<128;i++) {deep=[deep];}
+            let cleaned=0;
+            for(let i=0;i<1000;i++) {
+                try {write(["prefix",new Uint8Array(1)]);throw 99;}
+                catch(error) {if(error!==12) {throw error;}}
+                finally {process.env.TEMP=["😀", i];cleaned=cleaned+1;}
+                try {write(deep);throw 98;}
+                catch(error) {if(error!==3) {throw error;}}
+                if(process.env.VALUE!=="unchanged") {throw 97;}
+            }
+            if(cleaned!==1000) {throw 96;}
+            return process.env.VALUE+":"+process.env.TEMP;
+        }
+    "#;
+    let (mut store, instance) = instantiate(source, 262_144, |linker| {
+        linker
+            .instance("wasi:cli/environment@0.3.0")?
+            .func_wrap("get-environment", |_: StoreContextMut<'_, Host>, (): ()| {
+                Ok((Vec::<(String, String)>::new(),))
+            })?;
+        Ok(())
+    })
+    .await?;
+    let run = instance.get_typed_func::<(), (Result<String, f64>,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        assert_eq!(
+            run.call_async(&mut store, ()).await?.0,
+            Ok("unchanged:😀,999".into())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn environment_large_array_coercions_reuse_measured_output_storage() -> Result<()> {
+    let source = r#"
+        export function run(value:string):string {
+            const array=[value,value,value,value];
+            for(let i=0;i<20;i++) {process.env.VALUE=array;}
+            return process.env.VALUE;
+        }
+    "#;
+    let (mut store, instance) = instantiate(source, 2 * 1024 * 1024, |linker| {
+        linker
+            .instance("wasi:cli/environment@0.3.0")?
+            .func_wrap("get-environment", |_: StoreContextMut<'_, Host>, (): ()| {
+                Ok((Vec::<(String, String)>::new(),))
+            })?;
+        Ok(())
+    })
+    .await?;
+    let input = "é😀\0".repeat(20_000);
+    let expected = [input.as_str(); 4].join(",");
+    let run = instance.get_typed_func::<(String,), (String,)>(&mut store, "run")?;
+    for _ in 0..10 {
+        assert_eq!(
+            run.call_async(&mut store, (input.clone(),)).await?.0,
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn environment_json_snapshots_are_independent_and_keep_instance_mutations() -> Result<()> {
     let source = r#"
         export function run(first: boolean): string {
@@ -73,12 +269,12 @@ async fn environment_aliases_preserve_mutation_deletion_and_supported_coercions(
         write(env,'FLAG',1/0);if(env.FLAG!=='Infinity') {throw 87;}
         write(env,'FLAG',-1/0);if(env.FLAG!=='-Infinity') {throw 86;}
         write(env,'FLAG',{});if(env.FLAG!=='[object Object]') {throw 85;}
-        try {write(env,'FLAG',42);throw 84;}
+        write(env,'FLAG',42);if(env.FLAG!=='42') {throw 84;}
+        write(env,'FLAG',Object.keys(env));
+        if(first) {if(env.FLAG!=='BASE,EMPTY,FLAG') {throw 83;}}
+        try {write(env,'FLAG',new Uint8Array(1));throw 79;}
         catch(error) {if(error!==12) {throw error;}}
-        if(env.FLAG!=='[object Object]') {throw 83;}
-        try {write(env,'FLAG',Object.keys(env));throw 79;}
-        catch(error) {if(error!==12) {throw error;}}
-        if(env.FLAG!=='[object Object]') {throw 78;}
+        if(first) {if(env.FLAG!=='BASE,EMPTY,FLAG') {throw 78;}}
         let index=0;
         while(index<3000) {env.TEMP='prefix'+'😀';delete env.TEMP;index=index+1;}
         if(env.TEMP!==undefined) {throw 82;}
@@ -92,7 +288,7 @@ async fn environment_aliases_preserve_mutation_deletion_and_supported_coercions(
         return env.KEPT;
     }"#;
     let calls = Arc::new(AtomicUsize::new(0));
-    let (mut store, instance) = instantiate(source, 65536, |linker| {
+    let (mut store, instance) = instantiate(source, 262_144, |linker| {
         let calls = calls.clone();
         linker.instance("wasi:cli/environment@0.3.0")?.func_wrap(
             "get-environment",
@@ -214,7 +410,7 @@ async fn object_assign_preserves_environment_policy_order_and_partial_failure() 
         if(env.FIRST!=='é😀') {throw 96;}
         if(env.FLAG!=='true') {throw 95;}
         env['2']='unchanged';
-        try {Object.assign(env,{'10':'late','2':42,'1':false});throw 94;}
+        try {Object.assign(env,{'10':'late','2':new Uint8Array(1),'1':false});throw 94;}
         catch(error) {if(error!==12) {throw error;}}
         if(env['1']!=='false') {throw 93;}
         if(env['2']!=='unchanged') {throw 92;}
@@ -226,7 +422,7 @@ async fn object_assign_preserves_environment_policy_order_and_partial_failure() 
         let index=0;while(index<3000) {const other={text:'é'+'😀'};index=index+1;}
         return env.FIRST;
     }"#;
-    let (mut store, instance) = instantiate(source, 65536, |linker| {
+    let (mut store, instance) = instantiate(source, 262_144, |linker| {
         linker
             .instance("wasi:cli/environment@0.3.0")?
             .func_wrap("get-environment", |_: StoreContextMut<'_, Host>, (): ()| {
@@ -261,7 +457,7 @@ async fn environment_snapshots_preserve_native_strings_and_duplicate_keys() -> R
     expected_values[17] = "replacement\0é😀".into();
     entries.push(("key17".into(), expected_values[17].clone()));
     let calls = Arc::new(AtomicUsize::new(0));
-    let (mut store, instance) = instantiate(source, 65536, |linker| {
+    let (mut store, instance) = instantiate(source, 262_144, |linker| {
         let calls = calls.clone();
         linker.instance("wasi:cli/environment@0.3.0")?.func_wrap(
             "get-environment",
@@ -397,9 +593,9 @@ async fn cached_context_survives_sibling_collection_and_pending_store_disposal()
         return env;
     }
     export async function run():Promise<string[]> {
-        process.env.OLD='kept é😀';delete process.env.CURRENT;
+        process.env.OLD=['kept é😀'];delete process.env.CURRENT;
         const pending=keep();
-        delete process.env.OLD;process.env.CURRENT='kept é😀';
+        delete process.env.OLD;process.env.CURRENT=['kept é😀'];
         let index=0;while(index<3000) {new Date(index).toISOString();index=index+1;}
         Math.random();
         const env=await pending;
@@ -423,7 +619,12 @@ async fn cached_context_survives_sibling_collection_and_pending_store_disposal()
         let finish = Arc::new(Notify::new());
         let dropped = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
-        let (mut store, instance) = instantiate(source, 65536, |linker| {
+        let memory_limit = if source == environment {
+            262_144
+        } else {
+            65_536
+        };
+        let (mut store, instance) = instantiate(source, memory_limit, |linker| {
             let argument_calls = calls.clone();
             linker.instance("wasi:cli/environment@0.3.0")?.func_wrap(
                 "get-arguments",
@@ -501,7 +702,12 @@ async fn context_host_failures_trap_without_running_guest_finally() -> Result<()
             "export function run():number {{try {{return {expression};}} finally {{Math.random();}}}}"
         );
         let cleanup = Arc::new(AtomicUsize::new(0));
-        let (mut store, instance) = instantiate(&source, 65536, |linker| {
+        let memory_limit = if expression.contains("process.env") {
+            262_144
+        } else {
+            65_536
+        };
+        let (mut store, instance) = instantiate(&source, memory_limit, |linker| {
             let mut context = linker.instance("wasi:cli/environment@0.3.0")?;
             context.func_wrap(
                 "get-arguments",
@@ -579,7 +785,12 @@ async fn selected_context_imports_cover_empty_snapshots_and_absent_cwd() -> Resu
             assert_eq!(wat.contains(candidate), candidate == operation);
         }
         assert!(!wat.contains("wasi:clocks"));
-        let (mut store, instance) = instantiate(source, 65536, |linker| {
+        let memory_limit = if operation == "get-environment" {
+            262_144
+        } else {
+            65_536
+        };
+        let (mut store, instance) = instantiate(source, memory_limit, |linker| {
             let mut context = linker.instance("wasi:cli/environment@0.3.0")?;
             context.func_wrap("get-arguments", |_: StoreContextMut<'_, Host>, (): ()| {
                 Ok((Vec::<String>::new(),))
