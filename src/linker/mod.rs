@@ -138,10 +138,7 @@ pub(crate) fn merge_with_runtime_exports(
         } else {
             default_target
         };
-        let b_func_idx = b.export_funcs.get(target_name).copied().with_context(|| {
-            format!("Runtime import 'rt:{target_name}' not found in guest-runtime exports")
-        })?;
-        resolved_imports_a.push(b_func_idx);
+        resolved_imports_a.push(b.export_funcs.get(target_name).copied());
     }
 
     let callback_bridge = callbacks::CallbackBridge::discover(&b)?;

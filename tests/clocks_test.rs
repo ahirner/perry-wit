@@ -341,33 +341,71 @@ fn test_new_date_and_get_time() {
 }
 
 #[test]
-fn test_date_calendar_components_and_iso_string() {
-    // 1711929600000 ms is 2024-04-01T00:00:00.000Z (Monday)
-    let output = support::run(
-        r#"
-        const d = new Date(1711929600000);
-        console.log(d.toISOString());
-        console.log("year=" + d.getFullYear());
-        console.log("month=" + d.getMonth());
-        console.log("date=" + d.getDate());
-        console.log("day=" + d.getDay());
-        console.log("hours=" + d.getHours());
-        console.log("minutes=" + d.getMinutes());
-        console.log("seconds=" + d.getSeconds());
-    "#,
-        None,
-        None,
+fn legacy_date_calendar_getters_are_diagnosed_before_codegen() {
+    for method in [
+        "getFullYear",
+        "getMonth",
+        "getDate",
+        "getDay",
+        "getHours",
+        "getMinutes",
+        "getSeconds",
+        "getMilliseconds",
+    ] {
+        let source = format!("const date = new Date(1711929600000); console.log(date.{method}());");
+        let error = perry_wit::compiler::compile_typescript_raw(&source, "legacy-date.ts")
+            .err()
+            .unwrap_or_else(|| panic!("legacy Date method {method} must be diagnosed"));
+        assert!(
+            error.to_string().contains("Legacy Date"),
+            "{method}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn legacy_date_iso_formatting_matches_node_across_the_supported_epoch_range() {
+    let mut values = vec![
+        0.0,
+        -0.0,
+        1.9,
+        -1.9,
+        -1.0,
+        -86400000.0,
+        86400000.0,
+        -62167219200000.0,
+        -62167219200001.0,
+        253402300799999.0,
+        253402300800000.0,
+        -8640000000000000.0,
+        8640000000000000.0,
+        951782400000.0,
+        -2203891200000.0,
+        4107542400000.0,
+    ];
+    let mut seed = 7u64;
+    for _ in 0..500 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        values.push((seed % 17_280_000_000_000_001) as f64 - 8_640_000_000_000_000.0);
+    }
+    let source = values
+        .iter()
+        .map(|value| format!("console.log(new Date({value}).toISOString());\n"))
+        .collect::<String>();
+    let output = support::run(&source, None, None);
+    let node = std::process::Command::new("node")
+        .args(["--eval", &source])
+        .output()
+        .unwrap();
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
     );
-    let out = support::stdout(&output);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines[0], "2024-04-01T00:00:00.000Z");
-    assert_eq!(lines[1], "year=2024");
-    assert_eq!(lines[2], "month=3"); // April is month 3 (0-indexed)
-    assert_eq!(lines[3], "date=1");
-    assert_eq!(lines[4], "day=1"); // Monday is day 1
-    assert_eq!(lines[5], "hours=0");
-    assert_eq!(lines[6], "minutes=0");
-    assert_eq!(lines[7], "seconds=0");
+    assert_eq!(
+        support::stdout(&output),
+        String::from_utf8(node.stdout).unwrap()
+    );
 }
 
 #[test]

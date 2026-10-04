@@ -2,8 +2,8 @@
 
 use std::collections::VecDeque;
 
-use anyhow::Result;
-use wasmparser::{ElementItems, ExternalKind, Global, Operator};
+use anyhow::{Context, Result};
+use wasmparser::{Element, ElementItems, ExternalKind, Global, Operator};
 
 use super::sections::{ParsedModuleA, ParsedModuleB};
 
@@ -117,7 +117,7 @@ pub(crate) fn module_needs_fs(a: &ParsedModuleA) -> bool {
 pub(crate) fn compute_pruning_plan(
     a: &ParsedModuleA,
     b: &ParsedModuleB,
-    resolved_imports_a: &[u32],
+    resolved_imports_a: &[Option<u32>],
     synthesized_roots: &[u32],
 ) -> Result<PruningPlan> {
     let num_wasi = b.wasi_imports.len();
@@ -142,7 +142,7 @@ pub(crate) fn compute_pruning_plan(
         if exp.kind == ExternalKind::Func {
             mark_a(
                 exp.index as usize,
-                num_a_imports,
+                &a.imports,
                 resolved_imports_a,
                 num_wasi,
                 num_b_defs,
@@ -151,7 +151,7 @@ pub(crate) fn compute_pruning_plan(
                 &mut reachable_wasi,
                 &mut reachable_b_def,
                 &mut reachable_a_def,
-            );
+            )?;
         }
     }
     for el in &a.elements {
@@ -159,7 +159,7 @@ pub(crate) fn compute_pruning_plan(
             for f in funcs.clone() {
                 mark_a(
                     f? as usize,
-                    num_a_imports,
+                    &a.imports,
                     resolved_imports_a,
                     num_wasi,
                     num_b_defs,
@@ -168,7 +168,7 @@ pub(crate) fn compute_pruning_plan(
                     &mut reachable_wasi,
                     &mut reachable_b_def,
                     &mut reachable_a_def,
-                );
+                )?;
             }
         }
     }
@@ -231,10 +231,10 @@ pub(crate) fn compute_pruning_plan(
         }
     }
 
-    for function in global_function_references(&a.globals)? {
+    for function in initializer_function_references(&a.globals, &a.elements)? {
         mark_a(
             function as usize,
-            num_a_imports,
+            &a.imports,
             resolved_imports_a,
             num_wasi,
             num_b_defs,
@@ -243,9 +243,9 @@ pub(crate) fn compute_pruning_plan(
             &mut reachable_wasi,
             &mut reachable_b_def,
             &mut reachable_a_def,
-        );
+        )?;
     }
-    for function in global_function_references(&b.globals)? {
+    for function in initializer_function_references(&b.globals, &b.elements)? {
         mark_b(
             function as usize,
             num_wasi,
@@ -269,7 +269,7 @@ pub(crate) fn compute_pruning_plan(
                             | Operator::RefFunc { function_index } => {
                                 mark_a(
                                     function_index as usize,
-                                    num_a_imports,
+                                    &a.imports,
                                     resolved_imports_a,
                                     num_wasi,
                                     num_b_defs,
@@ -278,7 +278,7 @@ pub(crate) fn compute_pruning_plan(
                                     &mut reachable_wasi,
                                     &mut reachable_b_def,
                                     &mut reachable_a_def,
-                                );
+                                )?;
                             }
                             _ => {}
                         }
@@ -342,8 +342,7 @@ pub(crate) fn compute_pruning_plan(
     // Module A Function Map: maps any old Module A function index to its new index
     let mut func_map_a = Vec::with_capacity(num_a_imports + num_a_defs);
     for &target in resolved_imports_a {
-        let b_target = target as usize;
-        func_map_a.push(func_map_b[b_target]);
+        func_map_a.push(target.map_or(0, |index| func_map_b[index as usize]));
     }
     for i in 0..num_a_defs {
         func_map_a.push(num_emitted_wasi + (i as u32));
@@ -358,11 +357,23 @@ pub(crate) fn compute_pruning_plan(
     })
 }
 
-/// Finds roots in global initializers, which survive function pruning.
-fn global_function_references(globals: &[Global<'_>]) -> Result<Vec<u32>> {
+/// Finds roots in initializers, which survive function pruning.
+fn initializer_function_references(
+    globals: &[Global<'_>],
+    elements: &[Element<'_>],
+) -> Result<Vec<u32>> {
     let mut functions = Vec::new();
-    for global in globals {
-        let mut reader = global.init_expr.get_operators_reader();
+    let mut expressions = globals
+        .iter()
+        .map(|global| global.init_expr.clone())
+        .collect::<Vec<_>>();
+    for element in elements {
+        if let ElementItems::Expressions(_, items) = &element.items {
+            expressions.extend(items.clone().into_iter().collect::<Result<Vec<_>, _>>()?);
+        }
+    }
+    for expression in expressions {
+        let mut reader = expression.get_operators_reader();
         while !reader.eof() {
             if let Operator::RefFunc { function_index } = reader.read()? {
                 functions.push(function_index);
@@ -375,8 +386,8 @@ fn global_function_references(globals: &[Global<'_>]) -> Result<Vec<u32>> {
 #[expect(clippy::too_many_arguments)]
 fn mark_a(
     idx: usize,
-    num_a_imports: usize,
-    resolved_imports_a: &[u32],
+    imports: &[(&str, &str, u32)],
+    resolved_imports_a: &[Option<u32>],
     num_wasi: usize,
     num_b_defs: usize,
     num_a_defs: usize,
@@ -384,9 +395,15 @@ fn mark_a(
     reachable_wasi: &mut [bool],
     reachable_b_def: &mut [bool],
     reachable_a_def: &mut [bool],
-) {
+) -> Result<()> {
+    let num_a_imports = imports.len();
     if idx < num_a_imports {
-        let b_target = resolved_imports_a[idx] as usize;
+        let b_target = resolved_imports_a[idx].with_context(|| {
+            let (module, name, _) = imports[idx];
+            format!(
+                "Referenced runtime import '{module}:{name}' not found in guest-runtime exports"
+            )
+        })? as usize;
         if b_target < num_wasi {
             reachable_wasi[b_target] = true;
         } else {
@@ -403,6 +420,7 @@ fn mark_a(
             worklist.push_back(FuncNode::A(a_def));
         }
     }
+    Ok(())
 }
 
 fn mark_b(

@@ -8,5 +8,6 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+datealgo = { version = "0.2.1", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["alloc", "preserve_order"] }
 wit-bindgen = { version = "0.61.1", default-features = false, features = ["macros"] }

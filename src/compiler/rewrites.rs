@@ -383,7 +383,10 @@ impl Rewriter {
             | perry_hir::ir::Expr::DateNew(_)
             | perry_hir::ir::Expr::DateGetTime(_)
             | perry_hir::ir::Expr::DateToISOString(_)
-            | perry_hir::ir::Expr::DateGetFullYear(_)
+            | perry_hir::ir::Expr::PerformanceNow => {
+                self.needs_clocks = true;
+            }
+            perry_hir::ir::Expr::DateGetFullYear(_)
             | perry_hir::ir::Expr::DateGetMonth(_)
             | perry_hir::ir::Expr::DateGetDate(_)
             | perry_hir::ir::Expr::DateGetDay(_)
@@ -393,9 +396,10 @@ impl Rewriter {
             | perry_hir::ir::Expr::DateGetMilliseconds(_)
             | perry_hir::ir::Expr::DateParse(_)
             | perry_hir::ir::Expr::DateUtc(_)
-            | perry_hir::ir::Expr::DateValueOf(_)
-            | perry_hir::ir::Expr::PerformanceNow => {
-                self.needs_clocks = true;
+            | perry_hir::ir::Expr::DateValueOf(_) => {
+                self.compatibility_error.get_or_insert(
+                    "Legacy Date calendar getters, parsing, UTC construction, and valueOf are deferred; use Date.now(), new Date(epochMs), getTime(), and toISOString()",
+                );
             }
             perry_hir::ir::Expr::FetchWithOptions { .. }
             | perry_hir::ir::Expr::FetchGetWithAuth { .. }

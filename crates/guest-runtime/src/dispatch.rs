@@ -46,38 +46,6 @@ fn dispatch_clocks(name: &str, raw_args: &[i64]) -> Option<i64> {
             let arg = raw_args.first().copied().unwrap_or(0);
             Some(crate::date::date_to_iso_string(arg))
         }
-        "date_get_full_year" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_full_year(arg))
-        }
-        "date_get_month" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_month(arg))
-        }
-        "date_get_date" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_date(arg))
-        }
-        "date_get_day" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_day(arg))
-        }
-        "date_get_hours" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_hours(arg))
-        }
-        "date_get_minutes" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_minutes(arg))
-        }
-        "date_get_seconds" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_seconds(arg))
-        }
-        "date_get_milliseconds" => {
-            let arg = raw_args.first().copied().unwrap_or(0);
-            Some(crate::date::date_get_milliseconds(arg))
-        }
         _ => None,
     }
 }

@@ -13,6 +13,45 @@ use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 mod support;
 
 #[test]
+fn retired_runtime_imports_are_allowed_only_when_unreferenced() {
+    let runtime = wat::parse_str("(module)").unwrap();
+    for (reference, used) in [
+        ("", false),
+        (
+            "(func (export \"run\") (result i64) i64.const 0 call $retired)",
+            true,
+        ),
+        ("(export \"run\" (func $retired))", true),
+        ("(global funcref (ref.func $retired))", true),
+        ("(table 1 funcref) (elem (i32.const 0) $retired)", true),
+        (
+            "(table 1 funcref) (elem (i32.const 0) funcref (ref.func $retired))",
+            true,
+        ),
+    ] {
+        let source = wat::parse_str(format!(
+            "(module (import \"rt\" \"date_get_full_year\" (func $retired (param i64) (result i64))) (memory 1) {reference})"
+        )).unwrap();
+        match merge_core_modules(&source, &runtime) {
+            Ok(merged) => {
+                assert!(!used, "must reject referenced import: {reference}");
+                Validator::new().validate_all(&merged).unwrap();
+            }
+            Err(error) => {
+                assert!(
+                    used,
+                    "unused import must not need an implementation: {error:#}"
+                );
+                assert!(
+                    error.to_string().contains("rt:date_get_full_year"),
+                    "{error:#}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn global_function_references_keep_runtime_functions_and_their_imports() {
     let fixtures = [
         (

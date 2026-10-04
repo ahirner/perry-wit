@@ -42,11 +42,7 @@ pub use cabi::{
     cabi_reclaim_temporaries, cabi_record_init_checkpoint, cabi_register_global_root,
     cabi_reset_invocation_state,
 };
-pub use date::{
-    date_get_date, date_get_day, date_get_full_year, date_get_hours, date_get_milliseconds,
-    date_get_minutes, date_get_month, date_get_seconds, date_get_time, date_new_val, date_now,
-    date_to_iso_string, performance_now,
-};
+pub use date::{date_get_time, date_new_val, date_now, date_to_iso_string, performance_now};
 pub use dispatch::{
     console_error, console_log, mem_call, mem_call_all_sync, mem_call_clocks, mem_call_clocks_env,
     mem_call_clocks_env_fs, mem_call_clocks_fs, mem_call_clocks_random, mem_call_clocks_random_env,

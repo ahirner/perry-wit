@@ -640,6 +640,7 @@ dependencies = [
 name = "guest-runtime"
 version = "0.1.0"
 dependencies = [
+ "datealgo",
  "serde_json",
  "wit-bindgen",
 ]

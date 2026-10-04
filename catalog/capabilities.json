@@ -535,11 +535,11 @@
       "invariants": [
         "Date.now() returns whole UTC milliseconds since the UNIX epoch",
         "Omitted arguments use current time; numeric timestamps, Date copies, and the tested null/undefined/boolean conversions preserve the supported Date semantics",
-        "getTime(), toISOString(), and calendar getters (getFullYear, getMonth, getDate, getDay, getHours, getMinutes, getSeconds, getMilliseconds) operate in UTC",
+        "getTime() and toISOString() preserve UTC epoch milliseconds; ISO formatting uses the shared datealgo dependency",
         "Invalid Date toISOString calls raise a guest exception at the call site"
       ],
       "differences": [
-        "Legacy constructor coercions and calendar getters are excluded from the P3 cutover contract",
+        "Legacy constructor coercions are excluded from the P3 cutover contract; calendar getters are diagnosed on both compiler paths",
         "Date string parsing, multi-argument constructors, setters, and the remaining Date API are outside the supported subset",
         "Detailed constructor and exception regressions run in tests/clocks_test.rs"
       ],
