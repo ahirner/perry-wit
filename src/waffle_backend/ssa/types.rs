@@ -12,7 +12,7 @@ const SCALAR_ITERATION: &str = "perry:scalar-iteration";
 
 pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
     match ty {
-        HirType::Object(_) => Some("object"),
+        ty if crate::waffle_backend::objects::is_object(ty) => Some("object"),
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
@@ -27,7 +27,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
         ty if crate::waffle_backend::values::is_dynamic(ty) => true,
-        HirType::Object(_) => true,
+        ty if crate::waffle_backend::objects::is_object(ty) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty)
             || crate::waffle_backend::date::is_date(ty) =>
         {
@@ -70,6 +70,11 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::ObjectAssign { target, .. } => self.infer_expr_type(target),
+            Expr::ObjectKeys(_) | Expr::ObjectValues(_) => {
+                HirType::Array(Box::new(HirType::String))
+            }
+            Expr::In { .. } => HirType::Boolean,
             Expr::Null => HirType::Null,
             Expr::Delete(_) => HirType::Boolean,
             Expr::Object(_) => self.object_literal_type(expr),

@@ -4,6 +4,7 @@ mod context;
 mod date;
 mod decoder;
 mod filesystem;
+mod objects;
 mod options;
 pub(crate) use decoder::validate_lowering;
 
@@ -49,6 +50,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         module.visit_with(&mut names);
         ensure!(
             !names.0.contains(super::values::VALUE_TYPE)
+                && !names.0.contains(super::context::ENVIRONMENT_TYPE)
                 && !names.0.contains(super::date::DATE_TYPE)
                 && !names.0.contains(super::decoder::DECODER_TYPE)
                 && !names.0.iter().any(|name| name.starts_with("__AnonShape_")),
@@ -168,6 +170,7 @@ fn source_type(ty: &HirType) -> Result<String> {
         HirType::String => Ok("string".into()),
         HirType::Void => Ok("void".into()),
         HirType::Any => Ok("any".into()),
+        ty if super::context::is_environment(ty) => Ok(super::context::ENVIRONMENT_TYPE.into()),
         HirType::Promise(inner) => Ok(format!("Promise<{}>", source_type(inner)?)),
         ty if super::bytes::is_byte_view(ty) => Ok("Uint8Array".into()),
         ty if super::filesystem::is_stats(ty) => Ok("Stats".into()),
@@ -399,6 +402,10 @@ impl SourceCalls {
 impl VisitMut for SourceCalls {
     fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
         call.ctxt = SyntaxContext::empty();
+        if let Err(error) = self.validate_object_call(call) {
+            self.error.get_or_insert(error);
+            return;
+        }
         if let Err(error) = decoder::validate_decode_options(call) {
             self.error.get_or_insert(error);
             return;
@@ -464,7 +471,7 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
-        self.rewrite_process_arguments(expression);
+        self.rewrite_process_value(expression);
         if matches!(expression, ast::Expr::Object(_))
             && let Err(error) = options::validate_plain_options(expression, "Object")
         {
@@ -508,6 +515,7 @@ impl VisitMut for SourceCalls {
                 | "performance"
                 | "Date"
                 | "process"
+                | "Object"
         ) && ident.ctxt != self.unresolved
         {
             let id = ident.to_id();

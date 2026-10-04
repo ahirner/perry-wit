@@ -64,6 +64,9 @@ pub(crate) fn lower_module(
 
     // 2. Scan module for string requirements and build string pool if needed
     let mut reqs = scan_module_string_requirements(hir);
+    reqs.objects |= contract
+        .context_operations()
+        .contains(&super::capabilities::ContextOperation::Environment);
     reqs.needs_strings |= super::values::required(hir)
         || super::date::required(hir)
         || !contract.context_operations().is_empty()
@@ -82,6 +85,11 @@ pub(crate) fn lower_module(
         || contract.has_filesystem()
     {
         collect_strings_in_module(hir, &mut string_pool);
+        if reqs.objects {
+            for name in super::objects::COERCION_LITERALS {
+                string_pool.intern(name);
+            }
+        }
         if contract.has_filesystem() {
             for key in super::filesystem::OPTION_KEYS {
                 string_pool.intern(key);
@@ -1077,6 +1085,10 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::ObjectAssign { target, sources } => self.object_assign(target, sources),
+            Expr::ObjectKeys(object) => self.object_enumerate(object, false),
+            Expr::ObjectValues(object) => self.object_enumerate(object, true),
+            Expr::In { property, object } => self.object_has(property, object),
             Expr::Object(_) => self.new_object(expr),
             Expr::New { class_name, .. }
                 if self.contract.literal_shapes.contains_key(class_name) =>
@@ -1104,7 +1116,7 @@ impl<'a> FunctionLowerer<'a> {
                 receiver,
                 ..
             } if super::objects::is_object(&self.infer_expr_type(target))
-                && matches!((target.as_ref(),receiver.as_ref()), (Expr::LocalGet(left),Expr::LocalGet(right)) if left == right) =>
+                && self.same_object_reference(target, receiver) =>
             {
                 self.object_set(target, key, value)
             }

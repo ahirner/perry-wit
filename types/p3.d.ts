@@ -14,7 +14,18 @@
  * their tags and references; public any component boundaries remain numeric.
  * Opaque Promise adoption through any throws 12; callbacks remain migration work. */
 declare namespace NodeJS {
+  interface ProcessEnv {
+    [key: string]: string | undefined;
+  }
   interface Process {
+    /** Cached, guest-local environment; aliases share writes and deletions.
+     * Runtime writes through any also stringify undefined, null, booleans, NaN,
+     * infinities, and plain objects. Finite numbers and arrays currently throw 12
+     * before mutation. Object.assign uses the same policy; earlier writes remain
+     * if a later property fails. Object.keys/values return ordered snapshots;
+     * Object.values currently throws 12 for nonstring fields in ordinary objects.
+     * JSON environment consumers remain unsupported. */
+    env: ProcessEnv;
     /** Cached host-provided arguments, with no synthetic Node prefixes.
      * WAFFLE/P3 currently supports reads; argument-array mutation remains unsupported. */
     argv: string[];

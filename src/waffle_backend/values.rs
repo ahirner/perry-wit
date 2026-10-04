@@ -63,7 +63,7 @@ impl ValueTag {
             HirType::Number => Self::Number,
             HirType::String => Self::String,
             ty if super::bytes::is_byte_view(ty) => Self::Bytes,
-            HirType::Object(_) => Self::Object,
+            ty if super::objects::is_object(ty) => Self::Object,
             ty if super::filesystem::is_stats(ty) => Self::Stats,
             ty if super::structured::is_string_array(ty) => Self::StringArray,
             ty if super::decoder::is_decoder(ty) => Self::Decoder,
@@ -124,7 +124,7 @@ pub(crate) fn emit_runtime(
 
 fn contains_dynamic(ty: &HirType) -> bool {
     match ty {
-        HirType::Object(_) => true,
+        ty if super::objects::is_object(ty) => true,
         HirType::Promise(inner) | HirType::Array(inner) => contains_dynamic(inner),
         HirType::Union(types)
         | HirType::Generic {

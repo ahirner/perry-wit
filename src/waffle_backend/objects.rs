@@ -9,23 +9,37 @@ use perry_hir::{
 use std::collections::{BTreeMap, BTreeSet};
 use waffle::{Func, Memory, Module};
 
+pub(crate) const COERCION_LITERALS: [&str; 8] = [
+    "undefined",
+    "null",
+    "true",
+    "false",
+    "[object Object]",
+    "NaN",
+    "Infinity",
+    "-Infinity",
+];
+
 #[derive(Clone, Copy)]
 pub(crate) struct ObjectHelpers {
     pub(crate) new: Func,
+    pub(crate) environment: Func,
     pub(crate) set: Func,
     pub(crate) get: Func,
     pub(crate) delete: Func,
     pub(crate) value: Func,
     pub(crate) dynamic: Func,
+    pub(crate) enumerate: Func,
+    pub(crate) assign: Func,
 }
 
 pub(crate) fn is_object(ty: &HirType) -> bool {
-    matches!(ty, HirType::Object(_))
+    matches!(ty, HirType::Object(_)) || super::context::is_environment(ty)
 }
 
 pub(crate) fn contains_object(ty: &HirType) -> bool {
     match ty {
-        HirType::Object(_) => true,
+        ty if is_object(ty) => true,
         HirType::Promise(inner) | HirType::Array(inner) => contains_object(inner),
         HirType::Union(types)
         | HirType::Generic {
@@ -100,6 +114,54 @@ pub(crate) fn resolve_declared_types(hir: &mut HirModule) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn emit_runtime(
+    module: &mut Module<'static>,
+    memory: Memory,
+    allocator: AllocationFuncs,
+    compare: Func,
+    boxed_value: Func,
+    string_pool: &super::strings::StringPool,
+) -> Result<ObjectHelpers> {
+    let mut wat = format!(
+        "{} {})",
+        include_str!("objects/runtime.wat")
+            .trim_end()
+            .strip_suffix(')')
+            .unwrap(),
+        include_str!("objects/enumerate.wat")
+    );
+    for name in COERCION_LITERALS {
+        wat = wat.replace(
+            &format!("{{{{{name}}}}}"),
+            &string_pool
+                .get(name)
+                .expect("object coercion literal")
+                .to_string(),
+        );
+    }
+    let functions = runtime::emit_functions(
+        module,
+        memory,
+        &wat,
+        &BTreeMap::from([
+            ("realloc", allocator.realloc),
+            ("compare", compare),
+            ("box", boxed_value),
+        ]),
+    )?;
+    Ok(ObjectHelpers {
+        new: functions["object.new"],
+        environment: functions["object.environment"],
+        set: functions["object.set"],
+        get: functions["object.get"],
+        delete: functions["object.delete"],
+        value: functions["object.value"],
+        dynamic: functions["object.dynamic"],
+        enumerate: functions["object.enumerate"],
+        assign: functions["object.assign"],
+    })
+}
+
 fn resolve_type(
     ty: &mut HirType,
     definitions: &BTreeMap<String, HirType>,
@@ -139,31 +201,4 @@ fn resolve_type(
         _ => {}
     }
     Ok(())
-}
-
-pub(crate) fn emit_runtime(
-    module: &mut Module<'static>,
-    memory: Memory,
-    allocator: AllocationFuncs,
-    compare: Func,
-    boxed_value: Func,
-) -> Result<ObjectHelpers> {
-    let functions = runtime::emit_functions(
-        module,
-        memory,
-        include_str!("objects/runtime.wat"),
-        &BTreeMap::from([
-            ("realloc", allocator.realloc),
-            ("compare", compare),
-            ("box", boxed_value),
-        ]),
-    )?;
-    Ok(ObjectHelpers {
-        new: functions["object.new"],
-        set: functions["object.set"],
-        get: functions["object.get"],
-        delete: functions["object.delete"],
-        value: functions["object.value"],
-        dynamic: functions["object.dynamic"],
-    })
 }

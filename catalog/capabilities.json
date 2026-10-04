@@ -187,7 +187,7 @@
         "Invalid or overflowing wait durations trap before the host call",
         "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
         "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
-        "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; environment mutation and callback timers remain open migration work",
+        "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; remaining context coercions, JSON consumers, and callback timers remain open migration work",
         "Instances support serial calls; cancellation discards the store"
       ],
       "conformance": [
@@ -224,21 +224,26 @@
     },
     {
       "id": "compiler.p3_context",
-      "name": "P3 Process Arguments and Initial Directory",
+      "name": "P3 Process Context",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: process.argv reads and process.cwd()",
+      "domain": "WAFFLE Rust compiler API: process.env, process.argv reads, and process.cwd()",
       "invariants": [
         "Only selected wasi:cli/environment@0.3.0 functions are imported and read lazily once per instance",
         "Cached argument-array identity and valid UTF-8 values survive component returns, helper calls, retained Promises, collection, and native suspension",
         "Retained heap roots preserve instance-local snapshots while invocation temporaries remain reclaimable",
+        "Environment aliases share guest-local writes, deletion, and own-property membership without changing the host",
+        "Environment writes stringify strings, undefined, null, booleans, NaN, infinities, and plain objects; Object.assign follows the same policy and preserves earlier writes after a later failure",
+        "Object.keys and string-valued Object.values produce independent snapshots with integer-index keys first and other keys in insertion order; duplicate native environment keys replace values without moving their keys",
         "Host failures trap without running guest finally; store disposal releases pending native work"
       ],
       "differences": [
         "Arguments use the host-provided list without synthetic Node executable/script prefixes",
         "The initial directory defaults to / only when absent; an explicitly empty directory remains empty",
         "Text operations count Unicode scalars",
-        "Environment variables and argument-array mutation remain open migration work; the default CLI remains on the legacy pipeline until R9"
+        "Finite-number and array environment writes throw numeric 12 before mutation; Object.values throws 12 for nonstring fields",
+        "Object.assign accepts plain object targets/sources and ignores nullish sources; other primitive sources, prototypes, and spread arguments remain unsupported",
+        "JSON environment consumers, remaining coercions and array operations, and argument-array mutation remain open migration work; the default CLI remains on the legacy pipeline until R9"
       ],
       "conformance": ["tests/waffle_platform/context.rs"]
     },

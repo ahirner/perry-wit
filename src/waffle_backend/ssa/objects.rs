@@ -1,7 +1,13 @@
 //! Evaluate plain object fields in source order and check tags at typed reads.
 
 use super::{FunctionLowerer, options::literal_properties, types::StringKind};
-use crate::waffle_backend::{abi, objects::is_object, values::ValueTag};
+use crate::waffle_backend::{
+    abi,
+    capabilities::{CapabilityOperation, ContextOperation},
+    objects::is_object,
+    resolve::TypedIntrinsic,
+    values::ValueTag,
+};
 use anyhow::{Result, ensure};
 use perry_hir::{
     ir::Expr,
@@ -10,6 +16,79 @@ use perry_hir::{
 use waffle::{Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
+    pub(super) fn object_assign(&mut self, target: &Expr, sources: &[Expr]) -> Result<Value> {
+        ensure!(
+            is_object(&self.infer_expr_type(target)),
+            "Object.assign requires a plain object target"
+        );
+        let target = self.expression(target)?;
+        let mut objects = Vec::new();
+        for source in sources {
+            if matches!(source, Expr::Null | Expr::Undefined) {
+                continue;
+            }
+            let ty = self.infer_expr_type(source);
+            ensure!(
+                is_object(&ty) || matches!(ty, HirType::Null | HirType::Void),
+                "Object.assign sources must be plain objects, null, or undefined"
+            );
+            let source = self.expression(source)?;
+            if is_object(&ty) {
+                objects.push(source);
+            }
+        }
+        for source in objects {
+            self.call_completion(
+                self.registry.object_helpers.unwrap().assign,
+                &[target, source],
+            );
+        }
+        Ok(target)
+    }
+
+    pub(super) fn object_enumerate(&mut self, receiver: &Expr, values: bool) -> Result<Value> {
+        ensure!(
+            is_object(&self.infer_expr_type(receiver)),
+            "Object enumeration requires a plain object"
+        );
+        let object = self.expression(receiver)?;
+        let values = self.op(
+            Operator::I32Const {
+                value: u32::from(values),
+            },
+            &[],
+            &[Type::I32],
+        );
+        let payload = self.call_completion(
+            self.registry.object_helpers.unwrap().enumerate,
+            &[object, values],
+        );
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            payload,
+            true,
+        ))
+    }
+
+    pub(super) fn object_has(&mut self, property: &Expr, receiver: &Expr) -> Result<Value> {
+        ensure!(
+            is_object(&self.infer_expr_type(receiver)),
+            "Property membership requires a plain object"
+        );
+        let key = self.string_receiver(property)?;
+        let object = self.expression(receiver)?;
+        let entry = self.op(
+            Operator::Call {
+                function_index: self.registry.object_helpers.unwrap().get,
+            },
+            &[object, key],
+            &[Type::I32],
+        );
+        let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+        Ok(self.op(Operator::I32Ne, &[entry, zero], &[Type::I32]))
+    }
+
     pub(super) fn object_literal_type(&self, expression: &Expr) -> HirType {
         let fields = literal_properties(self.contract, expression)
             .ok()
@@ -34,6 +113,9 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn object_property_type(&self, receiver: &Expr, key: &Expr) -> HirType {
+        if crate::waffle_backend::context::is_environment(&self.infer_expr_type(receiver)) {
+            return HirType::Union(vec![HirType::String, HirType::Void]);
+        }
         let HirType::Object(object) = self.infer_expr_type(receiver) else {
             return HirType::Any;
         };
@@ -65,13 +147,7 @@ impl FunctionLowerer<'_> {
         for (name, expression) in fields {
             let key = self.expression(&Expr::String(name))?;
             let (_, tag, payload) = self.tagged_value(expression)?;
-            self.op(
-                Operator::Call {
-                    function_index: helpers.set,
-                },
-                &[object, key, tag, payload],
-                &[],
-            );
+            self.call_completion(helpers.set, &[object, key, tag, payload]);
         }
         Ok(object)
     }
@@ -85,12 +161,9 @@ impl FunctionLowerer<'_> {
         let object = self.expression(receiver)?;
         let key = self.string_receiver(key)?;
         let (original, tag, payload) = self.tagged_value(expression)?;
-        self.op(
-            Operator::Call {
-                function_index: self.registry.object_helpers.unwrap().set,
-            },
+        self.call_completion(
+            self.registry.object_helpers.unwrap().set,
             &[object, key, tag, payload],
-            &[],
         );
         Ok(original)
     }
@@ -154,5 +227,30 @@ impl FunctionLowerer<'_> {
             payload,
             value_type != &HirType::Number,
         ))
+    }
+
+    /// Perry duplicates the assignment receiver; only proven identical references may be skipped.
+    pub(super) fn same_object_reference(&self, target: &Expr, receiver: &Expr) -> bool {
+        match (target, receiver) {
+            (Expr::LocalGet(left), Expr::LocalGet(right)) => left == right,
+            (
+                Expr::Call {
+                    callee: left,
+                    args: left_args,
+                    ..
+                },
+                Expr::Call {
+                    callee: right,
+                    args: right_args,
+                    ..
+                },
+            ) if left_args.is_empty() && right_args.is_empty() => {
+                matches!((left.as_ref(), right.as_ref()),
+                    (Expr::ExternFuncRef { name: left, .. }, Expr::ExternFuncRef { name: right, .. })
+                    if left == right && matches!(self.contract.intrinsics.get(left),
+                        Some(TypedIntrinsic::Capability(CapabilityOperation::Context(ContextOperation::Environment)))))
+            }
+            _ => false,
+        }
     }
 }

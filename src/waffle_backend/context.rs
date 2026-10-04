@@ -1,15 +1,28 @@
 //! Selective P3 process context imports with instance-retained guest snapshots.
 
 use super::{
-    allocation::AllocationFuncs, capabilities::ContextOperation, component::forward, runtime,
-    structured::StructuredHelpers,
+    allocation::AllocationFuncs, capabilities::ContextOperation, component::forward,
+    objects::ObjectHelpers, runtime, structured::StructuredHelpers,
 };
 use anyhow::Result;
+use perry_hir::types::Type as HirType;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
 };
 use waffle::{Func, Memory, Module};
+
+pub(crate) const ENVIRONMENT_TYPE: &str = "__perry_internal_environment";
+
+pub(crate) fn is_environment(ty: &HirType) -> bool {
+    matches!(ty,HirType::Named(name) if name == ENVIRONMENT_TYPE)
+}
+
+pub(crate) struct ContextHelpers {
+    pub(crate) string_lift: Func,
+    pub(crate) structured: Option<StructuredHelpers>,
+    pub(crate) objects: Option<ObjectHelpers>,
+}
 
 pub(crate) fn declare_imports(
     module: &mut Module<'static>,
@@ -24,8 +37,7 @@ pub(crate) fn emit_runtime(
     allocator: AllocationFuncs,
     imports: BTreeMap<String, Func>,
     operations: &BTreeSet<ContextOperation>,
-    string_lift: Func,
-    structured: Option<StructuredHelpers>,
+    helpers: ContextHelpers,
 ) -> Result<BTreeMap<String, Func>> {
     let mut wat = format!(
         "(module {} (import \"host\" \"realloc\" (func $realloc (param i32 i32 i32 i32) (result i32))) (import \"host\" \"retain\" (func $retain (param i32) (result i32)))",
@@ -41,16 +53,28 @@ pub(crate) fn emit_runtime(
         wat.push_str("(import \"host\" \"strings\" (func $strings (param i32 i32) (result i32)))");
         imports.insert(
             "strings",
-            structured
+            helpers
+                .structured
                 .expect("arguments require string array helpers")
                 .take_strings,
         );
     }
-    if operations.contains(&ContextOperation::InitialCwd) {
+    if operations.contains(&ContextOperation::InitialCwd)
+        || operations.contains(&ContextOperation::Environment)
+    {
         wat.push_str("(import \"host\" \"string\" (func $string (param i32 i32) (result i32)))");
-        imports.insert("string", string_lift);
+        imports.insert("string", helpers.string_lift);
+    }
+    if operations.contains(&ContextOperation::Environment) {
+        wat.push_str("(import \"host\" \"environment\" (func $environment (result i32))) (import \"host\" \"set\" (func $set (param i32 i32 i32 f64) (result i32 f64)))");
+        let objects = helpers.objects.expect("environment requires objects");
+        imports.insert("environment", objects.environment);
+        imports.insert("set", objects.set);
     }
     wat.push_str(include_str!("context/cache.wat"));
+    if operations.contains(&ContextOperation::Environment) {
+        wat.push_str(include_str!("context/environment.wat"));
+    }
     if operations.contains(&ContextOperation::Arguments) {
         wat.push_str(include_str!("context/arguments.wat"));
     }
@@ -68,6 +92,7 @@ pub(crate) fn declare_adapters(operations: &BTreeSet<ContextOperation>) -> Resul
     let mut wat = String::from("(import \"wasi:cli/environment@0.3.0\" (instance $context");
     for operation in operations {
         let result = match operation {
+            ContextOperation::Environment => "(list (tuple string string))",
             ContextOperation::Arguments => "(list string)",
             ContextOperation::InitialCwd => "(option string)",
         };

@@ -6,7 +6,7 @@ use perry_parser::swc_ecma_ast as ast;
 use swc_common::SyntaxContext;
 
 impl SourceCalls {
-    pub(super) fn rewrite_process_arguments(&mut self, expression: &mut ast::Expr) {
+    pub(super) fn rewrite_process_value(&mut self, expression: &mut ast::Expr) {
         let ast::Expr::Member(member) = expression else {
             return;
         };
@@ -14,17 +14,20 @@ impl SourceCalls {
         {
             return;
         }
-        let arguments = match &member.prop {
-            ast::MemberProp::Ident(name) => name.sym == "argv",
-            ast::MemberProp::Computed(key) => {
-                matches!(underlying_expression(&key.expr), ast::Expr::Lit(ast::Lit::Str(text)) if text.value.as_str() == Some("argv"))
-            }
-            _ => false,
+        let property = match &member.prop {
+            ast::MemberProp::Ident(name) => Some(name.sym.as_ref()),
+            ast::MemberProp::Computed(key) => match underlying_expression(&key.expr) {
+                ast::Expr::Lit(ast::Lit::Str(text)) => text.value.as_str(),
+                _ => None,
+            },
+            _ => None,
         };
-        if !arguments {
-            return;
-        }
-        let name = self.capability_name(CapabilityOperation::Context(ContextOperation::Arguments));
+        let operation = match property {
+            Some("argv") => ContextOperation::Arguments,
+            Some("env") => ContextOperation::Environment,
+            _ => return,
+        };
+        let name = self.capability_name(CapabilityOperation::Context(operation));
         *expression = ast::Expr::Call(ast::CallExpr {
             span: member.span,
             ctxt: SyntaxContext::empty(),

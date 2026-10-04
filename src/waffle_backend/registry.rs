@@ -267,7 +267,7 @@ impl ModuleRegistry {
             None
         };
 
-        let value_helpers = if super::values::required(hir) {
+        let value_helpers = if super::values::required(hir) || string_reqs.objects {
             Some(super::values::emit_runtime(
                 module,
                 memory,
@@ -288,6 +288,7 @@ impl ModuleRegistry {
                     .expect("objects require string keys")
                     .str_compare,
                 value_helpers.expect("objects share tagged values").new,
+                string_pool,
             )?)
         } else {
             None
@@ -384,10 +385,13 @@ impl ModuleRegistry {
                 allocator.expect("context requires storage"),
                 imports,
                 &context_operations,
-                string_helpers
-                    .expect("context requires strings")
-                    .lift_canonical,
-                structured_helpers,
+                super::context::ContextHelpers {
+                    string_lift: string_helpers
+                        .expect("context requires strings")
+                        .lift_canonical,
+                    structured: structured_helpers,
+                    objects: object_helpers,
+                },
             )?;
             for (name, intrinsic) in &contract.intrinsics {
                 if let TypedIntrinsic::Capability(
@@ -530,7 +534,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
         ty if super::decoder::is_decoder(ty) || super::date::is_date(ty) => Ok(Type::I32),
-        HirType::Object(_) => Ok(Type::I32),
+        ty if super::objects::is_object(ty) => Ok(Type::I32),
         ty if super::filesystem::is_stats(ty) => Ok(Type::I32),
         HirType::Array(inner) if **inner == HirType::String => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
@@ -547,7 +551,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::String => Ok(vec![Type::I32]),
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
         ty if super::decoder::is_decoder(ty) || super::date::is_date(ty) => Ok(vec![Type::I32]),
-        HirType::Object(_) => Ok(vec![Type::I32]),
+        ty if super::objects::is_object(ty) => Ok(vec![Type::I32]),
         ty if super::filesystem::is_stats(ty) => Ok(vec![Type::I32]),
         HirType::Array(inner) if **inner == HirType::String => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
