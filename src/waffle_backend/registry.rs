@@ -119,8 +119,12 @@ impl ModuleRegistry {
     ) -> Result<Self> {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
+        let scalar_imports = super::capabilities::scalars::declare_imports(module, contract);
         let mut wit_imports = BTreeMap::new();
         for (name, intrinsic) in &contract.intrinsics {
+            if scalar_imports.contains_key(name) {
+                continue;
+            }
             if let TypedIntrinsic::WitImport { key, .. } = intrinsic {
                 let wit = contract.wit.as_ref().unwrap();
                 let import = &wit.imports[key];
@@ -266,6 +270,14 @@ impl ModuleRegistry {
         } else {
             None
         };
+
+        intrinsics.extend(super::capabilities::scalars::emit(
+            module,
+            contract,
+            memory,
+            allocator,
+            scalar_imports,
+        )?);
 
         let byte_helpers = if super::bytes::required(hir) || contract.has_http() {
             Some(super::bytes::emit_runtime(

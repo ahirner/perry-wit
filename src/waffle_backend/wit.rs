@@ -1,6 +1,7 @@
 //! Resolved WIT worlds use the SDK's source names and canonical ABI layouts.
 
 mod adapter;
+mod native;
 mod source;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -125,8 +126,11 @@ impl WitWorld {
         ensure!(!functions.is_empty(), "WIT world must export a function");
         for export in functions.values() {
             ensure!(
-                export.function.kind == FunctionKind::Freestanding,
-                "Resolved WIT exports currently require synchronous freestanding functions"
+                matches!(
+                    export.function.kind,
+                    FunctionKind::Freestanding | FunctionKind::AsyncFreestanding
+                ),
+                "Resolved WIT exports require freestanding functions"
             );
             for param in &export.function.params {
                 hir_type(&resolve, param.ty)?;

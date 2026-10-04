@@ -192,8 +192,9 @@ The [UTC fixture](tests/fixtures/temporal_utc.ts) restricts interchange to
 `YYYY-MM-DDTHH:mm:ss[.1–9 digits]Z`. The [day-shift fixture](tests/fixtures/temporal_shift.ts)
 checks timezone-free calendar arithmetic and codec errors.
 `waffle_backend::compile_typescript_for_world` accepts a resolved WIT world and
-uses the generated SDK's implementation names. Its synchronous import/export path
-supports booleans, 8–32-bit integers, floats, strings, records, fixed tuples, enums,
+uses the generated SDK's implementation names. Synchronous and directly awaited
+asynchronous WIT imports/exports support booleans, 8–32-bit integers, floats,
+strings, records, fixed tuples, enums,
 variants, results, nullable options, typed lists, and flags with at most 32 fields.
 WIT `u64` values use lossless `bigint` transport; arithmetic, coercion, comparison,
 and literal construction are unsupported. Signed 64-bit values remain unsupported.
@@ -206,8 +207,13 @@ expose matching functions and local type names. Small independent fixtures cover
 [optional imports](tests/fixtures/optional_import.ts), including missing versus
 empty values, variant errors, and shared-heap cleanup under bounded memory.
 Runner is an external reference for requirements and optional smoke tests;
-its source and WIT definitions are not vendored. Nested options, resources, and
-async WIT remain migration work; the production CLI still uses the legacy path.
+its source and WIT definitions are not vendored. Resolved worlds can use the
+existing P3 HTTP, filesystem, stdio, context, clock, and random operations when
+the world imports their WASI 0.3 interfaces. The standard component encoder
+binds them to the shared guest memory. Calls are serial; retained tasks remain
+unsupported on this path, and host traps or interruption require store disposal.
+Nested options and guest resource APIs remain unsupported; the production CLI
+still uses the legacy path.
 Shared tagged values preserve strict equality, truthiness, type tags, typed object
 fields, and retained `Promise<any>` outcomes. Typed boundaries validate the stored
 kind and throw numeric `12` on a mismatch. Public `any` component parameters/results

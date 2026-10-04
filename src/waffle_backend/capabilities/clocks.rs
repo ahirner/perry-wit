@@ -1,6 +1,9 @@
 //! Source clock units and selective WASI P3 clock imports.
 
-use super::{CapabilityImplementation, CapabilityPlan, LowerCapability};
+use super::{
+    CapabilityImplementation, CapabilityPlan, LowerCapability,
+    scalars::{DateStorage, Scalar},
+};
 use anyhow::Result;
 use perry_hir::types::Type as HirType;
 use std::{collections::BTreeSet, fmt::Write};
@@ -58,25 +61,20 @@ pub(crate) fn declare_adapters(operations: &BTreeSet<ClockOperation>) -> Result<
         || operations.contains(&ClockOperation::MonotonicNow)
     {
         wat.push_str("(import \"wasi:clocks/monotonic-clock@0.3.0\" (instance $clock");
-        for (operation, name, signature, core_signature, body) in [
+        for (operation, name, signature, core_signature, scalar) in [
             (
                 ClockOperation::WaitFor,
                 "wait-for",
                 "(param \"how-long\" u64)",
                 "(param i64)",
-                r#"
-              (func (export "waitFor") (param $milliseconds f64)
-                (if (f64.lt (local.get $milliseconds) (f64.const 0)) (then unreachable))
-                (call $wait-for (i64.trunc_f64_u (f64.mul (local.get $milliseconds) (f64.const 1000000)))))"#,
+                Scalar::Wait,
             ),
             (
                 ClockOperation::MonotonicNow,
                 "now",
                 "(result u64)",
                 "(result i64)",
-                r#"
-              (func (export "performance.now") (result f64)
-                (f64.div (f64.convert_i64_u (call $now)) (f64.const 1000000)))"#,
+                Scalar::Monotonic,
             ),
         ] {
             if !operations.contains(&operation) {
@@ -96,7 +94,7 @@ pub(crate) fn declare_adapters(operations: &BTreeSet<ClockOperation>) -> Result<
                 "(import \"native\" {name:?} (func ${name} {core_signature}))"
             )?;
             writeln!(exports, "(export {name:?} (func $clock-{name}))")?;
-            bodies.push_str(body);
+            bodies.push_str(&scalar.body(operation.name(), name));
         }
         wat.push_str("))\n");
         for (operation, name) in [
@@ -126,13 +124,7 @@ pub(crate) fn declare_adapters(operations: &BTreeSet<ClockOperation>) -> Result<
           (import "native" "memory" (memory 1))"#,
         );
         exports.push_str(r#"(export "system-now" (func $clock-system-now)) (export "memory" (memory $clock-storage "memory"))"#);
-        bodies.push_str(r#"
-          (func (export "Date.now") (result f64)
-            (call $system-now (i32.const 0))
-            (if (i32.ge_u (i32.load offset=8 (i32.const 0)) (i32.const 1000000000)) (then unreachable))
-            (f64.add (f64.mul (f64.convert_i64_s (i64.load (i32.const 0))) (f64.const 1000))
-              (f64.convert_i32_u (i32.div_u (i32.load offset=8 (i32.const 0)) (i32.const 1000000)))))
-        "#);
+        bodies.push_str(&Scalar::Date(DateStorage::Standalone).body("Date.now", "system-now"));
     }
     write!(
         wat,

@@ -2010,6 +2010,9 @@ impl<'a> FunctionLowerer<'a> {
             self.unwind_ctx.clear_catch_in_innermost();
             self.locals = blocks.catch_environment(&self.body);
             self.narrowings = incoming_narrowings.clone();
+            if let Some((id, _)) = &c_clause.param {
+                self.local_types.insert(*id, HirType::Number);
+            }
 
             self.statements(&c_clause.body)?;
             if self.body.blocks[self.block].terminator == Terminator::None {

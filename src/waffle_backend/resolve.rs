@@ -38,6 +38,7 @@ pub(crate) enum TypedIntrinsic {
         name: String,
         key: String,
         params: Vec<WaffleType>,
+        is_async: bool,
     },
     Capability(CapabilityOperation),
     HostDouble,
@@ -89,7 +90,7 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
-            Self::WitImport { .. } => false,
+            Self::WitImport { is_async, .. } => *is_async,
             Self::ByteAt | Self::DecoderNew | Self::DateNew | Self::Temporal(_) => false,
             Self::Custom { is_async, .. } => *is_async,
         }
@@ -295,6 +296,7 @@ pub(crate) fn resolve_contract(
                 TypedIntrinsic::WitImport {
                     name: name.clone(),
                     key: key.clone(),
+                    is_async: matches!(ret, HirType::Promise(_)),
                     params: params
                         .iter()
                         .map(super::registry::map_type_to_waffle)

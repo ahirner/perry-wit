@@ -1,7 +1,10 @@
 //! Selective P3 random imports and shared-memory byte filling.
 
 use super::{
-    allocation::AllocationFuncs, capabilities::RandomOperation, component::forward, runtime,
+    allocation::AllocationFuncs,
+    capabilities::{RandomOperation, scalars::Scalar},
+    component::forward,
+    runtime,
 };
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,14 +50,14 @@ pub(crate) fn declare_adapters(operations: &BTreeSet<RandomOperation>) -> Result
     }
     wat.push_str("))");
     if number {
-        wat.push_str(r#"
+        let body = Scalar::Random.body("sample", "word");
+        wat.push_str(&format!(r#"
           (core func $random-word (canon lower (func $random "get-random-u64")))
           (core module $random-number
             (import "native" "word" (func $word (result i64)))
-            (func (export "sample") (result f64)
-              (f64.div (f64.convert_i64_u (i64.shr_u (call $word) (i64.const 11))) (f64.const 9007199254740992))))
+            {body})
           (core instance $random-number (instantiate $random-number (with "native" (instance (export "word" (func $random-word))))))
-        "#);
+        "#));
     }
     if bytes {
         wat.push_str(&forward::declare("random", &native_functions())?);

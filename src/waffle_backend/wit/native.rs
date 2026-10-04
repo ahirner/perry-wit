@@ -1,0 +1,244 @@
+//! Use the component encoder's canonical import convention for native capabilities.
+
+use super::WitWorld;
+use anyhow::{Context, Result, bail, ensure};
+use waffle::Module;
+use wit_parser::{Type, TypeDefKind, WorldItem};
+
+const HTTP: &str = "wasi:http/types@0.3.0";
+const FILESYSTEM: &str = "wasi:filesystem/types@0.3.0";
+
+#[derive(Clone, Copy)]
+enum Payload {
+    Stream,
+    Completion,
+    Trailers,
+}
+
+impl WitWorld {
+    pub(in crate::waffle_backend) fn bind_native_imports(
+        &self,
+        module: &mut Module<'static>,
+    ) -> Result<()> {
+        for import in &mut module.imports {
+            let binding = match import.module.as_str() {
+                "http" => self.http_binding(&import.name)?,
+                "context" => ("wasi:cli/environment@0.3.0".into(), import.name.clone()),
+                "random" => ("wasi:random/random@0.3.0".into(), "get-random-bytes".into()),
+                "filesystem" => self.filesystem_binding(&import.name)?,
+                "output" => self.output_binding(&import.name)?,
+                module if module.starts_with("wasi:") => (module.into(), import.name.clone()),
+                _ => continue,
+            };
+            if binding.0 != "$root" {
+                ensure!(
+                    self.resolve.worlds[self.world]
+                        .imports
+                        .iter()
+                        .any(|(key, item)| matches!(item, WorldItem::Interface { .. })
+                            && self.resolve.name_world_key(key) == binding.0),
+                    "WIT world must import '{}' for this capability",
+                    binding.0
+                );
+            }
+            (import.module, import.name) = binding;
+        }
+        Ok(())
+    }
+
+    fn payload_binding(
+        &self,
+        interface: &str,
+        function: &str,
+        payload: Payload,
+        operation: &str,
+    ) -> Result<(String, String)> {
+        let function = &self
+            .imports
+            .get(&format!("{interface}#{function}"))
+            .with_context(|| format!("WIT world must import '{interface}' with '{function}'"))?
+            .function;
+        let payloads = function.find_futures_and_streams(&self.resolve);
+        let index = payloads
+            .iter()
+            .position(|id| match (&self.resolve.types[*id].kind, payload) {
+                (TypeDefKind::Stream(_), Payload::Stream) => true,
+                (
+                    TypeDefKind::Future(Some(Type::Id(id))),
+                    Payload::Completion | Payload::Trailers,
+                ) => {
+                    matches!(&self.resolve.types[*id].kind, TypeDefKind::Result(result)
+                        if result.ok.is_some() == matches!(payload, Payload::Trailers))
+                }
+                _ => false,
+            })
+            .context("Native capability has an incompatible stream/future payload")?;
+        let (prefix, operation) = operation
+            .strip_prefix("async-")
+            .map_or(("", operation), |operation| ("[async-lower]", operation));
+        Ok((
+            interface.into(),
+            format!("{prefix}[{operation}-{index}]{}", function.name),
+        ))
+    }
+
+    fn http_binding(&self, name: &str) -> Result<(String, String)> {
+        let function = match name {
+            "fields" => "[static]fields.from-list",
+            "copy-fields" => "[method]fields.copy-all",
+            "request" => "[static]request.new",
+            "scheme" => "[method]request.set-scheme",
+            "authority" => "[method]request.set-authority",
+            "path" => "[method]request.set-path-with-query",
+            "status" => "[method]response.get-status-code",
+            "headers" => "[method]response.get-headers",
+            "consume" => "[static]response.consume-body",
+            "drop-fields" => "[resource-drop]fields",
+            "drop-request" => "[resource-drop]request",
+            "send" => return Ok(("wasi:http/client@0.3.0".into(), "send".into())),
+            "read" | "drop-reader" => {
+                return self.payload_binding(
+                    HTTP,
+                    "[static]request.consume-body",
+                    Payload::Stream,
+                    if name == "read" {
+                        "stream-read"
+                    } else {
+                        "stream-drop-readable"
+                    },
+                );
+            }
+            "new-set" => return Ok(("$root".into(), "[waitable-set-new]".into())),
+            "join" => return Ok(("$root".into(), "[waitable-join]".into())),
+            "wait" => return Ok(("$root".into(), "[waitable-set-wait]".into())),
+            "drop-set" => return Ok(("$root".into(), "[waitable-set-drop]".into())),
+            name => {
+                let (operation, payload) = if let Some(operation) = name.strip_suffix("-trailers") {
+                    (operation, Payload::Trailers)
+                } else if let Some(operation) = name.strip_suffix("-completion") {
+                    (operation, Payload::Completion)
+                } else if let Some(operation) = name.strip_prefix("drop-trailers-") {
+                    (
+                        if operation == "reader" {
+                            "drop-readable"
+                        } else {
+                            "drop-writable"
+                        },
+                        Payload::Trailers,
+                    )
+                } else if let Some(operation) = name.strip_prefix("drop-completion-") {
+                    (
+                        if operation == "reader" {
+                            "drop-readable"
+                        } else {
+                            "drop-writable"
+                        },
+                        Payload::Completion,
+                    )
+                } else {
+                    bail!("Unknown HTTP canonical import '{name}'")
+                };
+                let operation = if operation == "write" {
+                    "async-future-write".into()
+                } else {
+                    format!("future-{operation}")
+                };
+                return self.payload_binding(
+                    HTTP,
+                    "[static]request.consume-body",
+                    payload,
+                    &operation,
+                );
+            }
+        };
+        Ok((HTTP.into(), function.into()))
+    }
+
+    fn filesystem_binding(&self, name: &str) -> Result<(String, String)> {
+        let function = match name {
+            "directories" => {
+                return Ok((
+                    "wasi:filesystem/preopens@0.3.0".into(),
+                    "get-directories".into(),
+                ));
+            }
+            "open" => "[method]descriptor.open-at",
+            "start-write" => "[method]descriptor.write-via-stream",
+            "start-read" => "[method]descriptor.read-via-stream",
+            "stat" => "[method]descriptor.stat-at",
+            "mkdir" => "[method]descriptor.create-directory-at",
+            "unlink" => "[method]descriptor.unlink-file-at",
+            "rmdir" => "[method]descriptor.remove-directory-at",
+            "start-directory" => "[method]descriptor.read-directory",
+            "drop-descriptor" => "[resource-drop]descriptor",
+            "read-entry" | "drop-entries" => {
+                return self.payload_binding(
+                    FILESYSTEM,
+                    "[method]descriptor.read-directory",
+                    Payload::Stream,
+                    if name == "read-entry" {
+                        "stream-read"
+                    } else {
+                        "stream-drop-readable"
+                    },
+                );
+            }
+            "await" | "drop-future" => {
+                return self.payload_binding(
+                    FILESYSTEM,
+                    "[method]descriptor.write-via-stream",
+                    Payload::Completion,
+                    if name == "await" {
+                        "future-read"
+                    } else {
+                        "future-drop-readable"
+                    },
+                );
+            }
+            "new" | "write" | "read" | "drop-reader" | "drop-writer" => {
+                return self.payload_binding(
+                    FILESYSTEM,
+                    "[method]descriptor.write-via-stream",
+                    Payload::Stream,
+                    &format!(
+                        "stream-{}",
+                        match name {
+                            "drop-reader" => "drop-readable",
+                            "drop-writer" => "drop-writable",
+                            name => name,
+                        }
+                    ),
+                );
+            }
+            _ => bail!("Unknown filesystem canonical import '{name}'"),
+        };
+        Ok((FILESYSTEM.into(), function.into()))
+    }
+
+    fn output_binding(&self, name: &str) -> Result<(String, String)> {
+        if matches!(name, "stdout" | "stderr") {
+            return Ok((format!("wasi:cli/{name}@0.3.0"), "write-via-stream".into()));
+        }
+        let channel = ["stdout", "stderr"]
+            .into_iter()
+            .find(|channel| {
+                self.imports
+                    .contains_key(&format!("wasi:cli/{channel}@0.3.0#write-via-stream"))
+            })
+            .context("WIT world must import wasi:cli/stdout@0.3.0 or wasi:cli/stderr@0.3.0")?;
+        let (payload, operation) = match name {
+            "new" => (Payload::Stream, "stream-new"),
+            "write" => (Payload::Stream, "stream-write"),
+            "drop-writer" => (Payload::Stream, "stream-drop-writable"),
+            "await" => (Payload::Completion, "future-read"),
+            "drop-future" => (Payload::Completion, "future-drop-readable"),
+            _ => bail!("Unknown output canonical import '{name}'"),
+        };
+        self.payload_binding(
+            &format!("wasi:cli/{channel}@0.3.0"),
+            "write-via-stream",
+            payload,
+            operation,
+        )
+    }
+}

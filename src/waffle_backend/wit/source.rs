@@ -115,8 +115,11 @@ impl WitWorld {
         for (symbol, key) in &calls.used {
             let function = &self.imports[key].function;
             ensure!(
-                function.kind == FunctionKind::Freestanding,
-                "WIT imports currently require synchronous freestanding functions"
+                matches!(
+                    function.kind,
+                    FunctionKind::Freestanding | FunctionKind::AsyncFreestanding
+                ),
+                "WIT imports require freestanding functions"
             );
             let params = function
                 .params
@@ -130,11 +133,14 @@ impl WitWorld {
                 })
                 .collect::<Result<Vec<_>>>()?
                 .join(",");
-            let result = function
+            let mut result = function
                 .result
                 .map(|ty| hir_type(&self.resolve, ty))
                 .transpose()?
                 .unwrap_or(HirType::Void);
+            if function.kind.is_async() {
+                result = HirType::Promise(Box::new(result));
+            }
             declarations.push_str(&format!(
                 "declare function {symbol}({params}): {};\n",
                 source_type(&result)?
@@ -259,6 +265,7 @@ fn source_type(ty: &HirType) -> Result<String> {
         HirType::Number => "number".into(),
         HirType::BigInt => "bigint".into(),
         HirType::String => "string".into(),
+        HirType::Promise(inner) => format!("Promise<{}>", source_type(inner)?),
         HirType::Array(inner) => format!("({})[]", source_type(inner)?),
         HirType::Named(name) if name == "Uint8Array" => name.clone(),
         HirType::StringLiteral(value) => serde_json::to_string(value)?,

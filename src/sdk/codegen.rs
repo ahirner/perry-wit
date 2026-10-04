@@ -150,9 +150,14 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
 
 /// Formats a WIT function return type into TypeScript.
 pub fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
-    match &func.result {
+    let result = match &func.result {
         None => "void".to_string(),
         Some(ty) => wit_type_to_ts(resolve, ty),
+    };
+    if func.kind.is_async() {
+        format!("Promise<{result}>")
+    } else {
+        result
     }
 }
 
@@ -318,7 +323,9 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
             out.push_str(": (");
             emit_params(&mut out, resolve, function);
             out.push_str(") => ");
-            let result = wit_result_to_ts(resolve, function);
+            let result = function
+                .result
+                .map_or_else(|| "void".into(), |ty| wit_type_to_ts(resolve, &ty));
             out.push_str(&format!("({result}) | Promise<{result}>"));
             out.push_str(";\n");
         }

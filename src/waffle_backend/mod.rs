@@ -167,7 +167,16 @@ fn compile_resolved_hir(
             "HTTP handlers require directly awaited calls; retained tasks remain unsupported"
         );
     }
-    let waffle_mod = ssa::lower_module(&hir, &contract)?;
+    let mut waffle_mod = ssa::lower_module(&hir, &contract)?;
+    if contract.http_handler.is_none()
+        && let Some(exports) = &contract.wit
+    {
+        anyhow::ensure!(
+            contract.promises.is_none(),
+            "Resolved WIT requires directly awaited calls; retained tasks remain unsupported"
+        );
+        exports.bind_native_imports(&mut waffle_mod)?;
+    }
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
         .to_wasm_bytes()
@@ -182,16 +191,6 @@ fn compile_resolved_hir(
         let (wat, bytes) = if contract.http_handler.is_some() {
             component::frame_component(&core, &contract, has_post_return)?
         } else if let Some(exports) = &contract.wit {
-            anyhow::ensure!(
-                contract.intrinsics.values().all(|intrinsic| matches!(
-                    intrinsic,
-                    resolve::TypedIntrinsic::Temporal(_)
-                        | resolve::TypedIntrinsic::DateNew
-                        | resolve::TypedIntrinsic::DecoderNew
-                        | resolve::TypedIntrinsic::WitImport { .. }
-                )) && contract.promises.is_none(),
-                "Resolved WIT world framing does not yet support host capabilities or retained tasks"
-            );
             exports.frame(&core)?
         } else {
             component::frame_component(&core, &contract, has_post_return)?

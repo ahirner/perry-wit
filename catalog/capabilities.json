@@ -31,7 +31,8 @@
         "Responses preserve status, duplicate headers, exact header bytes, and body bytes; non-2xx status remains a response",
         "Body EOF is followed by separate producer/request completion; native resources close before return",
         "Response metadata, body views, and header views survive helper returns and collection",
-        "The independent http_json fixture checks status, one supported Content-Type, a 64 KiB cap, strict UTF-8, and JSON syntax"
+        "The independent http_json fixture checks status, one supported Content-Type, a 64 KiB cap, strict UTF-8, and JSON syntax",
+        "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
@@ -41,7 +42,8 @@
         "Traps and interrupted calls require store disposal"
       ],
       "conformance": [
-        "src/waffle_backend/http/tests.rs"
+        "src/waffle_backend/http/tests.rs",
+        "tests/waffle_wit_native_test.rs"
       ]
     },
     {
@@ -229,12 +231,12 @@
         "Host failures trap independently of guest exception handlers"
       ],
       "differences": [
-        "The default CLI and generated WIT SDK still target the legacy pipeline; types/p3.d.ts describes these migration imports",
+        "The default CLI still targets the legacy pipeline; generated WIT SDK signatures also support resolved async WIT, and types/p3.d.ts describes P3 capability imports",
         "Only direct calls and literal namespace member names are supported; dynamic lookup, capability function values, and spread arguments are diagnosed",
         "Invalid or overflowing wait durations trap before the host call",
         "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
         "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
-        "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; argument-array mutation and callback timers remain open migration work",
+        "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; context mutation and callback timers are deferred under D1/D5",
         "Instances support serial calls; cancellation discards the store"
       ],
       "conformance": [

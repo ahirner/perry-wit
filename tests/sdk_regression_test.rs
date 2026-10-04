@@ -228,3 +228,49 @@ fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn asynchronous_wit_functions_have_promise_sdk_signatures() -> anyhow::Result<()> {
+    let project = tempfile::tempdir()?;
+    let root = project.path();
+    fs::create_dir(root.join("wit"))?;
+    fs::write(
+        root.join("wit/world.wit"),
+        r#"
+        package test:async-sdk;
+        interface lookup {load:async func(key:string)->string;}
+        world boundary {import lookup; export run:async func(key:string)->string;}
+    "#,
+    )?;
+    generate_sdk_files(&SdkOptions {
+        wit_dir: root.join("wit"),
+        world: Some("boundary".into()),
+        out_dir: root.join(".perry/types"),
+        project_root: Some(root.into()),
+        entry: "component.ts".into(),
+    })?;
+    assert!(
+        fs::read_to_string(root.join(".perry/types/world.d.ts"))?
+            .contains("run(key: string): Promise<string>")
+    );
+    for (body, valid) in [
+        ("return (await load(key)).toUpperCase();", true),
+        ("return load(key).toUpperCase();", false),
+        ("return (await load(key)).length;", false),
+    ] {
+        fs::write(
+            root.join("component.ts"),
+            format!(
+                "import {{load}} from 'test:async-sdk/lookup'; export async function run(key:string):Promise<string> {{{body}}}"
+            ),
+        )?;
+        let output = get_tsc_cmd().current_dir(root).arg("--noEmit").output()?;
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "{body}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    Ok(())
+}

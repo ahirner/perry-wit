@@ -4,6 +4,7 @@ pub(crate) mod clocks;
 mod context;
 mod filesystem;
 mod random;
+pub(crate) mod scalars;
 pub(crate) mod stdio;
 
 use perry_hir::types::Type as HirType;
