@@ -52,6 +52,8 @@ pub(crate) fn frame_component(
     )?);
     let random_operations = contract.random_operations();
     host_imports.push_str(&super::random::declare_adapters(&random_operations)?);
+    let context_operations = contract.context_operations();
+    host_imports.push_str(&super::context::declare_adapters(&context_operations)?);
 
     for (name, intrinsic) in &contract.intrinsics {
         match intrinsic {
@@ -107,6 +109,10 @@ pub(crate) fn frame_component(
         host_imports.push_str(&super::filesystem::declare_adapters()?);
         guest_adapters.push_str(&super::filesystem::bind_adapters()?);
         guest_imports.push_str(r#"(with "filesystem" (instance $filesystem-forward))"#);
+    }
+    if !context_operations.is_empty() {
+        guest_adapters.push_str(&super::context::bind_adapters(&context_operations)?);
+        guest_imports.push_str(r#"(with "context" (instance $context-forward))"#);
     }
 
     if let Some(plan) = &contract.promises {

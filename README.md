@@ -186,6 +186,14 @@ throw `12`. Public `any` component parameters/results retain their numeric contr
 heterogeneous values remain guest-internal. Awaiting or adopting a Promise hidden
 inside `any` throws `12` until dynamic Promise outcome tags are supported. Callback
 timers remain separate migration work.
+`process.argv` and `process.cwd()` lazily read the selected functions from
+`wasi:cli/environment@0.3.0`. They cache guest-local values for the instance lifetime,
+including across component returns, collection, and native suspension. Arguments
+are the host's string list without synthesized Node executable/script prefixes.
+The working directory uses `/` when the host supplies no initial directory; a
+supplied empty string remains empty. Host failures trap. Retained heap roots keep
+cached values alive while post-return collection reclaims invocation temporaries.
+Environment variables and argument-array mutation remain open migration work.
 `crypto.getRandomValues(view)` fills only the visible `Uint8Array` range and returns
 the same view. Empty views make no host call. Invalid supported value kinds throw
 numeric code `1`; views larger than 65,536 bytes throw `2`, before requesting randomness

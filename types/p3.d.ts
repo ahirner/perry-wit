@@ -13,6 +13,17 @@
  * Unsupported dynamic Date operands throw numeric 12. Guest any values preserve
  * their tags and references; public any component boundaries remain numeric.
  * Opaque Promise adoption through any throws 12; callbacks remain migration work. */
+declare namespace NodeJS {
+  interface Process {
+    /** Cached host-provided arguments, with no synthetic Node prefixes.
+     * WAFFLE/P3 currently supports reads; argument-array mutation remains unsupported. */
+    argv: string[];
+    /** Cached initial host directory, or / if absent. A supplied empty string is retained. */
+    cwd(): string;
+  }
+}
+declare var process: NodeJS.Process;
+
 declare module "perry:clocks" {
   /** Wait in milliseconds. May be stored and awaited repeatedly within one invocation.
    * Invalid or overflowing durations trap before host I/O. */

@@ -11,6 +11,8 @@ use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsB
 use wasmtime_wasi::p3::bindings::clocks::system_clock::Instant;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
+#[path = "waffle_platform/context.rs"]
+mod context;
 #[path = "waffle_platform/date.rs"]
 mod date;
 #[path = "waffle_platform/values.rs"]

@@ -19,6 +19,8 @@ pub(crate) struct AllocationFuncs {
     pub(crate) frame_new: Func,
     pub(crate) frame_drop: Func,
     pub(crate) collect: Func,
+    pub(crate) retained_frame_new: Func,
+    pub(crate) post_return: Func,
 }
 
 /// Discriminants shared with allocation/runtime.wat's precise object scanner.
@@ -51,6 +53,8 @@ pub(crate) fn emit_allocator(
         frame_new: functions["frame-new"],
         frame_drop: functions["frame-drop"],
         collect: functions["collect"],
+        retained_frame_new: functions["retained-frame-new"],
+        post_return: functions["post-return"],
     })
 }
 
@@ -97,9 +101,10 @@ pub(crate) fn tag_allocation(
 
 /// Releases invocation storage after the canonical caller has copied the result.
 /// All source frames have exited and native completion has drained pending tasks.
+/// Instance-retained roots survive; otherwise the entire arena can be reset.
 pub(crate) fn emit_post_return(
     module: &mut Module<'static>,
-    memory: Memory,
+    allocator: AllocationFuncs,
     export: &crate::waffle_backend::registry::FunctionExport,
 ) -> Result<()> {
     let sig = module.signatures.push(SignatureData {
@@ -108,17 +113,12 @@ pub(crate) fn emit_post_return(
     });
     let mut body = FunctionBody::new(module, sig);
     let entry = body.entry;
-    let zero = body.add_op(entry, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
     body.add_op(
         entry,
-        Operator::I32Store {
-            memory: MemoryArg {
-                align: 2,
-                offset: 0,
-                memory,
-            },
+        Operator::Call {
+            function_index: allocator.post_return,
         },
-        &[zero, zero],
+        &[],
         &[],
     );
     body.set_terminator(entry, Terminator::Return { values: vec![] });

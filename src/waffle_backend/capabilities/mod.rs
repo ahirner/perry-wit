@@ -1,6 +1,7 @@
 //! Typed capability plans; shared SSA and component code own their execution.
 
 pub(crate) mod clocks;
+mod context;
 mod filesystem;
 mod random;
 pub(crate) mod stdio;
@@ -8,6 +9,7 @@ pub(crate) mod stdio;
 use perry_hir::types::Type as HirType;
 
 pub(crate) use clocks::ClockOperation;
+pub(crate) use context::ContextOperation;
 pub(crate) use filesystem::FilesystemOperation;
 pub(crate) use random::RandomOperation;
 pub(crate) use stdio::StdioOperation;
@@ -16,6 +18,7 @@ pub(crate) use stdio::StdioOperation;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CapabilityOperation {
     Clock(ClockOperation),
+    Context(ContextOperation),
     Random(RandomOperation),
     Stdio(StdioOperation),
     Filesystem(FilesystemOperation),
@@ -33,6 +36,7 @@ pub(crate) enum CapabilityImplementation {
     Stdio(StdioOperation),
     Filesystem,
     RandomBytes,
+    Context,
 }
 
 /// Describe an operation without owning values, scheduling, or invocation state.
@@ -52,6 +56,7 @@ impl CapabilityOperation {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Clock(operation) => operation.name(),
+            Self::Context(operation) => operation.name(),
             Self::Random(operation) => operation.name(),
             Self::Stdio(operation) => operation.name(),
             Self::Filesystem(operation) => operation.name(),
@@ -63,6 +68,7 @@ impl LowerCapability for CapabilityOperation {
     fn lower(&self) -> CapabilityPlan {
         match self {
             Self::Clock(operation) => operation.lower(),
+            Self::Context(operation) => operation.lower(),
             Self::Random(operation) => operation.lower(),
             Self::Stdio(operation) => operation.lower(),
             Self::Filesystem(operation) => operation.lower(),

@@ -1,5 +1,6 @@
 //! Resolve source bindings before Perry's name-based builtin lowering.
 
+mod context;
 mod date;
 mod decoder;
 mod filesystem;
@@ -16,8 +17,8 @@ use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use super::capabilities::{
-    CapabilityOperation, ClockOperation, FilesystemOperation, LowerCapability, RandomOperation,
-    StdioOperation,
+    CapabilityOperation, ClockOperation, ContextOperation, FilesystemOperation, LowerCapability,
+    RandomOperation, StdioOperation,
 };
 
 #[derive(Default)]
@@ -318,12 +319,14 @@ impl SourceCalls {
                 let builtin_performance =
                     receiver.sym == "performance" && receiver.ctxt == self.unresolved;
                 let builtin_date = receiver.sym == "Date" && receiver.ctxt == self.unresolved;
+                let builtin_process = receiver.sym == "process" && receiver.ctxt == self.unresolved;
                 if namespace.is_none()
                     && !builtin_math
                     && !builtin_console
                     && !builtin_crypto
                     && !builtin_performance
                     && !builtin_date
+                    && !builtin_process
                 {
                     return Ok(None);
                 }
@@ -357,6 +360,11 @@ impl SourceCalls {
                 } else if builtin_date {
                     ensure!(name == "now", "Unsupported Date static method '{name}'");
                     Ok(Some(CapabilityOperation::Clock(ClockOperation::DateNow)))
+                } else if builtin_process {
+                    ensure!(name == "cwd", "Unsupported process operation '{name}'");
+                    Ok(Some(CapabilityOperation::Context(
+                        ContextOperation::InitialCwd,
+                    )))
                 } else if name == "random" {
                     Ok(Some(CapabilityOperation::Random(RandomOperation::Number)))
                 } else {
@@ -456,6 +464,7 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
+        self.rewrite_process_arguments(expression);
         if matches!(expression, ast::Expr::Object(_))
             && let Err(error) = options::validate_plain_options(expression, "Object")
         {
@@ -498,6 +507,7 @@ impl VisitMut for SourceCalls {
                 | "crypto"
                 | "performance"
                 | "Date"
+                | "process"
         ) && ident.ctxt != self.unresolved
         {
             let id = ident.to_id();

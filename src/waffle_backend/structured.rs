@@ -10,6 +10,7 @@ use waffle::{Func, Memory, Module};
 pub(crate) struct StructuredHelpers {
     pub(crate) lift_stats: Func,
     pub(crate) lift_strings: Func,
+    pub(crate) take_strings: Func,
     pub(crate) lower_strings: Func,
 }
 
@@ -62,6 +63,7 @@ pub(crate) fn emit_runtime(
     Ok(StructuredHelpers {
         lift_stats: functions["stats.lift"],
         lift_strings: functions["strings.lift"],
+        take_strings: functions["strings.take"],
         lower_strings: functions["strings.lower"],
     })
 }

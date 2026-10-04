@@ -2,6 +2,7 @@
   (import "heap" "bump" (func $bump (param i32 i32 i32 i32) (result i32)))
   (import "heap" "memory" (memory 1))
   ;; Memory[36,40,44] holds block head, block tail, and active root-frame head.
+  ;; Memory[72] holds the retained root-frame head across component invocations.
   ;; Block headers: next, span, payload offset, payload size, kind, mark, reserved.
   ;; The word immediately before every payload points back to its block header.
   ;; Kinds: 0 bytes, 1 string, 2 string array, 3 scalar Promise, 4 reference Promise,
@@ -93,19 +94,25 @@
       (i32.store offset=16 (local.get $block) (i32.const -1))))
     (local.get $pointer))
 
-  (func (export "frame-new") (param $slots i32) (result i32)
+  (func $frame-new (param $slots i32) (param $head i32) (result i32)
     (local $size i64) (local $frame i32) (local $next i32)
     (local.set $size (i64.add (i64.const 12) (i64.mul (i64.extend_i32_u (local.get $slots)) (i64.const 4))))
     (if (i64.gt_u (local.get $size) (i64.const 4294967295)) (then unreachable))
     (local.set $frame (call $allocate (i32.const 4) (i32.wrap_i64 (local.get $size))))
     (memory.fill (local.get $frame) (i32.const 0) (i32.wrap_i64 (local.get $size)))
     (i32.store offset=16 (i32.load (i32.sub (local.get $frame) (i32.const 4))) (i32.const 6))
-    (local.set $next (i32.load (i32.const 44)))
+    (local.set $next (i32.load (local.get $head)))
     (i32.store (local.get $frame) (local.get $next))
     (i32.store offset=8 (local.get $frame) (local.get $slots))
     (if (local.get $next) (then (i32.store offset=4 (local.get $next) (local.get $frame))))
-    (i32.store (i32.const 44) (local.get $frame))
+    (i32.store (local.get $head) (local.get $frame))
     (local.get $frame))
+
+  (func (export "frame-new") (param $slots i32) (result i32)
+    (call $frame-new (local.get $slots) (i32.const 44)))
+  ;; Retained frames own instance-local values beyond canonical post-return.
+  (func (export "retained-frame-new") (param $slots i32) (result i32)
+    (call $frame-new (local.get $slots) (i32.const 72)))
 
   (func (export "frame-drop") (param $frame i32)
     (local $next i32) (local $previous i32)
@@ -123,7 +130,20 @@
       (if (i32.eqz (i32.load offset=20 (local.get $block)))
         (then (i32.store offset=20 (local.get $block) (i32.const 1)))))))
 
-  (func (export "collect")
+  (func $mark-frames (param $head i32) (local $pointer i32)
+    (local.set $pointer (i32.load (local.get $head)))
+    (block $done (loop $frames
+      (br_if $done (i32.eqz (local.get $pointer)))
+      (call $mark (local.get $pointer))
+      (local.set $pointer (i32.load (local.get $pointer)))
+      (br $frames))))
+
+  (func (export "post-return")
+    (if (i32.load (i32.const 72))
+      (then (call $collect))
+      (else (i32.store (i32.const 0) (i32.const 0)))))
+
+  (func $collect (export "collect")
     (local $block i32) (local $next i32) (local $previous i32) (local $pointer i32)
     (local $kind i32) (local $changed i32) (local $index i32) (local $count i32)
     ;; Completed native transports no longer need the invocation's pending root.
@@ -138,12 +158,8 @@
         (else (call $mark (local.get $pointer)) (local.set $previous (local.get $pointer))))
       (local.set $pointer (local.get $next))
       (br $promises)))
-    (local.set $pointer (i32.load (i32.const 44)))
-    (block $frames_done (loop $frames
-      (br_if $frames_done (i32.eqz (local.get $pointer)))
-      (call $mark (local.get $pointer))
-      (local.set $pointer (i32.load (local.get $pointer)))
-      (br $frames)))
+    (call $mark-frames (i32.const 44))
+    (call $mark-frames (i32.const 72))
     (loop $trace
       (local.set $changed (i32.const 0))
       (local.set $block (i32.load (i32.const 36)))

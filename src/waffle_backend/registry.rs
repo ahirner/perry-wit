@@ -154,6 +154,10 @@ impl ModuleRegistry {
             .any(|operation| operation.needs_bytes())
             .then(|| super::random::declare_imports(module));
 
+        let context_operations = contract.context_operations();
+        let context_imports = (!context_operations.is_empty())
+            .then(|| super::context::declare_imports(module, &context_operations));
+
         let promises = if let Some(plan) = &contract.promises {
             let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
                 let sig = module.signatures.push(SignatureData { params, returns });
@@ -289,7 +293,9 @@ impl ModuleRegistry {
             None
         };
 
-        let structured_helpers = if super::structured::required(hir) {
+        let structured_helpers = if super::structured::required(hir)
+            || context_operations.contains(&super::capabilities::ContextOperation::Arguments)
+        {
             Some(super::structured::emit_runtime(
                 module,
                 memory,
@@ -370,6 +376,28 @@ impl ModuleRegistry {
         } else {
             None
         };
+
+        if let Some(imports) = context_imports {
+            let helpers = super::context::emit_runtime(
+                module,
+                memory,
+                allocator.expect("context requires storage"),
+                imports,
+                &context_operations,
+                string_helpers
+                    .expect("context requires strings")
+                    .lift_canonical,
+                structured_helpers,
+            )?;
+            for (name, intrinsic) in &contract.intrinsics {
+                if let TypedIntrinsic::Capability(
+                    super::capabilities::CapabilityOperation::Context(operation),
+                ) = intrinsic
+                {
+                    intrinsics.insert(name.clone(), helpers[operation.name()]);
+                }
+            }
+        }
 
         // 3. Pre-declare all functions and establish complete FunctionInfo records
         let mut functions = BTreeMap::new();

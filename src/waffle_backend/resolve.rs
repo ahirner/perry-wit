@@ -12,8 +12,8 @@ use perry_hir::types::{FuncId, Type as HirType};
 use waffle::Type as WaffleType;
 
 use super::capabilities::{
-    CapabilityImplementation, CapabilityOperation, ClockOperation, LowerCapability,
-    RandomOperation, StdioOperation,
+    CapabilityImplementation, CapabilityOperation, ClockOperation, ContextOperation,
+    LowerCapability, RandomOperation, StdioOperation,
 };
 use super::visit::visit_function_expressions;
 
@@ -137,6 +137,17 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn context_operations(&self) -> BTreeSet<ContextOperation> {
+        self.intrinsics
+            .values()
+            .filter_map(|intrinsic| match intrinsic {
+                TypedIntrinsic::Capability(CapabilityOperation::Context(operation)) => {
+                    Some(*operation)
+                }
+                _ => None,
+            })
+            .collect()
+    }
     pub(crate) fn clock_operations(&self) -> BTreeSet<ClockOperation> {
         self.intrinsics
             .values()

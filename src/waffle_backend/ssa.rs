@@ -66,6 +66,7 @@ pub(crate) fn lower_module(
     let mut reqs = scan_module_string_requirements(hir);
     reqs.needs_strings |= super::values::required(hir)
         || super::date::required(hir)
+        || !contract.context_operations().is_empty()
         || contract.has_filesystem()
         || contract
             .random_operations()
@@ -151,8 +152,12 @@ pub(crate) fn lower_module(
                 name: export.name.clone(),
                 kind: ExportKind::Func(export.func_index),
             });
-            if registry.allocator.is_some() {
-                crate::waffle_backend::allocation::emit_post_return(&mut module, memory, export)?;
+            if let Some(allocator) = registry.allocator {
+                crate::waffle_backend::allocation::emit_post_return(
+                    &mut module,
+                    allocator,
+                    export,
+                )?;
             }
         }
         if let Some(plan) = &contract.promises

@@ -6,6 +6,7 @@ pub(crate) mod audit;
 mod bytes;
 pub(crate) mod capabilities;
 pub(crate) mod component;
+mod context;
 pub(crate) mod control_flow;
 mod date;
 mod decoder;
