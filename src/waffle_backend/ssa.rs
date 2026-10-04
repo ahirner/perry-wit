@@ -55,6 +55,9 @@ pub(crate) fn lower_module(
     contract: &ResolvedContract,
 ) -> Result<Module<'static>> {
     let mut module = Module::empty();
+    let http_handler_imports = contract
+        .http_handler
+        .map(|_| super::http::handler::declare_imports(&mut module));
 
     // 1. Declare and export linear memory for Canonical ABI options and component framing
     let memory = module.memories.push(waffle::MemoryData {
@@ -228,6 +231,14 @@ pub(crate) fn lower_module(
         }
     }
 
+    if let Some(limits) = contract.http_handler {
+        super::http::handler::emit_entry(
+            &mut module,
+            &registry,
+            limits,
+            http_handler_imports.as_ref().unwrap(),
+        )?;
+    }
     Ok(module)
 }
 

@@ -41,6 +41,7 @@ use perry_hir::ir::Module as HirModule;
 use perry_hir::lower_module;
 use perry_parser::parse_typescript;
 
+pub use http::handler::HttpHandlerOptions;
 pub use resolve::ResolvedInputKind;
 
 /// Compilation options for the WAFFLE backend.
@@ -77,7 +78,23 @@ pub fn compile_typescript(
     file_name: &str,
     options: &WaffleCompileOptions,
 ) -> Result<WaffleCompiled> {
-    compile_source(ts_source, file_name, options, None)
+    compile_source(ts_source, file_name, options, None, None)
+}
+
+/// Compiles a bounded HTTP handler exporting `wasi:http/handler@0.3.0`.
+pub fn compile_http_handler(
+    ts_source: &str,
+    file_name: &str,
+    options: &WaffleCompileOptions,
+    limits: HttpHandlerOptions,
+) -> Result<WaffleCompiled> {
+    compile_source(
+        ts_source,
+        file_name,
+        options,
+        Some(http::handler::world()?),
+        Some(limits),
+    )
 }
 
 /// Compiles against a resolved WIT world, using the generated SDK implementation names.
@@ -93,6 +110,7 @@ pub fn compile_typescript_for_world(
         file_name,
         options,
         Some(wit::WitWorld::new(resolve, world)?),
+        None,
     )
 }
 
@@ -101,6 +119,7 @@ fn compile_source(
     file_name: &str,
     options: &WaffleCompileOptions,
     exports: Option<wit::WitWorld>,
+    http_handler: Option<HttpHandlerOptions>,
 ) -> Result<WaffleCompiled> {
     if options.audit_dependencies {
         audit::audit_no_llvm(include_str!("../../Cargo.lock"))
@@ -118,12 +137,12 @@ fn compile_source(
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
     source::validate_lowering(&hir)?;
 
-    compile_resolved_hir(hir, options, &bindings, exports)
+    compile_resolved_hir(hir, options, &bindings, exports, http_handler)
 }
 
 /// Compiles Perry HIR by taking ownership, avoiding redundant cloning of the HIR.
 pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
-    compile_resolved_hir(hir, options, &source::SourceBindings::default(), None)
+    compile_resolved_hir(hir, options, &source::SourceBindings::default(), None, None)
 }
 
 fn compile_resolved_hir(
@@ -131,6 +150,7 @@ fn compile_resolved_hir(
     options: &WaffleCompileOptions,
     bindings: &source::SourceBindings,
     exports: Option<wit::WitWorld>,
+    http_handler: Option<HttpHandlerOptions>,
 ) -> Result<WaffleCompiled> {
     objects::resolve_declared_types(&mut hir)?;
     if let Some(exports) = &exports {
@@ -139,7 +159,14 @@ fn compile_resolved_hir(
     values::resolve_types(&mut hir);
     text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
-    let contract = resolve::resolve_contract(&hir, bindings, exports)?;
+    let mut contract = resolve::resolve_contract(&hir, bindings, exports)?;
+    contract.http_handler = http_handler;
+    if http_handler.is_some() {
+        anyhow::ensure!(
+            contract.promises.is_none(),
+            "HTTP handlers require directly awaited calls; retained tasks remain unsupported"
+        );
+    }
     let waffle_mod = ssa::lower_module(&hir, &contract)?;
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
@@ -152,7 +179,9 @@ fn compile_resolved_hir(
             .exports
             .iter()
             .any(|export| export.name == "cabi_post_run");
-        let (wat, bytes) = if let Some(exports) = &contract.wit {
+        let (wat, bytes) = if contract.http_handler.is_some() {
+            component::frame_component(&core, &contract, has_post_return)?
+        } else if let Some(exports) = &contract.wit {
             anyhow::ensure!(
                 contract.intrinsics.values().all(|intrinsic| matches!(
                     intrinsic,

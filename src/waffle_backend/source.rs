@@ -55,7 +55,7 @@ pub(crate) fn resolve_bindings(
         module.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         readonly::validate(module, SyntaxContext::empty().apply_mark(unresolved))?;
         let wit_imports = wit
-            .map(|wit| wit.bind_source(module))
+            .map(|wit| wit.bind_source(module, unresolved))
             .transpose()?
             .unwrap_or_default();
         let mut names = IdentifierNames::default();

@@ -1265,6 +1265,10 @@ name = "perry-wit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
  "perry-codegen-wasm",
  "perry-hir",
  "perry-json-helper",

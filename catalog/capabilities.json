@@ -31,17 +31,40 @@
         "Responses preserve status, duplicate headers, exact header bytes, and body bytes; non-2xx status remains a response",
         "Body EOF is followed by separate producer/request completion; native resources close before return",
         "Response metadata, body views, and header views survive helper returns and collection",
-        "The runner document fixture checks status, one supported Content-Type, a 4 MiB cap, strict UTF-8, and JSON syntax"
+        "The independent http_json fixture checks status, one supported Content-Type, a 64 KiB cap, strict UTF-8, and JSON syntax"
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
-        "GET must be immediately awaited and cannot be combined with stored async tasks; incoming handlers remain migration work",
+        "GET must be immediately awaited and cannot be combined with stored async tasks",
         "HttpResponse is guest-internal; component wrappers export status, text, or bytes",
         "Numeric failures: 8 overflow, 12 invalid metadata/limit/index, 100 plus WASI HTTP error discriminant, 200 plus header error discriminant",
         "Traps and interrupted calls require store disposal"
       ],
       "conformance": [
         "src/waffle_backend/http/tests.rs"
+      ]
+    },
+    {
+      "id": "compiler.p3_http_handler",
+      "name": "Bounded P3 HTTP Handler",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "Rust compile_http_handler API exporting wasi:http/handler@0.3.0",
+      "invariants": [
+        "Typed request/response records preserve method, optional coordinates, duplicate header bytes, and bounded body bytes",
+        "Direct awaits can use P3 capabilities; invocations are serialized through body transfer and separate consumer completion",
+        "Responses are published before transmission; abandonment and consumer errors release streams, futures, resources, and invocation storage",
+        "Repeated calls are tested under a 1 MiB guest memory cap using independent Wasmtime P3 bindings"
+      ],
+      "differences": [
+        "Explicit request/response byte caps; status 200–599, with empty bodies for 204/205/304",
+        "Overflow returns the corresponding WASI body-size error; invalid response metadata and request producer failures return internal-error",
+        "Source exceptions and interrupted calls require store disposal; hosts must drive the P3 event loop through completion",
+        "Request trailers are consumed but not exposed; source streams, response trailers, and stored tasks remain unsupported",
+        "The default CLI remains on the legacy pipeline until R9"
+      ],
+      "conformance": [
+        "tests/waffle_http_handler_test.rs"
       ]
     },
     {

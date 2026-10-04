@@ -75,6 +75,29 @@ declare module "perry:clocks" {
   export function waitFor(milliseconds: number): Promise<void>;
 }
 
+declare module "perry:http-handler/types" {
+  export type Method =
+    | { tag: "get" | "head" | "post" | "put" | "delete" | "connect" | "options" | "trace" | "patch" }
+    | { tag: "other"; val: string };
+  export type Scheme = { tag: "http" | "https" } | { tag: "other"; val: string };
+  export interface Request {
+    method: Method;
+    scheme: Scheme | null | undefined;
+    authority: string | null | undefined;
+    pathWithQuery: string | null | undefined;
+    headers: [string, Uint8Array][];
+    body: Uint8Array;
+  }
+  /** Buffered response for compile_http_handler. Body caps are compiler options.
+   * Status is 200–599; 204/205/304 require an empty body. Headers preserve duplicates
+   * and bytes. Direct awaits are supported; retained tasks remain unsupported. */
+  export interface Response {
+    status: number;
+    headers: [string, Uint8Array][];
+    body: Uint8Array;
+  }
+}
+
 declare module "perry:http" {
   /** Buffered response with no remaining native HTTP resources. Headers preserve
    * duplicates and exact bytes. Indices must be integers in [0, headerCount).

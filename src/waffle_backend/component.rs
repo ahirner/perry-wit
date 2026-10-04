@@ -14,7 +14,11 @@ pub(crate) fn frame_component(
     contract: &ResolvedContract,
     has_post_return: bool,
 ) -> Result<(String, Vec<u8>)> {
-    let entry_signature = entry_signature(contract)?;
+    let entry_signature = if contract.http_handler.is_some() {
+        String::new()
+    } else {
+        entry_signature(contract)?
+    };
     let core_wat = wasmprinter::print_bytes(core_wasm).context("Printing core Wasm to WAT")?;
     let core_body = core_wat
         .strip_prefix("(module")
@@ -118,7 +122,15 @@ pub(crate) fn frame_component(
         host_imports.push_str(&super::http::declare_adapters()?);
         guest_adapters.push_str(&super::http::bind_adapters()?);
         guest_imports.push_str(r#"(with "http" (instance $http-forward))"#);
+    } else if contract.http_handler.is_some() {
+        host_imports.push_str(include_str!("http/interfaces.wat"));
     }
+    if contract.http_handler.is_some() {
+        host_imports.push_str(&super::http::handler::declare_adapters()?);
+        guest_adapters.push_str(&super::http::handler::bind_adapters()?);
+        guest_imports.push_str(r#"(with "http-server" (instance $http-server-forward))"#);
+    }
+
     if !context_operations.is_empty() {
         guest_adapters.push_str(&super::context::bind_adapters(&context_operations)?);
         guest_imports.push_str(r#"(with "context" (instance $context-forward))"#);
@@ -135,6 +147,21 @@ pub(crate) fn frame_component(
             &guest_adapters,
         )?;
         let bytes = wat::parse_str(&wat).context("Encoding stored-Promise component")?;
+        return Ok((wat, bytes));
+    }
+
+    if contract.http_handler.is_some() {
+        let wat = format!(
+            r#"(component
+            {host_imports}
+            (core module $guest {core_body})
+            (core instance $guest (instantiate $guest {guest_imports}
+                (with "host" (instance {host_wires}))))
+            {guest_adapters}
+            {})"#,
+            super::http::handler::export_adapter()
+        );
+        let bytes = wat::parse_str(&wat).context("Encoding incoming HTTP component")?;
         return Ok((wat, bytes));
     }
 

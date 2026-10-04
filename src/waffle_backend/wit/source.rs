@@ -2,13 +2,15 @@
 
 use super::*;
 use perry_parser::parse_typescript;
-use swc_common::SyntaxContext;
+use swc_common::{Mark, SyntaxContext};
+use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 impl WitWorld {
     pub(in crate::waffle_backend) fn bind_source(
         &self,
         module: &mut ast::Module,
+        unresolved: Mark,
     ) -> Result<BTreeMap<String, String>> {
         let mut functions = BTreeMap::new();
         let mut namespaces = BTreeMap::new();
@@ -141,9 +143,9 @@ impl WitWorld {
         for index in remove.into_iter().rev() {
             module.body.remove(index);
         }
-        module
-            .body
-            .append(&mut parse_typescript(&declarations, "wit-imports.d.ts")?.body);
+        let mut generated = parse_typescript(&declarations, "wit-imports.d.ts")?;
+        generated.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
+        module.body.append(&mut generated.body);
         Ok(calls.used)
     }
 }

@@ -179,7 +179,9 @@ impl FunctionLowerer<'_> {
             _ => return,
         };
         let Expr::LocalGet(id) = member.0 else { return };
-        let Some(HirType::Union(variants)) = self.local_types.get(id) else {
+        let Some(HirType::Union(variants)) =
+            self.narrowings.get(id).or_else(|| self.local_types.get(id))
+        else {
             return;
         };
         if member.1 == "ok" && label.is_none() {

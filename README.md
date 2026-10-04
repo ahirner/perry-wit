@@ -349,9 +349,25 @@ and producer completion is checked independently of EOF. Numeric errors are `8`
 for body overflow, `12` for invalid metadata/limits/indices, `100 +` the WASI HTTP
 error discriminant, and `200 +` the header error discriminant. Non-2xx statuses
 remain responses. Traps and interrupted calls require store disposal. HTTP calls
-cannot yet be combined with stored async tasks; incoming handlers remain migration
-work. The independent `tests/fixtures/http_json.ts` example checks status,
+cannot yet be combined with stored async tasks. The independent `tests/fixtures/http_json.ts` example checks status,
 Content-Type, strict UTF-8, and JSON validation under a 64 KiB response limit.
+
+The Rust `compile_http_handler` API exports `wasi:http/handler@0.3.0` from a typed
+`handle(request: Request): Response` or async `Promise<Response>` function. Import
+these record types from `perry:http-handler/types` (declared in `types/p3.d.ts`).
+Requests carry a method variant, optional scheme/authority/path, duplicate header
+byte pairs, and bounded body bytes. Compiler options require explicit request and
+response byte caps. Responses use status 200–599, header byte pairs, and a byte
+body; 204/205/304 require an empty body. Direct awaits can use P3 capabilities.
+The component serializes invocations through response completion, publishes the
+response before sending its body, and retains guest storage until transmission
+and the consumer's separate completion settle. Hosts must drive the P3 event loop
+through that completion. Request/response overflow returns the corresponding WASI
+body-size error; invalid response metadata and request producer failures return
+`internal-error`. Source exceptions and interrupted calls require store disposal.
+Request trailers are consumed and released; response trailers and source streams
+are not exposed. Consumer failure after publication closes and releases the
+response; no second response or retry is attempted. Stored tasks remain diagnosed.
 
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary

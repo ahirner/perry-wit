@@ -148,6 +148,7 @@ impl TypedIntrinsic {
 /// Validated contract containing typed operations and module signatures.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedContract {
+    pub(crate) http_handler: Option<super::HttpHandlerOptions>,
     pub(crate) wit: Option<super::wit::WitWorld>,
     pub(crate) literal_shapes: BTreeMap<String, Vec<String>>,
     pub(crate) promises: Option<super::promises::PromisePlan>,
@@ -476,6 +477,7 @@ pub(crate) fn resolve_contract(
         "Stream operations require a ByteStream entry input"
     );
     Ok(ResolvedContract {
+        http_handler: None,
         wit,
         literal_shapes: hir
             .classes

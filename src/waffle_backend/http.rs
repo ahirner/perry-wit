@@ -9,6 +9,9 @@ use waffle::{Func, Memory, Module};
 
 use super::{allocation::AllocationFuncs, component::forward, runtime, streams};
 
+mod future;
+pub(crate) mod handler;
+
 #[cfg(test)]
 #[path = "http/tests.rs"]
 mod tests;
@@ -88,17 +91,19 @@ pub(crate) fn emit_runtime(
         ("frame-drop", allocator.frame_drop),
     ]);
     let source = format!(
-        "(module {} {})",
+        "(module {} {} {})",
         forward::module_imports(&native_functions())?,
-        include_str!("http/runtime.wat")
+        include_str!("http/runtime.wat"),
+        include_str!("http/future.wat")
     );
     Ok(runtime::emit_functions(module, memory, &source, &imports)?["http.get"])
 }
 
 pub(crate) fn declare_adapters() -> Result<String> {
     Ok(format!(
-        "{}{}",
+        "{}{}{}",
         include_str!("http/interfaces.wat"),
+        include_str!("http/client.wat"),
         forward::declare("http", &native_functions())?
     ))
 }
@@ -127,21 +132,8 @@ pub(crate) fn bind_adapters() -> Result<String> {
       (core func $http-drop-request (canon resource.drop $http-request))
       (core func $http-read (canon stream.read $http-bytes (memory (core memory $guest "memory"))))
       (core func $http-drop-reader (canon stream.drop-readable $http-bytes))
-      (core func $http-new-trailers (canon future.new $http-trailers))
-      (core func $http-write-trailers (canon future.write $http-trailers async (memory (core memory $guest "memory"))))
-      (core func $http-read-trailers (canon future.read $http-trailers (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $http-drop-trailers-reader (canon future.drop-readable $http-trailers))
-      (core func $http-drop-trailers-writer (canon future.drop-writable $http-trailers))
-      (core func $http-new-completion (canon future.new $http-completion))
-      (core func $http-write-completion (canon future.write $http-completion async (memory (core memory $guest "memory"))))
-      (core func $http-read-completion (canon future.read $http-completion (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $http-drop-completion-reader (canon future.drop-readable $http-completion))
-      (core func $http-drop-completion-writer (canon future.drop-writable $http-completion))
-      (core func $http-new-set (canon waitable-set.new))
-      (core func $http-join (canon waitable.join))
-      (core func $http-wait (canon waitable-set.wait (memory (core memory $guest "memory"))))
-      (core func $http-drop-set (canon waitable-set.drop))
     "#);
+    wat.push_str(&future::bindings("http"));
     wat.push_str(&forward::bind("http", &native_functions())?);
     Ok(wat)
 }
@@ -162,20 +154,6 @@ fn native_functions() -> Vec<forward::Function> {
         ("drop-request", vec!["i32"], vec![]),
         ("read", vec!["i32"; 3], vec!["i32"]),
         ("drop-reader", vec!["i32"], vec![]),
-        ("new-trailers", vec![], vec!["i64"]),
-        ("write-trailers", vec!["i32"; 2], vec!["i32"]),
-        ("read-trailers", vec!["i32"; 2], vec!["i32"]),
-        ("drop-trailers-reader", vec!["i32"], vec![]),
-        ("drop-trailers-writer", vec!["i32"], vec![]),
-        ("new-completion", vec![], vec!["i64"]),
-        ("write-completion", vec!["i32"; 2], vec!["i32"]),
-        ("read-completion", vec!["i32"; 2], vec!["i32"]),
-        ("drop-completion-reader", vec!["i32"], vec![]),
-        ("drop-completion-writer", vec!["i32"], vec![]),
-        ("new-set", vec![], vec!["i32"]),
-        ("join", vec!["i32"; 2], vec![]),
-        ("wait", vec!["i32"; 2], vec!["i32"]),
-        ("drop-set", vec!["i32"], vec![]),
     ]
     .into_iter()
     .map(|(name, params, results)| forward::Function {
@@ -184,5 +162,6 @@ fn native_functions() -> Vec<forward::Function> {
         results,
         target: format!("(func $http-{name})"),
     })
+    .chain(future::functions("http"))
     .collect()
 }

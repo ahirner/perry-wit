@@ -179,8 +179,12 @@ impl WitWorld {
                 .map(|ty| hir_type(&self.resolve, ty))
                 .transpose()?
                 .unwrap_or(HirType::Void);
+            let result = match &function.return_type {
+                HirType::Promise(inner) if function.is_async => inner.as_ref(),
+                ty => ty,
+            };
             ensure!(
-                same_type(&function.return_type, &expected),
+                same_type(result, &expected),
                 "WIT export '{name}' result must match {expected:?}, found {:?}",
                 function.return_type
             );

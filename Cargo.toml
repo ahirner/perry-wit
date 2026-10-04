@@ -42,6 +42,10 @@ regex-automata = { version = "0.4.18", default-features = false, features = ["st
 wasmparser = "0.261"
 
 [dev-dependencies]
+bytes = "1"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
 wasmtime = { version = "49.0.2", default-features = false, features = ["component-model-async", "cranelift", "runtime", "std", "anyhow"] }
 wasmtime-wasi = { version = "49.0.2", default-features = false, features = ["p2", "p3"] }
 wasmtime-wasi-http = { version = "49.0.2", default-features = false, features = ["p3", "default-send-request"] }

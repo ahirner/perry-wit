@@ -3,18 +3,6 @@
   (import "host" "frame-new" (func $frame-new (param i32) (result i32)))
   (import "host" "frame-drop" (func $frame-drop (param i32)))
 
-  (func $finish-write (param $writer i32) (param $status i32) (param $scratch i32)
-    (local $set i32)
-    (if (i32.eq (local.get $status) (i32.const -1)) (then
-      (local.set $set (call $new-set))
-      (call $join (local.get $writer) (local.get $set))
-      (if (i32.ne (call $wait (local.get $set) (local.get $scratch)) (i32.const 5)) (then unreachable))
-      (if (i32.ne (i32.load (local.get $scratch)) (local.get $writer)) (then unreachable))
-      (local.set $status (i32.load offset=4 (local.get $scratch)))
-      (call $join (local.get $writer) (i32.const 0))
-      (call $drop-set (local.get $set))))
-    (if (i32.gt_u (local.get $status) (i32.const 1)) (then unreachable)))
-
   ;; Canonical request inputs; output is status, header-list pointer/count, body pointer/length.
   ;; HTTP errors are 100 + WIT discriminant, header errors 200 + discriminant;
   ;; invalid request metadata is 12, and response limit overflow is 8.
