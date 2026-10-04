@@ -10,6 +10,11 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
     let mut reqs = RequiredStringHelpers::default();
 
     for func in &hir.functions {
+        reqs.objects |= crate::waffle_backend::objects::contains_object(&func.return_type)
+            || func
+                .params
+                .iter()
+                .any(|param| crate::waffle_backend::objects::contains_object(&param.ty));
         for param in &func.params {
             if super::super::decoder::is_decoder(&param.ty) {
                 reqs.needs_strings = true;
@@ -34,11 +39,16 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
     visit::visit_statements(&hir.init, &mut |expr| {
         scan_expr_requirements(expr, &mut reqs)
     });
+    reqs.needs_strings |= reqs.objects;
     reqs
 }
 
 fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
     match expr {
+        Expr::Object(_) => reqs.objects = true,
+        Expr::New { class_name, .. } if class_name.starts_with("__AnonShape_") => {
+            reqs.objects = true
+        }
         Expr::TextDecoderNew { .. }
         | Expr::TextDecoderDecode { .. }
         | Expr::TextDecoderEncoding(_)
@@ -109,6 +119,7 @@ fn type_has_string(ty: &HirType) -> bool {
             type_args.iter().any(type_has_string)
         }
         HirType::Union(types) => types.iter().any(type_has_string),
+        HirType::Object(_) => true,
         _ => false,
     }
 }

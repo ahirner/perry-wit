@@ -35,6 +35,19 @@ pub(crate) fn frame_component(
     } else {
         String::new()
     };
+    if contract
+        .entry_params
+        .iter()
+        .any(super::structured::contains_stats)
+        || super::structured::contains_stats(contract.entry_result_type())
+    {
+        host_imports.push_str(r#"
+          (type $stats-kind-definition (enum "block-device" "character-device" "directory" "fifo" "symbolic-link" "regular-file" "socket" "other"))
+          (export $stats-kind "stats-kind" (type $stats-kind-definition))
+          (type $stats-definition (record (field "size" f64) (field "mtime-ms" f64) (field "kind" $stats-kind)))
+          (export $stats "stats" (type $stats-definition))
+        "#);
+    }
     let mut host_wires = String::new();
     let mut emitted_operations = BTreeSet::new();
 
@@ -157,7 +170,7 @@ pub(crate) fn frame_component(
     Ok((component_wat, component_bytes))
 }
 
-/// Describe the entry's primitive canonical ABI, retaining booleans as component booleans.
+/// Describe the entry's canonical ABI without erasing its declared value kinds.
 pub(crate) fn entry_signature(contract: &ResolvedContract) -> Result<String> {
     ensure!(
         canonical_param_types(&contract.entry_params)?.len() <= 16,
@@ -182,6 +195,8 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
         HirType::Number | HirType::Any => Ok("f64".into()),
         HirType::Boolean => Ok("bool".into()),
         HirType::String => Ok("string".into()),
+        ty if super::filesystem::is_stats(ty) => Ok("$stats".into()),
+        ty if super::structured::is_string_array(ty) => Ok("(list string)".into()),
         ty if super::bytes::is_byte_view(ty) => Ok("(list u8)".into()),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("$text-or-bytes".into()),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
@@ -197,6 +212,7 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
 fn requires_allocation(ty: &HirType) -> bool {
     match ty {
         HirType::String => true,
+        ty if super::filesystem::is_stats(ty) || super::structured::is_string_array(ty) => true,
         ty if super::text_or_bytes::is_text_or_bytes(ty) => true,
         HirType::Generic { base, type_args } if base == "Result" => {
             type_args.iter().any(requires_allocation)

@@ -119,7 +119,7 @@ pub(crate) fn plan_promises(
         );
         ensure!(
             task.params.len() < 16,
-            "Stored async calls support at most 15 primitive arguments"
+            "Stored async calls support at most 15 arguments"
         );
         ensure!(
             task.params
@@ -130,7 +130,7 @@ pub(crate) fn plan_promises(
         );
         ensure!(
             is_task_outcome(&task.result),
-            "Stored async task results require numbers, booleans, strings, bytes, string-or-byte values, or void"
+            "Stored async task results require supported scalar, text, byte, object, or list values"
         );
     }
     Ok(Some(PromisePlan { tasks: referenced }))
@@ -143,4 +143,7 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         HirType::Number | HirType::Boolean | HirType::String | HirType::Void
     ) || super::bytes::is_byte_view(ty)
         || super::text_or_bytes::is_text_or_bytes(ty)
+        || super::filesystem::is_stats(ty)
+        || super::objects::is_object(ty)
+        || super::structured::is_string_array(ty)
 }

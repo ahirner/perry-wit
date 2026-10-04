@@ -12,6 +12,7 @@ pub(crate) mod exceptions;
 mod filesystem;
 pub(crate) mod libraries;
 pub(crate) mod link;
+mod objects;
 pub(crate) mod promises;
 mod regex;
 pub(crate) mod registry;
@@ -21,6 +22,7 @@ mod source;
 pub(crate) mod ssa;
 mod streams;
 pub(crate) mod strings;
+mod structured;
 pub mod text_contract;
 mod text_or_bytes;
 mod visit;
@@ -88,10 +90,11 @@ pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Resu
 }
 
 fn compile_resolved_hir(
-    hir: HirModule,
+    mut hir: HirModule,
     options: &WaffleCompileOptions,
     bindings: &source::SourceBindings,
 ) -> Result<WaffleCompiled> {
+    objects::resolve_declared_types(&mut hir)?;
     text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
     let contract = resolve::resolve_contract(&hir, bindings)?;

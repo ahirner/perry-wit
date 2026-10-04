@@ -9,6 +9,7 @@ mod bytes;
 mod decoder;
 mod filesystem;
 mod loops;
+mod objects;
 mod optional;
 mod options;
 mod requirements;
@@ -59,17 +60,24 @@ pub(crate) fn lower_module(
     });
 
     // 2. Scan module for string requirements and build string pool if needed
-    let reqs = scan_module_string_requirements(hir);
+    let mut reqs = scan_module_string_requirements(hir);
+    reqs.needs_strings |= contract.has_filesystem();
     let mut string_pool = StringPool::new();
     let regex_tables = regex::compile_literals(hir)?;
     let (string_heap_base, regex_programs) = if reqs.needs_strings
         || contract.promises.is_some()
         || super::bytes::required(hir)
+        || super::structured::required(hir)
         || contract.has_stream_input()
         || !contract.output_operations().is_empty()
         || contract.has_filesystem()
     {
         collect_strings_in_module(hir, &mut string_pool);
+        if contract.has_filesystem() {
+            for key in super::filesystem::OPTION_KEYS {
+                string_pool.intern(key);
+            }
+        }
         if reqs.decoder {
             string_pool.intern("utf-8");
         }
@@ -102,8 +110,15 @@ pub(crate) fn lower_module(
     };
 
     // 3. Build complete module declarations registry
-    let registry =
-        ModuleRegistry::build(&mut module, hir, contract, string_heap_base, memory, reqs)?;
+    let registry = ModuleRegistry::build(
+        &mut module,
+        hir,
+        contract,
+        string_heap_base,
+        memory,
+        reqs,
+        &string_pool,
+    )?;
     let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
 
     // 5. Lower each function body using the established registry contracts
@@ -121,17 +136,7 @@ pub(crate) fn lower_module(
         module.funcs[info.func_index] = waffle::FuncDecl::Body(info.sig, func.name.clone(), body);
 
         if let Some(export) = &info.export {
-            let lift_fn = registry.string_helpers.as_ref().map(|h| h.lift_canonical);
-            let lift_bytes = registry.byte_helpers.as_ref().map(|h| h.lift_canonical);
-            let wrapper = abi::build_export_wrapper(
-                &module,
-                info,
-                export,
-                registry.memory,
-                lift_fn,
-                lift_bytes,
-                registry.text_or_bytes_lift,
-            )?;
+            let wrapper = abi::build_export_wrapper(&module, info, export, &registry)?;
             module.funcs[export.func_index] =
                 waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
             module.exports.push(Export {
@@ -281,7 +286,15 @@ impl<'a> FunctionLowerer<'a> {
                             self.text_or_bytes_operand(expr)?,
                         )
                     } else {
-                        (inferred, self.expression(expr)?)
+                        (
+                            if super::objects::is_object(ty) && super::objects::is_object(&inferred)
+                            {
+                                ty.clone()
+                            } else {
+                                inferred
+                            },
+                            self.expression(expr)?,
+                        )
                     };
                     self.local_types.insert(*id, ty);
                     self.narrowings.remove(id);
@@ -326,10 +339,14 @@ impl<'a> FunctionLowerer<'a> {
                                 self.byte_receiver(expr)
                             } else if super::decoder::is_decoder(self.return_type) {
                                 self.decoder_receiver(expr)
+                            } else if super::objects::is_object(self.return_type) {
+                                ensure!(super::objects::is_object(&self.infer_expr_type(expr)), "Object results require object values");
+                                self.expression(expr)
                             } else if super::filesystem::is_stats(self.return_type) || matches!(self.return_type, HirType::Array(_)) {
                                 ensure!(&self.infer_expr_type(expr) == self.return_type, "Returned value must match {:?}", self.return_type);
                                 self.expression(expr)
                             } else {
+                                ensure!(!super::objects::is_object(&self.infer_expr_type(expr)), "Cannot return a plain object as {:?}", self.return_type);
                                 ensure!(!super::filesystem::is_stats(&self.infer_expr_type(expr)) && !matches!(self.infer_expr_type(expr), HirType::Array(_)), "Cannot return an object as {:?}", self.return_type);
                                 ensure!(!is_text_or_bytes(&self.infer_expr_type(expr)), "Cannot return a string-or-byte value as {:?}; narrow it first", self.return_type);
                                 ensure!(!super::decoder::is_decoder(&self.infer_expr_type(expr)), "Cannot return a TextDecoder as {:?}", self.return_type);
@@ -514,6 +531,15 @@ impl<'a> FunctionLowerer<'a> {
                 _ => None,
             };
             let argument_type = self.infer_expr_type(arg);
+            if expected.is_some_and(super::objects::is_object)
+                || super::objects::is_object(&argument_type)
+            {
+                ensure!(
+                    expected.is_some_and(super::objects::is_object)
+                        && super::objects::is_object(&argument_type),
+                    "Object parameters require object arguments"
+                );
+            }
             if expected.is_some_and(super::filesystem::is_stats)
                 || super::filesystem::is_stats(&argument_type)
                 || matches!(expected, Some(HirType::Array(_)))
@@ -883,6 +909,44 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::Object(_) => self.new_object(expr),
+            Expr::New { class_name, .. }
+                if self.contract.literal_shapes.contains_key(class_name) =>
+            {
+                self.new_object(expr)
+            }
+            Expr::PropertySet {
+                object,
+                property,
+                value,
+            } if super::objects::is_object(&self.infer_expr_type(object)) => {
+                self.object_set(object, &Expr::String(property.clone()), value)
+            }
+            Expr::IndexSet {
+                object,
+                index,
+                value,
+            } if super::objects::is_object(&self.infer_expr_type(object)) => {
+                self.object_set(object, index, value)
+            }
+            Expr::PutValueSet {
+                target,
+                key,
+                value,
+                receiver,
+                ..
+            } if super::objects::is_object(&self.infer_expr_type(target))
+                && matches!((target.as_ref(),receiver.as_ref()), (Expr::LocalGet(left),Expr::LocalGet(right)) if left == right) =>
+            {
+                self.object_set(target, key, value)
+            }
+            Expr::Delete(target) => match target.as_ref() {
+                Expr::PropertyGet {
+                    object, property, ..
+                } => self.object_delete(object, &Expr::String(property.clone())),
+                Expr::IndexGet { object, index } => self.object_delete(object, index),
+                _ => bail!("delete requires a plain object property"),
+            },
             Expr::TypeOf(operand) => self.type_of(operand),
             Expr::Unary {
                 op: UnaryOp::Not, ..
@@ -1060,6 +1124,11 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::PropertyGet {
                 object, property, ..
+            } if super::objects::is_object(&self.infer_expr_type(object)) => {
+                self.object_get(object, &Expr::String(property.clone()))
+            }
+            Expr::PropertyGet {
+                object, property, ..
             } if super::filesystem::is_stats(&self.infer_expr_type(object)) => {
                 self.stats_property(object, property)
             }
@@ -1112,6 +1181,9 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
             Expr::IndexGet { object, index, .. } => {
+                if super::objects::is_object(&self.infer_expr_type(object)) {
+                    return self.object_get(object, index);
+                }
                 if super::bytes::is_byte_view(&self.infer_expr_type(object)) {
                     return self.byte_index(object, index);
                 }
@@ -1398,9 +1470,21 @@ impl<'a> FunctionLowerer<'a> {
 fn collect_strings_in_module(hir: &HirModule, pool: &mut StringPool) {
     pool.intern("");
     pool.intern(",");
+    for class in &hir.classes {
+        for field in &class.fields {
+            pool.intern(&field.name);
+        }
+    }
     let mut intern = |expr: &Expr| {
         if let Expr::String(text) = expr {
             pool.intern(text);
+        } else if let Expr::Object(fields) = expr {
+            for (name, _) in fields {
+                pool.intern(name);
+            }
+        } else if let Expr::PropertyGet { property, .. } | Expr::PropertySet { property, .. } = expr
+        {
+            pool.intern(property);
         } else if matches!(expr, Expr::TypeOf(_)) {
             for label in ["string", "object", "number", "boolean", "undefined"] {
                 pool.intern(label);

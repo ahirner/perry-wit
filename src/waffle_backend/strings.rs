@@ -49,6 +49,7 @@ pub(crate) struct RequiredStringHelpers {
     pub split: bool,
     pub join: bool,
     pub decoder: bool,
+    pub objects: bool,
 }
 
 /// Base memory address where static string descriptors and data are placed.

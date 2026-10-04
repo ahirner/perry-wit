@@ -11,7 +11,7 @@ use waffle::{
 };
 
 use crate::waffle_backend::registry::{
-    ExportConvention, FunctionExport, FunctionInfo, PrimitivePayload,
+    ExportConvention, FunctionExport, FunctionInfo, ModuleRegistry, ValuePayload,
 };
 use perry_hir::types::Type as HirType;
 
@@ -27,17 +27,21 @@ pub(crate) fn build_export_wrapper(
     module: &Module<'static>,
     callee: &FunctionInfo,
     export: &FunctionExport,
-    memory: waffle::Memory,
-    lift_canonical: Option<waffle::Func>,
-    lift_bytes: Option<waffle::Func>,
-    lift_text_or_bytes: Option<waffle::Func>,
+    registry: &ModuleRegistry,
 ) -> Result<FunctionBody> {
+    let memory = registry.memory;
+    let lift_canonical = registry
+        .string_helpers
+        .map(|helpers| helpers.lift_canonical);
+    let lift_bytes = registry.byte_helpers.map(|helpers| helpers.lift_canonical);
+    let lift_text_or_bytes = registry.text_or_bytes_lift;
     let mut body = FunctionBody::new(module, export.sig);
     let entry = body.entry;
     let mut args = Vec::new();
     let mut param_cursor = 0;
     for param_ty in &callee.param_types {
-        if super::text_or_bytes::is_text_or_bytes(param_ty) {
+        if super::text_or_bytes::is_text_or_bytes(param_ty) || super::filesystem::is_stats(param_ty)
+        {
             let values: Vec<_> = body.blocks[entry].params[param_cursor..param_cursor + 3]
                 .iter()
                 .map(|param| param.1)
@@ -46,9 +50,16 @@ pub(crate) fn build_export_wrapper(
             let value = body.add_op(
                 entry,
                 Operator::Call {
-                    function_index: lift_text_or_bytes.ok_or_else(|| {
-                        anyhow::anyhow!("String-or-byte parameters require canonical lifting")
-                    })?,
+                    function_index: if super::filesystem::is_stats(param_ty) {
+                        registry
+                            .structured_helpers
+                            .expect("Stats lifting is available")
+                            .lift_stats
+                    } else {
+                        lift_text_or_bytes.ok_or_else(|| {
+                            anyhow::anyhow!("String-or-byte parameters require canonical lifting")
+                        })?
+                    },
                 },
                 &values,
                 &[Type::I32],
@@ -57,6 +68,12 @@ pub(crate) fn build_export_wrapper(
             continue;
         }
         let lift = match param_ty {
+            ty if super::structured::is_string_array(ty) => Some(
+                registry
+                    .structured_helpers
+                    .expect("String arrays require canonical lifting")
+                    .lift_strings,
+            ),
             HirType::String => {
                 Some(lift_canonical.ok_or_else(|| {
                     anyhow::anyhow!("String parameters require canonical lifting")
@@ -89,6 +106,25 @@ pub(crate) fn build_export_wrapper(
     }
     let outcome = emit_fallible_call(&mut body, entry, callee.func_index, &args);
     match export.convention {
+        ExportConvention::Direct if super::structured::is_string_array(callee.success_type()) => {
+            let block = outcome.ok_block;
+            let descriptor = decode_payload(&mut body, block, outcome.payload, true);
+            let value = body.add_op(
+                block,
+                Operator::Call {
+                    function_index: registry.structured_helpers.unwrap().lower_strings,
+                },
+                &[descriptor],
+                &[Type::I32],
+            );
+            body.set_terminator(
+                block,
+                Terminator::Return {
+                    values: vec![value],
+                },
+            );
+            body.set_terminator(outcome.err_block, Terminator::Unreachable);
+        }
         ExportConvention::Direct
             if super::text_or_bytes::is_text_or_bytes(callee.success_type()) =>
         {
@@ -126,11 +162,11 @@ pub(crate) fn build_export_wrapper(
                 (
                     outcome.err_block,
                     CompletionStatus::Threw,
-                    PrimitivePayload::Number,
+                    ValuePayload::Number,
                 ),
             ] {
                 let retptr =
-                    emit_retptr_store(&mut body, block, memory, status, outcome.payload, ty);
+                    emit_retptr_store(&mut body, block, registry, status, outcome.payload, ty);
                 body.set_terminator(
                     block,
                     Terminator::Return {
@@ -203,17 +239,32 @@ pub(crate) fn decode_payload(
     }
 }
 
-/// Stores a WIT Result tag and its declared primitive payload at the return pointer.
+/// Stores a WIT Result tag and its declared payload at the return pointer.
 /// Numeric error payloads align the union to eight bytes, including boolean success variants.
 fn emit_retptr_store(
     body: &mut FunctionBody,
     block: Block,
-    memory: waffle::Memory,
+    registry: &ModuleRegistry,
     status: CompletionStatus,
     payload_f64: Value,
-    payload_type: PrimitivePayload,
+    payload_type: ValuePayload,
 ) -> Value {
-    let addr = body.add_op(block, Operator::I32Const { value: 8 }, &[], &[Type::I32]);
+    let memory = registry.memory;
+    let addr = if payload_type == ValuePayload::Stats {
+        let zero = body.add_op(block, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+        let alignment = body.add_op(block, Operator::I32Const { value: 8 }, &[], &[Type::I32]);
+        let size = body.add_op(block, Operator::I32Const { value: 32 }, &[], &[Type::I32]);
+        body.add_op(
+            block,
+            Operator::Call {
+                function_index: registry.allocator.unwrap().realloc,
+            },
+            &[zero, zero, alignment, size],
+            &[Type::I32],
+        )
+    } else {
+        body.add_op(block, Operator::I32Const { value: 8 }, &[], &[Type::I32])
+    };
     let status_val = body.add_op(
         block,
         Operator::I32Const {
@@ -236,7 +287,34 @@ fn emit_retptr_store(
         &[],
     );
     match payload_type {
-        PrimitivePayload::Number => {
+        ValuePayload::Stats => {
+            let descriptor = decode_payload(body, block, payload_f64, true);
+            let eight = body.add_op(block, Operator::I32Const { value: 8 }, &[], &[Type::I32]);
+            let destination = body.add_op(block, Operator::I32Add, &[addr, eight], &[Type::I32]);
+            let size = body.add_op(block, Operator::I32Const { value: 24 }, &[], &[Type::I32]);
+            body.add_op(
+                block,
+                Operator::MemoryCopy {
+                    src_mem: memory,
+                    dst_mem: memory,
+                },
+                &[destination, descriptor, size],
+                &[],
+            );
+        }
+        ValuePayload::StringArray => {
+            let descriptor = decode_payload(body, block, payload_f64, true);
+            let canonical = body.add_op(
+                block,
+                Operator::Call {
+                    function_index: registry.structured_helpers.unwrap().lower_strings,
+                },
+                &[descriptor],
+                &[Type::I32],
+            );
+            store_sequence(body, block, memory, addr, canonical, 8);
+        }
+        ValuePayload::Number => {
             body.add_op(
                 block,
                 Operator::F64Store {
@@ -250,7 +328,7 @@ fn emit_retptr_store(
                 &[],
             );
         }
-        PrimitivePayload::Boolean => {
+        ValuePayload::Boolean => {
             let payload = decode_payload(body, block, payload_f64, true);
             body.add_op(
                 block,
@@ -265,11 +343,11 @@ fn emit_retptr_store(
                 &[],
             );
         }
-        PrimitivePayload::String | PrimitivePayload::Bytes => {
+        ValuePayload::String | ValuePayload::Bytes => {
             let descriptor = decode_payload(body, block, payload_f64, true);
             store_sequence(body, block, memory, addr, descriptor, 8);
         }
-        PrimitivePayload::TextOrBytes => {
+        ValuePayload::TextOrBytes => {
             let value = decode_payload(body, block, payload_f64, true);
             store_text_or_bytes(body, block, memory, addr, value, 8);
         }

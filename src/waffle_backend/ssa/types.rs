@@ -12,6 +12,7 @@ const SCALAR_ITERATION: &str = "perry:scalar-iteration";
 
 pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
     match ty {
+        HirType::Object(_) => Some("object"),
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
@@ -24,6 +25,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
+        HirType::Object(_) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty) => true,
         ty if crate::waffle_backend::filesystem::is_stats(ty) => true,
         HirType::String | HirType::Promise(_) => true,
@@ -62,6 +64,27 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::Null => HirType::Null,
+            Expr::Delete(_) => HirType::Boolean,
+            Expr::Object(_) => self.object_literal_type(expr),
+            Expr::New { class_name, .. }
+                if self.contract.literal_shapes.contains_key(class_name) =>
+            {
+                self.object_literal_type(expr)
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::objects::is_object(&self.infer_expr_type(object)) => {
+                self.object_property_type(object, &Expr::String(property.clone()))
+            }
+            Expr::IndexGet { object, index, .. }
+                if crate::waffle_backend::objects::is_object(&self.infer_expr_type(object)) =>
+            {
+                self.object_property_type(object, index)
+            }
+            Expr::PropertySet { value, .. } | Expr::IndexSet { value, .. } => {
+                self.infer_expr_type(value)
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if crate::waffle_backend::filesystem::is_stats(&self.infer_expr_type(object))

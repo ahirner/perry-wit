@@ -479,7 +479,7 @@ fn metadata_types_and_unsupported_source_forms_are_diagnosed() {
         "return fs.statSync('/file', {get bigint() {return false}}).size",
         "return fs.existsSync('/file', {})",
         "return fs.readdirSync('/dir', {...{recursive:false}}).length",
-        "const options = {recursive:false}; return fs.readdirSync('/dir', options).length",
+        "const options = {get recursive() {return false;}}; return fs.readdirSync('/dir', options).length",
         "return fs.readdirSync('/dir')",
         "let names = fs.readdirSync('/dir'); names = true; return names.length",
     ] {

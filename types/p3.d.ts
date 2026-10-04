@@ -23,23 +23,26 @@ declare module "fs" {
   type Utf8Encoding = `${"u" | "U"}${"t" | "T"}${"f" | "F"}${"" | "-"}8`;
   type BinaryEncoding = `${"b" | "B"}${"i" | "I"}${"n" | "N"}${"a" | "A"}${"r" | "R"}${"y" | "Y"}`;
   /** Materialize exact bytes from a preopen-confined path and await producer completion.
-   * Options objects must be plain literals; encoding strings may be selected at runtime. */
+   * Encoding strings may be selected at runtime. */
   export function readFileSync(
     path: string,
-    options?: BinaryEncoding | { encoding?: BinaryEncoding | null; flag?: "r" } | null,
+    options?: BinaryEncoding | null,
   ): Uint8Array;
   /** Strict UTF-8, preserving BOMs. Malformed text throws filesystem error 9.
    * Reads use memory proportional to the file size; paths/flags follow readFileSync above. */
   export function readFileSync(
     path: string,
-    options: Utf8Encoding | { encoding: Utf8Encoding; flag?: "r" },
+    options: Utf8Encoding,
   ): string;
-  /** Runtime encoding strings return a tagged string-or-byte value.
+  /** Runtime encoding strings and reusable option objects return a tagged string-or-byte value.
+   * Plain objects support aliases, helper calls, mutation, and deletion. Getters,
+   * spreads, computed literal keys, methods, and custom prototypes are diagnosed.
+   * The compiler can specialize inline literals more precisely than this declaration.
    * Narrow with typeof before using string-only or byte-only operations.
    * Unsupported labels throw filesystem error 12 before opening a file. */
   export function readFileSync(
     path: string,
-    options: string | { encoding: string; flag?: "r" },
+    options: string | { encoding?: string | null; flag?: "r" },
   ): string | Uint8Array;
   interface WriteOptions {
     /** Case-insensitive utf8 or utf-8; binary is also accepted for byte data. */
@@ -47,7 +50,7 @@ declare module "fs" {
     flag?: "w";
   }
   /** Overwrite a preopen-confined path with exact UTF-8 or visible bytes.
-   * Options objects must be plain literals. Unsupported options throw before I/O.
+   * Plain option objects may be reused and mutated. Unsupported options throw before I/O.
    * May suspend until transfers and the independent P3 completion settle.
    * Failures throw the one-based WASI 0.3 filesystem error ordinal. */
   export function writeFileSync(
@@ -55,8 +58,8 @@ declare module "fs" {
     data: string | Uint8Array,
     options?: string | WriteOptions | null,
   ): void;
-  /** Guest-internal metadata value; component exports and retained Stats Promises
-   * are not yet supported. Identity and fields survive collection. */
+  /** Metadata with identity and fields retained through collection and Promises.
+   * Component boundaries use a stats record: size, mtime-ms, and a stats-kind enum. */
   export interface Stats {
     readonly size: number;
     readonly mtimeMs: number;
@@ -64,7 +67,7 @@ declare module "fs" {
     isDirectory(): boolean;
   }
   /** Follow confined symlinks and report size, modification milliseconds, and type.
-   * Options must be plain literals. Missing entries throw; bigint is unsupported. */
+   * Options are plain data objects. Missing entries throw; bigint is unsupported. */
   export function statSync(path: string, options?: { bigint?: false; throwIfNoEntry?: true } | null): Stats;
   /** Return false for filesystem errors, including paths outside available preopens. */
   export function existsSync(path: string): boolean;
@@ -73,9 +76,8 @@ declare module "fs" {
   export function unlinkSync(path: string, options?: undefined): void;
   export function rmdirSync(path: string, options?: undefined): void;
   /** Materialize UTF-8 entry names, excluding dot entries, then await producer completion.
-   * Options must be plain literals; runtime UTF-8 labels are supported. Ordering is host-defined.
-   * String arrays support guest helper calls; component exports and retained array Promises
-   * are not yet supported. */
+   * Plain option objects and runtime UTF-8 labels are supported. Ordering is host-defined.
+   * String arrays survive retained Promises and cross component boundaries as list<string>. */
   export function readdirSync(path: string, options?: string | { encoding?: string | null; recursive?: false; withFileTypes?: false } | null): string[];
   const fs: {
     writeFileSync: typeof writeFileSync;

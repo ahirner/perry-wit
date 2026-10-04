@@ -266,7 +266,7 @@ fn read_result_types_and_unsupported_options_are_explicit() {
         "export function run(): number { return readFileSync('/file', 'utf8'); }",
         "export function run(encoding: string): string { return readFileSync('/file', encoding); }",
         "export function run(encoding: string): string { return readFileSync('/file', {encoding}); }",
-        "export function run(): number { const options = {encoding:'utf8'}; return readFileSync('/file', options).length; }",
+        "export function run(): number { const options = {get encoding() {return 'utf8';}}; return readFileSync('/file', options).length; }",
         "export function run(): number { return readFileSync('/file', ({get encoding() { return 'utf8'; }} as any)).length; }",
         "export function run(): number { return readFileSync('/file', {...{encoding:'utf8'}}).length; }",
         "export function run(): number { return readFileSync('/file', {['encoding']:'utf8'}).length; }",

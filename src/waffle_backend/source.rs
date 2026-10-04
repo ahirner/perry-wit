@@ -45,7 +45,8 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         let mut names = IdentifierNames::default();
         module.visit_with(&mut names);
         ensure!(
-            !names.0.contains(super::decoder::DECODER_TYPE),
+            !names.0.contains(super::decoder::DECODER_TYPE)
+                && !names.0.iter().any(|name| name.starts_with("__AnonShape_")),
             "Reserved compiler type name in source"
         );
         let mut bindings = HashMap::new();
@@ -412,6 +413,12 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
+        if matches!(expression, ast::Expr::Object(_))
+            && let Err(error) = options::validate_plain_options(expression, "Object")
+        {
+            self.error.get_or_insert(error);
+            return;
+        }
         if let Err(error) = self.rewrite_decoder_constructor(expression) {
             self.error.get_or_insert(error);
             return;

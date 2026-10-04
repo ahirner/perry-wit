@@ -26,25 +26,35 @@ async fn directory_entries_and_completion_keep_owners_through_suspension_collect
 -> Result<()> {
     let source = r#"
     import {readdirSync} from 'fs';
-    async function read(): Promise<string> {
+    interface Options {encoding:string;recursive:boolean;}
+    async function read(options:Options): Promise<string[]> {
         try {
-            const names = readdirSync('/sandbox');
+            const names = readdirSync('/sandbox',options);
             let index = 0;
             while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
-            if (names.length !== 81) { return 'wrong count'; }
-            return names[0].slice(0) + names[80].slice(0);
-        } catch (error) { if (error === 37) { return 'failed'; } throw error; }
+            if (names.length !== 81) { throw 99; }
+            if (options.encoding !== 'utf8') { throw 98; }
+            return names;
+        }
         finally { console.log('finally'); }
     }
     export async function run(): Promise<string> {
-        const pending = read();
+        const pending = read({encoding:'utf'+'8',recursive:false});
         let index = 0;
         while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
         console.log('collected');
-        const first = await pending;
-        index = 0;
-        while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
-        return first + await pending;
+        try {
+            const first = await pending;
+            index = 0;
+            while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
+            const second = await pending;
+            if(first !== second) {return 'lost identity';}
+            return first[0].slice(0)+first[80].slice(0)+second[0].slice(0)+second[80].slice(0);
+        } catch(error) {
+            if(error !== 37) {throw error;}
+            try {await pending;return 'lost rejection';}
+            catch(again) {if(again === error) {return 'failedfailed';}throw again;}
+        }
     }"#;
     for outcome in [
         Outcome::Success,

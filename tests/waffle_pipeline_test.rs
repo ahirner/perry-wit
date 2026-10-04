@@ -672,11 +672,11 @@ async fn test_waffle_shadowing_and_binding_resolution() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_rejects_uncovered_hir_explicitly() -> Result<()> {
-    // Uncovered constructs (such as object literals without lowering support yet) must fail cleanly
     let unsupported = r#"
         export function run(input: number): number {
-            let obj = { x: input };
-            return obj.x;
+            const values = new Map<string, number>();
+            values.set("x", input);
+            return values.size;
         }
     "#;
     let res = compile_typescript_waffle(

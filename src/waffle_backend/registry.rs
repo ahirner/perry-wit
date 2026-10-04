@@ -20,17 +20,19 @@ pub(crate) enum ExportConvention {
     /// Exported function returning core Wasm values directly (`[]`, `[f64]`, `[i32]`).
     Direct,
     /// Exported function returning a WIT Result via memory retptr `[i32]`.
-    WitResult { success: PrimitivePayload },
+    WitResult { success: ValuePayload },
 }
 
-/// Primitive payload representations supported by WIT result adapters.
+/// Payload representations supported by WIT result adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrimitivePayload {
+pub(crate) enum ValuePayload {
     Number,
     Boolean,
     String,
     Bytes,
     TextOrBytes,
+    Stats,
+    StringArray,
 }
 
 /// Complete, immutable metadata for a function declaration.
@@ -77,6 +79,8 @@ pub(crate) struct ModuleRegistry {
     pub(crate) text_or_bytes_lift: Option<Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
+    pub(crate) object_helpers: Option<super::objects::ObjectHelpers>,
+    pub(crate) structured_helpers: Option<super::structured::StructuredHelpers>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
     pub(crate) stream_helpers: Option<super::streams::StreamHelpers>,
@@ -101,6 +105,7 @@ impl ModuleRegistry {
         string_heap_base: Option<u32>,
         memory: waffle::Memory,
         string_reqs: crate::waffle_backend::strings::RequiredStringHelpers,
+        string_pool: &super::strings::StringPool,
     ) -> Result<Self> {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
@@ -241,6 +246,29 @@ impl ModuleRegistry {
             None
         };
 
+        let object_helpers = if string_reqs.objects {
+            Some(super::objects::emit_runtime(
+                module,
+                memory,
+                allocator.expect("objects require an allocator"),
+                string_helpers
+                    .expect("objects require string keys")
+                    .str_compare,
+            )?)
+        } else {
+            None
+        };
+
+        let structured_helpers = if super::structured::required(hir) {
+            Some(super::structured::emit_runtime(
+                module,
+                memory,
+                allocator.expect("structured values require an allocator"),
+            )?)
+        } else {
+            None
+        };
+
         let stream_helpers = if let Some(imports) = stream_imports {
             let helpers = super::streams::emit_runtime(
                 module,
@@ -286,6 +314,10 @@ impl ModuleRegistry {
                 memory,
                 allocator.expect("filesystem storage requires an allocator"),
                 imports,
+                string_helpers
+                    .expect("filesystem paths require strings")
+                    .str_compare,
+                string_pool,
             )?)
         } else {
             None
@@ -312,13 +344,13 @@ impl ModuleRegistry {
                     "WIT Result error payloads must be numeric until the exception ABI preserves primitive type tags"
                 );
                 Some(match &type_args[0] {
-                    HirType::Number | HirType::Any => PrimitivePayload::Number,
-                    HirType::Boolean => PrimitivePayload::Boolean,
-                    HirType::String => PrimitivePayload::String,
-                    ty if super::bytes::is_byte_view(ty) => PrimitivePayload::Bytes,
-                    ty if super::text_or_bytes::is_text_or_bytes(ty) => {
-                        PrimitivePayload::TextOrBytes
-                    }
+                    HirType::Number | HirType::Any => ValuePayload::Number,
+                    HirType::Boolean => ValuePayload::Boolean,
+                    HirType::String => ValuePayload::String,
+                    ty if super::filesystem::is_stats(ty) => ValuePayload::Stats,
+                    ty if super::structured::is_string_array(ty) => ValuePayload::StringArray,
+                    ty if super::bytes::is_byte_view(ty) => ValuePayload::Bytes,
+                    ty if super::text_or_bytes::is_text_or_bytes(ty) => ValuePayload::TextOrBytes,
                     other => bail!("Unsupported WIT Result success payload: {other:?}"),
                 })
             } else {
@@ -397,6 +429,8 @@ impl ModuleRegistry {
             text_or_bytes_lift,
             decoder_helpers,
             filesystem_helpers,
+            object_helpers,
+            structured_helpers,
             functions,
             intrinsics,
             stream_helpers,
@@ -416,6 +450,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
         ty if super::decoder::is_decoder(ty) => Ok(Type::I32),
+        HirType::Object(_) => Ok(Type::I32),
         ty if super::filesystem::is_stats(ty) => Ok(Type::I32),
         HirType::Array(inner) if **inner == HirType::String => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
@@ -431,6 +466,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::String => Ok(vec![Type::I32]),
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
         ty if super::decoder::is_decoder(ty) => Ok(vec![Type::I32]),
+        HirType::Object(_) => Ok(vec![Type::I32]),
         ty if super::filesystem::is_stats(ty) => Ok(vec![Type::I32]),
         HirType::Array(inner) if **inner == HirType::String => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
@@ -445,6 +481,10 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
 pub(crate) fn canonical_param_types(params: &[HirType]) -> Result<Vec<Type>> {
     let mut flat = Vec::new();
     for ty in params {
+        if super::filesystem::is_stats(ty) {
+            flat.extend([Type::F64, Type::F64, Type::I32]);
+            continue;
+        }
         if super::text_or_bytes::is_text_or_bytes(ty) {
             flat.extend([Type::I32; 3]);
             continue;
@@ -454,7 +494,10 @@ pub(crate) fn canonical_param_types(params: &[HirType]) -> Result<Vec<Type>> {
             "Promise parameters cannot cross the public component boundary"
         );
         flat.push(map_type_to_waffle(ty)?);
-        if matches!(ty, HirType::String) || super::bytes::is_byte_view(ty) {
+        if matches!(ty, HirType::String)
+            || super::bytes::is_byte_view(ty)
+            || super::structured::is_string_array(ty)
+        {
             flat.push(Type::I32);
         }
     }

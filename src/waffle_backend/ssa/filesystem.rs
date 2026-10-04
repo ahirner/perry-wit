@@ -4,9 +4,10 @@ use anyhow::{Result, bail, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{MemoryArg, Operator, Type, Value};
 
-use super::{FunctionLowerer, options::literal_properties};
+use super::FunctionLowerer;
 use crate::waffle_backend::{
-    abi, bytes::is_byte_view, capabilities::FilesystemOperation, text_or_bytes::is_text_or_bytes,
+    abi, bytes::is_byte_view, capabilities::FilesystemOperation, objects::is_object,
+    text_or_bytes::is_text_or_bytes,
 };
 
 impl FunctionLowerer<'_> {
@@ -42,15 +43,30 @@ impl FunctionLowerer<'_> {
                     );
                     (data, binary)
                 };
-                let (encoding, flag, valid) = self.filesystem_options(arguments.get(2))?;
-                let checked = self.op(
-                    Operator::Call {
-                        function_index: self.registry.filesystem_helpers.unwrap().write_options,
-                    },
-                    &[encoding, flag, binary],
-                    &[Type::I32],
-                );
-                let valid = self.op(Operator::I32And, &[checked, valid], &[Type::I32]);
+                let helpers = self.registry.filesystem_helpers.unwrap();
+                let valid = if let Some(options) = arguments
+                    .get(2)
+                    .filter(|options| is_object(&self.infer_expr_type(options)))
+                {
+                    let object = self.expression(options)?;
+                    self.op(
+                        Operator::Call {
+                            function_index: helpers.write_object_options,
+                        },
+                        &[object, binary],
+                        &[Type::I32],
+                    )
+                } else {
+                    let encoding = self.filesystem_encoding(arguments.get(2))?;
+                    let flag = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+                    self.op(
+                        Operator::Call {
+                            function_index: helpers.write_options,
+                        },
+                        &[encoding, flag, binary],
+                        &[Type::I32],
+                    )
+                };
                 self.call_completion(
                     self.registry.filesystem_helpers.unwrap().write,
                     &[path, data, valid],
@@ -65,15 +81,31 @@ impl FunctionLowerer<'_> {
                     "readFileSync accepts a path and optional encoding/options"
                 );
                 let path = self.string_receiver(&arguments[0])?;
-                let (encoding, flag, valid) = self.filesystem_options(arguments.get(1))?;
                 let helpers = self.registry.filesystem_helpers.unwrap();
-                let mode = self.op(
-                    Operator::Call {
-                        function_index: helpers.read_options,
-                    },
-                    &[encoding, flag, valid],
-                    &[Type::I32],
-                );
+                let mode = if let Some(options) = arguments
+                    .get(1)
+                    .filter(|options| is_object(&self.infer_expr_type(options)))
+                {
+                    let object = self.expression(options)?;
+                    self.op(
+                        Operator::Call {
+                            function_index: helpers.read_object_options,
+                        },
+                        &[object],
+                        &[Type::I32],
+                    )
+                } else {
+                    let encoding = self.filesystem_encoding(arguments.get(1))?;
+                    let flag = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+                    let valid = self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]);
+                    self.op(
+                        Operator::Call {
+                            function_index: helpers.read_options,
+                        },
+                        &[encoding, flag, valid],
+                        &[Type::I32],
+                    )
+                };
                 let payload = self.call_completion(helpers.read, &[path, mode]);
                 let descriptor = abi::decode_payload(&mut self.body, self.block, payload, true);
                 let value = if operation == FilesystemOperation::ReadValue {
@@ -200,104 +232,54 @@ impl FunctionLowerer<'_> {
         if matches!(expression, Expr::Null) {
             return Ok(if supports_options { one } else { zero });
         }
-        let Some(properties) = literal_properties(self.contract, expression)? else {
-            if operation == FilesystemOperation::ReadDirectory {
-                let encoding = self.filesystem_option_string(expression, true)?;
-                return Ok(self.op(
-                    Operator::Call {
-                        function_index: self.registry.filesystem_helpers.unwrap().directory_options,
+        if is_object(&self.infer_expr_type(expression)) {
+            let object = self.expression(expression)?;
+            let operation = self.op(
+                Operator::I32Const {
+                    value: match operation {
+                        FilesystemOperation::Stat => 0,
+                        FilesystemOperation::ReadDirectory => 1,
+                        _ => 2,
                     },
-                    &[encoding],
-                    &[Type::I32],
-                ));
-            }
-            self.expression(expression)?;
-            return Ok(zero);
+                },
+                &[],
+                &[Type::I32],
+            );
+            return Ok(self.op(
+                Operator::Call {
+                    function_index: self
+                        .registry
+                        .filesystem_helpers
+                        .unwrap()
+                        .metadata_object_options,
+                },
+                &[object, operation],
+                &[Type::I32],
+            ));
+        }
+        if operation == FilesystemOperation::ReadDirectory {
+            let encoding = self.filesystem_encoding(Some(expression))?;
+            return Ok(self.op(
+                Operator::Call {
+                    function_index: self.registry.filesystem_helpers.unwrap().directory_options,
+                },
+                &[encoding],
+                &[Type::I32],
+            ));
+        }
+        self.expression(expression)?;
+        Ok(zero)
+    }
+
+    fn filesystem_encoding(&mut self, expression: Option<&Expr>) -> Result<Value> {
+        let Some(expression) = expression else {
+            return Ok(self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]));
         };
-        let mut valid = if supports_options { one } else { zero };
-        let mut fields = std::collections::BTreeMap::new();
-        for (name, expression) in properties {
-            if operation == FilesystemOperation::ReadDirectory && name == "encoding" {
-                let encoding = self.filesystem_option_string(expression, true)?;
-                fields.insert(
-                    name,
-                    self.op(
-                        Operator::Call {
-                            function_index: self
-                                .registry
-                                .filesystem_helpers
-                                .unwrap()
-                                .directory_options,
-                        },
-                        &[encoding],
-                        &[Type::I32],
-                    ),
-                );
-                continue;
-            }
-            let expected = match (operation, name.as_str()) {
-                (FilesystemOperation::Stat, "bigint")
-                | (FilesystemOperation::ReadDirectory, "recursive" | "withFileTypes") => {
-                    Some(false)
-                }
-                (FilesystemOperation::Stat, "throwIfNoEntry") => Some(true),
-                _ => None,
-            };
-            let value = if matches!(expression, Expr::Null) {
-                None
-            } else {
-                Some(self.expression(expression)?)
-            };
-            if let Some(expected) = expected {
-                let checked = if self.infer_expr_type(expression) == HirType::Boolean {
-                    if expected {
-                        value.unwrap()
-                    } else {
-                        self.op(Operator::I32Eqz, &[value.unwrap()], &[Type::I32])
-                    }
-                } else {
-                    zero
-                };
-                fields.insert(name, checked);
-            } else {
-                valid = zero;
-            }
-        }
-        for checked in fields.values() {
-            valid = self.op(Operator::I32And, &[valid, *checked], &[Type::I32]);
-        }
-        Ok(valid)
-    }
-
-    fn filesystem_options(&mut self, expression: Option<&Expr>) -> Result<(Value, Value, Value)> {
-        let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-        let mut encoding = zero;
-        let mut flag = zero;
-        let mut valid = self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]);
-        if let Some(expression) = expression {
-            if let Some(properties) = literal_properties(self.contract, expression)? {
-                for (name, value) in properties {
-                    match name.as_str() {
-                        "encoding" => encoding = self.filesystem_option_string(value, true)?,
-                        "flag" => flag = self.filesystem_option_string(value, false)?,
-                        _ => {
-                            if !matches!(value, Expr::Null) {
-                                self.expression(value)?;
-                            }
-                            valid = zero;
-                        }
-                    }
-                }
-            } else {
-                encoding = self.filesystem_option_string(expression, true)?;
-            }
-        }
-        Ok((encoding, flag, valid))
-    }
-
-    fn filesystem_option_string(&mut self, expression: &Expr, default: bool) -> Result<Value> {
-        if self.infer_expr_type(expression) == HirType::String {
-            return self.string_receiver(expression);
+        if matches!(
+            super::types::StringKind::of(&self.infer_expr_type(expression)),
+            Some(super::types::StringKind::Present | super::types::StringKind::Optional)
+        ) {
+            return self.expression(expression);
         }
         if !matches!(expression, Expr::Null) {
             self.expression(expression)?;
@@ -306,7 +288,7 @@ impl FunctionLowerer<'_> {
             matches!(expression, Expr::Null) || self.infer_expr_type(expression) == HirType::Void;
         Ok(self.op(
             Operator::I32Const {
-                value: if default && omitted { 0 } else { u32::MAX },
+                value: if omitted { 0 } else { u32::MAX },
             },
             &[],
             &[Type::I32],

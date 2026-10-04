@@ -59,6 +59,7 @@ pub(crate) fn contains(ty: &HirType) -> bool {
 
 pub(crate) fn equivalent(left: &HirType, right: &HirType) -> bool {
     left == right
+        || (super::objects::is_object(left) && super::objects::is_object(right))
         || (is_text_or_bytes(left) && is_text_or_bytes(right))
         || matches!((left, right), (HirType::Promise(left), HirType::Promise(right)) if equivalent(left, right))
 }

@@ -8,6 +8,15 @@ use waffle::{Func, Memory, Module};
 
 use super::{allocation::AllocationFuncs, component::forward, runtime};
 
+pub(crate) const OPTION_KEYS: [&str; 6] = [
+    "encoding",
+    "flag",
+    "bigint",
+    "throwIfNoEntry",
+    "recursive",
+    "withFileTypes",
+];
+
 #[derive(Clone, Copy)]
 pub(crate) struct FilesystemHelpers {
     pub(crate) write: Func,
@@ -17,6 +26,9 @@ pub(crate) struct FilesystemHelpers {
     pub(crate) metadata: Func,
     pub(crate) read_directory: Func,
     pub(crate) directory_options: Func,
+    pub(crate) read_object_options: Func,
+    pub(crate) write_object_options: Func,
+    pub(crate) metadata_object_options: Func,
 }
 
 pub(crate) fn is_stats(ty: &HirType) -> bool {
@@ -32,13 +44,26 @@ pub(crate) fn emit_runtime(
     memory: Memory,
     allocator: AllocationFuncs,
     imports: BTreeMap<String, Func>,
+    compare: Func,
+    keys: &super::strings::StringPool,
 ) -> Result<FilesystemHelpers> {
+    let mut object_options = include_str!("filesystem/object-options.wat").to_string();
+    for key in OPTION_KEYS {
+        object_options = object_options.replace(
+            &format!("__KEY_{key}__"),
+            &keys
+                .get(key)
+                .expect("filesystem keys are interned")
+                .to_string(),
+        );
+    }
     let wat = format!(
         r#"(module {}
       (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
       (import "host" "frame-new" (func $frame-new (param i32) (result i32)))
       (import "host" "frame-drop" (func $frame-drop (param i32)))
-      {} {} {} {} {} {} {} {} {} {})"#,
+      (import "host" "compare" (func $compare (param i32 i32) (result i32)))
+      {} {} {} {} {} {} {} {} {} {} {})"#,
         forward::module_imports(&native_functions())?,
         include_str!("streams/write.wat"),
         include_str!("streams/read.wat"),
@@ -52,6 +77,7 @@ pub(crate) fn emit_runtime(
         include_str!("filesystem/read.wat"),
         include_str!("filesystem/metadata.wat"),
         include_str!("filesystem/directory.wat"),
+        object_options,
     );
     let mut imports: BTreeMap<_, _> = imports
         .iter()
@@ -61,6 +87,7 @@ pub(crate) fn emit_runtime(
         ("realloc", allocator.realloc),
         ("frame-new", allocator.frame_new),
         ("frame-drop", allocator.frame_drop),
+        ("compare", compare),
     ]);
     let functions = runtime::emit_functions(module, memory, &wat, &imports)?;
     Ok(FilesystemHelpers {
@@ -71,6 +98,9 @@ pub(crate) fn emit_runtime(
         metadata: functions["fs.metadata"],
         read_directory: functions["fs.read-directory"],
         directory_options: functions["fs.directory-options"],
+        read_object_options: functions["fs.read-object-options"],
+        write_object_options: functions["fs.write-object-options"],
+        metadata_object_options: functions["fs.metadata-object-options"],
     })
 }
 

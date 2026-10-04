@@ -15,6 +15,12 @@ mod reads;
 #[path = "source_metadata.rs"]
 mod metadata;
 
+#[path = "source_options.rs"]
+mod options;
+
+#[path = "source_structured.rs"]
+mod structured;
+
 #[path = "../support/p3_input.rs"]
 mod input;
 
@@ -494,7 +500,7 @@ fn unsupported_filesystem_syntax_is_diagnosed_before_frontend_effects_are_lost()
         "fs.writeFileSync('/file', 'text', {flag() { return 'w'; }})",
         "fs.writeFileSync(...['/file', 'text'])",
         "const save = fs.writeFileSync; save('/file', 'text')",
-        "const options = {flag: 'w'}; fs.writeFileSync('/file', 'text', options)",
+        "const options = {get flag() { return 'w'; }}; fs.writeFileSync('/file', 'text', options)",
         "fs.readFileSync('/file', {get encoding() { return 'utf8'; }})",
         "fs.chmodSync('/file', 0)",
         "fs['write' + 'FileSync']('/file', 'text')",

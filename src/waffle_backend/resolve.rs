@@ -25,6 +25,8 @@ pub enum ResolvedInputKind {
     ByteStream,
     Bytes,
     TextOrBytes,
+    Stats,
+    StringArray,
 }
 
 /// Known typed intrinsics with explicit signatures.
@@ -320,6 +322,8 @@ pub(crate) fn resolve_contract(
             HirType::Number | HirType::Any => ResolvedInputKind::Number,
             HirType::Boolean => ResolvedInputKind::Boolean,
             HirType::String => ResolvedInputKind::String,
+            ty if super::filesystem::is_stats(ty) => ResolvedInputKind::Stats,
+            ty if super::structured::is_string_array(ty) => ResolvedInputKind::StringArray,
             ty if super::bytes::is_byte_view(ty) => ResolvedInputKind::Bytes,
             ty if super::text_or_bytes::is_text_or_bytes(ty) => ResolvedInputKind::TextOrBytes,
             other => bail!("Unsupported entry function parameter type: {other:?}"),
@@ -375,6 +379,7 @@ pub(crate) fn resolve_contract(
         literal_shapes: hir
             .classes
             .iter()
+            .filter(|class| class.name.starts_with("__AnonShape_"))
             .map(|class| {
                 (
                     class.name.clone(),

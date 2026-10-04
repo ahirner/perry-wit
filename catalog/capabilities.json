@@ -31,18 +31,18 @@
         "Stats preserve unsigned file sizes, signed modification milliseconds, type predicates, and identity",
         "Directory listings materialize UTF-8 names, omit dot entries, and await the separate producer completion after EOF",
         "Options and argument effects precede validation and I/O; known duplicate fields use the last value",
-        "Stats, string arrays, and suspended directory buffers survive helper calls and collection",
+        "Stats, string arrays, and suspended directory buffers survive helper calls, collection, and retained Promise outcomes",
         "Normal and recoverable-error paths release descriptors, entry streams, and completion futures"
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
-        "Options objects must be plain literals; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
+        "Reusable plain option objects retain aliases, mutation, deletion, and field effects; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
         "mkdirSync, unlinkSync, and rmdirSync only accept omitted or undefined options",
         "Directory order is host-defined, materialization uses memory proportional to contents, and absent modification timestamps return zero",
-        "Stats and string arrays cannot yet cross component boundaries or be retained Promise outcomes",
+        "Component Stats use the exported stats record and stats-kind enum; string arrays use list<string>, also inside numeric-error Result returns",
         "Errors use one-based WASI 0.3 ordinals; existsSync returns false on filesystem errors, while host traps and cancellation require store disposal"
       ],
-      "conformance": ["tests/p3_filesystem/source_metadata.rs", "tests/p3_filesystem/source_directory_lifecycle.rs"]
+      "conformance": ["tests/p3_filesystem/source_metadata.rs", "tests/p3_filesystem/source_directory_lifecycle.rs", "tests/p3_filesystem/source_options.rs", "tests/p3_filesystem/source_structured.rs"]
     },
     {
       "id": "compiler.p3_filesystem_read",
@@ -63,12 +63,12 @@
         "The default CLI remains on the legacy pipeline until R9",
         "Runtime string encodings return string-or-byte values; methods, indexing, and type-specific arguments require typeof narrowing",
         "Component unions use the exported text-or-bytes variant with text(string) and bytes(list<u8>) cases",
-        "Options objects must be plain literals with encoding and the default or r flag; general objects remain unsupported",
+        "Plain option objects support encoding and the default or r flag, preserve current fields through helpers and mutation, and return a string-or-byte union when reused",
         "Malformed text throws filesystem error 9 instead of Node replacement decoding",
         "The binary encoding label returns Uint8Array, preserving the existing compiler contract; Node returns Latin-1 text for that label",
         "Host traps and cancellation require store disposal"
       ],
-      "conformance": ["tests/p3_filesystem/source_reads.rs", "tests/p3_filesystem/source_dynamic_reads.rs", "tests/waffle_stream_test.rs", "tests/waffle_decoder_test.rs"]
+      "conformance": ["tests/p3_filesystem/source_reads.rs", "tests/p3_filesystem/source_dynamic_reads.rs", "tests/p3_filesystem/source_options.rs", "tests/waffle_stream_test.rs", "tests/waffle_decoder_test.rs"]
     },
     {
       "id": "compiler.p3_filesystem_write",
@@ -79,7 +79,7 @@
       "invariants": [
         "Named aliases, namespace imports, and default imports retain binding identity; unused imports add no filesystem capability",
         "String data preserves exact UTF-8 and NUL bytes; Uint8Array data writes only its visible range",
-        "Arguments and literal option properties execute in source order before validation or I/O",
+        "Arguments and plain object fields execute in source order; aliases, mutation, deletion, and duplicate-field effects survive validation and collection",
         "Invalid encodings, flags, and unknown option properties fail before opening or truncating a file",
         "Normalized paths select the longest matching preopen on a component boundary; symlink resolution remains host-confined",
         "Shared native stream writes preserve partial transfers and await an independent filesystem completion",
@@ -87,12 +87,12 @@
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
-        "Options accept encoding strings, null, undefined, and plain literal objects; general option objects, getters, spreads, computed keys, and custom prototypes are diagnosed",
+        "Options accept encoding strings, null, undefined, and reusable plain objects; getters, setters, methods, spreads, computed literal keys, and custom prototypes are diagnosed",
         "Only the default or w flag is supported; UTF8 labels accept ASCII case, and binary encoding is restricted to byte data",
         "Errors throw the one-based WASI 0.3 filesystem error ordinal; already written bytes are not rolled back",
-        "Host traps and cancellation require store disposal; general option objects remain open in R8.2"
+        "Host traps and cancellation require store disposal; plain objects remain guest-internal with nonrecursive structural types or simple interfaces"
       ],
-      "conformance": ["tests/p3_filesystem_test.rs", "tests/p3_filesystem/source.rs", "tests/p3_filesystem/source_lifecycle.rs"]
+      "conformance": ["tests/p3_filesystem_test.rs", "tests/p3_filesystem/source.rs", "tests/p3_filesystem/source_lifecycle.rs", "tests/p3_filesystem/source_options.rs"]
     },
     {
       "id": "compiler.p3_stdio",

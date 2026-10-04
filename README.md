@@ -191,10 +191,14 @@ namespace, and default imports from `fs` or `node:fs`. `writeFileSync(path, data
 options?)` overwrites a file with exact UTF-8 string bytes or the visible
 `Uint8Array` range. It accepts case-insensitive `utf8`/`utf-8` encoding labels,
 and `binary` for byte data, with the default or explicit `w` flag. Options may be
-an encoding string, null, undefined, or a plain literal object with `encoding` and
+an encoding string, null, undefined, or a plain data object with `encoding` and
 `flag` fields. Arguments and duplicate property values execute in source order;
-unsupported options fail before opening or truncating a file. Stored option objects,
-getters, spreads, computed keys, and custom prototypes are diagnosed.
+unsupported options fail before opening or truncating a file. Option objects support
+locals, aliases, helper calls, retained Promises, mutation, and deletion through static
+or runtime string keys. Nested values remain traced, and dead cycles are reclaimed.
+Getters, setters, methods, spreads, computed literal keys, and custom prototypes are
+diagnosed before frontend lowering can discard their effects. Unknown fields reject
+the operation even when their values are undefined; deleting them removes that rejection.
 Paths normalize `.` and `..` and select the longest matching preopen on a path
 component boundary. Relative paths require a relative or root preopen; NUL paths
 and escapes fail. The host confines symlink resolution to the selected preopen.
@@ -206,7 +210,7 @@ and `32` (broken pipe); host traps and cancellation require store disposal.
 Already written bytes are not rolled back.
 `readFileSync(path, options?)` returns an independent `Uint8Array` for omitted/null
 encoding or the `binary` label, and a string for `utf8`/`utf-8`
-labels (all case-insensitive). Plain literal options support `encoding` and the
+labels (all case-insensitive). Plain data options support `encoding` and the
 default or explicit `r` flag; unsupported options fail before opening a file.
 The `binary` label selects bytes here; Node treats it as Latin-1 text.
 Reads materialize the file with storage proportional to its size, share the native
@@ -214,8 +218,9 @@ read transfers, and await the producer's separate completion before returning.
 Text reads preserve BOMs and NULs and count Unicode scalars; malformed or unfinished
 UTF-8 throws filesystem error `9` instead of Node's replacement decoding.
 Returned values, pending buffers, and stored string/byte task outcomes survive collection.
-Runtime string encoding labels return `string | Uint8Array`. These values support
-`length`, truthiness, strict equality, assignment, helper calls, retained Promises,
+Runtime string encoding labels and reusable option objects return `string | Uint8Array`.
+Inline literals can select a more precise result; SDK object overloads conservatively
+return the union. These values support `length`, truthiness, strict equality, assignment, helper calls, retained Promises,
 and `writeFileSync`. Use `typeof value === "string"` (or `"object"`) before indexing,
 calling methods, or passing the value to a string-only or byte-only consumer.
 Assignments invalidate guards; loops and exception paths preserve the tagged value.
@@ -225,16 +230,21 @@ At component boundaries the union is exported as `text-or-bytes`, a variant with
 `isDirectory()`; signed native timestamps convert to milliseconds, and absent
 modification times return zero. `existsSync` returns false on filesystem errors.
 `mkdirSync`, `unlinkSync`, and `rmdirSync` accept only omitted/undefined options;
-preopen roots cannot be removed. `statSync` accepts null/undefined or plain literal
+preopen roots cannot be removed. `statSync` accepts null/undefined or plain data
 options with `bigint: false` and `throwIfNoEntry: true`.
 `readdirSync` materializes UTF-8 names, excludes dot entries, and awaits both the
 entry stream and its separate completion future. Ordering is host-defined. It
-accepts a UTF-8 label or plain literal options with `encoding`, `recursive: false`,
+accepts a UTF-8 label or plain data options with `encoding`, `recursive: false`,
 and `withFileTypes: false`. Argument effects precede validation and I/O; duplicate
 known fields use their last value. All operations share confined, normalized,
 longest-prefix preopen resolution. Directory arrays and Stats values survive
-collection and guest helper calls. General option objects, component boundaries
-for these structured values, and retained Stats/array Promises remain open.
+collection, guest helper calls, and repeated awaits of retained Promises. Component
+parameters and results use `list<string>` for arrays and an exported `stats` record
+with `size: f64`, `mtime-ms: f64`, and a `stats-kind` enum. Its cases are `block-device`,
+`character-device`, `directory`, `fifo`, `symbolic-link`, `regular-file`, `socket`, and
+`other`. Both values also work in numeric-error `Result` returns; guest identity is
+preserved within an invocation. Plain option objects remain guest-internal and use
+nonrecursive structural types or simple interfaces without inheritance or methods.
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary
 binary bytes, through shared native stream transfers and wait for the capability's
@@ -254,10 +264,10 @@ copy construction, indexed reads/writes, `subarray`, `slice`, `length`, `byteLen
 and `byteOffset`. Views have distinct identity and retain their shared backing
 allocation; `slice` and copy construction make independent bytes. Invalid indices
 read as undefined and ignore writes. Invalid lengths throw numeric payload `1`
-through the current exception ABI; allocation exhaustion traps. String coercions,
-ArrayBuffer overloads and stored byte-valued Promises still require further
-lowering. Component parameters and results use `list<u8>`, preserve arbitrary
-bytes, and share canonical allocation and post-return cleanup with text results.
+through the current exception ABI; allocation exhaustion traps. String coercions
+and ArrayBuffer overloads still require further lowering. Stored byte-valued
+Promises retain view identity and backing storage. Component parameters and results
+use `list<u8>`, preserve arbitrary bytes, and share canonical allocation and post-return cleanup with text results.
 Byte entry results also work after stored primitive tasks settle. Byte-only tasks
 import no host capability.
 `TextDecoder` supports strict incremental UTF-8 decoding of byte views through
