@@ -113,22 +113,13 @@ pub(in crate::waffle_backend) fn emit(
         let signature = contract.intrinsics[&name].core_signature()?;
         let helper = builder::declare(module, &name, &signature.params, &signature.returns);
         let mut b = Builder::new(module, helper, memory);
-        let real = |b: &mut Builder, value: f64| {
-            b.op(
-                Op::F64Const {
-                    value: value.to_bits(),
-                },
-                &[],
-                F64,
-            )
-        };
         let result = match scalar {
             Scalar::Wait | Scalar::Timeout => {
                 let value = b.param(0);
-                let zero = real(&mut b, 0.0);
+                let zero = b.number(0.0);
                 let value = if matches!(scalar, Scalar::Timeout) {
-                    let minimum = real(&mut b, 1.0);
-                    let maximum = real(&mut b, 2147483647.0);
+                    let minimum = b.number(1.0);
+                    let maximum = b.number(2147483647.0);
                     let low = b.op(Op::F64Ge, &[value, minimum], I32);
                     let high = b.op(Op::F64Le, &[value, maximum], I32);
                     let valid = b.op(Op::I32And, &[low, high], I32);
@@ -139,7 +130,7 @@ pub(in crate::waffle_backend) fn emit(
                     b.require(valid);
                     value
                 };
-                let million = real(&mut b, 1_000_000.0);
+                let million = b.number(1_000_000.0);
                 let ns = b.op(Op::F64Mul, &[value, million], F64);
                 let ns = b.op(Op::I64TruncF64U, &[ns], I64);
                 let subtask = b.call(function, &[ns], &[I32])[0];
@@ -152,7 +143,7 @@ pub(in crate::waffle_backend) fn emit(
             Scalar::Monotonic => {
                 let nanos = b.call(function, &[], &[I64])[0];
                 let nanos = b.op(Op::F64ConvertI64U, &[nanos], F64);
-                let million = real(&mut b, 1_000_000.0);
+                let million = b.number(1_000_000.0);
                 vec![b.op(Op::F64Div, &[nanos, million], F64)]
             }
             Scalar::Random => {
@@ -160,7 +151,7 @@ pub(in crate::waffle_backend) fn emit(
                 let shift = b.op(Op::I64Const { value: 11 }, &[], I64);
                 let word = b.op(Op::I64ShrU, &[word, shift], I64);
                 let word = b.op(Op::F64ConvertI64U, &[word], F64);
-                let scale = real(&mut b, 9007199254740992.0);
+                let scale = b.number(9007199254740992.0);
                 vec![b.op(Op::F64Div, &[word, scale], F64)]
             }
             Scalar::Date => {
@@ -182,7 +173,7 @@ pub(in crate::waffle_backend) fn emit(
                     I64,
                 );
                 let seconds = b.op(Op::F64ConvertI64S, &[seconds], F64);
-                let thousand = real(&mut b, 1000.0);
+                let thousand = b.number(1000.0);
                 let seconds = b.op(Op::F64Mul, &[seconds, thousand], F64);
                 let million = b.integer(1_000_000);
                 let millis = b.op(Op::I32DivU, &[nanos, million], I32);

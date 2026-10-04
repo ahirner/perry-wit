@@ -190,7 +190,6 @@ Rust algorithms or typed WAFFLE builders remains consolidation work.
 | Family | Caller and responsibility | Executable coverage |
 | --- | --- | --- |
 | `allocation` | `allocation.rs`: realloc, tracing, roots, reclamation | `waffle_string_test`, `waffle_wit_native_test` |
-| `bytes` | `bytes.rs`: byte-view allocation, copying, checked access | `waffle_bytes_test` |
 | `decoder`, `strings/utf8` | `decoder.rs`, `filesystem.rs`, `structured.rs`: UTF-8 and incremental decoding | `waffle_decoder_test`, `p3_filesystem_test` |
 | `filesystem` | `filesystem.rs`: paths, options, descriptors, metadata, buffered transfers | `p3_filesystem_test` |
 | `http` | `http.rs`, `http/handler.rs`: resources, bodies, completion, source records | `http/tests`, `waffle_http_handler_test`, `waffle_wit_native_test` |

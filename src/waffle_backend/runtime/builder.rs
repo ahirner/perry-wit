@@ -66,6 +66,15 @@ impl Builder {
     pub(crate) fn integer(&mut self, value: u32) -> Value {
         self.op(Operator::I32Const { value }, &[], Type::I32)
     }
+    pub(crate) fn number(&mut self, value: f64) -> Value {
+        self.op(
+            Operator::F64Const {
+                value: value.to_bits(),
+            },
+            &[],
+            Type::F64,
+        )
+    }
     pub(crate) fn memory(&self, offset: u32) -> MemoryArg {
         MemoryArg {
             memory: self.memory,

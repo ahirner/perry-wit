@@ -115,28 +115,18 @@ pub(crate) fn declare(
     })
 }
 
-fn number(b: &mut Builder, value: f64) -> Value {
-    b.op(
-        Op::F64Const {
-            value: value.to_bits(),
-        },
-        &[],
-        F64,
-    )
-}
-
 fn validate_code(b: &mut Builder, value: Value) {
     let integer = b.op(Op::F64Trunc, &[value], F64);
     let valid = b.op(Op::F64Eq, &[value, integer], I32);
     b.require(valid);
-    let maximum = number(b, 9_007_199_254_740_991.0);
+    let maximum = b.number(9_007_199_254_740_991.0);
     let magnitude = b.op(Op::F64Abs, &[value], F64);
     let in_range = b.op(Op::F64Le, &[magnitude, maximum], I32);
     b.require(in_range);
 }
 
 fn exit(b: &mut Builder, native: Func, value: Value) {
-    let width = number(b, 256.0);
+    let width = b.number(256.0);
     let quotient = b.op(Op::F64Div, &[value, width], F64);
     let quotient = b.op(Op::F64Floor, &[quotient], F64);
     let multiple = b.op(Op::F64Mul, &[quotient, width], F64);
@@ -189,7 +179,7 @@ pub(crate) fn emit(
                 b.ret(&[value]);
             }
             ProcessOperation::ClearExitCode => {
-                let value = number(&mut b, f64::NAN);
+                let value = b.number(f64::NAN);
                 b.effect(
                     Op::GlobalSet {
                         global_index: state,
@@ -222,7 +212,7 @@ pub(crate) fn emit(
                     F64,
                 );
                 let present = b.op(Op::F64Eq, &[value, value], I32);
-                let zero = number(&mut b, 0.0);
+                let zero = b.number(0.0);
                 let value = b.op(Op::Select, &[value, zero, present], F64);
                 exit(&mut b, imports.exit.unwrap(), value);
             }
@@ -240,7 +230,7 @@ pub(crate) fn emit(
             &[],
             F64,
         );
-        let zero = number(&mut b, 0.0);
+        let zero = b.number(0.0);
         let present = b.op(Op::F64Eq, &[value, value], I32);
         let nonzero = b.op(Op::F64Ne, &[value, zero], I32);
         let nonzero = b.op(Op::I32And, &[present, nonzero], I32);

@@ -1,12 +1,12 @@
 //! Mutable byte views with distinct identity and shared backing allocation ownership.
 
-use std::collections::BTreeMap;
+mod runtime;
 
 use anyhow::Result;
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use waffle::{Func, Memory, Module};
 
-use super::{allocation::AllocationFuncs, runtime, visit};
+use super::{allocation::AllocationFuncs, visit};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ByteHelpers {
@@ -48,20 +48,7 @@ pub(crate) fn emit_runtime(
     memory: Memory,
     allocator: AllocationFuncs,
 ) -> Result<ByteHelpers> {
-    let functions = runtime::emit_functions(
-        module,
-        memory,
-        include_str!("bytes/runtime.wat"),
-        &BTreeMap::from([("realloc", allocator.realloc)]),
-    )?;
-    Ok(ByteHelpers {
-        lift_canonical: functions["bytes.lift"],
-        new: functions["bytes.new"],
-        copy: functions["bytes.copy"],
-        get: functions["bytes.get"],
-        set: functions["bytes.set"],
-        subarray: functions["bytes.subarray"],
-    })
+    runtime::emit(module, memory, allocator)
 }
 
 fn contains_byte_view(ty: &HirType) -> bool {
