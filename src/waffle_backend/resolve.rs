@@ -56,6 +56,7 @@ impl TypedIntrinsic {
             Self::Capability(
                 CapabilityOperation::Stdio(_)
                     | CapabilityOperation::Filesystem(_)
+                    | CapabilityOperation::HttpGet
                     | CapabilityOperation::Random(RandomOperation::Fill)
             ) | Self::DecoderNew
                 | Self::Temporal(_)
@@ -148,6 +149,14 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn has_http(&self) -> bool {
+        self.intrinsics.values().any(|intrinsic| {
+            matches!(
+                intrinsic,
+                TypedIntrinsic::Capability(CapabilityOperation::HttpGet)
+            )
+        })
+    }
     pub(crate) fn context_operations(&self) -> BTreeSet<ContextOperation> {
         self.intrinsics
             .values()

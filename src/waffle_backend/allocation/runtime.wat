@@ -7,7 +7,7 @@
   ;; The word immediately before every payload points back to its block header.
   ;; Kinds: 0 bytes, 1 string, 2 string array, 3 scalar Promise, 4 reference Promise,
   ;; 5 observer, 6 root frame, 7 byte view, 8 decoder, 9 object, 10 property, 11 boxed value;
-  ;; -1 free. Marks: 0 white, 1 gray, 2 black.
+  ;; 12 value array, 13 buffered HTTP response; -1 free. Marks: 0 white, 1 gray, 2 black.
 
   (func $aligned (param $value i32) (param $alignment i32) (result i32)
     (local $result i64)
@@ -211,6 +211,19 @@
               (local.set $pointer (i32.add (local.get $pointer) (i32.const 4)))
               (local.set $index (i32.add (local.get $index) (i32.const 1)))
               (br $values)))))
+          (if (i32.eq (local.get $kind) (i32.const 13)) (then
+            (call $mark (i32.load offset=12 (local.get $pointer)))
+            (local.set $count (i32.load offset=8 (local.get $pointer)))
+            (local.set $pointer (i32.load offset=4 (local.get $pointer)))
+            (call $mark (local.get $pointer))
+            (local.set $index (i32.const 0))
+            (block $headers_done (loop $headers
+              (br_if $headers_done (i32.ge_u (local.get $index) (local.get $count)))
+              (call $mark (i32.load (local.get $pointer)))
+              (call $mark (i32.load offset=8 (local.get $pointer)))
+              (local.set $pointer (i32.add (local.get $pointer) (i32.const 16)))
+              (local.set $index (i32.add (local.get $index) (i32.const 1)))
+              (br $headers)))))
           (if (i32.eq (local.get $kind) (i32.const 6)) (then
             (local.set $count (i32.load offset=8 (local.get $pointer)))
             (local.set $pointer (i32.add (local.get $pointer) (i32.const 12)))

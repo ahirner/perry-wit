@@ -56,6 +56,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             !names.0.contains(super::values::VALUE_TYPE)
                 && !names.0.contains(super::context::ENVIRONMENT_TYPE)
                 && !names.0.contains(super::date::DATE_TYPE)
+                && !names.0.contains(super::http::RESPONSE_TYPE)
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
                 && !names
@@ -66,10 +67,28 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             "Reserved compiler type name in source"
         );
         let mut bindings = HashMap::new();
+        let mut http_types = HashSet::new();
         for item in &module.body {
             let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item else {
                 continue;
             };
+            if import.src.value.as_str() == Some("perry:http") {
+                for specifier in &import.specifiers {
+                    if let ast::ImportSpecifier::Named(named) = specifier {
+                        let name = named.imported.as_ref().map_or_else(
+                            || named.local.sym.to_string(),
+                            |name| name.atom().to_string(),
+                        );
+                        if name == "HttpResponse" {
+                            ensure!(
+                                import.type_only || named.is_type_only,
+                                "Import HttpResponse with import type"
+                            );
+                            http_types.insert(named.local.to_id());
+                        }
+                    }
+                }
+            }
             if import.type_only {
                 continue;
             }
@@ -77,6 +96,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
                 Some("perry:clocks") => CapabilityNamespace::Clocks,
                 Some("perry:random") => CapabilityNamespace::Random,
                 Some("perry:stdio") => CapabilityNamespace::Stdio,
+                Some("perry:http") => CapabilityNamespace::Http,
                 Some("fs" | "node:fs") => CapabilityNamespace::Filesystem,
                 _ => bail!("Unsupported capability import: {:?}", import.src.value),
             };
@@ -115,6 +135,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         });
         let mut calls = SourceCalls {
             bindings,
+            http_types,
             unresolved: SyntaxContext::empty().apply_mark(unresolved),
             names: names.0,
             shadow_names: HashMap::new(),
@@ -189,6 +210,8 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
 
 fn source_type(ty: &HirType) -> Result<String> {
     match ty {
+        ty if super::http::is_response(ty) => Ok(super::http::RESPONSE_TYPE.into()),
+        ty if *ty == super::http::headers_type() => Ok("{[key: string]: string}".into()),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("string | Uint8Array".into()),
         HirType::Number => Ok("number".into()),
         HirType::Boolean => Ok("boolean".into()),
@@ -210,11 +233,13 @@ enum CapabilityNamespace {
     Random,
     Stdio,
     Filesystem,
+    Http,
 }
 
 impl CapabilityNamespace {
     fn operation(self, name: &str) -> Result<CapabilityOperation> {
         match (self, name) {
+            (Self::Http, "get") => Ok(CapabilityOperation::HttpGet),
             (Self::Clocks, "waitFor") => Ok(CapabilityOperation::Clock(ClockOperation::WaitFor)),
             (Self::Random, "randomNumber") => {
                 Ok(CapabilityOperation::Random(RandomOperation::Number))
@@ -260,6 +285,7 @@ enum CapabilityBinding {
 }
 
 struct SourceCalls {
+    http_types: HashSet<ast::Id>,
     bindings: HashMap<ast::Id, CapabilityBinding>,
     unresolved: SyntaxContext,
     names: HashSet<String>,
@@ -616,6 +642,11 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && self.http_types.contains(&name.to_id())
+        {
+            name.sym = super::http::RESPONSE_TYPE.into();
+        }
         if let Err(error) = self.rewrite_time_type(reference) {
             self.error.get_or_insert(error);
             return;

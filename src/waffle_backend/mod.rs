@@ -12,7 +12,6 @@ mod date;
 mod decoder;
 pub(crate) mod exceptions;
 mod filesystem;
-#[cfg(test)]
 mod http;
 mod json;
 pub(crate) mod libraries;

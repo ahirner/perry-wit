@@ -318,6 +318,21 @@ with `size: f64`, `mtime-ms: f64`, and a `stats-kind` enum. Its cases are `block
 `other`. Both values also work in numeric-error `Result` returns; guest identity is
 preserved within an invocation. Plain option objects remain guest-internal and use
 nonrecursive structural types or simple interfaces without inheritance or methods.
+`perry:http` exports immediately awaited `get(scheme, authority, path, headers,
+maxResponseBytes)`. Scheme is `http` or `https`; headers are a string-valued
+dictionary. The caller supplies an integer body limit. The buffered response
+exposes read-only `status`, `body`, and `headerCount` properties, plus
+`headerName(index)` and `headerValue(index)`; duplicate headers and exact binary
+values are preserved. Body and header byte views retain their storage after
+helper returns and collection. Native resources close before a response returns,
+and producer completion is checked independently of EOF. Numeric errors are `8`
+for body overflow, `12` for invalid metadata/limits/indices, `100 +` the WASI HTTP
+error discriminant, and `200 +` the header error discriminant. Non-2xx statuses
+remain responses. Traps and interrupted calls require store disposal. HTTP calls
+cannot yet be combined with stored async tasks; incoming handlers remain migration
+work. `tests/fixtures/http_document.ts` demonstrates the runner document
+contract with status, Content-Type, strict UTF-8, and JSON validation.
+
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary
 binary bytes, through shared native stream transfers and wait for the capability's

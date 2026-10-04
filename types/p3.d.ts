@@ -75,6 +75,33 @@ declare module "perry:clocks" {
   export function waitFor(milliseconds: number): Promise<void>;
 }
 
+declare module "perry:http" {
+  /** Buffered response with no remaining native HTTP resources. Headers preserve
+   * duplicates and exact bytes. Indices must be integers in [0, headerCount).
+   * Response metadata is immutable; body and header views remain mutable bytes. */
+  export interface HttpResponse {
+    readonly status: number;
+    readonly body: Uint8Array;
+    readonly headerCount: number;
+    headerName(index: number): string;
+    headerValue(index: number): Uint8Array;
+  }
+  /** Immediately await this bounded GET; combining it with stored async tasks
+   * is currently diagnosed. Scheme is exactly http or https; path
+   * includes any query. Request headers are string-valued. The response limit
+   * must be an integer in [0, 4294967295]. Numeric failures: 8 body overflow,
+   * 12 invalid metadata/limit/index, 100 + WASI HTTP error discriminant, or
+   * 200 + WASI header error discriminant. Non-2xx status remains a response.
+   * Native producer completion is checked independently of body EOF. */
+  export function get(
+    scheme: "http" | "https",
+    authority: string,
+    path: string,
+    headers: { [name: string]: string },
+    maxResponseBytes: number,
+  ): Promise<HttpResponse>;
+}
+
 declare module "perry:random" {
   /** A number in [0, 1) from the high 53 bits of a WASI random word. */
   export function randomNumber(): number;

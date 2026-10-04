@@ -84,6 +84,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
     pub(crate) time_helpers: BTreeMap<&'static str, Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
+    pub(crate) http_helpers: Option<super::http::HttpHelpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
     pub(crate) object_helpers: Option<super::objects::ObjectHelpers>,
     pub(crate) structured_helpers: Option<super::structured::StructuredHelpers>,
@@ -148,6 +149,9 @@ impl ModuleRegistry {
         let output_operations = contract.output_operations();
         let output_imports = (!output_operations.is_empty())
             .then(|| super::streams::output::declare_imports(module, &output_operations));
+        let http_imports = contract
+            .has_http()
+            .then(|| super::http::declare_imports(module));
         let filesystem_imports = contract
             .has_filesystem()
             .then(|| super::filesystem::declare_imports(module));
@@ -232,7 +236,7 @@ impl ModuleRegistry {
             None
         };
 
-        let byte_helpers = if super::bytes::required(hir) {
+        let byte_helpers = if super::bytes::required(hir) || contract.has_http() {
             Some(super::bytes::emit_runtime(
                 module,
                 memory,
@@ -406,6 +410,19 @@ impl ModuleRegistry {
             }
         }
 
+        let http_helpers = if let Some(imports) = http_imports {
+            Some(super::http::emit_source_runtime(
+                module,
+                memory,
+                allocator.unwrap(),
+                &imports,
+                string_helpers.unwrap(),
+                byte_helpers.unwrap(),
+                string_pool,
+            )?)
+        } else {
+            None
+        };
         let filesystem_helpers = if let Some(imports) = filesystem_imports {
             Some(super::filesystem::emit_runtime(
                 module,
@@ -557,6 +574,7 @@ impl ModuleRegistry {
             json_helpers,
             value_access,
             decoder_helpers,
+            http_helpers,
             filesystem_helpers,
             object_helpers,
             structured_helpers,
@@ -581,7 +599,8 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
-            || super::time::is_time(ty) =>
+            || super::time::is_time(ty)
+            || super::http::is_response(ty) =>
         {
             Ok(Type::I32)
         }
@@ -603,7 +622,8 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
-            || super::time::is_time(ty) =>
+            || super::time::is_time(ty)
+            || super::http::is_response(ty) =>
         {
             Ok(vec![Type::I32])
         }

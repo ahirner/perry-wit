@@ -22,6 +22,7 @@ pub(crate) enum CapabilityOperation {
     Random(RandomOperation),
     Stdio(StdioOperation),
     Filesystem(FilesystemOperation),
+    HttpGet,
 }
 
 /// Pure lowering metadata for source validation, core calls, and component wiring.
@@ -35,6 +36,7 @@ pub(crate) enum CapabilityImplementation {
     Standalone { core_function: &'static str },
     Stdio(StdioOperation),
     Filesystem,
+    Http,
     RandomBytes,
     Context,
 }
@@ -60,6 +62,7 @@ impl CapabilityOperation {
             Self::Random(operation) => operation.name(),
             Self::Stdio(operation) => operation.name(),
             Self::Filesystem(operation) => operation.name(),
+            Self::HttpGet => "get",
         }
     }
 }
@@ -72,6 +75,19 @@ impl LowerCapability for CapabilityOperation {
             Self::Random(operation) => operation.lower(),
             Self::Stdio(operation) => operation.lower(),
             Self::Filesystem(operation) => operation.lower(),
+            Self::HttpGet => CapabilityPlan {
+                params: vec![
+                    HirType::String,
+                    HirType::String,
+                    HirType::String,
+                    crate::waffle_backend::http::headers_type(),
+                    HirType::Number,
+                ],
+                result: HirType::Promise(Box::new(HirType::Named(
+                    crate::waffle_backend::http::RESPONSE_TYPE.into(),
+                ))),
+                implementation: CapabilityImplementation::Http,
+            },
         }
     }
 }

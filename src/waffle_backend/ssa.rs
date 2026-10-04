@@ -10,6 +10,7 @@ mod bytes;
 mod date;
 mod decoder;
 mod filesystem;
+mod http;
 mod loops;
 mod objects;
 mod optional;
@@ -66,6 +67,7 @@ pub(crate) fn lower_module(
 
     // 2. Scan module for string requirements and build string pool if needed
     let mut reqs = scan_module_string_requirements(hir);
+    reqs.objects |= contract.has_http();
     reqs.objects |= contract
         .context_operations()
         .contains(&super::capabilities::ContextOperation::Environment);
@@ -74,6 +76,7 @@ pub(crate) fn lower_module(
         || super::time::required(hir)
         || !contract.context_operations().is_empty()
         || contract.has_filesystem()
+        || contract.has_http()
         || contract
             .random_operations()
             .contains(&super::capabilities::RandomOperation::Uuid);
@@ -88,6 +91,10 @@ pub(crate) fn lower_module(
         || contract.has_filesystem()
     {
         collect_strings_in_module(hir, &mut string_pool);
+        if contract.has_http() {
+            string_pool.intern("http");
+            string_pool.intern("https");
+        }
         if reqs.objects {
             string_pool.intern("length");
         }
@@ -323,6 +330,12 @@ impl<'a> FunctionLowerer<'a> {
                             "Temporal initializers must match their declared type"
                         );
                     }
+                    if super::http::is_response(ty) {
+                        ensure!(
+                            ty == &inferred,
+                            "HTTP response initializers must match their declared type"
+                        );
+                    }
                     let (ty, val) = if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
                         (
                             super::text_or_bytes::value_type(),
@@ -480,6 +493,7 @@ impl<'a> FunctionLowerer<'a> {
         } else if super::filesystem::is_stats(self.return_type)
             || super::date::is_date(self.return_type)
             || super::time::is_time(self.return_type)
+            || super::http::is_response(self.return_type)
             || matches!(self.return_type, HirType::Array(_))
         {
             ensure!(
@@ -507,8 +521,9 @@ impl<'a> FunctionLowerer<'a> {
             );
             ensure!(
                 !super::date::is_date(&self.infer_expr_type(expr))
-                    && !super::time::is_time(&self.infer_expr_type(expr)),
-                "Cannot return a Date/Temporal value as {:?}",
+                    && !super::time::is_time(&self.infer_expr_type(expr))
+                    && !super::http::is_response(&self.infer_expr_type(expr)),
+                "Cannot return a Date, Temporal, or HTTP response value as {:?}",
                 self.return_type
             );
             ensure!(
@@ -615,6 +630,16 @@ impl<'a> FunctionLowerer<'a> {
             return self.random_fill(name, args).map(Some);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::Capability(
+                    super::capabilities::CapabilityOperation::HttpGet
+                ))
+            )
+        {
+            return self.http_get(args).map(Some);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
             && let Some(super::resolve::TypedIntrinsic::Capability(
                 super::capabilities::CapabilityOperation::Filesystem(operation),
             )) = self.contract.intrinsics.get(name)
@@ -643,6 +668,9 @@ impl<'a> FunctionLowerer<'a> {
         {
             if let Some(kind) = super::time::TimeKind::of(&self.infer_expr_type(object)) {
                 return self.time_method(kind, object, property, args).map(Some);
+            }
+            if super::http::is_response(&self.infer_expr_type(object)) {
+                return self.http_header(object, property, args).map(Some);
             }
             if super::date::is_date(&self.infer_expr_type(object)) {
                 return self.date_method(object, property, args).map(Some);
@@ -712,6 +740,14 @@ impl<'a> FunctionLowerer<'a> {
                 ensure!(
                     expected == Some(&argument_type),
                     "Object arguments must match their declared parameter types"
+                );
+            }
+            if expected.is_some_and(super::http::is_response)
+                || super::http::is_response(&argument_type)
+            {
+                ensure!(
+                    expected == Some(&argument_type),
+                    "HTTP response arguments must match their declared type"
                 );
             }
             if expected.is_some_and(super::time::is_time) || super::time::is_time(&argument_type) {
@@ -1125,6 +1161,13 @@ impl<'a> FunctionLowerer<'a> {
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
             Expr::Logical { op, left, right } => self.boolean_logic(*op, left, right),
+            Expr::PropertySet { object, .. }
+            | Expr::IndexSet { object, .. }
+            | Expr::PutValueSet { target: object, .. }
+                if super::http::is_response(&self.infer_expr_type(object)) =>
+            {
+                bail!("HTTP response metadata is read-only")
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if super::time::is_time(&self.infer_expr_type(object)) => {
@@ -1465,6 +1508,11 @@ impl<'a> FunctionLowerer<'a> {
                 object, property, ..
             } if super::objects::is_object(&self.infer_expr_type(object)) => {
                 self.object_get(object, &Expr::String(property.clone()))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if super::http::is_response(&self.infer_expr_type(object)) => {
+                self.http_property(object, property)
             }
             Expr::PropertyGet {
                 object, property, ..

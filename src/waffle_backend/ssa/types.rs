@@ -16,6 +16,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
+        ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::time::is_time(ty) => {
             crate::waffle_backend::time::TimeKind::of(ty).map(|kind| match kind {
@@ -36,7 +37,8 @@ pub(super) fn is_reference(ty: &HirType) -> bool {
         ty if crate::waffle_backend::objects::is_object(ty) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty)
             || crate::waffle_backend::date::is_date(ty)
-            || crate::waffle_backend::time::is_time(ty) =>
+            || crate::waffle_backend::time::is_time(ty)
+            || crate::waffle_backend::http::is_response(ty) =>
         {
             true
         }
@@ -81,6 +83,15 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) => {
+                if property == "body" {
+                    HirType::Named("Uint8Array".into())
+                } else {
+                    HirType::Number
+                }
+            }
             Expr::Logical { left, right, .. }
                 if self.infer_expr_type(left) == HirType::Boolean
                     && self.infer_expr_type(right) == HirType::Boolean =>
@@ -223,6 +234,13 @@ impl FunctionLowerer<'_> {
                     object, property, ..
                 } = callee.as_ref()
                 {
+                    if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) {
+                        return if property == "headerName" {
+                            HirType::String
+                        } else {
+                            HirType::Named("Uint8Array".into())
+                        };
+                    }
                     if crate::waffle_backend::time::is_time(&self.infer_expr_type(object)) {
                         return if property == "toString" {
                             HirType::String

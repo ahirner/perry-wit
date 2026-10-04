@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use anyhow::Result;
+use perry_hir::types::{ObjectType, Type as HirType};
 use waffle::{Func, Memory, Module};
 
 use super::{allocation::AllocationFuncs, component::forward, runtime, streams};
@@ -11,6 +12,58 @@ use super::{allocation::AllocationFuncs, component::forward, runtime, streams};
 #[cfg(test)]
 #[path = "http/tests.rs"]
 mod tests;
+
+pub(crate) const RESPONSE_TYPE: &str = "__perry_http_response";
+
+pub(crate) fn is_response(ty: &HirType) -> bool {
+    matches!(ty, HirType::Named(name) if name == RESPONSE_TYPE)
+}
+pub(crate) fn headers_type() -> HirType {
+    HirType::Object(ObjectType {
+        property_order: Some(Vec::new()),
+        index_signature: Some(Box::new(HirType::String)),
+        ..Default::default()
+    })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HttpHelpers {
+    pub(crate) get: Func,
+    pub(crate) header: Func,
+}
+
+pub(crate) fn emit_source_runtime(
+    module: &mut Module<'static>,
+    memory: Memory,
+    allocator: AllocationFuncs,
+    imports: &BTreeMap<String, Func>,
+    strings: super::strings::StringHelperFuncs,
+    bytes: super::bytes::ByteHelpers,
+    pool: &super::strings::StringPool,
+) -> Result<HttpHelpers> {
+    let get = emit_runtime(module, memory, allocator, imports)?;
+    let source = include_str!("http/source.wat")
+        .replace("HTTP_TEXT", &pool.get("http").unwrap().to_string())
+        .replace("HTTPS_TEXT", &pool.get("https").unwrap().to_string());
+    let functions = runtime::emit_functions(
+        module,
+        memory,
+        &source,
+        &BTreeMap::from([
+            ("get", get),
+            ("realloc", allocator.realloc),
+            ("frame-new", allocator.frame_new),
+            ("frame-drop", allocator.frame_drop),
+            ("compare", strings.str_compare),
+            ("string-lift", strings.lift_canonical),
+            ("bytes-lift", bytes.lift_canonical),
+        ]),
+    )?;
+    Ok(HttpHelpers {
+        get: functions["get"],
+        header: functions["header"],
+    })
+}
 
 pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
     forward::declare_imports(module, "http", &native_functions())

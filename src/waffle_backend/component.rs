@@ -111,6 +111,11 @@ pub(crate) fn frame_component(
         guest_adapters.push_str(&super::filesystem::bind_adapters()?);
         guest_imports.push_str(r#"(with "filesystem" (instance $filesystem-forward))"#);
     }
+    if contract.has_http() {
+        host_imports.push_str(&super::http::declare_adapters()?);
+        guest_adapters.push_str(&super::http::bind_adapters()?);
+        guest_imports.push_str(r#"(with "http" (instance $http-forward))"#);
+    }
     if !context_operations.is_empty() {
         guest_adapters.push_str(&super::context::bind_adapters(&context_operations)?);
         guest_imports.push_str(r#"(with "context" (instance $context-forward))"#);
