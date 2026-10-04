@@ -1,3 +1,5 @@
+#[path = "support/output_capture.rs"]
+mod output_capture;
 use anyhow::{Context, Result};
 use perry_wit::waffle_backend::{
     WaffleCompileOptions, WaffleCompiled, compile_typescript_for_world,
@@ -409,7 +411,7 @@ async fn resolved_world_platform_io_uses_shared_guest_memory() -> Result<()> {
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let mut store = store(&engine);
     let directory = tempfile::tempdir()?;
-    let output = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(65536);
+    let output = crate::output_capture::MemoryOutput::new(65536);
     store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
         .env("LABEL", "漢🙂")
         .args(&["one", "two"])

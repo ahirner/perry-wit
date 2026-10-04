@@ -109,8 +109,8 @@ execute after disposal.
 ## Packaging and verification
 
 `flake.nix` pins the compiler toolchain, P3 WIT, host CLI, SDK, and independent
-example components. P2 WIT and host bindings remain only for versioned contracts
-and P2/P3 coexistence checks. They are not an alternative compiler backend.
+example components. The development shell and component tests use the pinned
+WASI 0.3 interfaces.
 The SDK shell and Nix component builder share WIT, world, and entry configuration.
 An exact compiler-flake revision supplies dependency pins to consumers. Disposable
 SDK output lives in ignored `.perry` files; shell entry preserves authored configuration.

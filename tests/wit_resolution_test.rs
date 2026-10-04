@@ -9,7 +9,7 @@ fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
     fs::create_dir_all(root.join("deps")).unwrap();
     fs::write(
         root.join("world.wit"),
-        "package test:resolution; world test { import wasi:http/outgoing-handler@0.2.6; }",
+        "package test:resolution; world test { import wasi:http/client@0.3.0; }",
     )
     .unwrap();
     assert!(
@@ -18,38 +18,44 @@ fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
     );
 
     fs::create_dir_all(root.join("deps/custom")).unwrap();
-    fs::write(root.join("deps/custom/package.wit"), "package test:custom; interface api { use wasi:io/poll@0.2.6.{pollable}; wait: func(p: borrow<pollable>); }").unwrap();
-    fs::write(root.join("world.wit"), "package test:resolution; world test { import test:custom/api; import wasi:http/outgoing-handler@0.2.6; }").unwrap();
-    let ambient = std::env::var_os("WASI_P2_WIT_PATH")
+    fs::write(root.join("deps/custom/package.wit"), "package test:custom; interface api { use wasi:clocks/types@0.3.0.{duration}; wait: async func(delay: duration); }").unwrap();
+    fs::write(root.join("world.wit"), "package test:resolution; world test { import test:custom/api; import wasi:http/client@0.3.0; }").unwrap();
+    let ambient = std::env::var_os("WASI_P3_WIT_PATH")
         .or_else(|| std::env::var_os("WASI_WIT_PATH"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("wit/deps"));
-    fs::create_dir_all(root.join("deps/io")).unwrap();
-    let mut io = String::new();
-    for file in fs::read_dir(ambient.join("io")).unwrap() {
+    fs::create_dir_all(root.join("deps/clocks")).unwrap();
+    for file in fs::read_dir(ambient.join("clocks")).unwrap() {
         let path = file.unwrap().path();
         if path.extension().is_some_and(|ext| ext == "wit") {
-            io.push_str(&fs::read_to_string(path).unwrap());
+            fs::copy(
+                &path,
+                root.join("deps/clocks").join(path.file_name().unwrap()),
+            )
+            .unwrap();
         }
     }
-    io.push_str("\ninterface local-marker {}\n");
-    fs::write(root.join("deps/io/package.wit"), io).unwrap();
+    fs::write(
+        root.join("deps/clocks/local.wit"),
+        "package wasi:clocks@0.3.0; interface local-marker {}",
+    )
+    .unwrap();
     let (resolve, _) = resolve_wit(&root).unwrap();
-    let io_package = resolve
+    let clocks_package = resolve
         .packages
         .iter()
-        .find(|(_, package)| package.name.namespace == "wasi" && package.name.name == "io")
+        .find(|(_, package)| package.name.namespace == "wasi" && package.name.name == "clocks")
         .unwrap()
         .1;
     assert!(
-        io_package.interfaces.contains_key("local-marker"),
+        clocks_package.interfaces.contains_key("local-marker"),
         "local packages must take precedence over ambient packages"
     );
     assert_eq!(
         resolve
             .packages
             .iter()
-            .filter(|(_, package)| package.name.namespace == "wasi" && package.name.name == "io")
+            .filter(|(_, package)| package.name.namespace == "wasi" && package.name.name == "clocks")
             .count(),
         1
     );

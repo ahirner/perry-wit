@@ -1,3 +1,5 @@
+#[path = "support/output_capture.rs"]
+mod output_capture;
 #[path = "support/waffle.rs"]
 mod waffle_fixture;
 use anyhow::Result;

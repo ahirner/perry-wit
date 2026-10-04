@@ -403,7 +403,7 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
         let receiver = Arc::new(Mutex::new(Some(receiver)));
         let finish = Arc::new(Notify::new());
         let completion_pending = Arc::new(Notify::new());
-        let output = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1024);
+        let output = crate::output_capture::MemoryOutput::new(1024);
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
             .stdout(output.clone())
@@ -501,7 +501,7 @@ async fn pending_read_disposal_and_producer_traps_release_owners_without_guest_f
         let (sender, receiver) = mpsc::channel(1);
         sender.send(Ok(vec![195])).await?;
         let receiver = Arc::new(Mutex::new(Some(receiver)));
-        let output = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1024);
+        let output = crate::output_capture::MemoryOutput::new(1024);
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
             .stdout(output.clone())

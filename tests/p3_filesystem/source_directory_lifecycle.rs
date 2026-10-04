@@ -77,7 +77,7 @@ async fn directory_entries_and_completion_keep_owners_through_suspension_collect
         let receiver = Arc::new(Mutex::new(Some(receiver)));
         let completion_pending = Arc::new(Notify::new());
         let finish = Arc::new(Notify::new());
-        let output = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1024);
+        let output = crate::output_capture::MemoryOutput::new(1024);
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
             .stdout(output.clone())

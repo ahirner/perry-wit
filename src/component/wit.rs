@@ -65,7 +65,7 @@ fn resolve_packages(
         available.extend(group.nested.iter().map(|package| package.name.clone()));
     }
 
-    for variable in ["WASI_P3_WIT_PATH", "WASI_WIT_PATH", "WASI_P2_WIT_PATH"] {
+    for variable in ["WASI_P3_WIT_PATH", "WASI_WIT_PATH"] {
         let Some(ambient) = std::env::var_os(variable).map(PathBuf::from) else {
             continue;
         };

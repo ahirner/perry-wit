@@ -9,17 +9,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
-    wasi = {
-      url = "github:WebAssembly/WASI/v0.2.6";
-      flake = false;
-    };
     wasi-p3 = {
       url = "github:WebAssembly/WASI/v0.3.0";
       flake = false;
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, wasi, wasi-p3 }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, wasi-p3 }:
     let
       systemOutputs = flake-utils.lib.eachDefaultSystem (system:
         let
@@ -31,22 +27,6 @@
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
-        # Official P2 definitions retained for versioned WIT and host coexistence checks.
-        # Consolidate each package's WIT files into a deterministic package.wit
-        wasiWit = pkgs.runCommand "wasi-preview2-wit" {} ''
-          mkdir -p "$out"
-          for pkg in cli clocks filesystem http io random sockets; do
-            mkdir -p "$out/$pkg"
-            pkg_header=$(grep -h "^package wasi:" "${wasi}/wasip2/$pkg"/*.wit | head -n 1)
-            echo "$pkg_header" > "$out/$pkg/package.wit"
-            for f in "${wasi}/wasip2/$pkg"/*.wit; do
-              sed "/^package wasi:/d" "$f" >> "$out/$pkg/package.wit"
-            done
-          done
-        '';
-
-        # The pinned 0.3 release keeps WIT under proposals, with native streams
-        # replacing the separate P2 io package.
         wasiP3Wit = pkgs.runCommand "wasi-preview3-wit" {} ''
           mkdir -p "$out"
           for pkg in cli clocks filesystem http random sockets; do
@@ -245,7 +225,7 @@
           example-merge-docs = exampleMergeDocs;
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
-          wasi-wit = wasiWit;
+          wasi-wit = wasiP3Wit;
           wasi-p3-wit = wasiP3Wit;
         };
 
@@ -274,7 +254,6 @@
           ];
 
           WASI_WIT_PATH = wasiP3Wit;
-          WASI_P2_WIT_PATH = wasiWit;
           WASI_P3_WIT_PATH = wasiP3Wit;
 
           shellHook = ''

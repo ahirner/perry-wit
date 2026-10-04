@@ -19,7 +19,7 @@ nix flake check
 
 The pinned shell supplies Rust, Node, TypeScript, Wasmtime, and wasm-tools.
 `WASI_WIT_PATH` and `WASI_P3_WIT_PATH` select the official WASI 0.3 packages;
-`WASI_P2_WIT_PATH` is retained for versioned WIT and host coexistence tests.
+application WIT supplies additional versioned packages through its `deps` directory.
 Project-local WIT dependencies take precedence over ambient packages of the same
 version. Compilation builds and embeds allocation-free text, search, JSON, and
 time helpers.

@@ -1,5 +1,0 @@
-[target.wasm32-wasip2]
-rustflags = [
-  "-C", "link-arg=-z",
-  "-C", "link-arg=stack-size=1048576",
-]

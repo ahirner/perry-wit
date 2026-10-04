@@ -47,8 +47,8 @@ registered together. The Rust harness uses Cargo's default test profile;
 Cranelift compiles both guests with its default settings. These are local
 comparisons, not production capacity estimates.
 
-[The harness](tests/cutover_measurement.rs) compiles the same independently written
-TypeScript with each compiler and checks every result. It excludes compilation
+The historical harness at `6bb5318:tests/cutover_measurement.rs` compiled the same
+independently written TypeScript with each compiler and checked every result. It excludes compilation
 and instantiation from timing, warms each instance with five calls, then measures
 five batches of 50 serial calls. Timings include host calls, canonical argument
 and result copying, and output comparison. Raw batch samples are saved in
@@ -87,18 +87,16 @@ valid even alongside unrelated async exports. The P3 I/O benchmark therefore use
 an async WIT export; legacy I/O retains its P2 synchronous contract. A legacy
 `slice` stub failed output validation and is excluded from comparisons.
 
-### Reproduce the historical comparison
+### Repeat component measurements
 
-Build the baseline compiler from `eeb5655` in a separate checkout using its pinned
-Nix flake. Keep that executable and enter the current compiler's `nix develop`:
+[The current harness](tests/component_measurement.rs) measures the production P3
+compiler with the same text and file workloads:
 
 ```sh
-PERRY_BASELINE_COMPILER=/absolute/path/to/baseline/bin/perry-wit \
-PERRY_MEASUREMENT_OUTPUT=/tmp/cutover.json \
-  cargo test --test cutover_measurement -- --ignored --nocapture
+PERRY_MEASUREMENT_OUTPUT=/tmp/components.json \
+  cargo test --test component_measurement -- --ignored --nocapture
 ```
 
-The baseline executable used here was
-`/nix/store/84q6mqyk6qz0w0kvfcz3m80vxrvky29d-perry-wit-0.1.0/bin/perry-wit`.
-The harness creates temporary WIT packages using the official P2/P3 interfaces;
-no runner source or WIT is used. Default tests skip this opt-in measurement.
+The historical comparison harness and its pinned environment are available at
+`6bb5318`. Its baseline compiler came from `eeb5655`. Historical raw samples above
+remain unchanged; current measurements do not rebuild or load the retired runtime.

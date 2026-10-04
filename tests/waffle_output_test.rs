@@ -1,11 +1,13 @@
+#[path = "support/output_capture.rs"]
+mod output_capture;
 #[path = "support/waffle.rs"]
 mod waffle_fixture;
+use crate::output_capture::MemoryOutput;
 use anyhow::Result;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use waffle_fixture::compile_typescript_waffle;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable, StreamReader};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
-use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 #[path = "waffle_output/completion.rs"]
@@ -52,8 +54,8 @@ async fn native_output_preserves_arbitrary_bytes_and_subview_ranges_beyond_guest
         await output.writeStderr(storage.subarray(0, 1));
         return storage[0] + storage[258];
     }"#;
-    let stdout = MemoryOutputPipe::new(16 * 1024 * 1024);
-    let stderr = MemoryOutputPipe::new(1024);
+    let stdout = MemoryOutput::new(16 * 1024 * 1024);
+    let stderr = MemoryOutput::new(1024);
     let context = WasiCtxBuilder::new()
         .stdout(stdout.clone())
         .stderr(stderr.clone())
@@ -93,8 +95,8 @@ async fn string_logging_preserves_utf8_nuls_order_and_stored_task_lifetimes() ->
         const result = await pending;
         return result + await pending;
     }"#;
-    let stdout = MemoryOutputPipe::new(8192);
-    let stderr = MemoryOutputPipe::new(8192);
+    let stdout = MemoryOutput::new(8192);
+    let stderr = MemoryOutput::new(8192);
     let context = WasiCtxBuilder::new()
         .stdout(stdout.clone())
         .stderr(stderr.clone())
@@ -129,7 +131,7 @@ async fn input_views_forward_to_output_without_buffering_the_full_stream() -> Re
         }
         return total;
     }"#;
-    let stdout = MemoryOutputPipe::new(8 * 1024 * 1024);
+    let stdout = MemoryOutput::new(8 * 1024 * 1024);
     let context = WasiCtxBuilder::new().stdout(stdout.clone()).build();
     let (mut store, instance) = instantiate(source, context).await?;
     let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
@@ -157,8 +159,8 @@ async fn logging_argument_effects_and_stream_routing_match_node() -> Result<()> 
         console.log("");
         return 3;
     }"#;
-    let stdout = MemoryOutputPipe::new(8192);
-    let stderr = MemoryOutputPipe::new(8192);
+    let stdout = MemoryOutput::new(8192);
+    let stderr = MemoryOutput::new(8192);
     let context = WasiCtxBuilder::new()
         .stdout(stdout.clone())
         .stderr(stderr.clone())
@@ -244,7 +246,7 @@ use std::{fs, process::Command};
 #[tokio::test(flavor = "current_thread")]
 async fn stored_output_operations_settle_once_and_preserve_bytes() -> Result<()> {
     let source = "import {writeStdout} from 'perry:stdio'; export async function run(): Promise<number> { const pending = writeStdout(new Uint8Array([65,0,255])); await pending; await pending; return 1; }";
-    let output = MemoryOutputPipe::new(1024);
+    let output = MemoryOutput::new(1024);
     let context = WasiCtxBuilder::new().stdout(output.clone()).build();
     let (mut store, instance) = instantiate(source, context).await?;
     let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;

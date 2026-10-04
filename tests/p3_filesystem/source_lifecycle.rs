@@ -95,7 +95,7 @@ async fn disposal_closes_pending_filesystem_owners_without_stale_guest_cleanup()
 
 #[tokio::test(flavor = "current_thread")]
 async fn incomplete_transfers_fail_and_host_traps_bypass_language_cleanup() -> Result<()> {
-    use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+    use crate::output_capture::MemoryOutput;
 
     let source = r#"
     import {writeFileSync} from "fs";
@@ -106,7 +106,7 @@ async fn incomplete_transfers_fail_and_host_traps_bypass_language_cleanup() -> R
     }"#;
     for trap in [false, true] {
         let directory = tempfile::tempdir()?;
-        let output = MemoryOutputPipe::new(4096);
+        let output = MemoryOutput::new(4096);
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
             .stdout(output.clone())
