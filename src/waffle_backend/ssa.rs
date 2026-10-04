@@ -57,36 +57,39 @@ pub(crate) fn lower_module(
     let reqs = scan_module_string_requirements(hir);
     let mut string_pool = StringPool::new();
     let regex_tables = regex::compile_literals(hir)?;
-    let (string_heap_base, regex_programs) =
-        if reqs.needs_strings || contract.promises.is_some() || super::bytes::required(hir) {
-            collect_strings_in_module(hir, &mut string_pool);
-            string_pool.populate_memory_segments(&mut module.memories[memory]);
-            let (regex_programs, next_free) = regex::emit_tables(
-                &mut module,
-                memory,
-                regex_tables,
-                string_pool.next_free_address(),
-            )?;
-            let needs_helper_library = reqs.find_substring
-                || reqs.code_point_at
-                || reqs.from_code_point
-                || reqs.case_convert
-                || reqs.split
-                || reqs.join;
-            if needs_helper_library {
-                let raw_base = next_free + 65_536 + 4096;
-                let aligned_heap_base = (raw_base + 65_535) & !65_535;
-                let needed_pages = (aligned_heap_base / 65_536) as usize + 1;
-                if module.memories[memory].initial_pages < needed_pages {
-                    module.memories[memory].initial_pages = needed_pages;
-                }
-                (Some(aligned_heap_base), regex_programs)
-            } else {
-                (Some(next_free), regex_programs)
+    let (string_heap_base, regex_programs) = if reqs.needs_strings
+        || contract.promises.is_some()
+        || super::bytes::required(hir)
+        || contract.has_stream_input()
+    {
+        collect_strings_in_module(hir, &mut string_pool);
+        string_pool.populate_memory_segments(&mut module.memories[memory]);
+        let (regex_programs, next_free) = regex::emit_tables(
+            &mut module,
+            memory,
+            regex_tables,
+            string_pool.next_free_address(),
+        )?;
+        let needs_helper_library = reqs.find_substring
+            || reqs.code_point_at
+            || reqs.from_code_point
+            || reqs.case_convert
+            || reqs.split
+            || reqs.join;
+        if needs_helper_library {
+            let raw_base = next_free + 65_536 + 4096;
+            let aligned_heap_base = (raw_base + 65_535) & !65_535;
+            let needed_pages = (aligned_heap_base / 65_536) as usize + 1;
+            if module.memories[memory].initial_pages < needed_pages {
+                module.memories[memory].initial_pages = needed_pages;
             }
+            (Some(aligned_heap_base), regex_programs)
         } else {
-            (None, BTreeMap::new())
-        };
+            (Some(next_free), regex_programs)
+        }
+    } else {
+        (None, BTreeMap::new())
+    };
 
     // 3. Build complete module declarations registry
     let registry =
@@ -213,10 +216,10 @@ fn lower_function_body(
         collection_blocks: BTreeSet::new(),
     };
 
-    if let (Some(stream_val), Some((_, init))) = (stream_parameter, registry.stream_helpers) {
+    if let (Some(stream_val), Some(helpers)) = (stream_parameter, registry.stream_helpers) {
         lowerer.op(
             Operator::Call {
-                function_index: init,
+                function_index: helpers.start,
             },
             &[stream_val],
             &[],
@@ -437,9 +440,16 @@ impl<'a> FunctionLowerer<'a> {
                     .functions
                     .get(fid)
                     .and_then(|info| info.param_types.get(index)),
+                Expr::ExternFuncRef { param_types, .. } => param_types.get(index),
                 _ => None,
             };
             let argument_type = self.infer_expr_type(arg);
+            if matches!(expected, Some(HirType::Named(name)) if name == "ByteStream") {
+                ensure!(
+                    matches!(&argument_type, HirType::Named(name) if name == "ByteStream"),
+                    "Stream parameters require ByteStream arguments"
+                );
+            }
             if expected.is_some_and(super::bytes::is_byte_view) {
                 ensure!(
                     super::bytes::is_byte_view(&argument_type),
@@ -1001,12 +1011,12 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn cleanup_resources(&mut self) {
-        if let (Some(stream_val), Some((drop, _))) =
+        if let (Some(stream_val), Some(helpers)) =
             (self.stream_parameter, self.registry.stream_helpers)
         {
             self.op(
                 Operator::Call {
-                    function_index: drop,
+                    function_index: helpers.drop,
                 },
                 &[stream_val],
                 &[],

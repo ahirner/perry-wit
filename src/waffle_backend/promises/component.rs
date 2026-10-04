@@ -8,17 +8,10 @@ use waffle::Type;
 
 use super::{PromisePlan, TaskTarget};
 use crate::waffle_backend::{
-    component::{component_value_type, entry_signature},
+    component::{component_value_type, entry_signature, forward},
     registry::{canonical_param_types, map_return_type_to_waffle, map_type_to_waffle},
     resolve::ResolvedContract,
 };
-
-struct Forward {
-    name: String,
-    params: Vec<&'static str>,
-    results: Vec<&'static str>,
-    target: String,
-}
 
 fn core_type(ty: Type) -> &'static str {
     match ty {
@@ -42,7 +35,7 @@ pub(crate) fn frame(
         ("yield", vec![], vec![]),
     ]
     .into_iter()
-    .map(|(name, params, results)| Forward {
+    .map(|(name, params, results)| forward::Function {
         name: name.into(),
         params,
         results,
@@ -59,7 +52,7 @@ pub(crate) fn frame(
                 .into_iter()
                 .map(core_type),
         );
-        forwards.push(Forward {
+        forwards.push(forward::Function {
             name: task.symbol.clone(),
             params,
             results: vec!["i32"],
@@ -67,33 +60,11 @@ pub(crate) fn frame(
         });
     }
     let mut wat = format!("(component\n{host_imports}\n(core instance $host {host_wires})\n");
-    writeln!(
-        wat,
-        "(core module $forward (table (export \"table\") {} funcref)",
-        forwards.len()
-    )?;
-    for (index, forward) in forwards.iter().enumerate() {
-        let params = forward.params.join(" ");
-        let results = forward.results.join(" ");
-        writeln!(
-            wat,
-            "(type $f{index} (func (param {params}) (result {results})))"
-        )?;
-        writeln!(
-            wat,
-            "(func (export {:?}) (param {params}) (result {results})",
-            forward.name
-        )?;
-        for param in 0..forward.params.len() {
-            writeln!(wat, "local.get {param}")?;
-        }
-        writeln!(wat, "i32.const {index} call_indirect (type $f{index}))")?;
-    }
-    writeln!(wat, ") (core instance $forward (instantiate $forward))")?;
+    wat.push_str(&forward::declare("promises", &forwards)?);
     writeln!(wat, "(core module $guest {core_body})")?;
     writeln!(
         wat,
-        "(core instance $guest (instantiate $guest (with \"host\" (instance $host)) (with \"promises\" (instance $forward))))"
+        "(core instance $guest (instantiate $guest (with \"host\" (instance $host)) (with \"promises\" (instance $promises-forward))))"
     )?;
     wat.push_str(
         r#"
@@ -202,25 +173,7 @@ pub(crate) fn frame(
             task.symbol, task.symbol
         )?;
     }
-    wat.push_str("(core module $wire (import \"forward\" \"table\" (table 0 funcref))\n");
-    for (index, forward) in forwards.iter().enumerate() {
-        writeln!(
-            wat,
-            "(import \"targets\" {:?} (func $f{index} (param {}) (result {})))",
-            forward.name,
-            forward.params.join(" "),
-            forward.results.join(" ")
-        )?;
-    }
-    wat.push_str("(elem (i32.const 0) func");
-    for index in 0..forwards.len() {
-        write!(wat, " $f{index}")?;
-    }
-    wat.push_str("))\n(core instance $wire (instantiate $wire (with \"forward\" (instance $forward)) (with \"targets\" (instance\n");
-    for forward in &forwards {
-        writeln!(wat, "(export {:?} {})", forward.name, forward.target)?;
-    }
-    wat.push_str("))))\n");
+    wat.push_str(&forward::bind("promises", &forwards)?);
     wat.push_str(&entry_adapter(contract)?);
     wat.push(')');
     Ok(wat)

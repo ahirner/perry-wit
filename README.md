@@ -173,8 +173,12 @@ Unused declarations introduce no component imports; dependencies of all emitted
 function bodies are retained conservatively.
 An entry may own one `ByteStream` parameter, represented by a native `stream<u8>`.
 Immediately awaited `readChunk(input)` reads up to 8192 bytes into a reusable
-buffer; `byteAt(index)` accesses the current chunk and traps on invalid indices.
-The next read replaces that chunk. A zero count means EOF; a capability's separate
+managed buffer; `byteAt(index)` accesses the current chunk and traps on invalid indices.
+Immediately awaited `readInto(input, destination)` reads directly into a `Uint8Array`
+view and returns the number of bytes written. It leaves the rest of the view and
+bytes outside the view unchanged. An empty destination returns zero without
+consuming input. Both read APIs invalidate the previous chunk.
+A zero count from a nonempty read means EOF; a capability's separate
 completion future must still be checked for recoverable errors. Source helper
 functions borrow the input, and entry cleanup closes it after `finally`, including
 early returns and numeric errors. Calls are serial: the pinned host queues
@@ -203,8 +207,9 @@ retain references across source calls and suspended native tasks. Loop backedges
 trace live strings, interior views, Promise outcomes, observers, byte views, and
 their backing storage, then reclaim and coalesce dead allocations. Storage is
 bounded by live values and a fixed
-number of reference slots per active source frame. Stream and callback owners
-will extend this tracing contract as their consumers land.
+number of reference slots per active source frame. Native input reads share this
+managed memory, retaining the chunk buffer and destination views through suspension
+and collection. Returned streams and callback owners still need lifecycle support.
 String `for…of` iteration evaluates its input once and yields complete Unicode
 scalars, including separate combining marks. It supports nested `for`/`while`
 loops, numeric updates, `break`/`continue`, and `finally` cleanup across P3 waits.

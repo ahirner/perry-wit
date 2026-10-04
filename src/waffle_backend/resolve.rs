@@ -30,6 +30,7 @@ pub(crate) enum TypedIntrinsic {
     Capability(CapabilityOperation),
     HostDouble,
     ReadChunk,
+    ReadInto,
     ByteAt,
     Custom {
         name: String,
@@ -45,6 +46,7 @@ impl TypedIntrinsic {
             Self::Capability(operation) => operation.name(),
             Self::HostDouble => "hostDouble",
             Self::ReadChunk => "readChunk",
+            Self::ReadInto => "readInto",
             Self::ByteAt => "byteAt",
             Self::Custom { name, .. } => name.as_str(),
         }
@@ -53,7 +55,7 @@ impl TypedIntrinsic {
     pub(crate) fn is_async(&self) -> bool {
         match self {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
-            Self::HostDouble | Self::ReadChunk => true,
+            Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
             Self::ByteAt => false,
             Self::Custom { is_async, .. } => *is_async,
         }
@@ -82,6 +84,7 @@ impl TypedIntrinsic {
             }
             Self::HostDouble | Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
+            Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
             Self::Custom {
                 params, returns, ..
             } => (params.clone(), returns.clone()),
@@ -202,6 +205,19 @@ pub(crate) fn resolve_contract(
                 );
                 intrinsics.insert(name.clone(), TypedIntrinsic::ReadChunk);
             }
+            "readInto" => {
+                ensure!(
+                    params.len() == 2
+                        && matches!(&params[0], HirType::Named(n) if n == "ByteStream")
+                        && super::bytes::is_byte_view(&params[1]),
+                    "readInto signature must be (stream: ByteStream, destination: Uint8Array) => Promise<number>"
+                );
+                ensure!(
+                    matches!(ret, HirType::Promise(inner) if matches!(**inner, HirType::Number)),
+                    "readInto must return Promise<number>"
+                );
+                intrinsics.insert(name.clone(), TypedIntrinsic::ReadInto);
+            }
             "byteAt" => {
                 ensure!(
                     params.len() == 1 && matches!(params[0], HirType::Number),
@@ -300,7 +316,7 @@ pub(crate) fn resolve_contract(
         stream_inputs == 1
             || !intrinsics.values().any(|intrinsic| matches!(
                 intrinsic,
-                TypedIntrinsic::ReadChunk | TypedIntrinsic::ByteAt
+                TypedIntrinsic::ReadChunk | TypedIntrinsic::ReadInto | TypedIntrinsic::ByteAt
             )),
         "Stream operations require a ByteStream entry input"
     );

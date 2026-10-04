@@ -95,6 +95,36 @@ async fn compiled_source_scans_a_real_p3_file_across_component_boundaries() -> R
         }
         return total;
     }"#;
+    check_source_scan(source).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_source_reads_a_real_p3_file_into_managed_views() -> Result<()> {
+    let source = r#"
+    declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
+    export async function run(input: ByteStream): Promise<number> {
+        const bytes = new Uint8Array(4099);
+        bytes[0] = 91;
+        bytes[4098] = 17;
+        const view = bytes.subarray(2, 4098);
+        let total = 0;
+        let count = await readInto(input, view);
+        while (count > 0) {
+            let index = 0;
+            while (index < count) {
+                total = total + view[index];
+                index = index + 1;
+            }
+            count = await readInto(input, view);
+        }
+        if (bytes[0] !== 91) { return -1; }
+        if (bytes[4098] !== 17) { return -1; }
+        return total;
+    }"#;
+    check_source_scan(source).await
+}
+
+async fn check_source_scan(source: &str) -> Result<()> {
     let compiled =
         compile_typescript_waffle(source, "file-scan.ts", &WaffleCompileOptions::default())?;
     let consumer = compiled.component_wat.unwrap();

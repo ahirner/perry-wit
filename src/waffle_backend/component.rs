@@ -1,5 +1,7 @@
 //! WebAssembly Component Model framing for WAFFLE core modules, supporting WASI 0.3 (P3).
 
+pub(crate) mod forward;
+
 use std::collections::BTreeSet;
 
 use crate::waffle_backend::capabilities::LowerCapability;
@@ -25,16 +27,6 @@ pub(crate) fn frame_component(
     let mut host_wires = String::new();
     let mut emitted_operations = BTreeSet::new();
 
-    if contract.has_stream_input() {
-        host_imports.push_str(super::streams::COMPONENT_ADAPTER);
-        host_wires.push_str(
-            r#"
-          (export "__perry.stream.start" (func $stream-io "start"))
-          (export "__perry.stream.drop" (func $stream-io "drop"))
-        "#,
-        );
-    }
-
     for (name, intrinsic) in &contract.intrinsics {
         match intrinsic {
             TypedIntrinsic::HostDouble => {
@@ -56,16 +48,7 @@ pub(crate) fn frame_component(
                 }
                 host_wires.push_str(&format!("      (export {name:?} {})\n", plan.core_function));
             }
-            TypedIntrinsic::ByteAt | TypedIntrinsic::ReadChunk => {
-                let function = if matches!(intrinsic, TypedIntrinsic::ReadChunk) {
-                    "read-chunk"
-                } else {
-                    "byte-at"
-                };
-                host_wires.push_str(&format!(
-                    "(export {name:?} (func $stream-io {function:?}))\n"
-                ));
-            }
+            TypedIntrinsic::ByteAt | TypedIntrinsic::ReadChunk | TypedIntrinsic::ReadInto => {}
             TypedIntrinsic::Custom { .. } => bail!(
                 "Intrinsic '{}' is unsupported in components until its import adapter is implemented",
                 intrinsic.name()
@@ -100,13 +83,31 @@ pub(crate) fn frame_component(
         ""
     };
 
+    let (stream_imports, stream_adapters) = if contract.has_stream_input() {
+        let functions = super::streams::forward_functions();
+        host_imports.push_str(&forward::declare("streams", &functions)?);
+        let adapters = format!(
+            r#"
+  (type $bytes (stream u8))
+  (core func $stream-read (canon stream.read $bytes (memory (core memory $guest "memory"))))
+  (core func $stream-drop (canon stream.drop-readable $bytes))
+{}"#,
+            forward::bind("streams", &functions)?
+        );
+        (r#"(with "streams" (instance $streams-forward))"#, adapters)
+    } else {
+        ("", String::new())
+    };
+
     let component_wat = format!(
         r#"(component
 {host_imports}
   (core module $guest {core_body})
   (core instance $guest (instantiate $guest
+    {stream_imports}
     (with "host" (instance
 {host_wires}))))
+{stream_adapters}
   (func (export "run") async {entry_signature}
     (canon lift (core func $guest "run"){memory_option}{post_return_option})))"#
     );

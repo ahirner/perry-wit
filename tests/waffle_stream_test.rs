@@ -16,6 +16,9 @@ use wasmtime::component::{
 };
 use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 
+#[path = "waffle_stream/transfers.rs"]
+mod transfers;
+
 const SUM_BYTES: &str = r#"
 declare function readChunk(input: ByteStream): Promise<number>;
 declare function byteAt(index: number): number;
@@ -37,20 +40,7 @@ export async function run(input: ByteStream): Promise<number> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn source_streams_read_more_than_guest_memory_and_reuse_the_instance() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("scan.ts");
-    fs::write(&path, SUM_BYTES)?;
-    let checked = Command::new("tsc")
-        .current_dir(directory.path())
-        .args(["--noEmit", "--strict", "--target", "ES2022"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
-        .arg(path)
-        .output()?;
-    assert!(
-        checked.status.success(),
-        "{}",
-        String::from_utf8_lossy(&checked.stdout)
-    );
+    check_typescript(SUM_BYTES)?;
     let (mut store, instance) = instantiate(SUM_BYTES).await?;
     let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
     for size in [0, 1, 8191, 8192, 8193, 4 * 1024 * 1024, 37] {
@@ -196,6 +186,11 @@ fn unsupported_stream_ownership_is_diagnosed() {
         "export function run(a: ByteStream, b: ByteStream): number { return 0; }",
         "declare function readChunk(input: ByteStream): Promise<number>; export async function run(input: ByteStream): Promise<number> { const pending = readChunk(input); return await pending; }",
         "declare function readChunk(input: ByteStream): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readChunk(7); }",
+        "declare function readChunk(input: ByteStream): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readChunk(true); }",
+        "declare function readChunk(input: ByteStream): Promise<number>; async function read(input: ByteStream): Promise<number> { return await readChunk(input); } export async function run(input: ByteStream): Promise<number> { return await read(new Uint8Array(1)); }",
+        "declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readInto(input, true); }",
+        "declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readInto(new Uint8Array(1), new Uint8Array(1)); }",
+        "declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>; export async function run(input: ByteStream): Promise<number> { const pending = readInto(input, new Uint8Array(1)); return await pending; }",
     ] {
         assert!(
             compile_typescript_waffle(
@@ -372,6 +367,24 @@ async fn instantiate(source: &str) -> Result<(Store<StoreLimits>, wasmtime::comp
         .instantiate_async(&mut store, &component)
         .await?;
     Ok((store, instance))
+}
+
+fn check_typescript(source: &str) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("scan.ts");
+    fs::write(&path, source)?;
+    let checked = Command::new("tsc")
+        .current_dir(directory.path())
+        .args(["--noEmit", "--strict", "--target", "ES2022"])
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
+        .arg(path)
+        .output()?;
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    Ok(())
 }
 
 #[derive(Default)]

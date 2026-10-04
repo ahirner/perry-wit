@@ -12,7 +12,7 @@ use waffle::{
 };
 
 use crate::waffle_backend::promises::TaskTarget;
-use crate::waffle_backend::resolve::ResolvedContract;
+use crate::waffle_backend::resolve::{ResolvedContract, TypedIntrinsic};
 
 /// Host-facing calling convention, separate from the exception-aware guest ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
-    pub(crate) stream_helpers: Option<(Func, Func)>,
+    pub(crate) stream_helpers: Option<super::streams::StreamHelpers>,
     pub(crate) string_helpers: Option<crate::waffle_backend::strings::StringHelperFuncs>,
     pub(crate) memory: waffle::Memory,
 }
@@ -101,6 +101,12 @@ impl ModuleRegistry {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
         for (name, intrinsic) in &contract.intrinsics {
+            if matches!(
+                intrinsic,
+                TypedIntrinsic::ReadChunk | TypedIntrinsic::ReadInto | TypedIntrinsic::ByteAt
+            ) {
+                continue;
+            }
             let signature = module.signatures.push(intrinsic.core_signature()?);
             let func = module.funcs.push(FuncDecl::Import(signature, name.clone()));
             module.imports.push(Import {
@@ -111,28 +117,9 @@ impl ModuleRegistry {
             intrinsics.insert(name.clone(), func);
         }
 
-        // Entry owns the readable end; ordinary source helpers only borrow it.
-        let stream_helpers = if contract.has_stream_input() {
-            let mut declare = |name: &str| {
-                let sig = module.signatures.push(SignatureData {
-                    params: vec![Type::I32],
-                    returns: vec![],
-                });
-                let function = module.funcs.push(FuncDecl::Import(sig, name.into()));
-                module.imports.push(Import {
-                    module: "host".into(),
-                    name: name.into(),
-                    kind: ImportKind::Func(function),
-                });
-                function
-            };
-            Some((
-                declare("__perry.stream.drop"),
-                declare("__perry.stream.start"),
-            ))
-        } else {
-            None
-        };
+        let stream_imports = contract
+            .has_stream_input()
+            .then(|| super::streams::declare_imports(module));
 
         let promises = if let Some(plan) = &contract.promises {
             let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
@@ -200,6 +187,27 @@ impl ModuleRegistry {
                 memory,
                 allocator.expect("byte storage requires an allocator"),
             )?)
+        } else {
+            None
+        };
+
+        let stream_helpers = if let Some(imports) = stream_imports {
+            let helpers = super::streams::emit_runtime(
+                module,
+                memory,
+                allocator.expect("stream buffers require an allocator"),
+                imports,
+            )?;
+            for (name, intrinsic) in &contract.intrinsics {
+                let function = match intrinsic {
+                    TypedIntrinsic::ReadChunk => helpers.read_chunk,
+                    TypedIntrinsic::ReadInto => helpers.read_into,
+                    TypedIntrinsic::ByteAt => helpers.byte_at,
+                    _ => continue,
+                };
+                intrinsics.insert(name.clone(), function);
+            }
+            Some(helpers)
         } else {
             None
         };

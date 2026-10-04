@@ -19,5 +19,11 @@ interface ByteStream {
  * Must be immediately awaited. The next read replaces the current chunk. */
 declare function readChunk(input: ByteStream): Promise<number>;
 
+/** Fill a byte view and return the number of bytes written, leaving the rest unchanged.
+ * A nonempty view returning zero means EOF, which does not imply producer success.
+ * An empty view returns zero without consuming input. Invalidates the current chunk.
+ * Must be immediately awaited; the destination and backing storage remain live. */
+declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
+
 /** Read a byte from the current chunk. Noninteger or out-of-range indices trap. */
 declare function byteAt(index: number): number;
