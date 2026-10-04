@@ -44,6 +44,7 @@ wasmparser = "0.261"
 [dev-dependencies]
 wasmtime = { version = "49.0.2", default-features = false, features = ["component-model-async", "cranelift", "runtime", "std", "anyhow"] }
 wasmtime-wasi = { version = "49.0.2", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "49.0.2", default-features = false, features = ["p3", "default-send-request"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
 tempfile = "3.27.0"
 perry-json-helper = { path = "crates/json-helper" }

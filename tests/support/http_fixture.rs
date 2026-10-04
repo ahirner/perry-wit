@@ -88,6 +88,11 @@ pub enum Reply {
     Body(u16, String),
     WithHeaders(u16, Vec<(String, String)>, String),
     Bytes(u16, Vec<u8>),
+    #[allow(
+        dead_code,
+        reason = "Used by the P3 HTTP tests, which share this fixture"
+    )]
+    TruncatedBody(Vec<u8>, usize),
     Disconnect,
     Stall,
     StallBody,
@@ -126,6 +131,10 @@ impl HttpFixture {
                         }
                         Reply::Bytes(status, body) => {
                             let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                            let _ = stream.write_all(&body);
+                        }
+                        Reply::TruncatedBody(body, declared_length) => {
+                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n");
                             let _ = stream.write_all(&body);
                         }
                         Reply::WithHeaders(status, headers, body) => {
