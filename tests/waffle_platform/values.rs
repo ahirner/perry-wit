@@ -107,7 +107,7 @@ async fn mixed_fields_aliases_and_retained_outcomes_keep_their_references() -> R
         if(await pending!==date) {throw 96;}
         if(await pending!==await pending) {throw 95;}
         const captured=await pending;
-        delete state.value;
+        state.value=undefined;
         const optional:{value?:any}=state;
         if(optional.value!==undefined) {throw 94;}
         try {return time(captured);}

@@ -17,32 +17,9 @@ use perry_hir::{
 use waffle::{MemoryArg, Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
-    pub(super) fn delete_property(&mut self, receiver: &Expr, key: &Expr) -> Result<Value> {
-        if !crate::waffle_backend::values::has_dynamic_properties(&self.infer_expr_type(receiver)) {
-            return self.object_delete(receiver, key);
-        }
-        let receiver = self.value_operand(receiver)?;
-        let key = self.value_operand(key)?;
-        self.dynamic_property_operation(receiver, key, true)
-    }
-
-    pub(super) fn dynamic_property_operation(
-        &mut self,
-        receiver: Value,
-        key: Value,
-        delete: bool,
-    ) -> Result<Value> {
-        let delete = self.op(
-            Operator::I32Const {
-                value: u32::from(delete),
-            },
-            &[],
-            &[Type::I32],
-        );
-        let result = self.call_completion(
-            self.registry.value_access.unwrap().property_operation,
-            &[receiver, key, delete],
-        );
+    pub(super) fn dynamic_has(&mut self, receiver: Value, key: Value) -> Result<Value> {
+        let result =
+            self.call_completion(self.registry.value_access.unwrap().has, &[receiver, key]);
         Ok(abi::decode_payload(
             &mut self.body,
             self.block,

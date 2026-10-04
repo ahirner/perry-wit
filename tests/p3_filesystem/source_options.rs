@@ -10,7 +10,7 @@ async fn options_retain_aliases_mutations_and_unknown_fields_through_helpers_and
     fs::write(directory.path().join("file"), "😀é")?;
     let source = r#"
     import fs from 'fs';
-    interface Options {encoding:string; flag:string;}
+    interface Options {encoding?:string; flag:string;}
     function make(label:string):Options { return {encoding:label,flag:'r'}; }
     function update(options:Options,label:string):Options { options.encoding=label; return options; }
     function text(value:string|Uint8Array):string {
@@ -26,15 +26,14 @@ async fn options_retain_aliases_mutations_and_unknown_fields_through_helpers_and
         update(alias,'binary');
         if(options.encoding!=='binary') {return 'lost mutation';}
         if (options!==alias) {return 'lost identity';}
-        options.extra = new Uint8Array(128);
-        try {fs.readFileSync('/outside/file',options);return 'accepted unknown';}
+        const invalid={encoding:options.encoding,flag:options.flag,extra:new Uint8Array(128)};
+        try {fs.readFileSync('/outside/file',invalid);return 'accepted unknown';}
         catch(error) {if(error!==12) {throw error;}}
-        delete alias.extra;
         const bytes=fs.readFileSync('/sandbox/file',options);
         options.flag='w';
         fs.writeFileSync('/sandbox/copy',bytes,options);
         options.flag='r';
-        delete options.encoding;
+        options.encoding=undefined;
         const again=fs.readFileSync('/sandbox/copy',options);
         if(typeof again==='string') {return 'wrong default';}
         return first+new TextDecoder().decode(again);
@@ -71,11 +70,11 @@ async fn options_keep_source_order_duplicate_effects_and_rejection_before_io() -
     }
     export function run(path:string):number {
         const state=new Uint8Array(1);
-        const options=make(state);
-        try {fs.writeFileSync(effect(state,path),effect(state,'changed'),options);return 0;}
+        const invalid=make(state);
+        try {fs.writeFileSync(effect(state,path),effect(state,'changed'),invalid);return 0;}
         catch(error) {if(error!==12) {throw error;}}
         if(state[0]!==6) {return -1;}
-        delete options.unknown;
+        const options:Options={encoding:invalid.encoding,flag:invalid.flag};
         fs.writeFileSync('/sandbox/copy','é😀',options);
         options.flag='r';
         const value=fs.readFileSync('/sandbox/copy',options);
@@ -157,13 +156,12 @@ async fn stored_metadata_options_validate_current_fields_and_types() -> Result<(
         const key='rec'+'ursive';
         alias[key]=true;
         try {fs.readdirSync('/outside',listing);return -5;} catch(error) {if(error!==12) {throw error;}}
-        delete alias[key];
+        alias[key]=false;
         stat.bigint=true;
         try {fs.statSync('/outside',stat);return -6;} catch(error) {if(error!==12) {throw error;}}
-        delete stat.bigint;
-        listing.unknown={encoding:'utf8'};
-        try {fs.readdirSync('/outside',listing);return -7;} catch(error) {if(error!==12) {throw error;}}
-        delete listing.unknown;
+        stat.bigint=false;
+        const invalid={encoding:listing.encoding,unknown:{encoding:'utf8'}};
+        try {fs.readdirSync('/outside',invalid);return -7;} catch(error) {if(error!==12) {throw error;}}
         return fs.statSync('/sandbox/é😀',stat).size+fs.readdirSync('/sandbox',listing).length;
     }"#;
     let context = WasiCtxBuilder::new()
@@ -188,7 +186,7 @@ async fn typed_property_reads_reject_missing_or_retagged_fields() -> Result<()> 
         const options:Options={encoding:'utf8'};
         const key='enc'+'oding';
         if(mode===1) {options[key]=123;}
-        if(mode===2) {delete options[key];}
+        if(mode===2) {options[key]=undefined;}
         return read(options);
     }"#;
     let (mut store, instance) = instantiate(source, WasiCtxBuilder::new().build()).await?;
@@ -242,7 +240,7 @@ async fn stored_options_match_node_for_supported_encodings_and_metadata() -> Res
         options.flag='r';
         const text=fs.readFileSync(file,options);
         if(typeof text!=='string') {return 'expected text';}
-        delete alias.encoding;
+        alias.encoding=undefined;
         const bytes=fs.readFileSync(file,options.encoding);
         if(typeof bytes==='string') {return 'expected bytes';}
         const metadata={bigint:false,throwIfNoEntry:true};
@@ -290,7 +288,7 @@ fn reusable_options_and_structured_promises_match_sdk_declarations() -> Result<(
     export async function run(path:string):Promise<string[]> {
         const options:ReadOptions={encoding:'utf8',flag:'r'};
         const first:string|Uint8Array=fs.readFileSync(path,options);
-        delete options.encoding;
+        options.encoding=undefined;
         const second:string|Uint8Array=fs.readFileSync(path,options);
         const stat:Stats=await retain(fs.statSync(path,{bigint:false,throwIfNoEntry:true}));
         if(stat.size<0) {throw 1;}

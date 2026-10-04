@@ -60,7 +60,7 @@
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
-        "Reusable plain option objects retain aliases, mutation, deletion, and field effects; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
+        "Reusable plain option objects retain aliases, typed mutation, optional undefined fields, and field effects; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
         "mkdirSync, unlinkSync, and rmdirSync only accept omitted or undefined options",
         "Directory order is host-defined, materialization uses memory proportional to contents, and absent modification timestamps return zero",
         "Component Stats use the exported stats record and stats-kind enum; string arrays use list<string>, also inside numeric-error Result returns",
@@ -103,7 +103,7 @@
       "invariants": [
         "Named aliases, namespace imports, and default imports retain binding identity; unused imports add no filesystem capability",
         "String data preserves exact UTF-8 and NUL bytes; Uint8Array data writes only its visible range",
-        "Arguments and plain object fields execute in source order; aliases, mutation, deletion, and duplicate-field effects survive validation and collection",
+        "Arguments and plain object fields execute in source order; aliases, typed mutation, optional undefined fields, and duplicate-field effects survive validation and collection",
         "Invalid encodings, flags, and unknown option properties fail before opening or truncating a file",
         "Normalized paths select the longest matching preopen on a component boundary; symlink resolution remains host-confined",
         "Shared native stream writes preserve partial transfers and await an independent filesystem completion",
@@ -111,7 +111,7 @@
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
-        "Options accept encoding strings, null, undefined, and reusable plain objects; getters, setters, methods, spreads, computed literal keys, and custom prototypes are diagnosed",
+        "Options accept encoding strings, null, undefined, and reusable plain objects; runtime delete, getters, setters, methods, spreads, computed literal keys, and custom prototypes are diagnosed",
         "Only the default or w flag is supported; UTF8 labels accept ASCII case, and binary encoding is restricted to byte data",
         "Errors throw the one-based WASI 0.3 filesystem error ordinal; already written bytes are not rolled back",
         "Host traps and cancellation require store disposal; plain objects remain guest-internal with nonrecursive structural types or simple interfaces"

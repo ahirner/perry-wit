@@ -5,7 +5,6 @@
   (import "host" "string-index" (func $string-index (param i32 f64) (result i32)))
   (import "host" "object-get" (func $object-get (param i32 i32) (result i32)))
   (import "host" "object-set" (func $object-set (param i32 i32 i32 f64) (result i32 f64)))
-  (import "host" "object-delete" (func $object-delete (param i32 i32) (result i32)))
   (import "host" "object-dynamic" (func $object-dynamic (param i32) (result i32)))
   (memory 1)
 
@@ -121,27 +120,22 @@
     (i32.store (i32.add (i32.load (local.get $pointer)) (i32.mul (local.get $position) (i32.const 4))) (local.get $item))
     (i32.const 0) (f64.const 0))
 
-  (func (export "value.property-operation") (param $value i32) (param $key i32) (param $delete i32) (result i32 f64)
+  (func (export "value.has") (param $value i32) (param $key i32) (result i32 f64)
     (local $tag i32) (local $pointer i32) (local $index f64) (local $slot i32)
     (local.set $tag (i32.load (local.get $value)))
     (if (i32.eq (local.get $tag) (i32.const 6)) (then
       (if (i32.ne (i32.load (local.get $key)) (i32.const 4)) (then (return (i32.const 1) (f64.const 12))))
       (local.set $pointer (i32.trunc_f64_u (f64.load offset=8 (local.get $value))))
       (local.set $slot (i32.trunc_f64_u (f64.load offset=8 (local.get $key))))
-      (if (local.get $delete)
-        (then (return (i32.const 0) (f64.convert_i32_u (call $object-delete (local.get $pointer) (local.get $slot)))))
-        (else (return (i32.const 0) (f64.convert_i32_u (i32.ne (call $object-get (local.get $pointer) (local.get $slot)) (i32.const 0))))))))
+      (return (i32.const 0) (f64.convert_i32_u (i32.ne (call $object-get (local.get $pointer) (local.get $slot)) (i32.const 0))))))
     (if (i32.ne (local.get $tag) (i32.const {{array-tag}})) (then (return (i32.const 1) (f64.const 12))))
     (if (call $is-length (local.get $key)) (then
-      (if (local.get $delete) (then (return (i32.const 1) (f64.const 12))))
       (return (i32.const 0) (f64.const 1))))
     (local.set $index (call $position (local.get $key)))
     (local.set $pointer (i32.trunc_f64_u (f64.load offset=8 (local.get $value))))
     (if (call $valid-position (local.get $index)) (then
       (if (f64.lt (local.get $index) (f64.convert_i32_u (i32.load offset=4 (local.get $pointer)))) (then
         (local.set $slot (i32.add (i32.load (local.get $pointer)) (i32.mul (i32.trunc_f64_u (local.get $index)) (i32.const 4))))
-        (if (local.get $delete)
-          (then (i32.store (local.get $slot) (i32.const 0)))
-          (else (return (i32.const 0) (f64.convert_i32_u (i32.ne (i32.load (local.get $slot)) (i32.const 0))))))))))
-    (i32.const 0) (f64.convert_i32_u (local.get $delete)))
+        (return (i32.const 0) (f64.convert_i32_u (i32.ne (i32.load (local.get $slot)) (i32.const 0))))))))
+    (i32.const 0) (f64.const 0))
 )

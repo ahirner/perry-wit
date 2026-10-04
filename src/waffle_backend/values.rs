@@ -105,7 +105,7 @@ pub(crate) struct ValueHelpers {
 #[derive(Clone, Copy)]
 pub(crate) struct ValueAccessHelpers {
     pub(crate) array_new: Func,
-    pub(crate) property_operation: Func,
+    pub(crate) has: Func,
     pub(crate) get: Func,
     pub(crate) set: Func,
 }
@@ -140,11 +140,10 @@ pub(crate) fn emit_access_runtime(
             ("object-get", objects.get),
             ("object-set", objects.set),
             ("object-dynamic", objects.dynamic),
-            ("object-delete", objects.delete),
         ]),
     )?;
     Ok(ValueAccessHelpers {
-        property_operation: functions["value.property-operation"],
+        has: functions["value.has"],
         array_new: functions["value.array-new"],
         get: functions["value.get"],
         set: functions["value.set"],

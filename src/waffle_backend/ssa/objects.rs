@@ -173,22 +173,6 @@ impl FunctionLowerer<'_> {
         Ok(original)
     }
 
-    pub(super) fn object_delete(&mut self, receiver: &Expr, key: &Expr) -> Result<Value> {
-        ensure!(
-            is_object(&self.infer_expr_type(receiver)),
-            "delete requires a plain object receiver"
-        );
-        let object = self.expression(receiver)?;
-        let key = self.string_receiver(key)?;
-        Ok(self.op(
-            Operator::Call {
-                function_index: self.registry.object_helpers.unwrap().delete,
-            },
-            &[object, key],
-            &[Type::I32],
-        ))
-    }
-
     pub(super) fn object_get(&mut self, receiver: &Expr, key: &Expr) -> Result<Value> {
         let ty = self.object_property_type(receiver, key);
         ensure!(

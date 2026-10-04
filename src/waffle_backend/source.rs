@@ -481,13 +481,21 @@ impl VisitMut for SourceCalls {
     fn visit_mut_array_lit(&mut self, array: &mut ast::ArrayLit) {
         if array.elems.iter().any(Option::is_none) {
             self.error.get_or_insert_with(|| {
-                anyhow::anyhow!(
-                    "Array elisions are unsupported; create holes through length or deletion"
-                )
+                anyhow::anyhow!("Array elisions are unsupported; arrays must be dense")
             });
             return;
         }
         array.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_unary_expr(&mut self, expression: &mut ast::UnaryExpr) {
+        if expression.op == ast::UnaryOp::Delete {
+            self.error.get_or_insert_with(|| {
+                anyhow::anyhow!("Runtime delete is unsupported by the static TypeScript contract")
+            });
+            return;
+        }
+        expression.visit_mut_children_with(self);
     }
 
     fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {

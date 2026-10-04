@@ -1270,7 +1270,7 @@ impl<'a> FunctionLowerer<'a> {
             {
                 let key = self.value_operand(property)?;
                 let object = self.value_operand(object)?;
-                self.dynamic_property_operation(object, key, false)
+                self.dynamic_has(object, key)
             }
             Expr::ObjectAssign { target, sources } => self.object_assign(target, sources),
             Expr::ObjectKeys(object) => self.object_enumerate(object, false),
@@ -1307,13 +1307,9 @@ impl<'a> FunctionLowerer<'a> {
             {
                 self.object_set(target, key, value)
             }
-            Expr::Delete(target) => match target.as_ref() {
-                Expr::PropertyGet {
-                    object, property, ..
-                } => self.delete_property(object, &Expr::String(property.clone())),
-                Expr::IndexGet { object, index } => self.delete_property(object, index),
-                _ => bail!("delete requires a plain object property"),
-            },
+            Expr::Delete(_) => {
+                bail!("Runtime delete is unsupported by the static TypeScript contract")
+            }
             Expr::TypeOf(operand) => self.type_of(operand),
             Expr::Unary {
                 op: UnaryOp::Not, ..

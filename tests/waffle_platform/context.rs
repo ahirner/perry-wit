@@ -137,10 +137,8 @@ async fn object_enumeration_matches_node_and_returns_independent_snapshots() -> 
         const before=Object.values(object);
         const keys=Object.keys(object);
         if(!('2' in object)) {throw 99;}
-        delete object['2'];
-        if('2' in object) {throw 98;}
+        if('missing' in object) {throw 98;}
         Object.assign(object,{'2':'discarded'},null,{'2':'changed'});
-        delete object.b;
         Object.assign(object,undefined,{b:'after'});
         let index=0;while(index<3000) {const other={value:'é'+'😀'};index=index+1;}
         if(mode===0) {return keys;}

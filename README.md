@@ -318,6 +318,8 @@ with `size: f64`, `mtime-ms: f64`, and a `stats-kind` enum. Its cases are `block
 `other`. Both values also work in numeric-error `Result` returns; guest identity is
 preserved within an invocation. Plain option objects remain guest-internal and use
 nonrecursive structural types or simple interfaces without inheritance or methods.
+Runtime `delete` is diagnosed for all receiver types; clear optional fields with
+`undefined` or construct a new record.
 `perry:http` exports immediately awaited `get(scheme, authority, path, headers,
 maxResponseBytes)`. Scheme is `http` or `https`; headers are a string-valued
 dictionary. The caller supplies an integer body limit. The buffered response

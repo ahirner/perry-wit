@@ -22,6 +22,46 @@ fn make_async_engine() -> Result<Engine> {
     Ok(Engine::new(&config)?)
 }
 
+#[test]
+fn runtime_delete_is_diagnosed_before_lowering_for_all_receiver_forms() {
+    for body in [
+        "const value={field:'x'}; delete value.field;",
+        "const value:{field?:string}={field:'x'}; const alias=value; delete alias.field;",
+        "const value:{[key:string]:string}={field:'x'}; const key='field'; delete value[key];",
+        "const value={field:'x'}; delete (value as any).field;",
+        "const value={field:'x'}; delete (<any>value).field;",
+        "const value=['x']; delete value[0];",
+        "const value=new Uint8Array(1); delete value[0];",
+        "const value=JSON.parse('{}'); delete value.field;",
+        "const value={field:'x'}; if(false) {delete value.field;}",
+        "function unused():void {const value={field:'x'};delete value.field;}",
+    ] {
+        let source = format!("export function run():number {{{body}return 0;}}");
+        let error =
+            compile_typescript_waffle(&source, "delete.ts", &WaffleCompileOptions::default())
+                .expect_err("runtime delete must be rejected before emission");
+        assert!(
+            format!("{error:#}").contains("Runtime delete is unsupported"),
+            "{body}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn hir_entry_point_cannot_restore_runtime_delete() -> Result<()> {
+    let source =
+        "export function run():number {const value={field:'x'};delete value.field;return 0;}";
+    let ast = perry_parser::parse_typescript(source, "delete.ts")?;
+    let hir = perry_hir::lower_module(&ast, "main", "delete.ts")?;
+    let error = perry_wit::waffle_backend::compile_hir_owned(hir, &WaffleCompileOptions::default())
+        .expect_err("direct HIR compilation must also reject runtime delete");
+    assert!(
+        format!("{error:#}").contains("Runtime delete is unsupported"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
 #[derive(Default)]
 struct WasiHostState {
     context: WasiCtx,
