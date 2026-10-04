@@ -520,6 +520,27 @@ impl VisitMut for SourceCalls {
         literal.raw = None;
     }
 
+    fn visit_mut_ts_property_signature(&mut self, property: &mut ast::TsPropertySignature) {
+        if property.computed {
+            property.key.visit_mut_with(self);
+        }
+        property.type_ann.visit_mut_with(self);
+    }
+
+    fn visit_mut_prop(&mut self, property: &mut ast::Prop) {
+        if let ast::Prop::Shorthand(id) = property {
+            let key = ast::PropName::Ident(ast::IdentName::new(id.sym.clone(), id.span));
+            let mut value = id.clone();
+            value.visit_mut_with(self);
+            *property = ast::Prop::KeyValue(ast::KeyValueProp {
+                key,
+                value: Box::new(ast::Expr::Ident(value)),
+            });
+        } else {
+            property.visit_mut_children_with(self);
+        }
+    }
+
     fn visit_mut_var_declarator(&mut self, declaration: &mut ast::VarDeclarator) {
         // Perry approximates factory calls in inferred record fields as any.
         // Preserve explicit annotations; let SSA infer unannotated literal fields.

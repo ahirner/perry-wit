@@ -2,7 +2,7 @@ use anyhow::Result;
 use perry_wit::waffle_backend::{
     WaffleCompileOptions, WaffleCompiled, compile_typescript_for_world,
 };
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, Linker, Val};
 use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 mod records {
@@ -938,5 +938,114 @@ fn component_compilation_requires_an_explicit_world() -> Result<()> {
     assert!(core.component.is_none());
     assert!(core.component_wat.is_none());
     wasmparser::Validator::new().validate_all(&core.core)?;
+    Ok(())
+}
+
+/// Signed clock instants and unsigned identifiers must retain every bit across both ABI directions.
+#[test]
+fn signed_bigint_transport_preserves_scalar_and_nested_instants() -> Result<()> {
+    const WIT: &str = "package test:signed-clock;
+      interface host {
+        record instant { seconds:s64, nanoseconds:u32 }
+        record packet { timestamp:option<instant>, samples:list<s64>, mixed:tuple<s64,u64> }
+        scalar:func(value:s64)->s64;
+        nested:func(value:packet)->packet;
+      }
+      world boundary { import host; use host.{packet};
+        export scalar:func(value:s64)->s64;
+        export nested:func(value:packet)->packet;
+      }";
+    let source = r#"import {scalar as scalarHost,nested as nestedHost} from 'test:signed-clock/host';
+      import type {Packet} from 'test:signed-clock/host';
+      export function scalar(value:bigint):bigint {return scalarHost(value);}
+      export function nested(value:Packet):Packet {return nestedHost(value);}"#;
+    check_sdk_source(WIT, source)?;
+    let compiled = compile_world(source, WIT)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    for function in ["scalar", "nested"] {
+        linker.instance("test:signed-clock/host")?.func_new(
+            function,
+            |_, _, params, results| {
+                results[0] = params[0].clone();
+                Ok(())
+            },
+        )?;
+    }
+    let mut store = Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &component)?;
+    let scalar = instance.get_typed_func::<(i64,), (i64,)>(&mut store, "scalar")?;
+    let nested = instance.get_func(&mut store, "nested").unwrap();
+    for seconds in [
+        i64::MIN,
+        -9_007_199_254_740_993,
+        -1,
+        0,
+        1,
+        9_007_199_254_740_993,
+        i64::MAX,
+    ] {
+        assert_eq!(scalar.call(&mut store, (seconds,))?, (seconds,));
+        for timestamp in [
+            None,
+            Some(Box::new(Val::Record(vec![
+                ("seconds".into(), Val::S64(seconds)),
+                ("nanoseconds".into(), Val::U32(999_999_999)),
+            ]))),
+        ] {
+            let packet = Val::Record(vec![
+                ("timestamp".into(), Val::Option(timestamp)),
+                (
+                    "samples".into(),
+                    Val::List(vec![Val::S64(seconds), Val::S64(-1)]),
+                ),
+                (
+                    "mixed".into(),
+                    Val::Tuple(vec![Val::S64(seconds), Val::U64(u64::MAX)]),
+                ),
+            ]);
+            let mut results = [Val::Bool(false)];
+            nested.call(&mut store, std::slice::from_ref(&packet), &mut results)?;
+            assert_eq!(results[0], packet);
+        }
+    }
+    Ok(())
+}
+
+/// Builtin shadow renaming changes bindings while retaining literal and declared record keys.
+#[test]
+fn builtin_names_remain_literal_record_fields() -> Result<()> {
+    const WIT: &str = "package test:property-names;
+      interface types { record metadata {fetch:string,process:string,console:string} }
+      world boundary {use types.{metadata}; export run:func()->list<metadata>;}";
+    let source = r#"interface Metadata {fetch:string;process:string;console:string}
+      export function run():Metadata[] {
+        const fetch:string='get'; const process:string='local'; const console:string='literal';
+        return [{fetch:'explicit',process:'named',console:'fields'},{fetch,process,console}];
+      }"#;
+    check_sdk_source(WIT, source)?;
+    let compiled = compile_world(source, WIT)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_func(&mut store, "run").unwrap();
+    let mut results = [Val::Bool(false)];
+    run.call(&mut store, &[], &mut results)?;
+    let record = |fetch: &str, process: &str, console: &str| {
+        Val::Record(vec![
+            ("fetch".into(), Val::String(fetch.into())),
+            ("process".into(), Val::String(process.into())),
+            ("console".into(), Val::String(console.into())),
+        ])
+    };
+    assert_eq!(
+        results[0],
+        Val::List(vec![
+            record("explicit", "named", "fields"),
+            record("get", "local", "literal")
+        ])
+    );
     Ok(())
 }

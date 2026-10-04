@@ -359,7 +359,7 @@ impl Adapter<'_> {
                 let target = match self.alias(ty) {
                     Type::F32 => CoreType::F32,
                     Type::F64 => CoreType::F64,
-                    Type::U64 => CoreType::I64,
+                    Type::U64 | Type::S64 => CoreType::I64,
                     _ => CoreType::I32,
                 };
                 self.convert_flat(value, target)
@@ -377,7 +377,7 @@ impl Adapter<'_> {
             Type::U32 | Type::S32 => (Operator::I32Load { memory }, CoreType::I32),
             Type::F32 => (Operator::F32Load { memory }, CoreType::F32),
             Type::F64 => (Operator::F64Load { memory }, CoreType::F64),
-            Type::U64 => (Operator::I64Load { memory }, CoreType::I64),
+            Type::U64 | Type::S64 => (Operator::I64Load { memory }, CoreType::I64),
             Type::Id(id) if matches!(self.wit.resolve.types[id].kind, TypeDefKind::Enum(_)) => {
                 match self.sizes.size(&Type::Id(id)).size_wasm32() {
                     1 => (Operator::I32Load8U { memory }, CoreType::I32),
@@ -391,7 +391,7 @@ impl Adapter<'_> {
     }
     fn lift(&mut self, ty: Type, source: &mut Input<'_>) -> Result<Value> {
         let ty = self.alias(ty);
-        if ty == Type::U64 {
+        if matches!(ty, Type::U64 | Type::S64) {
             let value = self.read_scalar(ty, source)?;
             let pointer = self.allocate(8, 8);
             self.body.add_op(
@@ -546,7 +546,7 @@ impl Adapter<'_> {
     fn lower(&mut self, ty: Type, value: Value, pointer: Value, offset: u32) -> Result<()> {
         let ty = self.alias(ty);
         let memory = self.memory(offset);
-        if ty == Type::U64 {
+        if matches!(ty, Type::U64 | Type::S64) {
             let value = self.load_scalar(ty, value, 0)?;
             self.body.add_op(
                 self.block,

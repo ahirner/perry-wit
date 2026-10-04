@@ -80,8 +80,10 @@ WASI command result.
 
 ### Compile and call exported functions
 
-WIT is authoritative for names, parameter/result types, and async effects. An
-export such as `run-task: func(input: string) -> string` is implemented with:
+WIT is authoritative for names, parameter/result types, and async effects.
+Both `s64` and `u64` use TypeScript `bigint`, including nested records, lists,
+options, and tuples. Literal record field names remain unchanged when they
+match builtins such as `fetch`, `process`, or `console`. An export such as `run-task: func(input: string) -> string` is implemented with:
 
 ```ts
 export function runTask(input: string): string {

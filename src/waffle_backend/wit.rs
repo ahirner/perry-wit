@@ -429,7 +429,7 @@ fn record(fields: impl IntoIterator<Item = (String, HirType)>) -> HirType {
 
 fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
     Ok(match ty {
-        Type::U64 => HirType::BigInt,
+        Type::U64 | Type::S64 => HirType::BigInt,
         Type::Bool => HirType::Boolean,
         Type::U8
         | Type::S8
