@@ -4,6 +4,9 @@ use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+#[path = "p3_filesystem/source.rs"]
+mod source;
+
 struct Host {
     context: WasiCtx,
     table: ResourceTable,

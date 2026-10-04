@@ -69,12 +69,17 @@ pub(crate) fn frame_component(
     host_imports.push_str(&super::streams::output::declare_adapters(
         &output_operations,
     )?);
-    let output_adapters = super::streams::output::bind_adapters(&output_operations)?;
-    let output_imports = if output_operations.is_empty() {
-        ""
+    let mut guest_adapters = super::streams::output::bind_adapters(&output_operations)?;
+    let mut guest_imports = if output_operations.is_empty() {
+        String::new()
     } else {
-        r#"(with "output" (instance $output-forward))"#
+        r#"(with "output" (instance $output-forward))"#.into()
     };
+    if contract.has_filesystem() {
+        host_imports.push_str(&super::filesystem::declare_adapters()?);
+        guest_adapters.push_str(&super::filesystem::bind_adapters()?);
+        guest_imports.push_str(r#"(with "filesystem" (instance $filesystem-forward))"#);
+    }
 
     if let Some(plan) = &contract.promises {
         let wat = super::promises::component::frame(
@@ -83,8 +88,8 @@ pub(crate) fn frame_component(
             &host_wires,
             contract,
             plan,
-            output_imports,
-            &output_adapters,
+            &guest_imports,
+            &guest_adapters,
         )?;
         let bytes = wat::parse_str(&wat).context("Encoding stored-Promise component")?;
         return Ok((wat, bytes));
@@ -127,11 +132,11 @@ pub(crate) fn frame_component(
   (core module $guest {core_body})
   (core instance $guest (instantiate $guest
     {stream_imports}
-    {output_imports}
+    {guest_imports}
     (with "host" (instance
 {host_wires}))))
 {stream_adapters}
-{output_adapters}
+{guest_adapters}
   (func (export "run") async {entry_signature}
     (canon lift (core func $guest "run"){memory_option}{post_return_option})))"#
     );

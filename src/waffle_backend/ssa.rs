@@ -7,8 +7,10 @@
 mod arrays;
 mod bytes;
 mod decoder;
+mod filesystem;
 mod loops;
 mod optional;
+mod options;
 mod requirements;
 mod string_ops;
 mod types;
@@ -63,6 +65,7 @@ pub(crate) fn lower_module(
         || super::bytes::required(hir)
         || contract.has_stream_input()
         || !contract.output_operations().is_empty()
+        || contract.has_filesystem()
     {
         collect_strings_in_module(hir, &mut string_pool);
         if reqs.decoder {
@@ -423,6 +426,13 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && let Some(super::resolve::TypedIntrinsic::Capability(
+                super::capabilities::CapabilityOperation::Filesystem(operation),
+            )) = self.contract.intrinsics.get(name)
+        {
+            return self.filesystem_operation(*operation, args);
+        }
         if let Expr::ExternFuncRef { name, .. } = callee
             && matches!(
                 self.contract.intrinsics.get(name),

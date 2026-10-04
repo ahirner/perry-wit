@@ -74,6 +74,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
     pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
+    pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
     pub(crate) stream_helpers: Option<super::streams::StreamHelpers>,
@@ -110,7 +111,10 @@ impl ModuleRegistry {
                     | TypedIntrinsic::DecoderNew
             ) || matches!(
                 intrinsic,
-                TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Stdio(_))
+                TypedIntrinsic::Capability(
+                    super::capabilities::CapabilityOperation::Stdio(_)
+                        | super::capabilities::CapabilityOperation::Filesystem(_)
+                )
             ) {
                 continue;
             }
@@ -131,6 +135,9 @@ impl ModuleRegistry {
         let output_operations = contract.output_operations();
         let output_imports = (!output_operations.is_empty())
             .then(|| super::streams::output::declare_imports(module, &output_operations));
+        let filesystem_imports = contract
+            .has_filesystem()
+            .then(|| super::filesystem::declare_imports(module));
 
         let promises = if let Some(plan) = &contract.promises {
             let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
@@ -251,6 +258,17 @@ impl ModuleRegistry {
             }
         }
 
+        let filesystem_helpers = if let Some(imports) = filesystem_imports {
+            Some(super::filesystem::emit_runtime(
+                module,
+                memory,
+                allocator.expect("filesystem storage requires an allocator"),
+                imports,
+            )?)
+        } else {
+            None
+        };
+
         // 3. Pre-declare all functions and establish complete FunctionInfo records
         let mut functions = BTreeMap::new();
         for func in &hir.functions {
@@ -352,6 +370,7 @@ impl ModuleRegistry {
             allocator,
             byte_helpers,
             decoder_helpers,
+            filesystem_helpers,
             functions,
             intrinsics,
             stream_helpers,

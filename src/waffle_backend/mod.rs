@@ -9,6 +9,7 @@ pub(crate) mod component;
 pub(crate) mod control_flow;
 mod decoder;
 pub(crate) mod exceptions;
+mod filesystem;
 pub(crate) mod libraries;
 pub(crate) mod link;
 pub(crate) mod promises;

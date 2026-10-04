@@ -21,6 +21,30 @@
   ],
   "capabilities": [
     {
+      "id": "compiler.p3_filesystem_write",
+      "name": "Native P3 Filesystem Writes",
+      "tier": "tier-2-node-core",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: overwrite-only writeFileSync from fs and node:fs",
+      "invariants": [
+        "Named aliases, namespace imports, and default imports retain binding identity; unused imports add no filesystem capability",
+        "String data preserves exact UTF-8 and NUL bytes; Uint8Array data writes only its visible range",
+        "Arguments and literal option properties execute in source order before validation or I/O",
+        "Invalid encodings, flags, and unknown option properties fail before opening or truncating a file",
+        "Normalized paths select the longest matching preopen on a component boundary; symlink resolution remains host-confined",
+        "Shared native stream writes preserve partial transfers and await an independent filesystem completion",
+        "Descriptors, writable ends, and completion futures close on normal and recoverable-error paths; suspended buffers survive sibling collection"
+      ],
+      "differences": [
+        "The default CLI remains on the legacy pipeline until R9",
+        "Options accept encoding strings, null, undefined, and plain literal objects; general option objects, getters, spreads, computed keys, and custom prototypes are diagnosed",
+        "Only the default or w flag is supported; UTF8 labels accept ASCII case, and binary encoding is restricted to byte data",
+        "Errors throw the one-based WASI 0.3 filesystem error ordinal; already written bytes are not rolled back",
+        "Host traps and cancellation require store disposal; reads, metadata, and directory operations remain open in R8.2"
+      ],
+      "conformance": ["tests/p3_filesystem_test.rs", "tests/p3_filesystem/source.rs", "tests/p3_filesystem/source_lifecycle.rs"]
+    },
+    {
       "id": "compiler.p3_stdio",
       "name": "Native P3 Output",
       "tier": "tier-1-web-primaries",

@@ -186,7 +186,25 @@ overlapping calls before entry, with an additional guest guard against reentry.
 Traps and cancellation require store disposal. Stored async tasks, multiple inputs,
 and returned streams remain unsupported for this input contract. The filesystem tests
 compose a source scanner with a real P3 producer and verify native file forwarding
-against independent bindings. Filesystem source APIs remain part of R8.
+against independent bindings. Filesystem source writes are available through named,
+namespace, and default imports from `fs` or `node:fs`. `writeFileSync(path, data,
+options?)` overwrites a file with exact UTF-8 string bytes or the visible
+`Uint8Array` range. It accepts case-insensitive `utf8`/`utf-8` encoding labels,
+and `binary` for byte data, with the default or explicit `w` flag. Options may be
+an encoding string, null, undefined, or a plain literal object with `encoding` and
+`flag` fields. Arguments and duplicate property values execute in source order;
+unsupported options fail before opening or truncating a file. Stored option objects,
+getters, spreads, computed keys, and custom prototypes are diagnosed.
+Paths normalize `.` and `..` and select the longest matching preopen on a path
+component boundary. Relative paths require a relative or root preopen; NUL paths
+and escapes fail. The host confines symlink resolution to the selected preopen.
+Writes return void and may suspend for native transfers and their separate completion
+future. Descriptors, stream ends, and futures close before returning, and buffers
+remain rooted during sibling collection. Errors throw the one-based ordinal of the
+WASI 0.3 filesystem error variant, including `1` (access), `12` (invalid options),
+and `32` (broken pipe); host traps and cancellation require store disposal.
+Already written bytes are not rolled back. `readFileSync`, metadata operations,
+and general option objects remain open in R8.2.
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary
 binary bytes, through shared native stream transfers and wait for the capability's

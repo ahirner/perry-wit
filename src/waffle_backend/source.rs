@@ -1,6 +1,7 @@
 //! Resolve source bindings before Perry's name-based builtin lowering.
 
 mod decoder;
+mod options;
 pub(crate) use decoder::validate_lowering;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -13,13 +14,27 @@ use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use super::capabilities::{
-    CapabilityOperation, ClockOperation, LowerCapability, RandomOperation, StdioOperation,
+    CapabilityOperation, ClockOperation, FilesystemOperation, LowerCapability, RandomOperation,
+    StdioOperation,
 };
 
 #[derive(Default)]
 pub(crate) struct SourceBindings {
     pub(crate) capabilities: BTreeMap<String, CapabilityOperation>,
     pub(crate) decoder_constructor: Option<String>,
+}
+
+fn underlying_expression(mut expression: &ast::Expr) -> &ast::Expr {
+    loop {
+        expression = match expression {
+            ast::Expr::Paren(value) => &value.expr,
+            ast::Expr::TsAs(value) => &value.expr,
+            ast::Expr::TsSatisfies(value) => &value.expr,
+            ast::Expr::TsNonNull(value) => &value.expr,
+            ast::Expr::TsTypeAssertion(value) => &value.expr,
+            _ => return expression,
+        };
+    }
 }
 
 pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBindings> {
@@ -44,6 +59,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
                 Some("perry:clocks") => CapabilityNamespace::Clocks,
                 Some("perry:random") => CapabilityNamespace::Random,
                 Some("perry:stdio") => CapabilityNamespace::Stdio,
+                Some("fs" | "node:fs") => CapabilityNamespace::Filesystem,
                 _ => bail!("Unsupported capability import: {:?}", import.src.value),
             };
             ensure!(
@@ -61,6 +77,11 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
                         CapabilityBinding::Operation(namespace.operation(&name)?)
                     }
                     ast::ImportSpecifier::Namespace(_) => CapabilityBinding::Namespace(namespace),
+                    ast::ImportSpecifier::Default(_)
+                        if matches!(namespace, CapabilityNamespace::Filesystem) =>
+                    {
+                        CapabilityBinding::Namespace(namespace)
+                    }
                     ast::ImportSpecifier::Default(_) => {
                         bail!("Capability modules have no default export")
                     }
@@ -127,6 +148,7 @@ fn source_type(ty: &HirType) -> Result<String> {
         HirType::Boolean => Ok("boolean".into()),
         HirType::String => Ok("string".into()),
         HirType::Void => Ok("void".into()),
+        HirType::Any => Ok("any".into()),
         HirType::Promise(inner) => Ok(format!("Promise<{}>", source_type(inner)?)),
         ty if super::bytes::is_byte_view(ty) => Ok("Uint8Array".into()),
         _ => bail!("Unsupported capability source type: {ty:?}"),
@@ -138,6 +160,7 @@ enum CapabilityNamespace {
     Clocks,
     Random,
     Stdio,
+    Filesystem,
 }
 
 impl CapabilityNamespace {
@@ -153,6 +176,9 @@ impl CapabilityNamespace {
             (Self::Stdio, "writeStderr") => {
                 Ok(CapabilityOperation::Stdio(StdioOperation::WriteStderr))
             }
+            (Self::Filesystem, "writeFileSync") => Ok(CapabilityOperation::Filesystem(
+                FilesystemOperation::WriteFile,
+            )),
             _ => bail!("Unknown capability member '{name}'"),
         }
     }
@@ -307,6 +333,14 @@ impl VisitMut for SourceCalls {
             }
             match self.operation(callee) {
                 Ok(Some(operation)) => {
+                    if matches!(operation, CapabilityOperation::Filesystem(_))
+                        && let Some(options) = call.args.get(2)
+                        && let Err(error) =
+                            options::validate_plain_options(&options.expr, "Filesystem")
+                    {
+                        self.error.get_or_insert(error);
+                        return;
+                    }
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         self.error.get_or_insert_with(|| {
                             anyhow::anyhow!("Spread capability arguments are unsupported")

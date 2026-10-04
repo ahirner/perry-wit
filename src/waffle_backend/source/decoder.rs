@@ -1,10 +1,10 @@
 //! Preserve decoder options that Perry's native decoder HIR cannot represent.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use swc_common::SyntaxContext;
 
-use super::SourceCalls;
+use super::{SourceCalls, options::validate_plain_options};
 use crate::waffle_backend::visit::visit_function_expressions;
 
 impl SourceCalls {
@@ -12,16 +12,7 @@ impl SourceCalls {
         let ast::Expr::New(constructor) = expression else {
             return Ok(());
         };
-        let mut callee = constructor.callee.as_ref();
-        loop {
-            callee = match callee {
-                ast::Expr::Paren(value) => &value.expr,
-                ast::Expr::TsAs(value) => &value.expr,
-                ast::Expr::TsNonNull(value) => &value.expr,
-                ast::Expr::TsTypeAssertion(value) => &value.expr,
-                _ => break,
-            };
-        }
+        let callee = super::underlying_expression(&constructor.callee);
         let builtin = match callee {
             ast::Expr::Ident(name) => name.sym == "TextDecoder" && name.ctxt == self.unresolved,
             ast::Expr::Member(member) if matches!(member.obj.as_ref(), ast::Expr::Ident(name) if name.sym == "globalThis" && name.ctxt == self.unresolved) => {
@@ -43,7 +34,7 @@ impl SourceCalls {
             "Spread TextDecoder arguments are unsupported"
         );
         if let Some(options) = arguments.get(1) {
-            validate_options(&options.expr)?;
+            validate_plain_options(&options.expr, "Decoder")?;
         }
         let name = if let Some(name) = &self.decoder_constructor {
             name.clone()
@@ -105,35 +96,7 @@ pub(super) fn validate_decode_options(call: &ast::CallExpr) -> Result<()> {
             "Spread decoder arguments are unsupported"
         );
         if let Some(options) = call.args.get(1) {
-            validate_options(&options.expr)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_options(expression: &ast::Expr) -> Result<()> {
-    if let ast::Expr::Object(object) = expression {
-        for property in &object.props {
-            match property {
-                ast::PropOrSpread::Prop(property) => match property.as_ref() {
-                    ast::Prop::Shorthand(_) => {}
-                    ast::Prop::KeyValue(pair) => {
-                        let name = match &pair.key {
-                            ast::PropName::Ident(name) => name.sym.as_ref(),
-                            ast::PropName::Str(name) => name.value.as_str().unwrap_or(""),
-                            _ => {
-                                bail!("Decoder options require plain properties with static names")
-                            }
-                        };
-                        ensure!(
-                            name != "__proto__",
-                            "Decoder option prototypes are unsupported"
-                        );
-                    }
-                    _ => bail!("Decoder options require plain properties with static names"),
-                },
-                _ => bail!("Spread decoder options are unsupported"),
-            }
+            validate_plain_options(&options.expr, "Decoder")?;
         }
     }
     Ok(())

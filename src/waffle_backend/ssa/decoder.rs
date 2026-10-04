@@ -4,7 +4,7 @@ use anyhow::{Result, bail, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{MemoryArg, Operator, Type, Value};
 
-use super::FunctionLowerer;
+use super::{FunctionLowerer, options::literal_properties};
 use crate::waffle_backend::{abi, decoder::is_decoder};
 
 impl FunctionLowerer<'_> {
@@ -136,23 +136,9 @@ impl FunctionLowerer<'_> {
             self.expression(expression)?;
             return Ok(values);
         }
-        let properties: Vec<_> = match expression {
-            Expr::Object(properties) => properties
-                .iter()
-                .map(|(key, value)| (key.as_str(), value))
-                .collect(),
-            Expr::New {
-                class_name, args, ..
-            } if self.contract.literal_shapes.contains_key(class_name) => {
-                let fields = &self.contract.literal_shapes[class_name];
-                ensure!(
-                    fields.len() == args.len(),
-                    "Literal object shape does not match its values"
-                );
-                fields.iter().map(String::as_str).zip(args).collect()
-            }
-            _ => bail!("Decoder options require a literal object, null, or undefined"),
-        };
+        let properties = literal_properties(self.contract, expression)?.ok_or_else(|| {
+            anyhow::anyhow!("Decoder options require a literal object, null, or undefined")
+        })?;
         for (name, expression) in properties {
             if let Some(index) = defaults.iter().position(|(key, _)| name == *key) {
                 values[index] = if self.infer_expr_type(expression) == HirType::Void {

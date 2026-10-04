@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use anyhow::Result;
-use waffle::{Func, FuncDecl, Import, ImportKind, Memory, Module, SignatureData, Type};
+use waffle::{Func, Memory, Module};
 
 use crate::waffle_backend::{
     allocation::AllocationFuncs, capabilities::StdioOperation, component::forward, runtime,
@@ -14,29 +14,7 @@ pub(crate) fn declare_imports(
     module: &mut Module<'static>,
     operations: &BTreeSet<StdioOperation>,
 ) -> BTreeMap<String, Func> {
-    native_functions(operations)
-        .into_iter()
-        .map(|function| {
-            let core_type = |name| match name {
-                "i32" => Type::I32,
-                "i64" => Type::I64,
-                _ => unreachable!("output imports use integer core handles"),
-            };
-            let signature = module.signatures.push(SignatureData {
-                params: function.params.into_iter().map(core_type).collect(),
-                returns: function.results.into_iter().map(core_type).collect(),
-            });
-            let index = module
-                .funcs
-                .push(FuncDecl::Import(signature, function.name.clone()));
-            module.imports.push(Import {
-                module: "output".into(),
-                name: function.name.clone(),
-                kind: ImportKind::Func(index),
-            });
-            (function.name, index)
-        })
-        .collect()
+    forward::declare_imports(module, "output", &native_functions(operations))
 }
 
 pub(crate) fn emit_runtime(
@@ -46,16 +24,10 @@ pub(crate) fn emit_runtime(
     imports: BTreeMap<String, Func>,
     operations: &BTreeSet<StdioOperation>,
 ) -> Result<BTreeMap<String, Func>> {
-    let mut wat = String::from("(module (import \"host\" \"memory\" (memory 1))\n");
-    for function in native_functions(operations) {
-        writeln!(
-            wat,
-            "(import \"host\" {0:?} (func ${0} (param {1}) (result {2})))",
-            function.name,
-            function.params.join(" "),
-            function.results.join(" ")
-        )?;
-    }
+    let mut wat = format!(
+        "(module {}",
+        forward::module_imports(&native_functions(operations))?
+    );
     wat.push_str(
         r#"(import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
         (import "host" "frame-new" (func $frame-new (param i32) (result i32)))

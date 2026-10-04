@@ -1,12 +1,14 @@
 //! Typed capability plans; shared SSA and component code own their execution.
 
 mod clocks;
+mod filesystem;
 mod random;
 pub(crate) mod stdio;
 
 use perry_hir::types::Type as HirType;
 
 pub(crate) use clocks::ClockOperation;
+pub(crate) use filesystem::FilesystemOperation;
 pub(crate) use random::RandomOperation;
 pub(crate) use stdio::StdioOperation;
 
@@ -16,6 +18,7 @@ pub(crate) enum CapabilityOperation {
     Clock(ClockOperation),
     Random(RandomOperation),
     Stdio(StdioOperation),
+    Filesystem(FilesystemOperation),
 }
 
 /// Pure lowering metadata for source validation, core calls, and component wiring.
@@ -31,6 +34,7 @@ pub(crate) enum CapabilityImplementation {
         core_function: &'static str,
     },
     Stdio(StdioOperation),
+    Filesystem,
 }
 
 /// Describe an operation without owning values, scheduling, or invocation state.
@@ -52,6 +56,7 @@ impl CapabilityOperation {
             Self::Clock(ClockOperation::WaitFor) => "waitFor",
             Self::Random(RandomOperation::Number) => "randomNumber",
             Self::Stdio(operation) => operation.name(),
+            Self::Filesystem(operation) => operation.name(),
         }
     }
 }
@@ -62,6 +67,7 @@ impl LowerCapability for CapabilityOperation {
             Self::Clock(operation) => operation.lower(),
             Self::Random(operation) => operation.lower(),
             Self::Stdio(operation) => operation.lower(),
+            Self::Filesystem(operation) => operation.lower(),
         }
     }
 }

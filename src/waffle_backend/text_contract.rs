@@ -209,6 +209,14 @@ impl TextContractMatrix {
             boundary_behavior: "Preserves UTF-8 and embedded NULs, appends a newline, and awaits P3 transfer and capability completion",
             node_difference: "Calls return void but may suspend for host output; numeric output failures enter catch/finally",
         },
+        TextOperationEntry {
+            operation: "filesystem_write_text",
+            unit: IndexUnit::Byte,
+            status: OperationStatus::SupportedBoundary,
+            coercion: "A string path and string or byte-view data; implicit coercions are diagnosed",
+            boundary_behavior: "Preserves exact UTF-8 and embedded NULs in data; NUL paths and invalid options fail before opening the file",
+            node_difference: "Overwrite-only writes through confined preopens; numeric failures enter catch/finally and separate P3 completion precedes return",
+        },
     ];
 
     pub fn entries() -> &'static [TextOperationEntry] {

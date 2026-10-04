@@ -1,0 +1,116 @@
+  ;; Returns owned normalized bytes, byte length, and a one-based WIT error code.
+  (func $normalize-path (param $source i32) (param $length i32) (result i32 i32 i32)
+    (local $data i32) (local $absolute i32) (local $read i32) (local $written i32)
+    (local $start i32) (local $count i32) (local $byte i32)
+    (if (i32.gt_u (local.get $length) (i32.const -3)) (then unreachable))
+    (local.set $data (call $realloc (i32.const 0) (i32.const 0) (i32.const 1) (i32.add (local.get $length) (i32.const 2))))
+    (if (local.get $length)
+      (then (local.set $absolute (i32.eq (i32.load8_u (local.get $source)) (i32.const 47)))))
+    (local.set $written (local.get $absolute))
+    (if (local.get $absolute) (then (i32.store8 (local.get $data) (i32.const 47))))
+    (block $done
+      (loop $segments
+        (br_if $done (i32.eq (local.get $read) (local.get $length)))
+        (local.set $start (local.get $read))
+        (block $segment-end
+          (loop $scan
+            (br_if $segment-end (i32.eq (local.get $read) (local.get $length)))
+            (local.set $byte (i32.load8_u (i32.add (local.get $source) (local.get $read))))
+            (if (i32.eqz (local.get $byte)) (then (return (local.get $data) (i32.const 0) (i32.const 12))))
+            (br_if $segment-end (i32.eq (local.get $byte) (i32.const 47)))
+            (local.set $read (i32.add (local.get $read) (i32.const 1)))
+            (br $scan)))
+        (local.set $count (i32.sub (local.get $read) (local.get $start)))
+        (if (i32.lt_u (local.get $read) (local.get $length)) (then (local.set $read (i32.add (local.get $read) (i32.const 1)))))
+        (br_if $segments (i32.eqz (local.get $count)))
+        (if (i32.eq (local.get $count) (i32.const 1))
+          (then (br_if $segments (i32.eq (i32.load8_u (i32.add (local.get $source) (local.get $start))) (i32.const 46)))))
+        (if (i32.eq (local.get $count) (i32.const 2))
+          (then
+            (if (i32.eq (i32.load16_u align=1 (i32.add (local.get $source) (local.get $start))) (i32.const 0x2e2e))
+              (then
+                (if (i32.eq (local.get $written) (local.get $absolute))
+                  (then
+                    (if (i32.eqz (local.get $absolute)) (then (return (local.get $data) (i32.const 0) (i32.const 1)))))
+                  (else
+                    (block $popped
+                      (loop $pop
+                        (local.set $written (i32.sub (local.get $written) (i32.const 1)))
+                        (br_if $popped (i32.eq (local.get $written) (local.get $absolute)))
+                        (br_if $popped (i32.eq (i32.load8_u (i32.add (local.get $data) (local.get $written))) (i32.const 47)))
+                        (br $pop)))))
+                (br $segments)))))
+        (if (i32.gt_u (local.get $written) (local.get $absolute))
+          (then
+            (i32.store8 (i32.add (local.get $data) (local.get $written)) (i32.const 47))
+            (local.set $written (i32.add (local.get $written) (i32.const 1)))))
+        (memory.copy (i32.add (local.get $data) (local.get $written))
+          (i32.add (local.get $source) (local.get $start)) (local.get $count))
+        (local.set $written (i32.add (local.get $written) (local.get $count)))
+        (br $segments)))
+    (if (i32.eqz (local.get $written))
+      (then (i32.store8 (local.get $data) (i32.const 46)) (local.set $written (i32.const 1))))
+    (local.get $data) (local.get $written) (i32.const 0))
+
+  ;; A nonnegative result is the byte offset of the path relative to this mount.
+  (func $match-mount (param $path i32) (param $length i32) (param $mount i32) (param $mount-length i32) (result i32)
+    (local $index i32)
+    (if (i32.eq (local.get $mount-length) (i32.const 1))
+      (then
+        (if (i32.eq (i32.load8_u (local.get $mount)) (i32.const 47))
+          (then (return (i32.eq (i32.load8_u (local.get $path)) (i32.const 47)))))
+        (if (i32.and (i32.eq (i32.load8_u (local.get $mount)) (i32.const 46))
+          (i32.ne (i32.load8_u (local.get $path)) (i32.const 47))) (then (return (i32.const 0))))))
+    (if (i32.lt_u (local.get $length) (local.get $mount-length)) (then (return (i32.const -1))))
+    (loop $compare
+      (if (i32.ne (i32.load8_u (i32.add (local.get $path) (local.get $index)))
+        (i32.load8_u (i32.add (local.get $mount) (local.get $index)))) (then (return (i32.const -1))))
+      (local.set $index (i32.add (local.get $index) (i32.const 1)))
+      (br_if $compare (i32.lt_u (local.get $index) (local.get $mount-length))))
+    (if (i32.eq (local.get $length) (local.get $mount-length)) (then (return (local.get $length))))
+    (if (i32.eq (i32.load8_u (i32.add (local.get $path) (local.get $mount-length))) (i32.const 47))
+      (then (return (i32.add (local.get $mount-length) (i32.const 1)))))
+    (i32.const -1))
+
+  (func $open-file (param $path i32) (param $scratch i32) (param $frame i32) (result i32 i32)
+    (local $data i32) (local $length i32) (local $error i32)
+    (local $entries i32) (local $count i32) (local $index i32) (local $entry i32)
+    (local $mount i32) (local $mount-length i32) (local $mount-error i32) (local $skip i32)
+    (local $best i32) (local $score i32) (local $relative i32)
+    (call $normalize-path (i32.load (local.get $path)) (i32.load offset=4 (local.get $path)))
+    local.set $error local.set $length local.set $data
+    (i32.store offset=24 (local.get $frame) (local.get $data))
+    (if (local.get $error) (then (return (local.get $error) (i32.const 0))))
+    (call $directories (local.get $scratch))
+    (local.set $entries (i32.load (local.get $scratch)))
+    (local.set $count (i32.load offset=4 (local.get $scratch)))
+    (local.set $best (i32.const -1))
+    (block $selected
+      (loop $directories
+        (br_if $selected (i32.eq (local.get $index) (local.get $count)))
+        (local.set $entry (i32.add (local.get $entries) (i32.mul (local.get $index) (i32.const 12))))
+        (call $normalize-path (i32.load offset=4 (local.get $entry)) (i32.load offset=8 (local.get $entry)))
+        local.set $mount-error local.set $mount-length local.set $mount
+        (local.set $skip (i32.const -1))
+        (if (i32.eqz (local.get $mount-error))
+          (then (local.set $skip (call $match-mount (local.get $data) (local.get $length) (local.get $mount) (local.get $mount-length)))))
+        (if (i32.and (i32.ge_s (local.get $skip) (i32.const 0)) (i32.gt_u (local.get $mount-length) (local.get $score)))
+          (then
+            (if (i32.ne (local.get $best) (i32.const -1)) (then (call $drop-descriptor (local.get $best))))
+            (local.set $best (i32.load (local.get $entry)))
+            (local.set $score (local.get $mount-length))
+            (local.set $relative (local.get $skip)))
+          (else (call $drop-descriptor (i32.load (local.get $entry)))))
+        (drop (call $realloc (local.get $mount) (i32.add (i32.load offset=8 (local.get $entry)) (i32.const 2)) (i32.const 1) (i32.const 0)))
+        (local.set $index (i32.add (local.get $index) (i32.const 1)))
+        (br $directories)))
+    (if (i32.eq (local.get $best) (i32.const -1)) (then (return (i32.const 1) (i32.const 0))))
+    (local.set $length (i32.sub (local.get $length) (local.get $relative)))
+    (local.set $data (i32.add (local.get $data) (local.get $relative)))
+    (if (i32.eqz (local.get $length))
+      (then (i32.store8 (local.get $data) (i32.const 46)) (local.set $length (i32.const 1))))
+    (call $open (local.get $best) (i32.const 1) (local.get $data) (local.get $length) (i32.const 9) (i32.const 2) (local.get $scratch))
+    (call $drop-descriptor (local.get $best))
+    (if (i32.load8_u (local.get $scratch))
+      (then (return (i32.add (i32.load8_u offset=4 (local.get $scratch)) (i32.const 1)) (i32.const 0))))
+    (i32.const 0) (i32.load offset=4 (local.get $scratch)))

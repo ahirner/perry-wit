@@ -19,6 +19,29 @@ declare module "perry:stdio" {
   export function writeStderr(bytes: Uint8Array): Promise<void>;
 }
 
+declare module "fs" {
+  interface WriteOptions {
+    /** Case-insensitive utf8 or utf-8; binary is also accepted for byte data. */
+    encoding?: string | null;
+    flag?: "w";
+  }
+  /** Overwrite a preopen-confined path with exact UTF-8 or visible bytes.
+   * Options objects must be plain literals. Unsupported options throw before I/O.
+   * May suspend until transfers and the independent P3 completion settle.
+   * Failures throw the one-based WASI 0.3 filesystem error ordinal. */
+  export function writeFileSync(
+    path: string,
+    data: string | Uint8Array,
+    options?: string | WriteOptions | null,
+  ): void;
+  const fs: { writeFileSync: typeof writeFileSync };
+  export default fs;
+}
+
+declare module "node:fs" {
+  export { writeFileSync, default } from "fs";
+}
+
 /** Opaque readable end of a native byte stream, owned by the entry invocation. */
 interface ByteStream {
   readonly __perryByteStream: unique symbol;

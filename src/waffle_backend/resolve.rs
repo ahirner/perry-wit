@@ -47,7 +47,8 @@ impl TypedIntrinsic {
     pub(crate) fn has_completion(&self) -> bool {
         matches!(
             self,
-            Self::Capability(CapabilityOperation::Stdio(_)) | Self::DecoderNew
+            Self::Capability(CapabilityOperation::Stdio(_) | CapabilityOperation::Filesystem(_))
+                | Self::DecoderNew
         )
     }
 
@@ -126,6 +127,15 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn has_filesystem(&self) -> bool {
+        self.intrinsics.values().any(|intrinsic| {
+            matches!(
+                intrinsic,
+                TypedIntrinsic::Capability(CapabilityOperation::Filesystem(_))
+            )
+        })
+    }
+
     pub(crate) fn output_operations(&self) -> BTreeSet<StdioOperation> {
         self.intrinsics
             .values()
