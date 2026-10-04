@@ -22,6 +22,24 @@ pub(crate) struct ObjectHelpers {
     pub(crate) assign: Func,
 }
 
+pub(crate) fn property_type(field: &PropertyInfo) -> HirType {
+    if !field.optional || super::values::is_dynamic(&field.ty) {
+        return field.ty.clone();
+    }
+    let mut variants = match &field.ty {
+        HirType::Union(variants) => variants.clone(),
+        ty => vec![ty.clone()],
+    };
+    if !variants.contains(&HirType::Void) {
+        variants.push(HirType::Void);
+    }
+    if variants.len() == 1 {
+        variants.remove(0)
+    } else {
+        HirType::Union(variants)
+    }
+}
+
 pub(crate) fn is_object(ty: &HirType) -> bool {
     matches!(ty, HirType::Object(_))
         || super::context::is_environment(ty)

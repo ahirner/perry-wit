@@ -2020,3 +2020,62 @@ fn standard_headers_reject_non_string_and_mismatched_static_shapes() {
         );
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_optional_fields_and_validation_rejections_match_node() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/optional_options.ts"),
+        "package test:optional-fetch; world boundary {import wasi:http/client@0.3.0;export run:async func(url:string)->string;}",
+    )?;
+    let server = fixture::HttpFixture::new(|request| {
+        let header = request
+            .headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("x-value"))
+            .map_or("", |(_, value)| value.as_str());
+        fixture::Reply::Body(
+            200,
+            format!(
+                "{}:{header}:{}",
+                request.method,
+                String::from_utf8_lossy(&request.body)
+            ),
+        )
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let url = format!("http://{}/", server.address);
+    let expected = "GET::|POST:before:body|POST::|GET::|GET::|GET::|GET::";
+    for _ in 0..30 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&url,)))
+                .await??
+                .0,
+            expected
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 240);
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/optional_options.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script, &url])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
+    Ok(())
+}

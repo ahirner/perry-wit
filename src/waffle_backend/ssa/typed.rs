@@ -96,12 +96,15 @@ impl FunctionLowerer<'_> {
             (_, HirType::Object(expected)) => {
                 if let Ok(Some(fields)) = literal_properties(self.contract, expression) {
                     return expected.properties.iter().all(|(name, field)| {
-                        fields
-                            .iter()
-                            .find(|(key, _)| key == name)
-                            .map_or(field.optional, |(_, value)| {
-                                self.matches_typed_value(value, &field.ty)
-                            })
+                        fields.iter().find(|(key, _)| key == name).map_or(
+                            field.optional,
+                            |(_, value)| {
+                                self.matches_typed_value(
+                                    value,
+                                    &crate::waffle_backend::objects::property_type(field),
+                                )
+                            },
+                        )
                     }) && fields
                         .iter()
                         .all(|(name, _)| expected.properties.contains_key(name));

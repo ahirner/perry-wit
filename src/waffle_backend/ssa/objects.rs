@@ -150,12 +150,7 @@ impl FunctionLowerer<'_> {
         if let Expr::String(key) = key
             && let Some(property) = object.properties.get(key)
         {
-            return if property.optional && !crate::waffle_backend::values::is_dynamic(&property.ty)
-            {
-                HirType::Union(vec![property.ty.clone(), HirType::Void])
-            } else {
-                property.ty.clone()
-            };
+            return crate::waffle_backend::objects::property_type(property);
         }
         object.index_signature.map_or(HirType::Any, |ty| *ty)
     }
@@ -179,11 +174,11 @@ impl FunctionLowerer<'_> {
         for (name, expression) in fields {
             let field_type = expected
                 .and_then(|record| record.properties.get(&name))
-                .map(|field| &field.ty);
+                .map(crate::waffle_backend::objects::property_type);
             let key = self.expression(&Expr::String(name))?;
             let (tag, payload) = if let Some(ty) = field_type {
-                let value = self.typed_operand(expression, ty)?;
-                self.typed_value_parts(value, ty)?
+                let value = self.typed_operand(expression, &ty)?;
+                self.typed_value_parts(value, &ty)?
             } else {
                 let (_, tag, payload) = self.tagged_value(expression)?;
                 (tag, payload)

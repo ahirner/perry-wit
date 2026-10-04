@@ -484,6 +484,7 @@ impl ModuleRegistry {
                     strings: string_helpers.unwrap(),
                     bytes: byte_helpers.unwrap(),
                     json: json_helpers,
+                    headers: headers_helpers,
                     pool: string_pool,
                     promises: promises.as_ref(),
                 },

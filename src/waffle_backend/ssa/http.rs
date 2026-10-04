@@ -131,8 +131,16 @@ impl FunctionLowerer<'_> {
         );
         let url = self.string_receiver(&arguments[0])?;
         let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-        let mut values = [url, zero, zero, zero, zero];
-        if let Some(options) = arguments.get(1) {
+        let mut values = [url, zero, zero, zero, zero, zero];
+        if let Some(options) = arguments.get(1)
+            && self.infer_expr_type(options) == HirType::Void
+        {
+            self.expression(options)?;
+        }
+        if let Some(options) = arguments
+            .get(1)
+            .filter(|options| self.infer_expr_type(options) != HirType::Void)
+        {
             let HirType::Object(shape) = self.infer_expr_type(options) else {
                 bail!("fetch options require a statically typed RequestInit record");
             };
@@ -141,21 +149,20 @@ impl FunctionLowerer<'_> {
                     matches!(key.as_str(), "method" | "headers" | "body"),
                     "fetch option '{key}' is not implemented yet"
                 );
-                ensure!(
-                    !field.optional,
-                    "fetch option '{key}' must have a statically known value"
-                );
+
+                let (ty, _) = fetch_option_type(&field.ty, field.optional);
                 match key.as_str() {
                     "method" => ensure!(
-                        matches!(field.ty, HirType::String | HirType::StringLiteral(_)),
+                        (crate::waffle_backend::values::is_string_type(ty) || *ty == HirType::Void),
                         "fetch method must be a string"
                     ),
                     "headers" => {
-                        header_shape(&field.ty)?;
+                        header_shape(ty)?;
                     }
                     "body" => ensure!(
-                        matches!(field.ty, HirType::String | HirType::StringLiteral(_))
-                            || crate::waffle_backend::bytes::is_byte_view(&field.ty),
+                        (crate::waffle_backend::values::is_string_type(ty) || *ty == HirType::Void)
+                            || crate::waffle_backend::bytes::is_byte_view(ty)
+                            || *ty == HirType::Null,
                         "fetch body must be string or Uint8Array"
                     ),
                     _ => unreachable!(),
@@ -165,6 +172,7 @@ impl FunctionLowerer<'_> {
             let helpers = self.registry.object_helpers.unwrap();
             for (name, index) in [("method", 1), ("headers", 2), ("body", 3)] {
                 if let Some(field) = shape.properties.get(name) {
+                    let (ty, optional) = fetch_option_type(&field.ty, field.optional);
                     let key = self.expression(&Expr::String(name.into()))?;
                     let entry = self.op(
                         Operator::Call {
@@ -173,27 +181,32 @@ impl FunctionLowerer<'_> {
                         &[object, key],
                         &[Type::I32],
                     );
-                    let tag = crate::waffle_backend::values::ValueTag::of(&field.ty)? as u32;
+                    let tag = crate::waffle_backend::values::ValueTag::of(ty)? as u32;
                     let tag = self.op(Operator::I32Const { value: tag }, &[], &[Type::I32]);
-                    let payload = self.call_completion(helpers.value, &[entry, tag, zero]);
+                    let optional = self.op(
+                        Operator::I32Const {
+                            value: u32::from(optional),
+                        },
+                        &[],
+                        &[Type::I32],
+                    );
+                    let payload = self.call_completion(helpers.value, &[entry, tag, optional]);
                     values[index] = abi::decode_payload(&mut self.body, self.block, payload, true);
                     if name == "headers" {
-                        let mode = header_shape(&field.ty)?;
+                        let mode = header_shape(ty)?;
                         let mode = self.op(Operator::I32Const { value: mode }, &[], &[Type::I32]);
-                        let payload = self.call_completion(
-                            self.registry.headers_helpers.unwrap().new,
-                            &[mode, values[index]],
-                        );
-                        values[index] =
-                            abi::decode_payload(&mut self.body, self.block, payload, true);
+                        values[5] =
+                            self.op(Operator::Select, &[mode, zero, values[index]], &[Type::I32]);
                     }
                     if name == "body" {
-                        let kind = if crate::waffle_backend::bytes::is_byte_view(&field.ty) {
+                        let kind = if crate::waffle_backend::bytes::is_byte_view(ty) {
                             2
                         } else {
                             1
                         };
-                        values[4] = self.op(Operator::I32Const { value: kind }, &[], &[Type::I32]);
+                        let kind = self.op(Operator::I32Const { value: kind }, &[], &[Type::I32]);
+                        values[4] =
+                            self.op(Operator::Select, &[kind, zero, values[index]], &[Type::I32]);
                     }
                 }
             }
@@ -320,6 +333,7 @@ impl FunctionLowerer<'_> {
                 let ty = HirType::Array(Box::new(HirType::Tuple(vec![HirType::String; 2])));
                 (2, self.typed_operand(argument, &ty)?)
             } else if self.infer_expr_type(argument) == HirType::Void {
+                self.expression(argument)?;
                 (
                     0,
                     self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]),
@@ -385,6 +399,9 @@ impl FunctionLowerer<'_> {
 
 fn header_shape(ty: &HirType) -> Result<u32> {
     use crate::waffle_backend::values::is_string_type;
+    if *ty == HirType::Void {
+        return Ok(0);
+    }
     if http::headers::is_headers(ty) {
         return Ok(3);
     }
@@ -408,4 +425,17 @@ fn header_shape(ty: &HirType) -> Result<u32> {
         return Ok(2);
     }
     bail!("Headers initializer requires a string record, [string, string][] pairs, or Headers")
+}
+
+fn fetch_option_type(ty: &HirType, optional: bool) -> (&HirType, bool) {
+    if let HirType::Union(variants) = ty
+        && variants.len() == 2
+        && variants.contains(&HirType::Void)
+    {
+        return (
+            variants.iter().find(|ty| **ty != HirType::Void).unwrap(),
+            true,
+        );
+    }
+    (ty, optional)
 }

@@ -124,12 +124,13 @@ pub(super) fn emit(
     let bytes = runtime.bytes;
     let native = runtime.imports;
     let promises = runtime.promises.unwrap();
-    let fetch = builder::declare(module, "fetch", &[I32; 5], &[I32, F64]);
+    let fetch = builder::declare(module, "fetch", &[I32; 6], &[I32, F64]);
     let body = builder::declare(module, "fetch.consume", &[I32], &[I32, F64]);
     let text = builder::declare(module, "fetch.text", &[I32], &[I32, F64]);
     let finish = builder::declare(module, "fetch.finish", &[], &[]);
     let transport = Transport {
         native,
+        headers: runtime.headers.unwrap(),
         allocator,
         finish_write: super::future::emit_finish_write(module, memory, native)?,
         promises,
@@ -230,6 +231,7 @@ pub(super) fn emit(
 
 struct Transport<'a> {
     native: &'a BTreeMap<String, Func>,
+    headers: super::headers::Helpers,
     allocator: AllocationFuncs,
     finish_write: Func,
     consume: Func,
@@ -319,6 +321,16 @@ fn emit_fetch(
     let url = b.call(strings.lift_canonical, &[normalized_data, length], &[I32])[0];
     b.store(response, 16, url, I32);
     let method = request::method(&mut b, t, frame)?;
+    let headers = b.call(t.headers.new, &[b.param(5), b.param(2)], &[I32, F64]);
+    let bad_headers = b.body.add_block();
+    let ready_headers = b.body.add_block();
+    b.branch(headers[0], bad_headers, ready_headers);
+    b.block = bad_headers;
+    b.call(t.allocator.frame_drop, &[frame], &[]);
+    b.ret(&headers);
+    b.block = ready_headers;
+    let headers = b.op(O::I32TruncF64U, &[headers[1]], I32);
+    b.store(frame, 32, headers, I32);
     request::fields(&mut b, t, frame, scratch, response)?;
     let fields = b.load(scratch, 4, I32);
     let has_body = b.op(O::I32Ne, &[b.param(4), zero], I32);

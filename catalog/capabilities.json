@@ -27,8 +27,9 @@
       "domain": "fetch(string, typed options) and the perry:http buffered GET facade",
       "invariants": [
         "fetch resolves at response headers and retains native body, trailers, upload task, and request completion ownership until acknowledged completion",
-        "GET/HEAD/POST/PUT/DELETE/OPTIONS/PATCH and permitted extension methods accept required typed method/header/body fields; string and Uint8Array bodies upload concurrently with response headers, and byte bodies snapshot the selected view before suspension",
+        "GET/HEAD/POST/PUT/DELETE/OPTIONS/PATCH and permitted extension methods accept typed required or optional method/header/body fields; string and Uint8Array bodies upload concurrently with response headers, and byte bodies snapshot the selected view before suspension",
         "Header records, [string, string][] pairs, and Headers snapshots validate names and ByteString values, trim HTTP whitespace, and add the string-body Content-Type only when absent; invalid methods, headers, and GET/HEAD bodies reject before network I/O",
+        "Omitted or undefined options and fields preserve defaults; null bodies are absent. Invalid metadata rejects the returned Promise, permits repeated observation, and performs no network I/O",
         "Response.status, ok, url, bodyUsed, text(), json(), bytes(), and arrayBuffer() use one response identity; non-null body methods reject repeated consumption and preserve stored Promise observation; HEAD and null-body statuses release ownership and remain repeatedly consumable",
         "Response.headers preserves identity and supports case-insensitive get()/has(), duplicate joining, null for missing fields, and ByteString decoding; retained metadata survives body consumption, async observation, and collection",
         "Headers construction from records, dense typed pairs, Headers, or omitted/undefined input requires no host imports; append/set/delete preserve snapshot independence while fetched response headers reject mutation",
@@ -43,7 +44,7 @@
         "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
-        "fetch accepts absolute HTTP(S) string URLs and typed records with required method/header/body fields. Request, optional RequestInit fields, redirects, Web Streams, cancellation, and finite Error objects remain unfinished R8.3 work",
+        "fetch accepts absolute HTTP(S) string URLs and typed records with required or optional method/header/body fields. Request, redirects, Web Streams, cancellation, and finite Error objects remain unfinished R8.3 work",
         "URL support currently covers ASCII authorities, bracketed IPv6, ports, empty paths, queries, UTF-8 path escaping, and fragment removal; remaining WHATWG URL normalization is unfinished",
         "Every non-null acquired fetch body must be consumed before the owning call returns; otherwise the invocation traps instead of abandoning its native owner",
         "Tasks may overlap in resolved WIT components and must finish before the owning invocation returns",
@@ -80,7 +81,8 @@
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_headers_match_node_and_retain_metadata_after_consumption",
         "rust:tests/waffle_wit_native_test.rs#decoded_string_literals_preserve_latin1_without_encoding_repair",
         "rust:tests/waffle_wit_native_test.rs#standard_headers_construct_mutate_and_snapshot_without_host_imports",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_accepts_header_objects_and_pairs_with_immutable_responses"
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_accepts_header_objects_and_pairs_with_immutable_responses",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_optional_fields_and_validation_rejections_match_node"
       ],
       "wasi": [
         "wasi:http/client@0.3.0",
