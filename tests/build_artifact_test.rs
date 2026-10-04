@@ -8,7 +8,13 @@ fn compute_helpers_are_built_and_sources_are_watched() {
     fs::create_dir_all(scratch.join("src/helpers")).unwrap();
 
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for source in ["search.rs", "text.rs", "casing.rs", "case_properties.rs"] {
+    for source in [
+        "search.rs",
+        "text.rs",
+        "fetch.rs",
+        "casing.rs",
+        "case_properties.rs",
+    ] {
         fs::copy(
             repo_root.join("src/helpers").join(source),
             scratch.join("src/helpers").join(source),
@@ -117,7 +123,7 @@ fn compute_helpers_are_built_and_sources_are_watched() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for helper in ["search", "text", "json", "time"] {
+    for helper in ["search", "text", "fetch", "json", "time"] {
         let bytes = fs::read(scratch.join(format!("out/{helper}.wasm"))).unwrap();
         assert!(wasmparser::Parser::is_core_wasm(&bytes));
     }
@@ -125,6 +131,7 @@ fn compute_helpers_are_built_and_sources_are_watched() {
         "src/helpers",
         "src/helpers/search.rs",
         "src/helpers/text.rs",
+        "src/helpers/fetch.rs",
     ] {
         assert!(stdout.lines().any(
             |line| line == format!("cargo:rerun-if-changed={}", scratch.join(source).display())

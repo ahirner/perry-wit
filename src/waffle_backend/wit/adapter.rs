@@ -226,6 +226,16 @@ impl Adapter<'_> {
             let zero = self.integer(0);
             self.store_i32(address, 0, zero);
         }
+        if let Some(fetch) = self.registry.http_helpers.and_then(|http| http.fetch) {
+            self.body.add_op(
+                self.block,
+                Operator::Call {
+                    function_index: fetch.finish,
+                },
+                &[],
+                &[],
+            );
+        }
     }
 
     fn op(&mut self, operator: Operator, args: &[Value], ty: CoreType) -> Value {

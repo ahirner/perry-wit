@@ -215,6 +215,18 @@ pub(crate) fn build_export_wrapper(
             }
         }
     }
+    if let Some(fetch) = registry.http_helpers.and_then(|http| http.fetch) {
+        for block in [outcome.ok_block, outcome.err_block] {
+            body.add_op(
+                block,
+                Operator::Call {
+                    function_index: fetch.finish,
+                },
+                &[],
+                &[],
+            );
+        }
+    }
     match export.convention {
         ExportConvention::ResolvedWit => unreachable!("resolved WIT uses its schema adapter"),
         ExportConvention::Direct if super::structured::is_string_array(callee.success_type()) => {

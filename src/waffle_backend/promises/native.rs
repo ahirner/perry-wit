@@ -194,6 +194,10 @@ pub(crate) fn emit(
         }
         let (callee, completion) = match target {
             TaskTarget::Guest(id) => (registry.functions[id].func_index, true),
+            TaskTarget::FetchBody(method) => (
+                registry.http_helpers.unwrap().fetch.unwrap().body(*method),
+                true,
+            ),
             TaskTarget::Intrinsic(name) => (
                 filesystem.unwrap_or_else(|| registry.intrinsics[name]),
                 contract.intrinsics[name].has_completion(),

@@ -16,6 +16,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
+        ty if crate::waffle_backend::http::fetch::is_response(ty) => Some("Response"),
         ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::time::is_time(ty) => {
@@ -101,6 +102,15 @@ impl FunctionLowerer<'_> {
                     unreachable!()
                 };
                 super::tuples::element_type(&types, index).unwrap_or(HirType::Unknown)
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::http::fetch::is_response(&self.infer_expr_type(object)) => {
+                match property.as_str() {
+                    "url" => HirType::String,
+                    "ok" | "bodyUsed" => HirType::Boolean,
+                    _ => HirType::Number,
+                }
             }
             Expr::PropertyGet {
                 object, property, ..
@@ -269,6 +279,13 @@ impl FunctionLowerer<'_> {
                     object, property, ..
                 } = callee.as_ref()
                 {
+                    if crate::waffle_backend::http::fetch::is_response(
+                        &self.infer_expr_type(object),
+                    ) && let Some(method) =
+                        crate::waffle_backend::http::fetch::BodyMethod::named(property)
+                    {
+                        return HirType::Promise(Box::new(method.result()));
+                    }
                     if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) {
                         return if property == "headerName" {
                             HirType::String

@@ -11,7 +11,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/helpers").display()
     );
-    for helper in ["search", "text"] {
+    for helper in ["search", "text", "fetch"] {
         let source = manifest_dir.join(format!("src/helpers/{helper}.rs"));
         if source.exists() {
             compile_helper(&manifest_dir, &out_dir, helper);

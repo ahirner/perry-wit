@@ -52,6 +52,9 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn http_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {
+        if http::fetch::is_response(&self.infer_expr_type(receiver)) {
+            return self.fetch_property(receiver, property);
+        }
         let response = self.expression(receiver)?;
         let offset = match property {
             "status" => 0,
@@ -117,5 +120,99 @@ impl FunctionLowerer<'_> {
             payload,
             true,
         ))
+    }
+}
+
+impl FunctionLowerer<'_> {
+    pub(super) fn fetch(&mut self, name: &str, arguments: &[Expr]) -> Result<Value> {
+        ensure!(
+            arguments.len() == 1,
+            "fetch currently requires one absolute HTTP(S) URL; Request and options lowering is not implemented yet"
+        );
+        let url = self.string_receiver(&arguments[0])?;
+        if let Some(record) = self.start_task(
+            &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
+            &[url],
+        )? {
+            return Ok(record);
+        }
+        let payload = self.call_completion(
+            self.registry.http_helpers.unwrap().fetch.unwrap().fetch,
+            &[url],
+        );
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            payload,
+            true,
+        ))
+    }
+
+    pub(super) fn fetch_body(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        arguments: &[Expr],
+    ) -> Result<Value> {
+        let method = http::fetch::BodyMethod::named(method)
+            .with_context(|| format!("Response.{method} lowering is not implemented yet"))?;
+        ensure!(
+            arguments.is_empty(),
+            "Response body methods take no arguments"
+        );
+        let response = self.expression(receiver)?;
+        if let Some(record) = self.start_task(
+            &crate::waffle_backend::promises::TaskTarget::FetchBody(method),
+            &[response],
+        )? {
+            return Ok(record);
+        }
+        let payload = self.call_completion(
+            self.registry
+                .http_helpers
+                .unwrap()
+                .fetch
+                .unwrap()
+                .body(method),
+            &[response],
+        );
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            payload,
+            true,
+        ))
+    }
+
+    fn fetch_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {
+        let offset = match property {
+            "status" | "ok" => 0,
+            "url" => 16,
+            "bodyUsed" => 20,
+            _ => bail!("Response.{property} lowering is not implemented yet"),
+        };
+        let response = self.expression(receiver)?;
+        let value = self.op(
+            Operator::I32Load {
+                memory: MemoryArg {
+                    align: 2,
+                    offset,
+                    memory: self.registry.memory,
+                },
+            },
+            &[response],
+            &[Type::I32],
+        );
+        Ok(match property {
+            "url" | "bodyUsed" => value,
+            "ok" => {
+                let lower = self.op(Operator::I32Const { value: 200 }, &[], &[Type::I32]);
+                let upper = self.op(Operator::I32Const { value: 299 }, &[], &[Type::I32]);
+                let above = self.op(Operator::I32GeU, &[value, lower], &[Type::I32]);
+                let below = self.op(Operator::I32LeU, &[value, upper], &[Type::I32]);
+                self.op(Operator::I32And, &[above, below], &[Type::I32])
+            }
+            _ => self.op(Operator::F64ConvertI32U, &[value], &[Type::F64]),
+        })
     }
 }

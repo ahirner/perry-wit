@@ -150,6 +150,9 @@ pub(crate) fn lower_module(
             string_pool.next_free_address(),
         )?;
         let mut helper_libraries = Vec::new();
+        if contract.has_fetch() {
+            helper_libraries.push(super::libraries::LibraryId::Fetch);
+        }
         if reqs.find_substring {
             helper_libraries.push(super::libraries::LibraryId::Search);
         }
@@ -734,6 +737,16 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::Capability(
+                    super::capabilities::CapabilityOperation::Fetch
+                ))
+            )
+        {
+            return self.fetch(name, args).map(Some);
+        }
         if let Some(operation) = self.combinator(callee) {
             return self.combine_promises(operation, args).map(Some);
         }
@@ -795,6 +808,9 @@ impl<'a> FunctionLowerer<'a> {
         {
             if let Some(kind) = super::time::TimeKind::of(&self.infer_expr_type(object)) {
                 return self.time_method(kind, object, property, args).map(Some);
+            }
+            if super::http::fetch::is_response(&self.infer_expr_type(object)) {
+                return self.fetch_body(object, property, args).map(Some);
             }
             if super::http::is_response(&self.infer_expr_type(object)) {
                 return self.http_header(object, property, args).map(Some);

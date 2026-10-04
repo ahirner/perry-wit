@@ -1399,3 +1399,252 @@ async fn export_results_survive_collection_while_ready_work_finishes() -> Result
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_consumes_body_once_and_preserves_http_status() -> Result<()> {
+    let compiled = compile(
+        r#"
+      export async function run(url:string):Promise<string> {
+        const response = await fetch(url);
+        if(response.status !== 404) return "status";
+        if(response.ok) return "ok";
+        if(response.bodyUsed) return "body-used-before";
+        const body = await response.text();
+        if(!response.bodyUsed) return "body-unused-after";
+        let rejected = false;
+        try { await response.bytes(); } catch(error) { rejected = true; }
+        if(!rejected) return "second-consumed";
+        return body+"|"+response.url;
+
+      }
+    "#,
+        r#"package test:fetch; world boundary {
+      import wasi:http/client@0.3.0;
+      export run:async func(url:string)->string;
+    }"#,
+    )?;
+    let server = fixture::HttpFixture::new(|_| {
+        fixture::Reply::Bytes(404, b"\xef\xbb\xbfhello\xe2\x82X\xff".to_vec())
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for _ in 0..30 {
+        let url = format!("http://{}/test?q=hello world#ignored", server.address);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, (&url,)))
+                .await??
+                .0,
+            format!("hello�X�|http://{}/test?q=hello%20world", server.address)
+        );
+        store.assert_concurrent_state_empty();
+    }
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET" && request.target == "/test?q=hello%20world")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_resolves_at_headers_and_matches_node() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let source = include_str!("fixtures/fetch/headers_first.ts");
+    let compiled = compile(
+        source,
+        r#"package test:fetch; world boundary {
+      import wasi:http/client@0.3.0;
+      export run:async func(base:string)->string;
+    }"#,
+    )?;
+    let released = Arc::new(AtomicBool::new(false));
+    let gate = released.clone();
+    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+        "/gated" => fixture::Reply::GatedBody("hello🙂".as_bytes().to_vec(), gate.clone()),
+        "/release" => {
+            gate.store(true, Ordering::Release);
+            fixture::Reply::Body(200, "!".into())
+        }
+        _ => fixture::Reply::Disconnect,
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    for _ in 0..30 {
+        released.store(false, Ordering::Release);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            "hello🙂!hello🙂"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    released.store(false, Ordering::Release);
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/headers_first.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script, &base])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "hello🙂!hello🙂");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_releases_failures_and_grows_bodies_incrementally() -> Result<()> {
+    let source = r#"
+      export async function run(url:string):Promise<number> {
+        let headers = false;
+        try {
+          const response = await fetch(url);
+          headers = true;
+          const data = await response.bytes();
+          return data.length;
+        } catch(error) { if(headers) return -2; return -1; }
+      }
+    "#;
+    let compiled = compile(
+        source,
+        r#"package test:fetch; world boundary {
+      import wasi:http/client@0.3.0;
+      export run:async func(url:string)->f64;
+    }"#,
+    )?;
+    let server = fixture::HttpFixture::new(|request| match request.target.as_str() {
+        "/truncated" => fixture::Reply::TruncatedBody(vec![1, 2, 3], 4_000_000_000),
+        "/disconnect" => fixture::Reply::Disconnect,
+        "/empty" => fixture::Reply::Bytes(200, vec![]),
+        _ => fixture::Reply::Bytes(200, vec![0; 32_769]),
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    for _ in 0..40 {
+        for (path, expected) in [
+            ("/truncated", -2.0),
+            ("/disconnect", -1.0),
+            ("/empty", 0.0),
+            ("/large", 32769.0),
+        ] {
+            let url = format!("http://{}{path}", server.address);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, (&url,)))
+                    .await??
+                    .0,
+                expected,
+                "{path}"
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+        }
+        assert_eq!(run.call_async(&mut store, ("not-a-url",)).await?.0, -1.0);
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 160);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_rejects_unconsumed_body_at_call_boundary() -> Result<()> {
+    let compiled = compile(
+        r#"export async function run(url:string):Promise<number> {
+        const response = await fetch(url); return response.status;
+    }"#,
+        r#"package test:fetch; world boundary {
+      import wasi:http/client@0.3.0;
+      export run:async func(url:string)->f64;
+    }"#,
+    )?;
+    let server = fixture::HttpFixture::new(|_| fixture::Reply::Body(200, "body".into()));
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    let url = format!("http://{}/", server.address);
+    assert!(run.call_async(&mut store, (&url,)).await.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> {
+    let server = fixture::HttpFixture::new(|_| fixture::Reply::Body(200, "from fetch".into()));
+    let source = format!(
+        r#"
+        const response:Response = await fetch("http://{}/");
+        console.log(await response.text());
+    "#,
+        server.address
+    );
+    let compiled = compile(
+        &source,
+        r#"package test:fetch-command; world boundary {
+        include wasi:cli/imports@0.3.0;
+        import wasi:http/client@0.3.0;
+        export wasi:cli/run@0.3.0;
+    }"#,
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let captured = output_capture::MemoryOutput::new(1024);
+    store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
+        .stdout(captured.clone())
+        .build();
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let interface = instance
+        .get_export_index(&mut store, None, "wasi:cli/run@0.3.0")
+        .context("CLI interface")?;
+    let export = instance
+        .get_export_index(&mut store, Some(&interface), "run")
+        .context("CLI run")?;
+    let run = instance.get_typed_func::<(), (std::result::Result<(), ()>,)>(&mut store, export)?;
+    assert_eq!(run.call_async(&mut store, ()).await?.0, Ok(()));
+    assert_eq!(captured.contents().as_ref(), b"from fetch\n");
+    store.assert_concurrent_state_empty();
+    let directory = tempfile::tempdir()?;
+    let file = directory.path().join("main.ts");
+    std::fs::write(&file, source)?;
+    let output = std::process::Command::new("node").arg(file).output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"from fetch\n");
+    Ok(())
+}

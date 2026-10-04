@@ -42,6 +42,7 @@ use super::visit::visit_function_expressions;
 pub(crate) enum TaskTarget {
     Guest(FuncId),
     Intrinsic(String),
+    FetchBody(super::http::fetch::BodyMethod),
 }
 
 impl TaskTarget {
@@ -151,6 +152,29 @@ pub(crate) fn plan_promises(
             );
         }
     }
+    let has_fetch = intrinsics.values().any(|intrinsic| {
+        matches!(
+            intrinsic,
+            TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Fetch)
+        )
+    });
+    if has_fetch {
+        for method in [
+            super::http::fetch::BodyMethod::Bytes,
+            super::http::fetch::BodyMethod::Text,
+        ] {
+            candidates.insert(
+                TaskTarget::FetchBody(method),
+                TaskPlan {
+                    symbol: format!("__perry.fetch.{method:?}"),
+                    arguments: TaskArguments::Source(vec![HirType::Named(
+                        super::http::fetch::RESPONSE_TYPE.into(),
+                    )]),
+                    result: method.result(),
+                },
+            );
+        }
+    }
     let mut calls = 0;
     let mut direct_awaits = 0;
     let mut referenced = BTreeMap::new();
@@ -161,7 +185,13 @@ pub(crate) fn plan_promises(
                 expression => (expression, false),
             };
             if let Expr::Call { callee, .. } = expression
-                && let Some(target) = TaskTarget::from_callee(callee)
+                && let Some(target) = TaskTarget::from_callee(callee).or_else(|| {
+                    if has_fetch && let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                        super::http::fetch::BodyMethod::named(property).map(TaskTarget::FetchBody)
+                    } else {
+                        None
+                    }
+                })
                 && let Some(plan) = candidates.get(&target)
             {
                 if awaited {
@@ -222,5 +252,5 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || super::values::is_boxed_union(ty)
         || super::structured::is_string_array(ty)
         || matches!(ty, HirType::Array(_) | HirType::Tuple(_))
-        || matches!(ty, HirType::Named(name) if name == super::http::RESPONSE_TYPE)
+        || super::http::is_response(ty)
 }

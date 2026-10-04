@@ -196,9 +196,13 @@ impl ModuleRegistry {
         let output_operations = contract.output_operations();
         let output_imports = (!output_operations.is_empty())
             .then(|| super::streams::output::declare_imports(module, &output_operations));
-        let http_imports = contract
-            .has_http()
-            .then(|| super::http::declare_imports(module));
+        let http_imports = contract.has_http().then(|| {
+            let mut imports = super::http::declare_imports(module);
+            if contract.has_fetch() {
+                imports.extend(super::http::fetch::declare_helpers(module));
+            }
+            imports
+        });
         let filesystem_imports = contract
             .has_filesystem()
             .then(|| super::filesystem::declare_imports(module));
@@ -483,6 +487,17 @@ impl ModuleRegistry {
                     TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::HttpGet)
                 ) {
                     intrinsics.insert(name.clone(), helpers.get);
+                }
+            }
+        }
+
+        if let Some(helpers) = http_helpers {
+            for (name, intrinsic) in &contract.intrinsics {
+                if matches!(
+                    intrinsic,
+                    TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Fetch)
+                ) {
+                    intrinsics.insert(name.clone(), helpers.fetch.unwrap().fetch);
                 }
             }
         }

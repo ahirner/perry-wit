@@ -28,6 +28,7 @@ pub(crate) enum CapabilityOperation {
     Filesystem(FilesystemOperation),
     FilesystemPromise(FilesystemOperation),
     HttpGet,
+    Fetch,
     Process(ProcessOperation),
 }
 
@@ -72,6 +73,7 @@ impl CapabilityOperation {
             Self::Stdio(operation) => operation.name(),
             Self::Filesystem(operation) | Self::FilesystemPromise(operation) => operation.name(),
             Self::HttpGet => "get",
+            Self::Fetch => "fetch",
             Self::Process(operation) => operation.name(),
         }
     }
@@ -96,6 +98,13 @@ impl LowerCapability for CapabilityOperation {
                 plan.result = HirType::Promise(Box::new(plan.result));
                 plan
             }
+            Self::Fetch => CapabilityPlan {
+                params: vec![HirType::String],
+                result: HirType::Promise(Box::new(HirType::Named(
+                    super::http::fetch::RESPONSE_TYPE.into(),
+                ))),
+                implementation: CapabilityImplementation::Http,
+            },
             Self::HttpGet => CapabilityPlan {
                 params: vec![
                     HirType::String,

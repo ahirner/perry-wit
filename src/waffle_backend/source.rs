@@ -66,6 +66,7 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::context::ENVIRONMENT_TYPE)
                 && !names.0.contains(super::date::DATE_TYPE)
                 && !names.0.contains(super::http::RESPONSE_TYPE)
+                && !names.0.contains(super::http::fetch::RESPONSE_TYPE)
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
                 && !names
@@ -226,7 +227,7 @@ pub(crate) fn resolve_bindings(
 
 fn source_type(ty: &HirType) -> Result<String> {
     match ty {
-        ty if super::http::is_response(ty) => Ok(super::http::RESPONSE_TYPE.into()),
+        HirType::Named(name) if super::http::is_response(ty) => Ok(name.clone()),
         ty if *ty == super::http::headers_type() => Ok("{[key: string]: string}".into()),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("string | Uint8Array".into()),
         ty if *ty == ProcessOperation::GetExitCode.lower().result => {
@@ -390,6 +391,9 @@ impl SourceCalls {
 
     fn operation(&self, expression: &ast::Expr) -> Result<Option<CapabilityOperation>> {
         match expression {
+            ast::Expr::Ident(ident) if ident.sym == "fetch" && ident.ctxt == self.unresolved => {
+                Ok(Some(CapabilityOperation::Fetch))
+            }
             ast::Expr::Ident(ident) => match self.bindings.get(&ident.to_id()) {
                 Some(CapabilityBinding::Operation(operation)) => Ok(Some(*operation)),
                 Some(CapabilityBinding::Namespace(_)) => {
@@ -697,6 +701,7 @@ impl VisitMut for SourceCalls {
             "Math"
                 | "RegExp"
                 | "JSON"
+                | "fetch"
                 | "Uint8Array"
                 | "TextDecoder"
                 | "console"
@@ -728,6 +733,12 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && name.sym == "Response"
+            && name.ctxt == self.unresolved
+        {
+            name.sym = super::http::fetch::RESPONSE_TYPE.into();
+        }
         if let ast::TsEntityName::Ident(name) = &mut reference.type_name
             && self.http_types.contains(&name.to_id())
         {

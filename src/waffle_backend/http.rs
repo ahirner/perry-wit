@@ -8,6 +8,7 @@ use waffle::{Func, Memory, Module};
 
 use super::{allocation::AllocationFuncs, runtime, runtime::imports, streams};
 
+pub(crate) mod fetch;
 mod future;
 pub(crate) mod handler;
 
@@ -18,7 +19,7 @@ mod tests;
 pub(crate) const RESPONSE_TYPE: &str = "__perry_http_response";
 
 pub(crate) fn is_response(ty: &HirType) -> bool {
-    matches!(ty, HirType::Named(name) if name == RESPONSE_TYPE)
+    matches!(ty, HirType::Named(name) if name == RESPONSE_TYPE) || fetch::is_response(ty)
 }
 pub(crate) fn headers_type() -> HirType {
     HirType::Object(ObjectType {
@@ -32,6 +33,7 @@ pub(crate) fn headers_type() -> HirType {
 pub(crate) struct HttpHelpers {
     pub(crate) get: Func,
     pub(crate) header: Func,
+    pub(crate) fetch: Option<fetch::Helpers>,
 }
 
 pub(crate) fn emit_source_runtime(
@@ -63,6 +65,10 @@ pub(crate) fn emit_source_runtime(
     )?;
     Ok(HttpHelpers {
         get: functions["get"],
+        fetch: imports
+            .contains_key("fetch_url")
+            .then(|| fetch::emit(module, memory, allocator, imports, strings, bytes))
+            .transpose()?,
         header: functions["header"],
     })
 }

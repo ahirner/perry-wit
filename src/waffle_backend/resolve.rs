@@ -75,6 +75,7 @@ impl TypedIntrinsic {
                         | CapabilityOperation::Filesystem(_)
                         | CapabilityOperation::FilesystemPromise(_)
                         | CapabilityOperation::HttpGet
+                        | CapabilityOperation::Fetch
                         | CapabilityOperation::Random(RandomOperation::Fill)
                 )
                 | Self::DecoderNew
@@ -173,11 +174,21 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn has_fetch(&self) -> bool {
+        self.intrinsics.values().any(|intrinsic| {
+            matches!(
+                intrinsic,
+                TypedIntrinsic::Capability(CapabilityOperation::Fetch)
+            )
+        })
+    }
     pub(crate) fn has_http(&self) -> bool {
         self.intrinsics.values().any(|intrinsic| {
             matches!(
                 intrinsic,
-                TypedIntrinsic::Capability(CapabilityOperation::HttpGet)
+                TypedIntrinsic::Capability(
+                    CapabilityOperation::HttpGet | CapabilityOperation::Fetch
+                )
             )
         })
     }

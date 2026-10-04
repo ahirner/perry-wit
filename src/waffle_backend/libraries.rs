@@ -12,6 +12,7 @@ use wasmparser::{
     Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Operator, Parser, Payload, TypeRef,
 };
 
+pub(crate) const FETCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fetch.wasm"));
 pub(crate) const SEARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/search.wasm"));
 pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.wasm"));
 pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/time.wasm"));
@@ -19,6 +20,7 @@ pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wa
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {
+    Fetch,
     Search,
     Text,
     Json,
@@ -28,6 +30,7 @@ pub(crate) enum LibraryId {
 impl LibraryId {
     pub(crate) fn for_entry(entry: &str) -> Result<Self> {
         Ok(match entry {
+            "fetch_url" | "fetch_decode" => Self::Fetch,
             "str_find_substring" | "str_scalar_to_byte" => Self::Search,
             "str_code_point_at"
             | "str_from_code_point"
@@ -55,6 +58,7 @@ impl LibraryId {
 
     pub(crate) fn bytes(self) -> &'static [u8] {
         match self {
+            Self::Fetch => FETCH,
             Self::Search => SEARCH,
             Self::Text => TEXT,
             Self::Json => JSON,
