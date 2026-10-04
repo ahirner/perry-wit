@@ -254,6 +254,9 @@ impl WitWorld {
                 continue;
             }
             let mut pending = vec![contract.functions_by_name[name]];
+            if let Some(initialization) = &contract.initialization {
+                pending.push(initialization.function);
+            }
             let mut visited = BTreeSet::new();
             while let Some(id) = pending.pop() {
                 if !visited.insert(id) {
@@ -262,6 +265,14 @@ impl WitWorld {
                 let mut suspending = None;
                 super::visit::visit_statements(&functions[&id].body, &mut |expression| {
                     match expression {
+                        Expr::Await(_)
+                            if contract
+                                .initialization
+                                .as_ref()
+                                .is_some_and(|initialization| initialization.function == id) =>
+                        {
+                            suspending = Some("module initialization".to_owned());
+                        }
                         Expr::FuncRef(callee) => pending.push(*callee),
                         Expr::ExternFuncRef { name, .. } => {
                             if let Some(intrinsic) = contract.intrinsics.get(name)

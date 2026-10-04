@@ -5,10 +5,10 @@ use perry_wit::{CompileOptions, compile_typescript};
 fn production_command_runs_with_the_nix_p3_host() -> Result<()> {
     let compiled = compile_typescript(
         r#"
-      export function runRun():{ok:true}|{ok:false} {
-        console.log('native P3: 漢🙂');
-        return {ok:true};
-      }
+      import {setTimeout} from 'node:timers/promises';
+      const started = 'native P3: ';
+      await setTimeout(1);
+      console.log(started + '漢🙂');
     "#,
         "command.ts",
         &CompileOptions {
@@ -149,7 +149,7 @@ fn static_modules_preserve_aliases_namespaces_and_multiple_exports() -> Result<(
     )?;
     fs::write(
         directory.path().join("text.ts"),
-        "export function decorate(input:string):string{return input+'!';} export function count(input:string):number{return input.length;}",
+        "let initialized:number=0; initialized++; export function decorate(input:string):string{return input+'!';} export function count(input:string):number{return input.length+initialized-1;}",
     )?;
     fs::write(
         directory.path().join("barrel.ts"),

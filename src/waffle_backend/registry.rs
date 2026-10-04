@@ -77,6 +77,7 @@ impl FunctionInfo {
 
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
+    pub(crate) module_state: Option<super::initialization::ModuleState>,
     pub(crate) promises: Option<PromiseImports>,
     pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
     pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
@@ -647,7 +648,13 @@ impl ModuleRegistry {
             );
         }
 
+        let module_state = contract
+            .initialization
+            .as_ref()
+            .map(|plan| super::initialization::ModuleState::declare(module, plan))
+            .transpose()?;
         let mut registry = Self {
+            module_state,
             promises,
             allocator,
             byte_helpers,

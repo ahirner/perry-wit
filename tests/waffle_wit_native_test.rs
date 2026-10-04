@@ -1155,3 +1155,51 @@ async fn timer_delays_map_to_p3_nanoseconds_without_waiting_for_the_clock() -> R
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn asynchronous_module_initialization_is_shared_by_named_exports() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let compiled = compile(
+        r#"
+        import {load} from 'test:initialization/host';
+        const label:string=await load();
+        let calls:number=0;
+        export async function first():Promise<string> {calls++; return label;}
+        export async function second():Promise<number> {return calls;}
+        "#,
+        "package test:initialization; interface host {load:async func()->string;} world boundary {import host; export first:async func()->string; export second:async func()->f64;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let count = Arc::new(AtomicUsize::new(0));
+    let captured = count.clone();
+    let mut linker = Linker::<Host>::new(&engine);
+    linker
+        .instance("test:initialization/host")?
+        .func_wrap_concurrent("load", move |_, (): ()| {
+            let count = captured.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                Ok(("initialized 漢🙂".to_string(),))
+            })
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let first = instance.get_typed_func::<(), (String,)>(&mut store, "first")?;
+    let second = instance.get_typed_func::<(), (f64,)>(&mut store, "second")?;
+    assert_eq!(second.call_async(&mut store, ()).await?.0, 0.0);
+    for index in 1..=100 {
+        assert_eq!(
+            first.call_async(&mut store, ()).await?.0,
+            "initialized 漢🙂"
+        );
+        assert_eq!(second.call_async(&mut store, ()).await?.0, index as f64);
+        store.assert_concurrent_state_empty();
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    Ok(())
+}

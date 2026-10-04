@@ -112,7 +112,7 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     };
 
     let mut check_config = serde_json::json!({
-        "compilerOptions": {"target": "ES2022", "module": "ESNext", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false},
+        "compilerOptions": {"target": "ES2022", "module": "ESNext", "moduleDetection": "force", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false},
         "files": ["implementation-check.ts"],
         "include": [],
         "exclude": []

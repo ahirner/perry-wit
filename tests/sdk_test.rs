@@ -7,7 +7,7 @@ use std::process::Command;
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
 #[test]
-fn command_contract_requires_typed_run_export() {
+fn command_contract_accepts_scripts_and_validates_explicit_run_exports() {
     let temp_dir = std::env::temp_dir().join(format!("perry-sdk-command-{}", std::process::id()));
     fs::create_dir_all(temp_dir.join("src")).unwrap();
     generate_sdk_files(&SdkOptions {
@@ -20,6 +20,12 @@ fn command_contract_requires_typed_run_export() {
     })
     .unwrap();
     for (source, succeeds) in [
+        ("console.log('script');", true),
+        ("await 1; console.log('async script');", true),
+        (
+            "console.log('setup'); export function helper():number {return 2;}",
+            true,
+        ),
         (
             "export async function runRun(): Promise<{ok:true}|{ok:false}> { return {ok:true}; }",
             true,

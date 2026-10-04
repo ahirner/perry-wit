@@ -12,6 +12,7 @@ mod decoder;
 mod filesystem;
 mod http;
 mod loops;
+mod module_state;
 mod objects;
 mod optional;
 mod options;
@@ -23,7 +24,7 @@ mod text_or_bytes;
 mod time;
 mod tuples;
 mod typed;
-mod types;
+pub(crate) mod types;
 mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -187,6 +188,9 @@ pub(crate) fn lower_module(
         reqs,
         &string_pool,
     )?;
+    if let (Some(state), Some(plan)) = (&registry.module_state, &contract.initialization) {
+        state.emit(&mut module, plan, &registry)?;
+    }
     let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
     if registry
         .promises
@@ -377,6 +381,13 @@ impl<'a> FunctionLowerer<'a> {
                 break;
             }
             match stmt {
+                Stmt::Let {
+                    id,
+                    init: Some(expression),
+                    ..
+                } if self.module_binding(*id).is_some() => {
+                    self.assign_module_binding(&self.module_binding(*id).unwrap(), expression)?;
+                }
                 Stmt::Let {
                     id,
                     ty,
@@ -1610,6 +1621,34 @@ impl<'a> FunctionLowerer<'a> {
                     .map(std::slice::from_ref)
                     .unwrap_or_default(),
             ),
+            Expr::Update { id, op, prefix } if self.module_binding(*id).is_some() => {
+                let binding = self.module_binding(*id).unwrap();
+                ensure!(
+                    binding.ty == HirType::Number,
+                    "Module updates require a number binding"
+                );
+                let previous = self.read_module_binding(&binding);
+                let one = self.op(
+                    Operator::F64Const {
+                        value: 1f64.to_bits(),
+                    },
+                    &[],
+                    &[Type::F64],
+                );
+                let operation = match op {
+                    UpdateOp::Increment => Operator::F64Add,
+                    UpdateOp::Decrement => Operator::F64Sub,
+                };
+                let updated = self.op(operation, &[previous, one], &[Type::F64]);
+                self.write_module_binding(&binding, updated);
+                Ok(if *prefix { updated } else { previous })
+            }
+            Expr::LocalSet(id, expr) if self.module_binding(*id).is_some() => {
+                self.assign_module_binding(&self.module_binding(*id).unwrap(), expr)
+            }
+            Expr::LocalGet(id) if self.module_binding(*id).is_some() => {
+                Ok(self.read_module_binding(&self.module_binding(*id).unwrap()))
+            }
             Expr::Update { id, op, prefix } => {
                 let previous = *self
                     .locals

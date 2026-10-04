@@ -31,7 +31,6 @@ pub struct ComparisonResult {
 /// Executes a TypeScript file under the native Node.js reference oracle.
 pub fn run_node_oracle(script_path: &Path) -> Result<ExecutionVector> {
     let output = Command::new("node")
-        .args(["--input-type=module", "--eval", "import { pathToFileURL } from 'node:url'; const task = await import(pathToFileURL(process.argv[1])); const result = await task.runRun(); if (!result.ok) process.exitCode = 1;"])
         .arg(fs::canonicalize(script_path)?)
         .env("PERRY_CONFORMANCE", "fixture")
         .output()

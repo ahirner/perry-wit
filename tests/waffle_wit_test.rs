@@ -846,3 +846,71 @@ fn telemetry_scalar_transport_preserves_u64_precision_and_optional_flags() -> Re
     }
     Ok(())
 }
+
+#[test]
+fn module_bindings_initialize_once_and_survive_collection_across_exports() -> Result<()> {
+    let compiled = compile_world(
+        r#"
+        let count:number=10;
+        let label:string='retained 漢🙂';
+        function setup():number {let i=0;while(i<600){const unused=label+' temporary';i++;} count=count+1;return count;}
+        const initial:number=setup();
+        export function next(value:string):string {
+            let i=0;
+            while(i<600){const temporary=value+' discarded'; i=i+1;}
+            count=count+1;
+            label=label+'!';
+            return value+label;
+        }
+        export function total():number {return count+initial;}
+        "#,
+        "package test:boundary; world boundary {export next:func(value:string)->string; export total:func()->f64;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    for _ in 0..2 {
+        let mut store = Store::new(
+            &engine,
+            StoreLimitsBuilder::new().memory_size(262144).build(),
+        );
+        store.limiter(|limits: &mut StoreLimits| limits);
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let next = instance.get_typed_func::<(String,), (String,)>(&mut store, "next")?;
+        let total = instance.get_typed_func::<(), (f64,)>(&mut store, "total")?;
+        let mut label = String::from("retained 漢🙂");
+        for index in 0..50 {
+            label.push('!');
+            assert_eq!(
+                next.call(&mut store, ("input ".repeat(100),))?.0,
+                "input ".repeat(100) + label.as_str()
+            );
+            assert_eq!(total.call(&mut store, ())?.0, 23.0 + index as f64);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn initialization_reads_observe_the_temporal_dead_zone() -> Result<()> {
+    let compiled = compile_world(
+        "const first:number=read(); let later:number=4; function read():number{return later;} export function value():number{return first;}",
+        "package test:boundary; world boundary {export value:func()->f64;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let value = instance.get_typed_func::<(), (f64,)>(&mut store, "value")?;
+    assert!(value.call(&mut store, ()).is_err());
+    Ok(())
+}
+
+#[test]
+fn top_level_await_requires_asynchronous_wit_exports() {
+    let error = compile_world(
+        "await 1; export function value():number{return 2;}",
+        "package test:boundary; world boundary {export value:func()->f64;}",
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("async func"), "{error:#}");
+}

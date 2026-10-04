@@ -267,7 +267,9 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
         }
     }
 
-    out.push_str("export interface ComponentImplementation {\n");
+    out.push_str(
+        "export interface ComponentImplementation {\n  readonly [name: string]: unknown;\n",
+    );
     for (key, item) in &world.exports {
         let functions = match item {
             WorldItem::Function(function) => vec![(to_camel_case(&function.name), function)],
@@ -291,6 +293,11 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
         for (name, function) in functions {
             out.push_str("  ");
             out.push_str(&name);
+            if crate::abi::export_names::core_export_name(resolve, key, function)
+                == "wasi:cli/run@0.3.0#run"
+            {
+                out.push('?');
+            }
             out.push_str(": (");
             emit_params(&mut out, resolve, function);
             out.push_str(") => ");

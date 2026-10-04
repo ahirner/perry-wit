@@ -96,6 +96,29 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         }
         args.push(adapter.lift(param.ty, &mut source)?);
     }
+    if let Some(state) = &registry.module_state {
+        let count = adapter.integer(args.len() as u32);
+        let allocator = registry.allocator.unwrap();
+        let roots = adapter.call(allocator.frame_new, &[count]);
+        for (index, (argument, param)) in args.iter().zip(&declaration.function.params).enumerate()
+        {
+            if crate::waffle_backend::ssa::types::is_reference(&super::hir_type(
+                &wit.resolve,
+                param.ty,
+            )?) {
+                adapter.store_i32(roots, 12 + index as u32 * 4, *argument);
+            }
+        }
+        adapter.call_checked(state.evaluate, &[]);
+        adapter.body.add_op(
+            adapter.block,
+            Operator::Call {
+                function_index: allocator.frame_drop,
+            },
+            &[roots],
+            &[],
+        );
+    }
     let payload = adapter.call_checked(callee.func_index, &args);
     if let Some(native) = registry
         .promises

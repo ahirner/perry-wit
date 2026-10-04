@@ -32,7 +32,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
     }
 }
 
-pub(super) fn is_reference(ty: &HirType) -> bool {
+pub(crate) fn is_reference(ty: &HirType) -> bool {
     match ty {
         ty if crate::waffle_backend::nullable::inner(ty).is_some() => true,
         ty if crate::waffle_backend::values::is_boxed(ty) => true,
@@ -234,6 +234,14 @@ impl FunctionLowerer<'_> {
                 .narrowings
                 .get(id)
                 .or_else(|| self.local_types.get(id))
+                .or_else(|| {
+                    self.registry
+                        .module_state
+                        .as_ref()?
+                        .bindings
+                        .get(id)
+                        .map(|binding| &binding.ty)
+                })
                 .cloned()
                 .unwrap_or(HirType::Any),
             Expr::IndexGet { object, .. } if self.is_scalar_iteration(object) => HirType::String,

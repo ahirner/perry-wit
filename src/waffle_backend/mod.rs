@@ -13,6 +13,7 @@ mod decoder;
 pub(crate) mod exceptions;
 mod filesystem;
 mod http;
+mod initialization;
 mod json;
 pub(crate) mod libraries;
 pub(crate) mod link;
@@ -118,7 +119,7 @@ fn compile_source(
     ts_source: &str,
     file_name: &str,
     options: &WaffleCompileOptions,
-    exports: Option<wit::WitWorld>,
+    mut exports: Option<wit::WitWorld>,
     http_handler: Option<HttpHandlerOptions>,
 ) -> Result<WaffleCompiled> {
     if options.audit_dependencies {
@@ -135,6 +136,9 @@ fn compile_source(
     text_contract::validate_ast_text(&ast).context("Source text contract validation failed")?;
     if exports.is_some() {
         wit::validate_source(&ast)?;
+    }
+    if let Some(exports) = &mut exports {
+        initialization::prepare_command(&mut ast, exports)?;
     }
     let bindings = source::resolve_bindings(&mut ast, exports.as_ref())?;
     let hir = lower_module(&ast, "main", file_name)
@@ -156,6 +160,9 @@ fn compile_resolved_hir(
     exports: Option<wit::WitWorld>,
     http_handler: Option<HttpHandlerOptions>,
 ) -> Result<WaffleCompiled> {
+    if exports.is_some() {
+        initialization::extract(&mut hir)?;
+    }
     objects::resolve_declared_types(&mut hir)?;
     if let Some(exports) = &exports {
         exports.validate(&hir)?;
