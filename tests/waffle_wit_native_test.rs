@@ -492,3 +492,141 @@ async fn resolved_world_http_disposal_releases_suspended_headers_and_body() -> R
     }
     Ok(())
 }
+
+#[path = "support/wit_source.rs"]
+mod wit_source;
+
+#[derive(Debug, Clone, PartialEq, ComponentType, Lift, Lower)]
+#[component(record)]
+struct FlowEntry {
+    key: String,
+    title: String,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, ComponentType, Lift, Lower)]
+#[component(enum)]
+#[repr(u8)]
+enum FlowFailure {
+    #[component(name = "unavailable")]
+    Unavailable,
+    #[component(name = "invalid")]
+    Invalid,
+    #[component(name = "too-many")]
+    TooMany,
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn independent_record_flow_preserves_transformations_and_orders_host_effects() -> Result<()> {
+    use std::sync::{Arc, Mutex};
+    const SOURCE: &str = include_str!("fixtures/record_flow.ts");
+    const WIT: &str = include_str!("fixtures/record-flow/world.wit");
+    wit_source::check_sdk_source(WIT, SOURCE)?;
+    let compiled = compile(SOURCE, WIT)?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let row = |key: &str, title: &str, active| FlowEntry {
+        key: key.into(),
+        title: title.into(),
+        active,
+    };
+    let cases = [
+        (Ok(vec![]), Ok(0)),
+        (
+            Ok(vec![
+                row("a", "first", None),
+                row("b", "skipped", Some(false)),
+                row("a", "漢🙂", Some(true)),
+            ]),
+            Ok(1),
+        ),
+        (Ok(vec![row("a", "漢🙂", Some(true)); 64]), Ok(1)),
+        (
+            Ok(vec![row("", "invalid", None)]),
+            Err(FlowFailure::Invalid),
+        ),
+        (Ok(vec![row("a", "", None)]), Err(FlowFailure::Invalid)),
+        (
+            Ok(vec![row("a", "valid", None); 65]),
+            Err(FlowFailure::TooMany),
+        ),
+        (Err(FlowFailure::Unavailable), Err(FlowFailure::Unavailable)),
+    ];
+    for (input, expected) in cases {
+        for reject_save in [false, true] {
+            let events = Arc::new(Mutex::new(Vec::<String>::new()));
+            let saved = Arc::new(Mutex::new(Vec::<Vec<FlowEntry>>::new()));
+            let mut linker = Linker::<Host>::new(&engine);
+            let mut storage = linker.instance("test:record-flow/storage")?;
+            let trace = events.clone();
+            let input = input.clone();
+            storage.func_wrap_concurrent("load", move |_, (): ()| {
+                let input = input.clone();
+                let trace = trace.clone();
+                Box::pin(async move {
+                    trace.lock().unwrap().push("load-start".into());
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    trace.lock().unwrap().push("load-end".into());
+                    Ok((input,))
+                })
+            })?;
+            let (trace, outputs) = (events.clone(), saved.clone());
+            storage.func_wrap_concurrent("save", move |_, (entries,): (Vec<FlowEntry>,)| {
+                let (trace, outputs) = (trace.clone(), outputs.clone());
+                Box::pin(async move {
+                    trace.lock().unwrap().push("save-start".into());
+                    tokio::task::yield_now().await;
+                    let count = entries.len() as u32;
+                    outputs.lock().unwrap().push(entries);
+                    trace.lock().unwrap().push("save-end".into());
+                    Ok((if reject_save {
+                        Err(FlowFailure::Unavailable)
+                    } else {
+                        Ok(count)
+                    },))
+                })
+            })?;
+            let mut store = store(&engine);
+            let instance = linker.instantiate_async(&mut store, &component).await?;
+            let run = instance
+                .get_typed_func::<(&str,), (std::result::Result<u32, FlowFailure>,)>(
+                    &mut store, "run",
+                )?;
+            for _ in 0..40 {
+                events.lock().unwrap().clear();
+                saved.lock().unwrap().clear();
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    run.call_async(&mut store, ("新:",)),
+                )
+                .await??
+                .0;
+                assert_eq!(
+                    outcome,
+                    if expected.is_ok() && reject_save {
+                        Err(FlowFailure::Unavailable)
+                    } else {
+                        expected
+                    }
+                );
+                if expected.is_ok() {
+                    assert_eq!(
+                        *events.lock().unwrap(),
+                        ["load-start", "load-end", "save-start", "save-end"]
+                    );
+                    let entries = if expected == Ok(1) {
+                        vec![row("a", "新:漢🙂", Some(true))]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(*saved.lock().unwrap(), [entries]);
+                } else {
+                    assert_eq!(*events.lock().unwrap(), ["load-start", "load-end"]);
+                    assert!(saved.lock().unwrap().is_empty());
+                }
+                store.assert_concurrent_state_empty();
+            }
+        }
+    }
+    Ok(())
+}

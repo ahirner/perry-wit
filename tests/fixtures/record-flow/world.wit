@@ -1,0 +1,15 @@
+package test:record-flow;
+
+interface storage {
+  record entry { key: string, title: string, active: option<bool> }
+  enum failure { unavailable, invalid, too-many }
+  load: async func() -> result<list<entry>, failure>;
+  save: async func(entries: list<entry>) -> result<u32, failure>;
+}
+
+world boundary {
+  import storage;
+  use storage.{entry, failure};
+  export select: func(entries: list<entry>, prefix: string) -> result<list<entry>, failure>;
+  export run: async func(prefix: string) -> result<u32, failure>;
+}
