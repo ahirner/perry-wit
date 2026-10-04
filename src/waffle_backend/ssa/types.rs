@@ -93,6 +93,7 @@ impl FunctionLowerer<'_> {
             }
             Expr::Uint8ArrayGet { .. } => HirType::Union(vec![HirType::Number, HirType::Void]),
             Expr::Uint8ArraySet { value, .. } => self.infer_expr_type(value),
+            Expr::PutValueSet { value, .. } => self.infer_expr_type(value),
             Expr::LocalSet(_, value) => self.infer_expr_type(value),
             Expr::ForOfToArray(_) => HirType::Named(SCALAR_ITERATION.into()),
             Expr::String(_)

@@ -7,7 +7,7 @@
     (i32.store offset=16 (local.get $frame) (local.get $data))
     (local.set $scratch (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 24)))
     (i32.store offset=20 (local.get $frame) (local.get $scratch))
-    (call $open-file (local.get $path) (local.get $scratch) (local.get $frame))
+    (call $open-file (local.get $path) (local.get $scratch) (local.get $frame) (i32.const 1))
     local.set $file local.set $error
     (if (i32.eqz (local.get $error))
       (then

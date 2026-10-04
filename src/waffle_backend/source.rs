@@ -1,6 +1,7 @@
 //! Resolve source bindings before Perry's name-based builtin lowering.
 
 mod decoder;
+mod filesystem;
 mod options;
 pub(crate) use decoder::validate_lowering;
 
@@ -179,6 +180,9 @@ impl CapabilityNamespace {
             (Self::Filesystem, "writeFileSync") => Ok(CapabilityOperation::Filesystem(
                 FilesystemOperation::WriteFile,
             )),
+            (Self::Filesystem, "readFileSync") => Ok(CapabilityOperation::Filesystem(
+                FilesystemOperation::ReadBytes,
+            )),
             _ => bail!("Unknown capability member '{name}'"),
         }
     }
@@ -333,14 +337,14 @@ impl VisitMut for SourceCalls {
             }
             match self.operation(callee) {
                 Ok(Some(operation)) => {
-                    if matches!(operation, CapabilityOperation::Filesystem(_))
-                        && let Some(options) = call.args.get(2)
-                        && let Err(error) =
-                            options::validate_plain_options(&options.expr, "Filesystem")
-                    {
-                        self.error.get_or_insert(error);
-                        return;
-                    }
+                    let operation =
+                        match filesystem::specialize(operation, &call.args, self.unresolved) {
+                            Ok(operation) => operation,
+                            Err(error) => {
+                                self.error.get_or_insert(error);
+                                return;
+                            }
+                        };
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
                         self.error.get_or_insert_with(|| {
                             anyhow::anyhow!("Spread capability arguments are unsupported")

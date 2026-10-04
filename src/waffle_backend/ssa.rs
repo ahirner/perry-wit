@@ -840,6 +840,17 @@ impl<'a> FunctionLowerer<'a> {
                 index,
                 value,
             } => self.byte_set(array, index, value),
+            Expr::PutValueSet {
+                target,
+                key,
+                value,
+                receiver,
+                ..
+            } if super::bytes::is_byte_view(&self.infer_expr_type(target))
+                && matches!((target.as_ref(), receiver.as_ref()), (Expr::LocalGet(target), Expr::LocalGet(receiver)) if target == receiver) =>
+            {
+                self.byte_set(target, key, value)
+            }
             Expr::Uint8ArrayLength(array) => self.byte_property(array, "length"),
             Expr::String(s) => {
                 let offset = self.string_pool.get(s).unwrap_or_else(|| {

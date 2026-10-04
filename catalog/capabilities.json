@@ -21,6 +21,30 @@
   ],
   "capabilities": [
     {
+      "id": "compiler.p3_filesystem_read",
+      "name": "Native P3 Filesystem Reads",
+      "tier": "tier-2-node-core",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: readFileSync with omitted or literal encoding",
+      "invariants": [
+        "Binary reads preserve arbitrary bytes and return independent mutable views",
+        "Text reads preserve BOMs, NULs, and valid UTF-8 with scalar string semantics",
+        "The shared transfer loop handles partial input and closure; successful EOF still awaits producer completion",
+        "Invalid options fail before I/O; read-only preopens work without requesting write permissions",
+        "Pending buffers and returned values survive collection; resources close on success and recoverable errors",
+        "Materialization uses storage proportional to file size, with multi-megabyte and repeated bounded-memory fixtures"
+      ],
+      "differences": [
+        "The default CLI remains on the legacy pipeline until R9",
+        "Encoding must be omitted or literal; runtime-selected string-or-byte results still require union lowering",
+        "Options objects must be plain literals with encoding and the default or r flag; general objects remain unsupported",
+        "Malformed text throws filesystem error 9 instead of Node replacement decoding",
+        "The binary encoding label returns Uint8Array, preserving the existing compiler contract; Node returns Latin-1 text for that label",
+        "Host traps and cancellation require store disposal; metadata and directory operations remain open"
+      ],
+      "conformance": ["tests/p3_filesystem/source_reads.rs", "tests/waffle_stream_test.rs", "tests/waffle_decoder_test.rs"]
+    },
+    {
       "id": "compiler.p3_filesystem_write",
       "name": "Native P3 Filesystem Writes",
       "tier": "tier-2-node-core",
@@ -40,7 +64,7 @@
         "Options accept encoding strings, null, undefined, and plain literal objects; general option objects, getters, spreads, computed keys, and custom prototypes are diagnosed",
         "Only the default or w flag is supported; UTF8 labels accept ASCII case, and binary encoding is restricted to byte data",
         "Errors throw the one-based WASI 0.3 filesystem error ordinal; already written bytes are not rolled back",
-        "Host traps and cancellation require store disposal; reads, metadata, and directory operations remain open in R8.2"
+        "Host traps and cancellation require store disposal; runtime-selected read encodings, metadata, and directory operations remain open in R8.2"
       ],
       "conformance": ["tests/p3_filesystem_test.rs", "tests/p3_filesystem/source.rs", "tests/p3_filesystem/source_lifecycle.rs"]
     },

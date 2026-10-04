@@ -203,8 +203,20 @@ future. Descriptors, stream ends, and futures close before returning, and buffer
 remain rooted during sibling collection. Errors throw the one-based ordinal of the
 WASI 0.3 filesystem error variant, including `1` (access), `12` (invalid options),
 and `32` (broken pipe); host traps and cancellation require store disposal.
-Already written bytes are not rolled back. `readFileSync`, metadata operations,
-and general option objects remain open in R8.2.
+Already written bytes are not rolled back.
+`readFileSync(path, options?)` returns an independent `Uint8Array` for omitted/null
+encoding or the literal `binary` label, and a string for literal `utf8`/`utf-8`
+labels (all case-insensitive). Plain literal options support `encoding` and the
+default or explicit `r` flag; unsupported options fail before opening a file.
+The `binary` label selects bytes here; Node treats it as Latin-1 text.
+Reads materialize the file with storage proportional to its size, share the native
+read transfers, and await the producer's separate completion before returning.
+Text reads preserve BOMs and NULs and count Unicode scalars; malformed or unfinished
+UTF-8 throws filesystem error `9` instead of Node's replacement decoding.
+Returned values, pending buffers, and stored text task outcomes survive collection.
+Encoding values selected at runtime still require string-or-byte union lowering;
+they currently produce a diagnostic. Those encodings, general option objects,
+metadata operations, and directory APIs remain open in R8.2.
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary
 binary bytes, through shared native stream transfers and wait for the capability's

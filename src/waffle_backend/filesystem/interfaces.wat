@@ -27,6 +27,8 @@
       (param "self" $borrow) (param "path-flags" $path-flags) (param "path" string)
       (param "open-flags" $open-flags) (param "flags" $descriptor-flags)
       (result (result $own (error $error)))))
+    (export "[method]descriptor.read-via-stream" (func
+      (param "self" $borrow) (param "offset" u64) (result (tuple $bytes $completion))))
     (export "[method]descriptor.write-via-stream" (func
       (param "self" $borrow) (param "data" $bytes) (param "offset" u64) (result $completion)))))
   (alias export $fs-types "descriptor" (type $fs-descriptor))

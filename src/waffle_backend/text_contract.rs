@@ -217,6 +217,14 @@ impl TextContractMatrix {
             boundary_behavior: "Preserves exact UTF-8 and embedded NULs in data; NUL paths and invalid options fail before opening the file",
             node_difference: "Overwrite-only writes through confined preopens; numeric failures enter catch/finally and separate P3 completion precedes return",
         },
+        TextOperationEntry {
+            operation: "filesystem_read_text",
+            unit: IndexUnit::Byte,
+            status: OperationStatus::SupportedBoundary,
+            coercion: "A string path and literal UTF-8 encoding; dynamic encodings require union lowering",
+            boundary_behavior: "Checks producer completion and strict UTF-8, preserving BOMs and NULs in immutable scalar text",
+            node_difference: "Malformed text throws filesystem error 9 instead of replacement decoding; reads materialize memory proportional to the file",
+        },
     ];
 
     pub fn entries() -> &'static [TextOperationEntry] {

@@ -49,7 +49,8 @@ pub(crate) fn emit_runtime(
     let functions = runtime::emit_functions(
         module,
         memory,
-        include_str!("streams/runtime.wat"),
+        &include_str!("streams/runtime.wat")
+            .replace(";; READ_TRANSFER", include_str!("streams/read.wat")),
         &BTreeMap::from([
             ("read", imports.read),
             ("drop", imports.drop),

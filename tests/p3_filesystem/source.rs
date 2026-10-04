@@ -9,6 +9,8 @@ use super::Host;
 
 #[path = "source_lifecycle.rs"]
 mod lifecycle;
+#[path = "source_reads.rs"]
+mod reads;
 
 #[tokio::test(flavor = "current_thread")]
 async fn source_writes_preserve_binary_subviews_and_exact_utf8_under_repeated_calls() -> Result<()>
@@ -487,7 +489,7 @@ fn unsupported_filesystem_syntax_is_diagnosed_before_frontend_effects_are_lost()
         "fs.writeFileSync(...['/file', 'text'])",
         "const save = fs.writeFileSync; save('/file', 'text')",
         "const options = {flag: 'w'}; fs.writeFileSync('/file', 'text', options)",
-        "fs.readFileSync('/file')",
+        "fs.readFileSync('/file', {get encoding() { return 'utf8'; }})",
         "fs.mkdirSync('/dir')",
         "fs['write' + 'FileSync']('/file', 'text')",
     ] {

@@ -28,7 +28,8 @@ pub(crate) fn emit_runtime(
     let functions = runtime::emit_functions(
         module,
         memory,
-        include_str!("decoder/runtime.wat"),
+        &include_str!("decoder/runtime.wat")
+            .replace(";; UTF8_VALIDATOR", include_str!("strings/utf8.wat")),
         &BTreeMap::from([("realloc", allocator.realloc)]),
     )?;
     Ok(DecoderHelpers {

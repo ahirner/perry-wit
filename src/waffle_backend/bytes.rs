@@ -32,6 +32,7 @@ pub(crate) fn required(hir: &HirModule) -> bool {
                 .any(|param| contains_byte_view(&param.ty));
         visit::visit_function_expressions(function, &mut |expression| {
             required |= matches!(expression, perry_hir::ir::Expr::Uint8ArrayNew(_));
+            required |= matches!(expression, perry_hir::ir::Expr::ExternFuncRef { return_type, .. } if contains_byte_view(return_type));
         });
     }
     required

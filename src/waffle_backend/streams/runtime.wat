@@ -31,15 +31,11 @@
     (call $check-owner (local.get $stream))
     (if (i32.or (i32.load (i32.const 64)) (i32.eqz (local.get $capacity)))
       (then (return (i32.const 0))))
-    (loop $read-again
-      (local.set $status (call $read (local.get $stream) (local.get $data) (local.get $capacity)))
-      ;; Synchronous canonical reads suspend; BLOCKED/CANCELLED cannot be returned.
-      (if (i32.gt_u (i32.and (local.get $status) (i32.const 15)) (i32.const 1)) (then unreachable))
-      (local.set $length (i32.shr_u (local.get $status) (i32.const 4)))
-      (if (i32.gt_u (local.get $length) (local.get $capacity)) (then unreachable))
-      (i32.store (i32.const 64) (i32.and (local.get $status) (i32.const 1)))
-      (br_if $read-again (i32.and (i32.eqz (local.get $length)) (i32.eqz (i32.load (i32.const 64))))))
+    (call $read-transfer (local.get $stream) (local.get $data) (local.get $capacity))
+    local.set $status local.set $length
+    (i32.store (i32.const 64) (local.get $status))
     (local.get $length))
+  ;; READ_TRANSFER
   (func (export "stream.read-chunk") (param $stream i32) (result f64)
     (local $data i32) (local $length i32)
     (call $check-owner (local.get $stream))

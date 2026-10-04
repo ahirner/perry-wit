@@ -20,6 +20,20 @@ declare module "perry:stdio" {
 }
 
 declare module "fs" {
+  type Utf8Encoding = `${"u" | "U"}${"t" | "T"}${"f" | "F"}${"" | "-"}8`;
+  type BinaryEncoding = `${"b" | "B"}${"i" | "I"}${"n" | "N"}${"a" | "A"}${"r" | "R"}${"y" | "Y"}`;
+  /** Materialize exact bytes from a preopen-confined path and await producer completion.
+   * Options must be plain literals; encoding labels must be literal strings. */
+  export function readFileSync(
+    path: string,
+    options?: BinaryEncoding | { encoding?: BinaryEncoding | null; flag?: "r" } | null,
+  ): Uint8Array;
+  /** Strict UTF-8, preserving BOMs. Malformed text throws filesystem error 9.
+   * Reads use memory proportional to the file size; paths/flags follow readFileSync above. */
+  export function readFileSync(
+    path: string,
+    options: Utf8Encoding | { encoding: Utf8Encoding; flag?: "r" },
+  ): string;
   interface WriteOptions {
     /** Case-insensitive utf8 or utf-8; binary is also accepted for byte data. */
     encoding?: string | null;
@@ -34,12 +48,12 @@ declare module "fs" {
     data: string | Uint8Array,
     options?: string | WriteOptions | null,
   ): void;
-  const fs: { writeFileSync: typeof writeFileSync };
+  const fs: { writeFileSync: typeof writeFileSync; readFileSync: typeof readFileSync };
   export default fs;
 }
 
 declare module "node:fs" {
-  export { writeFileSync, default } from "fs";
+  export { writeFileSync, readFileSync, default } from "fs";
 }
 
 /** Opaque readable end of a native byte stream, owned by the entry invocation. */
