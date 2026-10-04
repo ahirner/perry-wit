@@ -183,9 +183,11 @@ Stored async tasks retain their outcomes for repeated observation.
 `Promise.all`, `allSettled`, and `race` register each operand once; execution is
 eager to the first suspension. Race losers continue running and must finish
 before the owning call returns. Unresolved ordinary work at that boundary traps.
-Standard `fetch(url)` resolves at headers and supports `status`, `ok`, `url`,
+Standard `fetch(url, options)` accepts typed method/header records and string or
+byte bodies, resolves at headers, and supports `status`, `ok`, `url`,
 `bodyUsed`, `text()`, and `bytes()`. Body consumption grows incrementally and waits
-for P3 transfer completion. Request options, redirects, cooperative cancellation,
+for P3 transfer completion. Uploads retain snapshots through partial writes.
+Request/Headers objects, redirects, cooperative cancellation,
 and Web Streams remain implementation work; see the catalog for supported shapes. Traps and interrupted calls require store disposal, which releases
 native resources without running guest `finally` blocks.
 

@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::{BufRead, BufReader, Cursor, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
@@ -136,24 +136,44 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         .filter_map(|line| line.split_once(':'))
         .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_string()))
         .collect();
-    let length = headers
+    let chunked = headers
         .iter()
-        .find(|(name, _)| name == "content-length")
-        .map(|(_, value)| value.parse::<usize>().unwrap())
-        .unwrap_or(0);
-    while request.len() < header_end + length {
-        let mut buffer = [0u8; 4096];
-        let count = stream.read(&mut buffer).ok()?;
-        if count == 0 {
-            return None;
+        .any(|(key, value)| key == "transfer-encoding" && value.eq_ignore_ascii_case("chunked"));
+    let mut reader = BufReader::new(Cursor::new(&request[header_end..]).chain(stream));
+    let mut body = Vec::new();
+    if chunked {
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).ok()?;
+            let length = usize::from_str_radix(line.trim().split(';').next()?, 16).ok()?;
+            if length == 0 {
+                break;
+            }
+            let start = body.len();
+            body.resize(start + length, 0);
+            reader.read_exact(&mut body[start..]).ok()?;
+            let mut ending = [0; 2];
+            reader.read_exact(&mut ending).ok()?;
+            if ending != *b"\r\n" {
+                return None;
+            }
         }
-        request.extend_from_slice(&buffer[..count]);
+    } else {
+        let length = headers
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .map(|(_, value)| value.parse::<usize>())
+            .transpose()
+            .ok()?
+            .unwrap_or(0);
+        body.resize(length, 0);
+        reader.read_exact(&mut body).ok()?;
     }
     Some(Request {
         method,
         target,
         headers,
-        body: request[header_end..header_end + length].to_vec(),
+        body,
     })
 }
 

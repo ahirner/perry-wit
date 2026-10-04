@@ -203,7 +203,8 @@
               (br $values)))))
           (if (i32.eq (local.get $kind) (i32.const 14)) (then
             (call $mark (i32.load offset=16 (local.get $pointer)))
-            (call $mark (i32.load offset=48 (local.get $pointer)))))
+            (call $mark (i32.load offset=48 (local.get $pointer)))
+            (call $mark (i32.load offset=60 (local.get $pointer)))))
           (if (i32.or (i32.eq (local.get $kind) (i32.const 13)) (i32.eq (local.get $kind) (i32.const 14))) (then
             (call $mark (i32.load offset=12 (local.get $pointer)))
             (local.set $count (i32.load offset=8 (local.get $pointer)))

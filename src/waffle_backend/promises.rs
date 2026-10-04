@@ -43,6 +43,7 @@ pub(crate) enum TaskTarget {
     Guest(FuncId),
     Intrinsic(String),
     FetchBody(super::http::fetch::BodyMethod),
+    FetchUpload,
 }
 
 impl TaskTarget {
@@ -65,12 +66,16 @@ pub(crate) struct TaskPlan {
 #[derive(Clone, Debug)]
 pub(crate) enum TaskArguments {
     Source(Vec<HirType>),
+    Fetch,
+    FetchUpload,
     Filesystem(super::capabilities::FilesystemOperation),
 }
 
 impl TaskArguments {
     pub(crate) fn core_types(&self) -> Result<Vec<waffle::Type>> {
         match self {
+            Self::Fetch => Ok(vec![waffle::Type::I32; 5]),
+            Self::FetchUpload => Ok(vec![waffle::Type::I32; 2]),
             Self::Source(types) => types
                 .iter()
                 .map(super::registry::map_type_to_waffle)
@@ -143,6 +148,9 @@ pub(crate) fn plan_promises(
                     symbol: format!("__perry.import.{index}"),
                     arguments: match intrinsic {
                         TypedIntrinsic::Capability(
+                            super::capabilities::CapabilityOperation::Fetch,
+                        ) => TaskArguments::Fetch,
+                        TypedIntrinsic::Capability(
                             super::capabilities::CapabilityOperation::FilesystemPromise(operation),
                         ) => TaskArguments::Filesystem(*operation),
                         _ => TaskArguments::Source(params.clone()),
@@ -209,7 +217,17 @@ pub(crate) fn plan_promises(
             TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Promise(_))
         )
     });
-    if calls == direct_awaits && !combinators {
+    if has_fetch {
+        referenced.insert(
+            TaskTarget::FetchUpload,
+            TaskPlan {
+                symbol: "__perry.fetch.upload".into(),
+                arguments: TaskArguments::FetchUpload,
+                result: HirType::Number,
+            },
+        );
+    }
+    if calls == direct_awaits && !combinators && !has_fetch {
         return Ok(None);
     }
     for task in referenced.values() {

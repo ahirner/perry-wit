@@ -160,6 +160,7 @@ impl WitWorld {
             "fields" => "[static]fields.from-list",
             "copy-fields" => "[method]fields.copy-all",
             "request" => "[static]request.new",
+            "set-method" => "[method]request.set-method",
             "scheme" => "[method]request.set-scheme",
             "authority" => "[method]request.set-authority",
             "path" => "[method]request.set-path-with-query",
@@ -169,15 +170,17 @@ impl WitWorld {
             "drop-fields" => "[resource-drop]fields",
             "drop-request" => "[resource-drop]request",
             "send" => return Ok(("wasi:http/client@0.3.0".into(), "send".into())),
-            "read" | "drop-reader" => {
+            "read" | "drop-reader" | "new-stream" | "write" | "drop-writer" => {
                 return self.payload_binding(
                     HTTP,
                     "[static]request.consume-body",
                     Payload::Stream,
-                    if name == "read" {
-                        "stream-read"
-                    } else {
-                        "stream-drop-readable"
+                    match name {
+                        "read" => "stream-read",
+                        "drop-reader" => "stream-drop-readable",
+                        "new-stream" => "stream-new",
+                        "write" => "stream-write",
+                        _ => "stream-drop-writable",
                     },
                 );
             }

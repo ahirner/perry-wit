@@ -113,6 +113,61 @@ fn normalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
     ])
 }
 
+fn header(input: &[u8]) -> Result<u32, ()> {
+    if input.is_empty()
+        || !input
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
+    {
+        return Err(());
+    }
+    Ok(u32::from(input.eq_ignore_ascii_case(b"content-type")))
+}
+
+fn header_value(input: &[u8], output: &mut [u8]) -> Result<usize, ()> {
+    let text = core::str::from_utf8(input)
+        .map_err(|_| ())?
+        .trim_matches(['\t', ' ', '\r', '\n']);
+    let mut length = 0;
+    for ch in text.chars() {
+        if u32::from(ch) > 255 || matches!(ch, '\0' | '\r' | '\n') {
+            return Err(());
+        }
+        *output.get_mut(length).ok_or(())? = ch as u8;
+        length += 1;
+    }
+    Ok(length)
+}
+
+fn method(input: &[u8]) -> Result<u32, ()> {
+    if input.is_empty()
+        || !input
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
+    {
+        return Err(());
+    }
+    if [b"CONNECT".as_slice(), b"TRACE", b"TRACK"]
+        .iter()
+        .any(|name| input.eq_ignore_ascii_case(name))
+    {
+        return Err(());
+    }
+    for (name, tag) in [
+        (b"GET".as_slice(), 0),
+        (b"HEAD", 1),
+        (b"POST", 2),
+        (b"PUT", 3),
+        (b"DELETE", 4),
+        (b"OPTIONS", 6),
+    ] {
+        if input.eq_ignore_ascii_case(name) {
+            return Ok(tag);
+        }
+    }
+    Ok(if input == b"PATCH" { 8 } else { 9 })
+}
+
 fn decode(input: &[u8], output: &mut [u8]) -> Result<usize, ()> {
     let input = input.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(input);
     let mut length = 0;
@@ -183,6 +238,36 @@ pub extern "C" fn fetch_decode(input: u32, length: u32, output: u32, capacity: u
 }
 
 #[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
+    let result = (|| {
+        let input = guest_memory::GuestRange::new(input, length)?;
+        // SAFETY: validated initialized guest input, read without allocation or suspension.
+        method(unsafe { input.bytes() })
+    })();
+    result.unwrap_or(u32::MAX)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fetch_header(input: u32, length: u32) -> u32 {
+    let result = (|| {
+        let input = guest_memory::GuestRange::new(input, length)?;
+        // SAFETY: validated initialized guest input, read without allocation or suspension.
+        header(unsafe { input.bytes() })
+    })();
+    result.unwrap_or(u32::MAX)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fetch_header_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+    borrow(input, length, output, capacity, |input, output| {
+        header_value(input, output).map(|length| length as u32)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()
@@ -191,6 +276,29 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn methods_and_header_bytes_follow_fetch_validation() {
+        assert_eq!(method(b"post"), Ok(2));
+        assert_eq!(method(b"patch"), Ok(9));
+        assert_eq!(method(b"PATCH"), Ok(8));
+        for invalid in [
+            b"trace".as_slice(),
+            b"TRACK",
+            b"connect",
+            b"bad method",
+            b"",
+        ] {
+            assert!(method(invalid).is_err());
+        }
+        assert_eq!(header(b"Content-Type"), Ok(1));
+        assert!(header(b"bad header").is_err());
+        let mut output = [0; 32];
+        let length = header_value(" \tété\r\n".as_bytes(), &mut output).unwrap();
+        assert_eq!(&output[..length], b"\xe9t\xe9");
+        for invalid in ["🙂", "a\0b", "a\nb", "a\rb"] {
+            assert!(header_value(invalid.as_bytes(), &mut output).is_err());
+        }
+    }
     #[test]
     fn url_and_utf8_use_one_runtime_path() {
         for (input, expected) in [

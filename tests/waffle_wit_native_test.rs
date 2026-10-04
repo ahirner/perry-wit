@@ -1648,3 +1648,125 @@ async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> 
     assert_eq!(output.stdout, b"from fetch\n");
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_uploads_snapshot_bodies_and_options_and_match_node() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/upload.ts"),
+        r#"package test:upload; world boundary {
+        import wasi:http/client@0.3.0;
+        export run: async func(base:string)->string;
+    }"#,
+    )?;
+    let server = fixture::HttpFixture::new(|request| {
+        if request.target == "/text" {
+            assert_eq!(request.method, "POST");
+            assert!(
+                request
+                    .headers
+                    .contains(&("x-request".into(), "original".into()))
+            );
+            assert_eq!(request.body, "héllo🙂".as_bytes());
+            assert!(
+                request
+                    .headers
+                    .contains(&("content-type".into(), "text/plain;charset=UTF-8".into()))
+            );
+            fixture::Reply::Body(200, "text".into())
+        } else {
+            assert_eq!(request.method, "PATCH");
+            assert!(
+                request
+                    .headers
+                    .contains(&("content-type".into(), "application/octet-stream".into()))
+            );
+            assert_eq!(request.body.len(), 70001);
+            assert_eq!(request.body[0], 65);
+            assert_eq!(request.body[70000], 66);
+            fixture::Reply::Body(200, "bytes".into())
+        }
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    for _ in 0..30 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            "text|bytes"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/upload.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script, &base])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "text|bytes");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_validates_methods_and_finishes_null_bodies() -> Result<()> {
+    let compiled = compile(
+        r#"
+        export async function run(base:string):Promise<number> {
+            let rejected = 0;
+            try { await fetch(base, {method: "CONNECT"}); } catch(error) { rejected++; }
+            try { await fetch(base, {method: "get", body: "bad"}); } catch(error) { rejected++; }
+            try { await fetch(base, {method: "HEAD", body: new Uint8Array(0)}); } catch(error) { rejected++; }
+            try { await fetch(base, {method: "not a token"}); } catch(error) { rejected++; }
+            try { await fetch(base, {headers: {"bad header": "value"}}); } catch(error) { rejected++; }
+            try { await fetch(base, {headers: {"x-bad": "embedded\nline"}}); } catch(error) { rejected++; }
+            try { await fetch(base, {headers: {"x-bad": "🙂"}}); } catch(error) { rejected++; }
+            const head = await fetch(base + "/head", {method: "head"});
+            if((await head.bytes()).length !== 0 || (await head.text()) !== "" || head.bodyUsed) return -1;
+            const empty = await fetch(base + "/empty");
+            if(empty.status !== 204 || (await empty.text()) !== "" || (await empty.bytes()).length !== 0 || empty.bodyUsed) return -2;
+            const unread = await fetch(base + "/empty");
+            return rejected;
+        }
+    "#,
+        r#"package test:fetch-methods; world boundary {import wasi:http/client@0.3.0; export run:async func(base:string)->f64;}"#,
+    )?;
+    let server = fixture::HttpFixture::new(|request| match request.target.as_str() {
+        "/head" => fixture::Reply::WithHeaders(200, vec![], "not sent".into()),
+        "/empty" => fixture::Reply::WithHeaders(204, vec![], "".into()),
+        _ => panic!("invalid fetch reached the host"),
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    for _ in 0..30 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            7.0
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 90);
+    Ok(())
+}

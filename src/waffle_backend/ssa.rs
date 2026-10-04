@@ -130,6 +130,8 @@ pub(crate) fn lower_module(
         if contract.has_http() {
             string_pool.intern("http");
             string_pool.intern("https");
+            string_pool.intern("content-type");
+            string_pool.intern("text/plain;charset=UTF-8");
         }
         if reqs.objects {
             string_pool.intern("length");
@@ -401,6 +403,13 @@ impl<'a> FunctionLowerer<'a> {
                     ..
                 } => {
                     let inferred = self.infer_expr_type(expr);
+                    let declared = if matches!(ty, HirType::Named(name) if name == super::objects::INFERRED_RECORD_TYPE)
+                    {
+                        inferred.clone()
+                    } else {
+                        ty.clone()
+                    };
+                    let ty = &declared;
                     if self.contract.wit.is_some()
                         && *ty != HirType::Any
                         && !(ty == &HirType::Number

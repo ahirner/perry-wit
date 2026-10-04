@@ -194,6 +194,7 @@ pub(crate) fn emit(
         }
         let (callee, completion) = match target {
             TaskTarget::Guest(id) => (registry.functions[id].func_index, true),
+            TaskTarget::FetchUpload => (registry.http_helpers.unwrap().fetch.unwrap().upload, true),
             TaskTarget::FetchBody(method) => (
                 registry.http_helpers.unwrap().fetch.unwrap().body(*method),
                 true,

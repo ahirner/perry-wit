@@ -126,19 +126,88 @@ impl FunctionLowerer<'_> {
 impl FunctionLowerer<'_> {
     pub(super) fn fetch(&mut self, name: &str, arguments: &[Expr]) -> Result<Value> {
         ensure!(
-            arguments.len() == 1,
-            "fetch currently requires one absolute HTTP(S) URL; Request and options lowering is not implemented yet"
+            !arguments.is_empty() && arguments.len() <= 2,
+            "fetch requires a URL and optional typed RequestInit record"
         );
         let url = self.string_receiver(&arguments[0])?;
+        let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+        let mut values = [url, zero, zero, zero, zero];
+        if let Some(options) = arguments.get(1) {
+            let HirType::Object(shape) = self.infer_expr_type(options) else {
+                bail!("fetch options require a statically typed RequestInit record");
+            };
+            for (key, field) in &shape.properties {
+                ensure!(
+                    matches!(key.as_str(), "method" | "headers" | "body"),
+                    "fetch option '{key}' is not implemented yet"
+                );
+                ensure!(
+                    !field.optional,
+                    "fetch option '{key}' must have a statically known value"
+                );
+                match key.as_str() {
+                    "method" => ensure!(
+                        matches!(field.ty, HirType::String | HirType::StringLiteral(_)),
+                        "fetch method must be a string"
+                    ),
+                    "headers" => {
+                        let HirType::Object(headers) = &field.ty else {
+                            bail!("fetch headers require a typed string record");
+                        };
+                        ensure!(
+                            headers.properties.values().all(|field| !field.optional
+                                && matches!(field.ty, HirType::String | HirType::StringLiteral(_)))
+                                && headers
+                                    .index_signature
+                                    .as_deref()
+                                    .is_none_or(|ty| *ty == HirType::String),
+                            "fetch header values must be strings"
+                        );
+                    }
+                    "body" => ensure!(
+                        matches!(field.ty, HirType::String | HirType::StringLiteral(_))
+                            || crate::waffle_backend::bytes::is_byte_view(&field.ty),
+                        "fetch body must be string or Uint8Array"
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+            let object = self.expression(options)?;
+            let helpers = self.registry.object_helpers.unwrap();
+            for (name, index) in [("method", 1), ("headers", 2), ("body", 3)] {
+                if let Some(field) = shape.properties.get(name) {
+                    let key = self.expression(&Expr::String(name.into()))?;
+                    let entry = self.op(
+                        Operator::Call {
+                            function_index: helpers.get,
+                        },
+                        &[object, key],
+                        &[Type::I32],
+                    );
+                    let tag = crate::waffle_backend::values::ValueTag::of(&field.ty)? as u32;
+                    let tag = self.op(Operator::I32Const { value: tag }, &[], &[Type::I32]);
+                    let payload = self.call_completion(helpers.value, &[entry, tag, zero]);
+                    values[index] = abi::decode_payload(&mut self.body, self.block, payload, true);
+                    if name == "body" {
+                        let kind = if crate::waffle_backend::bytes::is_byte_view(&field.ty) {
+                            2
+                        } else {
+                            1
+                        };
+                        values[4] = self.op(Operator::I32Const { value: kind }, &[], &[Type::I32]);
+                    }
+                }
+            }
+        }
         if let Some(record) = self.start_task(
             &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
-            &[url],
+            &values,
         )? {
             return Ok(record);
         }
         let payload = self.call_completion(
             self.registry.http_helpers.unwrap().fetch.unwrap().fetch,
-            &[url],
+            &values,
         );
         Ok(abi::decode_payload(
             &mut self.body,

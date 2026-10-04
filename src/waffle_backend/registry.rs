@@ -456,11 +456,14 @@ impl ModuleRegistry {
             Some(super::http::emit_source_runtime(
                 module,
                 memory,
-                allocator.unwrap(),
-                &imports,
-                string_helpers.unwrap(),
-                byte_helpers.unwrap(),
-                string_pool,
+                super::http::SourceRuntime {
+                    allocator: allocator.unwrap(),
+                    imports: &imports,
+                    strings: string_helpers.unwrap(),
+                    bytes: byte_helpers.unwrap(),
+                    pool: string_pool,
+                    promises: promises.as_ref(),
+                },
             )?)
         } else {
             None

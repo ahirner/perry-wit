@@ -36,15 +36,28 @@ pub(crate) struct HttpHelpers {
     pub(crate) fetch: Option<fetch::Helpers>,
 }
 
+pub(crate) struct SourceRuntime<'a> {
+    pub(crate) allocator: AllocationFuncs,
+    pub(crate) imports: &'a BTreeMap<String, Func>,
+    pub(crate) strings: super::strings::StringHelperFuncs,
+    pub(crate) bytes: super::bytes::ByteHelpers,
+    pub(crate) pool: &'a super::strings::StringPool,
+    pub(crate) promises: Option<&'a super::registry::PromiseImports>,
+}
+
 pub(crate) fn emit_source_runtime(
     module: &mut Module<'static>,
     memory: Memory,
-    allocator: AllocationFuncs,
-    imports: &BTreeMap<String, Func>,
-    strings: super::strings::StringHelperFuncs,
-    bytes: super::bytes::ByteHelpers,
-    pool: &super::strings::StringPool,
+    runtime: SourceRuntime<'_>,
 ) -> Result<HttpHelpers> {
+    let SourceRuntime {
+        allocator,
+        imports,
+        strings,
+        bytes,
+        pool,
+        ..
+    } = runtime;
     let get = emit_runtime(module, memory, allocator, imports)?;
     let source = include_str!("http/source.wat")
         .replace("HTTP_TEXT", &pool.get("http").unwrap().to_string())
@@ -67,7 +80,7 @@ pub(crate) fn emit_source_runtime(
         get: functions["get"],
         fetch: imports
             .contains_key("fetch_url")
-            .then(|| fetch::emit(module, memory, allocator, imports, strings, bytes))
+            .then(|| fetch::emit(module, memory, &runtime))
             .transpose()?,
         header: functions["header"],
     })
