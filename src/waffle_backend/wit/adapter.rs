@@ -5,6 +5,7 @@ use crate::{
     sdk::codegen::to_camel_case,
     waffle_backend::{
         abi,
+        allocation::RetainedValues,
         registry::{FunctionExport, FunctionInfo, ModuleRegistry},
         strings::StringPool,
         values::ValueTag,
@@ -98,31 +99,27 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
     }
     if let Some(state) = &registry.module_state {
         let allocator = registry.allocator.unwrap();
-        let roots = if args.is_empty() {
-            None
-        } else {
-            let count = adapter.integer(args.len() as u32);
-            Some(adapter.call(allocator.frame_new, &[count]))
-        };
-        for (index, (argument, param)) in args.iter().zip(&declaration.function.params).enumerate()
-        {
+        let mut references = Vec::new();
+        for (argument, param) in args.iter().zip(&declaration.function.params) {
             if crate::waffle_backend::ssa::types::is_reference(&super::hir_type(
                 &wit.resolve,
                 param.ty,
             )?) {
-                adapter.store_i32(roots.unwrap(), 12 + index as u32 * 4, *argument);
+                references.push(*argument);
             }
         }
+        let roots = (!references.is_empty()).then(|| {
+            RetainedValues::new(
+                &mut adapter.body,
+                adapter.block,
+                registry.memory,
+                allocator,
+                &references,
+            )
+        });
         adapter.call_checked(state.evaluate, &[]);
         if let Some(roots) = roots {
-            adapter.body.add_op(
-                adapter.block,
-                Operator::Call {
-                    function_index: allocator.frame_drop,
-                },
-                &[roots],
-                &[],
-            );
+            roots.release(&mut adapter.body, adapter.block);
         }
     }
     let payload = adapter.call_checked(callee.func_index, &args);
@@ -134,10 +131,13 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
     let result_root = if let Some(ty) = declaration.function.result
         && crate::waffle_backend::ssa::types::is_reference(&super::hir_type(&wit.resolve, ty)?)
     {
-        let count = adapter.integer(1);
-        let root = adapter.call(registry.allocator.unwrap().frame_new, &[count]);
-        adapter.store_i32(root, 12, result.unwrap());
-        Some(root)
+        Some(RetainedValues::new(
+            &mut adapter.body,
+            adapter.block,
+            registry.memory,
+            registry.allocator.unwrap(),
+            &[result.unwrap()],
+        ))
     } else {
         None
     };
@@ -168,14 +168,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         }
     }
     if let Some(root) = result_root {
-        adapter.body.add_op(
-            adapter.block,
-            Operator::Call {
-                function_index: registry.allocator.unwrap().frame_drop,
-            },
-            &[root],
-            &[],
-        );
+        root.release(&mut adapter.body, adapter.block);
     }
     adapter
         .body

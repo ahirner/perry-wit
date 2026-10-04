@@ -26,6 +26,69 @@ fn make_engine() -> Result<Engine> {
     Ok(Engine::new(&config)?)
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn core_export_results_survive_ready_task_collection() -> Result<()> {
+    for (result_type, expression, expected) in [
+        (
+            "string",
+            "input + ' retained result'",
+            Val::String("A.B.C retained result".into()),
+        ),
+        (
+            "Result<string, number>",
+            "input + ' retained result'",
+            Val::Result(Ok(Some(Box::new(Val::String(
+                "A.B.C retained result".into(),
+            ))))),
+        ),
+        (
+            "string[]",
+            "(input + ' first,' + input + ' second').split(',')",
+            Val::List(vec![
+                Val::String("A.B.C first".into()),
+                Val::String("A.B.C second".into()),
+            ]),
+        ),
+    ] {
+        let source = format!(
+            "async function cleanup(input:string):Promise<void> {{
+                await 0;
+                for(let i=0;i<2000;i++) {{
+                    const discarded=input.toLowerCase().split('.').join('-');
+                }}
+            }}
+            export function run(input:string):{result_type} {{
+                const pending=cleanup(input);
+                return {expression};
+            }}"
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "core_export_roots.ts",
+            &WaffleCompileOptions::default(),
+        )?;
+        let engine = make_engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(
+            &engine,
+            StoreLimitsBuilder::new().memory_size(524_288).build(),
+        );
+        store.limiter(|limits| limits);
+        let instance = Linker::new(&engine)
+            .instantiate_async(&mut store, &component)
+            .await?;
+        let run = instance.get_func(&mut store, "run").unwrap();
+        for _ in 0..50 {
+            let mut result = [Val::Bool(false)];
+            run.call_async(&mut store, &[Val::String("A.B.C".into())], &mut result)
+                .await?;
+            assert_eq!(result[0], expected, "{result_type}");
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct Host {
     context: WasiCtx,

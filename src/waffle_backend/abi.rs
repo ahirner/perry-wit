@@ -10,6 +10,7 @@ use waffle::{
     Block, BlockTarget, Func, FunctionBody, Module, Operator, Terminator, Type, Value, ValueDef,
 };
 
+use super::allocation::RetainedValues;
 use crate::waffle_backend::registry::{
     ExportConvention, FunctionExport, FunctionInfo, ModuleRegistry, ValuePayload,
 };
@@ -182,6 +183,38 @@ pub(crate) fn build_export_wrapper(
             payload: extracted.payload,
         };
     }
+    if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
+        for (block, retain) in [
+            (
+                outcome.ok_block,
+                super::ssa::types::is_reference(callee.success_type())
+                    && !super::values::is_dynamic(callee.success_type()),
+            ),
+            (outcome.err_block, false),
+        ] {
+            let root = retain.then(|| {
+                let value = decode_payload(&mut body, block, outcome.payload, true);
+                RetainedValues::new(
+                    &mut body,
+                    block,
+                    memory,
+                    registry.allocator.unwrap(),
+                    &[value],
+                )
+            });
+            body.add_op(
+                block,
+                Operator::Call {
+                    function_index: native.finish,
+                },
+                &[],
+                &[],
+            );
+            if let Some(root) = root {
+                root.release(&mut body, block);
+            }
+        }
+    }
     match export.convention {
         ExportConvention::ResolvedWit => unreachable!("resolved WIT uses its schema adapter"),
         ExportConvention::Direct if super::structured::is_string_array(callee.success_type()) => {
@@ -257,23 +290,6 @@ pub(crate) fn build_export_wrapper(
                     },
                 );
             }
-        }
-    }
-    if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
-        let returns: Vec<_> = body
-            .blocks
-            .iter()
-            .filter(|&block| matches!(body.blocks[block].terminator, Terminator::Return { .. }))
-            .collect();
-        for block in returns {
-            body.add_op(
-                block,
-                Operator::Call {
-                    function_index: native.finish,
-                },
-                &[],
-                &[],
-            );
         }
     }
     body.validate()?;

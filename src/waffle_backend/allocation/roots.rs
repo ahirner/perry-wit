@@ -7,6 +7,54 @@ use waffle::{Block, FunctionBody, Memory, MemoryArg, Operator, Terminator, Type,
 
 use super::AllocationFuncs;
 
+/// Retains known reference values across calls that can run source collection.
+pub(crate) struct RetainedValues {
+    frame: Value,
+    allocator: AllocationFuncs,
+}
+
+impl RetainedValues {
+    pub(crate) fn new(
+        body: &mut FunctionBody,
+        block: Block,
+        memory: Memory,
+        allocator: AllocationFuncs,
+        values: &[Value],
+    ) -> Self {
+        let count = body.add_op(
+            block,
+            Operator::I32Const {
+                value: values.len() as u32,
+            },
+            &[],
+            &[Type::I32],
+        );
+        let frame = body.add_op(
+            block,
+            Operator::Call {
+                function_index: allocator.frame_new,
+            },
+            &[count],
+            &[Type::I32],
+        );
+        for (index, &value) in values.iter().enumerate() {
+            store_root(body, block, memory, frame, index as u32, value);
+        }
+        Self { frame, allocator }
+    }
+
+    pub(crate) fn release(self, body: &mut FunctionBody, block: Block) {
+        body.add_op(
+            block,
+            Operator::Call {
+                function_index: self.allocator.frame_drop,
+            },
+            &[self.frame],
+            &[],
+        );
+    }
+}
+
 /// Each reference definition owns a slot, overwritten when that definition runs
 /// again. This retains operands and encoded return values across calls/finally
 /// without keeping an allocation history. Collection is restricted to source

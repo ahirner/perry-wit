@@ -3,7 +3,7 @@
 mod lookup;
 mod roots;
 pub(crate) mod scope;
-pub(crate) use roots::track_roots;
+pub(crate) use roots::{RetainedValues, track_roots};
 
 use std::collections::BTreeMap;
 
