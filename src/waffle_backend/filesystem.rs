@@ -48,6 +48,7 @@ pub(crate) fn emit_runtime(
     keys: &super::strings::StringPool,
 ) -> Result<FilesystemHelpers> {
     let read_transfer = super::streams::emit_read_transfer(module, memory, imports["read"])?;
+    let write_buffer = super::streams::transfer::write(module, memory, imports["write"])?;
     let read_directory_transfer =
         super::streams::emit_read_transfer(module, memory, imports["read-entry"])?;
     let read_buffered = super::streams::buffered::emit(module, memory, allocator, read_transfer)?;
@@ -69,9 +70,9 @@ pub(crate) fn emit_runtime(
       (import "host" "compare" (func $compare (param i32 i32) (result i32)))
       (import "host" "read-buffered" (func $read-buffered (param i32 i32) (result i32 i32 i32)))
       (import "host" "read-directory-transfer" (func $read-directory-transfer (param i32 i32 i32) (result i32 i32)))
-      {} {} {} {} {} {} {} {} {})"#,
+      (import "host" "write-buffer" (func $write-buffer (param i32 i32 i32) (result i32)))
+      {} {} {} {} {} {} {} {})"#,
         imports::module_imports(&native_functions())?,
-        include_str!("streams/write.wat"),
         include_str!("strings/utf8.wat"),
         include_str!("filesystem/options.wat"),
         include_str!("filesystem/path.wat"),
@@ -91,6 +92,7 @@ pub(crate) fn emit_runtime(
         ("frame-drop", allocator.frame_drop),
         ("compare", compare),
         ("read-buffered", read_buffered),
+        ("write-buffer", write_buffer),
         ("read-directory-transfer", read_directory_transfer),
     ]);
     let functions = runtime::emit_functions(module, memory, &wat, &imports)?;

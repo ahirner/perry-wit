@@ -2,6 +2,9 @@
 
 pub(crate) mod buffered;
 pub(crate) mod output;
+pub(crate) mod transfer;
+
+pub(crate) use transfer::read as emit_read_transfer;
 
 #[cfg(test)]
 #[path = "streams/buffered_test.rs"]
@@ -71,21 +74,4 @@ pub(crate) fn emit_runtime(
         read_into: functions["stream.read-into"],
         byte_at: functions["stream.byte-at"],
     })
-}
-
-pub(crate) fn emit_read_transfer(
-    module: &mut Module<'static>,
-    memory: Memory,
-    read: Func,
-) -> Result<Func> {
-    let functions = runtime::emit_functions(
-        module,
-        memory,
-        &format!(
-            "(module (import \"host\" \"read\" (func $read (param i32 i32 i32) (result i32))) (memory 1) {} (export \"read-transfer\" (func $read-transfer)))",
-            include_str!("streams/read.wat")
-        ),
-        &BTreeMap::from([("read", read)]),
-    )?;
-    Ok(functions["read-transfer"])
 }

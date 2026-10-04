@@ -84,7 +84,8 @@ use common type and ownership rules. Reference-bearing values occupy root frames
 that remain linked across suspension.
 
 Typed builders in `runtime/builder.rs` construct scheduling, combinator, scalar
-capability, process-context, and Date helpers. Pure text/search, JSON, and time algorithms are
+capability, process-context, transfer, output, and Date helpers. Pure text/search,
+JSON, and time algorithms are
 compiled from Rust and linked into the same module and memory.
 
 ### 4. Emit core Wasm
@@ -194,7 +195,7 @@ Rust algorithms or typed WAFFLE builders remains consolidation work.
 | `objects` | `objects.rs`: records, dictionaries, enumeration | `p3_filesystem/source_options`, `waffle_wit_test` |
 | `random` | `random.rs`: byte transfers and UUID formatting | `waffle_platform_test` |
 | `regex` | `regex.rs`: search helper descriptors and scratch | `waffle_string_test` |
-| `streams` | `streams.rs`, `streams/output.rs`, `filesystem.rs`, HTTP handler: transfer loops and completion | `waffle_stream_test`, `waffle_output_test` |
+| `streams/runtime.wat` | `streams.rs`: invocation-owned byte input and chunk storage | `waffle_stream_test` |
 | `structured` | `structured.rs`: Stats and string-list storage | `p3_filesystem/source_structured` |
 | `values` | `values.rs`: tagged values, dense arrays, checked access | `waffle_wit_test`, `waffle_json_test` |
 
