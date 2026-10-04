@@ -320,6 +320,8 @@ preserved within an invocation. Plain option objects remain guest-internal and u
 nonrecursive structural types or simple interfaces without inheritance or methods.
 Runtime `delete` is diagnosed for all receiver types; clear optional fields with
 `undefined` or construct a new record.
+Dictionary enumeration uses insertion order, including numeric-looking keys.
+JavaScript's integer-key sorting is deferred under D2.
 `perry:http` exports immediately awaited `get(scheme, authority, path, headers,
 maxResponseBytes)`. Scheme is `http` or `https`; headers are a string-valued
 dictionary. The caller supplies an integer body limit. The buffered response

@@ -127,18 +127,18 @@ async fn environment_json_snapshots_are_independent_and_keep_cached_values() -> 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn object_enumeration_matches_node_and_returns_independent_snapshots() -> Result<()> {
+async fn nonnumeric_dictionary_keys_match_node_and_return_independent_snapshots() -> Result<()> {
     let source = r#"
     function build():{[key:string]:string} {
-        return {b:'before', '10':'ten','2':'two','01':'leading','4294967294':'last index','4294967295':'ordinary','😀':'unicode','0':'zero'};
+        return {b:'before','key10':'ten','key2':'two','key01':'leading','key4294967294':'large','key4294967295':'ordinary','😀':'unicode','key0':'zero'};
     }
     export function run(mode:number):string[] {
         const object=build();
         const before=Object.values(object);
         const keys=Object.keys(object);
-        if(!('2' in object)) {throw 99;}
+        if(!('key2' in object)) {throw 99;}
         if('missing' in object) {throw 98;}
-        Object.assign(object,{'2':'discarded'},null,{'2':'changed'});
+        Object.assign(object,{'key2':'discarded'},null,{'key2':'changed'});
         Object.assign(object,undefined,{b:'after'});
         let index=0;while(index<3000) {const other={value:'é'+'😀'};index=index+1;}
         if(mode===0) {return keys;}
@@ -171,6 +171,45 @@ async fn object_enumeration_matches_node_and_returns_independent_snapshots() -> 
                 *expected
             );
         }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn numeric_dictionary_keys_keep_insertion_order_through_assignment_and_collection()
+-> Result<()> {
+    let source = r#"
+    export function run(keys:boolean):string[] {
+        const values:{[key:string]:string}={'10':'ten','2':'two','0':'zero',word:'word','01':'leading','4294967294':'large','4294967295':'outside','😀':'unicode'};
+        Object.assign(values,values,{'2':'changed','1':'last'});
+        const names=Object.keys(values);const items=Object.values(values);
+        let index=0;while(index<3000) {const temporary={value:'é'+'😀'};index=index+1;}
+        if(keys) {return names;} return items;
+    }"#;
+    let (mut store, instance) = instantiate(source, 65536, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(bool,), (Vec<String>,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        assert_eq!(
+            run.call_async(&mut store, (true,)).await?.0,
+            [
+                "10",
+                "2",
+                "0",
+                "word",
+                "01",
+                "4294967294",
+                "4294967295",
+                "😀",
+                "1"
+            ]
+        );
+        assert_eq!(
+            run.call_async(&mut store, (false,)).await?.0,
+            [
+                "ten", "changed", "zero", "word", "leading", "large", "outside", "unicode", "last"
+            ]
+        );
+        store.assert_concurrent_state_empty();
     }
     Ok(())
 }

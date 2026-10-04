@@ -280,7 +280,7 @@
         "Retained heap roots preserve instance-local snapshots while invocation temporaries remain reclaimable",
         "Environment and arguments are read-only; assignment, deletion, mutating methods, and bulk writes are diagnosed through aliases, casts, containers, and helper calls",
         "Environment-only tasks do not link JSON formatting or coercion helpers",
-        "Object.keys and string-valued Object.values produce independent snapshots with integer-index keys first and other keys in insertion order; duplicate native environment keys replace values without moving their keys",
+        "Object.keys and string-valued Object.values produce independent snapshots in insertion order; duplicate native environment keys replace values without moving their keys",
         "JSON snapshots preserve cached environment values and parsed copies are independent",
         "Host failures trap without running guest finally; store disposal releases pending native work"
       ],
@@ -289,6 +289,7 @@
         "The initial directory defaults to / only when absent; an explicitly empty directory remains empty",
         "Text operations count Unicode scalars",
         "Missing environment keys return undefined; Object.values throws 12 for nonstring fields in ordinary objects",
+        "Numeric-looking dictionary keys keep insertion order; JavaScript integer-key sorting is deferred under D2",
         "Object.assign accepts plain object targets/sources and ignores nullish sources; other primitive sources, prototypes, and spread arguments remain unsupported",
         "All environment and argument mutation is deferred; the default CLI remains on the legacy pipeline until R9"
       ],
