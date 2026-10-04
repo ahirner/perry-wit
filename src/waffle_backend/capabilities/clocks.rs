@@ -11,6 +11,7 @@ use std::{collections::BTreeSet, fmt::Write};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ClockOperation {
     WaitFor,
+    Timeout,
     MonotonicNow,
     DateNow,
 }
@@ -19,6 +20,7 @@ impl ClockOperation {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::WaitFor => "waitFor",
+            Self::Timeout => "setTimeout",
             Self::MonotonicNow => "performance.now",
             Self::DateNow => "Date.now",
         }
@@ -28,12 +30,12 @@ impl ClockOperation {
 impl LowerCapability for ClockOperation {
     fn lower(&self) -> CapabilityPlan {
         CapabilityPlan {
-            params: if *self == Self::WaitFor {
+            params: if matches!(self, Self::WaitFor | Self::Timeout) {
                 vec![HirType::Number]
             } else {
                 vec![]
             },
-            result: if *self == Self::WaitFor {
+            result: if matches!(self, Self::WaitFor | Self::Timeout) {
                 HirType::Promise(Box::new(HirType::Void))
             } else {
                 HirType::Number
@@ -41,6 +43,7 @@ impl LowerCapability for ClockOperation {
             implementation: CapabilityImplementation::Standalone {
                 core_function: match self {
                     Self::WaitFor => "(func $clocks \"waitFor\")",
+                    Self::Timeout => "(func $clocks \"setTimeout\")",
                     Self::MonotonicNow => "(func $clocks \"performance.now\")",
                     Self::DateNow => "(func $clocks \"Date.now\")",
                 },
@@ -53,11 +56,20 @@ pub(crate) fn declare_adapters(operations: &BTreeSet<ClockOperation>) -> Result<
     if operations.is_empty() {
         return Ok(String::new());
     }
+    let timeout = operations.contains(&ClockOperation::Timeout);
+    let mut operations = operations.clone();
+    if timeout {
+        operations.insert(ClockOperation::WaitFor);
+    }
     let mut wat = String::new();
     let mut imports = String::new();
     let mut exports = String::new();
     let mut bodies = String::new();
+    if timeout {
+        bodies.push_str(&Scalar::Timeout.body("setTimeout", "wait-for"));
+    }
     if operations.contains(&ClockOperation::WaitFor)
+        || operations.contains(&ClockOperation::Timeout)
         || operations.contains(&ClockOperation::MonotonicNow)
     {
         wat.push_str("(import \"wasi:clocks/monotonic-clock@0.3.0\" (instance $clock");
@@ -83,7 +95,7 @@ pub(crate) fn declare_adapters(operations: &BTreeSet<ClockOperation>) -> Result<
             write!(
                 wat,
                 "(export {name:?} (func {} {signature}))",
-                if operation == ClockOperation::WaitFor {
+                if matches!(operation, ClockOperation::WaitFor | ClockOperation::Timeout) {
                     "async"
                 } else {
                     ""

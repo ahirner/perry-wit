@@ -3,6 +3,120 @@ use std::process::Command;
 
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
+#[test]
+fn disposable_sdk_checks_the_entry_without_rewriting_authored_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir(root.join("wit")).unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("wit/world.wit"),
+        "package test:disposable; world task {export run:func()->string;}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/index.ts"),
+        "export function run():string{return 'hello';}",
+    )
+    .unwrap();
+    let options = SdkOptions {
+        wit_dir: root.join("wit"),
+        out_dir: root.join(".perry/types"),
+        project_root: Some(root.into()),
+        initialize_tsconfig: false,
+        ..Default::default()
+    };
+    generate_sdk_files(&options).unwrap();
+    assert!(!root.join("tsconfig.json").exists());
+    let config = "{\"compilerOptions\":{\"strict\":false},\"files\":[\"src/unrelated.ts\"]}";
+    fs::write(root.join("tsconfig.json"), config).unwrap();
+    fs::write(root.join("src/unrelated.ts"), "export {};\n").unwrap();
+    for valid in [true, false] {
+        fs::remove_dir_all(root.join(".perry")).unwrap();
+        generate_sdk_files(&options).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("tsconfig.json")).unwrap(),
+            config
+        );
+        fs::write(
+            root.join("src/index.ts"),
+            if valid {
+                "export function run():string{return 'hello';}"
+            } else {
+                "export function unrelated():string{return 'hello';}"
+            },
+        )
+        .unwrap();
+        let output = get_tsc_cmd()
+            .current_dir(root)
+            .args(["--noEmit", "-p", ".perry/types"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
+fn cli_and_sdk_reject_ambiguous_worlds_before_writing_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir(root.join("wit")).unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("wit/world.wit"), "package test:ambiguous; world first {export run:func();} world second {export run:func();}").unwrap();
+    fs::write(root.join("src/index.ts"), "export function run():void{} ").unwrap();
+    for arguments in [
+        vec!["gen-types", "--no-tsconfig"],
+        vec!["src/index.ts", "-o", "out.wasm"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_perry-wit"))
+            .current_dir(root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("world"));
+        assert!(!root.join(".perry").exists());
+        assert!(!root.join("out.wasm").exists());
+        assert!(!root.join("tsconfig.json").exists());
+    }
+}
+
+#[test]
+fn cli_and_sdk_reject_colliding_implementation_names() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("wit")).unwrap();
+    fs::write(root.path().join("wit/world.wit"), "package test:collision; interface api {read:func();} world task {export api; export api-read:func(); export test-collision-api-read:func();}").unwrap();
+    fs::write(
+        root.path().join("entry.ts"),
+        "export function apiRead():void{} export function testCollisionApiRead():void{}",
+    )
+    .unwrap();
+    for arguments in [
+        vec!["gen-types", "--no-tsconfig"],
+        vec!["entry.ts", "-o", "out.wasm"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_perry-wit"))
+            .current_dir(root.path())
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("both require TypeScript implementation"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.path().join(".perry").exists());
+        assert!(!root.path().join("out.wasm").exists());
+    }
+}
+
 fn get_tsc_cmd() -> Command {
     if let Ok(path) = std::env::var("TSC") {
         return Command::new(path);
@@ -53,6 +167,7 @@ fn generated_contract_checks_the_selected_implementation_module() {
             }),
             project_root: Some(root.clone()),
             entry: entry.into(),
+            initialize_tsconfig: true,
         })
         .unwrap();
         assert!(result.check_path.exists());
@@ -108,6 +223,7 @@ fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
         out_dir: root.join(".perry/types"),
         project_root: Some(root.clone()),
         entry: std::path::PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
     })
     .unwrap();
     fs::write(
@@ -208,6 +324,7 @@ fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
         out_dir: root.join(".perry/types"),
         project_root: Some(root.clone()),
         entry: std::path::PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
     })
     .unwrap();
     fs::write(root.join("src/index.ts"), r#"
@@ -248,6 +365,7 @@ fn asynchronous_wit_functions_have_promise_sdk_signatures() -> anyhow::Result<()
         out_dir: root.join(".perry/types"),
         project_root: Some(root.into()),
         entry: "component.ts".into(),
+        initialize_tsconfig: true,
     })?;
     assert!(
         fs::read_to_string(root.join(".perry/types/world.d.ts"))?

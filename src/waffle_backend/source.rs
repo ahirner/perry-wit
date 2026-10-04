@@ -4,6 +4,7 @@ mod context;
 mod date;
 mod decoder;
 mod filesystem;
+pub(crate) mod modules;
 mod objects;
 mod options;
 mod readonly;
@@ -12,7 +13,7 @@ pub(crate) use decoder::validate_lowering;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use perry_hir::types::Type as HirType;
 use perry_parser::{parse_typescript, swc_ecma_ast as ast};
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
@@ -102,10 +103,12 @@ pub(crate) fn resolve_bindings(
             }
             let namespace = match import.src.value.as_str() {
                 Some("perry:clocks") => CapabilityNamespace::Clocks,
+                Some("node:timers/promises") => CapabilityNamespace::TimerPromises,
                 Some("perry:random") => CapabilityNamespace::Random,
                 Some("perry:stdio") => CapabilityNamespace::Stdio,
                 Some("perry:http") => CapabilityNamespace::Http,
                 Some("fs" | "node:fs") => CapabilityNamespace::Filesystem,
+                Some("fs/promises" | "node:fs/promises") => CapabilityNamespace::FilesystemPromises,
                 _ => bail!("Unsupported capability import: {:?}", import.src.value),
             };
             ensure!(
@@ -124,7 +127,11 @@ pub(crate) fn resolve_bindings(
                     }
                     ast::ImportSpecifier::Namespace(_) => CapabilityBinding::Namespace(namespace),
                     ast::ImportSpecifier::Default(_)
-                        if matches!(namespace, CapabilityNamespace::Filesystem) =>
+                        if matches!(
+                            namespace,
+                            CapabilityNamespace::Filesystem
+                                | CapabilityNamespace::FilesystemPromises
+                        ) =>
                     {
                         CapabilityBinding::Namespace(namespace)
                     }
@@ -238,18 +245,36 @@ fn source_type(ty: &HirType) -> Result<String> {
 
 #[derive(Clone, Copy)]
 enum CapabilityNamespace {
+    TimerPromises,
     Clocks,
     Random,
     Stdio,
     Filesystem,
+    FilesystemPromises,
     Http,
 }
 
 impl CapabilityNamespace {
     fn operation(self, name: &str) -> Result<CapabilityOperation> {
+        if matches!(self, Self::FilesystemPromises) {
+            let operation = match name {
+                "readFile" => FilesystemOperation::ReadBytes,
+                "writeFile" => FilesystemOperation::WriteFile,
+                "stat" => FilesystemOperation::Stat,
+                "mkdir" => FilesystemOperation::MakeDirectory,
+                "unlink" => FilesystemOperation::Unlink,
+                "rmdir" => FilesystemOperation::RemoveDirectory,
+                "readdir" => FilesystemOperation::ReadDirectory,
+                _ => bail!("Unsupported promise-based filesystem operation '{name}'"),
+            };
+            return Ok(CapabilityOperation::FilesystemPromise(operation));
+        }
         match (self, name) {
             (Self::Http, "get") => Ok(CapabilityOperation::HttpGet),
             (Self::Clocks, "waitFor") => Ok(CapabilityOperation::Clock(ClockOperation::WaitFor)),
+            (Self::TimerPromises, "setTimeout") => {
+                Ok(CapabilityOperation::Clock(ClockOperation::Timeout))
+            }
             (Self::Random, "randomNumber") => {
                 Ok(CapabilityOperation::Random(RandomOperation::Number))
             }
@@ -405,9 +430,9 @@ impl SourceCalls {
                     _ => bail!("Private capability member lookup is unsupported"),
                 };
                 if builtin_promise {
-                    bail!(
-                        "Promise.{name} is unsupported; Promise combinators and factories are deferred under D5"
-                    )
+                    let operation = super::promises::Combinator::from_name(name)
+                        .with_context(|| format!("Promise.{name} is unsupported; factories and dynamic callbacks are deferred under D5"))?;
+                    Ok(Some(CapabilityOperation::Promise(operation)))
                 } else if let Some(namespace) = namespace {
                     Ok(Some(namespace.operation(name)?))
                 } else if builtin_console {
@@ -547,6 +572,24 @@ impl VisitMut for SourceCalls {
             }
             match self.operation(callee) {
                 Ok(Some(operation)) => {
+                    if operation == CapabilityOperation::Clock(ClockOperation::Timeout) {
+                        let default = ast::ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
+                                span: call.span,
+                                value: 1.0,
+                                raw: None,
+                            }))),
+                        };
+                        if call.args.is_empty() {
+                            call.args.push(default);
+                        } else if call.args.len() == 1
+                            && matches!(call.args[0].expr.as_ref(), ast::Expr::Ident(name)
+                                if name.sym == "undefined" && name.ctxt == self.unresolved)
+                        {
+                            call.args[0] = default;
+                        }
+                    }
                     let operation =
                         match filesystem::specialize(operation, &call.args, self.unresolved) {
                             Ok(operation) => operation,

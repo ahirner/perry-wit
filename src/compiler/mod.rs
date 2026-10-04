@@ -22,7 +22,7 @@ impl Default for CompileOptions {
     fn default() -> Self {
         Self {
             wit_dir: "wit".into(),
-            world: Some("command".into()),
+            world: None,
             core_only: false,
         }
     }

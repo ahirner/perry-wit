@@ -13,6 +13,7 @@ use crate::waffle_backend::{
 impl FunctionLowerer<'_> {
     pub(super) fn filesystem_operation(
         &mut self,
+        name: &str,
         operation: FilesystemOperation,
         arguments: &[Expr],
     ) -> Result<Option<Value>> {
@@ -67,6 +68,12 @@ impl FunctionLowerer<'_> {
                         &[Type::I32],
                     )
                 };
+                if let Some(record) = self.start_task(
+                    &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
+                    &[path, data, valid],
+                )? {
+                    return Ok(Some(record));
+                }
                 self.call_completion(
                     self.registry.filesystem_helpers.unwrap().write,
                     &[path, data, valid],
@@ -106,6 +113,12 @@ impl FunctionLowerer<'_> {
                         &[Type::I32],
                     )
                 };
+                if let Some(record) = self.start_task(
+                    &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
+                    &[path, mode],
+                )? {
+                    return Ok(Some(record));
+                }
                 let payload = self.call_completion(helpers.read, &[path, mode]);
                 let descriptor = abi::decode_payload(&mut self.body, self.block, payload, true);
                 let value = if operation == FilesystemOperation::ReadValue {
@@ -134,6 +147,12 @@ impl FunctionLowerer<'_> {
                 );
                 let path = self.string_receiver(&arguments[0])?;
                 let valid = self.filesystem_metadata_options(operation, arguments.get(1))?;
+                if let Some(record) = self.start_task(
+                    &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
+                    &[path, valid],
+                )? {
+                    return Ok(Some(record));
+                }
                 let helpers = self.registry.filesystem_helpers.unwrap();
                 let payload = if operation == FilesystemOperation::ReadDirectory {
                     self.call_completion(helpers.read_directory, &[path, valid])

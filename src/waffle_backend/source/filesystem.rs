@@ -12,8 +12,17 @@ pub(super) fn specialize(
     arguments: &[ast::ExprOrSpread],
     unresolved: SyntaxContext,
 ) -> Result<CapabilityOperation> {
-    let CapabilityOperation::Filesystem(filesystem) = operation else {
-        return Ok(operation);
+    let (filesystem, asynchronous) = match operation {
+        CapabilityOperation::Filesystem(filesystem) => (filesystem, false),
+        CapabilityOperation::FilesystemPromise(filesystem) => (filesystem, true),
+        _ => return Ok(operation),
+    };
+    let specialize = |operation| {
+        if asynchronous {
+            CapabilityOperation::FilesystemPromise(operation)
+        } else {
+            CapabilityOperation::Filesystem(operation)
+        }
     };
     let index = if filesystem == FilesystemOperation::WriteFile {
         2
@@ -54,9 +63,7 @@ pub(super) fn specialize(
         encoding = match selected {
             Some(ast::Prop::KeyValue(pair)) => underlying_expression(&pair.value),
             Some(_) => {
-                return Ok(CapabilityOperation::Filesystem(
-                    FilesystemOperation::ReadValue,
-                ));
+                return Ok(specialize(FilesystemOperation::ReadValue));
             }
             None => return Ok(operation),
         };
@@ -68,12 +75,10 @@ pub(super) fn specialize(
         ast::Expr::Lit(_) => false,
         ast::Expr::Ident(name) if name.sym == "undefined" && name.ctxt == unresolved => false,
         _ => {
-            return Ok(CapabilityOperation::Filesystem(
-                FilesystemOperation::ReadValue,
-            ));
+            return Ok(specialize(FilesystemOperation::ReadValue));
         }
     };
-    Ok(CapabilityOperation::Filesystem(if text {
+    Ok(specialize(if text {
         FilesystemOperation::ReadText
     } else {
         FilesystemOperation::ReadBytes

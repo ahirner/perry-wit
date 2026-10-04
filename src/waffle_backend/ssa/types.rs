@@ -35,7 +35,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
         ty if crate::waffle_backend::nullable::inner(ty).is_some() => true,
-        ty if crate::waffle_backend::values::is_dynamic(ty) => true,
+        ty if crate::waffle_backend::values::is_boxed(ty) => true,
         ty if crate::waffle_backend::objects::is_object(ty) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty)
             || crate::waffle_backend::date::is_date(ty)
@@ -244,7 +244,12 @@ impl FunctionLowerer<'_> {
             }
             Expr::IndexGet { .. } => HirType::Union(vec![HirType::String, HirType::Void]),
             Expr::Undefined => HirType::Void,
-            Expr::Call { callee, .. } => {
+            Expr::Call { callee, args, .. } => {
+                if let Some(operation) = self.combinator(callee) {
+                    return self
+                        .combinator_type(operation, args)
+                        .unwrap_or(HirType::Any);
+                }
                 if let Some(plan) = &self.contract.promises
                     && let Some(target) =
                         crate::waffle_backend::promises::TaskTarget::from_callee(callee)

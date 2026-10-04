@@ -291,7 +291,9 @@ async fn async_handler_retains_text_bytes_and_metadata_through_delays() -> Resul
         import {waitFor} from 'perry:clocks';
         export async function handle(request:Request):Promise<Response> {
             const text=new TextDecoder('utf-8',{fatal:true}).decode(request.body);
-            await waitFor(1);
+            const first=waitFor(1);
+            const second=waitFor(2);
+            await Promise.all([first,second]);
             const scheme=request.scheme;
             if(scheme!==undefined && scheme!==null) { if(scheme.tag!=='https') {throw 1;} } else {throw 3;}
             if(request.authority!=='example.test') {throw 2;}
@@ -485,7 +487,7 @@ fn handler_imports_only_required_capabilities_and_checks_source_types() -> Resul
     ] {
         assert!(!component.contains(unused));
     }
-    for body in ["await Promise.all([]);", "await Promise.race([]);"] {
+    for body in ["await Promise.resolve(1);", "await Promise.reject(1);"] {
         let source = ECHO
             .replace("function handle", "async function handle")
             .replace("):Response", "):Promise<Response>")

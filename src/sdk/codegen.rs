@@ -163,6 +163,7 @@ pub fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
 
 /// Generates TypeScript declarations (.d.ts) for a given WIT world.
 pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
+    crate::abi::export_names::validate_implementation_names(resolve, world)?;
     let mut out = String::new();
 
     out.push_str("/**\n * Auto-generated TypeScript definitions for WIT world `");

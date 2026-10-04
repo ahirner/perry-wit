@@ -47,7 +47,8 @@ pub(crate) fn frame(
     for task in plan.tasks.values() {
         let mut params = vec!["i32"];
         params.extend(
-            task.params
+            task.arguments
+                .source()?
                 .iter()
                 .map(map_type_to_waffle)
                 .collect::<Result<Vec<_>>>()?
@@ -102,7 +103,8 @@ pub(crate) fn frame(
     );
     for (target, task) in &plan.tasks {
         let params = task
-            .params
+            .arguments
+            .source()?
             .iter()
             .map(map_type_to_waffle)
             .collect::<Result<Vec<_>>>()?
@@ -130,7 +132,7 @@ pub(crate) fn frame(
     }
     for (target, task) in &plan.tasks {
         writeln!(wat, "(func (export {:?}) (param $owner i32)", task.symbol)?;
-        for (index, ty) in task.params.iter().enumerate() {
+        for (index, ty) in task.arguments.source()?.iter().enumerate() {
             writeln!(
                 wat,
                 "(param $p{index} {})",
@@ -139,7 +141,7 @@ pub(crate) fn frame(
         }
         wat.push_str("(local $tag i32) (local $payload f64)\n");
         write!(wat, "(call $source-{}", task.symbol)?;
-        for index in 0..task.params.len() {
+        for index in 0..task.arguments.source()?.len() {
             write!(wat, " (local.get $p{index})")?;
         }
         wat.push_str(")\n");
@@ -158,7 +160,7 @@ pub(crate) fn frame(
     "#);
     for task in plan.tasks.values() {
         write!(wat, "(func ${} async (param \"owner\" u32)", task.symbol)?;
-        for (index, ty) in task.params.iter().enumerate() {
+        for (index, ty) in task.arguments.source()?.iter().enumerate() {
             let ty = match map_type_to_waffle(ty)? {
                 Type::F64 => "f64",
                 _ => "u32",

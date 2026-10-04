@@ -12,7 +12,7 @@
  * and multi-argument constructors, calendar getters, valueOf(), setters, and
  * string parsing are diagnosed. Component boundaries carry UTC ISO strings.
  * Temporal supports the typed immutable subset declared below.
- * Unconstrained any coercion, Promise combinators, callbacks, and detached work
+ * Unconstrained any coercion, callbacks, and detached work
  * are deferred. Standard library declarations do not imply compiler support.
  * JSON.parse accepts strict UTF-8 strings and rejects unpaired surrogate escapes.
  * JSON.stringify supports primitives, plain records, JSON value trees, dense typed arrays, string
@@ -74,6 +74,12 @@ declare module "perry:clocks" {
   export function waitFor(milliseconds: number): Promise<void>;
 }
 
+declare module "node:timers/promises" {
+  /** Millisecond wait with Node delay clamping/truncation. Optional result values
+   * and AbortSignal options are not yet supported. */
+  export function setTimeout(milliseconds?: number): Promise<void>;
+}
+
 declare module "perry:http-handler/types" {
   export type Method =
     | { tag: "get" | "head" | "post" | "put" | "delete" | "connect" | "options" | "trace" | "patch" }
@@ -89,7 +95,7 @@ declare module "perry:http-handler/types" {
   }
   /** Buffered response for compile_http_handler. Body caps are compiler options.
    * Status is 200–599; 204/205/304 require an empty body. Headers preserve duplicates
-   * and bytes. Direct awaits are supported; retained tasks remain unsupported. */
+   * and bytes. Typed owned tasks and combinators may remain pending within handle. */
   export interface Response {
     status: number;
     headers: [string, Uint8Array][];
@@ -108,8 +114,7 @@ declare module "perry:http" {
     headerName(index: number): string;
     headerValue(index: number): Uint8Array;
   }
-  /** Immediately await this bounded GET; combining it with stored async tasks
-   * is currently diagnosed. Scheme is exactly http or https; path
+  /** Bounded GET, supporting stored tasks in resolved WIT components. Scheme is exactly http or https; path
    * includes any query. Request headers are string-valued. The response limit
    * must be an integer in [0, 4294967295]. Numeric failures: 8 body overflow,
    * 12 invalid metadata/limit/index, 100 + WASI HTTP error discriminant, or
@@ -131,7 +136,7 @@ declare module "perry:random" {
 
 declare module "perry:stdio" {
   /** Write the visible bytes, then await the independent P3 output completion.
-   * Must be immediately awaited. Numeric rejection codes: 1 I/O, 2 invalid
+   * Tasks remain owned by the invocation. Numeric rejection codes: 1 I/O, 2 invalid
    * byte sequence, 3 broken pipe. Already written bytes are not rolled back. */
   export function writeStdout(bytes: Uint8Array): Promise<void>;
   /** Same transfer and completion contract as writeStdout, directed to stderr. */
@@ -154,7 +159,7 @@ declare module "fs" {
     options: Utf8Encoding,
   ): string;
   /** Runtime encoding strings and reusable option objects return a tagged string-or-byte value.
-   * Plain objects support aliases, helper calls, mutation, and deletion. Getters,
+   * Plain objects support aliases, helper calls, and declared-field mutation. Getters,
    * spreads, computed literal keys, methods, and custom prototypes are diagnosed.
    * The compiler can specialize inline literals more precisely than this declaration.
    * Narrow with typeof before using string-only or byte-only operations.
@@ -213,6 +218,26 @@ declare module "fs" {
 
 declare module "node:fs" {
   export { writeFileSync, readFileSync, statSync, existsSync, mkdirSync, unlinkSync, rmdirSync, readdirSync, Stats, default } from "fs";
+}
+
+declare module "fs/promises" {
+  import type { Stats } from "fs";
+  /** Materialize the file in guest memory; errors use the numeric WASI filesystem ordinal. */
+  export function readFile(path: string, encoding: "utf8" | "utf-8"): Promise<string>;
+  export function readFile(path: string, encoding?: null): Promise<Uint8Array>;
+  export function readFile(path: string, options: string | { encoding?: string | null; flag?: "r" }): Promise<string | Uint8Array>;
+  export function writeFile(path: string, data: string | Uint8Array, options?: string | { encoding?: string | null; flag?: "w" } | null): Promise<void>;
+  export function stat(path: string, options?: { bigint?: false; throwIfNoEntry?: true } | null): Promise<Stats>;
+  export function mkdir(path: string): Promise<void>;
+  export function unlink(path: string): Promise<void>;
+  export function rmdir(path: string): Promise<void>;
+  export function readdir(path: string, options?: string | { encoding?: string | null; recursive?: false; withFileTypes?: false } | null): Promise<string[]>;
+  const fs: { readFile: typeof readFile; writeFile: typeof writeFile; stat: typeof stat; mkdir: typeof mkdir; unlink: typeof unlink; rmdir: typeof rmdir; readdir: typeof readdir };
+  export default fs;
+}
+
+declare module "node:fs/promises" {
+  export { readFile, writeFile, stat, mkdir, unlink, rmdir, readdir, default } from "fs/promises";
 }
 
 /** Opaque readable end of a native byte stream, owned by the entry invocation. */

@@ -70,6 +70,100 @@ fn engine() -> Result<Engine> {
         .wasm_component_model_async_stackful(true);
     Ok(Engine::new(&config)?)
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_wit_tasks_overlap_and_retain_outcomes_in_the_resolved_component() -> Result<()> {
+    use std::sync::Arc;
+    let compiled = compile(
+        r#"
+      import {load} from 'test:overlap/work';
+      async function decorate(key:string):Promise<string> { return (await load(key))+'!'; }
+      export async function run(key:string):Promise<string> {
+        const first=decorate(key);
+        const second=decorate(key+'2');
+        const a=await first;
+        const b=await second;
+        return a+b+(await first);
+      }
+    "#,
+        r#"package test:overlap;
+      interface work { load:async func(key:string)->string; }
+      world boundary { import work; export run:async func(key:string)->string; }
+    "#,
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::<Host>::new(&engine);
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    linker.instance("test:overlap/work")?.func_wrap_concurrent(
+        "load",
+        move |_, (key,): (String,)| {
+            let gate = gate.clone();
+            Box::pin(async move {
+                gate.wait().await;
+                Ok((key,))
+            })
+        },
+    )?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for _ in 0..150 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                run.call_async(&mut store, ("漢🙂",))
+            )
+            .await??
+            .0,
+            "漢🙂!漢🙂2!漢🙂!"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_native_timers_handle_immediate_rejection_and_repeated_awaits() -> Result<()> {
+    let compiled = compile(
+        r#"
+      import {setTimeout} from 'node:timers/promises';
+      async function task(fail:boolean):Promise<number> {
+        if(fail) throw 7;
+        await setTimeout(0);
+        return 11;
+      }
+      export async function run():Promise<number> {
+        const a=task(false);
+        const b=task(true);
+        let error=0;
+        try { await b; } catch(e) { error=e; }
+        return (await a)+(await a)+error;
+      }
+    "#,
+        r#"package test:timer;
+      world boundary { import wasi:clocks/monotonic-clock@0.3.0; export run:async func()->f64; }
+    "#,
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..150 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, ()))
+                .await??
+                .0,
+            29.0
+        );
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
 fn store(engine: &Engine) -> Store<Host> {
     let mut store = Store::new(
         engine,
@@ -111,7 +205,8 @@ async fn asynchronous_wit_imports_preserve_records_results_and_repeated_calls() 
       import {load} from 'test:async-lookup/lookup';
       import type {Item} from 'test:async-lookup/lookup';
       export async function run(key:string):Promise<{ok:true,value:Item}|{ok:false,error:string}> {
-        const result=await load(key);
+        const pending=load(key);
+        const result=await pending;
         if(result.ok) {return {ok:true,value:{label:result.value.label+'!',count:result.value.count+1}};}
         return {ok:false,error:result.error};
       }
@@ -170,6 +265,64 @@ world boundary {
   export run: async func(authority:string,path:string)->string;
 }
 "#;
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_http_requests_overlap_and_complete_both_channels() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let compiled = compile(
+        r#"
+      import {get} from 'perry:http';
+      export async function run(authority:string,path:string):Promise<string> {
+        const first=get('http',authority,path+'1',{},4096);
+        const second=get('http',authority,path+'2',{},4096);
+        const responses=await Promise.all([first,second]);
+        const retained=await first;
+        if(retained!==responses[0])throw 1;
+        const decoder=new TextDecoder('utf-8',{fatal:true});
+        return decoder.decode(responses[0].body)+decoder.decode(responses[1].body);
+      }
+    "#,
+        HTTP_WORLD,
+    )?;
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let server = fixture::HttpFixture::new(move |request| {
+        let pair = count.fetch_add(1, Ordering::SeqCst) / 2 + 1;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while count.load(Ordering::SeqCst) < pair * 2 {
+            if std::time::Instant::now() >= deadline {
+                return fixture::Reply::Disconnect;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fixture::Reply::Body(200, request.target.clone())
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, &str), (String,)>(&mut store, "run")?;
+    for _ in 0..60 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                run.call_async(&mut store, (&server.address.to_string(), "/item"))
+            )
+            .await??
+            .0,
+            "/item1/item2"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    assert_eq!(received.load(Ordering::SeqCst), 120);
+    Ok(())
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn resolved_world_http_get_uses_native_component_bindings() -> Result<()> {
@@ -288,6 +441,69 @@ async fn resolved_world_platform_io_uses_shared_guest_memory() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn node_filesystem_promises_preserve_retained_outcomes_and_cleanup() -> Result<()> {
+    let source = r#"
+      import {readFile,writeFile,stat,readdir,unlink} from 'node:fs/promises';
+      export async function run(path:string):Promise<string> {
+        const a=writeFile(path+'/first','hello');
+        const b=writeFile(path+'/second','world');
+        await Promise.all([a,b]);
+        const first=readFile(path+'/first','utf8');
+        const second=readFile(path+'/second','utf8');
+        const texts=await Promise.all([first,second]);
+        if((await first)!==texts[0])throw 1;
+        const info=stat(path+'/first');
+        const names=readdir(path);
+        if((await info).size!==5||(await names).length!==2)throw 2;
+        await Promise.all([unlink(path+'/first'),unlink(path+'/second')]);
+        return texts[0]+texts[1];
+      }
+    "#;
+    let compiled = compile(
+        source,
+        r#"package test:filesystem-promises; world boundary {
+      include wasi:cli/imports@0.3.0; export run:async func(path:string)->string;
+    }"#,
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let directory = tempfile::tempdir()?;
+    let mut store = store(&engine);
+    store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
+        .preopened_dir(directory.path(), "/data", wasmtime_wasi::FsPerms::ReadWrite)?
+        .build();
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for _ in 0..80 {
+        assert_eq!(
+            run.call_async(&mut store, ("/data",)).await?.0,
+            "helloworld"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let script = tempfile::tempdir()?;
+    let file = script.path().join("compare.ts");
+    std::fs::write(
+        &file,
+        format!("{source}\nconsole.log(await run(process.argv[2]));"),
+    )?;
+    let output = std::process::Command::new("node")
+        .arg(&file)
+        .arg(directory.path())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "helloworld");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn asynchronous_wit_traps_and_disposal_release_pending_host_calls() -> Result<()> {
     use std::sync::{
         Arc,
@@ -355,17 +571,14 @@ async fn asynchronous_wit_traps_and_disposal_release_pending_host_calls() -> Res
 }
 
 #[test]
-fn resolved_world_rejects_retained_tasks_and_missing_capabilities() {
-    for body in [
-        "const pending=load(key); return await pending;",
-        "load(key); return {ok:false,error:'unawaited'};",
-    ] {
-        let source = format!("import {{load}} from 'test:async-lookup/lookup';
-          import type {{Item}} from 'test:async-lookup/lookup';
-          export async function run(key:string):Promise<{{ok:true,value:Item}}|{{ok:false,error:string}}> {{{body}}}");
-        let error = compile(&source, ASYNC_WORLD).unwrap_err();
-        assert!(format!("{error:#}").contains("await"), "{error:#}");
-    }
+fn resolved_world_rejects_detached_tasks_and_missing_capabilities() {
+    let source = "import {load} from 'test:async-lookup/lookup';
+      import type {Item} from 'test:async-lookup/lookup';
+      export async function run(key:string):Promise<{ok:true,value:Item}|{ok:false,error:string}> {load(key); return {ok:false,error:'unawaited'};}";
+    let error = compile(source, ASYNC_WORLD)
+        .map(|_| ())
+        .expect_err("detached task diagnostic");
+    assert!(format!("{error:#}").contains("await"), "{error:#}");
     for (body, interface) in [
         ("return Date.now();", "wasi:clocks/system-clock@0.3.0"),
         ("console.log('text');return 1;", "wasi:cli/stdout@0.3.0"),
@@ -627,6 +840,318 @@ async fn independent_record_flow_preserves_transformations_and_orders_host_effec
                 store.assert_concurrent_state_empty();
             }
         }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn promise_combinators_preserve_results_and_release_native_threads() -> Result<()> {
+    for (body, expected) in [
+        (
+            "const values=await Promise.all([task(1,3),task(2,0)]); return values[0]+values[1];",
+            3.0,
+        ),
+        (
+            "const a=task(1,3); const b=task(2,0); const winner=await Promise.race([a,b]); await a; await b; return winner;",
+            2.0,
+        ),
+        (
+            "const values=await Promise.all([]); return values.length;",
+            0.0,
+        ),
+        (
+            "const values=await Promise.all([1,2,3]); return values[0]+values[2];",
+            4.0,
+        ),
+        (
+            "const values=await Promise.allSettled([task(1,0),failed()]); return values.length;",
+            2.0,
+        ),
+        (
+            "const a=task(1,3); const b=failed(); let error=0; try { await Promise.all([a,b]); } catch(e) { error=e; } await a; try { await b; } catch(e) {} return error;",
+            7.0,
+        ),
+        (
+            "const values=await Promise.allSettled([task(1,0),failed()]); const a=values[0]; const b=values[1]; if(a.status==='fulfilled'&&b.status==='rejected')return a.value+b.reason; throw 99;",
+            8.0,
+        ),
+        (
+            "const tasks:Promise<number>[]=[task(1,3),task(2,0)]; const combined=Promise.all(tasks); const values=await combined; const again=await combined; if(values!==again)throw 99; return values[0]+values[1];",
+            3.0,
+        ),
+        (
+            "const input:string[]=['ab','c']; const values=await Promise.all(input); return values[0].length+values[1].length;",
+            3.0,
+        ),
+        (
+            "const a=task(1,3); const b=text('hello',0); const winner=await Promise.race([a,b]); await a; await b; if(typeof winner==='string')return winner.length; return winner;",
+            5.0,
+        ),
+        (
+            "const a=task(1,0); const b=text('hello',3); const winner=await Promise.race([a,b]); await a; await b; if(typeof winner==='string')return winner.length; return winner;",
+            1.0,
+        ),
+        (
+            "const values=await Promise.all([task(1,0),text('hi',0)]); return values[0]+values[1].length;",
+            3.0,
+        ),
+    ] {
+        let source = format!(
+            r#"
+          import {{setTimeout}} from 'node:timers/promises';
+          async function task(value:number,delay:number):Promise<number> {{ await setTimeout(delay); return value; }}
+          async function text(value:string,delay:number):Promise<string> {{ await setTimeout(delay); return value; }}
+          async function failed():Promise<number> {{ throw 7; }}
+          export async function run():Promise<number> {{ {body} }}
+        "#
+        );
+        let compiled = compile(
+            &source,
+            r#"package test:combinators;
+          world boundary { import wasi:clocks/monotonic-clock@0.3.0; export run:async func()->f64; }
+        "#,
+        )
+        .with_context(|| source.clone())?;
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+        let mut store = store(&engine);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+        for _ in 0..40 {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, ()))
+                    .await??
+                    .0,
+                expected,
+                "{body}"
+            );
+            store.assert_concurrent_state_empty();
+        }
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("compare.ts");
+        std::fs::write(&path, format!("{source}\nconsole.log(await run());"))?;
+        let result = std::process::Command::new("node").arg(&path).output()?;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout)?.trim().parse::<f64>()?,
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resolved_task_reaction_order_matches_node() -> Result<()> {
+    for body in [
+        "const a=child(state,'a'); const b=child(state,'b'); const first=observe(a,state,'one'); const second=observe(a,state,'two'); const both=Promise.all([a,b]); state.text=state.text+'parent;'; await both; state.text=state.text+'all;'; await first; await second; return state.text;",
+        "const a=child(state,'a'); const adopted=adopt(a,state); const observer=observe(a,state,'observed'); state.text=state.text+'parent;'; await adopted; state.text=state.text+'adopted;'; await observer; return state.text;",
+        "const adopted=adopt(rejected(),state); state.text=state.text+'parent;'; try {await adopted;} catch(e) {state.text=state.text+'rejected;';} return state.text;",
+        "const race=Promise.race(['a','b']); const observed=observe(race,state,'race'); const empty=Promise.allSettled([]); state.text=state.text+'parent;'; await empty; state.text=state.text+'empty;'; await observed; return state.text;",
+    ] {
+        let source = format!(
+            r#"
+        interface Trace {{ text:string }}
+        async function child(state:Trace, name:string):Promise<string> {{
+          state.text=state.text+name+'-start;';
+          await 0;
+          state.text=state.text+name+'-end;';
+          return name;
+        }}
+        async function observe(task:Promise<string>,state:Trace,name:string):Promise<void> {{
+          await task;
+          state.text=state.text+name+';';
+        }}
+        async function rejected():Promise<string> {{throw 7;}}
+        async function adopt(task:Promise<string>,state:Trace):Promise<string> {{
+          try {{return task;}} catch(e) {{state.text=state.text+'caught;'; return 'bad';}}
+          finally {{state.text=state.text+'finally;';}}
+        }}
+        export async function run():Promise<string> {{
+          const state:Trace={{text:''}};
+          {body}
+        }}
+      "#
+        );
+        let compiled = compile(
+            &source,
+            "package test:ordering; world boundary {export run:async func()->string;}",
+        )?;
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("compare.ts");
+        std::fs::write(&file, format!("{source}\nconsole.log(await run());"))?;
+        let output = std::process::Command::new("node").arg(file).output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = String::from_utf8(output.stdout)?;
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = store(&engine);
+        let instance = Linker::new(&engine)
+            .instantiate_async(&mut store, &component)
+            .await?;
+        let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+        for _ in 0..40 {
+            assert_eq!(
+                run.call_async(&mut store, ()).await?.0,
+                expected.trim(),
+                "{body}"
+            );
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_race_stays_pending_and_cannot_escape_its_call() -> Result<()> {
+    for awaited in [true, false] {
+        let body = if awaited {
+            "await Promise.race([]); return 1;"
+        } else {
+            "const pending=Promise.race([]); return 1;"
+        };
+        let compiled = compile(
+            &format!("export async function run():Promise<number>{{{body}}}"),
+            "package test:empty-race; world boundary {export run:async func()->f64;}",
+        )?;
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = store(&engine);
+        let instance = Linker::new(&engine)
+            .instantiate_async(&mut store, &component)
+            .await?;
+        let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+        let result =
+            tokio::time::timeout(Duration::from_millis(20), run.call_async(&mut store, ())).await;
+        if awaited {
+            match result {
+                Err(_) => {}
+                Ok(Err(error)) => assert!(format!("{error:#}").contains("deadlock"), "{error:#}"),
+                Ok(Ok(value)) => panic!("an empty race must not settle: {value:?}"),
+            }
+        } else {
+            let error = result?.expect_err("unresolved work must fail the owning boundary");
+            assert!(format!("{error:#}").contains("unreachable"), "{error:#}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn directly_awaited_imports_serialize_public_calls() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let compiled = compile(
+        "import {wait} from 'test:ownership/work'; export async function run():Promise<number>{await wait();return 1;}",
+        "package test:ownership; interface work {wait:async func();} world boundary {import work; export run:async func()->f64;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let started = Arc::new(AtomicUsize::new(0));
+    let calls = started.clone();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let host_gate = gate.clone();
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("test:ownership/work")?
+        .func_wrap_concurrent("wait", move |_, (): ()| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let gate = host_gate.clone();
+            Box::pin(async move {
+                gate.notified().await;
+                Ok(())
+            })
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        store.run_concurrent(async |accessor| {
+            let mut first = Box::pin(run.call_concurrent(accessor, ()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut first)
+                    .await
+                    .is_err()
+            );
+            let mut second = Box::pin(run.call_concurrent(accessor, ()));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut second)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            gate.notify_one();
+            assert_eq!(first.await?.0, 1.0);
+            gate.notify_one();
+            assert_eq!(second.await?.0, 1.0);
+            Ok::<(), wasmtime::Error>(())
+        }),
+    )
+    .await???;
+    assert_eq!(started.load(Ordering::SeqCst), 2);
+    store.assert_concurrent_state_empty();
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timer_delays_map_to_p3_nanoseconds_without_waiting_for_the_clock() -> Result<()> {
+    use std::sync::{Arc, Mutex};
+    let source = r#"
+      import {setTimeout} from 'node:timers/promises';
+      async function shadow(undefined:number):Promise<void> {await setTimeout(undefined);}
+      export async function run(delay:number):Promise<void> {
+        await setTimeout();
+        await setTimeout(undefined);
+        await shadow(delay);
+      }
+    "#;
+    let wit = r#"package test:timer-units; world boundary {
+      import wasi:clocks/monotonic-clock@0.3.0;
+      export run:async func(delay:f64);
+    }"#;
+    wit_source::check_sdk_source(wit, source)?;
+    let compiled = compile(source, wit)?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let durations = Arc::new(Mutex::new(Vec::new()));
+    let observed = durations.clone();
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (nanos,): (u64,)| {
+            observed.lock().unwrap().push(nanos);
+            Box::pin(async { Ok(()) })
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(f64,), ()>(&mut store, "run")?;
+    for (delay, nanos) in [
+        (f64::NAN, 1_000_000),
+        (f64::INFINITY, 1_000_000),
+        (-1.0, 1_000_000),
+        (0.0, 1_000_000),
+        (0.9, 1_000_000),
+        (1.9, 1_000_000),
+        (2.9, 2_000_000),
+        (2_147_483_647.0, 2_147_483_647_000_000),
+        (2_147_483_648.0, 1_000_000),
+    ] {
+        durations.lock().unwrap().clear();
+        run.call_async(&mut store, (delay,)).await?;
+        assert_eq!(*durations.lock().unwrap(), [1_000_000, 1_000_000, nanos]);
+        store.assert_concurrent_state_empty();
     }
     Ok(())
 }

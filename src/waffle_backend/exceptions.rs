@@ -19,6 +19,8 @@ pub(crate) enum ExitReason {
     Throw = 2,
     Break = 3,
     Continue = 4,
+    /// Adopt a returned Promise after all synchronous finally clauses finish.
+    ReturnPromise = 5,
 }
 
 impl ExitReason {
@@ -313,12 +315,13 @@ pub(crate) fn emit_finally_dispatcher(
     join_block: Block,
     scope_locals: &[LocalId],
     current_locals: &BTreeMap<LocalId, Value>,
-) -> [(ExitReason, Block); 4] {
+) -> [(ExitReason, Block); 5] {
     let exits = [
         ExitReason::Return,
         ExitReason::Throw,
         ExitReason::Break,
         ExitReason::Continue,
+        ExitReason::ReturnPromise,
     ]
     .map(|reason| {
         let block = body.add_block();

@@ -1,0 +1,126 @@
+{
+  "date": "2026-10-04",
+  "host": "arm64 macOS 27.0 (26A428)",
+  "wasmtime": "49.0.2",
+  "cargo_profile": "test",
+  "cranelift_settings": "default",
+  "warmup_calls": 5,
+  "samples": 5,
+  "memory_limit_bytes": 8388608,
+  "before_heap_index": [
+    {
+      "operands": 1,
+      "component_bytes": 13728,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        74.82582,
+        72.78918,
+        72.8325,
+        70.07584,
+        71.75
+      ]
+    },
+    {
+      "operands": 16,
+      "component_bytes": 13728,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        937.57166,
+        943.92666,
+        946.395,
+        946.52666,
+        947.83334
+      ]
+    },
+    {
+      "operands": 64,
+      "component_bytes": 13728,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        8033.55166,
+        7965.23,
+        7950.7675,
+        8014.23416,
+        7943.28
+      ]
+    },
+    {
+      "operands": 256,
+      "component_bytes": 13728,
+      "memory_after_warmup": 131072,
+      "memory_after_samples": 131072,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        267647.9225,
+        267149.33418,
+        265953.56168,
+        265786.73084,
+        265168.70832
+      ]
+    }
+  ],
+  "with_heap_index": [
+    {
+      "operands": 1,
+      "component_bytes": 13947,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        72.30084000000001,
+        73.64916,
+        82.29082,
+        70.68166000000001,
+        71.6
+      ]
+    },
+    {
+      "operands": 16,
+      "component_bytes": 13947,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        900.23334,
+        932.34834,
+        902.5733399999999,
+        911.67666,
+        933.62918
+      ]
+    },
+    {
+      "operands": 64,
+      "component_bytes": 13947,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        4196.628339999999,
+        4173.95418,
+        4189.37332,
+        4161.7775,
+        4156.8216600000005
+      ]
+    },
+    {
+      "operands": 256,
+      "component_bytes": 13947,
+      "memory_after_warmup": 131072,
+      "memory_after_samples": 131072,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        32670.613340000004,
+        32684.09916,
+        32544.062499999996,
+        32589.70834,
+        32553.905
+      ]
+    }
+  ]
+}

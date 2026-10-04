@@ -70,15 +70,20 @@
           wasm-tools component wit probe -o "$out"
         '';
 
+        authoredSourceFilter = path: type:
+          !(builtins.elem (baseNameOf path) [ ".perry" "node_modules" "target" "dist" "result" ])
+          && pkgs.lib.cleanSourceFilter path type;
+
         # Common source filter for Rust crate builds
         commonFilter = path: type:
+          authoredSourceFilter path type && (
           (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
           (pkgs.lib.hasSuffix ".json" path) ||
           (pkgs.lib.hasSuffix ".toml" path) ||
           (pkgs.lib.hasSuffix ".lock" path) ||
-          (craneLib.filterCargoSources path type);
+          (craneLib.filterCargoSources path type));
 
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
@@ -162,15 +167,19 @@
         }: pkgs.stdenv.mkDerivation {
           pname = name;
           version = "0.1.0";
-          inherit src;
-          nativeBuildInputs = [ perryWitBin pkgs.wasm-tools ];
+          src = pkgs.lib.cleanSourceWith { inherit src; filter = authoredSourceFilter; };
+          nativeBuildInputs = [ perryWitBin pkgs.typescript pkgs.wasm-tools ];
           buildPhase = ''
-            export HOME="$TMPDIR"
             export WASI_WIT_PATH="${wasiP3Wit}"
+            perry-wit gen-types --no-tsconfig \
+              --wit ${pkgs.lib.escapeShellArg (toString wit)} \
+              --entry ${pkgs.lib.escapeShellArg entry} \
+              ${pkgs.lib.optionalString (world != null) ("--world " + pkgs.lib.escapeShellArg world)}
+            tsc --noEmit -p .perry/types
             mkdir -p dist
-            perry-wit ${entry} \
-              --wit "${wit}" \
-              ${if world != null then "--world " + world else ""} \
+            perry-wit ${pkgs.lib.escapeShellArg entry} \
+              --wit ${pkgs.lib.escapeShellArg (toString wit)} \
+              ${if world != null then "--world " + pkgs.lib.escapeShellArg world else ""} \
               -o "dist/${name}.wasm"
           '';
           installPhase = ''
@@ -178,6 +187,22 @@
             cp "dist/${name}.wasm" "$out/lib/"
           '';
         };
+
+        mkSdkShell = { wit ? "wit", world ? null, entry ? "src/index.ts", ... }:
+          pkgs.mkShell {
+            name = "perry-wit-sdk";
+            packages = [ perryWitBin pkgs.nodejs pkgs.typescript pkgs.wasmtime pkgs.wasm-tools ];
+            WASI_WIT_PATH = wasiP3Wit;
+            WASI_P3_WIT_PATH = wasiP3Wit;
+            shellHook = ''
+              ${perryWitBin}/bin/perry-wit gen-types --no-tsconfig \
+                --wit ${pkgs.lib.escapeShellArg (toString wit)} \
+                --entry ${pkgs.lib.escapeShellArg entry} \
+                ${pkgs.lib.optionalString (world != null) ("--world " + pkgs.lib.escapeShellArg world)} \
+                || exit "$?"
+              echo "Perry-WIT SDK: node, tsc --noEmit -p .perry/types, perry-wit, wasmtime"
+            '';
+          };
 
         # Consumer starter template component compiled with buildComponent
         templateComponent = buildComponent {
@@ -225,7 +250,7 @@
         };
 
         lib = {
-          inherit buildComponent;
+          inherit buildComponent mkSdkShell;
         };
 
         checks = {
@@ -260,26 +285,11 @@
           '';
         };
 
-        devShells.sdk = pkgs.mkShell {
-          name = "perry-wit-sdk";
-          packages = [
-            perryWitBin
-            pkgs.typescript
-            pkgs.wasmtime
-            pkgs.wasm-tools
-          ];
-
-          WASI_WIT_PATH = wasiP3Wit;
-          WASI_P2_WIT_PATH = wasiWit;
-          WASI_P3_WIT_PATH = wasiP3Wit;
-
-          shellHook = ''
-            if [ -d wit ]; then
-              ${perryWitBin}/bin/perry-wit gen-types --wit wit
-            fi
-            echo "Perry-WIT component SDK: tsc --noEmit, perry-wit, wasmtime"
-          '';
+        devShells.sdk = mkSdkShell {
+          entry = "examples/merge_task.ts";
+          world = "task-runner";
         };
+
       }
     );
   in systemOutputs // {

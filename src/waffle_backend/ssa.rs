@@ -15,6 +15,7 @@ mod loops;
 mod objects;
 mod optional;
 mod options;
+mod promises;
 mod random;
 mod requirements;
 mod string_ops;
@@ -87,6 +88,15 @@ pub(crate) fn lower_module(
             .random_operations()
             .contains(&super::capabilities::RandomOperation::Uuid);
     let mut string_pool = StringPool::new();
+    if contract
+        .promises
+        .as_ref()
+        .is_some_and(|plan| plan.combinators)
+    {
+        for key in ["status", "fulfilled", "rejected", "value", "reason"] {
+            string_pool.intern(key);
+        }
+    }
     let regex_tables = regex::compile_literals(hir)?;
     let (string_heap_base, regex_programs) = if reqs.needs_strings
         || contract.promises.is_some()
@@ -146,7 +156,7 @@ pub(crate) fn lower_module(
         if reqs.json {
             helper_libraries.push(super::libraries::LibraryId::Json);
         }
-        if super::time::required(hir) {
+        if super::time::required(hir) || super::date::required(hir) || reqs.json {
             helper_libraries.push(super::libraries::LibraryId::Time);
         }
         if !helper_libraries.is_empty() {
@@ -154,7 +164,7 @@ pub(crate) fn lower_module(
             for id in helper_libraries {
                 placement.place(&super::libraries::Library::parse(id.bytes())?)?;
             }
-            let aligned_heap_base = super::libraries::align_to(placement.stack_top()?, 65_536)?;
+            let aligned_heap_base = super::libraries::align_to(placement.stack_top()?, 16)?;
             let needed_pages = (aligned_heap_base / 65_536) as usize + 1;
             if module.memories[memory].initial_pages < needed_pages {
                 module.memories[memory].initial_pages = needed_pages;
@@ -178,6 +188,13 @@ pub(crate) fn lower_module(
         &string_pool,
     )?;
     let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
+    if registry
+        .promises
+        .as_ref()
+        .is_some_and(|runtime| runtime.native.is_some())
+    {
+        super::promises::native::emit(&mut module, &registry, contract, &string_pool)?;
+    }
 
     // 5. Lower each function body using the established registry contracts
     for func in &hir.functions {
@@ -391,7 +408,7 @@ impl<'a> FunctionLowerer<'a> {
                             || matches!(ty, HirType::Array(_) | HirType::Tuple(_)))
                     {
                         (ty.clone(), self.typed_operand(expr, ty)?)
-                    } else if super::nullable::inner(ty).is_some() {
+                    } else if super::values::is_boxed_union(ty) {
                         self.check_typed_value(expr, ty)?;
                         (ty.clone(), self.typed_operand(expr, ty)?)
                     } else if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
@@ -433,6 +450,30 @@ impl<'a> FunctionLowerer<'a> {
                         "Detached async calls are unsupported; store and await their outcome"
                     );
                     self.expression(expr)?;
+                }
+                Stmt::Return(Some(expr))
+                    if matches!(self.infer_expr_type(expr), HirType::Promise(_))
+                        && self
+                            .registry
+                            .promises
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.native.is_some()) =>
+                {
+                    let HirType::Promise(result) = self.infer_expr_type(expr) else {
+                        unreachable!()
+                    };
+                    ensure!(
+                        self.is_async,
+                        "Returning a stored Promise requires an async function"
+                    );
+                    ensure!(
+                        super::wit::same_type(&result, self.return_type),
+                        "Returned Promise outcome must match the declared function result type"
+                    );
+                    let record = self.expression(expr)?;
+                    self.reference_values.insert(record);
+                    let payload = abi::encode_payload(&mut self.body, self.block, Some(record));
+                    self.emit_promise_return(payload);
                 }
                 Stmt::Return(expr) => {
                     let ret_val = expr
@@ -494,7 +535,7 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn return_expression(&mut self, expr: &Expr) -> Result<Value> {
-        if super::nullable::inner(self.return_type).is_some() {
+        if super::values::is_boxed_union(self.return_type) {
             return self.typed_operand(expr, &self.return_type.clone());
         }
         if self.contract.wit.is_some() {
@@ -689,6 +730,9 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Some(operation) = self.combinator(callee) {
+            return self.combine_promises(operation, args).map(Some);
+        }
         if let Expr::ExternFuncRef { name, .. } = callee
             && let Some(super::resolve::TypedIntrinsic::Temporal(operation)) =
                 self.contract.intrinsics.get(name)
@@ -715,14 +759,15 @@ impl<'a> FunctionLowerer<'a> {
                 ))
             )
         {
-            return self.http_get(args).map(Some);
+            return self.http_get(name, args).map(Some);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
             && let Some(super::resolve::TypedIntrinsic::Capability(
-                super::capabilities::CapabilityOperation::Filesystem(operation),
+                super::capabilities::CapabilityOperation::Filesystem(operation)
+                | super::capabilities::CapabilityOperation::FilesystemPromise(operation),
             )) = self.contract.intrinsics.get(name)
         {
-            return self.filesystem_operation(*operation, args);
+            return self.filesystem_operation(name, *operation, args);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
             && matches!(
@@ -908,51 +953,9 @@ impl<'a> FunctionLowerer<'a> {
             arg_vals.push(value);
         }
 
-        if let Some(runtime) = &self.registry.promises
-            && let Some(target) = super::promises::TaskTarget::from_callee(callee)
-            && let Some(&start) = runtime.starts.get(&target)
+        if let Some(target) = super::promises::TaskTarget::from_callee(callee)
+            && let Some(record) = self.start_task(&target, &arg_vals)?
         {
-            let signature = &self.module.signatures[self.module.funcs[start].sig()];
-            ensure!(
-                arg_vals.len() + 1 == signature.params.len(),
-                "Stored async call has incorrect argument count"
-            );
-            for (value, expected) in arg_vals.iter().zip(&signature.params[1..]) {
-                ensure!(
-                    self.body.values[*value].ty(&self.body.type_pool) == Some(*expected),
-                    "Stored async call has an incompatible argument type"
-                );
-            }
-            let task = &self.contract.promises.as_ref().unwrap().tasks[&target];
-            let kind = if types::is_reference(&task.result) {
-                super::allocation::AllocationKind::ReferencePromise
-            } else {
-                super::allocation::AllocationKind::ScalarPromise
-            };
-            let kind = self.op(Operator::I32Const { value: kind as u32 }, &[], &[Type::I32]);
-            let record = self.op(
-                Operator::Call {
-                    function_index: runtime.new,
-                },
-                &[kind],
-                &[Type::I32],
-            );
-            self.reference_values.insert(record);
-            arg_vals.insert(0, record);
-            let status = self.op(
-                Operator::Call {
-                    function_index: start,
-                },
-                &arg_vals,
-                &[Type::I32],
-            );
-            self.op(
-                Operator::Call {
-                    function_index: runtime.bind,
-                },
-                &[record, status],
-                &[],
-            );
             return Ok(Some(record));
         }
 
@@ -1039,6 +1042,63 @@ impl<'a> FunctionLowerer<'a> {
         } else {
             bail!("Unsupported call callee in WAFFLE lowering: {callee:?}");
         }
+    }
+
+    fn start_task(
+        &mut self,
+        target: &super::promises::TaskTarget,
+        arg_vals: &[Value],
+    ) -> Result<Option<Value>> {
+        if let Some(runtime) = &self.registry.promises
+            && let Some(&start) = runtime.starts.get(target)
+        {
+            let signature = &self.module.signatures[self.module.funcs[start].sig()];
+            ensure!(
+                arg_vals.len() + 1 == signature.params.len(),
+                "Stored async call has incorrect argument count"
+            );
+            for (value, expected) in arg_vals.iter().zip(&signature.params[1..]) {
+                ensure!(
+                    self.body.values[*value].ty(&self.body.type_pool) == Some(*expected),
+                    "Stored async call has an incompatible argument type"
+                );
+            }
+            let task = &self.contract.promises.as_ref().unwrap().tasks[target];
+            let kind = if types::is_reference(&task.result) {
+                super::allocation::AllocationKind::ReferencePromise
+            } else {
+                super::allocation::AllocationKind::ScalarPromise
+            };
+            let kind = self.op(Operator::I32Const { value: kind as u32 }, &[], &[Type::I32]);
+            let record = self.op(
+                Operator::Call {
+                    function_index: runtime.new,
+                },
+                &[kind],
+                &[Type::I32],
+            );
+            self.reference_values.insert(record);
+            let mut arg_vals = arg_vals.to_vec();
+            arg_vals.insert(0, record);
+            let status = self.op(
+                Operator::Call {
+                    function_index: start,
+                },
+                &arg_vals,
+                &[Type::I32],
+            );
+            if let Some(bind) = runtime.bind {
+                self.op(
+                    Operator::Call {
+                        function_index: bind,
+                    },
+                    &[record, status],
+                    &[],
+                );
+            }
+            return Ok(Some(record));
+        }
+        Ok(None)
     }
 
     fn call_completion(&mut self, function: waffle::Func, args: &[Value]) -> Value {
@@ -1577,7 +1637,7 @@ impl<'a> FunctionLowerer<'a> {
             Expr::LocalSet(id, expr) => {
                 let declared = self.local_types.get(id).cloned();
                 if let Some(ty) = &declared
-                    && super::nullable::inner(ty).is_some()
+                    && super::values::is_boxed_union(ty)
                 {
                     self.check_typed_value(expr, ty)?;
                     let value = self.typed_operand(expr, ty)?;
@@ -1657,7 +1717,7 @@ impl<'a> FunctionLowerer<'a> {
                 if self
                     .local_types
                     .get(id)
-                    .is_some_and(|ty| super::nullable::inner(ty).is_some())
+                    .is_some_and(super::values::is_boxed_union)
                     && let Some(narrowed) = self.narrowings.get(id).cloned()
                 {
                     let stored = self.locals[id];
@@ -1955,6 +2015,34 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
 
+    fn emit_promise_return(&mut self, payload: Value) {
+        if !exceptions::route_cleanup(
+            &mut self.body,
+            self.block,
+            self.unwind_ctx.target_for_exit(0),
+            &self.locals,
+            (ExitReason::ReturnPromise, payload),
+        ) {
+            return;
+        }
+        let runtime = self.registry.promises.as_ref().unwrap();
+        let record = abi::decode_payload(&mut self.body, self.block, payload, true);
+        self.reference_values.insert(record);
+        self.op(
+            Operator::Call {
+                function_index: runtime.yield_thread,
+            },
+            &[],
+            &[],
+        );
+        let outcome =
+            abi::emit_fallible_call(&mut self.body, self.block, runtime.await_result, &[record]);
+        self.block = outcome.err_block;
+        self.emit_terminal_throw(outcome.payload);
+        self.block = outcome.ok_block;
+        self.emit_terminal_return(Some(outcome.payload));
+    }
+
     fn emit_throw(&mut self, err_val_f64: Value) {
         if exceptions::route_throw(
             &mut self.body,
@@ -2047,6 +2135,15 @@ impl<'a> FunctionLowerer<'a> {
                     self.block = block;
                     match reason {
                         ExitReason::Return => self.emit_finally_return(environment.payload),
+                        ExitReason::ReturnPromise
+                            if self
+                                .registry
+                                .promises
+                                .as_ref()
+                                .is_some_and(|runtime| runtime.native.is_some()) =>
+                        {
+                            self.emit_promise_return(environment.payload)
+                        }
                         ExitReason::Throw => self.emit_throw(environment.payload),
                         ExitReason::Break | ExitReason::Continue if !self.loops.is_empty() => {
                             self.loop_exit(reason)?

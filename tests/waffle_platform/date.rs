@@ -207,7 +207,7 @@ fn unsupported_date_forms_are_diagnosed_before_frontend_argument_loss() {
         ),
         (
             "function time(value:number|string):number {return new Date(value).getTime();} export function run():number {return time(0);}",
-            "Unsupported parameter type",
+            "Date construction requires a statically known number",
         ),
         (
             "function empty():void {} export function run():number {return new Date(empty()).getTime();}",

@@ -11,6 +11,7 @@ pub(crate) fn check_sdk_source(wit: &str, source: &str) -> Result<()> {
         world: Some("boundary".into()),
         out_dir: project.path().join("types"),
         project_root: Some(project.path().into()),
+        initialize_tsconfig: true,
         entry: "component.ts".into(),
     })?;
     let output = std::process::Command::new("tsc")

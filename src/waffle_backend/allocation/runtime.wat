@@ -1,6 +1,8 @@
 (module
   (import "heap" "bump" (func $bump (param i32 i32 i32 i32) (result i32)))
   (import "heap" "memory" (memory 1))
+  (import "heap" "find" (func $find (param i32) (result i32)))
+  (import "heap" "index" (func $index))
   ;; Memory[36,40,44] holds block head, block tail, and active root-frame head.
   ;; Memory[72] holds the retained root-frame head across component invocations.
   ;; Block headers: next, span, payload offset, payload size, kind, mark, reserved.
@@ -16,20 +18,6 @@
       (i64.sub (i64.const 0) (i64.extend_i32_u (local.get $alignment)))))
     (if (i64.gt_u (local.get $result) (i64.const 4294967295)) (then unreachable))
     (i32.wrap_i64 (local.get $result)))
-
-  (func $find (param $pointer i32) (result i32)
-    (local $block i32) (local $start i32)
-    (local.set $block (i32.load (i32.const 36)))
-    (block $done (loop $next
-      (br_if $done (i32.eqz (local.get $block)))
-      (if (i32.ne (i32.load offset=16 (local.get $block)) (i32.const -1)) (then
-        (local.set $start (i32.add (local.get $block) (i32.load offset=8 (local.get $block))))
-        (if (i32.and (i32.ge_u (local.get $pointer) (local.get $start))
-          (i32.lt_u (local.get $pointer) (i32.add (local.get $start) (i32.load offset=12 (local.get $block)))))
-          (then (return (local.get $block))))))
-      (local.set $block (i32.load (local.get $block)))
-      (br $next)))
-    (i32.const 0))
 
   (func $allocate (param $alignment i32) (param $size i32) (result i32)
     (local $block i32) (local $pointer i32) (local $tail i32) (local $end i64) (local $total i64)
@@ -146,6 +134,7 @@
   (func $collect (export "collect")
     (local $block i32) (local $next i32) (local $previous i32) (local $pointer i32)
     (local $kind i32) (local $changed i32) (local $index i32) (local $count i32)
+    (call $index)
     ;; Completed native transports no longer need the invocation's pending root.
     (local.set $pointer (i32.load (i32.const 4)))
     (block $promises_done (loop $promises
@@ -158,6 +147,7 @@
         (else (call $mark (local.get $pointer)) (local.set $previous (local.get $pointer))))
       (local.set $pointer (local.get $next))
       (br $promises)))
+    (call $mark (i32.load (i32.const 80))) ;; Promise reaction queue.
     (call $mark-frames (i32.const 44))
     (call $mark-frames (i32.const 72))
     (loop $trace
@@ -246,6 +236,7 @@
       (local.set $block (i32.load (local.get $block)))
       (br $sweep)))
     (local.set $block (i32.load (i32.const 36)))
+    (i32.store (i32.const 96) (i32.const 0))
     (block $coalesced (loop $coalesce
       (br_if $coalesced (i32.eqz (local.get $block)))
       (local.set $next (i32.load (local.get $block)))

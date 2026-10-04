@@ -23,8 +23,8 @@ fn make_async_engine() -> Result<Engine> {
 }
 
 #[test]
-fn deferred_promise_combinators_are_rejected() {
-    for combinator in ["all", "race", "['all']", "['race']"] {
+fn deferred_promise_factories_are_rejected() {
+    for combinator in ["resolve", "reject", "['resolve']", "['reject']"] {
         let member = if combinator.starts_with('[') {
             combinator.to_string()
         } else {
@@ -35,7 +35,7 @@ fn deferred_promise_combinators_are_rejected() {
         );
         let error =
             compile_typescript_waffle(&source, "combinator.ts", &WaffleCompileOptions::default())
-                .expect_err("Promise combinators remain deferred under D5");
+                .expect_err("Promise factories remain deferred under D5");
         assert!(
             format!("{error:#}").contains("deferred under D5"),
             "{error:#}"

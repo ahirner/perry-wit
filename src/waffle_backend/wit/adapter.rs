@@ -51,6 +51,27 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         .iter()
         .map(|param| param.1)
         .collect();
+    if let Some(native) = registry
+        .promises
+        .as_ref()
+        .and_then(|runtime| runtime.native.as_ref())
+    {
+        adapter.body.add_op(
+            adapter.block,
+            Operator::Call {
+                function_index: native.enter,
+            },
+            &[],
+            &[],
+        );
+    } else {
+        let address = adapter.integer(32);
+        let active = adapter.load_i32(address, 0);
+        let inactive = adapter.op(Operator::I32Eqz, &[active], CoreType::I32);
+        adapter.require(inactive);
+        let one = adapter.integer(1);
+        adapter.store_i32(address, 0, one);
+    }
     let mut source = if signature.indirect_params {
         Input::Memory {
             pointer: params[0],
@@ -76,6 +97,24 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         args.push(adapter.lift(param.ty, &mut source)?);
     }
     let payload = adapter.call_checked(callee.func_index, &args);
+    if let Some(native) = registry
+        .promises
+        .as_ref()
+        .and_then(|runtime| runtime.native.as_ref())
+    {
+        adapter.body.add_op(
+            adapter.block,
+            Operator::Call {
+                function_index: native.finish,
+            },
+            &[],
+            &[],
+        );
+    } else {
+        let address = adapter.integer(32);
+        let zero = adapter.integer(0);
+        adapter.store_i32(address, 0, zero);
+    }
     let mut returned = Vec::new();
     if let Some(ty) = declaration.function.result {
         let value = adapter.decode(ty, payload)?;

@@ -4,7 +4,7 @@ use crate::waffle_backend::{
     component::forward, registry::ModuleRegistry, runtime, streams, wit::WitWorld,
 };
 use anyhow::{Result, ensure};
-use std::{collections::BTreeMap, fmt::Write};
+use std::collections::BTreeMap;
 use waffle::{Export, ExportKind, Func, Module};
 
 #[derive(Clone, Copy, Debug)]
@@ -18,6 +18,14 @@ pub(crate) fn world() -> Result<WitWorld> {
     let package = resolve.push_str("handler.wit", include_str!("handler/world.wit"))?;
     let world = resolve.select_world(&[package], Some("handler"))?;
     WitWorld::new(resolve, world)
+}
+
+pub(crate) fn native_world() -> Result<WitWorld> {
+    let (resolve, package) = crate::component::wit::resolve_source(
+        "package perry:compiler-http; world handler { include wasi:cli/imports@0.3.0; import wasi:http/client@0.3.0; export wasi:http/handler@0.3.0; }",
+    )?;
+    let world = resolve.select_world(&[package], Some("handler"))?;
+    WitWorld::for_encoding(resolve, world)
 }
 
 pub(crate) fn emit_entry(
@@ -67,7 +75,7 @@ pub(crate) fn emit_entry(
     );
     let emitted = runtime::emit_functions(module, registry.memory, &source, &imports)?;
     module.exports.push(Export {
-        name: "__perry_http_handle".into(),
+        name: "[async-lift-stackful]wasi:http/handler@0.3.0#handle".into(),
         kind: ExportKind::Func(emitted["handle"]),
     });
     Ok(())
@@ -75,53 +83,6 @@ pub(crate) fn emit_entry(
 
 pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
     forward::declare_imports(module, "http-server", &native_functions())
-}
-
-pub(crate) fn declare_adapters() -> Result<String> {
-    forward::declare("http-server", &native_functions())
-}
-
-pub(crate) fn bind_adapters() -> Result<String> {
-    let mut wat = String::new();
-    for (name, method) in [
-        ("fields", "[static]fields.from-list"),
-        ("copy-fields", "[method]fields.copy-all"),
-        ("method", "[method]request.get-method"),
-        ("scheme", "[method]request.get-scheme"),
-        ("authority", "[method]request.get-authority"),
-        ("path", "[method]request.get-path-with-query"),
-        ("headers", "[method]request.get-headers"),
-        ("consume", "[static]request.consume-body"),
-        ("response", "[static]response.new"),
-        ("status", "[method]response.set-status-code"),
-    ] {
-        writeln!(
-            wat,
-            "(core func $server-{name} (canon lower (func $http-types {method:?}) (memory (core memory $guest \"memory\")) (realloc (core func $guest \"cabi_realloc\"))))"
-        )?;
-    }
-    wat.push_str(r#"
-      (core func $server-drop-fields (canon resource.drop $http-fields))
-      (core func $server-read (canon stream.read $http-bytes (memory (core memory $guest "memory"))))
-      (core func $server-drop-reader (canon stream.drop-readable $http-bytes))
-      (core func $server-new-stream (canon stream.new $http-bytes))
-      (core func $server-write (canon stream.write $http-bytes (memory (core memory $guest "memory"))))
-      (core func $server-drop-writer (canon stream.drop-writable $http-bytes))
-      (core func $server-return (canon task.return (result (result (own $http-response) (error $http-error))) (memory (core memory $guest "memory"))))
-      (core func $server-backpressure-inc (canon backpressure.inc))
-      (core func $server-backpressure-dec (canon backpressure.dec))
-    "#);
-    wat.push_str(&super::future::bindings("server"));
-    wat.push_str(&forward::bind("http-server", &native_functions())?);
-    Ok(wat)
-}
-
-pub(crate) fn export_adapter() -> &'static str {
-    r#"(func $http-handle async (param "request" (own $http-request)) (result (result (own $http-response) (error $http-error)))
-      (canon lift (core func $guest "__perry_http_handle") async (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-    (instance $http-handler (export "request" (type $http-request)) (export "response" (type $http-response))
-      (export "error-code" (type $http-error)) (export "handle" (func $http-handle)))
-    (export "wasi:http/handler@0.3.0" (instance $http-handler))"#
 }
 
 fn native_functions() -> Vec<forward::Function> {

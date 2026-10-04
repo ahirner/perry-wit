@@ -1,0 +1,6 @@
+.perry/
+/dist/
+/target/
+/result
+/wit/deps
+/flake.lock

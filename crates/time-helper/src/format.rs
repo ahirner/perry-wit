@@ -5,6 +5,15 @@ pub(crate) fn date_time(
     utc: bool,
     output: &mut [u8],
 ) -> Result<usize, Error> {
+    date_time_precision(value, utc, 0, output)
+}
+
+pub(crate) fn date_time_precision(
+    value: PlainDateTime,
+    utc: bool,
+    minimum_fraction: usize,
+    output: &mut [u8],
+) -> Result<usize, Error> {
     let mut bytes = [0; 33];
     let date_length = date(value.date(), &mut bytes);
     let (hour, minute, second, fraction) = value.time();
@@ -16,11 +25,11 @@ pub(crate) fn date_time(
     time[6] = b':';
     decimal(u32::from(second), &mut time[7..9]);
     let mut length = date_length + 9;
-    if fraction != 0 {
+    if fraction != 0 || minimum_fraction != 0 {
         bytes[length] = b'.';
         decimal(fraction, &mut bytes[length + 1..length + 10]);
         length += 10;
-        while bytes[length - 1] == b'0' {
+        while bytes[length - 1] == b'0' && length > date_length + 10 + minimum_fraction {
             length -= 1;
         }
     }

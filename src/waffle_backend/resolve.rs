@@ -64,6 +64,7 @@ impl TypedIntrinsic {
                 | Self::Capability(
                     CapabilityOperation::Stdio(_)
                         | CapabilityOperation::Filesystem(_)
+                        | CapabilityOperation::FilesystemPromise(_)
                         | CapabilityOperation::HttpGet
                         | CapabilityOperation::Random(RandomOperation::Fill)
                 )
@@ -88,6 +89,7 @@ impl TypedIntrinsic {
 
     pub(crate) fn is_async(&self) -> bool {
         match self {
+            Self::Capability(CapabilityOperation::Promise(_)) => true,
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
             Self::WitImport { is_async, .. } => *is_async,
@@ -209,7 +211,9 @@ impl ResolvedContract {
         self.intrinsics.values().any(|intrinsic| {
             matches!(
                 intrinsic,
-                TypedIntrinsic::Capability(CapabilityOperation::Filesystem(_))
+                TypedIntrinsic::Capability(
+                    CapabilityOperation::Filesystem(_) | CapabilityOperation::FilesystemPromise(_)
+                )
             )
         })
     }
@@ -455,7 +459,7 @@ pub(crate) fn resolve_contract(
         )
     });
 
-    let promises = super::promises::plan_promises(hir, &intrinsics)?;
+    let promises = super::promises::plan_promises(hir, &intrinsics, wit.is_some())?;
     let stream_inputs = entry_func
         .params
         .iter()

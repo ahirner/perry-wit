@@ -7,6 +7,7 @@ pub fn generate_default_tsconfig() -> String {
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "strict": true,
     "noEmit": true,
     "skipLibCheck": false,

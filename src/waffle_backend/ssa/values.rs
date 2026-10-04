@@ -7,7 +7,7 @@ use super::{
 use crate::waffle_backend::{
     abi,
     text_or_bytes::is_text_or_bytes,
-    values::{ValueTag, is_dynamic},
+    values::{ValueTag, is_boxed, is_dynamic},
 };
 use anyhow::{Result, ensure};
 use perry_hir::{
@@ -116,7 +116,7 @@ impl FunctionLowerer<'_> {
 
     pub(super) fn value_operand(&mut self, expression: &Expr) -> Result<Value> {
         let ty = self.infer_expr_type(expression);
-        if is_dynamic(&ty) || crate::waffle_backend::nullable::inner(&ty).is_some() {
+        if is_boxed(&ty) {
             return self.expression(expression);
         }
         let (_, tag, payload) = self.tagged_value(expression)?;
@@ -171,7 +171,7 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn extract_value(&mut self, value: Value, expected: &HirType) -> Result<Value> {
-        if crate::waffle_backend::nullable::inner(expected).is_some() {
+        if is_boxed(expected) {
             return Ok(value);
         }
         let tag = ValueTag::of(expected)? as u32;
@@ -207,7 +207,7 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn box_typed_value(&mut self, value: Value, ty: &HirType) -> Result<Value> {
-        if is_dynamic(ty) || crate::waffle_backend::nullable::inner(ty).is_some() {
+        if is_boxed(ty) {
             return Ok(value);
         }
         let (tag, payload) = self.typed_value_parts(value, ty)?;
@@ -219,7 +219,7 @@ impl FunctionLowerer<'_> {
         original: Value,
         ty: &HirType,
     ) -> Result<(Value, Value)> {
-        if is_dynamic(ty) || crate::waffle_backend::nullable::inner(ty).is_some() {
+        if is_boxed(ty) {
             return Ok(self.value_parts(original));
         }
         let (tag, value) = if is_text_or_bytes(ty) {

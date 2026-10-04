@@ -11,7 +11,10 @@ fn production_command_runs_with_the_nix_p3_host() -> Result<()> {
       }
     "#,
         "command.ts",
-        &CompileOptions::default(),
+        &CompileOptions {
+            world: Some("command".into()),
+            ..Default::default()
+        },
     )?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("command.wasm");
@@ -110,8 +113,8 @@ fn production_rejects_deferred_operations_before_creating_output() -> Result<()>
     let output = directory.path().join("bad.wasm");
     for (body, diagnostic) in [
         ("process.env.KEY = 'value';", "read-only"),
-        ("Promise.all([]);", "D5"),
-        ("Promise.race([]);", "D5"),
+        ("Promise.resolve(1);", "D5"),
+        ("new Promise(() => {});", "Promise"),
         ("new Date('2024-01-01');", "Date"),
     ] {
         fs::write(
@@ -122,6 +125,7 @@ fn production_rejects_deferred_operations_before_creating_output() -> Result<()>
         )?;
         let result = Command::new(env!("CARGO_BIN_EXE_perry-wit"))
             .arg(&source)
+            .args(["--world", "command"])
             .arg("-o")
             .arg(&output)
             .output()?;
@@ -129,6 +133,183 @@ fn production_rejects_deferred_operations_before_creating_output() -> Result<()>
         assert!(!result.status.success());
         assert!(error.contains(diagnostic), "{error}");
         assert!(!output.exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn static_modules_preserve_aliases_namespaces_and_multiple_exports() -> Result<()> {
+    use std::{fs, process::Command};
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Engine, Store};
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("world.wit"),
+        "package test:modules; world task { export echo:func(input:string)->string; export length:func(input:string)->u32; }",
+    )?;
+    fs::write(
+        directory.path().join("text.ts"),
+        "export function decorate(input:string):string{return input+'!';} export function count(input:string):number{return input.length;}",
+    )?;
+    fs::write(
+        directory.path().join("barrel.ts"),
+        "export {decorate as decorated} from './text.ts';",
+    )?;
+    let source = "import {decorated as format} from './barrel.ts'; import * as text from './text.ts'; function echoImpl(input:string):string{return format(input);} export {echoImpl as echo}; export function length(input:string):number{return text.count(input);}";
+    let entry = directory.path().join("entry.ts");
+    fs::write(&entry, source)?;
+    let compiled = compile_typescript(
+        source,
+        entry.to_str().unwrap(),
+        &CompileOptions {
+            wit_dir: directory.path().into(),
+            world: Some("task".into()),
+            core_only: false,
+        },
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let echo = instance.get_typed_func::<(String,), (String,)>(&mut store, "echo")?;
+    let length = instance.get_typed_func::<(String,), (u32,)>(&mut store, "length")?;
+    assert_eq!(echo.call(&mut store, ("hello".into(),))?.0, "hello!");
+    assert_eq!(length.call(&mut store, ("hello".into(),))?.0, 5);
+    fs::write(
+        directory.path().join("check.ts"),
+        "import {echo,length} from './entry.ts'; if(echo('hello')!=='hello!'||length('hello')!==5)throw new Error('mismatch');",
+    )?;
+    let output = Command::new("node")
+        .arg(directory.path().join("check.ts"))
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_reexports_use_disposable_sdk_types() -> Result<()> {
+    use perry_wit::sdk::{SdkOptions, generate_sdk_files};
+    use std::{fs, process::Command};
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Config, Engine, Store};
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    fs::create_dir(root.join("wit"))?;
+    fs::write(
+        root.join("wit/world.wit"),
+        "package test:async-modules; world task { record item { text:string } export run:async func(input:item)->string; }",
+    )?;
+    fs::write(
+        root.join("work.ts"),
+        "import type {Item} from './.perry/types/world'; export async function work(input:Item):Promise<string>{await 0;return input.text+'!';}",
+    )?;
+    let source = "export {work as run} from './work.ts';";
+    let entry = root.join("entry.ts");
+    fs::write(&entry, source)?;
+    generate_sdk_files(&SdkOptions {
+        wit_dir: root.join("wit"),
+        out_dir: root.join(".perry/types"),
+        project_root: Some(root.into()),
+        entry: "entry.ts".into(),
+        initialize_tsconfig: false,
+        ..Default::default()
+    })?;
+    let check = Command::new("tsc")
+        .current_dir(root)
+        .args(["-p", ".perry/types"])
+        .output()?;
+    assert!(
+        check.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let compiled = compile_typescript(
+        source,
+        entry.to_str().unwrap(),
+        &CompileOptions {
+            wit_dir: root.join("wit"),
+            world: Some("task".into()),
+            core_only: false,
+        },
+    )?;
+    let mut config = Config::new();
+    config
+        .wasm_component_model_async(true)
+        .wasm_component_model_more_async_builtins(true)
+        .wasm_component_model_threading(true)
+        .wasm_component_model_async_stackful(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    #[derive(wasmtime::component::ComponentType, wasmtime::component::Lower)]
+    #[component(record)]
+    struct Item {
+        text: String,
+    }
+    let run = instance.get_typed_func::<(Item,), (String,)>(&mut store, "run")?;
+    assert_eq!(
+        run.call_async(
+            &mut store,
+            (Item {
+                text: "hello".into()
+            },)
+        )
+        .await?
+        .0,
+        "hello!"
+    );
+    fs::write(
+        root.join("compare.ts"),
+        "import {run} from './entry.ts'; console.log(await run({text:'hello'}));",
+    )?;
+    let node = Command::new("node").arg(root.join("compare.ts")).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(String::from_utf8(node.stdout)?.trim(), "hello!");
+    assert!(!root.join("tsconfig.json").exists());
+    Ok(())
+}
+
+#[test]
+fn unsupported_export_forms_receive_direct_diagnostics() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(
+        root.path().join("world.wit"),
+        "package test:exports; world task {export run:func()->f64;}",
+    )?;
+    for source in [
+        "export default function run():number{return 1;}",
+        "export const run=():number=>1;",
+        "export function* run(){yield 1;}",
+        "export function run<T>():number{return 1;}",
+        "export function run(value:number=1):number{return value;}",
+    ] {
+        let error = compile_typescript(
+            source,
+            "exports.ts",
+            &CompileOptions {
+                wit_dir: root.path().into(),
+                world: Some("task".into()),
+                core_only: false,
+            },
+        )
+        .map(|_| ())
+        .expect_err("unsupported export form");
+        assert!(
+            format!("{error:#}").contains("Component export"),
+            "{error:#}"
+        );
     }
     Ok(())
 }

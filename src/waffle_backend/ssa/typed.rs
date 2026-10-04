@@ -11,6 +11,9 @@ impl FunctionLowerer<'_> {
         expected: &HirType,
     ) -> Result<waffle::Value> {
         self.check_typed_value(expression, expected)?;
+        if crate::waffle_backend::values::is_boxed_union(expected) {
+            return self.value_operand(expression);
+        }
         if let Some(inner) = crate::waffle_backend::nullable::inner(expected) {
             let actual = self.infer_expr_type(expression);
             if crate::waffle_backend::nullable::inner(&actual).is_some() {
@@ -131,6 +134,10 @@ impl FunctionLowerer<'_> {
             return;
         }
         if let Expr::Logical { op, left, right } = expression {
+            if (*op == LogicalOp::And && truth) || (*op == LogicalOp::Or && !truth) {
+                self.narrow_declared_union(left, truth);
+                self.narrow_declared_union(right, truth);
+            }
             if let Some(left) = null_guard(left)
                 && let Some(right) = null_guard(right)
                 && left.local == right.local

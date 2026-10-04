@@ -18,11 +18,13 @@ pub(crate) use stdio::StdioOperation;
 /// A resolved operation, independent of the source binding used to call it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CapabilityOperation {
+    Promise(super::promises::Combinator),
     Clock(ClockOperation),
     Context(ContextOperation),
     Random(RandomOperation),
     Stdio(StdioOperation),
     Filesystem(FilesystemOperation),
+    FilesystemPromise(FilesystemOperation),
     HttpGet,
 }
 
@@ -34,6 +36,7 @@ pub(crate) struct CapabilityPlan {
 }
 
 pub(crate) enum CapabilityImplementation {
+    Promise,
     Standalone { core_function: &'static str },
     Stdio(StdioOperation),
     Filesystem,
@@ -58,11 +61,12 @@ impl CapabilityOperation {
 
     pub(crate) fn name(self) -> &'static str {
         match self {
+            Self::Promise(operation) => operation.name(),
             Self::Clock(operation) => operation.name(),
             Self::Context(operation) => operation.name(),
             Self::Random(operation) => operation.name(),
             Self::Stdio(operation) => operation.name(),
-            Self::Filesystem(operation) => operation.name(),
+            Self::Filesystem(operation) | Self::FilesystemPromise(operation) => operation.name(),
             Self::HttpGet => "get",
         }
     }
@@ -71,11 +75,21 @@ impl CapabilityOperation {
 impl LowerCapability for CapabilityOperation {
     fn lower(&self) -> CapabilityPlan {
         match self {
+            Self::Promise(_) => CapabilityPlan {
+                params: vec![HirType::Any],
+                result: HirType::Any,
+                implementation: CapabilityImplementation::Promise,
+            },
             Self::Clock(operation) => operation.lower(),
             Self::Context(operation) => operation.lower(),
             Self::Random(operation) => operation.lower(),
             Self::Stdio(operation) => operation.lower(),
             Self::Filesystem(operation) => operation.lower(),
+            Self::FilesystemPromise(operation) => {
+                let mut plan = operation.lower();
+                plan.result = HirType::Promise(Box::new(plan.result));
+                plan
+            }
             Self::HttpGet => CapabilityPlan {
                 params: vec![
                     HirType::String,

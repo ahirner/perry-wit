@@ -41,6 +41,24 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
     let main = UnresolvedPackageGroup::parse_dir(wit_dir)
         .with_context(|| format!("loading WIT package from {}", wit_dir.display()))?;
     let mut deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)?;
+    resolve_packages(main, &mut resolve, &mut deps)
+        .with_context(|| format!("resolving WIT dependencies for {}", wit_dir.display()))
+        .map(|package| (resolve, package))
+}
+
+pub(crate) fn resolve_source(source: &str) -> Result<(Resolve, PackageId)> {
+    let main = UnresolvedPackageGroup::parse("compiler-world.wit", source)
+        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+    let mut resolve = Resolve::new();
+    let package = resolve_packages(main, &mut resolve, &mut Vec::new())?;
+    Ok((resolve, package))
+}
+
+fn resolve_packages(
+    main: UnresolvedPackageGroup,
+    resolve: &mut Resolve,
+    deps: &mut Vec<UnresolvedPackageGroup>,
+) -> Result<PackageId> {
     let mut available: HashSet<_> = resolve.package_names.keys().cloned().collect();
     for group in std::iter::once(&main).chain(deps.iter()) {
         available.insert(group.main.name.clone());
@@ -51,7 +69,7 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
         let Some(ambient) = std::env::var_os(variable).map(PathBuf::from) else {
             continue;
         };
-        for mut group in read_dependencies(&ambient, &mut resolve)? {
+        for mut group in read_dependencies(&ambient, resolve)? {
             if available.insert(group.main.name.clone()) {
                 group
                     .nested
@@ -61,8 +79,5 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
         }
     }
 
-    let pkg_id = resolve
-        .push_groups(main, deps)
-        .with_context(|| format!("resolving WIT dependencies for {}", wit_dir.display()))?;
-    Ok((resolve, pkg_id))
+    Ok(resolve.push_groups(main, std::mem::take(deps))?)
 }

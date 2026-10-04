@@ -79,7 +79,7 @@ impl FunctionLowerer<'_> {
     pub(super) fn type_of(&mut self, expression: &Expr) -> Result<Value> {
         let ty = self.infer_expr_type(expression);
         let value = self.expression(expression)?;
-        if crate::waffle_backend::values::is_dynamic(&ty) {
+        if crate::waffle_backend::values::is_boxed(&ty) {
             return self.value_typeof(value);
         }
         if super::types::StringKind::of(&ty) == Some(super::types::StringKind::Optional) {
@@ -220,6 +220,31 @@ impl FunctionLowerer<'_> {
         if let Some((id, label, equal)) = type_guard(expression, truth)
             && let Some(ty) = self.local_types.get(&id)
         {
+            if crate::waffle_backend::values::is_boxed_union(ty)
+                && let HirType::Union(variants) = self.narrowings.get(&id).unwrap_or(ty)
+            {
+                let selected = variants
+                    .iter()
+                    .filter(|ty| {
+                        let kind = match ty {
+                            HirType::Number => "number",
+                            HirType::Boolean => "boolean",
+                            HirType::Void => "undefined",
+                            HirType::BigInt => "bigint",
+                            ty if crate::waffle_backend::values::is_string_type(ty) => "string",
+                            _ => "object",
+                        };
+                        (kind == label) == equal
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if selected.len() == 1 {
+                    self.narrowings.insert(id, selected[0].clone());
+                } else if !selected.is_empty() {
+                    self.narrowings.insert(id, HirType::Union(selected));
+                }
+                return;
+            }
             let other = if is_text_or_bytes(ty) {
                 Some(("object", HirType::Named("Uint8Array".into())))
             } else if super::types::StringKind::of(ty) == Some(super::types::StringKind::Optional) {

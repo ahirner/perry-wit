@@ -7,7 +7,7 @@ use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{MemoryArg, Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
-    pub(super) fn http_get(&mut self, arguments: &[Expr]) -> Result<Value> {
+    pub(super) fn http_get(&mut self, name: &str, arguments: &[Expr]) -> Result<Value> {
         ensure!(
             arguments.len() == 5,
             "HTTP get requires scheme, authority, path, headers, and maximum response bytes"
@@ -36,6 +36,12 @@ impl FunctionLowerer<'_> {
             "HTTP response limit must be a number"
         );
         values.push(self.expression(&arguments[4])?);
+        if let Some(record) = self.start_task(
+            &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
+            &values,
+        )? {
+            return Ok(record);
+        }
         let payload = self.call_completion(self.registry.http_helpers.unwrap().get, &values);
         Ok(abi::decode_payload(
             &mut self.body,

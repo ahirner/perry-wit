@@ -11,6 +11,18 @@ mod memory;
 use memory::GuestRange;
 
 /// # Safety
+/// Output must be exclusively guest-owned outside helper stack/data during this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity: u32) -> u64 {
+    // SAFETY: the caller owns output; transform checks its guest-memory range.
+    unsafe {
+        transform(0, 0, output, capacity, |_, output| {
+            Instant::from_epoch_milliseconds(value)?.format_milliseconds(output)
+        })
+    }
+}
+
+/// # Safety
 /// Input/output must be guest-owned, initialized/exclusive respectively, outside
 /// helper stack/data, and remain valid during this single-threaded call.
 #[unsafe(no_mangle)]

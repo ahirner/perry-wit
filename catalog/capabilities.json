@@ -35,7 +35,7 @@
         "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
-        "GET must be immediately awaited and cannot be combined with stored async tasks",
+        "Tasks may overlap in resolved WIT components and must finish before the owning invocation returns",
         "HttpResponse is guest-internal; component wrappers export status, text, or bytes",
         "Numeric failures: 8 overflow, 12 invalid metadata/limit/index, 100 plus WASI HTTP error discriminant, 200 plus header error discriminant",
         "Traps and interrupted calls require store disposal"
@@ -53,15 +53,15 @@
       "domain": "Rust compile_http_handler API exporting wasi:http/handler@0.3.0",
       "invariants": [
         "Typed request/response records preserve method, optional coordinates, duplicate header bytes, and bounded body bytes",
-        "Direct awaits can use P3 capabilities; invocations are serialized through body transfer and separate consumer completion",
+        "Typed guest tasks and combinators can use P3 capabilities; invocations are serialized through body transfer and separate consumer completion",
         "Responses are published before transmission; abandonment and consumer errors release streams, futures, resources, and invocation storage",
         "Repeated calls are tested under a 1 MiB guest memory cap using independent Wasmtime P3 bindings"
       ],
       "differences": [
-        "Explicit request/response byte caps; status 200\u2013599, with empty bodies for 204/205/304",
+        "Explicit request/response byte caps; status 200–599, with empty bodies for 204/205/304",
         "Overflow returns the corresponding WASI body-size error; invalid response metadata and request producer failures return internal-error",
         "Source exceptions and interrupted calls require store disposal; hosts must drive the P3 event loop through completion",
-        "Request trailers are consumed but not exposed; source streams, response trailers, and stored tasks remain unsupported"
+        "Request trailers are consumed but not exposed; source Web Streams, response trailers, and cooperative cancellation are unsupported"
       ],
       "conformance": [
         "tests/waffle_http_handler_test.rs"
@@ -72,14 +72,15 @@
       "name": "Native P3 Filesystem Metadata and Directories",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "Production compiler: statSync, existsSync, mkdirSync, unlinkSync, rmdirSync, and readdirSync",
+      "domain": "stat, mkdir, unlink, rmdir, readdir from node:fs/promises; synchronous spellings and existsSync from node:fs",
       "invariants": [
         "Shared normalized longest-prefix preopens confine paths and symlinks; mutation cannot remove preopen roots",
         "Stats preserve unsigned file sizes, signed modification milliseconds, type predicates, and identity",
         "Directory listings materialize UTF-8 names, omit dot entries, and await the separate producer completion after EOF",
         "Options and argument effects precede validation and I/O; known duplicate fields use the last value",
         "Stats, string arrays, and suspended directory buffers survive helper calls, collection, and retained Promise outcomes",
-        "Normal and recoverable-error paths release descriptors, entry streams, and completion futures"
+        "Normal and recoverable-error paths release descriptors, entry streams, and completion futures",
+        "The corresponding node:fs/promises operations use the same wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
       ],
       "differences": [
         "Reusable plain option objects retain aliases, typed mutation, optional undefined fields, and field effects; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
@@ -92,7 +93,8 @@
         "tests/p3_filesystem/source_metadata.rs",
         "tests/p3_filesystem/source_directory_lifecycle.rs",
         "tests/p3_filesystem/source_options.rs",
-        "tests/p3_filesystem/source_structured.rs"
+        "tests/p3_filesystem/source_structured.rs",
+        "tests/waffle_wit_native_test.rs"
       ]
     },
     {
@@ -100,7 +102,7 @@
       "name": "Native P3 Filesystem Reads",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "Production compiler: readFileSync with omitted, literal, or runtime string encoding",
+      "domain": "readFile from node:fs/promises and readFileSync from node:fs with omitted, literal, or runtime string encoding",
       "invariants": [
         "Binary reads preserve arbitrary bytes and return independent mutable views",
         "Text reads preserve BOMs, NULs, and valid UTF-8 with scalar string semantics",
@@ -108,7 +110,8 @@
         "Invalid options fail before I/O; read-only preopens work without requesting write permissions",
         "Pending buffers and returned values survive collection; resources close on success and recoverable errors",
         "Materialization uses storage proportional to file size, with multi-megabyte and repeated bounded-memory fixtures",
-        "String-or-byte kinds survive aliases, assignments, control flow, retained Promise outcomes, and component parameters/results"
+        "String-or-byte kinds survive aliases, assignments, control flow, retained Promise outcomes, and component parameters/results",
+        "The corresponding node:fs/promises operations use the same wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
       ],
       "differences": [
         "Runtime string encodings return string-or-byte values; methods, indexing, and type-specific arguments require typeof narrowing",
@@ -123,7 +126,8 @@
         "tests/p3_filesystem/source_dynamic_reads.rs",
         "tests/p3_filesystem/source_options.rs",
         "tests/waffle_stream_test.rs",
-        "tests/waffle_decoder_test.rs"
+        "tests/waffle_decoder_test.rs",
+        "tests/waffle_wit_native_test.rs"
       ]
     },
     {
@@ -131,7 +135,7 @@
       "name": "Native P3 Filesystem Writes",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "Production compiler: overwrite-only writeFileSync from fs and node:fs",
+      "domain": "Overwrite-only writeFile from node:fs/promises and writeFileSync from node:fs",
       "invariants": [
         "Named aliases, namespace imports, and default imports retain binding identity; unused imports add no filesystem capability",
         "String data preserves exact UTF-8 and NUL bytes; Uint8Array data writes only its visible range",
@@ -139,7 +143,8 @@
         "Invalid encodings, flags, and unknown option properties fail before opening or truncating a file",
         "Normalized paths select the longest matching preopen on a component boundary; symlink resolution remains host-confined",
         "Shared native stream writes preserve partial transfers and await an independent filesystem completion",
-        "Descriptors, writable ends, and completion futures close on normal and recoverable-error paths; suspended buffers survive sibling collection"
+        "Descriptors, writable ends, and completion futures close on normal and recoverable-error paths; suspended buffers survive sibling collection",
+        "The corresponding node:fs/promises operations use the same wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
       ],
       "differences": [
         "Options accept encoding strings, null, undefined, and reusable plain objects; runtime delete, getters, setters, methods, spreads, computed literal keys, and custom prototypes are diagnosed",
@@ -151,7 +156,8 @@
         "tests/p3_filesystem_test.rs",
         "tests/p3_filesystem/source.rs",
         "tests/p3_filesystem/source_lifecycle.rs",
-        "tests/p3_filesystem/source_options.rs"
+        "tests/p3_filesystem/source_options.rs",
+        "tests/waffle_wit_native_test.rs"
       ]
     },
     {
@@ -169,7 +175,7 @@
         "Normal and recoverable error paths close writable ends and consume and drop completion futures"
       ],
       "differences": [
-        "Byte writes must be immediately awaited; console calls return void but may suspend for host output",
+        "Byte writes are owned tasks; console calls return void but may suspend for host output",
         "Console supports exactly one string; formatting and other argument forms are diagnosed",
         "Output errors throw numeric codes: 1 I/O, 2 invalid byte sequence, 3 broken pipe; already written bytes remain visible",
         "Host traps and cancellation require store disposal; returned streams and callbacks need further ownership support"
@@ -195,7 +201,7 @@
       ],
       "differences": [
         "Unpaired surrogate escapes and UTF-16 code-unit APIs are diagnosed",
-        "Custom iterator protocols, labeled loop exits, and JSON remain unsupported on this path",
+        "Custom iterator protocols and labeled loop exits are unsupported; JSON is described separately in compiler.p3_json",
         "Regex support is literal string.search with u/s flags; constructors, stored regex values, other flags, lookaround, backreferences, and property escapes are diagnosed",
         "Implicit string coercions are restricted; traced loop collection reclaims dead temporaries, while returned-stream and callback owners remain incomplete"
       ],
@@ -209,23 +215,24 @@
       "name": "Stored P3 Promise Outcomes",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "Production compiler: stored named async calls, waitFor, and repeated await",
+      "domain": "Production compiler: typed guest tasks, async WIT imports, native operations, and repeated await",
       "invariants": [
         "A source task starts eagerly and its caller continues while native P3 work is pending",
-        "Aliases preserve Promise identity and repeated awaits retain numeric, boolean, string, or void success and numeric rejection",
-        "Each native subtask result is observed and dropped once; later awaits read the retained language outcome",
-        "Typed Promise parameters share one native completion reader and wake concurrent observers in registration order",
-        "Promise records and retained strings share the serial invocation arena and are reclaimed after result copying",
+        "Aliases preserve Promise identity and repeated awaits retain statically typed success values and numeric rejection",
+        "Native P3 threads settle one shared outcome and notify registered observers once",
+        "A FIFO reaction queue preserves registration order, eager execution to first suspension, and return-promise adoption after finally",
+        "Promise records and reference-bearing outcomes share the guest heap, survive collection, and are reclaimed after result copying",
         "Guest rejection enters catch and finally at await; host traps remain outside the language error channel"
       ],
       "differences": [
         "Stored Promises require the host's component async stackful and threading features",
-        "Promise parameters are guest-internal; callbacks, constructors, and combinators are not yet supported",
-        "Detached call statements are diagnosed; unobserved pending work or overlapping entry calls trap and require instance disposal",
-        "Traced loop collection reclaims dead strings and Promise outcomes; escaped captures and returned streams still need lifetime support"
+        "Promise parameters are guest-internal; constructors and callback reactions remain unsupported",
+        "Detached call statements are diagnosed; unresolved work at return traps. Public calls execute serially; entries that bypass host serialization trap on the invocation guard",
+        "Traps and interrupted calls require store disposal. Cooperative cancellation and returned stream ownership are not yet exposed"
       ],
       "conformance": [
-        "tests/p3_promise_test.rs"
+        "tests/p3_promise_test.rs",
+        "tests/waffle_wit_native_test.rs"
       ]
     },
     {
@@ -233,10 +240,10 @@
       "name": "Typed P3 Clock and Random Calls",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "Production compiler: waitFor, performance.now, Date.now, Math.random, crypto.getRandomValues, and crypto.randomUUID",
+      "domain": "performance.now, Date.now, Math.random, crypto.getRandomValues, crypto.randomUUID, and promise-based node:timers/promises.setTimeout",
       "invariants": [
         "Clocks and randomness use typed shared lowering plans and WASI 0.3 canonical adapters",
-        "Named and namespace imports from perry:clocks and perry:random preserve binding aliases and distinguish local shadows",
+        "Named and namespace timer imports preserve binding identity; the perry:clocks and perry:random source facades remain available",
         "Arguments execute once in source order, with clock durations converted from milliseconds to nanoseconds",
         "Monotonic reads return fractional milliseconds and system-clock reads return signed whole epoch milliseconds",
         "Random filling preserves byte-view identity and its visible range, validates type and the 65536-byte quota before host calls, skips empty views, and loops over P3 short reads",
@@ -244,22 +251,24 @@
         "Clock and random imports contain only selected functions and share adapters when multiple operations use the same interface",
         "Unused declarations add no component imports; all emitted function bodies retain their referenced dependencies",
         "UTF-8 values, exceptions, and async invocation ownership remain shared across capabilities",
-        "Host failures trap independently of guest exception handlers"
+        "Host failures trap independently of guest exception handlers",
+        "Timer promises map to wasi:clocks/monotonic-clock@0.3.0 wait-for; delays below 1, above 2147483647, or NaN become 1 ms, and fractional delays are truncated"
       ],
       "differences": [
         "Only direct calls and literal namespace member names are supported; dynamic lookup, capability function values, and spread arguments are diagnosed",
-        "Invalid or overflowing wait durations trap before the host call",
+        "The timer subset accepts one numeric delay; value and AbortSignal options are unsupported. The lower-level waitFor facade traps on invalid or overflowing durations",
         "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
         "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
         "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; context mutation and callback timers are deferred under D1/D5",
-        "Instances support serial calls; cancellation discards the store"
+        "Public calls execute serially; cooperative cancellation is not exposed and interrupted calls require store disposal"
       ],
       "conformance": [
         "tests/waffle_pipeline_test.rs",
         "tests/waffle_platform_test.rs",
         "tests/waffle_string_test.rs",
         "tests/conformance/cases/07_clocks.ts",
-        "tests/conformance/cases/09_random.ts"
+        "tests/conformance/cases/09_random.ts",
+        "tests/waffle_wit_native_test.rs"
       ]
     },
     {
@@ -373,25 +382,37 @@
     },
     {
       "id": "web.promise_all",
-      "name": "Promise.all Concurrency",
+      "name": "Typed Promise Combinators",
       "tier": "tier-1-web-primaries",
-      "support": "unsupported",
-      "domain": "Concurrent dispatch and collection of multiple asynchronous operations",
-      "invariants": [],
-      "differences": [
-        "Promise.all and Promise.race are rejected; combinators are deferred under D5."
+      "support": "partial",
+      "domain": "Promise.all, Promise.allSettled, and Promise.race over dense typed arrays and tuples",
+      "invariants": [
+        "Operands are registered once; aggregate results preserve input order and retained identity",
+        "all rejects on the first observed rejection; allSettled retains status/value/reason records",
+        "race settles once and leaves losing operations owned until they complete",
+        "Finite heterogeneous tuple outcomes retain explicit static types",
+        "Empty all and allSettled settle to empty arrays; empty race remains pending and cannot escape its owning call",
+        "Shared observers register each operand once; joining does not sequentially await operands or rebuild pending lists on wake"
       ],
-      "conformance": []
+      "differences": [
+        "Requires a resolved WIT world and the pinned host threading features",
+        "Arbitrary iterables and thenables are unsupported; rejection payloads are numeric",
+        "Cooperative cancellation and returned stream ownership are not yet exposed"
+      ],
+      "conformance": [
+        "tests/waffle_wit_native_test.rs",
+        "tests/async_measurement.rs"
+      ]
     },
     {
       "id": "web.fetch",
       "name": "global.fetch",
       "tier": "tier-1-web-primaries",
       "support": "unsupported",
-      "domain": "Asynchronous HTTP network requests using wasi:http/outgoing-handler",
+      "domain": "Fetch mapped to wasi:http/client@0.3.0",
       "invariants": [],
       "differences": [
-        "Use the bounded perry:http GET API; general Fetch and Response APIs are deferred under D8."
+        "Not implemented; R6/R7 require standard fetch, cancellation, and Web Streams. The bounded perry:http GET operation is available."
       ],
       "conformance": []
     },
@@ -417,12 +438,12 @@
         "Numeric lengths create zero-filled views; array/view inputs copy the visible bytes",
         "Construction and indexed writes apply wrapping byte conversion; invalid indices do not alias valid elements",
         "Subarrays share storage and resolve negative bounds relative to the current view",
-        "JSON serialization exposes enumerable numeric object keys",
-        "Object properties, spreads, and Object.assign preserve view identity and offset; retained object graphs keep their referenced views alive across task calls"
+        "Byte views survive object properties, helper calls, retained Promise outcomes, and collection",
+        "Canonical list<u8> parameters and results preserve arbitrary bytes and copy visible subview ranges before reclamation"
       ],
       "differences": [
         "Other typed-array classes, ArrayBuffer interoperability, Node Buffer compatibility, and broader Uint8Array methods are outside the tested subset",
-        "This evidence is a Rust integration suite; the TypeScript differential report does not execute it"
+        "JSON serialization of byte views throws numeric 12; callers must choose an explicit text or numeric-array representation"
       ],
       "conformance": [
         "tests/waffle_bytes_test.rs"

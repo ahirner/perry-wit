@@ -1,5 +1,6 @@
 //! Managed invocation storage, canonical allocation, and typed graph tracing.
 
+mod lookup;
 mod roots;
 pub(crate) use roots::track_roots;
 
@@ -37,11 +38,12 @@ pub(crate) fn emit_allocator(
     heap_base: u32,
 ) -> Result<AllocationFuncs> {
     let bump = emit_bump_allocator(module, memory, heap_base)?;
+    let (find, index) = lookup::emit(module, memory)?;
     let functions = super::runtime::emit_functions(
         module,
         memory,
         include_str!("allocation/runtime.wat"),
-        &BTreeMap::from([("bump", bump)]),
+        &BTreeMap::from([("bump", bump), ("find", find), ("index", index)]),
     )?;
     let realloc = functions["cabi_realloc"];
     module.exports.push(Export {

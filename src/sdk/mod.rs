@@ -15,6 +15,7 @@ pub struct SdkOptions {
     pub out_dir: PathBuf,
     pub project_root: Option<PathBuf>,
     pub entry: PathBuf,
+    pub initialize_tsconfig: bool,
 }
 
 impl Default for SdkOptions {
@@ -25,6 +26,7 @@ impl Default for SdkOptions {
             out_dir: PathBuf::from(".perry/types"),
             project_root: None,
             entry: PathBuf::from("src/index.ts"),
+            initialize_tsconfig: true,
         }
     }
 }
@@ -40,6 +42,9 @@ pub struct SdkResult {
 
 /// Generates world/import declarations, an implementation check, and a missing tsconfig.
 pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
+    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
+    let world = resolve.select_world(&[package], options.world.as_deref())?;
+    let dts = codegen::generate_world_declarations(&resolve, &resolve.worlds[world])?;
     fs::create_dir_all(&options.out_dir).with_context(|| {
         format!(
             "Failed to create SDK output directory at {}",
@@ -47,9 +52,6 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         )
     })?;
 
-    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
-    let world = resolve.select_world(&[package], options.world.as_deref())?;
-    let dts = codegen::generate_world_declarations(&resolve, &resolve.worlds[world])?;
     let imports_path = options.out_dir.join("imports.d.ts");
     fs::write(
         &imports_path,
@@ -91,7 +93,7 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         serde_json::to_string(&entry_import)?
     );
     fs::write(&check_path, check)?;
-    let generated_tsconfig = if !tsconfig_path.exists() {
+    let generated_tsconfig = if !tsconfig_path.exists() && options.initialize_tsconfig {
         let mut config: serde_json::Value =
             serde_json::from_str(&tsconfig::generate_default_tsconfig())?;
         config["files"] = serde_json::json!([relative_path(&project_root, &check_path)?]);
@@ -103,9 +105,25 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
             )
         })?;
         Some(tsconfig_path)
-    } else {
+    } else if tsconfig_path.exists() {
         Some(tsconfig_path)
+    } else {
+        None
     };
+
+    let mut check_config = serde_json::json!({
+        "compilerOptions": {"target": "ES2022", "module": "ESNext", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false},
+        "files": ["implementation-check.ts"],
+        "include": [],
+        "exclude": []
+    });
+    if let Some(path) = &generated_tsconfig {
+        check_config["extends"] = serde_json::json!(relative_path(&options.out_dir, path)?);
+    }
+    fs::write(
+        options.out_dir.join("tsconfig.json"),
+        serde_json::to_string_pretty(&check_config)?,
+    )?;
 
     Ok(SdkResult {
         types_path: dts_path,

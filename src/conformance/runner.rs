@@ -114,7 +114,10 @@ pub fn execute_conformance_case(case_path: &Path, scratch_dir: &Path) -> Result<
         .unwrap_or("case");
     let target_wasm = scratch_dir.join(format!("{case_stem}.wasm"));
 
-    let options = CompileOptions::default();
+    let options = CompileOptions {
+        world: Some("command".into()),
+        ..Default::default()
+    };
     let compiled = compile_file(case_path, &options)
         .with_context(|| format!("Compiling {} to WASI 0.3", case_path.display()))?;
 

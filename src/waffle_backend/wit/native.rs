@@ -23,6 +23,7 @@ impl WitWorld {
         for import in &mut module.imports {
             let binding = match import.module.as_str() {
                 "http" => self.http_binding(&import.name)?,
+                "http-server" => self.http_handler_binding(&import.name)?,
                 "context" => ("wasi:cli/environment@0.3.0".into(), import.name.clone()),
                 "random" => ("wasi:random/random@0.3.0".into(), "get-random-bytes".into()),
                 "filesystem" => self.filesystem_binding(&import.name)?,
@@ -30,7 +31,7 @@ impl WitWorld {
                 module if module.starts_with("wasi:") => (module.into(), import.name.clone()),
                 _ => continue,
             };
-            if binding.0 != "$root" {
+            if binding.0 != "$root" && !binding.0.starts_with("[export]") {
                 ensure!(
                     self.resolve.worlds[self.world]
                         .imports
@@ -44,6 +45,41 @@ impl WitWorld {
             (import.module, import.name) = binding;
         }
         Ok(())
+    }
+
+    fn http_handler_binding(&self, name: &str) -> Result<(String, String)> {
+        let function = match name {
+            "method" => "[method]request.get-method",
+            "scheme" => "[method]request.get-scheme",
+            "authority" => "[method]request.get-authority",
+            "path" => "[method]request.get-path-with-query",
+            "headers" => "[method]request.get-headers",
+            "consume" => "[static]request.consume-body",
+            "response" => "[static]response.new",
+            "status" => "[method]response.set-status-code",
+            "new-stream" | "write" | "drop-writer" => {
+                return self.payload_binding(
+                    HTTP,
+                    "[static]request.consume-body",
+                    Payload::Stream,
+                    match name {
+                        "new-stream" => "stream-new",
+                        "write" => "stream-write",
+                        _ => "stream-drop-writable",
+                    },
+                );
+            }
+            "return" => {
+                return Ok((
+                    "[export]wasi:http/handler@0.3.0".into(),
+                    "[task-return]handle".into(),
+                ));
+            }
+            "backpressure-inc" => return Ok(("$root".into(), "[backpressure-inc]".into())),
+            "backpressure-dec" => return Ok(("$root".into(), "[backpressure-dec]".into())),
+            _ => return self.http_binding(name),
+        };
+        Ok((HTTP.into(), function.into()))
     }
 
     fn payload_binding(

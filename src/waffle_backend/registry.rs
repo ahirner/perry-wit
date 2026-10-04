@@ -99,8 +99,9 @@ pub(crate) struct ModuleRegistry {
 }
 
 pub(crate) struct PromiseImports {
+    pub(crate) native: Option<super::promises::native::NativeRuntime>,
     pub(crate) new: Func,
-    pub(crate) bind: Func,
+    pub(crate) bind: Option<Func>,
     pub(crate) await_result: Func,
     pub(crate) yield_thread: Func,
     pub(crate) starts: BTreeMap<TaskTarget, Func>,
@@ -205,50 +206,58 @@ impl ModuleRegistry {
             .json
             .then(|| super::json::declare_imports(module));
 
-        let promises = if let Some(plan) = &contract.promises {
-            let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
-                let sig = module.signatures.push(SignatureData { params, returns });
-                let func = module.funcs.push(FuncDecl::Import(sig, name.into()));
-                module.imports.push(Import {
-                    module: "promises".into(),
-                    name: name.into(),
-                    kind: ImportKind::Func(func),
-                });
-                func
-            };
-            let new = declare("new", vec![Type::I32], vec![Type::I32]);
-            let bind = declare("bind", vec![Type::I32, Type::I32], vec![]);
-            let await_result = declare("await", vec![Type::I32], vec![Type::I32, Type::F64]);
-            let yield_thread = declare("yield", vec![], vec![]);
-            let mut starts = BTreeMap::new();
-            for (target, task) in &plan.tasks {
-                let mut params = vec![Type::I32];
-                params.extend(
-                    task.params
-                        .iter()
-                        .map(map_type_to_waffle)
-                        .collect::<Result<Vec<_>>>()?,
-                );
-                starts.insert(
-                    target.clone(),
-                    declare(&task.symbol, params, vec![Type::I32]),
-                );
-            }
-            Some(PromiseImports {
-                new,
-                bind,
-                await_result,
-                yield_thread,
-                starts,
-            })
-        } else {
-            None
-        };
-
+        let date_import = (super::date::required(hir) || string_reqs.json)
+            .then(|| super::date::declare_import(module));
         let time_helpers = if super::time::required(hir) {
             super::time::declare_imports(module)
         } else {
             BTreeMap::new()
+        };
+
+        let promises = if let Some(plan) = &contract.promises {
+            if contract.wit.is_some() {
+                Some(super::promises::native::declare(module, plan)?)
+            } else {
+                let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
+                    let sig = module.signatures.push(SignatureData { params, returns });
+                    let func = module.funcs.push(FuncDecl::Import(sig, name.into()));
+                    module.imports.push(Import {
+                        module: "promises".into(),
+                        name: name.into(),
+                        kind: ImportKind::Func(func),
+                    });
+                    func
+                };
+                let new = declare("new", vec![Type::I32], vec![Type::I32]);
+                let bind = declare("bind", vec![Type::I32, Type::I32], vec![]);
+                let await_result = declare("await", vec![Type::I32], vec![Type::I32, Type::F64]);
+                let yield_thread = declare("yield", vec![], vec![]);
+                let mut starts = BTreeMap::new();
+                for (target, task) in &plan.tasks {
+                    let mut params = vec![Type::I32];
+                    params.extend(
+                        task.arguments
+                            .source()?
+                            .iter()
+                            .map(map_type_to_waffle)
+                            .collect::<Result<Vec<_>>>()?,
+                    );
+                    starts.insert(
+                        target.clone(),
+                        declare(&task.symbol, params, vec![Type::I32]),
+                    );
+                }
+                Some(PromiseImports {
+                    native: None,
+                    new,
+                    bind: Some(bind),
+                    await_result,
+                    yield_thread,
+                    starts,
+                })
+            }
+        } else {
+            None
         };
 
         // Emit storage helpers only after every function import has been declared.
@@ -309,11 +318,12 @@ impl ModuleRegistry {
             None
         };
 
-        let date_helpers = if super::date::required(hir) || string_reqs.json {
+        let date_helpers = if let Some(format) = date_import {
             Some(super::date::emit_runtime(
                 module,
                 memory,
                 allocator.expect("Date storage requires an allocator"),
+                format,
             )?)
         } else {
             None
@@ -480,6 +490,17 @@ impl ModuleRegistry {
         } else {
             None
         };
+
+        if let Some(helpers) = http_helpers {
+            for (name, intrinsic) in &contract.intrinsics {
+                if matches!(
+                    intrinsic,
+                    TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::HttpGet)
+                ) {
+                    intrinsics.insert(name.clone(), helpers.get);
+                }
+            }
+        }
 
         if let Some(imports) = context_imports {
             let helpers = super::context::emit_runtime(
@@ -667,7 +688,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
     match ty {
         ty if super::nullable::inner(ty).is_some() => Ok(Type::I32),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(Type::I32),
-        ty if super::values::is_dynamic(ty) => Ok(Type::I32),
+        ty if super::values::is_boxed(ty) => Ok(Type::I32),
         HirType::Number | HirType::Any => Ok(Type::F64),
         HirType::Boolean | HirType::BigInt => Ok(Type::I32),
         ty if super::values::is_string_type(ty) => Ok(Type::I32),

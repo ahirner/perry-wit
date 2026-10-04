@@ -2,6 +2,36 @@ use wit_parser::{Function, Resolve, World, WorldItem, WorldKey};
 
 use crate::sdk::codegen::to_camel_case;
 
+pub fn validate_implementation_names(resolve: &Resolve, world: &World) -> anyhow::Result<()> {
+    let mut names = std::collections::BTreeMap::new();
+    for (key, item) in &world.exports {
+        let functions = match item {
+            WorldItem::Function(function) => {
+                vec![(to_camel_case(&function.name), function.name.clone())]
+            }
+            WorldItem::Interface { id, .. } => resolve.interfaces[*id]
+                .functions
+                .values()
+                .map(|function| {
+                    (
+                        interface_implementation_name(resolve, world, key, function),
+                        core_export_name(resolve, key, function),
+                    )
+                })
+                .collect(),
+            WorldItem::Type { .. } => continue,
+        };
+        for (name, export) in functions {
+            if let Some(previous) = names.insert(name.clone(), export.clone()) {
+                anyhow::bail!(
+                    "WIT exports '{previous}' and '{export}' both require TypeScript implementation '{name}'"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn core_export_name(resolve: &Resolve, key: &WorldKey, function: &Function) -> String {
     format!("{}#{}", resolve.name_world_key(key), function.name)
 }

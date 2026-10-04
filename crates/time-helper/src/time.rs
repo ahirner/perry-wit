@@ -86,6 +86,22 @@ impl Instant {
             output,
         )
     }
+
+    /// UTC Date interchange with exactly three millisecond fraction digits.
+    pub fn format_milliseconds(self, output: &mut [u8]) -> Result<usize, Error> {
+        if self.nanoseconds % 1_000_000 != 0 {
+            return Err(Error::Range);
+        }
+        format::date_time_precision(
+            PlainDateTime {
+                day: self.nanoseconds.div_euclid(NANOS_PER_DAY) as i32,
+                nanosecond: self.nanoseconds.rem_euclid(NANOS_PER_DAY) as u64,
+            },
+            true,
+            3,
+            output,
+        )
+    }
 }
 
 /// ISO calendar fields without a time zone or an implicit conversion to an instant.

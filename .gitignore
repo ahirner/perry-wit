@@ -3,7 +3,7 @@
 /artifacts
 result
 
-# Resolved WASI Preview 2 WIT definitions dynamically sourced from flake
+# Resolved WIT dependencies sourced from the pinned flake
 wit/deps
 wit/deps/
 

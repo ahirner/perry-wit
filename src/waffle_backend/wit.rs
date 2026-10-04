@@ -21,6 +21,41 @@ use crate::{abi::export_names, sdk::codegen::to_camel_case};
 pub(super) use adapter::{build_export_wrapper, build_import_wrapper};
 
 pub(super) fn validate_source(module: &ast::Module) -> Result<()> {
+    for item in &module.body {
+        match item {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
+                match &export.decl {
+                    ast::Decl::Fn(function) => {
+                        ensure!(
+                            !function.declare && function.function.body.is_some(),
+                            "Component exports require function implementations"
+                        );
+                        ensure!(
+                            !function.function.is_generator
+                                && function.function.type_params.is_none(),
+                            "Component exports require non-generic functions without generators"
+                        );
+                        ensure!(
+                            function
+                                .function
+                                .params
+                                .iter()
+                                .all(|param| matches!(param.pat, ast::Pat::Ident(_))),
+                            "Component export parameters require named identifiers without defaults or rest parameters"
+                        );
+                    }
+                    ast::Decl::TsInterface(_) | ast::Decl::TsTypeAlias(_) => {}
+                    _ => bail!("Component exports require named function declarations"),
+                }
+            }
+            ast::ModuleItem::ModuleDecl(
+                ast::ModuleDecl::ExportDefaultDecl(_)
+                | ast::ModuleDecl::ExportDefaultExpr(_)
+                | ast::ModuleDecl::TsExportAssignment(_),
+            ) => bail!("Component exports require named function declarations"),
+            _ => {}
+        }
+    }
     struct ExplicitAny(bool);
     impl Visit for ExplicitAny {
         fn visit_ts_keyword_type(&mut self, ty: &ast::TsKeywordType) {
@@ -67,7 +102,28 @@ pub(crate) struct WitExport {
 
 impl WitWorld {
     pub(super) fn new(resolve: Resolve, world: WorldId) -> Result<Self> {
+        let resolved = Self::for_encoding(resolve, world)?;
+        for export in resolved.functions.values() {
+            ensure!(
+                matches!(
+                    export.function.kind,
+                    FunctionKind::Freestanding | FunctionKind::AsyncFreestanding
+                ),
+                "Resolved WIT exports require freestanding functions"
+            );
+            for param in &export.function.params {
+                hir_type(&resolved.resolve, param.ty)?;
+            }
+            if let Some(ty) = export.function.result {
+                hir_type(&resolved.resolve, ty)?;
+            }
+        }
+        Ok(resolved)
+    }
+
+    pub(super) fn for_encoding(resolve: Resolve, world: WorldId) -> Result<Self> {
         let contract = &resolve.worlds[world];
+        export_names::validate_implementation_names(&resolve, contract)?;
         let mut imports = BTreeMap::new();
         for (key, item) in &contract.imports {
             match item {
@@ -124,21 +180,6 @@ impl WitWorld {
             }
         }
         ensure!(!functions.is_empty(), "WIT world must export a function");
-        for export in functions.values() {
-            ensure!(
-                matches!(
-                    export.function.kind,
-                    FunctionKind::Freestanding | FunctionKind::AsyncFreestanding
-                ),
-                "Resolved WIT exports require freestanding functions"
-            );
-            for param in &export.function.params {
-                hir_type(&resolve, param.ty)?;
-            }
-            if let Some(ty) = export.function.result {
-                hir_type(&resolve, ty)?;
-            }
-        }
         Ok(Self {
             resolve,
             world,

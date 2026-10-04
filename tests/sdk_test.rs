@@ -16,6 +16,7 @@ fn command_contract_requires_typed_run_export() {
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
         entry: PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
     })
     .unwrap();
     for (source, succeeds) in [
@@ -69,6 +70,7 @@ fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
         entry: PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
     })
     .unwrap();
     for (source, succeeds) in [
@@ -117,6 +119,7 @@ fn test_generate_sdk_files_for_merge_task() {
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
         entry: PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
     };
 
     let result = generate_sdk_files(&options).expect("generate_sdk_files failed");
@@ -163,6 +166,7 @@ fn test_generate_sdk_files_for_template_world() {
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
         entry: PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
     };
 
     let result = generate_sdk_files(&options).expect("generate_sdk_files for template failed");
@@ -190,6 +194,7 @@ fn test_typecheck_examples_against_generated_declarations() {
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
         entry: PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
     };
     generate_sdk_files(&options).unwrap();
 

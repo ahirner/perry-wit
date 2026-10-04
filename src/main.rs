@@ -26,7 +26,7 @@ fn run() -> Result<()> {
     let mut ts_file_path: Option<String> = None;
     let mut out_file_path: Option<String> = None;
     let mut wit_dir_path = "wit".to_string();
-    let mut world_name = Some("command".to_string());
+    let mut world_name = None;
     let mut core_only = false;
 
     let mut i = 1;
@@ -64,7 +64,9 @@ fn run() -> Result<()> {
                 println!("Options:");
                 println!("  -o, --out <PATH>      Output WebAssembly file path");
                 println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
-                println!("      --world <NAME>    WIT world name to target (default: 'command')");
+                println!(
+                    "      --world <NAME>    WIT world (required when the package has multiple worlds)"
+                );
                 println!(
                     "      --core-only       Output Core WebAssembly without component encoding"
                 );
@@ -143,10 +145,15 @@ fn run_gen_types(args: &[String]) -> Result<()> {
     let mut world_name = None;
     let mut entry = PathBuf::from("src/index.ts");
     let mut out_dir_path = ".perry/types".to_string();
+    let mut initialize_tsconfig = true;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--no-tsconfig" => {
+                initialize_tsconfig = false;
+                i += 1;
+            }
             "-o" | "--out" if i + 1 < args.len() => {
                 out_dir_path = args[i + 1].clone();
                 i += 2;
@@ -173,12 +180,13 @@ fn run_gen_types(args: &[String]) -> Result<()> {
                 println!("Options:");
                 println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
                 println!(
-                    "      --world <NAME>    WIT world name to target (default: first world found)"
+                    "      --world <NAME>    WIT world (required when the package has multiple worlds)"
                 );
                 println!(
                     "  -o, --out <DIR>       Output directory for generated types (default: '.perry/types')"
                 );
                 println!("      --entry <PATH>    Implementation module (default: src/index.ts)");
+                println!("      --no-tsconfig    Do not create an authored tsconfig.json");
                 println!("  -h, --help            Print help information");
                 return Ok(());
             }
@@ -196,6 +204,7 @@ fn run_gen_types(args: &[String]) -> Result<()> {
         out_dir: PathBuf::from(out_dir_path),
         project_root: None,
         entry,
+        initialize_tsconfig,
     };
 
     let result = perry_wit::generate_sdk_files(&options)?;

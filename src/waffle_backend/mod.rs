@@ -126,8 +126,12 @@ fn compile_source(
             .context("LLVM audit verification failed")?;
     }
 
-    let mut ast = parse_typescript(ts_source, file_name)
-        .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
+    let mut ast = if exports.is_some() {
+        source::modules::load(ts_source, file_name)?
+    } else {
+        parse_typescript(ts_source, file_name)
+            .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?
+    };
     text_contract::validate_ast_text(&ast).context("Source text contract validation failed")?;
     if exports.is_some() {
         wit::validate_source(&ast)?;
@@ -166,20 +170,11 @@ fn compile_resolved_hir(
         exports.validate_suspension(&hir, &contract)?;
     }
     contract.http_handler = http_handler;
-    if http_handler.is_some() {
-        anyhow::ensure!(
-            contract.promises.is_none(),
-            "HTTP handlers require directly awaited calls; retained tasks remain unsupported"
-        );
-    }
+    let native_handler = http_handler
+        .map(|_| http::handler::native_world())
+        .transpose()?;
     let mut waffle_mod = ssa::lower_module(&hir, &contract)?;
-    if contract.http_handler.is_none()
-        && let Some(exports) = &contract.wit
-    {
-        anyhow::ensure!(
-            contract.promises.is_none(),
-            "Resolved WIT requires directly awaited calls; retained tasks remain unsupported"
-        );
+    if let Some(exports) = native_handler.as_ref().or(contract.wit.as_ref()) {
         exports.bind_native_imports(&mut waffle_mod)?;
     }
     let waffle_ir = format!("{}", waffle_mod.display());
@@ -193,9 +188,8 @@ fn compile_resolved_hir(
             .exports
             .iter()
             .any(|export| export.name == "cabi_post_run");
-        let (wat, bytes) = if contract.http_handler.is_some() {
-            component::frame_component(&core, &contract, has_post_return)?
-        } else if let Some(exports) = &contract.wit {
+        let (wat, bytes) = if let Some(exports) = native_handler.as_ref().or(contract.wit.as_ref())
+        {
             exports.frame(&core)?
         } else {
             component::frame_component(&core, &contract, has_post_return)?

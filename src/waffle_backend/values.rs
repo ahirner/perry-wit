@@ -30,6 +30,19 @@ pub(crate) fn is_dynamic(ty: &HirType) -> bool {
     matches!(ty, HirType::Named(name) if name == VALUE_TYPE)
 }
 
+/// Finite unions with different storage representations keep an explicit value tag.
+pub(crate) fn is_boxed_union(ty: &HirType) -> bool {
+    matches!(ty, HirType::Union(types) if types.len() > 1)
+        && !is_string_type(ty)
+        && !super::objects::is_object(ty)
+        && !super::text_or_bytes::is_text_or_bytes(ty)
+        && !matches!(ty, HirType::Union(types) if types.len() == 2 && types.contains(&HirType::Void) && (types.contains(&HirType::String) || types.contains(&HirType::Number)))
+}
+
+pub(crate) fn is_boxed(ty: &HirType) -> bool {
+    is_dynamic(ty) || is_boxed_union(ty)
+}
+
 /// Intrinsic `any` operands are validated by each source operation. Guest calls
 /// need a concrete heterogeneous representation, distinct from that placeholder.
 pub(crate) fn resolve_types(hir: &mut HirModule) {

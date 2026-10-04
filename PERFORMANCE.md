@@ -1,4 +1,43 @@
-# Production cutover measurements
+# Performance measurements
+
+## Owned async fan-out
+
+[The scheduling harness](tests/async_measurement.rs) starts typed async functions,
+each suspending once, joins them with `Promise.all`, and sums their ordered results.
+It validates every result and checks that native task state is empty and linear
+memory stops growing after warmup. It measures the entire call, including source
+loops, guest allocation/collection, scheduling, canonical transport, and result
+checking; it is not an isolated promise-reaction benchmark.
+
+Local measurements on 2026-10-04 use arm64 macOS 27.0, Wasmtime 49.0.2, Cargo's test
+profile, and default Cranelift settings. Each instance receives five warmup calls
+and five batches of 50 calls. Compilation and instantiation are excluded. The
+8 MiB limit applies to guest linear memory; host task stacks, JIT code, and RSS are
+not measured. [Raw samples](measurements/async-2026-10-04.json) include the same
+workload before and after indexing heap blocks during collection.
+
+| Tasks per call | Median before heap index | Median with heap index | Linear memory after warmup and samples |
+| ---: | ---: | ---: | ---: |
+| 1 | 72.83 µs | 72.30 µs | 64 KiB |
+| 16 | 946.40 µs | 911.68 µs | 64 KiB |
+| 64 | 7.97 ms | 4.17 ms | 64 KiB |
+| 256 | 265.95 ms | 32.59 ms | 128 KiB |
+
+The indexed component is 13,947 bytes stripped, up from 13,728 bytes. The index
+uses reserved heap-header storage without additional guest allocations. These
+local samples show roughly an eightfold improvement at 256 tasks. Cost still
+grows faster than the task count; the source loops, allocation scans, and tracing
+remain part of that cost. The results do not establish performance for network
+latency, cancellation, returned streams, or production host configurations.
+
+Run in the pinned development shell:
+
+```sh
+PERRY_ASYNC_MEASUREMENT_OUTPUT=/tmp/async.json \
+  cargo test --test async_measurement -- --ignored --nocapture
+```
+
+## Historical compiler comparison
 
 Measured on 2026-10-04 on a local arm64 macOS 27.0 (26A428) host. Baseline: the Nix-packaged
 compiler at `eeb5655`, the last commit before production cutover. Final path:
@@ -36,10 +75,9 @@ workload. P3 storage remains flat during the measured calls. Legacy text storage
 grows after warmup; the table makes no claim about its eventual plateau.
 
 For these workloads P3 reduces component size by 95.2% and 88.7%, respectively,
-and median latency by 62.6% and 35.3%. No measured regression requires optimization.
+and median latency by 62.6% and 35.3%. Neither of these workloads showed a regression.
 The input size, serial execution, warm cache, and debug host profile limit how
-broadly these figures apply. Deferred concurrency and additional library surfaces
-are not benchmarked.
+broadly these figures apply. Concurrency and additional library surfaces were not benchmarked in this comparison.
 
 The measurement exposed and fixed a contract gap: synchronous WIT exports could
 reach suspending P3 operations and trap when the host needed to block. The compiler
@@ -49,7 +87,7 @@ valid even alongside unrelated async exports. The P3 I/O benchmark therefore use
 an async WIT export; legacy I/O retains its P2 synchronous contract. A legacy
 `slice` stub failed output validation and is excluded from comparisons.
 
-## Reproduce
+### Reproduce the historical comparison
 
 Build the baseline compiler from `eeb5655` in a separate checkout using its pinned
 Nix flake. Keep that executable and enter the current compiler's `nix develop`:

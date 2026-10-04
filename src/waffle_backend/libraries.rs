@@ -39,7 +39,8 @@ impl LibraryId {
             "json_measure" | "json_populate" | "json_serialized_size" | "json_serialize" => {
                 Self::Json
             }
-            "time_instant_parse"
+            "time_date_iso"
+            | "time_instant_parse"
             | "time_utc_parse"
             | "time_instant_from_ms"
             | "time_instant_ms"
@@ -66,6 +67,7 @@ impl LibraryId {
 pub(crate) struct HelperMemory {
     end: u32,
     pub(crate) needs_stack: bool,
+    stack_bytes: u32,
 }
 
 impl HelperMemory {
@@ -73,6 +75,7 @@ impl HelperMemory {
         Self {
             end: data_end.max(1024),
             needs_stack: false,
+            stack_bytes: 0,
         }
     }
 
@@ -82,12 +85,17 @@ impl HelperMemory {
             .checked_add(library.data_size)
             .context("helper data exceeds memory32")?;
         self.needs_stack |= library.globals.contains(&Global::Stack);
+        if library.globals.contains(&Global::Stack) {
+            self.stack_bytes = self
+                .stack_bytes
+                .max(library.fixed_stack_bound().unwrap_or(65_536));
+        }
         Ok(base)
     }
 
     pub(crate) fn stack_top(&self) -> Result<u32> {
         align_to(self.end, 16)?
-            .checked_add(if self.needs_stack { 65_536 } else { 0 })
+            .checked_add(self.stack_bytes)
             .context("helper stack exceeds memory32")
     }
 }
@@ -128,6 +136,115 @@ pub(crate) struct Library {
 }
 
 impl Library {
+    /// Acyclic helpers with fixed LLVM stack frames need at most the sum of all
+    /// frames. Unrecognized stack writes, recursion, and indirect calls retain
+    /// the conservative reservation. The allocator and linker use this same bound.
+    fn fixed_stack_bound(&self) -> Option<u32> {
+        use wasmparser::Operator as Op;
+        if !self.imports.is_empty() {
+            return None;
+        }
+        let stack = self
+            .globals
+            .iter()
+            .position(|global| *global == Global::Stack)? as u32;
+        let mut graph = Vec::new();
+        let mut total = 0_u32;
+        for body in &self.bodies {
+            let ops = body
+                .get_operators_reader()
+                .ok()?
+                .into_iter()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .ok()?;
+            let mut frame = None;
+            let mut depth = 0;
+            let mut restored = false;
+            let mut calls = Vec::new();
+            for (index, op) in ops.iter().enumerate() {
+                match op {
+                    Op::Call { function_index } => calls.push(*function_index as usize),
+                    Op::CallIndirect { .. }
+                    | Op::CallRef { .. }
+                    | Op::ReturnCall { .. }
+                    | Op::ReturnCallIndirect { .. }
+                    | Op::ReturnCallRef { .. } => return None,
+                    Op::GlobalSet { global_index } if *global_index == stack => {
+                        if index == 4
+                            && let [
+                                Op::GlobalGet { global_index },
+                                Op::I32Const { value },
+                                Op::I32Sub,
+                                Op::LocalTee { local_index },
+                            ] = &ops[..index]
+                            && *global_index == stack
+                            && *value > 0
+                            && frame.is_none()
+                        {
+                            frame = Some((*local_index, *value));
+                            total = total.checked_add(*value as u32)?;
+                        } else if index >= 3
+                            && let [
+                                Op::LocalGet { local_index },
+                                Op::I32Const { value },
+                                Op::I32Add,
+                            ] = &ops[index - 3..index]
+                            && frame == Some((*local_index, *value))
+                            && depth == 0
+                            && !restored
+                        {
+                            restored = true;
+                        } else {
+                            return None;
+                        }
+                    }
+                    Op::LocalSet { local_index } | Op::LocalTee { local_index }
+                        if frame.is_some_and(|(slot, _)| slot == *local_index) =>
+                    {
+                        return None;
+                    }
+                    Op::Block { .. } | Op::Loop { .. } | Op::If { .. } => depth += 1,
+                    Op::End if depth > 0 => depth -= 1,
+                    Op::Return | Op::End if frame.is_some() && !restored => return None,
+                    Op::Br { relative_depth } | Op::BrIf { relative_depth }
+                        if frame.is_some() && *relative_depth >= depth =>
+                    {
+                        return None;
+                    }
+                    Op::BrTable { targets }
+                        if frame.is_some()
+                            && (targets.default() >= depth
+                                || targets.targets().any(|target| {
+                                    target.map_or(true, |target| target >= depth)
+                                })) =>
+                    {
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            graph.push(calls);
+        }
+        fn visit(index: usize, graph: &[Vec<usize>], marks: &mut [u8]) -> Option<()> {
+            match *marks.get(index)? {
+                1 => return None,
+                2 => return Some(()),
+                _ => {}
+            }
+            marks[index] = 1;
+            for &callee in &graph[index] {
+                visit(callee, graph, marks)?;
+            }
+            marks[index] = 2;
+            Some(())
+        }
+        let mut marks = vec![0; graph.len()];
+        for index in 0..graph.len() {
+            visit(index, &graph, &mut marks)?;
+        }
+        Some(total.max(1024))
+    }
+
     pub(crate) fn parse(bytes: &'static [u8]) -> Result<Self> {
         let mut library = Self {
             types: vec![],
@@ -474,6 +591,33 @@ impl Reencode for Relocations<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_helper_has_a_checked_small_stack() {
+        let library = Library::parse(TIME).unwrap();
+        assert!(
+            library.fixed_stack_bound().is_some_and(|size| size < 8192),
+            "{:?}",
+            library.fixed_stack_bound()
+        );
+    }
+
+    #[test]
+    fn unbounded_or_unbalanced_helpers_keep_the_full_stack_reservation() {
+        for body in [
+            "(func call 0)",
+            "(func (local i32) loop global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 br 0 end)",
+            "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 return)",
+            "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 i32.const 1 if return end local.get 0 i32.const 16 i32.add global.set 0)",
+        ] {
+            let bytes = wat::parse_str(format!(
+                "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
+            ))
+            .unwrap();
+            let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
+            assert_eq!(library.fixed_stack_bound(), None, "{body}");
+        }
+    }
 
     #[test]
     fn test_search_library_parse() {
