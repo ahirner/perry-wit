@@ -88,6 +88,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) value_access: Option<super::values::ValueAccessHelpers>,
     pub(crate) json_helpers: Option<super::json::JsonHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
+    pub(crate) headers_helpers: Option<super::http::headers::Helpers>,
     pub(crate) time_helpers: BTreeMap<&'static str, Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) http_helpers: Option<super::http::HttpHelpers>,
@@ -165,6 +166,7 @@ impl ModuleRegistry {
                     | TypedIntrinsic::ByteAt
                     | TypedIntrinsic::DecoderNew
                     | TypedIntrinsic::DateNew
+                    | TypedIntrinsic::HeadersNew
                     | TypedIntrinsic::Temporal(_)
             ) || matches!(
                 intrinsic,
@@ -196,6 +198,9 @@ impl ModuleRegistry {
         let output_operations = contract.output_operations();
         let output_imports = (!output_operations.is_empty())
             .then(|| super::streams::output::declare_imports(module, &output_operations));
+        let headers_imports = contract
+            .has_headers()
+            .then(|| super::http::headers::declare_helpers(module));
         let http_imports = contract.has_http().then(|| {
             let mut imports = super::http::declare_imports(module);
             if contract.has_fetch() {
@@ -383,7 +388,24 @@ impl ModuleRegistry {
             None
         };
 
-        let structured_helpers = if super::structured::required(hir)
+        let headers_helpers = headers_imports
+            .as_ref()
+            .map(|imports| {
+                super::http::headers::emit(
+                    module,
+                    memory,
+                    &super::http::headers::Runtime {
+                        allocator: allocator.unwrap(),
+                        imports,
+                        strings: string_helpers.unwrap(),
+                        values: value_helpers.unwrap(),
+                    },
+                )
+            })
+            .transpose()?;
+
+        let structured_helpers = if contract.has_headers()
+            || super::structured::required(hir)
             || context_operations.contains(&super::capabilities::ContextOperation::Arguments)
         {
             Some(super::structured::emit_runtime(
@@ -462,7 +484,6 @@ impl ModuleRegistry {
                     strings: string_helpers.unwrap(),
                     bytes: byte_helpers.unwrap(),
                     json: json_helpers,
-                    values: value_helpers.unwrap(),
                     pool: string_pool,
                     promises: promises.as_ref(),
                 },
@@ -685,6 +706,7 @@ impl ModuleRegistry {
             json_helpers,
             value_access,
             decoder_helpers,
+            headers_helpers,
             http_helpers,
             filesystem_helpers,
             object_helpers,

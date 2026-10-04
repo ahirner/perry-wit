@@ -46,6 +46,7 @@ pub(crate) enum TypedIntrinsic {
     ByteAt,
     DecoderNew,
     DateNew,
+    HeadersNew,
     Temporal(super::time::TimeConstructor),
     Custom {
         name: String,
@@ -78,6 +79,7 @@ impl TypedIntrinsic {
                         | CapabilityOperation::Fetch
                         | CapabilityOperation::Random(RandomOperation::Fill)
                 )
+                | Self::HeadersNew
                 | Self::DecoderNew
                 | Self::Temporal(_)
         )
@@ -91,6 +93,7 @@ impl TypedIntrinsic {
             Self::ByteAt => "byteAt",
             Self::DecoderNew => "TextDecoder",
             Self::DateNew => "Date",
+            Self::HeadersNew => "Headers",
             Self::Temporal(operation) => operation.name(),
             Self::Custom { name, .. } | Self::WitImport { name, .. } => name.as_str(),
         }
@@ -102,7 +105,11 @@ impl TypedIntrinsic {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::ReadChunk | Self::ReadInto => true,
             Self::WitImport { is_async, .. } => *is_async,
-            Self::ByteAt | Self::DecoderNew | Self::DateNew | Self::Temporal(_) => false,
+            Self::ByteAt
+            | Self::DecoderNew
+            | Self::DateNew
+            | Self::HeadersNew
+            | Self::Temporal(_) => false,
             Self::Custom { is_async, .. } => *is_async,
         }
     }
@@ -137,6 +144,10 @@ impl TypedIntrinsic {
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
             Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
             Self::DateNew => (vec![WaffleType::F64], vec![WaffleType::I32]),
+            Self::HeadersNew => (
+                vec![WaffleType::I32; 2],
+                vec![WaffleType::I32, WaffleType::F64],
+            ),
             Self::Temporal(operation) => (
                 vec![if operation.argument_type() == HirType::Number {
                     WaffleType::F64
@@ -174,6 +185,13 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn has_headers(&self) -> bool {
+        self.has_fetch()
+            || self
+                .intrinsics
+                .values()
+                .any(|intrinsic| matches!(intrinsic, TypedIntrinsic::HeadersNew))
+    }
     pub(crate) fn has_fetch(&self) -> bool {
         self.intrinsics.values().any(|intrinsic| {
             matches!(
@@ -317,6 +335,10 @@ pub(crate) fn resolve_contract(
         }
         if let Some(operation) = bindings.time_constructors.get(name) {
             intrinsics.insert(name.clone(), TypedIntrinsic::Temporal(*operation));
+            continue;
+        }
+        if bindings.headers_constructor.as_ref() == Some(name) {
+            intrinsics.insert(name.clone(), TypedIntrinsic::HeadersNew);
             continue;
         }
         if bindings.date_constructor.as_ref() == Some(name) {

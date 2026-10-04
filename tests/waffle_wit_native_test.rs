@@ -1904,3 +1904,119 @@ async fn decoded_string_literals_preserve_latin1_without_encoding_repair() -> Re
     assert_eq!(run.call_async(&mut store, ()).await?.0, "Ã©|Â£|é|🙂");
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_headers_construct_mutate_and_snapshot_without_host_imports() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/header_construction.ts"),
+        "package test:headers; world boundary {export run:async func()->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = store(&engine);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    for _ in 0..40 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, "headers:ok");
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fetch/header_construction.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(run());",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "headers:ok");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_accepts_header_objects_and_pairs_with_immutable_responses() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/header_requests.ts"),
+        "package test:request-headers; world boundary {import wasi:http/client@0.3.0;export run:async func(url:string)->string;}",
+    )?;
+    let server = fixture::HttpFixture::new(|request| {
+        let header = request
+            .headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("x-request"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        fixture::Reply::WithHeaders(
+            200,
+            vec![("x-request".into(), "returned".into())],
+            format!("{header}:{}", String::from_utf8_lossy(&request.body)),
+        )
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let url = format!("http://{}/", server.address);
+    for _ in 0..40 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&url,)))
+                .await??
+                .0,
+            "copy:again|pairs, last:"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/header_requests.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script, &url])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?.trim(),
+        "copy:again|pairs, last:"
+    );
+    Ok(())
+}
+
+#[test]
+fn standard_headers_reject_non_string_and_mismatched_static_shapes() {
+    for source in [
+        "export function run():string { const h=new Headers({x:42}); return ''; }",
+        "export function run():string { const h=new Headers([['x','y','z']]); return ''; }",
+        "export function run():string { const h=new Headers(42); return ''; }",
+        "export function run():string { const h=new Headers(); h.set('x',true); return ''; }",
+        "function read(h:Headers):boolean {return h.has('x');} export function run():string {const h=new Headers(); read(4); return '';}",
+    ] {
+        let error = compile(
+            source,
+            "package test:bad-headers; world boundary {export run:async func()->string;}",
+        )
+        .expect_err("invalid header shape compiled");
+        assert!(
+            format!("{error:#}").contains("Lowering function"),
+            "{error:#}"
+        );
+    }
+}

@@ -62,7 +62,6 @@ pub(crate) struct Helpers {
     pub(crate) bytes: Func,
     pub(crate) text: Func,
     json: Option<Func>,
-    pub(crate) headers: Func,
     pub(crate) finish: Func,
 }
 impl Helpers {
@@ -125,7 +124,6 @@ pub(super) fn emit(
     let bytes = runtime.bytes;
     let native = runtime.imports;
     let promises = runtime.promises.unwrap();
-    let headers = super::headers::emit(module, memory, runtime)?;
     let fetch = builder::declare(module, "fetch", &[I32; 5], &[I32, F64]);
     let body = builder::declare(module, "fetch.consume", &[I32], &[I32, F64]);
     let text = builder::declare(module, "fetch.text", &[I32], &[I32, F64]);
@@ -222,7 +220,6 @@ pub(super) fn emit(
     b.finish(module, finish)?;
     Ok(Helpers {
         fetch,
-        headers,
         upload,
         bytes: body,
         text,
@@ -572,21 +569,6 @@ pub(crate) fn declare_helpers(module: &mut Module<'static>) -> BTreeMap<String, 
             imports::Function {
                 name: "fetch_method".into(),
                 params: vec!["i32"; 2],
-                results: vec!["i32"],
-            },
-            imports::Function {
-                name: "fetch_header_size".into(),
-                params: vec!["i32"; 4],
-                results: vec!["i32"],
-            },
-            imports::Function {
-                name: "fetch_header_get".into(),
-                params: vec!["i32"; 6],
-                results: vec!["i32"],
-            },
-            imports::Function {
-                name: "fetch_header_value".into(),
-                params: vec!["i32"; 4],
                 results: vec!["i32"],
             },
             imports::Function {

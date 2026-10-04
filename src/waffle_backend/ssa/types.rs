@@ -289,10 +289,10 @@ impl FunctionLowerer<'_> {
                     if crate::waffle_backend::http::headers::is_headers(
                         &self.infer_expr_type(object),
                     ) {
-                        return if property == "has" {
-                            HirType::Boolean
-                        } else {
-                            HirType::Union(vec![HirType::String, HirType::Null])
+                        return match property.as_str() {
+                            "has" => HirType::Boolean,
+                            "get" => HirType::Union(vec![HirType::String, HirType::Null]),
+                            _ => HirType::Void,
                         };
                     }
                     if crate::waffle_backend::http::fetch::is_response(
@@ -359,6 +359,18 @@ impl FunctionLowerer<'_> {
                 }
                 if let Expr::ExternFuncRef { return_type, .. } = callee.as_ref() {
                     return_type.clone()
+                } else {
+                    HirType::Any
+                }
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                let left = self.infer_expr_type(then_expr);
+                if crate::waffle_backend::wit::same_type(&left, &self.infer_expr_type(else_expr)) {
+                    left
                 } else {
                     HirType::Any
                 }

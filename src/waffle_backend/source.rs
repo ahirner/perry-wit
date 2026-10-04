@@ -4,6 +4,7 @@ mod context;
 mod date;
 mod decoder;
 mod filesystem;
+mod headers;
 pub(crate) mod modules;
 mod objects;
 mod options;
@@ -31,6 +32,7 @@ pub(crate) struct SourceBindings {
     pub(crate) capabilities: BTreeMap<String, CapabilityOperation>,
     pub(crate) decoder_constructor: Option<String>,
     pub(crate) date_constructor: Option<String>,
+    pub(crate) headers_constructor: Option<String>,
     pub(crate) time_constructors: BTreeMap<String, super::time::TimeConstructor>,
 }
 
@@ -159,6 +161,7 @@ pub(crate) fn resolve_bindings(
             operations: BTreeMap::new(),
             decoder_constructor: None,
             date_constructor: None,
+            headers_constructor: None,
             time_constructors: BTreeMap::new(),
             error: None,
         };
@@ -170,6 +173,7 @@ pub(crate) fn resolve_bindings(
             wit_imports,
             decoder_constructor: calls.decoder_constructor,
             date_constructor: calls.date_constructor,
+            headers_constructor: calls.headers_constructor,
             time_constructors: calls
                 .time_constructors
                 .into_iter()
@@ -211,6 +215,15 @@ pub(crate) fn resolve_bindings(
             module
                 .body
                 .append(&mut parse_typescript(&declaration, "date.d.ts")?.body);
+        }
+        if let Some(name) = &resolved.headers_constructor {
+            let declaration = format!(
+                "declare function {name}(init: any): {};",
+                super::http::headers::HEADERS_TYPE
+            );
+            module
+                .body
+                .append(&mut parse_typescript(&declaration, "headers.d.ts")?.body);
         }
         for (name, operation) in &resolved.time_constructors {
             let declaration = format!(
@@ -332,6 +345,7 @@ struct SourceCalls {
     operations: BTreeMap<CapabilityOperation, String>,
     decoder_constructor: Option<String>,
     date_constructor: Option<String>,
+    headers_constructor: Option<String>,
     time_constructors: BTreeMap<super::time::TimeConstructor, String>,
     error: Option<anyhow::Error>,
 }
@@ -671,6 +685,10 @@ impl VisitMut for SourceCalls {
         if matches!(expression, ast::Expr::Object(_))
             && let Err(error) = options::validate_plain_options(expression, "Object")
         {
+            self.error.get_or_insert(error);
+            return;
+        }
+        if let Err(error) = self.rewrite_headers_constructor(expression) {
             self.error.get_or_insert(error);
             return;
         }

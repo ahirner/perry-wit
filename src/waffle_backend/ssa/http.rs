@@ -151,18 +151,7 @@ impl FunctionLowerer<'_> {
                         "fetch method must be a string"
                     ),
                     "headers" => {
-                        let HirType::Object(headers) = &field.ty else {
-                            bail!("fetch headers require a typed string record");
-                        };
-                        ensure!(
-                            headers.properties.values().all(|field| !field.optional
-                                && matches!(field.ty, HirType::String | HirType::StringLiteral(_)))
-                                && headers
-                                    .index_signature
-                                    .as_deref()
-                                    .is_none_or(|ty| *ty == HirType::String),
-                            "fetch header values must be strings"
-                        );
+                        header_shape(&field.ty)?;
                     }
                     "body" => ensure!(
                         matches!(field.ty, HirType::String | HirType::StringLiteral(_))
@@ -188,6 +177,16 @@ impl FunctionLowerer<'_> {
                     let tag = self.op(Operator::I32Const { value: tag }, &[], &[Type::I32]);
                     let payload = self.call_completion(helpers.value, &[entry, tag, zero]);
                     values[index] = abi::decode_payload(&mut self.body, self.block, payload, true);
+                    if name == "headers" {
+                        let mode = header_shape(&field.ty)?;
+                        let mode = self.op(Operator::I32Const { value: mode }, &[], &[Type::I32]);
+                        let payload = self.call_completion(
+                            self.registry.headers_helpers.unwrap().new,
+                            &[mode, values[index]],
+                        );
+                        values[index] =
+                            abi::decode_payload(&mut self.body, self.block, payload, true);
+                    }
                     if name == "body" {
                         let kind = if crate::waffle_backend::bytes::is_byte_view(&field.ty) {
                             2
@@ -259,26 +258,87 @@ impl FunctionLowerer<'_> {
         method: &str,
         args: &[Expr],
     ) -> Result<Value> {
+        let lookup = matches!(method, "get" | "has");
         ensure!(
-            matches!(method, "get" | "has"),
+            lookup || matches!(method, "append" | "set" | "delete"),
             "Headers.{method} lowering is not implemented yet"
         );
-        ensure!(args.len() == 1, "Headers.{method} requires one string name");
+        let count = if lookup || method == "delete" { 1 } else { 2 };
+        ensure!(
+            args.len() == count,
+            "Headers.{method} requires {count} string arguments"
+        );
         let headers = self.expression(receiver)?;
         let name = self.string_receiver(&args[0])?;
-        let query = self.op(
-            Operator::I32Const {
-                value: u32::from(method == "has"),
-            },
-            &[],
-            &[Type::I32],
-        );
         let helpers = self
             .registry
-            .http_helpers
-            .and_then(|helpers| helpers.fetch)
-            .context("Headers requires a supported HTTP source operation")?;
-        let payload = self.call_completion(helpers.headers, &[headers, name, query]);
+            .headers_helpers
+            .context("Headers requires a supported constructor or HTTP source operation")?;
+        if lookup {
+            let query = self.op(
+                Operator::I32Const {
+                    value: u32::from(method == "has"),
+                },
+                &[],
+                &[Type::I32],
+            );
+            let payload = self.call_completion(helpers.lookup, &[headers, name, query]);
+            Ok(abi::decode_payload(
+                &mut self.body,
+                self.block,
+                payload,
+                true,
+            ))
+        } else {
+            let value = if args.len() == 2 {
+                self.string_receiver(&args[1])?
+            } else {
+                self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])
+            };
+            let action = self.op(
+                Operator::I32Const {
+                    value: match method {
+                        "append" => 0,
+                        "set" => 1,
+                        _ => 2,
+                    },
+                },
+                &[],
+                &[Type::I32],
+            );
+            Ok(self.call_completion(helpers.edit, &[headers, name, value, action]))
+        }
+    }
+
+    pub(super) fn new_headers(&mut self, arguments: &[Expr]) -> Result<Value> {
+        ensure!(
+            arguments.len() <= 1,
+            "Headers accepts one optional initializer"
+        );
+        let (mode, input) = if let Some(argument) = arguments.first() {
+            if matches!(argument, Expr::Array(_)) {
+                let ty = HirType::Array(Box::new(HirType::Tuple(vec![HirType::String; 2])));
+                (2, self.typed_operand(argument, &ty)?)
+            } else if self.infer_expr_type(argument) == HirType::Void {
+                (
+                    0,
+                    self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]),
+                )
+            } else {
+                (
+                    header_shape(&self.infer_expr_type(argument))?,
+                    self.expression(argument)?,
+                )
+            }
+        } else {
+            (
+                0,
+                self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]),
+            )
+        };
+        let mode = self.op(Operator::I32Const { value: mode }, &[], &[Type::I32]);
+        let payload =
+            self.call_completion(self.registry.headers_helpers.unwrap().new, &[mode, input]);
         Ok(abi::decode_payload(
             &mut self.body,
             self.block,
@@ -321,4 +381,31 @@ impl FunctionLowerer<'_> {
             _ => self.op(Operator::F64ConvertI32U, &[value], &[Type::F64]),
         })
     }
+}
+
+fn header_shape(ty: &HirType) -> Result<u32> {
+    use crate::waffle_backend::values::is_string_type;
+    if http::headers::is_headers(ty) {
+        return Ok(3);
+    }
+    if let HirType::Object(headers) = ty {
+        ensure!(
+            headers
+                .properties
+                .values()
+                .all(|field| !field.optional && is_string_type(&field.ty))
+                && headers
+                    .index_signature
+                    .as_deref()
+                    .is_none_or(is_string_type),
+            "Header record values must be strings"
+        );
+        return Ok(1);
+    }
+    if let HirType::Array(inner) = ty
+        && matches!(inner.as_ref(), HirType::Tuple(types) if types.len()==2 && types.iter().all(is_string_type))
+    {
+        return Ok(2);
+    }
+    bail!("Headers initializer requires a string record, [string, string][] pairs, or Headers")
 }

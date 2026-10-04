@@ -43,7 +43,6 @@ pub(crate) struct SourceRuntime<'a> {
     pub(crate) strings: super::strings::StringHelperFuncs,
     pub(crate) bytes: super::bytes::ByteHelpers,
     pub(crate) json: Option<super::json::JsonHelpers>,
-    pub(crate) values: super::values::ValueHelpers,
     pub(crate) pool: &'a super::strings::StringPool,
     pub(crate) promises: Option<&'a super::registry::PromiseImports>,
 }

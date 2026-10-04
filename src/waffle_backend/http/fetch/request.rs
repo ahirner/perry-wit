@@ -51,101 +51,63 @@ pub(super) fn fields(
 ) -> Result<()> {
     let zero = b.integer(0);
     let one = b.integer(1);
+    let stride = b.integer(16);
     let supplied = b.body.add_block();
     let empty = b.body.add_block();
-    let first = b.body.add_block();
-    let head = b.body.add_blockparam(first, I32);
+    let scan = b.body.add_block();
+    let data = b.body.add_blockparam(scan, I32);
+    let count = b.body.add_blockparam(scan, I32);
     b.branch(b.param(2), supplied, empty);
-    b.block = supplied;
-    let entry = b.load(b.param(2), 0, I32);
-    b.jump(first, &[entry]);
     b.block = empty;
-    b.jump(first, &[zero]);
-    b.block = first;
-    let count_loop = b.body.add_block();
-    let entry = b.body.add_blockparam(count_loop, I32);
-    let count = b.body.add_blockparam(count_loop, I32);
-    let has_type = b.body.add_blockparam(count_loop, I32);
-    let next = b.body.add_block();
+    b.jump(scan, &[zero, zero]);
+    b.block = supplied;
+    let fields = b.load(b.param(2), 4, I32);
+    let length = b.load(b.param(2), 8, I32);
+    b.jump(scan, &[fields, length]);
+    b.block = scan;
+    let search = b.body.add_block();
+    let index = b.body.add_blockparam(search, I32);
+    let has_type = b.body.add_blockparam(search, I32);
+    b.jump(search, &[zero, zero]);
+    b.block = search;
+    let more = b.op(O::I32LtU, &[index, count], I32);
+    let item = b.body.add_block();
     let counted = b.body.add_block();
-    b.jump(count_loop, &[head, zero, zero]);
-    b.block = count_loop;
-    b.branch(entry, next, counted);
-    b.block = next;
-    let key = b.load(entry, 4, I32);
-    let data = b.load(key, 0, I32);
-    let length = b.load(key, 4, I32);
-    let classification = b.call(t.native["fetch_header"], &[data, length], &[I32])[0];
-    let bad = b.integer(u32::MAX);
-    let bad = b.op(O::I32Eq, &[classification, bad], I32);
-    invalid(b, t, frame, bad);
-    let next_type = b.op(O::I32Or, &[has_type, classification], I32);
-    let next_entry = b.load(entry, 0, I32);
-    let next_count = b.op(O::I32Add, &[count, one], I32);
-    b.jump(count_loop, &[next_entry, next_count, next_type]);
+    b.branch(more, item, counted);
+    b.block = item;
+    let offset = b.op(O::I32Mul, &[index, stride], I32);
+    let field = b.op(O::I32Add, &[data, offset], I32);
+    let name = b.load(field, 0, I32);
+    let length = b.load(field, 4, I32);
+    let classification = b.call(t.native["fetch_header"], &[name, length], &[I32])[0];
+    let found = b.op(O::I32Or, &[has_type, classification], I32);
+    let next = b.op(O::I32Add, &[index, one], I32);
+    b.jump(search, &[next, found]);
     b.block = counted;
-    let max = b.integer(u32::MAX / 16);
-    let fits = b.op(O::I32LtU, &[count, max], I32);
-    b.require(fits);
     let text_body = b.op(O::I32Eq, &[b.param(4), one], I32);
     let no_type = b.op(O::I32Eqz, &[has_type], I32);
     let default_type = b.op(O::I32And, &[text_body, no_type], I32);
-    let count = b.op(O::I32Add, &[count, default_type], I32);
-    let stride = b.integer(16);
-    let length = b.op(O::I32Mul, &[count, stride], I32);
+    let max = b.integer(u32::MAX / 16);
+    let fits = b.op(O::I32LtU, &[count, max], I32);
+    b.require(fits);
+    let total = b.op(O::I32Add, &[count, default_type], I32);
+    let size = b.op(O::I32Mul, &[total, stride], I32);
     let alignment = b.integer(4);
-    let list = b.call(
-        t.allocator.realloc,
-        &[zero, zero, alignment, length],
-        &[I32],
-    )[0];
+    let list = b.call(t.allocator.realloc, &[zero, zero, alignment, size], &[I32])[0];
     b.store(frame, 40, list, I32);
+    let length = b.op(O::I32Mul, &[count, stride], I32);
     b.effect(
-        O::MemoryFill {
-            mem: b.memory(0).memory,
+        O::MemoryCopy {
+            dst_mem: b.memory(0).memory,
+            src_mem: b.memory(0).memory,
         },
-        &[list, zero, length],
+        &[list, data, length],
     );
-    b.store(response, 4, list, I32);
-    b.store(response, 8, count, I32);
-    let copy = b.body.add_block();
-    let entry = b.body.add_blockparam(copy, I32);
-    let target = b.body.add_blockparam(copy, I32);
-    let item = b.body.add_block();
-    let copied = b.body.add_block();
-    b.jump(copy, &[head, list]);
-    b.block = copy;
-    b.branch(entry, item, copied);
-    b.block = item;
-    let key = b.load(entry, 4, I32);
-    let value = b.load(entry, 16, F64);
-    let value = b.op(O::I32TruncF64U, &[value], I32);
-    for at in [0, 4] {
-        let data = b.load(key, at, I32);
-        b.store(target, at, data, I32);
-    }
-    let data = b.load(value, 0, I32);
-    let length = b.load(value, 4, I32);
-    let capacity = b.op(O::Select, &[length, one, length], I32);
-    let normalized = b.call(t.allocator.realloc, &[zero, zero, one, capacity], &[I32])[0];
-    b.store(target, 8, normalized, I32);
-    let length = b.call(
-        t.native["fetch_header_value"],
-        &[data, length, normalized, capacity],
-        &[I32],
-    )[0];
-    let error = b.integer(u32::MAX);
-    let error = b.op(O::I32Eq, &[length, error], I32);
-    invalid(b, t, frame, error);
-    b.store(target, 12, length, I32);
-    let entry = b.load(entry, 0, I32);
-    let next_target = b.op(O::I32Add, &[target, stride], I32);
-    b.jump(copy, &[entry, next_target]);
-    b.block = copied;
     let append = b.body.add_block();
     let construct = b.body.add_block();
     b.branch(default_type, append, construct);
     b.block = append;
+    let target = b.op(O::I32Add, &[list, length], I32);
     for (descriptor, at) in t.content_type.into_iter().zip([0, 8]) {
         let source = b.integer(descriptor);
         for part in [0, 4] {
@@ -155,7 +117,9 @@ pub(super) fn fields(
     }
     b.jump(construct, &[]);
     b.block = construct;
-    b.call(t.native["fields"], &[list, count, scratch], &[]);
+    b.store(response, 4, list, I32);
+    b.store(response, 8, total, I32);
+    b.call(t.native["fields"], &[list, total, scratch], &[]);
     let failed = byte(b, scratch, 0);
     invalid(b, t, frame, failed);
     Ok(())

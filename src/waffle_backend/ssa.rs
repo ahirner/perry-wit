@@ -80,7 +80,7 @@ pub(crate) fn lower_module(
                 super::http::fetch::BodyMethod::Json,
             ))
     });
-    reqs.objects |= contract.has_http() || contract.wit.is_some();
+    reqs.objects |= contract.has_http() || contract.has_headers() || contract.wit.is_some();
     reqs.objects |= contract
         .context_operations()
         .contains(&super::capabilities::ContextOperation::Environment);
@@ -94,6 +94,7 @@ pub(crate) fn lower_module(
         || !contract.context_operations().is_empty()
         || contract.has_filesystem()
         || contract.has_http()
+        || contract.has_headers()
         || contract
             .random_operations()
             .contains(&super::capabilities::RandomOperation::Uuid);
@@ -158,7 +159,7 @@ pub(crate) fn lower_module(
             string_pool.next_free_address(),
         )?;
         let mut helper_libraries = Vec::new();
-        if contract.has_fetch() {
+        if contract.has_headers() {
             helper_libraries.push(super::libraries::LibraryId::Fetch);
         }
         if reqs.find_substring {
@@ -819,6 +820,14 @@ impl<'a> FunctionLowerer<'a> {
         {
             return self.new_date(args).map(Some);
         }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::HeadersNew)
+            )
+        {
+            return self.new_headers(args).map(Some);
+        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
@@ -930,10 +939,12 @@ impl<'a> FunctionLowerer<'a> {
             }
             if expected.is_some_and(super::http::is_response)
                 || super::http::is_response(&argument_type)
+                || expected.is_some_and(super::http::headers::is_headers)
+                || super::http::headers::is_headers(&argument_type)
             {
                 ensure!(
                     expected == Some(&argument_type),
-                    "HTTP response arguments must match their declared type"
+                    "HTTP value arguments must match their declared type"
                 );
             }
             if expected.is_some_and(super::time::is_time) || super::time::is_time(&argument_type) {
@@ -1386,6 +1397,11 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => self.conditional(condition, then_expr, else_expr),
             Expr::Logical { op, left, right } => self.boolean_logic(*op, left, right),
             Expr::PropertySet { object, .. }
             | Expr::IndexSet { object, .. }

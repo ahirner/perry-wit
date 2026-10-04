@@ -427,11 +427,131 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()
 }
 
+fn edit_headers<'a>(
+    fields: impl Iterator<Item = ([u32; 4], &'a [u8])>,
+    name: &[u8],
+    replacement: [u32; 4],
+    action: u32,
+    output: &mut [u8],
+) -> Result<u32, ()> {
+    header(name)?;
+    if action > 2 {
+        return Err(());
+    }
+    let mut count = 0u32;
+    let mut replaced = false;
+    let mut write = |field: [u32; 4]| -> Result<(), ()> {
+        let offset = (count as usize).checked_mul(16).ok_or(())?;
+        let target = output
+            .get_mut(offset..offset.checked_add(16).ok_or(())?)
+            .ok_or(())?;
+        for (word, slot) in field
+            .into_iter()
+            .zip(target.as_chunks_mut::<4>().0.iter_mut())
+        {
+            slot.copy_from_slice(&word.to_le_bytes());
+        }
+        count = count.checked_add(1).ok_or(())?;
+        Ok(())
+    };
+    for (field, key) in fields {
+        if action != 0 && key.eq_ignore_ascii_case(name) {
+            if action == 1 && !replaced {
+                write(replacement)?;
+                replaced = true;
+            }
+        } else {
+            write(field)?;
+        }
+    }
+    if action == 0 || (action == 1 && !replaced) {
+        write(replacement)?;
+    }
+    Ok(count)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fetch_header_name(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+    borrow(input, length, output, capacity, |input, output| {
+        header(input)?;
+        let target = output.get_mut(..input.len()).ok_or(())?;
+        for (source, target) in input.iter().zip(target) {
+            *target = source.to_ascii_lowercase();
+        }
+        Ok(input.len() as u32)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fetch_header_edit(
+    fields: u32,
+    count: u32,
+    name: u32,
+    name_length: u32,
+    value: u32,
+    value_length: u32,
+    action: u32,
+    output: u32,
+    capacity: u32,
+) -> u32 {
+    use guest_memory::GuestRange;
+    (|| {
+        let input = HeaderInput::new(fields, count, name, name_length)?;
+        let value_range = GuestRange::new(value, value_length)?;
+        let target = GuestRange::new(output, capacity)?;
+        input.validate_output(target)?;
+        if value_range.overlaps(target) {
+            return Err(());
+        }
+        // SAFETY: the canonical list is initialized and immutable; target is disjoint.
+        let fields = unsafe { input.fields.bytes() }
+            .chunks_exact(16)
+            .zip(input.fields())
+            .map(|(record, (key, _))| {
+                let word = |at| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
+                ([word(0), word(4), word(8), word(12)], key)
+            });
+        // SAFETY: all input ranges were validated and output is exclusively borrowed and disjoint.
+        edit_headers(
+            fields,
+            input.name(),
+            [name, name_length, value, value_length],
+            action,
+            unsafe { target.bytes_mut() },
+        )
+    })()
+    .unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn methods_and_header_bytes_follow_fetch_validation() {
+        let fields = [
+            ([1, 1, 2, 1], b"X".as_slice()),
+            ([3, 1, 4, 1], b"x".as_slice()),
+            ([5, 1, 6, 1], b"y".as_slice()),
+        ];
+        let mut output = [0u8; 64];
+        assert_eq!(
+            edit_headers(fields.into_iter(), b"x", [7, 1, 8, 1], 0, &mut output),
+            Ok(4)
+        );
+        assert_eq!(
+            edit_headers(fields.into_iter(), b"x", [7, 1, 8, 1], 1, &mut output),
+            Ok(2)
+        );
+        assert_eq!(u32::from_le_bytes(output[..4].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(output[16..20].try_into().unwrap()), 5);
+        assert_eq!(
+            edit_headers(fields.into_iter(), b"X", [0; 4], 2, &mut output),
+            Ok(1)
+        );
+        assert_eq!(u32::from_le_bytes(output[..4].try_into().unwrap()), 5);
+        assert!(edit_headers(fields.into_iter(), b"X", [0; 4], 0, &mut output[..1]).is_err());
         assert_eq!(method(b"post"), Ok(2));
         assert_eq!(method(b"patch"), Ok(9));
         assert_eq!(method(b"PATCH"), Ok(8));
