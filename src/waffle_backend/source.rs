@@ -153,7 +153,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         }
         if let Some(name) = &resolved.date_constructor {
             let declaration = format!(
-                "declare function {name}(value: any): {};",
+                "declare function {name}(value: number): {};",
                 super::date::DATE_TYPE
             );
             module

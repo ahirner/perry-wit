@@ -169,21 +169,21 @@ The zero-argument builtin `Math.random()` uses the same random operation.
 `performance.now()` returns the host monotonic clock in floating-point milliseconds;
 `Date.now()` returns whole UTC epoch milliseconds from the signed P3 system clock.
 Only the selected clock functions are imported, including when reads and waits share
-one component. `new Date()` uses that same system-clock import. Numeric construction,
-Date copies, and null/undefined/boolean arguments preserve clipping
-and invalid-date behavior. Dates retain distinct object identity through helper calls,
-plain object properties, stored Promises, and native suspension. `getTime`, `valueOf`,
-calendar getters from `getFullYear` through `getMilliseconds` (and their UTC forms),
-and `toISOString` are supported; all calendar getters use UTC. Invalid getters return
-NaN, while invalid ISO serialization throws numeric code `1` through catch/finally.
-Pure calendar tasks import no WASI capabilities. String parsing, multi-argument
-construction, setters, and Date values at component boundaries are unsupported.
-Mixed primitive/Date arguments also pass through `any` helper parameters and results.
+one component. Date values support `new Date(epochMs)` with a statically known
+number, `.getTime()`, and `.toISOString()`. Numeric construction clips fractional
+milliseconds and preserves invalid-date behavior. Invalid dates return NaN from
+`getTime()` and throw numeric code `1` from `toISOString()` through catch/finally.
+Dates retain distinct identity through helpers, object properties, stored Promises,
+and native suspension. Pure epoch/ISO computations import no WASI capabilities.
+Omitted, copy, nonnumeric, and multi-argument constructors, calendar getters,
+`valueOf()`, setters, and string parsing are diagnosed. Dates remain guest-internal;
+use UTC ISO strings at component boundaries. Strict timestamp parsing and typed
+`Temporal.Instant` / `Temporal.PlainDateTime` operations are planned in R8.1b.ii.
 Shared tagged values preserve strict equality, truthiness, type tags, typed object
 fields, and retained `Promise<any>` outcomes. Typed boundaries validate the stored
-kind and throw numeric `12` on a mismatch. Unsupported dynamic Date operands also
-throw `12`. Public `any` component parameters/results retain their numeric contract;
-heterogeneous values remain guest-internal. Awaiting or adopting a Promise hidden
+kind and throw numeric `12` on a mismatch. Public `any` component parameters/results
+retain their numeric contract; heterogeneous values remain guest-internal.
+Awaiting or adopting a Promise hidden
 inside `any` throws `12` until dynamic Promise outcome tags are supported. Callback
 timers remain separate migration work.
 `JSON.parse(string)` and compact `JSON.stringify(value)` use the Rust UTF-8 codec.

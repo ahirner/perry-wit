@@ -5,13 +5,15 @@
  * It returns the same view, throws numeric 1 for other supported value kinds or 2
  * for a view over 65536 bytes, and makes no host call for an empty view.
  * Random UUIDs are lowercase v4 strings. Clock reads use milliseconds; Date.now()
- * returns whole signed UTC epoch milliseconds. Date construction accepts omitted,
- * numeric, null/undefined/boolean, and Date-copy arguments, including any helpers. Calendar
- * getters use UTC; invalid getters return NaN and toISOString throws numeric 1.
- * Dates retain guest-local identity in helpers, objects, and Promises. Parsing,
- * setters, multi-argument construction, and component Date values are unsupported.
- * Unsupported dynamic Date operands throw numeric 12. Guest any values preserve
- * their tags and references; public any component boundaries remain numeric.
+ * returns whole signed UTC epoch milliseconds. Date supports new Date(epochMs)
+ * with a statically known number, getTime(), and toISOString(). Invalid dates
+ * return NaN from getTime() and throw numeric 1 from toISOString(). Dates retain
+ * guest-local identity in helpers, objects, and Promises. Omitted, copy, nonnumeric,
+ * and multi-argument constructors, calendar getters, valueOf(), setters, and
+ * string parsing are diagnosed. Component boundaries carry UTC ISO strings.
+ * Strict timestamp parsing and Temporal operations are planned in R8.1b.ii.
+ * Guest any values preserve their tags and references; public any component
+ * boundaries remain numeric.
  * Opaque Promise adoption through any throws 12; callbacks remain migration work.
  * JSON.parse accepts strict UTF-8 strings and rejects unpaired surrogate escapes.
  * JSON.stringify supports primitives, plain objects, dense/mixed arrays, string

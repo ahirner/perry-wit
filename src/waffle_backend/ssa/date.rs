@@ -1,4 +1,4 @@
-//! Date coercions and checked receivers using the shared value and completion ABI.
+//! Numeric Date construction and immutable UTC operations.
 
 use super::FunctionLowerer;
 use crate::waffle_backend::{abi, date::is_date};
@@ -14,44 +14,11 @@ impl FunctionLowerer<'_> {
         );
         let argument = &arguments[0];
         let ty = self.infer_expr_type(argument);
-        let time = if crate::waffle_backend::values::is_dynamic(&ty) {
-            let value = self.expression(argument)?;
-            self.call_completion(
-                self.registry
-                    .value_helpers
-                    .expect("dynamic values have helpers")
-                    .date_number,
-                &[value],
-            )
-        } else if is_date(&ty) {
-            self.date_method(argument, "getTime", &[])?
-        } else if matches!(ty, HirType::Null) {
-            self.op(
-                Operator::F64Const {
-                    value: 0.0f64.to_bits(),
-                },
-                &[],
-                &[Type::F64],
-            )
-        } else if matches!(ty, HirType::Void) {
-            self.expression(argument)?;
-            self.op(
-                Operator::F64Const {
-                    value: f64::NAN.to_bits(),
-                },
-                &[],
-                &[Type::F64],
-            )
-        } else if ty == HirType::Boolean {
-            let value = self.expression(argument)?;
-            self.op(Operator::F64ConvertI32U, &[value], &[Type::F64])
-        } else {
-            ensure!(
-                matches!(ty, HirType::Number | HirType::Any),
-                "Date construction supports numbers, booleans, null, undefined, and Date copies; string parsing and object coercion are unsupported"
-            );
-            self.expression(argument)?
-        };
+        ensure!(
+            ty == HirType::Number,
+            "Date construction requires a statically known number of epoch milliseconds; coercion and parsing are unsupported"
+        );
+        let time = self.expression(argument)?;
         let helper = self
             .registry
             .date_helpers
@@ -82,7 +49,7 @@ impl FunctionLowerer<'_> {
             .registry
             .date_helpers
             .expect("Date helpers are registered");
-        if method == "getTime" || method == "valueOf" {
+        if method == "getTime" {
             return Ok(self.op(
                 Operator::F64Load {
                     memory: MemoryArg {
@@ -104,24 +71,6 @@ impl FunctionLowerer<'_> {
                 true,
             ));
         }
-        let part = match method {
-            "getFullYear" | "getUTCFullYear" => 0,
-            "getMonth" | "getUTCMonth" => 1,
-            "getDate" | "getUTCDate" => 2,
-            "getDay" | "getUTCDay" => 3,
-            "getHours" | "getUTCHours" => 4,
-            "getMinutes" | "getUTCMinutes" => 5,
-            "getSeconds" | "getUTCSeconds" => 6,
-            "getMilliseconds" | "getUTCMilliseconds" => 7,
-            _ => bail!("Unsupported Date method '{method}'"),
-        };
-        let part = self.op(Operator::I32Const { value: part }, &[], &[Type::I32]);
-        Ok(self.op(
-            Operator::Call {
-                function_index: helpers.part,
-            },
-            &[date, part],
-            &[Type::F64],
-        ))
+        bail!("Unsupported Date method '{method}'; only getTime() and toISOString() are supported")
     }
 }

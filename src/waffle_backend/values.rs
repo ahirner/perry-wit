@@ -88,7 +88,6 @@ pub(crate) struct ValueHelpers {
     pub(crate) extract: Func,
     pub(crate) truthy: Func,
     pub(crate) equal: Func,
-    pub(crate) date_number: Func,
     pub(crate) scalar_number: Func,
     pub(crate) async_result: Func,
 }
@@ -173,7 +172,6 @@ pub(crate) fn emit_runtime(
         extract: functions["value.extract"],
         truthy: functions["value.truthy"],
         equal: functions["value.equal"],
-        date_number: functions["value.date-number"],
         scalar_number: functions["value.scalar-number"],
         async_result: functions["value.async-result"],
     })

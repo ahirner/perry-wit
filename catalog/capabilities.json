@@ -198,27 +198,26 @@
     },
     {
       "id": "compiler.p3_dates",
-      "name": "P3 Date Values and UTC Calendar Operations",
+      "name": "P3 Immutable UTC Date Values",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: Date construction, mixed-value coercions, copies, time/calendar getters, and ISO serialization",
+      "domain": "WAFFLE Rust compiler API: Date.now(), new Date(epochMs), getTime(), and toISOString()",
       "invariants": [
-        "Omitted arguments read the signed P3 system clock; numeric, null/undefined/boolean, and Date arguments preserve time clipping and invalid dates, including through any helpers",
-        "Date copies have distinct object identity and aliases retain identity",
-        "getTime and valueOf return the timestamp; calendar getters and their UTC variants use UTC and return NaN for invalid dates",
+        "Date.now() reads whole signed UTC epoch milliseconds from the P3 system clock",
+        "Construction requires a statically known number and preserves time clipping and invalid dates",
+        "Constructed dates have distinct object identity and aliases retain identity",
+        "getTime() returns the timestamp or NaN for invalid dates",
         "ISO formatting covers the entire clipped range, including negative timestamps, year zero, and signed six-digit years",
         "Invalid ISO serialization throws numeric 1 through shared catch/finally completion handling",
         "Dates and ISO strings survive helpers, object properties, retained Promises, suspension, and repeated allocating loops under a 64 KiB guest cap",
-        "Pure date computations require no WASI imports; only omitted construction reads the clock",
-        "Shared tagged values preserve mixed helper parameters/results, typed any object fields, strict equality, truthiness, typeof, and retained Promise<any> outcomes"
+        "Pure epoch/ISO computations require no WASI imports"
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
-        "Unsupported dynamic Date operands and mismatched typed guest boundaries throw numeric 12; public any component boundaries retain their numeric contract",
-        "Awaiting or adopting an opaque Promise hidden inside any throws numeric 12 until dynamic outcome tags are supported",
-        "Date values are guest-internal and cannot cross component parameters or results",
-        "String parsing, multi-argument construction, setters, dynamic methods, and method arguments are diagnosed",
-        "Calendar getters use UTC regardless of the host time zone; invalid ISO errors are numeric rather than Error objects"
+        "Date values are guest-internal; component boundaries carry UTC ISO strings",
+        "Omitted, copy, nonnumeric, and multi-argument constructors, calendar getters, valueOf, setters, string parsing, dynamic methods, and method arguments are diagnosed",
+        "Invalid ISO errors are numeric rather than Error objects",
+        "Strict timestamp parsing and typed Temporal operations are planned in R8.1b.ii"
       ],
       "conformance": ["tests/waffle_platform/date.rs", "tests/waffle_platform/values.rs"]
     },
@@ -532,7 +531,7 @@
       "name": "Date and Wall Clocks",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "Wall clock time and date calendar operations using wasi:clocks/wall-clock",
+      "domain": "Legacy P2 CLI date support pending R9 retirement; the production contract is compiler.p3_dates",
       "invariants": [
         "Date.now() returns whole UTC milliseconds since the UNIX epoch",
         "Omitted arguments use current time; numeric timestamps, Date copies, and the tested null/undefined/boolean conversions preserve the supported Date semantics",
@@ -540,7 +539,7 @@
         "Invalid Date toISOString calls raise a guest exception at the call site"
       ],
       "differences": [
-        "Calendar getters use UTC rather than the host local timezone",
+        "Legacy constructor coercions and calendar getters are excluded from the P3 cutover contract",
         "Date string parsing, multi-argument constructors, setters, and the remaining Date API are outside the supported subset",
         "Detailed constructor and exception regressions run in tests/clocks_test.rs"
       ],

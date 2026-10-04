@@ -46,11 +46,6 @@
       (return (i32.const 0) (f64.load offset=8 (local.get $value)))))
     (i32.const 1) (f64.const 12))
 
-  (func (export "value.date-number") (param $value i32) (result i32 f64)
-    (if (i32.eq (i32.load (local.get $value)) (i32.const 11)) (then
-      (return (i32.const 0) (f64.load (i32.trunc_f64_u (f64.load offset=8 (local.get $value)))))))
-    (call $scalar-number (local.get $value)))
-
   ;; Dynamic Promise adoption requires an outcome tag, beyond an opaque Promise handle.
   (func (export "value.async-result") (param $value i32) (result i32 f64)
     (if (i32.eq (i32.load (local.get $value)) (i32.const 10))

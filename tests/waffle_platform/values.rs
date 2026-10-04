@@ -86,7 +86,7 @@ async fn dynamic_missing_text_and_byte_values_preserve_undefined() -> Result<()>
 async fn mixed_fields_aliases_and_retained_outcomes_keep_their_references() -> Result<()> {
     let source = r#"
     function identity(value:any):any {return value;}
-    function time(value:any):number {return new Date(value).getTime();}
+    function time(value:Date):number {return value.getTime();}
     async function retain(value:any):Promise<any> {return value;}
     export async function run():Promise<number> {
         const date=new Date(-1);
@@ -95,7 +95,7 @@ async fn mixed_fields_aliases_and_retained_outcomes_keep_their_references() -> R
         const pending=retain(state.value);
         let value=identity(date);
         value=false;
-        if(time(value)!==0) {throw 98;}
+        if(value!==false) {throw 98;}
         let index=0;
         while(index<4000) {
             identity(new Date(index));
@@ -136,6 +136,7 @@ async fn dynamic_returns_preserve_undefined_and_adopt_typed_task_outcomes() -> R
     async function widenedNumber():Promise<any> {return number();}
     async function widenedVoid():Promise<any> {return nothing();}
     async function narrowed():Promise<Date> {return widened();}
+    function time(value:Date):number {return value.getTime();}
     function identity(value:any):any {return value;}
     async function opaque(value:any):Promise<any> {return value;}
     export async function run():Promise<number> {
@@ -148,7 +149,7 @@ async fn dynamic_returns_preserve_undefined_and_adopt_typed_task_outcomes() -> R
         const pending=widened();
         const value=await pending;
         if(await pending!==value) {throw 93;}
-        if(new Date(value).getTime()!==-1) {throw 92;}
+        if(time(value)!==-1) {throw 92;}
         const concrete=await narrowed();
         if(concrete.getTime()!==-1) {throw 91;}
         const primitive=await identity(null);
@@ -250,12 +251,13 @@ async fn boxed_arguments_and_numeric_errors_survive_later_argument_effects_and_c
         while(index<4000) {identity(new Date(index));index=index+1;}
         return 2;
     }
-    function choose(first:any,second:number):number {return new Date(first).getTime()+second;}
+    function time(value:Date):number {return value.getTime();}
+    function choose(first:any,second:number):number {return time(first)+second;}
     function raise(value:any):number {throw value;}
-    function invalid(value:any):number {return new Date(value).getTime();}
+    function invalid(value:Date):number {return value.getTime();}
     export function run():Result<number,number> {
         if(choose(new Date(-1),churn())!==1) {throw 99;}
-        try {invalid('unsupported parsing');throw 98;}
+        try {invalid(identity('wrong receiver'));throw 98;}
         catch(error) {if(error!==12) {throw error;}}
         try {return raise(identity(7));} finally {churn();}
     }"#;

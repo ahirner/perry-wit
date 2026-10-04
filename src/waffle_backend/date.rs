@@ -14,7 +14,6 @@ pub(crate) const DATE_TYPE: &str = "__perry_internal_date";
 #[derive(Clone, Copy)]
 pub(crate) struct DateHelpers {
     pub(crate) new: Func,
-    pub(crate) part: Func,
     pub(crate) iso: Func,
 }
 
@@ -48,7 +47,6 @@ pub(crate) fn emit_runtime(
     )?;
     Ok(DateHelpers {
         new: functions["date.new"],
-        part: functions["date.part"],
         iso: functions["date.iso"],
     })
 }

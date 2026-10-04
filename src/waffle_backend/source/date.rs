@@ -1,7 +1,6 @@
 //! Preserve Date constructor and method arguments before builtin HIR folding.
 
 use super::{SourceCalls, underlying_expression};
-use crate::waffle_backend::capabilities::{CapabilityOperation, ClockOperation};
 use anyhow::{Result, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use swc_common::SyntaxContext;
@@ -17,8 +16,8 @@ impl SourceCalls {
         }
         let arguments = constructor.args.as_deref().unwrap_or_default();
         ensure!(
-            arguments.len() <= 1 && constructor.type_args.is_none(),
-            "Date construction supports zero or one argument"
+            arguments.len() == 1 && constructor.type_args.is_none(),
+            "Date construction requires one numeric epoch-millisecond argument; use Date.now() for the current time"
         );
         ensure!(
             arguments.iter().all(|argument| argument.spread.is_none()),
@@ -31,25 +30,7 @@ impl SourceCalls {
             self.date_constructor = Some(name.clone());
             name
         };
-        let mut args = constructor.args.take().unwrap_or_default();
-        if args.is_empty() {
-            let operation = CapabilityOperation::Clock(ClockOperation::DateNow);
-            let clock = self.capability_name(operation);
-            args.push(ast::ExprOrSpread {
-                spread: None,
-                expr: Box::new(ast::Expr::Call(ast::CallExpr {
-                    span: constructor.span,
-                    ctxt: SyntaxContext::empty(),
-                    callee: ast::Callee::Expr(Box::new(ast::Expr::Ident(ast::Ident::new(
-                        clock.into(),
-                        constructor.span,
-                        SyntaxContext::empty(),
-                    )))),
-                    args: vec![],
-                    type_args: None,
-                })),
-            });
-        }
+        let args = constructor.args.take().unwrap_or_default();
         *expression = ast::Expr::Call(ast::CallExpr {
             span: constructor.span,
             ctxt: SyntaxContext::empty(),
