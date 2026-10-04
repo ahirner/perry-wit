@@ -191,6 +191,7 @@ fn value_tag(ty: &HirType) -> Result<u32> {
         ty if crate::waffle_backend::filesystem::is_stats(ty) => 7,
         HirType::Array(inner) if **inner == HirType::String => 8,
         ty if crate::waffle_backend::decoder::is_decoder(ty) => 9,
+        ty if crate::waffle_backend::date::is_date(ty) => 11,
         HirType::Promise(_) => 10,
         _ => bail!("Unsupported object field type: {ty:?}"),
     })

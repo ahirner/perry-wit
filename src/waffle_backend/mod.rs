@@ -7,6 +7,7 @@ mod bytes;
 pub(crate) mod capabilities;
 pub(crate) mod component;
 pub(crate) mod control_flow;
+mod date;
 mod decoder;
 pub(crate) mod exceptions;
 mod filesystem;

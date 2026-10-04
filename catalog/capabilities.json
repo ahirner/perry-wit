@@ -187,7 +187,7 @@
         "Invalid or overflowing wait durations trap before the host call",
         "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
         "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
-        "Date objects, calendar methods, environment/arguments, and callback timers remain open migration work",
+        "Date objects are scoped separately in compiler.p3_dates; environment/arguments and callback timers remain open migration work",
         "Instances support serial calls; cancellation discards the store"
       ],
       "conformance": [
@@ -195,6 +195,30 @@
         "tests/waffle_platform_test.rs",
         "tests/waffle_string_test.rs"
       ]
+    },
+    {
+      "id": "compiler.p3_dates",
+      "name": "P3 Date Values and UTC Calendar Operations",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: typed Date construction, copies, time/calendar getters, and ISO serialization",
+      "invariants": [
+        "Omitted arguments read the signed P3 system clock; numeric, directly typed null/undefined/boolean, and Date arguments preserve time clipping and invalid dates",
+        "Date copies have distinct object identity and aliases retain identity",
+        "getTime and valueOf return the timestamp; calendar getters and their UTC variants use UTC and return NaN for invalid dates",
+        "ISO formatting covers the entire clipped range, including negative timestamps, year zero, and signed six-digit years",
+        "Invalid ISO serialization throws numeric 1 through shared catch/finally completion handling",
+        "Dates and ISO strings survive helpers, object properties, retained Promises, suspension, and repeated allocating loops under a 64 KiB guest cap",
+        "Pure date computations require no WASI imports; only omitted construction reads the clock"
+      ],
+      "differences": [
+        "The default CLI remains on the legacy pipeline until R9",
+        "Mixed primitive/Date values through any helper parameters require the still-open general value ABI",
+        "Date values are guest-internal and cannot cross component parameters or results",
+        "String parsing, multi-argument construction, setters, dynamic methods, and method arguments are diagnosed",
+        "Calendar getters use UTC regardless of the host time zone; invalid ISO errors are numeric rather than Error objects"
+      ],
+      "conformance": ["tests/waffle_platform/date.rs"]
     },
     {
       "id": "web.guest_callbacks",

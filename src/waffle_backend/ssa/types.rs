@@ -16,6 +16,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
+        ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::filesystem::is_stats(ty) => Some("Stats"),
         HirType::Array(inner) if **inner == HirType::String => Some("string[]"),
         HirType::Named(name) if name == "ByteStream" => Some("ByteStream"),
@@ -26,7 +27,11 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
         HirType::Object(_) => true,
-        ty if crate::waffle_backend::decoder::is_decoder(ty) => true,
+        ty if crate::waffle_backend::decoder::is_decoder(ty)
+            || crate::waffle_backend::date::is_date(ty) =>
+        {
+            true
+        }
         ty if crate::waffle_backend::filesystem::is_stats(ty) => true,
         HirType::String | HirType::Promise(_) => true,
         HirType::Array(inner) => **inner == HirType::String,
@@ -175,6 +180,13 @@ impl FunctionLowerer<'_> {
                     object, property, ..
                 } = callee.as_ref()
                 {
+                    if crate::waffle_backend::date::is_date(&self.infer_expr_type(object)) {
+                        return if property == "toISOString" {
+                            HirType::String
+                        } else {
+                            HirType::Number
+                        };
+                    }
                     if crate::waffle_backend::filesystem::is_stats(&self.infer_expr_type(object))
                         && matches!(property.as_str(), "isFile" | "isDirectory")
                     {

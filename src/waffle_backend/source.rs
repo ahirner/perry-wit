@@ -1,5 +1,6 @@
 //! Resolve source bindings before Perry's name-based builtin lowering.
 
+mod date;
 mod decoder;
 mod filesystem;
 mod options;
@@ -23,6 +24,7 @@ use super::capabilities::{
 pub(crate) struct SourceBindings {
     pub(crate) capabilities: BTreeMap<String, CapabilityOperation>,
     pub(crate) decoder_constructor: Option<String>,
+    pub(crate) date_constructor: Option<String>,
 }
 
 fn underlying_expression(mut expression: &ast::Expr) -> &ast::Expr {
@@ -45,7 +47,8 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         let mut names = IdentifierNames::default();
         module.visit_with(&mut names);
         ensure!(
-            !names.0.contains(super::decoder::DECODER_TYPE)
+            !names.0.contains(super::date::DATE_TYPE)
+                && !names.0.contains(super::decoder::DECODER_TYPE)
                 && !names.0.iter().any(|name| name.starts_with("__AnonShape_")),
             "Reserved compiler type name in source"
         );
@@ -104,6 +107,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             shadow_names: HashMap::new(),
             operations: BTreeMap::new(),
             decoder_constructor: None,
+            date_constructor: None,
             error: None,
         };
         module.visit_mut_with(&mut calls);
@@ -112,6 +116,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         }
         let mut resolved = SourceBindings {
             decoder_constructor: calls.decoder_constructor,
+            date_constructor: calls.date_constructor,
             ..Default::default()
         };
         for (operation, name) in calls.operations {
@@ -139,6 +144,15 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             module
                 .body
                 .append(&mut parse_typescript(&declaration, "decoder.d.ts")?.body);
+        }
+        if let Some(name) = &resolved.date_constructor {
+            let declaration = format!(
+                "declare function {name}(value: any): {};",
+                super::date::DATE_TYPE
+            );
+            module
+                .body
+                .append(&mut parse_typescript(&declaration, "date.d.ts")?.body);
         }
         Ok(resolved)
     })
@@ -222,6 +236,7 @@ struct SourceCalls {
     shadow_names: HashMap<ast::Id, String>,
     operations: BTreeMap<CapabilityOperation, String>,
     decoder_constructor: Option<String>,
+    date_constructor: Option<String>,
     error: Option<anyhow::Error>,
 }
 
@@ -351,6 +366,15 @@ impl SourceCalls {
         }
     }
 
+    fn capability_name(&mut self, operation: CapabilityOperation) -> String {
+        if let Some(name) = self.operations.get(&operation) {
+            return name.clone();
+        }
+        let name = self.fresh_name();
+        self.operations.insert(operation, name.clone());
+        name
+    }
+
     fn fresh_name(&mut self) -> String {
         let mut index = self.names.len();
         loop {
@@ -397,13 +421,7 @@ impl VisitMut for SourceCalls {
                         });
                         return;
                     }
-                    let name = if let Some(name) = self.operations.get(&operation) {
-                        name.clone()
-                    } else {
-                        let name = self.fresh_name();
-                        self.operations.insert(operation, name.clone());
-                        name
-                    };
+                    let name = self.capability_name(operation);
                     **callee = ast::Expr::Ident(ast::Ident::new(
                         name.into(),
                         call.span,
@@ -440,6 +458,10 @@ impl VisitMut for SourceCalls {
         if matches!(expression, ast::Expr::Object(_))
             && let Err(error) = options::validate_plain_options(expression, "Object")
         {
+            self.error.get_or_insert(error);
+            return;
+        }
+        if let Err(error) = self.rewrite_date_constructor(expression) {
             self.error.get_or_insert(error);
             return;
         }
@@ -500,6 +522,12 @@ impl VisitMut for SourceCalls {
             && name.ctxt == self.unresolved
         {
             name.sym = super::decoder::DECODER_TYPE.into();
+        }
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && name.sym == "Date"
+            && name.ctxt == self.unresolved
+        {
+            name.sym = super::date::DATE_TYPE.into();
         }
         reference.visit_mut_children_with(self);
     }

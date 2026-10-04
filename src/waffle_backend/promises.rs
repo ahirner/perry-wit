@@ -145,5 +145,6 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || super::text_or_bytes::is_text_or_bytes(ty)
         || super::filesystem::is_stats(ty)
         || super::objects::is_object(ty)
+        || super::date::is_date(ty)
         || super::structured::is_string_array(ty)
 }

@@ -39,6 +39,7 @@ pub(crate) enum TypedIntrinsic {
     ReadInto,
     ByteAt,
     DecoderNew,
+    DateNew,
     Custom {
         name: String,
         params: Vec<WaffleType>,
@@ -67,6 +68,7 @@ impl TypedIntrinsic {
             Self::ReadInto => "readInto",
             Self::ByteAt => "byteAt",
             Self::DecoderNew => "TextDecoder",
+            Self::DateNew => "Date",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -75,7 +77,7 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
-            Self::ByteAt | Self::DecoderNew => false,
+            Self::ByteAt | Self::DecoderNew | Self::DateNew => false,
             Self::Custom { is_async, .. } => *is_async,
         }
     }
@@ -106,6 +108,7 @@ impl TypedIntrinsic {
             Self::HostDouble | Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
             Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
+            Self::DateNew => (vec![WaffleType::F64], vec![WaffleType::I32]),
             Self::DecoderNew => (
                 vec![WaffleType::I32; 3],
                 vec![WaffleType::I32, WaffleType::F64],
@@ -240,6 +243,10 @@ pub(crate) fn resolve_contract(
     let mut intrinsics = BTreeMap::new();
 
     for (name, params, ret) in &hir.extern_funcs {
+        if bindings.date_constructor.as_ref() == Some(name) {
+            intrinsics.insert(name.clone(), TypedIntrinsic::DateNew);
+            continue;
+        }
         if bindings.decoder_constructor.as_ref() == Some(name) {
             intrinsics.insert(name.clone(), TypedIntrinsic::DecoderNew);
             continue;

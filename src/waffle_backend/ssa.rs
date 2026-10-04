@@ -6,6 +6,7 @@
 
 mod arrays;
 mod bytes;
+mod date;
 mod decoder;
 mod filesystem;
 mod loops;
@@ -62,7 +63,8 @@ pub(crate) fn lower_module(
 
     // 2. Scan module for string requirements and build string pool if needed
     let mut reqs = scan_module_string_requirements(hir);
-    reqs.needs_strings |= contract.has_filesystem()
+    reqs.needs_strings |= super::date::required(hir)
+        || contract.has_filesystem()
         || contract
             .random_operations()
             .contains(&super::capabilities::RandomOperation::Uuid);
@@ -346,13 +348,14 @@ impl<'a> FunctionLowerer<'a> {
                             } else if super::objects::is_object(self.return_type) {
                                 ensure!(super::objects::is_object(&self.infer_expr_type(expr)), "Object results require object values");
                                 self.expression(expr)
-                            } else if super::filesystem::is_stats(self.return_type) || matches!(self.return_type, HirType::Array(_)) {
+                            } else if super::filesystem::is_stats(self.return_type) || super::date::is_date(self.return_type) || matches!(self.return_type, HirType::Array(_)) {
                                 ensure!(&self.infer_expr_type(expr) == self.return_type, "Returned value must match {:?}", self.return_type);
                                 self.expression(expr)
                             } else {
                                 ensure!(!super::objects::is_object(&self.infer_expr_type(expr)), "Cannot return a plain object as {:?}", self.return_type);
                                 ensure!(!super::filesystem::is_stats(&self.infer_expr_type(expr)) && !matches!(self.infer_expr_type(expr), HirType::Array(_)), "Cannot return an object as {:?}", self.return_type);
                                 ensure!(!is_text_or_bytes(&self.infer_expr_type(expr)), "Cannot return a string-or-byte value as {:?}; narrow it first", self.return_type);
+                                ensure!(!super::date::is_date(&self.infer_expr_type(expr)), "Cannot return a Date as {:?}", self.return_type);
                                 ensure!(!super::decoder::is_decoder(&self.infer_expr_type(expr)), "Cannot return a TextDecoder as {:?}", self.return_type);
                                 ensure!(!super::bytes::is_byte_view(&self.infer_expr_type(expr)), "Cannot return a Uint8Array as {:?}", self.return_type);
                                 ensure!(
@@ -508,10 +511,21 @@ impl<'a> FunctionLowerer<'a> {
         {
             return self.new_decoder(args).map(Some);
         }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::DateNew)
+            )
+        {
+            return self.new_date(args).map(Some);
+        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
         {
+            if super::date::is_date(&self.infer_expr_type(object)) {
+                return self.date_method(object, property, args).map(Some);
+            }
             if super::filesystem::is_stats(&self.infer_expr_type(object)) {
                 return self.stats_method(object, property, args).map(Some);
             }
@@ -564,6 +578,12 @@ impl<'a> FunctionLowerer<'a> {
                 ensure!(
                     expected == Some(&argument_type),
                     "Object arguments must match their declared parameter types"
+                );
+            }
+            if expected.is_some_and(super::date::is_date) || super::date::is_date(&argument_type) {
+                ensure!(
+                    expected == Some(&argument_type),
+                    "Date arguments must match Date parameters"
                 );
             }
             if expected.is_some_and(super::decoder::is_decoder) {
