@@ -23,7 +23,9 @@ pub(crate) struct ObjectHelpers {
 }
 
 pub(crate) fn is_object(ty: &HirType) -> bool {
-    matches!(ty, HirType::Object(_)) || super::context::is_environment(ty)
+    matches!(ty, HirType::Object(_))
+        || super::context::is_environment(ty)
+        || matches!(ty, HirType::Union(types) if !types.is_empty() && types.iter().all(is_object))
 }
 
 pub(crate) fn contains_object(ty: &HirType) -> bool {
@@ -31,6 +33,7 @@ pub(crate) fn contains_object(ty: &HirType) -> bool {
         ty if is_object(ty) => true,
         HirType::Promise(inner) | HirType::Array(inner) => contains_object(inner),
         HirType::Union(types)
+        | HirType::Tuple(types)
         | HirType::Generic {
             type_args: types, ..
         } => types.iter().any(contains_object),

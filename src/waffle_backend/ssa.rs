@@ -20,12 +20,14 @@ mod requirements;
 mod string_ops;
 mod text_or_bytes;
 mod time;
+mod tuples;
+mod typed;
 mod types;
 mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use perry_hir::ir::{
     BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt, UnaryOp, UpdateOp,
 };
@@ -67,11 +69,12 @@ pub(crate) fn lower_module(
 
     // 2. Scan module for string requirements and build string pool if needed
     let mut reqs = scan_module_string_requirements(hir);
-    reqs.objects |= contract.has_http();
+    reqs.objects |= contract.has_http() || contract.wit.is_some();
     reqs.objects |= contract
         .context_operations()
         .contains(&super::capabilities::ContextOperation::Environment);
-    reqs.needs_strings |= super::values::required(hir)
+    reqs.needs_strings |= contract.wit.is_some()
+        || super::values::required(hir)
         || super::date::required(hir)
         || super::time::required(hir)
         || !contract.context_operations().is_empty()
@@ -91,6 +94,9 @@ pub(crate) fn lower_module(
         || contract.has_filesystem()
     {
         collect_strings_in_module(hir, &mut string_pool);
+        if let Some(wit) = &contract.wit {
+            wit.intern_keys(&mut string_pool);
+        }
         if contract.has_http() {
             string_pool.intern("http");
             string_pool.intern("https");
@@ -176,7 +182,19 @@ pub(crate) fn lower_module(
         module.funcs[info.func_index] = waffle::FuncDecl::Body(info.sig, func.name.clone(), body);
 
         if let Some(export) = &info.export {
-            let wrapper = abi::build_export_wrapper(&module, info, export, &registry)?;
+            let wrapper = if let Some(wit) = &contract.wit {
+                super::wit::build_export_wrapper(
+                    &module,
+                    info,
+                    export,
+                    &registry,
+                    wit,
+                    &wit.functions[&func.name],
+                    &string_pool,
+                )?
+            } else {
+                abi::build_export_wrapper(&module, info, export, &registry)?
+            };
             module.funcs[export.func_index] =
                 waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
             module.exports.push(Export {
@@ -288,7 +306,12 @@ fn lower_function_body(
         );
     }
 
-    lowerer.statements(&func.body)?;
+    let lowered = lowerer.statements(&func.body);
+    if contract.wit.is_some() {
+        lowered.with_context(|| format!("Lowering function {}", func.name))?;
+    } else {
+        lowered?;
+    }
 
     // If the block is not terminated, emit default return or ensure proper termination
     if lowerer.body.blocks[lowerer.block].terminator == Terminator::None {
@@ -324,6 +347,13 @@ impl<'a> FunctionLowerer<'a> {
                     ..
                 } => {
                     let inferred = self.infer_expr_type(expr);
+                    if self.contract.wit.is_some()
+                        && *ty != HirType::Any
+                        && !(ty == &HirType::Number
+                            && inferred == HirType::Union(vec![HirType::Number, HirType::Void]))
+                    {
+                        self.check_typed_value(expr, ty)?;
+                    }
                     if super::time::is_time(ty) {
                         ensure!(
                             ty == &inferred,
@@ -343,7 +373,10 @@ impl<'a> FunctionLowerer<'a> {
                         )
                     } else {
                         (
-                            if super::objects::is_object(ty) && super::objects::is_object(&inferred)
+                            if matches!(ty, HirType::Tuple(_))
+                                || (super::values::is_string_type(ty) && *ty != HirType::String)
+                                || super::objects::is_object(ty)
+                                    && super::objects::is_object(&inferred)
                             {
                                 ty.clone()
                             } else {
@@ -433,6 +466,13 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn return_expression(&mut self, expr: &Expr) -> Result<Value> {
+        if self.contract.wit.is_some() {
+            self.check_typed_value(expr, self.return_type)?;
+        }
+        if matches!(self.return_type, HirType::Tuple(_)) {
+            self.check_typed_value(expr, self.return_type)?;
+            return self.expression(expr);
+        }
         if let HirType::Promise(result) = self.infer_expr_type(expr) {
             ensure!(
                 self.is_async,
@@ -478,7 +518,7 @@ impl<'a> FunctionLowerer<'a> {
         }
         if is_text_or_bytes(self.return_type) {
             self.text_or_bytes_operand(expr)
-        } else if self.return_type == &HirType::String {
+        } else if super::values::is_string_type(self.return_type) {
             self.string_receiver(expr)
         } else if super::bytes::is_byte_view(self.return_type) {
             self.byte_receiver(expr)
@@ -710,6 +750,11 @@ impl<'a> FunctionLowerer<'a> {
                 _ => None,
             };
             let argument_type = self.infer_expr_type(arg);
+            if let Some(expected) = expected
+                && (self.contract.wit.is_some() || matches!(expected, HirType::Tuple(_)))
+            {
+                self.check_typed_value(arg, expected)?;
+            }
             if expected.is_some_and(super::values::is_dynamic) {
                 arg_vals.push(self.value_operand(arg)?);
                 continue;
@@ -1214,6 +1259,11 @@ impl<'a> FunctionLowerer<'a> {
                     true,
                 ))
             }
+            Expr::IndexSet { object, .. } | Expr::PropertySet { object, .. }
+                if matches!(self.infer_expr_type(object), HirType::Tuple(_)) =>
+            {
+                bail!("Tuple mutation is unsupported; construct a new fixed tuple")
+            }
             Expr::Array(items) => self.new_value_array(items),
             Expr::PropertyGet {
                 object, property, ..
@@ -1407,6 +1457,21 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(if *prefix { updated } else { previous })
             }
             Expr::LocalSet(id, expr) => {
+                let declared = self.local_types.get(id).cloned();
+                if let Some(ty) = &declared
+                    && (self.contract.wit.is_some() || matches!(ty, HirType::Tuple(_)))
+                {
+                    self.check_typed_value(expr, ty)?;
+                    if matches!(ty, HirType::Tuple(_))
+                        || super::objects::is_object(ty)
+                        || (super::values::is_string_type(ty) && *ty != HirType::String)
+                    {
+                        let value = self.expression(expr)?;
+                        self.locals.insert(*id, value);
+                        self.narrowings.remove(id);
+                        return Ok(value);
+                    }
+                }
                 if self
                     .local_types
                     .get(id)
@@ -1457,6 +1522,7 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 let value = self.expression(expr)?;
                 self.local_types.insert(*id, inferred);
+                self.narrowings.remove(id);
                 self.locals.insert(*id, value);
                 Ok(value)
             }
@@ -1545,7 +1611,9 @@ impl<'a> FunctionLowerer<'a> {
                     Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
                 } else {
                     ensure!(
-                        self.infer_expr_type(object) == HirType::Array(Box::new(HirType::String)),
+                        matches!(self.infer_expr_type(object), HirType::Tuple(_))
+                            || self.infer_expr_type(object)
+                                == HirType::Array(Box::new(HirType::String)),
                         "Unsupported length receiver"
                     );
                     let arr_ptr = self.expression(object)?;
@@ -1564,6 +1632,9 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
             Expr::IndexGet { object, index, .. } => {
+                if let HirType::Tuple(types) = self.infer_expr_type(object) {
+                    return self.tuple_index(object, index, &types);
+                }
                 if super::objects::is_object(&self.infer_expr_type(object)) {
                     return self.object_get(object, index);
                 }

@@ -13,6 +13,11 @@ pub(crate) const ARRAY_TYPE: &str = "__perry_internal_array";
 
 pub(crate) const VALUE_TYPE: &str = "__perry_internal_value";
 
+pub(crate) fn is_string_type(ty: &HirType) -> bool {
+    matches!(ty, HirType::String | HirType::StringLiteral(_))
+        || matches!(ty, HirType::Union(types) if !types.is_empty() && types.iter().all(|ty| matches!(ty, HirType::StringLiteral(_))))
+}
+
 pub(crate) fn value_type() -> HirType {
     HirType::Named(VALUE_TYPE.into())
 }
@@ -71,7 +76,8 @@ impl ValueTag {
             HirType::Null => Self::Null,
             HirType::Boolean => Self::Boolean,
             HirType::Number => Self::Number,
-            HirType::String => Self::String,
+            ty if is_string_type(ty) => Self::String,
+            HirType::Tuple(_) => Self::Array,
             HirType::Named(name) if name == ARRAY_TYPE => Self::Array,
             ty if super::bytes::is_byte_view(ty) => Self::Bytes,
             ty if super::objects::is_object(ty) => Self::Object,
@@ -190,6 +196,7 @@ fn contains_dynamic(ty: &HirType) -> bool {
     match ty {
         ty if super::objects::is_object(ty) => true,
         HirType::Promise(inner) | HirType::Array(inner) => contains_dynamic(inner),
+        HirType::Tuple(_) => true,
         HirType::Union(types)
         | HirType::Generic {
             type_args: types, ..

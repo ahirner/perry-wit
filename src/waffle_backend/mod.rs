@@ -33,6 +33,7 @@ mod text_or_bytes;
 mod time;
 mod values;
 mod visit;
+mod wit;
 
 use anyhow::{Context, Result};
 use perry_hir::ir::Module as HirModule;
@@ -75,6 +76,31 @@ pub fn compile_typescript(
     file_name: &str,
     options: &WaffleCompileOptions,
 ) -> Result<WaffleCompiled> {
+    compile_source(ts_source, file_name, options, None)
+}
+
+/// Compiles against a resolved WIT world, using the generated SDK implementation names.
+pub fn compile_typescript_for_world(
+    ts_source: &str,
+    file_name: &str,
+    options: &WaffleCompileOptions,
+    resolve: wit_parser::Resolve,
+    world: wit_parser::WorldId,
+) -> Result<WaffleCompiled> {
+    compile_source(
+        ts_source,
+        file_name,
+        options,
+        Some(wit::WitExports::new(resolve, world)?),
+    )
+}
+
+fn compile_source(
+    ts_source: &str,
+    file_name: &str,
+    options: &WaffleCompileOptions,
+    exports: Option<wit::WitExports>,
+) -> Result<WaffleCompiled> {
     if options.audit_dependencies {
         audit::audit_no_llvm(include_str!("../../Cargo.lock"))
             .context("LLVM audit verification failed")?;
@@ -83,29 +109,36 @@ pub fn compile_typescript(
     let mut ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
     text_contract::validate_ast_text(&ast).context("Source text contract validation failed")?;
+    if exports.is_some() {
+        wit::validate_source(&ast)?;
+    }
     let bindings = source::resolve_bindings(&mut ast)?;
     let hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
     source::validate_lowering(&hir)?;
 
-    compile_resolved_hir(hir, options, &bindings)
+    compile_resolved_hir(hir, options, &bindings, exports)
 }
 
 /// Compiles Perry HIR by taking ownership, avoiding redundant cloning of the HIR.
 pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
-    compile_resolved_hir(hir, options, &source::SourceBindings::default())
+    compile_resolved_hir(hir, options, &source::SourceBindings::default(), None)
 }
 
 fn compile_resolved_hir(
     mut hir: HirModule,
     options: &WaffleCompileOptions,
     bindings: &source::SourceBindings,
+    exports: Option<wit::WitExports>,
 ) -> Result<WaffleCompiled> {
     objects::resolve_declared_types(&mut hir)?;
+    if let Some(exports) = &exports {
+        exports.validate(&hir)?;
+    }
     values::resolve_types(&mut hir);
     text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
-    let contract = resolve::resolve_contract(&hir, bindings)?;
+    let contract = resolve::resolve_contract(&hir, bindings, exports)?;
     let waffle_mod = ssa::lower_module(&hir, &contract)?;
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
@@ -118,7 +151,20 @@ fn compile_resolved_hir(
             .exports
             .iter()
             .any(|export| export.name == "cabi_post_run");
-        let (wat, bytes) = component::frame_component(&core, &contract, has_post_return)?;
+        let (wat, bytes) = if let Some(exports) = &contract.wit {
+            anyhow::ensure!(
+                contract.intrinsics.values().all(|intrinsic| matches!(
+                    intrinsic,
+                    resolve::TypedIntrinsic::Temporal(_)
+                        | resolve::TypedIntrinsic::DateNew
+                        | resolve::TypedIntrinsic::DecoderNew
+                )) && contract.promises.is_none(),
+                "Resolved WIT world framing does not yet support host capabilities or retained tasks"
+            );
+            exports.frame(&core)?
+        } else {
+            component::frame_component(&core, &contract, has_post_return)?
+        };
         (Some(wat), Some(bytes))
     } else {
         (None, None)

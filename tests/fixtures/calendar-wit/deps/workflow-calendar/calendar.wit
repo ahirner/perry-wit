@@ -1,0 +1,11 @@
+package workflow:calendar@0.1.0;
+
+interface dates {
+  /// Exactly ten ASCII bytes in YYYY-MM-DD form. A fixed tuple avoids heap allocation.
+  type iso-date = tuple<u8, u8, u8, u8, u8, u8, u8, u8, u8, u8>;
+  record shift { date: iso-date, days: s32 }
+  enum error { invalid-date, out-of-range }
+  /// Shift by whole days without reading a clock. Invalid dates and offsets
+  /// outside years 0001–9999 return errors rather than normalizing or wrapping.
+  offset: func(request: shift) -> result<iso-date, error>;
+}

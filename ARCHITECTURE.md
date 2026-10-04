@@ -121,6 +121,7 @@ It eliminates in-Wasm JavaScript interpreters (such as QuickJS, SpiderMonkey, or
   - **WASI 0.3 Clocks Adapter:** When `uses_p3_clocks` is detected, the component embeds a canonical adapter linking `wasi:clocks/monotonic-clock@0.3.0#wait-for` to the core guest module, converting milliseconds to nanoseconds.
   - **Canonical Lift & Lower:** Exported functions (e.g. `run: async func(input: f64) -> f64`) are lifted using canonical async ABI primitives.
   - **Import Wiring:** Host imports (e.g. `host-double`, `read-chunk`) are canonically lowered and wired to the guest's import table.
+  - **Resolved WIT Exports:** `src/waffle_backend/wit.rs` validates source signatures against a resolved world, generates SSA adapters using `wit-parser` signatures/layouts, and delegates synchronous component encoding to `wit-component`. Records, fixed tuples, enums, and result returns reuse the managed guest heap; every export shares one guest instance and canonical post-return cleanup. Calendar exercises this path through its production WIT. Imported and async WIT contracts remain open.
 
 ---
 

@@ -189,9 +189,17 @@ Parsing, range, and unsupported bracket annotations throw numeric `1`, `2`, and 
 Object overloads, other duration fields, options, timezone databases, and implicit
 JSON serialization are unsupported; serialize explicitly with `toString()`.
 The [UTC fixture](tests/fixtures/temporal_utc.ts) restricts interchange to
-`YYYY-MM-DDTHH:mm:ss[.1–9 digits]Z`. The [calendar source port](tests/fixtures/temporal_calendar.ts)
-preserves strict years 0001–9999 and checked whole-day offsets. These fixtures use
-P3 string/number/result boundaries; the original production WIT bindings remain R9 work.
+`YYYY-MM-DDTHH:mm:ss[.1–9 digits]Z`. The [calendar component](tests/fixtures/calendar_component.ts)
+preserves strict years 0001–9999 and checked whole-day offsets through runner's
+original `workflow:calendar/dates@0.1.0` record, fixed tuple, and result-enum contract.
+`waffle_backend::compile_typescript_for_world` accepts a resolved WIT world and
+uses the generated SDK's implementation names. Its current synchronous export path
+supports booleans, 8–32-bit integers, floats, strings, records, fixed tuples, enums,
+and result returns, including indirect parameters. Integer outputs are range-checked;
+tuple indexing is bounds-checked and tuple mutation is diagnosed. It uses the shared
+allocator and canonical post-return cleanup, verified under a 256 KiB memory cap.
+Imported functions/resources, async WIT exports, result parameters, lists, options,
+and 64-bit integers remain migration work; the production CLI still uses the legacy path.
 Shared tagged values preserve strict equality, truthiness, type tags, typed object
 fields, and retained `Promise<any>` outcomes. Typed boundaries validate the stored
 kind and throw numeric `12` on a mismatch. Public `any` component parameters/results

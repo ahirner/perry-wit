@@ -43,7 +43,8 @@ pub(super) fn is_reference(ty: &HirType) -> bool {
             true
         }
         ty if crate::waffle_backend::filesystem::is_stats(ty) => true,
-        HirType::String | HirType::Promise(_) => true,
+        ty if crate::waffle_backend::values::is_string_type(ty) => true,
+        HirType::Tuple(_) | HirType::Promise(_) => true,
         HirType::Array(inner) => **inner == HirType::String,
         HirType::Named(name) => {
             name == SCALAR_ITERATION
@@ -66,7 +67,7 @@ pub(super) enum StringKind {
 impl StringKind {
     pub(super) fn of(ty: &HirType) -> Option<Self> {
         match ty {
-            HirType::String => Some(Self::Present),
+            ty if crate::waffle_backend::values::is_string_type(ty) => Some(Self::Present),
             HirType::Void => Some(Self::Undefined),
             HirType::Union(types)
                 if types.len() == 2
@@ -83,6 +84,14 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::IndexGet { object, index }
+                if matches!(self.infer_expr_type(object), HirType::Tuple(_)) =>
+            {
+                let HirType::Tuple(types) = self.infer_expr_type(object) else {
+                    unreachable!()
+                };
+                super::tuples::element_type(&types, index).unwrap_or(HirType::Unknown)
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) => {
@@ -175,7 +184,10 @@ impl FunctionLowerer<'_> {
                         &self.infer_expr_type(object),
                     )
                     || self.is_scalar_iteration(object)
-                    || matches!(self.infer_expr_type(object), HirType::Array(_))) =>
+                    || matches!(
+                        self.infer_expr_type(object),
+                        HirType::Array(_) | HirType::Tuple(_)
+                    )) =>
             {
                 HirType::Number
             }

@@ -20,6 +20,7 @@ use super::visit::visit_function_expressions;
 /// The nature of input accepted by the module entry point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvedInputKind {
+    Wit,
     Number,
     Boolean,
     String,
@@ -136,6 +137,7 @@ impl TypedIntrinsic {
 /// Validated contract containing typed operations and module signatures.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedContract {
+    pub(crate) wit: Option<super::wit::WitExports>,
     pub(crate) literal_shapes: BTreeMap<String, Vec<String>>,
     pub(crate) promises: Option<super::promises::PromisePlan>,
     pub(crate) input_kind: ResolvedInputKind,
@@ -239,6 +241,7 @@ impl ResolvedContract {
 pub(crate) fn resolve_contract(
     hir: &HirModule,
     bindings: &super::source::SourceBindings,
+    wit: Option<super::wit::WitExports>,
 ) -> Result<ResolvedContract> {
     ensure!(
         hir.init.is_empty(),
@@ -385,7 +388,9 @@ pub(crate) fn resolve_contract(
         .find(|f| f.is_exported)
         .unwrap_or(&hir.functions[0]);
 
-    let input_kind = if let Some(first_param) = entry_func.params.first() {
+    let input_kind = if wit.is_some() {
+        ResolvedInputKind::Wit
+    } else if let Some(first_param) = entry_func.params.first() {
         match &first_param.ty {
             HirType::Named(name) if name == "ByteStream" => ResolvedInputKind::ByteStream,
             ty if super::values::is_dynamic(ty) => ResolvedInputKind::Number,
@@ -446,6 +451,7 @@ pub(crate) fn resolve_contract(
         "Stream operations require a ByteStream entry input"
     );
     Ok(ResolvedContract {
+        wit,
         literal_shapes: hir
             .classes
             .iter()

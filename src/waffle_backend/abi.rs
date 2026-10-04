@@ -173,6 +173,7 @@ pub(crate) fn build_export_wrapper(
         };
     }
     match export.convention {
+        ExportConvention::ResolvedWit => unreachable!("resolved WIT uses its schema adapter"),
         ExportConvention::Direct if super::structured::is_string_array(callee.success_type()) => {
             let block = outcome.ok_block;
             let descriptor = decode_payload(&mut body, block, outcome.payload, true);

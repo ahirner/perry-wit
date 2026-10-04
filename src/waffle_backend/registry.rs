@@ -18,10 +18,13 @@ use crate::waffle_backend::resolve::{ResolvedContract, TypedIntrinsic};
 /// Host-facing calling convention, separate from the exception-aware guest ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExportConvention {
+    ResolvedWit,
     /// Exported function returning core Wasm values directly (`[]`, `[f64]`, `[i32]`).
     Direct,
     /// Exported function returning a WIT Result via memory retptr `[i32]`.
-    WitResult { success: ValuePayload },
+    WitResult {
+        success: ValuePayload,
+    },
 }
 
 /// Payload representations supported by WIT result adapters.
@@ -466,7 +469,15 @@ impl ModuleRegistry {
         // 3. Pre-declare all functions and establish complete FunctionInfo records
         let mut functions = BTreeMap::new();
         for func in &hir.functions {
-            let is_exported = func.is_exported || (func.id == contract.entry_func_id);
+            let wit_export = contract
+                .wit
+                .as_ref()
+                .and_then(|wit| wit.functions.get(&func.name));
+            let is_exported = if contract.wit.is_some() {
+                wit_export.is_some()
+            } else {
+                func.is_exported || (func.id == contract.entry_func_id)
+            };
 
             let mut ret_ty = &func.return_type;
             while let HirType::Promise(inner) = ret_ty {
@@ -504,7 +515,11 @@ impl ModuleRegistry {
                 .map(|p| map_type_to_waffle(&p.ty))
                 .collect::<Result<Vec<_>>>()?;
 
-            let host_returns = map_return_type_to_waffle(&func.return_type)?;
+            let host_returns = if contract.wit.is_none() {
+                map_return_type_to_waffle(&func.return_type)?
+            } else {
+                vec![]
+            };
             let sig = module.signatures.push(SignatureData {
                 params: params.clone(),
                 returns: vec![Type::I32, Type::F64],
@@ -516,7 +531,9 @@ impl ModuleRegistry {
                 .push(FuncDecl::Body(sig, func.name.clone(), body));
 
             let export = if is_exported {
-                let name = if func.name == "main"
+                let name = if let Some(export) = wit_export {
+                    export.core_name.clone()
+                } else if func.name == "main"
                     || func.name == "experiment"
                     || func.id == contract.entry_func_id
                 {
@@ -524,17 +541,23 @@ impl ModuleRegistry {
                 } else {
                     func.name.clone()
                 };
-                let convention = if let Some(success) = result_success {
+                let convention = if wit_export.is_some() {
+                    ExportConvention::ResolvedWit
+                } else if let Some(success) = result_success {
                     ExportConvention::WitResult { success }
                 } else {
                     ExportConvention::Direct
                 };
                 let param_types: Vec<_> = func.params.iter().map(|p| p.ty.clone()).collect();
-                let export_params = canonical_param_types(&param_types)?;
-                let sig = module.signatures.push(SignatureData {
-                    params: export_params,
-                    returns: host_returns,
-                });
+                let signature = if let Some(export) = wit_export {
+                    contract.wit.as_ref().unwrap().signature(export)
+                } else {
+                    SignatureData {
+                        params: canonical_param_types(&param_types)?,
+                        returns: host_returns,
+                    }
+                };
+                let sig = module.signatures.push(signature);
                 let mut body = FunctionBody::new(module, sig);
                 body.set_terminator(body.entry, Terminator::Unreachable);
                 let func_index =
@@ -593,7 +616,8 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         ty if super::values::is_dynamic(ty) => Ok(Type::I32),
         HirType::Number | HirType::Any => Ok(Type::F64),
         HirType::Boolean => Ok(Type::I32),
-        HirType::String => Ok(Type::I32),
+        ty if super::values::is_string_type(ty) => Ok(Type::I32),
+        HirType::Tuple(_) => Ok(Type::I32),
         HirType::Promise(inner) if super::promises::is_task_outcome(inner) => Ok(Type::I32),
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
@@ -618,7 +642,8 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         ty if super::values::is_dynamic(ty) => Ok(vec![Type::F64]),
         HirType::Number | HirType::Any => Ok(vec![Type::F64]),
         HirType::Boolean => Ok(vec![Type::I32]),
-        HirType::String => Ok(vec![Type::I32]),
+        ty if super::values::is_string_type(ty) => Ok(vec![Type::I32]),
+        HirType::Tuple(_) => Ok(vec![Type::I32]),
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)

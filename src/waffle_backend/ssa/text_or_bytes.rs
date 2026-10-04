@@ -180,6 +180,33 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn narrow_type_guard(&mut self, expression: &Expr, truth: bool) {
+        if let Expr::Compare {
+            op: CompareOp::Eq | CompareOp::Ne,
+            left,
+            right,
+        } = expression
+        {
+            let local = match (left.as_ref(), right.as_ref()) {
+                (Expr::LocalGet(id), Expr::Undefined) | (Expr::Undefined, Expr::LocalGet(id)) => {
+                    Some(id)
+                }
+                _ => None,
+            };
+            if let Some(id) = local
+                && self.local_types.get(id)
+                    == Some(&HirType::Union(vec![HirType::Number, HirType::Void]))
+                && let Expr::Compare { op, .. } = expression
+            {
+                self.narrowings.insert(
+                    *id,
+                    if (*op == CompareOp::Eq) == truth {
+                        HirType::Void
+                    } else {
+                        HirType::Number
+                    },
+                );
+            }
+        }
         if let Some((id, ty)) = type_guard(expression, truth)
             && self.local_types.get(&id).is_some_and(is_text_or_bytes)
         {

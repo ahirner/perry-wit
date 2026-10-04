@@ -163,6 +163,14 @@ impl FunctionLowerer<'_> {
         key: &Expr,
         expression: &Expr,
     ) -> Result<Value> {
+        if self.contract.wit.is_some() {
+            let expected = self.object_property_type(receiver, key);
+            ensure!(
+                expected != HirType::Any,
+                "Record writes require a declared field"
+            );
+            self.check_typed_value(expression, &expected)?;
+        }
         let object = self.expression(receiver)?;
         let key = self.string_receiver(key)?;
         let (original, tag, payload) = self.tagged_value(expression)?;
