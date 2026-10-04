@@ -657,7 +657,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(Type::I32),
         ty if super::values::is_dynamic(ty) => Ok(Type::I32),
         HirType::Number | HirType::Any => Ok(Type::F64),
-        HirType::Boolean => Ok(Type::I32),
+        HirType::Boolean | HirType::BigInt => Ok(Type::I32),
         ty if super::values::is_string_type(ty) => Ok(Type::I32),
         HirType::Tuple(_) => Ok(Type::I32),
         HirType::Promise(inner) if super::promises::is_task_outcome(inner) => Ok(Type::I32),
@@ -672,7 +672,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         }
         ty if super::objects::is_object(ty) => Ok(Type::I32),
         ty if super::filesystem::is_stats(ty) => Ok(Type::I32),
-        HirType::Array(inner) if **inner == HirType::String => Ok(Type::I32),
+        HirType::Array(_) => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
     }
 }
@@ -684,7 +684,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::Void => Ok(vec![]),
         ty if super::values::is_dynamic(ty) => Ok(vec![Type::F64]),
         HirType::Number | HirType::Any => Ok(vec![Type::F64]),
-        HirType::Boolean => Ok(vec![Type::I32]),
+        HirType::Boolean | HirType::BigInt => Ok(vec![Type::I32]),
         ty if super::values::is_string_type(ty) => Ok(vec![Type::I32]),
         HirType::Tuple(_) => Ok(vec![Type::I32]),
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
@@ -697,7 +697,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         }
         ty if super::objects::is_object(ty) => Ok(vec![Type::I32]),
         ty if super::filesystem::is_stats(ty) => Ok(vec![Type::I32]),
-        HirType::Array(inner) if **inner == HirType::String => Ok(vec![Type::I32]),
+        HirType::Array(_) => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             Ok(vec![Type::I32])
         }

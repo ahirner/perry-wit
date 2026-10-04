@@ -384,6 +384,7 @@ impl SourceCalls {
                     receiver.sym == "performance" && receiver.ctxt == self.unresolved;
                 let builtin_date = receiver.sym == "Date" && receiver.ctxt == self.unresolved;
                 let builtin_process = receiver.sym == "process" && receiver.ctxt == self.unresolved;
+                let builtin_promise = receiver.sym == "Promise" && receiver.ctxt == self.unresolved;
                 if namespace.is_none()
                     && !builtin_math
                     && !builtin_console
@@ -391,6 +392,7 @@ impl SourceCalls {
                     && !builtin_performance
                     && !builtin_date
                     && !builtin_process
+                    && !builtin_promise
                 {
                     return Ok(None);
                 }
@@ -402,7 +404,11 @@ impl SourceCalls {
                     },
                     _ => bail!("Private capability member lookup is unsupported"),
                 };
-                if let Some(namespace) = namespace {
+                if builtin_promise {
+                    bail!(
+                        "Promise.{name} is unsupported; Promise combinators and factories are deferred under D5"
+                    )
+                } else if let Some(namespace) = namespace {
                     Ok(Some(namespace.operation(name)?))
                 } else if builtin_console {
                     Ok(Some(CapabilityOperation::Stdio(match name {
@@ -636,6 +642,7 @@ impl VisitMut for SourceCalls {
                 | "performance"
                 | "Date"
                 | "Temporal"
+                | "Promise"
                 | "process"
                 | "Object"
                 | "Array"

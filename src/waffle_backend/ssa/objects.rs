@@ -160,7 +160,11 @@ impl FunctionLowerer<'_> {
         object.index_signature.map_or(HirType::Any, |ty| *ty)
     }
 
-    pub(super) fn new_object(&mut self, expression: &Expr) -> Result<Value> {
+    pub(super) fn new_object(
+        &mut self,
+        expression: &Expr,
+        expected: Option<&ObjectType>,
+    ) -> Result<Value> {
         let fields = literal_properties(self.contract, expression)?
             .ok_or_else(|| anyhow::anyhow!("Expected a plain object literal"))?;
         let helpers = self.registry.object_helpers.unwrap();
@@ -173,8 +177,17 @@ impl FunctionLowerer<'_> {
         );
         self.reference_values.insert(object);
         for (name, expression) in fields {
+            let field_type = expected
+                .and_then(|record| record.properties.get(&name))
+                .map(|field| &field.ty);
             let key = self.expression(&Expr::String(name))?;
-            let (_, tag, payload) = self.tagged_value(expression)?;
+            let (tag, payload) = if let Some(ty) = field_type {
+                let value = self.typed_operand(expression, ty)?;
+                self.typed_value_parts(value, ty)?
+            } else {
+                let (_, tag, payload) = self.tagged_value(expression)?;
+                (tag, payload)
+            };
             self.call_completion(helpers.set, &[object, key, tag, payload]);
         }
         Ok(object)
@@ -186,8 +199,8 @@ impl FunctionLowerer<'_> {
         key: &Expr,
         expression: &Expr,
     ) -> Result<Value> {
+        let expected = self.object_property_type(receiver, key);
         if self.contract.wit.is_some() {
-            let expected = self.object_property_type(receiver, key);
             ensure!(
                 expected != HirType::Any,
                 "Record writes require a declared field"
@@ -196,7 +209,13 @@ impl FunctionLowerer<'_> {
         }
         let object = self.expression(receiver)?;
         let key = self.string_receiver(key)?;
-        let (original, tag, payload) = self.tagged_value(expression)?;
+        let (original, tag, payload) = if self.contract.wit.is_some() {
+            let value = self.typed_operand(expression, &expected)?;
+            let (tag, payload) = self.typed_value_parts(value, &expected)?;
+            (value, tag, payload)
+        } else {
+            self.tagged_value(expression)?
+        };
         self.call_completion(
             self.registry.object_helpers.unwrap().set,
             &[object, key, tag, payload],

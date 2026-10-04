@@ -5,6 +5,54 @@ use anyhow::{Result, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
 
 impl FunctionLowerer<'_> {
+    pub(super) fn typed_operand(
+        &mut self,
+        expression: &Expr,
+        expected: &HirType,
+    ) -> Result<waffle::Value> {
+        self.check_typed_value(expression, expected)?;
+        if let Some(inner) = crate::waffle_backend::nullable::inner(expected) {
+            let actual = self.infer_expr_type(expression);
+            if crate::waffle_backend::nullable::inner(&actual).is_some() {
+                return self.expression(expression);
+            }
+            if matches!(actual, HirType::Null | HirType::Void) {
+                return self.value_operand(expression);
+            }
+            let value = self.typed_operand(expression, inner)?;
+            return self.box_typed_value(value, inner);
+        }
+        if let HirType::Union(variants) = expected {
+            if let Ok(Some(fields)) = literal_properties(self.contract, expression)
+                && let Some((_, Expr::Bool(ok))) = fields.iter().find(|(name, _)| name == "ok")
+                && let Some(variant) = result_variant(variants, *ok)
+            {
+                return self.typed_operand(expression, variant);
+            }
+            if let Some(variant) = variants
+                .iter()
+                .find(|ty| self.matches_typed_value(expression, ty))
+            {
+                return self.typed_operand(expression, variant);
+            }
+        }
+        match (expression, expected) {
+            (Expr::Array(items), HirType::Array(inner)) if **inner == HirType::String => {
+                self.new_string_array(items)
+            }
+            (Expr::Array(items), HirType::Array(inner)) => {
+                self.new_value_array(items, Some(&vec![(**inner).clone(); items.len()]))
+            }
+            (Expr::Array(items), HirType::Tuple(types)) => self.new_value_array(items, Some(types)),
+            (_, HirType::Object(record))
+                if literal_properties(self.contract, expression)?.is_some() =>
+            {
+                self.new_object(expression, Some(record))
+            }
+            _ => self.expression(expression),
+        }
+    }
+
     pub(super) fn check_typed_value(&self, expression: &Expr, expected: &HirType) -> Result<()> {
         ensure!(
             self.matches_typed_value(expression, expected),
@@ -31,6 +79,9 @@ impl FunctionLowerer<'_> {
                 .any(|ty| self.matches_typed_value(expression, ty));
         }
         match (expression, expected) {
+            (Expr::Array(items), HirType::Array(inner)) => items
+                .iter()
+                .all(|item| self.matches_typed_value(item, inner)),
             (Expr::String(value), HirType::StringLiteral(expected)) => value == expected,
             (Expr::Array(items), HirType::Tuple(types)) => {
                 items.len() == types.len()

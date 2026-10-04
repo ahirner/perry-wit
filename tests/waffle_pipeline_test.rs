@@ -23,6 +23,33 @@ fn make_async_engine() -> Result<Engine> {
 }
 
 #[test]
+fn deferred_promise_combinators_are_rejected() {
+    for combinator in ["all", "race", "['all']", "['race']"] {
+        let member = if combinator.starts_with('[') {
+            combinator.to_string()
+        } else {
+            format!(".{combinator}")
+        };
+        let source = format!(
+            "export async function run():Promise<number> {{await Promise{member}([1,2]);return 0;}}"
+        );
+        let error =
+            compile_typescript_waffle(&source, "combinator.ts", &WaffleCompileOptions::default())
+                .expect_err("Promise combinators remain deferred under D5");
+        assert!(
+            format!("{error:#}").contains("deferred under D5"),
+            "{error:#}"
+        );
+    }
+    compile_typescript_waffle(
+        "export function run():number {const Promise={all:7};return Promise.all;}",
+        "shadow.ts",
+        &WaffleCompileOptions::default(),
+    )
+    .expect("a local Promise binding is unrelated to the global combinators");
+}
+
+#[test]
 fn runtime_delete_is_diagnosed_before_lowering_for_all_receiver_forms() {
     for body in [
         "const value={field:'x'}; delete value.field;",

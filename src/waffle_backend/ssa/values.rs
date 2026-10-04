@@ -72,7 +72,11 @@ impl FunctionLowerer<'_> {
         Ok(original)
     }
 
-    pub(super) fn new_value_array(&mut self, items: &[Expr]) -> Result<Value> {
+    pub(super) fn new_value_array(
+        &mut self,
+        items: &[Expr],
+        types: Option<&[HirType]>,
+    ) -> Result<Value> {
         let length = self.op(
             Operator::I32Const {
                 value: items.len().try_into()?,
@@ -89,7 +93,12 @@ impl FunctionLowerer<'_> {
         );
         self.reference_values.insert(array);
         for (index, item) in items.iter().enumerate() {
-            let value = self.value_operand(item)?;
+            let value = if let Some(types) = types {
+                let value = self.typed_operand(item, &types[index])?;
+                self.box_typed_value(value, &types[index])?
+            } else {
+                self.value_operand(item)?
+            };
             self.op(
                 Operator::I32Store {
                     memory: MemoryArg {
@@ -205,7 +214,11 @@ impl FunctionLowerer<'_> {
         Ok(self.box_value(tag, payload))
     }
 
-    fn typed_value_parts(&mut self, original: Value, ty: &HirType) -> Result<(Value, Value)> {
+    pub(super) fn typed_value_parts(
+        &mut self,
+        original: Value,
+        ty: &HirType,
+    ) -> Result<(Value, Value)> {
         if is_dynamic(ty) || crate::waffle_backend::nullable::inner(ty).is_some() {
             return Ok(self.value_parts(original));
         }

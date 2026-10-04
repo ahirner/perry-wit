@@ -3,6 +3,35 @@
 use perry_hir::ir::{Expr, Function, Stmt};
 use perry_hir::walker::walk_expr_children;
 
+pub(crate) fn contains_type(
+    ty: &perry_hir::types::Type,
+    predicate: fn(&perry_hir::types::Type) -> bool,
+) -> bool {
+    use perry_hir::types::Type;
+    if predicate(ty) {
+        return true;
+    }
+    match ty {
+        Type::Array(inner) | Type::Promise(inner) => contains_type(inner, predicate),
+        Type::Union(types)
+        | Type::Tuple(types)
+        | Type::Generic {
+            type_args: types, ..
+        } => types.iter().any(|ty| contains_type(ty, predicate)),
+        Type::Object(record) => {
+            record
+                .properties
+                .values()
+                .any(|field| contains_type(&field.ty, predicate))
+                || record
+                    .index_signature
+                    .as_deref()
+                    .is_some_and(|ty| contains_type(ty, predicate))
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn visit_function_expressions(function: &Function, visitor: &mut impl FnMut(&Expr)) {
     for parameter in &function.params {
         if let Some(default) = &parameter.default {

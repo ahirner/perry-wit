@@ -67,6 +67,7 @@ pub(crate) enum ValueTag {
     Instant = 13,
     PlainDateTime = 14,
     HttpResponse = 15,
+    WitU64 = 16,
 }
 
 impl ValueTag {
@@ -76,6 +77,7 @@ impl ValueTag {
             HirType::Null => Self::Null,
             HirType::Boolean => Self::Boolean,
             HirType::Number => Self::Number,
+            HirType::BigInt => Self::WitU64,
             ty if is_string_type(ty) => Self::String,
             HirType::Tuple(_) => Self::Array,
             HirType::Named(name) if name == ARRAY_TYPE => Self::Array,
@@ -83,6 +85,7 @@ impl ValueTag {
             ty if super::objects::is_object(ty) => Self::Object,
             ty if super::filesystem::is_stats(ty) => Self::Stats,
             ty if super::structured::is_string_array(ty) => Self::StringArray,
+            HirType::Array(_) => Self::Array,
             ty if super::decoder::is_decoder(ty) => Self::Decoder,
             HirType::Promise(_) => Self::Promise,
             ty if super::date::is_date(ty) => Self::Date,
@@ -111,6 +114,7 @@ pub(crate) struct ValueHelpers {
 #[derive(Clone, Copy)]
 pub(crate) struct ValueAccessHelpers {
     pub(crate) array_new: Func,
+    pub(crate) array_resize: Func,
     pub(crate) has: Func,
     pub(crate) get: Func,
     pub(crate) set: Func,
@@ -151,6 +155,7 @@ pub(crate) fn emit_access_runtime(
     Ok(ValueAccessHelpers {
         has: functions["value.has"],
         array_new: functions["value.array-new"],
+        array_resize: functions["value.array-resize"],
         get: functions["value.get"],
         set: functions["value.set"],
     })

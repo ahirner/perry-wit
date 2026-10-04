@@ -5,33 +5,18 @@ use perry_wit::waffle_backend::{
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 
-mod calendar {
-    wasmtime::component::bindgen!({path: "tests/fixtures/calendar-wit", world: "component"});
+mod records {
+    wasmtime::component::bindgen!({path: "tests/fixtures/record-boundary", world: "boundary"});
 }
 
-fn compile(source: &str) -> Result<WaffleCompiled> {
-    let (resolve, package) = perry_wit::component::wit::resolve_wit(std::path::Path::new(
-        "tests/fixtures/calendar-wit",
-    ))?;
-    let world = resolve.select_world(&[package], Some("component"))?;
-    compile_typescript_for_world(
-        source,
-        "calendar.ts",
-        &WaffleCompileOptions::default(),
-        resolve,
-        world,
-    )
-}
-
-fn iso(text: &str) -> calendar::exports::workflow::calendar::dates::IsoDate {
-    let b = text.as_bytes();
-    (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9])
+fn compile_records(source: &str) -> Result<WaffleCompiled> {
+    compile_world(source, include_str!("fixtures/record-boundary/world.wit"))
 }
 
 #[test]
-fn calendar_implements_the_production_wit_world_under_bounded_memory() -> Result<()> {
-    use calendar::exports::workflow::calendar::dates::{Error, Shift};
-    let compiled = compile(include_str!("fixtures/calendar_component.ts"))?;
+fn record_tuple_and_result_exports_remain_valid_under_bounded_memory() -> Result<()> {
+    use records::exports::test::records::transform::{Failure, Input};
+    let compiled = compile_records(include_str!("fixtures/record_boundary.ts"))?;
     let engine = Engine::default();
     let component = Component::new(&engine, compiled.component.unwrap())?;
     let mut store = Store::new(
@@ -39,31 +24,22 @@ fn calendar_implements_the_production_wit_world_under_bounded_memory() -> Result
         StoreLimitsBuilder::new().memory_size(262144).build(),
     );
     store.limiter(|limits: &mut StoreLimits| limits);
-    let instance = calendar::Component::instantiate(&mut store, &component, &Linker::new(&engine))?;
-    let dates = instance.workflow_calendar_dates();
-    for _ in 0..100 {
-        for (date, days, expected) in [
-            ("2024-02-28", 1, Ok(iso("2024-02-29"))),
-            ("2024-02-29", 1, Ok(iso("2024-03-01"))),
-            ("2000-03-01", -1, Ok(iso("2000-02-29"))),
-            ("1900-03-01", -1, Ok(iso("1900-02-28"))),
-            ("1970-01-01", -1, Ok(iso("1969-12-31"))),
-            ("0001-01-01", 0, Ok(iso("0001-01-01"))),
-            ("9999-12-31", 0, Ok(iso("9999-12-31"))),
-            ("0000-01-01", 0, Err(Error::InvalidDate)),
-            ("2023-02-29", 0, Err(Error::InvalidDate)),
-            ("2024/01/01", 0, Err(Error::InvalidDate)),
-            ("9999-12-31", 1, Err(Error::OutOfRange)),
-            ("0001-01-01", -1, Err(Error::OutOfRange)),
-            ("2000-01-01", i32::MAX, Err(Error::OutOfRange)),
-            ("2000-01-01", i32::MIN, Err(Error::OutOfRange)),
+    let instance = records::Boundary::instantiate(&mut store, &component, &Linker::new(&engine))?;
+    let transform = instance.test_records_transform();
+    for _ in 0..300 {
+        for (label, samples, adjust, expected) in [
+            ("漢字🙂", (4, 5, 6), -2, Ok(("漢字🙂!".into(), 13))),
+            ("zero", (-7, 3, 4), 0, Ok(("zero!".into(), 0))),
+            ("", (1, 2, 3), 0, Err(Failure::EmptyLabel)),
+            ("negative", (-9, 1, 2), 0, Err(Failure::Negative)),
         ] {
             assert_eq!(
-                dates.call_offset(
+                transform.call_summarize(
                     &mut store,
-                    Shift {
-                        date: iso(date),
-                        days
+                    &Input {
+                        label: label.into(),
+                        samples,
+                        adjust
                     }
                 )?,
                 expected
@@ -74,22 +50,22 @@ fn calendar_implements_the_production_wit_world_under_bounded_memory() -> Result
 }
 
 #[test]
-fn calendar_source_matches_the_generated_production_sdk() -> Result<()> {
+fn record_source_matches_the_generated_export_sdk() -> Result<()> {
     check_sdk_source(
-        "calendar-wit",
-        "component",
-        include_str!("fixtures/calendar_component.ts"),
+        include_str!("fixtures/record-boundary/world.wit"),
+        include_str!("fixtures/record_boundary.ts"),
     )
 }
 
-fn check_sdk_source(fixture: &str, world: &str, source: &str) -> Result<()> {
+fn check_sdk_source(wit: &str, source: &str) -> Result<()> {
     let project = tempfile::tempdir()?;
     std::fs::write(project.path().join("component.ts"), source)?;
+    let wit_dir = project.path().join("wit");
+    std::fs::create_dir(&wit_dir)?;
+    std::fs::write(wit_dir.join("world.wit"), wit)?;
     let sdk = perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
-        wit_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(fixture),
-        world: Some(world.into()),
+        wit_dir,
+        world: Some("boundary".into()),
         out_dir: project.path().join("types"),
         project_root: Some(project.path().into()),
         entry: "component.ts".into(),
@@ -207,37 +183,40 @@ fn integer_exports_reject_fractional_out_of_range_and_nonfinite_values() -> Resu
 
 #[test]
 fn resolved_wit_rejects_incompatible_source_contracts() {
-    let source = include_str!("fixtures/calendar_component.ts");
+    let source = include_str!("fixtures/record_boundary.ts");
     for (from, to) in [
-        ("datesOffset", "wrongName"),
-        ("days: number", "days: string"),
-        ("date: IsoDate", "wrong: IsoDate"),
+        ("transformSummarize", "wrongName"),
+        ("adjust: number", "adjust: string"),
         (
-            "number, number, number, number, number, number, number, number, number, number",
-            "number, number",
+            "samples: [number, number, number]",
+            "samples: [number, number]",
         ),
-        ("\"invalid-date\" | \"out-of-range\"", "string"),
-        ("request.date[index]", "request.date[10]"),
-        ("request.date[index]", "request.date['0']"),
-        ("request.date[index]", "(request as any).missing[index]"),
-        ("let date = \"\";", "let date = \"\"; request.days='wrong';"),
+        ("\"empty-label\" | \"negative\"", "string"),
+        ("input.samples[index]", "input.samples[3]"),
+        ("input.samples[index]", "input.samples['0']"),
+        ("input.samples[index]", "(input as any).missing[index]"),
         (
-            "return { ok: false, error: \"invalid-date\" };",
-            "return { ok: true, error: 'invalid-date' };",
+            "let total = input.adjust;",
+            "input.adjust='wrong';let total = 0;",
         ),
         (
-            "return { ok: false, error: \"invalid-date\" };",
-            "return { ok: false, error: 1 };",
+            "{ ok: false, error: \"empty-label\" }",
+            "{ ok: true, error: 'empty-label' }",
         ),
         (
-            "return { ok: false, error: \"invalid-date\" };",
-            "return { ok: false, error: 'wrong-error' };",
+            "{ ok: false, error: \"empty-label\" }",
+            "{ ok: false, error: 1 }",
         ),
-        ("code(text,0),code(text,1)", "'bad',code(text,1)"),
-        ("code(text,0),code(text,1)", "code(text,0)"),
+        (
+            "{ ok: false, error: \"empty-label\" }",
+            "{ ok: false, error: 'wrong-error' }",
+        ),
+        ("[input.label + \"!\", total]", "[total, total]"),
+        ("[input.label + \"!\", total]", "[input.label]"),
     ] {
+        assert!(source.contains(from), "missing replacement: {from}");
         assert!(
-            compile(&source.replace(from, to)).is_err(),
+            compile_records(&source.replace(from, to)).is_err(),
             "accepted {from} -> {to}"
         );
     }
@@ -403,15 +382,14 @@ fn nullable_and_variant_values_preserve_payloads_and_flat_join_bits() -> Result<
 }
 
 #[test]
-fn configuration_import_uses_the_consumers_original_result_option_and_error_contract() -> Result<()>
-{
+fn imports_preserve_missing_empty_and_variant_error_values() -> Result<()> {
     use wasmtime::component::Val;
-    let wit_dir = std::path::Path::new("tests/fixtures/catalog-config-wit");
+    let wit_dir = std::path::Path::new("tests/fixtures/optional-import");
     let (resolve, package) = perry_wit::component::wit::resolve_wit(wit_dir)?;
     let world = resolve.select_world(&[package], Some("boundary"))?;
     let compiled = compile_typescript_for_world(
-        include_str!("fixtures/catalog_config.ts"),
-        "catalog_config.ts",
+        include_str!("fixtures/optional_import.ts"),
+        "optional_import.ts",
         &WaffleCompileOptions::default(),
         resolve,
         world,
@@ -419,8 +397,8 @@ fn configuration_import_uses_the_consumers_original_result_option_and_error_cont
     let engine = Engine::default();
     let component = Component::new(&engine, compiled.component.unwrap())?;
     let mut linker = Linker::new(&engine);
-    linker.instance("wasi:config/store@0.2.0-rc.1")?.func_new(
-        "get",
+    linker.instance("test:lookup/service")?.func_new(
+        "lookup",
         |_store, _ty, params, results| {
             let Val::String(key) = &params[0] else {
                 unreachable!()
@@ -429,11 +407,12 @@ fn configuration_import_uses_the_consumers_original_result_option_and_error_cont
                 return Err(wasmtime::Error::msg("injected configuration host failure"));
             }
             results[0] = match key.as_str() {
+                "denied" => Val::Result(Err(Some(Box::new(Val::Variant("denied".into(), None))))),
                 "missing" => Val::Result(Ok(Some(Box::new(Val::Option(None))))),
                 "empty" => Val::Result(Ok(Some(Box::new(Val::Option(Some(Box::new(
                     Val::String(String::new()),
                 ))))))),
-                "upstream" | "io" => Val::Result(Err(Some(Box::new(Val::Variant(
+                "offline" => Val::Result(Err(Some(Box::new(Val::Variant(
                     key.clone(),
                     Some(Box::new(Val::String("漢字🙂".into()))),
                 ))))),
@@ -453,11 +432,11 @@ fn configuration_import_uses_the_consumers_original_result_option_and_error_cont
     let read = instance.get_typed_func::<(String,), (String,)>(&mut store, "read")?;
     for _ in 0..100 {
         for (key, expected) in [
-            ("missing", "visual"),
+            ("missing", "fallback"),
             ("empty", ""),
-            ("camera_group", "checkout"),
-            ("upstream", "upstream: 漢字🙂"),
-            ("io", "io: 漢字🙂"),
+            ("present", "checkout"),
+            ("denied", "denied"),
+            ("offline", "offline: 漢字🙂"),
         ] {
             assert_eq!(read.call(&mut store, (key.into(),))?.0, expected);
         }
@@ -470,9 +449,8 @@ fn configuration_import_uses_the_consumers_original_result_option_and_error_cont
 #[test]
 fn configuration_source_matches_the_generated_import_sdk() -> Result<()> {
     check_sdk_source(
-        "catalog-config-wit",
-        "boundary",
-        include_str!("fixtures/catalog_config.ts"),
+        include_str!("fixtures/optional-import/world.wit"),
+        include_str!("fixtures/optional_import.ts"),
     )
 }
 
@@ -647,6 +625,255 @@ fn wit_import_binding_identity_and_static_call_diagnostics() -> Result<()> {
         };
         let error = format!("{error:#}");
         assert!(error.contains(diagnostic), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
+fn typed_lists_preserve_nested_values_and_dense_mutation_under_collection() -> Result<()> {
+    const WIT: &str = "package test:lists; interface host {
+        record row {name:string,enabled:option<bool>,labels:list<string>,values:list<f64>}
+        echo:func(rows:list<row>)->list<row>;
+    } world boundary {import host; use host.{row};
+        export transform:func(rows:list<row>)->list<row>;
+        export bytes:func(value:list<u8>)->list<u8>;
+    }";
+    let source = r#"
+        import {echo} from "test:lists/host";
+        import type {Row} from "test:lists/host";
+        function label(value:string):string {
+            let index=0;
+            while(index<100) {const discarded=value+'x';index=index+1;}
+            return '追加🙂';
+        }
+        export function transform(rows:Row[]):Row[] {
+            const output:Row[]=[];
+            let index=0;
+            while(index<rows.length) {
+                const row=rows[index];
+                const values:number[]=[1,2];
+                values.push(index);
+                values[0]=row.values[0];
+                output.push({name:row.name,enabled:row.enabled,labels:[row.name+'!',label(row.name)],values:values});
+                index=index+1;
+            }
+            const retained=echo(output);
+            index=0;
+            while(index<500) {const discarded=echo(output);index=index+1;}
+            return retained;
+        }
+        export function bytes(value:Uint8Array):Uint8Array {return value;}
+    "#;
+    check_sdk_source(WIT, source)?;
+    let compiled = compile_world(source, WIT)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("test:lists/host")?
+        .func_new("echo", |_store, _ty, params, results| {
+            results[0] = params[0].clone();
+            Ok(())
+        })?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(524288).build(),
+    );
+    store.limiter(|limits: &mut StoreLimits| limits);
+    let instance = linker.instantiate(&mut store, &component)?;
+    let transform = instance.get_func(&mut store, "transform").unwrap();
+    use wasmtime::component::Val;
+    let row = |index: u32, transformed: bool| {
+        Val::Record(vec![
+            ("name".into(), Val::String(format!("品🙂{index}"))),
+            (
+                "enabled".into(),
+                Val::Option(Some(Box::new(Val::Bool(false)))),
+            ),
+            (
+                "labels".into(),
+                Val::List(if transformed {
+                    vec![
+                        Val::String(format!("品🙂{index}!")),
+                        Val::String("追加🙂".into()),
+                    ]
+                } else {
+                    vec![]
+                }),
+            ),
+            (
+                "values".into(),
+                Val::List(if transformed {
+                    vec![
+                        Val::Float64(-1.25),
+                        Val::Float64(2.),
+                        Val::Float64(index as f64),
+                    ]
+                } else {
+                    vec![Val::Float64(-1.25)]
+                }),
+            ),
+        ])
+    };
+    for _ in 0..8 {
+        for count in [0, 1, 12] {
+            let input = Val::List((0..count).map(|index| row(index, false)).collect());
+            let mut output = [Val::Bool(false)];
+            transform.call(&mut store, &[input], &mut output)?;
+            assert_eq!(
+                output[0],
+                Val::List((0..count).map(|index| row(index, true)).collect())
+            );
+        }
+    }
+    let bytes = instance.get_typed_func::<(Vec<u8>,), (Vec<u8>,)>(&mut store, "bytes")?;
+    assert_eq!(
+        bytes.call(&mut store, ((0..=255).collect(),))?.0,
+        (0..=255).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn typed_list_bounds_and_invalid_mutations_do_not_create_holes() -> Result<()> {
+    const WIT: &str = "package test:bounds; world boundary {export run:func(index:f64)->result<list<f64>,list<f64>>;}";
+    let source = r#"
+        type Outcome={ok:true;value:number[]}|{ok:false;error:number[]};
+        export function run(index:number):Outcome {
+            const values:number[]=[10,20];
+            const alias=values;
+            try {alias[index]=30;const value=values[index];return {ok:true,value:values};}
+            catch(error) {return {ok:false,error:values};}
+        }
+    "#;
+    let compiled = compile_world(source, WIT)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run =
+        instance.get_typed_func::<(f64,), (Result<Vec<f64>, Vec<f64>>,)>(&mut store, "run")?;
+    for (index, expected) in [
+        (0., Ok(vec![30., 20.])),
+        (1., Ok(vec![10., 30.])),
+        (2., Err(vec![10., 20.])),
+        (-1., Err(vec![10., 20.])),
+        (0.5, Err(vec![10., 20.])),
+        (f64::NAN, Err(vec![10., 20.])),
+        (f64::INFINITY, Err(vec![10., 20.])),
+    ] {
+        assert_eq!(run.call(&mut store, (index,))?.0, expected);
+    }
+    for mutation in [
+        "alias.push('wrong')",
+        "alias[index]='wrong'",
+        "alias.length=10",
+        "alias[-1]='wrong'",
+        "delete alias[0]",
+        "(alias as string[]).push('wrong')",
+    ] {
+        assert!(
+            compile_world(&source.replace("alias[index]=30", mutation), WIT).is_err(),
+            "{mutation}"
+        );
+    }
+    assert!(compile_world(&source.replace("[10,20]", "[10,,20]"), WIT).is_err());
+    assert!(compile_world(&source.replace("[10,20]", "[10,'wrong']"), WIT).is_err());
+    Ok(())
+}
+
+#[test]
+fn telemetry_scalar_transport_preserves_u64_precision_and_optional_flags() -> Result<()> {
+    const WIT: &str = "package test:telemetry; interface host {
+        flags trace-flags {sampled}
+        record datetime {seconds:u64,nanoseconds:u32}
+        record packet {timestamp:option<datetime>,trace-flags:option<trace-flags>}
+        echo:func(packet:packet)->packet;
+    } world boundary {import host; use host.{packet,trace-flags};
+        export echo:func(packet:packet)->packet;
+        export select:func(enabled:option<bool>)->trace-flags;
+    }";
+    let source = r#"import {echo as hostEcho} from "test:telemetry/host"; import type {Packet,TraceFlags} from "test:telemetry/host";
+        export function echo(packet:Packet):Packet {const retained=hostEcho(packet);let index=0;while(index<500){const discarded=hostEcho(packet);index=index+1;}return retained;}
+        export function select(enabled:boolean|null|undefined):TraceFlags {
+            if(enabled===null||enabled===undefined) {return {};}
+            return {sampled:enabled};
+        }"#;
+    check_sdk_source(WIT, source)?;
+    let compiled = compile_world(source, WIT)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("test:telemetry/host")?
+        .func_new("echo", |_store, _ty, params, results| {
+            results[0] = params[0].clone();
+            Ok(())
+        })?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(262144).build(),
+    );
+    store.limiter(|limits: &mut StoreLimits| limits);
+    let instance = linker.instantiate(&mut store, &component)?;
+    let echo = instance.get_func(&mut store, "echo").unwrap();
+    use wasmtime::component::Val;
+    let select = instance.get_func(&mut store, "select").unwrap();
+    for enabled in [None, Some(false), Some(true)] {
+        let mut result = [Val::Bool(false)];
+        select.call(
+            &mut store,
+            &[Val::Option(enabled.map(|value| Box::new(Val::Bool(value))))],
+            &mut result,
+        )?;
+        assert_eq!(
+            result[0],
+            Val::Flags(if enabled == Some(true) {
+                vec!["sampled".into()]
+            } else {
+                vec![]
+            })
+        );
+    }
+    for seconds in [0, 1, 9007199254740993, u64::MAX] {
+        for flags in [
+            None,
+            Some(Box::new(Val::Flags(vec![]))),
+            Some(Box::new(Val::Flags(vec!["sampled".into()]))),
+        ] {
+            let packet = Val::Record(vec![
+                (
+                    "timestamp".into(),
+                    Val::Option(Some(Box::new(Val::Record(vec![
+                        ("seconds".into(), Val::U64(seconds)),
+                        ("nanoseconds".into(), Val::U32(999999999)),
+                    ])))),
+                ),
+                ("trace-flags".into(), Val::Option(flags)),
+            ]);
+            let mut result = [Val::Bool(false)];
+            echo.call(&mut store, std::slice::from_ref(&packet), &mut result)?;
+            assert_eq!(result[0], packet);
+        }
+    }
+    for operation in [
+        "return value+value;",
+        "value++;return value;",
+        "return -value;",
+        "return +value;",
+        "if(value){return value;}return value;",
+        "if(value===value){return value;}return value;",
+        "return 1n;",
+    ] {
+        let source = format!("export function run(value:bigint):bigint {{{operation}}}");
+        assert!(
+            compile_world(
+                &source,
+                "package test:bigint; world boundary {export run:func(value:u64)->u64;}"
+            )
+            .is_err(),
+            "{operation}"
+        );
     }
     Ok(())
 }

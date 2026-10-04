@@ -1,0 +1,11 @@
+package test:lookup;
+
+interface service {
+  variant failure { denied, offline(string) }
+  lookup: func(name: string) -> result<option<string>, failure>;
+}
+
+world boundary {
+  import service;
+  export read: func(key: string) -> string;
+}

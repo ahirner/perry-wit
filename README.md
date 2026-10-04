@@ -189,21 +189,25 @@ Parsing, range, and unsupported bracket annotations throw numeric `1`, `2`, and 
 Object overloads, other duration fields, options, timezone databases, and implicit
 JSON serialization are unsupported; serialize explicitly with `toString()`.
 The [UTC fixture](tests/fixtures/temporal_utc.ts) restricts interchange to
-`YYYY-MM-DDTHH:mm:ss[.1–9 digits]Z`. The [calendar component](tests/fixtures/calendar_component.ts)
-preserves strict years 0001–9999 and checked whole-day offsets through runner's
-original `workflow:calendar/dates@0.1.0` record, fixed tuple, and result-enum contract.
+`YYYY-MM-DDTHH:mm:ss[.1–9 digits]Z`. The [day-shift fixture](tests/fixtures/temporal_shift.ts)
+checks timezone-free calendar arithmetic and codec errors.
 `waffle_backend::compile_typescript_for_world` accepts a resolved WIT world and
 uses the generated SDK's implementation names. Its synchronous import/export path
 supports booleans, 8–32-bit integers, floats, strings, records, fixed tuples, enums,
-variants, results, and nullable options, including indirect parameters. Integer outputs are range-checked;
-tuple indexing is bounds-checked and tuple mutation is diagnosed. It uses the shared
-allocator and canonical post-return cleanup, verified under a 256 KiB memory cap.
-Named and namespace calls to imported WIT interfaces use their exact module names;
-the generated `imports.d.ts` exposes their functions and interface-local type names.
-The [configuration fixture](tests/fixtures/catalog_config.ts) exercises product-catalog's
-original `wasi:config/store` result, optional value, and error contract. Missing values
-remain distinct from empty strings and false. Nested options, resources, async WIT,
-lists, and 64-bit integers remain migration work; the production CLI still uses the legacy path.
+variants, results, nullable options, typed lists, and flags with at most 32 fields.
+WIT `u64` values use lossless `bigint` transport; arithmetic, coercion, comparison,
+and literal construction are unsupported. Signed 64-bit values remain unsupported.
+Integer outputs and tuple/list indices are checked. Dense typed arrays support
+construction, indexed replacement, and single-element `push`; string arrays use
+separate immutable storage. Sparse and heterogeneous mutation is rejected.
+Named and namespace WIT imports retain binding identity; generated SDK modules
+expose matching functions and local type names. Small independent fixtures cover
+[records and tuples](tests/fixtures/record_boundary.ts) and
+[optional imports](tests/fixtures/optional_import.ts), including missing versus
+empty values, variant errors, and shared-heap cleanup under bounded memory.
+Runner is an external reference for requirements and optional smoke tests;
+its source and WIT definitions are not vendored. Nested options, resources, and
+async WIT remain migration work; the production CLI still uses the legacy path.
 Shared tagged values preserve strict equality, truthiness, type tags, typed object
 fields, and retained `Promise<any>` outcomes. Typed boundaries validate the stored
 kind and throw numeric `12` on a mismatch. Public `any` component parameters/results
@@ -346,8 +350,8 @@ for body overflow, `12` for invalid metadata/limits/indices, `100 +` the WASI HT
 error discriminant, and `200 +` the header error discriminant. Non-2xx statuses
 remain responses. Traps and interrupted calls require store disposal. HTTP calls
 cannot yet be combined with stored async tasks; incoming handlers remain migration
-work. `tests/fixtures/http_document.ts` demonstrates the runner document
-contract with status, Content-Type, strict UTF-8, and JSON validation.
+work. The independent `tests/fixtures/http_json.ts` example checks status,
+Content-Type, strict UTF-8, and JSON validation under a 64 KiB response limit.
 
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary

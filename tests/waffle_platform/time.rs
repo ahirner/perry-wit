@@ -11,7 +11,7 @@ fn temporal_sdk_declares_only_the_supported_immutable_surface() -> Result<()> {
         &calendar,
         format!(
             "type Result<T,E> = T;\n{}",
-            include_str!("../fixtures/temporal_calendar.ts")
+            include_str!("../fixtures/temporal_shift.ts")
         ),
     )?;
     let utc = scratch.path().join("utc.ts");
@@ -85,22 +85,18 @@ async fn boolean_guards_short_circuit_effects_and_merge_local_assignments() -> R
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn calendar_source_preserves_strict_dates_and_distinct_domain_errors() -> Result<()> {
-    let source = include_str!("../fixtures/temporal_calendar.ts");
+async fn plain_datetime_source_checks_day_arithmetic_and_codec_errors() -> Result<()> {
+    let source = include_str!("../fixtures/temporal_shift.ts");
     let (mut store, instance) = instantiate(source, 262144, |_| Ok(())).await?;
     let run =
         instance.get_typed_func::<(String, f64), (Result<String, f64>,)>(&mut store, "run")?;
     for (input, days, expected) in [
-        ("2024-02-28", 1.0, Ok("2024-02-29".into())),
-        ("0001-01-01", 3_652_058.0, Ok("9999-12-31".into())),
-        ("9999-12-31", -3_652_058.0, Ok("0001-01-01".into())),
+        ("2024-02-28T12:30:00", 1.0, Ok("2024-02-29T12:30:00".into())),
+        ("2000-03-01", -1.0, Ok("2000-02-29T00:00:00".into())),
+        ("1900-03-01", -1.0, Ok("1900-02-28T00:00:00".into())),
         ("1900-02-29", 0.0, Err(1.0)),
-        ("0000-01-01", 0.0, Err(1.0)),
-        ("2024-1-01", 0.0, Err(1.0)),
-        ("2024-01-01T00:00", 0.0, Err(1.0)),
-        ("9999-12-31", 1.0, Err(2.0)),
-        ("0001-01-01", -1.0, Err(2.0)),
-        ("2024-01-01", 2_147_483_647.0, Err(2.0)),
+        ("not-a-date", 0.0, Err(1.0)),
+        ("2024-01-01", f64::INFINITY, Err(2.0)),
         ("2024-01-01", f64::NAN, Err(2.0)),
         ("2024-01-01", 0.5, Err(2.0)),
     ] {

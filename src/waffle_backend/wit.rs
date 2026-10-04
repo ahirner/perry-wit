@@ -213,6 +213,12 @@ impl WitWorld {
             return;
         };
         match &self.resolve.types[id].kind {
+            TypeDefKind::Flags(flags) => {
+                for flag in &flags.flags {
+                    pool.intern(&to_camel_case(&flag.name));
+                }
+            }
+            TypeDefKind::List(inner) => self.intern_type(*inner, pool),
             TypeDefKind::Type(ty) => self.intern_type(*ty, pool),
             TypeDefKind::Record(record) => {
                 for field in &record.fields {
@@ -311,6 +317,7 @@ fn record(fields: impl IntoIterator<Item = (String, HirType)>) -> HirType {
 
 fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
     Ok(match ty {
+        Type::U64 => HirType::BigInt,
         Type::Bool => HirType::Boolean,
         Type::U8
         | Type::S8
@@ -322,6 +329,26 @@ fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
         | Type::F64 => HirType::Number,
         Type::String => HirType::String,
         Type::Id(id) => match &resolve.types[id].kind {
+            TypeDefKind::Flags(flags) => {
+                ensure!(
+                    flags.flags.len() <= 32,
+                    "WIT flags currently support at most 32 fields"
+                );
+                let HirType::Object(mut object) = record(
+                    flags
+                        .flags
+                        .iter()
+                        .map(|flag| (to_camel_case(&flag.name), HirType::Boolean)),
+                ) else {
+                    unreachable!()
+                };
+                for field in object.properties.values_mut() {
+                    field.optional = true;
+                }
+                HirType::Object(object)
+            }
+            TypeDefKind::List(Type::U8) => HirType::Named("Uint8Array".into()),
+            TypeDefKind::List(inner) => HirType::Array(Box::new(hir_type(resolve, *inner)?)),
             TypeDefKind::Type(ty) => return hir_type(resolve, *ty),
             TypeDefKind::Option(inner) => {
                 let inner = hir_type(resolve, *inner)?;
@@ -394,14 +421,14 @@ fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
 
 pub(super) fn same_type(actual: &HirType, expected: &HirType) -> bool {
     match (actual, expected) {
+        (HirType::Array(actual), HirType::Array(expected)) => same_type(actual, expected),
         (HirType::Object(actual), HirType::Object(expected)) => {
             actual.index_signature.is_none()
                 && actual.properties.len() == expected.properties.len()
                 && expected.properties.iter().all(|(key, field)| {
-                    actual
-                        .properties
-                        .get(key)
-                        .is_some_and(|found| !found.optional && same_type(&found.ty, &field.ty))
+                    actual.properties.get(key).is_some_and(|found| {
+                        found.optional == field.optional && same_type(&found.ty, &field.ty)
+                    })
                 })
         }
         (HirType::Tuple(actual), HirType::Tuple(expected)) => {

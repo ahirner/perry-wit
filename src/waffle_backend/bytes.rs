@@ -23,7 +23,12 @@ pub(crate) fn is_byte_view(ty: &HirType) -> bool {
 }
 
 pub(crate) fn required(hir: &HirModule) -> bool {
-    let mut required = false;
+    let mut required = hir.extern_funcs.iter().any(|(_, params, result)| {
+        params
+            .iter()
+            .chain(std::iter::once(result))
+            .any(contains_byte_view)
+    });
     for function in &hir.functions {
         required |= contains_byte_view(&function.return_type)
             || function
@@ -60,12 +65,5 @@ pub(crate) fn emit_runtime(
 }
 
 fn contains_byte_view(ty: &HirType) -> bool {
-    match ty {
-        HirType::Union(types) => types.iter().any(contains_byte_view),
-        HirType::Promise(inner) => contains_byte_view(inner),
-        HirType::Generic { base, type_args } if base == "Result" => {
-            type_args.iter().any(contains_byte_view)
-        }
-        ty => is_byte_view(ty),
-    }
+    visit::contains_type(ty, is_byte_view)
 }

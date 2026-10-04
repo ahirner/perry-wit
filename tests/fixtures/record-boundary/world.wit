@@ -1,0 +1,9 @@
+package test:records;
+
+interface transform {
+  record input { label: string, samples: tuple<s16, s16, s16>, adjust: s16 }
+  enum failure { empty-label, negative }
+  summarize: func(input: input) -> result<tuple<string, s32>, failure>;
+}
+
+world boundary { export transform; }

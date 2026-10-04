@@ -1,3 +1,0 @@
-package workflow:calendar-component@0.1.0;
-
-world component { export workflow:calendar/dates@0.1.0; }

@@ -26,6 +26,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         }
         ty if crate::waffle_backend::filesystem::is_stats(ty) => Some("Stats"),
         HirType::Array(inner) if **inner == HirType::String => Some("string[]"),
+        HirType::Array(_) => Some("array"),
         HirType::Named(name) if name == "ByteStream" => Some("ByteStream"),
         _ => None,
     }
@@ -45,8 +46,8 @@ pub(super) fn is_reference(ty: &HirType) -> bool {
         }
         ty if crate::waffle_backend::filesystem::is_stats(ty) => true,
         ty if crate::waffle_backend::values::is_string_type(ty) => true,
-        HirType::Tuple(_) | HirType::Promise(_) => true,
-        HirType::Array(inner) => **inner == HirType::String,
+        HirType::Tuple(_) | HirType::Promise(_) | HirType::BigInt => true,
+        HirType::Array(_) => true,
         HirType::Named(name) => {
             name == SCALAR_ITERATION
                 || name == "Uint8Array"
@@ -85,6 +86,14 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::ArrayPush { .. } => HirType::Number,
+            Expr::IndexGet { object, .. } if matches!(self.infer_expr_type(object),HirType::Array(inner) if *inner!=HirType::String) =>
+            {
+                let HirType::Array(inner) = self.infer_expr_type(object) else {
+                    unreachable!()
+                };
+                *inner
+            }
             Expr::IndexGet { object, index }
                 if matches!(self.infer_expr_type(object), HirType::Tuple(_)) =>
             {

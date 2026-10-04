@@ -3,7 +3,7 @@
 use super::FunctionLowerer;
 use anyhow::{Result, bail, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
-use waffle::{BlockTarget, MemoryArg, Operator, Terminator, Type, Value};
+use waffle::{MemoryArg, Operator, Type, Value};
 
 pub(super) fn element_type(types: &[HirType], index: &Expr) -> Result<HirType> {
     let constant = match index {
@@ -49,44 +49,12 @@ impl FunctionLowerer<'_> {
             &[],
             &[Type::I32],
         );
-        let valid =
-            crate::waffle_backend::strings::valid_index(&mut self.body, self.block, index, count);
-        let present = self.body.add_block();
-        let absent = self.body.add_block();
-        self.body.set_terminator(
-            self.block,
-            Terminator::CondBr {
-                cond: valid,
-                if_true: BlockTarget {
-                    block: present,
-                    args: vec![],
-                },
-                if_false: BlockTarget {
-                    block: absent,
-                    args: vec![],
-                },
-            },
-        );
-        self.block = absent;
-        let error = self.op(
-            Operator::F64Const {
-                value: 12f64.to_bits(),
-            },
-            &[],
-            &[Type::F64],
-        );
-        self.emit_throw(error);
-        self.block = present;
+        let address = self.checked_array_slot(array, index, count, 4);
         let memory = MemoryArg {
             memory: self.registry.memory,
             offset: 0,
             align: 2,
         };
-        let data = self.op(Operator::I32Load { memory }, &[array], &[Type::I32]);
-        let index = self.op(Operator::I32TruncF64U, &[index], &[Type::I32]);
-        let stride = self.op(Operator::I32Const { value: 4 }, &[], &[Type::I32]);
-        let offset = self.op(Operator::I32Mul, &[index, stride], &[Type::I32]);
-        let address = self.op(Operator::I32Add, &[data, offset], &[Type::I32]);
         let boxed = self.op(Operator::I32Load { memory }, &[address], &[Type::I32]);
         self.extract_value(boxed, &ty)
     }

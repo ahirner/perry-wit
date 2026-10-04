@@ -18,7 +18,7 @@
     (memory.fill (i32.load (local.get $array)) (i32.const 0) (i32.mul (local.get $count) (i32.const 4)))
     (local.get $array))
 
-  (func $resize (param $array i32) (param $count i32)
+  (func $resize (export "value.array-resize") (param $array i32) (param $count i32)
     (local $data i32) (local $previous i32) (local $capacity i32) (local $inline i32) (local $next i32)
     (if (i32.gt_u (local.get $count) (i32.const 1073741821)) (then unreachable))
     (local.set $data (i32.load (local.get $array)))

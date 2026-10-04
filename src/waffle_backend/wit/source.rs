@@ -255,7 +255,10 @@ fn source_type(ty: &HirType) -> Result<String> {
         HirType::Null => "null".into(),
         HirType::Boolean => "boolean".into(),
         HirType::Number => "number".into(),
+        HirType::BigInt => "bigint".into(),
         HirType::String => "string".into(),
+        HirType::Array(inner) => format!("({})[]", source_type(inner)?),
+        HirType::Named(name) if name == "Uint8Array" => name.clone(),
         HirType::StringLiteral(value) => serde_json::to_string(value)?,
         HirType::Tuple(types) => format!(
             "[{}]",
@@ -277,7 +280,13 @@ fn source_type(ty: &HirType) -> Result<String> {
             let mut fields = record
                 .properties
                 .iter()
-                .map(|(name, field)| Ok(format!("{name}:{}", source_type(&field.ty)?)))
+                .map(|(name, field)| {
+                    Ok(format!(
+                        "{name}{}:{}",
+                        if field.optional { "?" } else { "" },
+                        source_type(&field.ty)?
+                    ))
+                })
                 .collect::<Result<Vec<_>>>()?;
             fields.sort();
             format!("{{{}}}", fields.join(";"))

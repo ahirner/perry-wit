@@ -17,6 +17,8 @@ use waffle::{
 };
 use wit_parser::{Int, SizeAlign, Type, TypeDefKind};
 
+mod flags;
+mod lists;
 mod variants;
 
 pub(in crate::waffle_backend) fn build_export_wrapper(
@@ -211,6 +213,7 @@ impl Adapter<'_> {
                 let target = match self.alias(ty) {
                     Type::F32 => CoreType::F32,
                     Type::F64 => CoreType::F64,
+                    Type::U64 => CoreType::I64,
                     _ => CoreType::I32,
                 };
                 self.convert_flat(value, target)
@@ -228,6 +231,7 @@ impl Adapter<'_> {
             Type::U32 | Type::S32 => (Operator::I32Load { memory }, CoreType::I32),
             Type::F32 => (Operator::F32Load { memory }, CoreType::F32),
             Type::F64 => (Operator::F64Load { memory }, CoreType::F64),
+            Type::U64 => (Operator::I64Load { memory }, CoreType::I64),
             Type::Id(id) if matches!(self.wit.resolve.types[id].kind, TypeDefKind::Enum(_)) => {
                 match self.sizes.size(&Type::Id(id)).size_wasm32() {
                     1 => (Operator::I32Load8U { memory }, CoreType::I32),
@@ -241,11 +245,25 @@ impl Adapter<'_> {
     }
     fn lift(&mut self, ty: Type, source: &mut Input<'_>) -> Result<Value> {
         let ty = self.alias(ty);
+        if ty == Type::U64 {
+            let value = self.read_scalar(ty, source)?;
+            let pointer = self.allocate(8, 8);
+            self.body.add_op(
+                self.block,
+                Operator::I64Store {
+                    memory: self.memory(0),
+                },
+                &[pointer, value],
+                &[],
+            );
+            return Ok(pointer);
+        }
         if let Some(shape) = self.variant(ty) {
             return self.lift_variant(ty, shape, source);
         }
         if let Type::Id(id) = ty {
             return match self.wit.resolve.types[id].kind.clone() {
+                TypeDefKind::Flags(flags) => self.lift_flags(&flags, source),
                 TypeDefKind::Record(record) => {
                     let object = self.call(self.registry.object_helpers.unwrap().new, &[]);
                     let offsets = self
@@ -267,6 +285,7 @@ impl Adapter<'_> {
                     }
                     Ok(object)
                 }
+                TypeDefKind::List(inner) => self.lift_list(inner, source),
                 TypeDefKind::Tuple(tuple) => {
                     let length = self.integer(tuple.types.len() as u32);
                     let array = self.call(self.registry.value_access.unwrap().array_new, &[length]);
@@ -381,11 +400,23 @@ impl Adapter<'_> {
     fn lower(&mut self, ty: Type, value: Value, pointer: Value, offset: u32) -> Result<()> {
         let ty = self.alias(ty);
         let memory = self.memory(offset);
+        if ty == Type::U64 {
+            let value = self.load_scalar(ty, value, 0)?;
+            self.body.add_op(
+                self.block,
+                Operator::I64Store { memory },
+                &[pointer, value],
+                &[],
+            );
+            return Ok(());
+        }
         if let Some(shape) = self.variant(ty) {
             return self.lower_variant(shape, value, pointer, offset);
         }
         if let Type::Id(id) = ty {
             match self.wit.resolve.types[id].kind.clone() {
+                TypeDefKind::Flags(flags) => self.lower_flags(&flags, value, pointer, offset)?,
+                TypeDefKind::List(inner) => self.lower_list(inner, value, pointer, offset)?,
                 TypeDefKind::Record(record) => {
                     let offsets = self
                         .sizes
@@ -535,6 +566,18 @@ impl Adapter<'_> {
         values: &mut Vec<Value>,
     ) -> Result<()> {
         let ty = self.alias(ty);
+        if let Type::Id(id) = ty
+            && let TypeDefKind::Flags(flags) = &self.wit.resolve.types[id].kind
+        {
+            values.push(self.load_scalar(flags::storage_type(flags), pointer, offset)?);
+            return Ok(());
+        }
+        if matches!(ty,Type::Id(id) if matches!(self.wit.resolve.types[id].kind,TypeDefKind::List(_)))
+        {
+            values.push(self.load_i32(pointer, offset));
+            values.push(self.load_i32(pointer, offset + 4));
+            return Ok(());
+        }
         if let Some(shape) = self.variant(ty) {
             return self.flatten_variant(ty, shape, pointer, offset, values);
         }

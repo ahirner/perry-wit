@@ -375,9 +375,14 @@ impl<'a> FunctionLowerer<'a> {
                             "HTTP response initializers must match their declared type"
                         );
                     }
-                    let (ty, val) = if super::nullable::inner(ty).is_some() {
+                    let (ty, val) = if self.contract.wit.is_some()
+                        && (super::objects::is_object(ty)
+                            || matches!(ty, HirType::Array(_) | HirType::Tuple(_)))
+                    {
+                        (ty.clone(), self.typed_operand(expr, ty)?)
+                    } else if super::nullable::inner(ty).is_some() {
                         self.check_typed_value(expr, ty)?;
-                        (ty.clone(), self.value_operand(expr)?)
+                        (ty.clone(), self.typed_operand(expr, ty)?)
                     } else if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
                         (
                             super::text_or_bytes::value_type(),
@@ -479,13 +484,19 @@ impl<'a> FunctionLowerer<'a> {
 
     fn return_expression(&mut self, expr: &Expr) -> Result<Value> {
         if super::nullable::inner(self.return_type).is_some() {
-            self.check_typed_value(expr, self.return_type)?;
-            return self.value_operand(expr);
+            return self.typed_operand(expr, &self.return_type.clone());
         }
         if self.contract.wit.is_some() {
             self.check_typed_value(expr, self.return_type)?;
+            if super::objects::is_object(self.return_type)
+                || matches!(self.return_type, HirType::Array(_) | HirType::Tuple(_))
+            {
+                return self.typed_operand(expr, &self.return_type.clone());
+            }
         }
-        if matches!(self.return_type, HirType::Tuple(_)) {
+        if matches!(self.return_type, HirType::Tuple(_))
+            || matches!(self.return_type,HirType::Array(inner) if **inner!=HirType::String)
+        {
             self.check_typed_value(expr, self.return_type)?;
             return self.expression(expr);
         }
@@ -751,6 +762,10 @@ impl<'a> FunctionLowerer<'a> {
             if property == "join" {
                 return self.array_join(object, args).map(Some);
             }
+            if property == "push" && self.is_dense_array(object) {
+                ensure!(args.len() == 1, "Typed array push requires one element");
+                return self.dense_push(object, &args[0]).map(Some);
+            }
             return self.string_method(object, property, args).map(Some);
         }
 
@@ -765,6 +780,12 @@ impl<'a> FunctionLowerer<'a> {
                 Expr::ExternFuncRef { param_types, .. } => param_types.get(index),
                 _ => None,
             };
+            if self.contract.wit.is_some()
+                && let Some(expected) = expected
+            {
+                arg_vals.push(self.typed_operand(arg, expected)?);
+                continue;
+            }
             if let Some(expected) = expected
                 && super::nullable::inner(expected).is_some()
             {
@@ -806,7 +827,8 @@ impl<'a> FunctionLowerer<'a> {
                 || matches!(&argument_type, HirType::Array(_))
             {
                 ensure!(
-                    expected == Some(&argument_type),
+                    expected
+                        .is_some_and(|expected| super::wit::same_type(expected, &argument_type)),
                     "Object arguments must match their declared parameter types"
                 );
             }
@@ -1101,6 +1123,24 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn condition(&mut self, expr: &Expr) -> Result<Value> {
+        let transported_integer = |ty: &HirType| {
+            *ty == HirType::BigInt || super::nullable::inner(ty) == Some(&HirType::BigInt)
+        };
+        ensure!(
+            !transported_integer(&self.infer_expr_type(expr)),
+            "WIT bigint values support transport only; truthiness is unsupported"
+        );
+        if let Expr::Compare { left, right, .. } = expr {
+            let left_type = self.infer_expr_type(left);
+            let right_type = self.infer_expr_type(right);
+            ensure!(
+                !(transported_integer(&left_type)
+                    && !matches!(right_type, HirType::Null | HirType::Void))
+                    && !(transported_integer(&right_type)
+                        && !matches!(left_type, HirType::Null | HirType::Void)),
+                "WIT bigint values support transport only; comparisons are unsupported"
+            );
+        }
         match expr {
             Expr::Bool(b) => {
                 let v = if *b { 1 } else { 0 };
@@ -1305,7 +1345,33 @@ impl<'a> FunctionLowerer<'a> {
             {
                 bail!("Tuple mutation is unsupported; construct a new fixed tuple")
             }
-            Expr::Array(items) => self.new_value_array(items),
+            Expr::PutValueSet {
+                target,
+                key,
+                value,
+                receiver,
+                ..
+            } if self.is_dense_array(target) => {
+                ensure!(
+                    self.same_object_reference(target, receiver),
+                    "Unsupported array assignment receiver"
+                );
+                self.dense_set(target, key, value)
+            }
+            Expr::ArrayPush {
+                array_id, value, ..
+            } => self.dense_push(&Expr::LocalGet(*array_id), value),
+            Expr::IndexSet {
+                object,
+                index,
+                value,
+            } if self.is_dense_array(object) => self.dense_set(object, index, value),
+            Expr::PropertySet { object, .. }
+                if matches!(self.infer_expr_type(object), HirType::Array(_)) =>
+            {
+                bail!("Typed array properties are read-only; use push to append elements")
+            }
+            Expr::Array(items) => self.new_value_array(items, None),
             Expr::PropertyGet {
                 object, property, ..
             } if super::values::has_dynamic_properties(&self.infer_expr_type(object)) => {
@@ -1367,11 +1433,11 @@ impl<'a> FunctionLowerer<'a> {
             Expr::ObjectKeys(object) => self.object_enumerate(object, false),
             Expr::ObjectValues(object) => self.object_enumerate(object, true),
             Expr::In { property, object } => self.object_has(property, object),
-            Expr::Object(_) => self.new_object(expr),
+            Expr::Object(_) => self.new_object(expr, None),
             Expr::New { class_name, .. }
                 if self.contract.literal_shapes.contains_key(class_name) =>
             {
-                self.new_object(expr)
+                self.new_object(expr, None)
             }
             Expr::PropertySet {
                 object,
@@ -1503,7 +1569,7 @@ impl<'a> FunctionLowerer<'a> {
                     && super::nullable::inner(ty).is_some()
                 {
                     self.check_typed_value(expr, ty)?;
-                    let value = self.value_operand(expr)?;
+                    let value = self.typed_operand(expr, ty)?;
                     self.locals.insert(*id, value);
                     self.narrowings.remove(id);
                     return Ok(value);
@@ -1512,11 +1578,11 @@ impl<'a> FunctionLowerer<'a> {
                     && (self.contract.wit.is_some() || matches!(ty, HirType::Tuple(_)))
                 {
                     self.check_typed_value(expr, ty)?;
-                    if matches!(ty, HirType::Tuple(_))
+                    if matches!(ty, HirType::Tuple(_) | HirType::Array(_))
                         || super::objects::is_object(ty)
                         || (super::values::is_string_type(ty) && *ty != HirType::String)
                     {
-                        let value = self.expression(expr)?;
+                        let value = self.typed_operand(expr, ty)?;
                         self.locals.insert(*id, value);
                         self.narrowings.remove(id);
                         return Ok(value);
@@ -1670,9 +1736,10 @@ impl<'a> FunctionLowerer<'a> {
                     Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
                 } else {
                     ensure!(
-                        matches!(self.infer_expr_type(object), HirType::Tuple(_))
-                            || self.infer_expr_type(object)
-                                == HirType::Array(Box::new(HirType::String)),
+                        matches!(
+                            self.infer_expr_type(object),
+                            HirType::Tuple(_) | HirType::Array(_)
+                        ),
                         "Unsupported length receiver"
                     );
                     let arr_ptr = self.expression(object)?;
@@ -1691,6 +1758,9 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
             Expr::IndexGet { object, index, .. } => {
+                if self.is_dense_array(object) {
+                    return self.dense_index(object, index);
+                }
                 if let HirType::Tuple(types) = self.infer_expr_type(object) {
                     return self.tuple_index(object, index, &types);
                 }

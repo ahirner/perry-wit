@@ -473,34 +473,21 @@ async fn source_validation_preserves_argument_order_and_errors_before_io() -> Re
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn runner_document_contract_checks_status_headers_text_and_json() -> Result<()> {
+async fn json_fetch_checks_status_media_type_and_payload() -> Result<()> {
     let server = HttpFixture::new(|request| {
         let (status, headers, body) = match request.target.as_str() {
             "/json" => (
                 200,
-                vec![(
-                    "Content-Type".into(),
-                    "application/json; charset=utf-8".into(),
-                )],
+                vec![("Content-Type".into(), "application/json".into())],
                 "{\"text\":\"é😀\"}".into(),
-            ),
-            "/text" => (
-                200,
-                vec![("Content-Type".into(), "Text/Plain; charset=utf-8".into())],
-                "é😀".into(),
-            ),
-            "/xml" => (
-                200,
-                vec![("Content-Type".into(), "application/xml".into())],
-                "<doc/>".into(),
             ),
             "/status" => (404, vec![], "missing".into()),
             "/missing" => (200, vec![], "missing".into()),
             "/duplicate" => (
                 200,
                 vec![
-                    ("Content-Type".into(), "text/plain".into()),
-                    ("Content-Type".into(), "text/plain".into()),
+                    ("Content-Type".into(), "application/json".into()),
+                    ("Content-Type".into(), "application/json".into()),
                 ],
                 "duplicate".into(),
             ),
@@ -518,18 +505,13 @@ async fn runner_document_contract_checks_status_headers_text_and_json() -> Resul
         };
         Reply::WithHeaders(status, headers, body)
     });
-    let (mut store, instance) = instantiate_source(
-        include_str!("../../../tests/fixtures/http_document.ts"),
-        524288,
-    )
-    .await?;
+    let (mut store, instance) =
+        instantiate_source(include_str!("../../../tests/fixtures/http_json.ts"), 524288).await?;
     let run =
         instance.get_typed_func::<(String, String), (Result<String, f64>,)>(&mut store, "run")?;
     for _ in 0..10 {
         for (path, expected) in [
             ("/json", Ok("{\"text\":\"é😀\"}".into())),
-            ("/text", Ok("é😀".into())),
-            ("/xml", Ok("<doc/>".into())),
             ("/status", Err(400.)),
             ("/missing", Err(401.)),
             ("/duplicate", Err(401.)),
@@ -673,7 +655,7 @@ fn http_sdk_checks_the_document_fixture_and_static_contract() -> Result<()> {
         &source,
         format!(
             "type Result<T,E>=T;\n{}",
-            include_str!("../../../tests/fixtures/http_document.ts")
+            include_str!("../../../tests/fixtures/http_json.ts")
         ),
     )?;
     let errors = scratch.path().join("errors.ts");
