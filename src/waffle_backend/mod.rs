@@ -16,6 +16,7 @@ mod http;
 mod json;
 pub(crate) mod libraries;
 pub(crate) mod link;
+mod nullable;
 mod objects;
 pub(crate) mod promises;
 mod random;
@@ -91,7 +92,7 @@ pub fn compile_typescript_for_world(
         ts_source,
         file_name,
         options,
-        Some(wit::WitExports::new(resolve, world)?),
+        Some(wit::WitWorld::new(resolve, world)?),
     )
 }
 
@@ -99,7 +100,7 @@ fn compile_source(
     ts_source: &str,
     file_name: &str,
     options: &WaffleCompileOptions,
-    exports: Option<wit::WitExports>,
+    exports: Option<wit::WitWorld>,
 ) -> Result<WaffleCompiled> {
     if options.audit_dependencies {
         audit::audit_no_llvm(include_str!("../../Cargo.lock"))
@@ -112,7 +113,7 @@ fn compile_source(
     if exports.is_some() {
         wit::validate_source(&ast)?;
     }
-    let bindings = source::resolve_bindings(&mut ast)?;
+    let bindings = source::resolve_bindings(&mut ast, exports.as_ref())?;
     let hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
     source::validate_lowering(&hir)?;
@@ -129,7 +130,7 @@ fn compile_resolved_hir(
     mut hir: HirModule,
     options: &WaffleCompileOptions,
     bindings: &source::SourceBindings,
-    exports: Option<wit::WitExports>,
+    exports: Option<wit::WitWorld>,
 ) -> Result<WaffleCompiled> {
     objects::resolve_declared_types(&mut hir)?;
     if let Some(exports) = &exports {
@@ -158,6 +159,7 @@ fn compile_resolved_hir(
                     resolve::TypedIntrinsic::Temporal(_)
                         | resolve::TypedIntrinsic::DateNew
                         | resolve::TypedIntrinsic::DecoderNew
+                        | resolve::TypedIntrinsic::WitImport { .. }
                 )) && contract.promises.is_none(),
                 "Resolved WIT world framing does not yet support host capabilities or retained tasks"
             );

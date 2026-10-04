@@ -119,7 +119,35 @@ impl ModuleRegistry {
     ) -> Result<Self> {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
+        let mut wit_imports = BTreeMap::new();
         for (name, intrinsic) in &contract.intrinsics {
+            if let TypedIntrinsic::WitImport { key, .. } = intrinsic {
+                let wit = contract.wit.as_ref().unwrap();
+                let import = &wit.imports[key];
+                let signature = wit
+                    .resolve
+                    .wasm_signature(wit_parser::abi::AbiVariant::GuestImport, &import.function);
+                let signature = module.signatures.push(SignatureData {
+                    params: signature
+                        .params
+                        .into_iter()
+                        .map(super::wit::core_type)
+                        .collect(),
+                    returns: signature
+                        .results
+                        .into_iter()
+                        .map(super::wit::core_type)
+                        .collect(),
+                });
+                let function = module.funcs.push(FuncDecl::Import(signature, name.clone()));
+                module.imports.push(Import {
+                    module: import.module.clone(),
+                    name: import.function.name.clone(),
+                    kind: ImportKind::Func(function),
+                });
+                wit_imports.insert(name.clone(), (key.clone(), function));
+                continue;
+            }
             if matches!(
                 intrinsic,
                 TypedIntrinsic::ReadChunk
@@ -586,7 +614,7 @@ impl ModuleRegistry {
             );
         }
 
-        Ok(Self {
+        let mut registry = Self {
             promises,
             allocator,
             byte_helpers,
@@ -606,12 +634,26 @@ impl ModuleRegistry {
             stream_helpers,
             string_helpers,
             memory,
-        })
+        };
+        for (name, (key, function)) in wit_imports {
+            let wit = contract.wit.as_ref().unwrap();
+            let wrapper = super::wit::build_import_wrapper(
+                module,
+                &registry,
+                wit,
+                &wit.imports[&key],
+                function,
+                string_pool,
+            )?;
+            registry.intrinsics.insert(name, wrapper);
+        }
+        Ok(registry)
     }
 }
 
 pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
     match ty {
+        ty if super::nullable::inner(ty).is_some() => Ok(Type::I32),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(Type::I32),
         ty if super::values::is_dynamic(ty) => Ok(Type::I32),
         HirType::Number | HirType::Any => Ok(Type::F64),
@@ -637,6 +679,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
 
 pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
     match ty {
+        ty if super::nullable::inner(ty).is_some() => Ok(vec![Type::I32]),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(vec![Type::I32]),
         HirType::Void => Ok(vec![]),
         ty if super::values::is_dynamic(ty) => Ok(vec![Type::F64]),

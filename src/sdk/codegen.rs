@@ -126,15 +126,15 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
             format!("{} | null | undefined", wit_type_to_ts(resolve, inner))
         }
         TypeDefKind::Result(WitResult { ok, err }) => {
-            let ok_str = ok
+            let ok = ok
                 .as_ref()
-                .map(|t| wit_type_to_ts(resolve, t))
-                .unwrap_or_else(|| "void".to_string());
-            let err_str = err
+                .map(|ty| format!("; value: {}", wit_type_to_ts(resolve, ty)))
+                .unwrap_or_default();
+            let err = err
                 .as_ref()
-                .map(|t| wit_type_to_ts(resolve, t))
-                .unwrap_or_else(|| "unknown".to_string());
-            format!("{{ ok: true; value: {ok_str} }} | {{ ok: false; error: {err_str} }}")
+                .map(|ty| format!("; error: {}", wit_type_to_ts(resolve, ty)))
+                .unwrap_or_default();
+            format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
         }
         TypeDefKind::Tuple(tuple) => {
             let items: Vec<String> = tuple
@@ -327,12 +327,96 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
     Ok(out)
 }
 
+/// Ambient modules expose typed host functions and interface-local type names.
+pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> String {
+    fn collect(resolve: &Resolve, ty: &Type, ids: &mut HashSet<TypeId>) {
+        let Type::Id(id) = ty else {
+            return;
+        };
+        let id = declaration_id(resolve, *id);
+        if !ids.insert(id) {
+            return;
+        }
+        for ty in type_children(&resolve.types[id].kind) {
+            collect(resolve, ty, ids);
+        }
+    }
+    let mut out = String::new();
+    let mut emitted = HashSet::new();
+    for (imported, (key, item)) in world
+        .imports
+        .iter()
+        .map(|item| (true, item))
+        .chain(world.exports.iter().map(|item| (false, item)))
+    {
+        let WorldItem::Interface { id, .. } = item else {
+            continue;
+        };
+        let module = resolve.name_world_key(key);
+        if !emitted.insert(module.clone()) {
+            continue;
+        }
+        let interface = &resolve.interfaces[*id];
+        let mut ids = HashSet::new();
+        for id in interface.types.values() {
+            collect(resolve, &Type::Id(*id), &mut ids);
+        }
+        for function in interface.functions.values() {
+            for param in &function.params {
+                collect(resolve, &param.ty, &mut ids);
+            }
+            if let Some(ty) = function.result {
+                collect(resolve, &ty, &mut ids);
+            }
+        }
+        let mut names: Vec<_> = ids
+            .into_iter()
+            .filter(|id| resolve.types[*id].name.is_some())
+            .map(|id| type_name(resolve, id))
+            .collect();
+        names.sort();
+        names.dedup();
+        out.push_str(&format!(
+            "declare module {} {{\n",
+            serde_json::to_string(&module).unwrap()
+        ));
+        for name in &names {
+            out.push_str(&format!("  type {name} = import(\"./world\").{name};\n"));
+        }
+        for (name, id) in &interface.types {
+            let local = to_pascal_case(name);
+            let target = type_name(resolve, *id);
+            if local == target {
+                out.push_str(&format!("  export {{ type {target} }};\n"));
+            } else {
+                out.push_str(&format!("  export type {local} = {target};\n"));
+            }
+        }
+        if imported {
+            for function in interface.functions.values() {
+                out.push_str(&format!(
+                    "  export function {}(",
+                    to_camel_case(&function.name)
+                ));
+                emit_params(&mut out, resolve, function);
+                out.push_str(&format!("): {};\n", wit_result_to_ts(resolve, function)));
+            }
+        }
+        out.push_str("}\n\n");
+    }
+    out
+}
+
 fn emit_params(out: &mut String, resolve: &Resolve, function: &Function) {
     for (index, param) in function.params.iter().enumerate() {
         if index != 0 {
             out.push_str(", ");
         }
-        out.push_str(&to_camel_case(&param.name));
+        let name = to_camel_case(&param.name);
+        let name = perry_parser::swc_ecma_ast::Ident::verify_symbol(&name)
+            .err()
+            .unwrap_or(name);
+        out.push_str(&name);
         out.push_str(": ");
         out.push_str(&wit_type_to_ts(resolve, &param.ty));
     }

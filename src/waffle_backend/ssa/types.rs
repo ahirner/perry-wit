@@ -33,6 +33,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
+        ty if crate::waffle_backend::nullable::inner(ty).is_some() => true,
         ty if crate::waffle_backend::values::is_dynamic(ty) => true,
         ty if crate::waffle_backend::objects::is_object(ty) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty)

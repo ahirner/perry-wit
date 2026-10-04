@@ -57,6 +57,9 @@ pub(crate) fn frame_component(
 
     for (name, intrinsic) in &contract.intrinsics {
         match intrinsic {
+            TypedIntrinsic::WitImport { .. } => {
+                anyhow::bail!("WIT imports require resolved-world framing")
+            }
             TypedIntrinsic::HostDouble => {
                 host_imports.push_str(
                     r#"  (import "host-double" (func $host-double async (param "value" f64) (result f64)))

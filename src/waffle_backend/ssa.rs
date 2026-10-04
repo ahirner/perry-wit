@@ -95,7 +95,16 @@ pub(crate) fn lower_module(
     {
         collect_strings_in_module(hir, &mut string_pool);
         if let Some(wit) = &contract.wit {
-            wit.intern_keys(&mut string_pool);
+            wit.intern_keys(
+                &mut string_pool,
+                contract
+                    .intrinsics
+                    .values()
+                    .filter_map(|intrinsic| match intrinsic {
+                        super::resolve::TypedIntrinsic::WitImport { key, .. } => Some(key.clone()),
+                        _ => None,
+                    }),
+            );
         }
         if contract.has_http() {
             string_pool.intern("http");
@@ -366,7 +375,10 @@ impl<'a> FunctionLowerer<'a> {
                             "HTTP response initializers must match their declared type"
                         );
                     }
-                    let (ty, val) = if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
+                    let (ty, val) = if super::nullable::inner(ty).is_some() {
+                        self.check_typed_value(expr, ty)?;
+                        (ty.clone(), self.value_operand(expr)?)
+                    } else if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
                         (
                             super::text_or_bytes::value_type(),
                             self.text_or_bytes_operand(expr)?,
@@ -466,6 +478,10 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn return_expression(&mut self, expr: &Expr) -> Result<Value> {
+        if super::nullable::inner(self.return_type).is_some() {
+            self.check_typed_value(expr, self.return_type)?;
+            return self.value_operand(expr);
+        }
         if self.contract.wit.is_some() {
             self.check_typed_value(expr, self.return_type)?;
         }
@@ -749,6 +765,13 @@ impl<'a> FunctionLowerer<'a> {
                 Expr::ExternFuncRef { param_types, .. } => param_types.get(index),
                 _ => None,
             };
+            if let Some(expected) = expected
+                && super::nullable::inner(expected).is_some()
+            {
+                self.check_typed_value(arg, expected)?;
+                arg_vals.push(self.value_operand(arg)?);
+                continue;
+            }
             let argument_type = self.infer_expr_type(arg);
             if let Some(expected) = expected
                 && (self.contract.wit.is_some() || matches!(expected, HirType::Tuple(_)))
@@ -842,7 +865,9 @@ impl<'a> FunctionLowerer<'a> {
                 self.string_receiver(arg)?
             } else {
                 ensure!(
-                    !matches!(self.infer_expr_type(arg), HirType::Union(_) | HirType::Void),
+                    !matches!(&argument_type, HirType::Union(_) | HirType::Void)
+                        || super::objects::is_object(&argument_type)
+                        || super::values::is_string_type(&argument_type),
                     "String-or-undefined arguments require a string parameter"
                 );
                 self.expression(arg)?
@@ -922,7 +947,19 @@ impl<'a> FunctionLowerer<'a> {
                 );
             }
             if has_completion {
-                self.call_completion(func_idx, &arg_vals);
+                let payload = self.call_completion(func_idx, &arg_vals);
+                if matches!(intrinsic, super::resolve::TypedIntrinsic::WitImport { .. })
+                    && let Expr::ExternFuncRef { return_type, .. } = callee
+                    && *return_type != HirType::Void
+                {
+                    let reference = super::registry::map_type_to_waffle(return_type)? == Type::I32;
+                    return Ok(Some(abi::decode_payload(
+                        &mut self.body,
+                        self.block,
+                        payload,
+                        reference,
+                    )));
+                }
                 return Ok(None);
             }
             let ret_types = &signature.returns;
@@ -1078,7 +1115,9 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::Compare { op, left, right }
                 if super::values::is_dynamic(&self.infer_expr_type(left))
-                    || super::values::is_dynamic(&self.infer_expr_type(right)) =>
+                    || super::values::is_dynamic(&self.infer_expr_type(right))
+                    || super::nullable::inner(&self.infer_expr_type(left)).is_some()
+                    || super::nullable::inner(&self.infer_expr_type(right)).is_some() =>
             {
                 self.value_comparison(*op, left, right)
             }
@@ -1158,7 +1197,9 @@ impl<'a> FunctionLowerer<'a> {
             _ => {
                 let val = self.expression(expr)?;
                 let ty = self.body.values[val].ty(&self.body.type_pool);
-                if super::values::is_dynamic(&self.infer_expr_type(expr)) {
+                if super::values::is_dynamic(&self.infer_expr_type(expr))
+                    || super::nullable::inner(&self.infer_expr_type(expr)).is_some()
+                {
                     Ok(self.op(
                         Operator::Call {
                             function_index: self
@@ -1459,6 +1500,15 @@ impl<'a> FunctionLowerer<'a> {
             Expr::LocalSet(id, expr) => {
                 let declared = self.local_types.get(id).cloned();
                 if let Some(ty) = &declared
+                    && super::nullable::inner(ty).is_some()
+                {
+                    self.check_typed_value(expr, ty)?;
+                    let value = self.value_operand(expr)?;
+                    self.locals.insert(*id, value);
+                    self.narrowings.remove(id);
+                    return Ok(value);
+                }
+                if let Some(ty) = &declared
                     && (self.contract.wit.is_some() || matches!(ty, HirType::Tuple(_)))
                 {
                     self.check_typed_value(expr, ty)?;
@@ -1527,6 +1577,15 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(value)
             }
             Expr::LocalGet(id) => {
+                if self
+                    .local_types
+                    .get(id)
+                    .is_some_and(|ty| super::nullable::inner(ty).is_some())
+                    && let Some(narrowed) = self.narrowings.get(id).cloned()
+                {
+                    let stored = self.locals[id];
+                    return self.extract_value(stored, &narrowed);
+                }
                 let stored = self
                     .locals
                     .get(id)

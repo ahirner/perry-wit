@@ -193,13 +193,17 @@ The [UTC fixture](tests/fixtures/temporal_utc.ts) restricts interchange to
 preserves strict years 0001–9999 and checked whole-day offsets through runner's
 original `workflow:calendar/dates@0.1.0` record, fixed tuple, and result-enum contract.
 `waffle_backend::compile_typescript_for_world` accepts a resolved WIT world and
-uses the generated SDK's implementation names. Its current synchronous export path
+uses the generated SDK's implementation names. Its synchronous import/export path
 supports booleans, 8–32-bit integers, floats, strings, records, fixed tuples, enums,
-and result returns, including indirect parameters. Integer outputs are range-checked;
+variants, results, and nullable options, including indirect parameters. Integer outputs are range-checked;
 tuple indexing is bounds-checked and tuple mutation is diagnosed. It uses the shared
 allocator and canonical post-return cleanup, verified under a 256 KiB memory cap.
-Imported functions/resources, async WIT exports, result parameters, lists, options,
-and 64-bit integers remain migration work; the production CLI still uses the legacy path.
+Named and namespace calls to imported WIT interfaces use their exact module names;
+the generated `imports.d.ts` exposes their functions and interface-local type names.
+The [configuration fixture](tests/fixtures/catalog_config.ts) exercises product-catalog's
+original `wasi:config/store` result, optional value, and error contract. Missing values
+remain distinct from empty strings and false. Nested options, resources, async WIT,
+lists, and 64-bit integers remain migration work; the production CLI still uses the legacy path.
 Shared tagged values preserve strict equality, truthiness, type tags, typed object
 fields, and retained `Promise<any>` outcomes. Typed boundaries validate the stored
 kind and throw numeric `12` on a mismatch. Public `any` component parameters/results

@@ -26,6 +26,7 @@ use super::capabilities::{
 
 #[derive(Default)]
 pub(crate) struct SourceBindings {
+    pub(crate) wit_imports: BTreeMap<String, String>,
     pub(crate) capabilities: BTreeMap<String, CapabilityOperation>,
     pub(crate) decoder_constructor: Option<String>,
     pub(crate) date_constructor: Option<String>,
@@ -45,11 +46,18 @@ fn underlying_expression(mut expression: &ast::Expr) -> &ast::Expr {
     }
 }
 
-pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBindings> {
+pub(crate) fn resolve_bindings(
+    module: &mut ast::Module,
+    wit: Option<&super::wit::WitWorld>,
+) -> Result<SourceBindings> {
     GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         module.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         readonly::validate(module, SyntaxContext::empty().apply_mark(unresolved))?;
+        let wit_imports = wit
+            .map(|wit| wit.bind_source(module))
+            .transpose()?
+            .unwrap_or_default();
         let mut names = IdentifierNames::default();
         module.visit_with(&mut names);
         ensure!(
@@ -150,6 +158,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             return Err(error);
         }
         let mut resolved = SourceBindings {
+            wit_imports,
             decoder_constructor: calls.decoder_constructor,
             date_constructor: calls.date_constructor,
             time_constructors: calls

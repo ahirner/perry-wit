@@ -1,6 +1,7 @@
-//! Resolved WIT exports use the SDK's source names and the canonical ABI layouts.
+//! Resolved WIT worlds use the SDK's source names and canonical ABI layouts.
 
 mod adapter;
+mod source;
 
 use anyhow::{Context, Result, bail, ensure};
 use perry_hir::{
@@ -16,7 +17,7 @@ use wit_parser::{Function, FunctionKind, Resolve, Type, TypeDefKind, WorldId, Wo
 use super::strings::StringPool;
 use crate::{abi::export_names, sdk::codegen::to_camel_case};
 
-pub(super) use adapter::build_export_wrapper;
+pub(super) use adapter::{build_export_wrapper, build_import_wrapper};
 
 pub(super) fn validate_source(module: &ast::Module) -> Result<()> {
     struct ExplicitAny(bool);
@@ -25,6 +26,15 @@ pub(super) fn validate_source(module: &ast::Module) -> Result<()> {
             self.0 |= ty.kind == ast::TsKeywordTypeKind::TsAnyKeyword;
         }
     }
+    struct Reserved(bool);
+    impl Visit for Reserved {
+        fn visit_ident(&mut self, ident: &ast::Ident) {
+            self.0 |= ident.sym.starts_with("__perry_wit_import_");
+        }
+    }
+    let mut reserved = Reserved(false);
+    module.visit_with(&mut reserved);
+    ensure!(!reserved.0, "Reserved WIT binding name in source");
     let mut any = ExplicitAny(false);
     module.visit_with(&mut any);
     ensure!(
@@ -35,10 +45,17 @@ pub(super) fn validate_source(module: &ast::Module) -> Result<()> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct WitExports {
+pub(crate) struct WitWorld {
     pub(super) resolve: Resolve,
     pub(super) world: WorldId,
     pub(super) functions: BTreeMap<String, WitExport>,
+    pub(super) imports: BTreeMap<String, WitImport>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WitImport {
+    pub(super) module: String,
+    pub(super) function: Function,
 }
 
 #[derive(Clone, Debug)]
@@ -47,16 +64,36 @@ pub(crate) struct WitExport {
     pub(super) function: Function,
 }
 
-impl WitExports {
+impl WitWorld {
     pub(super) fn new(resolve: Resolve, world: WorldId) -> Result<Self> {
         let contract = &resolve.worlds[world];
-        ensure!(
-            contract
-                .imports
-                .values()
-                .all(|item| matches!(item, WorldItem::Type { .. })),
-            "Resolved WIT imports are not yet supported by the WAFFLE world compiler"
-        );
+        let mut imports = BTreeMap::new();
+        for (key, item) in &contract.imports {
+            match item {
+                WorldItem::Interface { id, .. } => {
+                    let module = resolve.name_world_key(key);
+                    for function in resolve.interfaces[*id].functions.values() {
+                        imports.insert(
+                            format!("{module}#{}", function.name),
+                            WitImport {
+                                module: module.clone(),
+                                function: function.clone(),
+                            },
+                        );
+                    }
+                }
+                WorldItem::Function(function) => {
+                    imports.insert(
+                        function.name.clone(),
+                        WitImport {
+                            module: "$root".into(),
+                            function: function.clone(),
+                        },
+                    );
+                }
+                WorldItem::Type { .. } => {}
+            }
+        }
         let mut functions = BTreeMap::new();
         for (key, item) in &contract.exports {
             match item {
@@ -102,6 +139,7 @@ impl WitExports {
             resolve,
             world,
             functions,
+            imports,
         })
     }
 
@@ -150,7 +188,16 @@ impl WitExports {
         Ok(())
     }
 
-    pub(super) fn intern_keys(&self, pool: &mut StringPool) {
+    pub(super) fn intern_keys(&self, pool: &mut StringPool, used: impl Iterator<Item = String>) {
+        for name in used {
+            let function = &self.imports[&name].function;
+            for param in &function.params {
+                self.intern_type(param.ty, pool);
+            }
+            if let Some(ty) = function.result {
+                self.intern_type(ty, pool);
+            }
+        }
         for export in self.functions.values() {
             for param in &export.function.params {
                 self.intern_type(param.ty, pool);
@@ -171,6 +218,17 @@ impl WitExports {
                 for field in &record.fields {
                     pool.intern(&to_camel_case(&field.name));
                     self.intern_type(field.ty, pool);
+                }
+            }
+            TypeDefKind::Option(inner) => self.intern_type(*inner, pool),
+            TypeDefKind::Variant(variant) => {
+                pool.intern("tag");
+                pool.intern("val");
+                for case in &variant.cases {
+                    pool.intern(&case.name);
+                    if let Some(ty) = case.ty {
+                        self.intern_type(ty, pool);
+                    }
                 }
             }
             TypeDefKind::Tuple(tuple) => {
@@ -222,7 +280,7 @@ impl WitExports {
     }
 }
 
-fn core_type(ty: wit_parser::abi::WasmType) -> CoreType {
+pub(super) fn core_type(ty: wit_parser::abi::WasmType) -> CoreType {
     use wit_parser::abi::WasmType;
     match ty {
         WasmType::I32 | WasmType::Pointer | WasmType::Length => CoreType::I32,
@@ -265,6 +323,28 @@ fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
         Type::String => HirType::String,
         Type::Id(id) => match &resolve.types[id].kind {
             TypeDefKind::Type(ty) => return hir_type(resolve, *ty),
+            TypeDefKind::Option(inner) => {
+                let inner = hir_type(resolve, *inner)?;
+                ensure!(
+                    super::nullable::inner(&inner).is_none(),
+                    "Nested WIT options need a distinct presence representation"
+                );
+                HirType::Union(vec![inner, HirType::Null, HirType::Void])
+            }
+            TypeDefKind::Variant(variant) => HirType::Union(
+                variant
+                    .cases
+                    .iter()
+                    .map(|case| {
+                        let mut fields =
+                            vec![("tag".into(), HirType::StringLiteral(case.name.clone()))];
+                        if let Some(ty) = case.ty {
+                            fields.push(("val".into(), hir_type(resolve, ty)?));
+                        }
+                        Ok(record(fields))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
             TypeDefKind::Tuple(tuple) => HirType::Tuple(
                 tuple
                     .types
@@ -312,7 +392,7 @@ fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
     })
 }
 
-fn same_type(actual: &HirType, expected: &HirType) -> bool {
+pub(super) fn same_type(actual: &HirType, expected: &HirType) -> bool {
     match (actual, expected) {
         (HirType::Object(actual), HirType::Object(expected)) => {
             actual.index_signature.is_none()

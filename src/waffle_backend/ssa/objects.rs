@@ -121,7 +121,30 @@ impl FunctionLowerer<'_> {
         if crate::waffle_backend::context::is_environment(&self.infer_expr_type(receiver)) {
             return HirType::Union(vec![HirType::String, HirType::Void]);
         }
-        let HirType::Object(object) = self.infer_expr_type(receiver) else {
+        let receiver_type = self.infer_expr_type(receiver);
+        if let HirType::Union(variants) = &receiver_type {
+            let Expr::String(key) = key else {
+                return HirType::Any;
+            };
+            let mut types = Vec::new();
+            for variant in variants {
+                let HirType::Object(record) = variant else {
+                    return HirType::Any;
+                };
+                let Some(field) = record.properties.get(key) else {
+                    return HirType::Any;
+                };
+                if !types.contains(&field.ty) {
+                    types.push(field.ty.clone());
+                }
+            }
+            return if types.len() == 1 {
+                types.remove(0)
+            } else {
+                HirType::Union(types)
+            };
+        }
+        let HirType::Object(object) = receiver_type else {
             return HirType::Any;
         };
         if let Expr::String(key) = key
@@ -199,7 +222,9 @@ impl FunctionLowerer<'_> {
             &[object, key],
             &[Type::I32],
         );
-        if crate::waffle_backend::values::is_dynamic(&ty) {
+        if crate::waffle_backend::values::is_dynamic(&ty)
+            || crate::waffle_backend::nullable::inner(&ty).is_some()
+        {
             return Ok(self.op(
                 Operator::Call {
                     function_index: helpers.dynamic,

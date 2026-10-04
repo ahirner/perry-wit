@@ -55,7 +55,9 @@ impl FunctionLowerer<'_> {
         let receiver = self.value_operand(receiver)?;
         let key = self.value_operand(key)?;
         let (original, tag, payload) = self.tagged_value(expression)?;
-        let stored = if is_dynamic(&self.infer_expr_type(expression)) {
+        let stored = if is_dynamic(&self.infer_expr_type(expression))
+            || crate::waffle_backend::nullable::inner(&self.infer_expr_type(expression)).is_some()
+        {
             original
         } else {
             self.box_value(tag, payload)
@@ -104,7 +106,8 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn value_operand(&mut self, expression: &Expr) -> Result<Value> {
-        if is_dynamic(&self.infer_expr_type(expression)) {
+        let ty = self.infer_expr_type(expression);
+        if is_dynamic(&ty) || crate::waffle_backend::nullable::inner(&ty).is_some() {
             return self.expression(expression);
         }
         let (_, tag, payload) = self.tagged_value(expression)?;
@@ -159,6 +162,9 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn extract_value(&mut self, value: Value, expected: &HirType) -> Result<Value> {
+        if crate::waffle_backend::nullable::inner(expected).is_some() {
+            return Ok(value);
+        }
         let tag = ValueTag::of(expected)? as u32;
         let tag = self.op(Operator::I32Const { value: tag }, &[], &[Type::I32]);
         let payload = self.call_completion(
@@ -192,7 +198,7 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn box_typed_value(&mut self, value: Value, ty: &HirType) -> Result<Value> {
-        if is_dynamic(ty) {
+        if is_dynamic(ty) || crate::waffle_backend::nullable::inner(ty).is_some() {
             return Ok(value);
         }
         let (tag, payload) = self.typed_value_parts(value, ty)?;
@@ -200,7 +206,7 @@ impl FunctionLowerer<'_> {
     }
 
     fn typed_value_parts(&mut self, original: Value, ty: &HirType) -> Result<(Value, Value)> {
-        if is_dynamic(ty) {
+        if is_dynamic(ty) || crate::waffle_backend::nullable::inner(ty).is_some() {
             return Ok(self.value_parts(original));
         }
         let (tag, value) = if is_text_or_bytes(ty) {

@@ -1,6 +1,6 @@
 //! Canonical values and typed guest values share the invocation allocator.
 
-use super::{WitExport, WitExports};
+use super::{WitExport, WitWorld};
 use crate::{
     sdk::codegen::to_camel_case,
     waffle_backend::{
@@ -17,12 +17,14 @@ use waffle::{
 };
 use wit_parser::{Int, SizeAlign, Type, TypeDefKind};
 
+mod variants;
+
 pub(in crate::waffle_backend) fn build_export_wrapper(
     module: &Module<'static>,
     callee: &FunctionInfo,
     export: &FunctionExport,
     registry: &ModuleRegistry,
-    wit: &WitExports,
+    wit: &WitWorld,
     declaration: &WitExport,
     strings: &StringPool,
 ) -> Result<FunctionBody> {
@@ -74,8 +76,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
     let payload = adapter.call_checked(callee.func_index, &args);
     let mut returned = Vec::new();
     if let Some(ty) = declaration.function.result {
-        let reference = adapter.tag(ty)? as u32 != ValueTag::Number as u32;
-        let value = abi::decode_payload(&mut adapter.body, adapter.block, payload, reference);
+        let value = adapter.decode(ty, payload)?;
         let size = adapter.sizes.size(&ty).size_wasm32() as u32;
         let alignment = adapter.sizes.align(&ty).align_wasm32() as u32;
         let address = adapter.allocate(size.max(1), alignment);
@@ -103,7 +104,7 @@ struct Adapter<'a> {
     body: FunctionBody,
     block: Block,
     registry: &'a ModuleRegistry,
-    wit: &'a WitExports,
+    wit: &'a WitWorld,
     sizes: SizeAlign,
     strings: &'a StringPool,
 }
@@ -207,7 +208,12 @@ impl Adapter<'_> {
             Input::Flat { values, cursor } => {
                 let value = values[*cursor];
                 *cursor += 1;
-                Ok(value)
+                let target = match self.alias(ty) {
+                    Type::F32 => CoreType::F32,
+                    Type::F64 => CoreType::F64,
+                    _ => CoreType::I32,
+                };
+                self.convert_flat(value, target)
             }
             Input::Memory { pointer, offset } => self.load_scalar(ty, *pointer, *offset),
         }
@@ -235,6 +241,9 @@ impl Adapter<'_> {
     }
     fn lift(&mut self, ty: Type, source: &mut Input<'_>) -> Result<Value> {
         let ty = self.alias(ty);
+        if let Some(shape) = self.variant(ty) {
+            return self.lift_variant(ty, shape, source);
+        }
         if let Type::Id(id) = ty {
             return match self.wit.resolve.types[id].kind.clone() {
                 TypeDefKind::Record(record) => {
@@ -254,14 +263,7 @@ impl Adapter<'_> {
                             *position = base + offset.size_wasm32() as u32;
                         }
                         let value = self.lift(field.ty, source)?;
-                        let key =
-                            self.integer(self.strings.get(&to_camel_case(&field.name)).unwrap());
-                        let tag = self.integer(self.tag(field.ty)? as u32);
-                        let payload = abi::encode_payload(&mut self.body, self.block, Some(value));
-                        self.call_checked(
-                            self.registry.object_helpers.unwrap().set,
-                            &[object, key, tag, payload],
-                        );
+                        self.set_field(object, &to_camel_case(&field.name), field.ty, value)?;
                     }
                     Ok(object)
                 }
@@ -281,10 +283,7 @@ impl Adapter<'_> {
                             *position = base + offset.size_wasm32() as u32;
                         }
                         let value = self.lift(*ty, source)?;
-                        let tag = self.integer(self.tag(*ty)? as u32);
-                        let payload = abi::encode_payload(&mut self.body, self.block, Some(value));
-                        let boxed =
-                            self.call(self.registry.value_helpers.unwrap().new, &[tag, payload]);
+                        let boxed = self.box_value(*ty, value)?;
                         self.store_i32(array, 8 + index as u32 * 4, boxed);
                     }
                     Ok(array)
@@ -336,7 +335,10 @@ impl Adapter<'_> {
         if ty == Type::String {
             let (pointer, length) = match source {
                 Input::Flat { values, cursor } => {
-                    let pair = (values[*cursor], values[*cursor + 1]);
+                    let pair = (
+                        self.convert_flat(values[*cursor], CoreType::I32)?,
+                        self.convert_flat(values[*cursor + 1], CoreType::I32)?,
+                    );
                     *cursor += 2;
                     pair
                 }
@@ -379,6 +381,9 @@ impl Adapter<'_> {
     fn lower(&mut self, ty: Type, value: Value, pointer: Value, offset: u32) -> Result<()> {
         let ty = self.alias(ty);
         let memory = self.memory(offset);
+        if let Some(shape) = self.variant(ty) {
+            return self.lower_variant(shape, value, pointer, offset);
+        }
         if let Type::Id(id) = ty {
             match self.wit.resolve.types[id].kind.clone() {
                 TypeDefKind::Record(record) => {
@@ -387,7 +392,7 @@ impl Adapter<'_> {
                         .field_offsets(record.fields.iter().map(|field| &field.ty));
                     for (field, (position, _)) in record.fields.iter().zip(offsets) {
                         let child =
-                            self.field(value, &to_camel_case(&field.name), self.tag(field.ty)?);
+                            self.read_field(value, &to_camel_case(&field.name), field.ty)?;
                         self.lower(
                             field.ty,
                             child,
@@ -409,14 +414,7 @@ impl Adapter<'_> {
                         .enumerate()
                     {
                         let boxed = self.load_i32(data, index as u32 * 4);
-                        let tag = self.integer(self.tag(*ty)? as u32);
-                        let payload = self.call_checked(
-                            self.registry.value_helpers.unwrap().extract,
-                            &[boxed, tag],
-                        );
-                        let reference = self.tag(*ty)? as u32 != ValueTag::Number as u32;
-                        let child =
-                            abi::decode_payload(&mut self.body, self.block, payload, reference);
+                        let child = self.extract(*ty, boxed)?;
                         self.lower(*ty, child, pointer, offset + position.size_wasm32() as u32)?;
                     }
                 }
@@ -467,56 +465,6 @@ impl Adapter<'_> {
                     }
                     self.body
                         .set_terminator(self.block, Terminator::Unreachable);
-                    self.block = join;
-                }
-                TypeDefKind::Result(result) => {
-                    let ok = self.field(value, "ok", ValueTag::Boolean);
-                    let yes = self.body.add_block();
-                    let no = self.body.add_block();
-                    let join = self.body.add_block();
-                    self.body.set_terminator(
-                        self.block,
-                        Terminator::CondBr {
-                            cond: ok,
-                            if_true: BlockTarget {
-                                block: yes,
-                                args: vec![],
-                            },
-                            if_false: BlockTarget {
-                                block: no,
-                                args: vec![],
-                            },
-                        },
-                    );
-                    let payload_offset = self
-                        .sizes
-                        .payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])
-                        .size_wasm32() as u32;
-                    for (block, discriminant, name, ty) in
-                        [(yes, 0, "value", result.ok), (no, 1, "error", result.err)]
-                    {
-                        self.block = block;
-                        let tag = self.integer(discriminant);
-                        self.body.add_op(
-                            block,
-                            Operator::I32Store8 { memory },
-                            &[pointer, tag],
-                            &[],
-                        );
-                        if let Some(ty) = ty {
-                            let child = self.field(value, name, self.tag(ty)?);
-                            self.lower(ty, child, pointer, offset + payload_offset)?;
-                        }
-                        self.body.set_terminator(
-                            self.block,
-                            Terminator::Br {
-                                target: BlockTarget {
-                                    block: join,
-                                    args: vec![],
-                                },
-                            },
-                        );
-                    }
                     self.block = join;
                 }
                 other => bail!("Unsupported resolved WIT result: {other:?}"),
@@ -587,6 +535,9 @@ impl Adapter<'_> {
         values: &mut Vec<Value>,
     ) -> Result<()> {
         let ty = self.alias(ty);
+        if let Some(shape) = self.variant(ty) {
+            return self.flatten_variant(ty, shape, pointer, offset, values);
+        }
         if let Type::Id(id) = ty {
             let fields = match &self.wit.resolve.types[id].kind {
                 TypeDefKind::Tuple(tuple) => Some(tuple.types.clone()),
@@ -594,10 +545,6 @@ impl Adapter<'_> {
                     Some(record.fields.iter().map(|field| field.ty).collect())
                 }
                 TypeDefKind::Enum(_) => None,
-                TypeDefKind::Result(_) if self.sizes.size(&ty).size_wasm32() == 1 => {
-                    values.push(self.load_scalar(Type::U8, pointer, offset)?);
-                    return Ok(());
-                }
                 _ => bail!("WIT aggregate requires an indirect result"),
             };
             if let Some(fields) = fields {
@@ -612,8 +559,132 @@ impl Adapter<'_> {
                 return Ok(());
             }
         }
-        ensure!(ty != Type::String, "WIT strings require an indirect result");
+        if ty == Type::String {
+            values.push(self.load_i32(pointer, offset));
+            values.push(self.load_i32(pointer, offset + 4));
+            return Ok(());
+        }
         values.push(self.load_scalar(ty, pointer, offset)?);
         Ok(())
     }
+}
+
+pub(in crate::waffle_backend) fn build_import_wrapper(
+    module: &mut Module<'static>,
+    registry: &ModuleRegistry,
+    wit: &WitWorld,
+    import: &super::WitImport,
+    callee: Func,
+    strings: &StringPool,
+) -> Result<Func> {
+    let signature = wit
+        .resolve
+        .wasm_signature(wit_parser::abi::AbiVariant::GuestImport, &import.function);
+    let params = import
+        .function
+        .params
+        .iter()
+        .map(|param| {
+            crate::waffle_backend::registry::map_type_to_waffle(&super::hir_type(
+                &wit.resolve,
+                param.ty,
+            )?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let sig = module.signatures.push(waffle::SignatureData {
+        params,
+        returns: vec![CoreType::I32, CoreType::F64],
+    });
+    let mut sizes = SizeAlign::default();
+    sizes.fill(&wit.resolve)?;
+    let body = FunctionBody::new(module, sig);
+    let block = body.entry;
+    let mut adapter = Adapter {
+        body,
+        block,
+        registry,
+        wit,
+        sizes,
+        strings,
+    };
+    let guest_params: Vec<_> = adapter.body.blocks[block]
+        .params
+        .iter()
+        .map(|param| param.1)
+        .collect();
+    let layout = adapter
+        .sizes
+        .params(import.function.params.iter().map(|param| &param.ty));
+    let pointer = adapter.allocate(
+        (layout.size.size_wasm32() as u32).max(1),
+        layout.align.align_wasm32() as u32,
+    );
+    let offsets = adapter
+        .sizes
+        .field_offsets(import.function.params.iter().map(|param| &param.ty));
+    let mut args = Vec::new();
+    for ((param, value), (offset, _)) in
+        import.function.params.iter().zip(guest_params).zip(offsets)
+    {
+        let offset = offset.size_wasm32() as u32;
+        adapter.lower(param.ty, value, pointer, offset)?;
+        if !signature.indirect_params {
+            adapter.flatten_memory(param.ty, pointer, offset, &mut args)?;
+        }
+    }
+    if signature.indirect_params {
+        args.push(pointer);
+    }
+    let return_pointer = if signature.retptr {
+        let ty = import.function.result.unwrap();
+        let pointer = adapter.allocate(
+            (adapter.sizes.size(&ty).size_wasm32() as u32).max(1),
+            adapter.sizes.align(&ty).align_wasm32() as u32,
+        );
+        args.push(pointer);
+        Some(pointer)
+    } else {
+        None
+    };
+    let results: Vec<_> = signature
+        .results
+        .into_iter()
+        .map(super::core_type)
+        .collect();
+    let returned = adapter.body.add_op(
+        adapter.block,
+        Operator::Call {
+            function_index: callee,
+        },
+        &args,
+        &results,
+    );
+    let value = if let Some(ty) = import.function.result {
+        let direct = [returned];
+        let mut input = if let Some(pointer) = return_pointer {
+            Input::Memory { pointer, offset: 0 }
+        } else {
+            Input::Flat {
+                values: &direct,
+                cursor: 0,
+            }
+        };
+        Some(adapter.lift(ty, &mut input)?)
+    } else {
+        None
+    };
+    let payload = abi::encode_payload(&mut adapter.body, adapter.block, value);
+    abi::emit_completion(
+        &mut adapter.body,
+        adapter.block,
+        abi::CompletionStatus::Returned,
+        payload,
+    );
+    adapter.body.validate()?;
+    adapter.body.verify_reducible()?;
+    Ok(module.funcs.push(waffle::FuncDecl::Body(
+        sig,
+        format!("{}.import", import.function.name),
+        adapter.body,
+    )))
 }

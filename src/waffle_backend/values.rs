@@ -194,6 +194,7 @@ pub(crate) fn emit_runtime(
 
 fn contains_dynamic(ty: &HirType) -> bool {
     match ty {
+        ty if super::nullable::inner(ty).is_some() => true,
         ty if super::objects::is_object(ty) => true,
         HirType::Promise(inner) | HirType::Array(inner) => contains_dynamic(inner),
         HirType::Tuple(_) => true,

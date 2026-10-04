@@ -75,18 +75,24 @@ fn calendar_implements_the_production_wit_world_under_bounded_memory() -> Result
 
 #[test]
 fn calendar_source_matches_the_generated_production_sdk() -> Result<()> {
-    let project = tempfile::tempdir()?;
-    std::fs::write(
-        project.path().join("calendar.ts"),
+    check_sdk_source(
+        "calendar-wit",
+        "component",
         include_str!("fixtures/calendar_component.ts"),
-    )?;
+    )
+}
+
+fn check_sdk_source(fixture: &str, world: &str, source: &str) -> Result<()> {
+    let project = tempfile::tempdir()?;
+    std::fs::write(project.path().join("component.ts"), source)?;
     let sdk = perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
         wit_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/calendar-wit"),
-        world: Some("component".into()),
+            .join("tests/fixtures")
+            .join(fixture),
+        world: Some(world.into()),
         out_dir: project.path().join("types"),
         project_root: Some(project.path().into()),
-        entry: "calendar.ts".into(),
+        entry: "component.ts".into(),
     })?;
     let output = std::process::Command::new("tsc")
         .args([
@@ -299,6 +305,12 @@ fn empty_result_payloads_preserve_the_discriminant() -> Result<()> {
     let check = instance.get_typed_func::<(bool,), (Result<(), ()>,)>(&mut store, "check")?;
     assert_eq!(check.call(&mut store, (true,))?.0, Ok(()));
     assert_eq!(check.call(&mut store, (false,))?.0, Err(()));
+    for invalid in ["{ok:false}", "{ok:true,error:'unexpected'}"] {
+        let source = format!(
+            "type Outcome={{ok:true}}|{{ok:false;error:string}}; export function check(value:boolean):Outcome {{return {invalid};}}"
+        );
+        assert!(compile_world(&source,"package test:boundary; world boundary {export check:func(value:bool)->result<_,string>;}").is_err(),"{invalid}");
+    }
     Ok(())
 }
 
@@ -314,4 +326,327 @@ fn resolved_wit_rejects_any_in_helpers_aliases_and_casts() {
     ] {
         assert!(compile_world(source, wit).is_err(), "{source}");
     }
+}
+
+#[test]
+fn nullable_and_variant_values_preserve_payloads_and_flat_join_bits() -> Result<()> {
+    let source = r#"
+        type Choice={tag:'number';val:number}|{tag:'text';val:string}|{tag:'absent'};
+        interface Packet { label:string|null|undefined; enabled:boolean|null|undefined; choice:Choice; }
+        export function echo(value:Packet):Packet {return value;}
+        export function choose(value:Choice):Choice {return value;}
+        export function fallback(value:string|null|undefined):string {
+            if(value===null || value===undefined) {return 'visual';}
+            return value;
+        }
+    "#;
+    let compiled = compile_world(
+        source,
+        "package test:boundary; world boundary {
+        variant choice { number(f64), text(string), absent }
+        record packet { label:option<string>, enabled:option<bool>, choice:choice }
+        export echo:func(value:packet)->packet;
+        export choose:func(value:choice)->choice;
+        export fallback:func(value:option<string>)->string;
+    }",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(262144).build(),
+    );
+    store.limiter(|limits: &mut StoreLimits| limits);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let echo = instance.get_func(&mut store, "echo").unwrap();
+    let choose = instance.get_func(&mut store, "choose").unwrap();
+    let fallback =
+        instance.get_typed_func::<(Option<String>,), (String,)>(&mut store, "fallback")?;
+    use wasmtime::component::Val;
+    for _ in 0..100 {
+        for choice in [
+            Val::Variant("number".into(), Some(Box::new(Val::Float64(-123.25)))),
+            Val::Variant("text".into(), Some(Box::new(Val::String("漢字🙂".into())))),
+            Val::Variant("absent".into(), None),
+        ] {
+            let mut results = [Val::Bool(false)];
+            choose.call(&mut store, std::slice::from_ref(&choice), &mut results)?;
+            assert_eq!(results[0], choice);
+            for (label, enabled) in [
+                (None, None),
+                (
+                    Some(Box::new(Val::String(String::new()))),
+                    Some(Box::new(Val::Bool(false))),
+                ),
+                (
+                    Some(Box::new(Val::String("location".into()))),
+                    Some(Box::new(Val::Bool(true))),
+                ),
+            ] {
+                let input = Val::Record(vec![
+                    ("label".into(), Val::Option(label)),
+                    ("enabled".into(), Val::Option(enabled)),
+                    ("choice".into(), choice.clone()),
+                ]);
+                echo.call(&mut store, std::slice::from_ref(&input), &mut results)?;
+                assert_eq!(results[0], input);
+            }
+        }
+        assert_eq!(fallback.call(&mut store, (None,))?.0, "visual");
+        assert_eq!(fallback.call(&mut store, (Some(String::new()),))?.0, "");
+        assert_eq!(
+            fallback.call(&mut store, (Some("漢字🙂".into()),))?.0,
+            "漢字🙂"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn configuration_import_uses_the_consumers_original_result_option_and_error_contract() -> Result<()>
+{
+    use wasmtime::component::Val;
+    let wit_dir = std::path::Path::new("tests/fixtures/catalog-config-wit");
+    let (resolve, package) = perry_wit::component::wit::resolve_wit(wit_dir)?;
+    let world = resolve.select_world(&[package], Some("boundary"))?;
+    let compiled = compile_typescript_for_world(
+        include_str!("fixtures/catalog_config.ts"),
+        "catalog_config.ts",
+        &WaffleCompileOptions::default(),
+        resolve,
+        world,
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    linker.instance("wasi:config/store@0.2.0-rc.1")?.func_new(
+        "get",
+        |_store, _ty, params, results| {
+            let Val::String(key) = &params[0] else {
+                unreachable!()
+            };
+            if key == "trap" {
+                return Err(wasmtime::Error::msg("injected configuration host failure"));
+            }
+            results[0] = match key.as_str() {
+                "missing" => Val::Result(Ok(Some(Box::new(Val::Option(None))))),
+                "empty" => Val::Result(Ok(Some(Box::new(Val::Option(Some(Box::new(
+                    Val::String(String::new()),
+                ))))))),
+                "upstream" | "io" => Val::Result(Err(Some(Box::new(Val::Variant(
+                    key.clone(),
+                    Some(Box::new(Val::String("漢字🙂".into()))),
+                ))))),
+                _ => Val::Result(Ok(Some(Box::new(Val::Option(Some(Box::new(
+                    Val::String("checkout".into()),
+                ))))))),
+            };
+            Ok(())
+        },
+    )?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(262144).build(),
+    );
+    store.limiter(|limits: &mut StoreLimits| limits);
+    let instance = linker.instantiate(&mut store, &component)?;
+    let read = instance.get_typed_func::<(String,), (String,)>(&mut store, "read")?;
+    for _ in 0..100 {
+        for (key, expected) in [
+            ("missing", "visual"),
+            ("empty", ""),
+            ("camera_group", "checkout"),
+            ("upstream", "upstream: 漢字🙂"),
+            ("io", "io: 漢字🙂"),
+        ] {
+            assert_eq!(read.call(&mut store, (key.into(),))?.0, expected);
+        }
+    }
+    let error = read.call(&mut store, ("trap".into(),)).unwrap_err();
+    assert!(format!("{error:#}").contains("injected configuration host failure"));
+    Ok(())
+}
+
+#[test]
+fn configuration_source_matches_the_generated_import_sdk() -> Result<()> {
+    check_sdk_source(
+        "catalog-config-wit",
+        "boundary",
+        include_str!("fixtures/catalog_config.ts"),
+    )
+}
+
+#[test]
+fn wit_imports_preserve_indirect_values_flat_joins_unit_results_and_live_owners() -> Result<()> {
+    const WIT: &str = "package test:imports;
+        interface service {
+            variant choice { number(f64), text(string), absent }
+            record packet { label:string, enabled:option<bool>, choice:choice, values:tuple<u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32,u32> }
+            exchange:func(value:packet)->packet;
+            choose:func(value:choice)->choice;
+            apply:func(value:bool)->result<_,string>;
+            double:func(value:f64)->f64;
+            notify:func();
+        }
+        interface checkpoint {}
+        world boundary {
+            import service;
+            export checkpoint;
+            use service.{packet,choice};
+            export relay:func(value:packet)->packet;
+            export select:func(value:choice)->choice;
+            export checked:func(value:bool)->string;
+            export twice:func(value:f64)->f64;
+        }";
+    let source = r#"
+        import * as host from "test:imports/service";
+        import type { Packet, Choice } from "test:imports/service";
+        export function relay(value:Packet):Packet {
+            const retained=host.exchange(value);
+            let index=0;
+            while(index<300) {const discarded=host.exchange(value); index=index+1;}
+            return retained;
+        }
+        export function select(value:Choice):Choice {return host['choose'](value);}
+        export function checked(value:boolean):string {
+            const result=host.apply(value);
+            if(!result.ok) {return result.error;}
+            host.notify();
+            return "done";
+        }
+        export function twice(value:number):number {return host.double(value);}
+    "#;
+    let compiled = compile_world(source, WIT)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    let mut service = linker.instance("test:imports/service")?;
+    for function in ["exchange", "choose"] {
+        service.func_new(function, |_store, _ty, params, results| {
+            results[0] = params[0].clone();
+            Ok(())
+        })?;
+    }
+    use wasmtime::component::Val;
+    service.func_new("apply", |_store, _ty, params, results| {
+        results[0] = if params[0] == Val::Bool(true) {
+            Val::Result(Ok(None))
+        } else {
+            Val::Result(Err(Some(Box::new(Val::String("拒否🙂".into())))))
+        };
+        Ok(())
+    })?;
+    service.func_wrap(
+        "double",
+        |_store: wasmtime::StoreContextMut<'_, StoreLimits>, (value,): (f64,)| Ok((value * 2.,)),
+    )?;
+    service.func_wrap(
+        "notify",
+        |_store: wasmtime::StoreContextMut<'_, StoreLimits>, (): ()| Ok(()),
+    )?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(262144).build(),
+    );
+    store.limiter(|limits: &mut StoreLimits| limits);
+    let instance = linker.instantiate(&mut store, &component)?;
+    let relay = instance.get_func(&mut store, "relay").unwrap();
+    let select = instance.get_func(&mut store, "select").unwrap();
+    let checked = instance.get_typed_func::<(bool,), (String,)>(&mut store, "checked")?;
+    let twice = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "twice")?;
+    for choice in [
+        Val::Variant("number".into(), Some(Box::new(Val::Float64(-123.25)))),
+        Val::Variant("text".into(), Some(Box::new(Val::String("漢字🙂".into())))),
+        Val::Variant("absent".into(), None),
+    ] {
+        let packet = Val::Record(vec![
+            ("label".into(), Val::String("owner漢字🙂".repeat(20))),
+            (
+                "enabled".into(),
+                Val::Option(Some(Box::new(Val::Bool(false)))),
+            ),
+            ("choice".into(), choice.clone()),
+            (
+                "values".into(),
+                Val::Tuple((0..18).map(|i| Val::U32(u32::MAX - i)).collect()),
+            ),
+        ]);
+        let mut results = [Val::Bool(false)];
+        for _ in 0..10 {
+            relay.call(&mut store, std::slice::from_ref(&packet), &mut results)?;
+            assert_eq!(results[0], packet);
+            select.call(&mut store, std::slice::from_ref(&choice), &mut results)?;
+            assert_eq!(results[0], choice);
+            assert_eq!(checked.call(&mut store, (true,))?.0, "done");
+            assert_eq!(checked.call(&mut store, (false,))?.0, "拒否🙂");
+            assert_eq!(twice.call(&mut store, (1.25,))?.0, 2.5);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn wit_import_binding_identity_and_static_call_diagnostics() -> Result<()> {
+    const WIT: &str = "package test:bindings; interface service { echo:func(value:string)->string; } world boundary {import service; export run:func(value:string)->string;}";
+    let compiled = compile_world(
+        r#"
+        import {echo as send} from "test:bindings/service";
+        function shadow(send:string):string {return send;}
+        export function run(value:string):string {return send(shadow(value));}
+    "#,
+        WIT,
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    linker.instance("test:bindings/service")?.func_wrap(
+        "echo",
+        |_store: wasmtime::StoreContextMut<'_, ()>, (value,): (String,)| Ok((value + "!",)),
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &component)?;
+    assert_eq!(
+        instance
+            .get_typed_func::<(String,), (String,)>(&mut store, "run")?
+            .call(&mut store, ("scope".into(),))?
+            .0,
+        "scope!"
+    );
+    for (source, diagnostic) in [
+        (
+            r#"import {echo} from "test:bindings/service"; export function run(value:string):string {const escaped=echo;return escaped(value);}"#,
+            "direct calls",
+        ),
+        (
+            r#"import * as host from "test:bindings/service"; export function run(value:string):string {const escaped=host;return escaped.echo(value);}"#,
+            "direct member calls",
+        ),
+        (
+            r#"import * as host from "test:bindings/service"; export function run(value:string):string {return host[value](value);}"#,
+            "static member name",
+        ),
+        (
+            r#"import {echo} from "test:bindings/service"; export function run(value:string):string {return echo(...[value]);}"#,
+            "Spread WIT arguments",
+        ),
+        (
+            r#"import host from "test:bindings/service"; export function run(value:string):string {return value;}"#,
+            "no default export",
+        ),
+        (
+            r#"import "test:bindings/service"; export function run(value:string):string {return value;}"#,
+            "module initialization",
+        ),
+        (
+            r#"import {echo} from "test:bindings/service"; export function run(value:string):string {return echo(42);}"#,
+            "static type",
+        ),
+    ] {
+        let Err(error) = compile_world(source, WIT) else {
+            panic!("{source}");
+        };
+        let error = format!("{error:#}");
+        assert!(error.contains(diagnostic), "{error}");
+    }
+    Ok(())
 }

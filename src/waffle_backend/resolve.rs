@@ -34,6 +34,11 @@ pub enum ResolvedInputKind {
 /// Known typed intrinsics with explicit signatures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TypedIntrinsic {
+    WitImport {
+        name: String,
+        key: String,
+        params: Vec<WaffleType>,
+    },
     Capability(CapabilityOperation),
     HostDouble,
     ReadChunk,
@@ -54,12 +59,14 @@ impl TypedIntrinsic {
     pub(crate) fn has_completion(&self) -> bool {
         matches!(
             self,
-            Self::Capability(
-                CapabilityOperation::Stdio(_)
-                    | CapabilityOperation::Filesystem(_)
-                    | CapabilityOperation::HttpGet
-                    | CapabilityOperation::Random(RandomOperation::Fill)
-            ) | Self::DecoderNew
+            Self::WitImport { .. }
+                | Self::Capability(
+                    CapabilityOperation::Stdio(_)
+                        | CapabilityOperation::Filesystem(_)
+                        | CapabilityOperation::HttpGet
+                        | CapabilityOperation::Random(RandomOperation::Fill)
+                )
+                | Self::DecoderNew
                 | Self::Temporal(_)
         )
     }
@@ -74,7 +81,7 @@ impl TypedIntrinsic {
             Self::DecoderNew => "TextDecoder",
             Self::DateNew => "Date",
             Self::Temporal(operation) => operation.name(),
-            Self::Custom { name, .. } => name.as_str(),
+            Self::Custom { name, .. } | Self::WitImport { name, .. } => name.as_str(),
         }
     }
 
@@ -82,6 +89,7 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
+            Self::WitImport { .. } => false,
             Self::ByteAt | Self::DecoderNew | Self::DateNew | Self::Temporal(_) => false,
             Self::Custom { is_async, .. } => *is_async,
         }
@@ -89,6 +97,9 @@ impl TypedIntrinsic {
 
     pub(crate) fn core_signature(&self) -> Result<waffle::SignatureData> {
         let (params, returns) = match self {
+            Self::WitImport { params, .. } => {
+                (params.clone(), vec![WaffleType::I32, WaffleType::F64])
+            }
             Self::Capability(operation) => {
                 let plan = operation.lower();
                 let result = match &plan.result {
@@ -137,7 +148,7 @@ impl TypedIntrinsic {
 /// Validated contract containing typed operations and module signatures.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedContract {
-    pub(crate) wit: Option<super::wit::WitExports>,
+    pub(crate) wit: Option<super::wit::WitWorld>,
     pub(crate) literal_shapes: BTreeMap<String, Vec<String>>,
     pub(crate) promises: Option<super::promises::PromisePlan>,
     pub(crate) input_kind: ResolvedInputKind,
@@ -241,7 +252,7 @@ impl ResolvedContract {
 pub(crate) fn resolve_contract(
     hir: &HirModule,
     bindings: &super::source::SourceBindings,
-    wit: Option<super::wit::WitExports>,
+    wit: Option<super::wit::WitWorld>,
 ) -> Result<ResolvedContract> {
     ensure!(
         hir.init.is_empty(),
@@ -277,6 +288,20 @@ pub(crate) fn resolve_contract(
     let mut intrinsics = BTreeMap::new();
 
     for (name, params, ret) in &hir.extern_funcs {
+        if let Some(key) = bindings.wit_imports.get(name) {
+            intrinsics.insert(
+                name.clone(),
+                TypedIntrinsic::WitImport {
+                    name: name.clone(),
+                    key: key.clone(),
+                    params: params
+                        .iter()
+                        .map(super::registry::map_type_to_waffle)
+                        .collect::<Result<_>>()?,
+                },
+            );
+            continue;
+        }
         if let Some(operation) = bindings.time_constructors.get(name) {
             intrinsics.insert(name.clone(), TypedIntrinsic::Temporal(*operation));
             continue;

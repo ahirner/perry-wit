@@ -180,6 +180,7 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn narrow_type_guard(&mut self, expression: &Expr, truth: bool) {
+        self.narrow_declared_union(expression, truth);
         if let Expr::Compare {
             op: CompareOp::Eq | CompareOp::Ne,
             left,

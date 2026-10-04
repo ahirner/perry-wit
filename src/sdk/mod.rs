@@ -33,11 +33,12 @@ impl Default for SdkOptions {
 #[derive(Debug, Clone)]
 pub struct SdkResult {
     pub types_path: PathBuf,
+    pub imports_path: PathBuf,
     pub check_path: PathBuf,
     pub tsconfig_path: Option<PathBuf>,
 }
 
-/// Generates `.perry/types/world.d.ts` and default `tsconfig.json` if not present.
+/// Generates world/import declarations, an implementation check, and a missing tsconfig.
 pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     fs::create_dir_all(&options.out_dir).with_context(|| {
         format!(
@@ -46,8 +47,15 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         )
     })?;
 
-    let (_world_name, dts) =
-        codegen::generate_declarations_from_wit_dir(&options.wit_dir, options.world.as_deref())?;
+    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
+    let world = resolve.select_world(&[package], options.world.as_deref())?;
+    let dts = codegen::generate_world_declarations(&resolve, &resolve.worlds[world])?;
+    let imports_path = options.out_dir.join("imports.d.ts");
+    fs::write(
+        &imports_path,
+        codegen::generate_import_declarations(&resolve, &resolve.worlds[world]),
+    )?;
+    let dts = format!("/// <reference path=\"./imports.d.ts\" />\n{dts}");
 
     let dts_path = options.out_dir.join("world.d.ts");
     fs::write(&dts_path, dts)
@@ -95,6 +103,7 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
 
     Ok(SdkResult {
         types_path: dts_path,
+        imports_path,
         check_path,
         tsconfig_path: generated_tsconfig,
     })
