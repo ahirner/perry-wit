@@ -22,6 +22,13 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
         "crates/json-helper/Cargo.toml",
         "crates/json-helper/src/lib.rs",
         "crates/json-helper/src/guest.rs",
+        "crates/time-helper/Cargo.toml",
+        "crates/time-helper/src/lib.rs",
+        "crates/time-helper/src/time.rs",
+        "crates/time-helper/src/parse.rs",
+        "crates/time-helper/src/format.rs",
+        "crates/time-helper/src/guest.rs",
+        "src/helpers/guest_memory.rs",
         "src/helpers/json.rs",
         "src/helpers/json/parse.rs",
         "src/helpers/json/serialize.rs",
@@ -159,12 +166,18 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
             );
             assert!(scratch.join("out/search.wasm").exists());
             assert!(scratch.join("out/text.wasm").exists());
-            assert!(scratch.join("out/json.wasm").exists());
-            assert!(
-                stdout_str
-                    .lines()
-                    .any(|line| line == "cargo:rerun-if-changed=crates/json-helper")
-            );
+            for helper in ["json", "time"] {
+                assert!(scratch.join(format!("out/{helper}.wasm")).exists());
+                assert!(stdout_str.lines().any(|line| {
+                    line == format!("cargo:rerun-if-changed=crates/{helper}-helper")
+                }));
+            }
+            assert!(stdout_str.lines().any(|line| {
+                line == format!(
+                    "cargo:rerun-if-changed={}",
+                    scratch.join("src/helpers").display()
+                )
+            }));
             assert!(
                 stdout_str
                     .lines()

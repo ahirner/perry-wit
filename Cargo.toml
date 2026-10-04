@@ -9,6 +9,7 @@ members = [
     ".",
     "crates/guest-runtime",
     "crates/json-helper",
+    "crates/time-helper",
 ]
 
 [profile.release]

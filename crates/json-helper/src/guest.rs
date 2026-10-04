@@ -5,7 +5,11 @@
 //! 6 memory range/overlap, 7 malformed UTF-8.
 
 use crate::{Error, measure, measure_serialized, populate, serialize};
-use core::{arch::wasm32, slice, str};
+use core::str;
+
+#[path = "../../../src/helpers/guest_memory.rs"]
+mod memory;
+use memory::GuestRange;
 
 /// Measure graph storage for strict UTF-8 JSON without changing guest memory.
 ///
@@ -118,55 +122,6 @@ pub unsafe extern "C" fn json_serialize(
     // SAFETY: output is in bounds, disjoint from the graph, and exclusively guest-owned.
     let destination = unsafe { destination.bytes_mut() };
     outcome(serialize(graph, pointer, root, destination))
-}
-
-#[derive(Clone, Copy)]
-struct GuestRange {
-    pointer: usize,
-    length: usize,
-}
-
-impl GuestRange {
-    fn new(pointer: u32, length: u32) -> Result<Self, ()> {
-        let end = u64::from(pointer) + u64::from(length);
-        let memory_bytes = (wasm32::memory_size::<0>() as u64) * 65_536;
-        if (pointer == 0 && length != 0)
-            || length > isize::MAX as u32
-            || end > memory_bytes
-            || end > u64::from(u32::MAX)
-        {
-            return Err(());
-        }
-        Ok(Self {
-            pointer: pointer as usize,
-            length: length as usize,
-        })
-    }
-
-    fn overlaps(self, other: Self) -> bool {
-        self.length != 0
-            && other.length != 0
-            && self.pointer < other.pointer + other.length
-            && other.pointer < self.pointer + self.length
-    }
-
-    /// The caller must guarantee initialized, immutable storage for the borrow.
-    unsafe fn bytes<'a>(self) -> &'a [u8] {
-        if self.length == 0 {
-            return &[];
-        }
-        // SAFETY: construction checks nonnull, bounds, and isize limits; caller supplies ownership.
-        unsafe { slice::from_raw_parts(self.pointer as *const u8, self.length) }
-    }
-
-    /// The caller must guarantee exclusive ownership for the returned borrow.
-    unsafe fn bytes_mut<'a>(self) -> &'a mut [u8] {
-        if self.length == 0 {
-            return &mut [];
-        }
-        // SAFETY: construction checks nonnull, bounds, and isize limits; caller supplies exclusivity.
-        unsafe { slice::from_raw_parts_mut(self.pointer as *mut u8, self.length) }
-    }
 }
 
 fn outcome(result: Result<usize, Error>) -> u64 {

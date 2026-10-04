@@ -17,7 +17,9 @@ fn main() {
             compile_helper(&manifest_dir, &out_dir, helper);
         }
     }
-    compile_json_helper(&manifest_dir, &out_dir);
+    for helper in ["json", "time"] {
+        compile_cargo_helper(&manifest_dir, &out_dir, helper);
+    }
 
     println!("cargo:rerun-if-env-changed=GUEST_RUNTIME_PATH");
     println!("cargo:rerun-if-changed=crates/guest-runtime/Cargo.toml");
@@ -109,10 +111,10 @@ fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
         .expect("validate embedded helper module");
 }
 
-fn compile_json_helper(manifest: &Path, output: &Path) {
-    println!("cargo:rerun-if-changed=crates/json-helper");
+fn compile_cargo_helper(manifest: &Path, output: &Path, helper: &str) {
+    println!("cargo:rerun-if-changed=crates/{helper}-helper");
     println!("cargo:rerun-if-changed=Cargo.lock");
-    let target = output.join("json-helper-build");
+    let target = output.join("cargo-helper-build");
     let status = Command::new(env::var_os("CARGO").expect("Cargo sets CARGO"))
         .current_dir(manifest)
         .env("CARGO_ENCODED_RUSTFLAGS", "-Crelocation-model=pic")
@@ -122,7 +124,7 @@ fn compile_json_helper(manifest: &Path, output: &Path) {
             "--locked",
             "--offline",
             "--release",
-            "--package=perry-json-helper",
+            &format!("--package=perry-{helper}-helper"),
             "--crate-type=cdylib",
             "--target=wasm32-unknown-unknown",
             "--target-dir",
@@ -136,13 +138,15 @@ fn compile_json_helper(manifest: &Path, output: &Path) {
             "-Clink-arg=--import-memory",
         ])
         .status()
-        .expect("build embedded JSON helper");
-    assert!(status.success(), "compile embedded JSON helper");
-    let source = target.join("wasm32-unknown-unknown/release/perry_json_helper.wasm");
-    let module = output.join("json.wasm");
-    fs::copy(source, &module).expect("copy embedded JSON helper");
-    let wasm = fs::read(module).expect("read embedded JSON helper");
+        .expect("build embedded Cargo helper");
+    assert!(status.success(), "compile embedded {helper} helper");
+    let source = target.join(format!(
+        "wasm32-unknown-unknown/release/perry_{helper}_helper.wasm"
+    ));
+    let module = output.join(format!("{helper}.wasm"));
+    fs::copy(source, &module).expect("copy embedded Cargo helper");
+    let wasm = fs::read(module).expect("read embedded Cargo helper");
     wasmparser::Validator::new()
         .validate_all(&wasm)
-        .expect("validate embedded JSON helper");
+        .expect("validate embedded Cargo helper");
 }

@@ -14,6 +14,7 @@ use wasmparser::{
 
 pub(crate) const SEARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/search.wasm"));
 pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.wasm"));
+pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/time.wasm"));
 pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -21,6 +22,7 @@ pub(crate) enum LibraryId {
     Search,
     Text,
     Json,
+    Time,
 }
 
 impl LibraryId {
@@ -37,6 +39,15 @@ impl LibraryId {
             "json_measure" | "json_populate" | "json_serialized_size" | "json_serialize" => {
                 Self::Json
             }
+            "time_instant_parse"
+            | "time_utc_parse"
+            | "time_instant_from_ms"
+            | "time_instant_ms"
+            | "time_instant_format"
+            | "time_plain_parse"
+            | "time_plain_add_days"
+            | "time_plain_part"
+            | "time_plain_format" => Self::Time,
             _ => bail!("unknown helper entry {entry}"),
         })
     }
@@ -46,6 +57,7 @@ impl LibraryId {
             Self::Search => SEARCH,
             Self::Text => TEXT,
             Self::Json => JSON,
+            Self::Time => TIME,
         }
     }
 }
