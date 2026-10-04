@@ -134,6 +134,9 @@ time. Cancellation probes exercise the pinned runtime's canonical protocol;
 those probes do not imply source-level AbortController support.
 
 The [capability catalog](catalog/capabilities.json) is the support register.
+`scripts/check_conformance.mjs` discovers current Cargo test executables, validates
+exact catalog test identifiers, and combines their execution outcomes with fresh
+Node comparisons. Missing, skipped, or failed evidence prevents completion.
 Deviations such as Unicode scalar indexing are explicit contracts. Generated
 declarations are type-checking inputs, not evidence of implemented behavior.
 Fixtures are independently authored; Runner source and WIT remain external.

@@ -115,11 +115,15 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ./scripts/test_e2e.sh
+node scripts/check_conformance.mjs
 nix flake check
 ```
 
 Tests compare supported source behavior with Node and exercise components against
-controlled P3 hosts. HTTP tests own ephemeral endpoints. Performance workloads and
+controlled P3 hosts. The conformance check runs fresh Rust and Node tests, validates
+the catalog's exact test identifiers, and rejects missing or skipped evidence.
+Its report is written to `target/conformance/report.json`. HTTP tests own ephemeral
+endpoints. Performance workloads and
 recorded measurements are described in [PERFORMANCE.md](PERFORMANCE.md).
 
 ## Authoring components

@@ -1,4 +1,4 @@
-use perry_wit::conformance::{CapabilityCatalog, SupportLevel};
+use perry_wit::conformance::{CapabilityCatalog, EvidenceReference, SupportLevel};
 use std::path::Path;
 
 #[test]
@@ -27,8 +27,12 @@ fn test_embedded_catalog_loads_and_validates() {
             cap.id
         );
         for reference in &cap.conformance {
+            let path = match EvidenceReference::parse(reference).unwrap() {
+                EvidenceReference::Node { path } => path,
+                EvidenceReference::Rust { target, .. } => target,
+            };
             assert!(
-                Path::new(reference).is_file(),
+                Path::new(path).is_file(),
                 "capability '{}' references missing evidence: {reference}",
                 cap.id
             );
@@ -51,7 +55,7 @@ fn test_catalog_rejects_duplicates() {
                 "domain": "test",
                 "invariants": ["inv"],
                 "differences": [],
-                "conformance": ["test.ts"]
+                "conformance": ["node:test.ts"]
             },
             {
                 "id": "cap.one",
@@ -61,7 +65,7 @@ fn test_catalog_rejects_duplicates() {
                 "domain": "test",
                 "invariants": ["inv"],
                 "differences": [],
-                "conformance": ["test.ts"]
+                "conformance": ["node:test.ts"]
             }
         ]
     }"#;

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::catalog::{CapabilityCatalog, SupportLevel};
@@ -19,10 +19,41 @@ pub enum EvidenceStatus {
     Unsupported,
 }
 
+/// A result observed by an executable test runner; skipped tests are not proof.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TestOutcome {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestEvidence {
+    pub id: String,
+    pub outcome: TestOutcome,
+    #[serde(default)]
+    pub details: Vec<String>,
+}
+
+impl From<&ComparisonResult> for TestEvidence {
+    fn from(result: &ComparisonResult) -> Self {
+        Self {
+            id: format!("node:{}", result.case_path),
+            outcome: if result.matched {
+                TestOutcome::Passed
+            } else {
+                TestOutcome::Failed
+            },
+            details: result.discrepancies.clone(),
+        }
+    }
+}
+
 /// Verification evidence for an individual test case.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CaseEvidence {
-    pub case_path: String,
+    pub test_id: String,
     pub passed: bool,
     pub discrepancies: Vec<String>,
 }
@@ -42,7 +73,7 @@ pub struct CapabilityEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConformanceReport {
     pub version: String,
-    pub timestamp: String,
+    pub generated_at_unix_seconds: u64,
     pub total_capabilities: usize,
     pub supported_capabilities: usize,
     pub passing_capabilities: usize,
@@ -54,9 +85,19 @@ pub struct ConformanceReport {
 
 impl ConformanceReport {
     /// Builds an aggregate report by cross-referencing catalog declarations against executed test results.
-    pub fn build(catalog: &CapabilityCatalog, results: &[ComparisonResult]) -> Self {
-        let results_by_path: HashMap<String, &ComparisonResult> =
-            results.iter().map(|r| (r.case_path.clone(), r)).collect();
+    pub fn build(
+        catalog: &CapabilityCatalog,
+        results: &[TestEvidence],
+        generated_at_unix_seconds: u64,
+    ) -> Result<Self> {
+        let mut results_by_path = HashMap::new();
+        for result in results {
+            ensure!(
+                results_by_path.insert(result.id.as_str(), result).is_none(),
+                "duplicate execution evidence: {}",
+                result.id
+            );
+        }
 
         let mut evidence = Vec::new();
         let mut passing_capabilities = 0;
@@ -84,17 +125,18 @@ impl ConformanceReport {
             let mut has_missing = cap.conformance.is_empty();
 
             for case_ref in &cap.conformance {
-                if let Some(res) = results_by_path.get(case_ref) {
-                    has_failed |= !res.matched;
+                if let Some(res) = results_by_path.get(case_ref.as_str()) {
+                    has_failed |= res.outcome == TestOutcome::Failed;
+                    has_missing |= res.outcome == TestOutcome::Skipped;
                     case_evidences.push(CaseEvidence {
-                        case_path: case_ref.clone(),
-                        passed: res.matched,
-                        discrepancies: res.discrepancies.clone(),
+                        test_id: case_ref.clone(),
+                        passed: res.outcome == TestOutcome::Passed,
+                        discrepancies: res.details.clone(),
                     });
                 } else {
                     has_missing = true;
                     case_evidences.push(CaseEvidence {
-                        case_path: case_ref.clone(),
+                        test_id: case_ref.clone(),
                         passed: false,
                         discrepancies: vec!["Test case was not executed".to_string()],
                     });
@@ -128,9 +170,9 @@ impl ConformanceReport {
             100.0
         };
 
-        Self {
+        Ok(Self {
             version: catalog.version.clone(),
-            timestamp: "2026-10-01T22:30:00Z".to_string(),
+            generated_at_unix_seconds,
             total_capabilities: catalog.capabilities.len(),
             supported_capabilities: supported_count,
             passing_capabilities,
@@ -138,7 +180,27 @@ impl ConformanceReport {
             missing_capabilities,
             coverage_percent,
             evidence,
-        }
+        })
+    }
+
+    pub fn require_complete(&self) -> Result<()> {
+        let unverified: Vec<_> = self
+            .evidence
+            .iter()
+            .filter(|capability| {
+                matches!(
+                    capability.status,
+                    EvidenceStatus::Failed | EvidenceStatus::Missing
+                )
+            })
+            .map(|capability| capability.capability_id.as_str())
+            .collect();
+        ensure!(
+            unverified.is_empty(),
+            "unverified capability evidence: {}",
+            unverified.join(", ")
+        );
+        Ok(())
     }
 
     /// Renders a human-readable markdown summary table.

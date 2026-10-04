@@ -35,7 +35,37 @@ pub struct Capability {
     pub domain: String,
     pub invariants: Vec<String>,
     pub differences: Vec<String>,
+    #[serde(default)]
+    pub wasi: Vec<String>,
     pub conformance: Vec<String>,
+}
+
+pub enum EvidenceReference<'a> {
+    Node { path: &'a str },
+    Rust { target: &'a str, test: &'a str },
+}
+
+impl<'a> EvidenceReference<'a> {
+    pub fn parse(reference: &'a str) -> Result<Self> {
+        if let Some(path) = reference.strip_prefix("node:") {
+            ensure!(
+                path.ends_with(".ts"),
+                "Node evidence must identify a TypeScript fixture: {reference}"
+            );
+            return Ok(Self::Node { path });
+        }
+        if let Some((target, test)) = reference
+            .strip_prefix("rust:")
+            .and_then(|value| value.split_once('#'))
+        {
+            ensure!(
+                target.ends_with(".rs") && !test.is_empty(),
+                "Rust evidence requires a Cargo target source and exact test identifier: {reference}"
+            );
+            return Ok(Self::Rust { target, test });
+        }
+        bail!("Invalid evidence reference '{reference}'")
+    }
 }
 
 /// The root capability catalog.
@@ -113,6 +143,16 @@ impl CapabilityCatalog {
                 ensure!(
                     !cap.conformance.is_empty(),
                     "supported capability '{}' must declare at least one conformance reference",
+                    cap.id
+                );
+            }
+            let mut references = HashSet::new();
+            for reference in &cap.conformance {
+                EvidenceReference::parse(reference)
+                    .with_context(|| format!("capability '{}'", cap.id))?;
+                ensure!(
+                    references.insert(reference),
+                    "duplicate evidence reference for '{}': {reference}",
                     cap.id
                 );
             }

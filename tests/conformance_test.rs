@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use perry_wit::conformance::{
-    CapabilityCatalog, ConformanceReport, EvidenceStatus, run_conformance_suite,
+    CapabilityCatalog, ConformanceReport, TestEvidence, run_conformance_suite,
 };
 
 #[test]
@@ -31,12 +31,10 @@ fn shell_banner_filter_preserves_component_output() {
 #[test]
 fn test_differential_conformance_suite() {
     let cases_dir = Path::new("tests/conformance/cases");
-    let scratch_dir = std::env::temp_dir().join("perry_wit_conformance");
-    let _ = fs::create_dir_all(&scratch_dir);
-
-    let catalog = CapabilityCatalog::load_embedded().expect("Loading embedded capability catalog");
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch_dir = scratch.path();
     let results =
-        run_conformance_suite(cases_dir, &scratch_dir).expect("Running differential test suite");
+        run_conformance_suite(cases_dir, scratch_dir).expect("Running differential test suite");
 
     assert!(
         !results.is_empty(),
@@ -65,55 +63,26 @@ fn test_differential_conformance_suite() {
         );
     }
 
-    let report = ConformanceReport::build(&catalog, &results);
-
-    println!("\n{}", report.render_markdown_table());
-
-    assert_eq!(
-        report.failing_capabilities, 0,
-        "Expected 0 failing capabilities in report"
-    );
-    // Cargo verifies these suites separately; this runner only executes .ts cases.
-    let integration_required: Vec<_> = catalog
-        .supported_capabilities()
-        .into_iter()
-        .filter(|capability| {
-            !capability.conformance.is_empty()
-                && capability.conformance.iter().any(|reference| {
-                    Path::new(reference)
-                        .extension()
-                        .is_some_and(|ext| ext == "rs")
-                })
-        })
-        .map(|capability| capability.id.as_str())
-        .collect();
-    assert_eq!(report.missing_capabilities, integration_required.len());
-    assert_eq!(
-        report.passing_capabilities,
-        report.supported_capabilities - integration_required.len()
-    );
-
-    let json_report = report.render_json().expect("Serializing report to JSON");
-    assert!(json_report.contains("compiler.p3_json"));
-    assert!(json_report.contains("compiler.p3_stdio"));
-    assert!(json_report.contains("web.promise_all"));
-    assert!(json_report.contains("web.fetch"));
-    assert!(json_report.contains("compiler.p3_context"));
-    assert!(json_report.contains("node.process_exit"));
-    assert!(json_report.contains("compiler.p3_context"));
-
-    for ev in &report.evidence {
-        if ev.status != EvidenceStatus::Unsupported {
-            let expected = if integration_required.contains(&ev.capability_id.as_str()) {
-                EvidenceStatus::Missing
-            } else {
-                EvidenceStatus::Passed
-            };
-            assert_eq!(
-                ev.status, expected,
-                "Capability {} failed conformance verification",
-                ev.capability_id
-            );
+    if let Some(path) = std::env::var_os("PERRY_RUST_EVIDENCE") {
+        let mut evidence: Vec<TestEvidence> =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        evidence.extend(results.iter().map(TestEvidence::from));
+        let catalog = CapabilityCatalog::load_embedded().unwrap();
+        let report = ConformanceReport::build(
+            &catalog,
+            &evidence,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        println!("{}", report.render_markdown_table());
+        if let Some(path) = std::env::var_os("PERRY_CONFORMANCE_REPORT") {
+            fs::write(path, report.render_json().unwrap()).unwrap();
         }
+        report
+            .require_complete()
+            .expect("All advertised capabilities need executed evidence");
     }
 }
