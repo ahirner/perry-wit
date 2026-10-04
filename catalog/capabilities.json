@@ -168,11 +168,15 @@
       "name": "Typed P3 Clock and Random Calls",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: waitFor, randomNumber, and zero-argument Math.random",
+      "domain": "WAFFLE Rust compiler API: waitFor, performance.now, Date.now, Math.random, crypto.getRandomValues, and crypto.randomUUID",
       "invariants": [
         "Clocks and randomness use typed shared lowering plans and WASI 0.3 canonical adapters",
         "Named and namespace imports from perry:clocks and perry:random preserve binding aliases and distinguish local shadows",
         "Arguments execute once in source order, with clock durations converted from milliseconds to nanoseconds",
+        "Monotonic reads return fractional milliseconds and system-clock reads return signed whole epoch milliseconds",
+        "Random filling preserves byte-view identity and its visible range, validates type and the 65536-byte quota before host calls, skips empty views, and loops over P3 short reads",
+        "UUIDs use fresh random bytes with v4 version and variant bits; UUID text and filled views survive collection, retained Promises, suspension, and disposal",
+        "Clock and random imports contain only selected functions and share adapters when multiple operations use the same interface",
         "Unused declarations add no component imports; all emitted function bodies retain their referenced dependencies",
         "UTF-8 values, exceptions, and async invocation ownership remain shared across capabilities",
         "Host failures trap independently of guest exception handlers"
@@ -181,10 +185,14 @@
         "The default CLI and generated WIT SDK still target the legacy pipeline; types/p3.d.ts describes these migration imports",
         "Only direct calls and literal namespace member names are supported; dynamic lookup, capability function values, and spread arguments are diagnosed",
         "Invalid or overflowing wait durations trap before the host call",
+        "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
+        "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
+        "Date objects, calendar methods, environment/arguments, and callback timers remain open migration work",
         "Instances support serial calls; cancellation discards the store"
       ],
       "conformance": [
         "tests/waffle_pipeline_test.rs",
+        "tests/waffle_platform_test.rs",
         "tests/waffle_string_test.rs"
       ]
     },

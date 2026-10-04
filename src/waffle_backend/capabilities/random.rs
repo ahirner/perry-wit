@@ -1,4 +1,4 @@
-//! Uniform double samples using the high 53 bits of a WASI random word.
+//! Typed random operations with shared host imports and guest byte ownership.
 
 use super::{CapabilityImplementation, CapabilityPlan, LowerCapability};
 use perry_hir::types::Type as HirType;
@@ -6,34 +6,43 @@ use perry_hir::types::Type as HirType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RandomOperation {
     Number,
+    Fill,
+    Uuid,
+}
+
+impl RandomOperation {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Number => "randomNumber",
+            Self::Fill => "crypto.getRandomValues",
+            Self::Uuid => "crypto.randomUUID",
+        }
+    }
+    pub(crate) fn needs_bytes(self) -> bool {
+        self != Self::Number
+    }
 }
 
 impl LowerCapability for RandomOperation {
     fn lower(&self) -> CapabilityPlan {
-        match self {
-            Self::Number => CapabilityPlan {
-                params: vec![],
-                result: HirType::Number,
-                implementation: CapabilityImplementation::Standalone {
-                    adapter: P3_RANDOM_ADAPTER,
+        CapabilityPlan {
+            params: if *self == Self::Fill {
+                vec![HirType::Any]
+            } else {
+                vec![]
+            },
+            result: match self {
+                Self::Number => HirType::Number,
+                Self::Fill => HirType::Named("Uint8Array".into()),
+                Self::Uuid => HirType::String,
+            },
+            implementation: if *self == Self::Number {
+                CapabilityImplementation::Standalone {
                     core_function: "(func $random-number \"sample\")",
-                },
+                }
+            } else {
+                CapabilityImplementation::RandomBytes
             },
         }
     }
 }
-
-const P3_RANDOM_ADAPTER: &str = r#"
-  (import "wasi:random/random@0.3.0" (instance $random
-    (export "get-random-u64" (func (result u64)))))
-  (alias export $random "get-random-u64" (func $random-word))
-  (core func $random-word (canon lower (func $random-word)))
-  (core module $random-number
-    (import "wasi" "random-word" (func $random-word (result i64)))
-    (func (export "sample") (result f64)
-      (f64.div
-        (f64.convert_i64_u (i64.shr_u (call $random-word) (i64.const 11)))
-        (f64.const 9007199254740992))))
-  (core instance $random-number (instantiate $random-number
-    (with "wasi" (instance (export "random-word" (func $random-word))))))
-"#;

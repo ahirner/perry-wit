@@ -14,6 +14,7 @@ pub(crate) mod libraries;
 pub(crate) mod link;
 mod objects;
 pub(crate) mod promises;
+mod random;
 mod regex;
 pub(crate) mod registry;
 pub(crate) mod resolve;

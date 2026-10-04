@@ -1,4 +1,12 @@
-/** Capability imports accepted by the WAFFLE/P3 compiler API. */
+/** Capability imports accepted by the WAFFLE/P3 compiler API.
+ * Standard TypeScript library declarations also describe Math.random(),
+ * performance.now(), Date.now(), crypto.randomUUID(), and crypto.getRandomValues().
+ * This compiler currently accepts only Uint8Array destinations for random filling.
+ * It returns the same view, throws numeric 1 for other supported value kinds or 2
+ * for a view over 65536 bytes, and makes no host call for an empty view.
+ * Random UUIDs are lowercase v4 strings. Clock reads use milliseconds; Date.now()
+ * returns whole signed UTC epoch milliseconds. Date objects and callbacks remain
+ * separate migration work. */
 declare module "perry:clocks" {
   /** Wait in milliseconds. May be stored and awaited repeatedly within one invocation.
    * Invalid or overflowing durations trap before host I/O. */

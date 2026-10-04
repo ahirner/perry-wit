@@ -11,6 +11,7 @@ use waffle::{
     Func, FuncDecl, FunctionBody, Import, ImportKind, Module, SignatureData, Terminator, Type,
 };
 
+use crate::waffle_backend::capabilities::{CapabilityImplementation, LowerCapability};
 use crate::waffle_backend::promises::TaskTarget;
 use crate::waffle_backend::resolve::{ResolvedContract, TypedIntrinsic};
 
@@ -118,10 +119,8 @@ impl ModuleRegistry {
                     | TypedIntrinsic::DecoderNew
             ) || matches!(
                 intrinsic,
-                TypedIntrinsic::Capability(
-                    super::capabilities::CapabilityOperation::Stdio(_)
-                        | super::capabilities::CapabilityOperation::Filesystem(_)
-                )
+                TypedIntrinsic::Capability(operation)
+                    if !matches!(operation.lower().implementation, CapabilityImplementation::Standalone { .. })
             ) {
                 continue;
             }
@@ -145,6 +144,12 @@ impl ModuleRegistry {
         let filesystem_imports = contract
             .has_filesystem()
             .then(|| super::filesystem::declare_imports(module));
+
+        let random_imports = contract
+            .random_operations()
+            .iter()
+            .any(|operation| operation.needs_bytes())
+            .then(|| super::random::declare_imports(module));
 
         let promises = if let Some(plan) = &contract.promises {
             let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
@@ -302,6 +307,24 @@ impl ModuleRegistry {
                 if let TypedIntrinsic::Capability(
                     super::capabilities::CapabilityOperation::Stdio(operation),
                 ) = intrinsic
+                {
+                    intrinsics.insert(name.clone(), helpers[operation.name()]);
+                }
+            }
+        }
+
+        if let Some(imports) = random_imports {
+            let helpers = super::random::emit_runtime(
+                module,
+                memory,
+                allocator.expect("random byte storage requires an allocator"),
+                imports,
+            )?;
+            for (name, intrinsic) in &contract.intrinsics {
+                if let TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Random(
+                    operation,
+                )) = intrinsic
+                    && operation.needs_bytes()
                 {
                     intrinsics.insert(name.clone(), helpers[operation.name()]);
                 }

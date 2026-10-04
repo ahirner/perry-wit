@@ -12,7 +12,8 @@ use perry_hir::types::{FuncId, Type as HirType};
 use waffle::Type as WaffleType;
 
 use super::capabilities::{
-    CapabilityImplementation, CapabilityOperation, LowerCapability, StdioOperation,
+    CapabilityImplementation, CapabilityOperation, ClockOperation, LowerCapability,
+    RandomOperation, StdioOperation,
 };
 use super::visit::visit_function_expressions;
 
@@ -50,8 +51,11 @@ impl TypedIntrinsic {
     pub(crate) fn has_completion(&self) -> bool {
         matches!(
             self,
-            Self::Capability(CapabilityOperation::Stdio(_) | CapabilityOperation::Filesystem(_))
-                | Self::DecoderNew
+            Self::Capability(
+                CapabilityOperation::Stdio(_)
+                    | CapabilityOperation::Filesystem(_)
+                    | CapabilityOperation::Random(RandomOperation::Fill)
+            ) | Self::DecoderNew
         )
     }
 
@@ -130,6 +134,29 @@ pub(crate) struct ResolvedContract {
 }
 
 impl ResolvedContract {
+    pub(crate) fn clock_operations(&self) -> BTreeSet<ClockOperation> {
+        self.intrinsics
+            .values()
+            .filter_map(|intrinsic| match intrinsic {
+                TypedIntrinsic::Capability(CapabilityOperation::Clock(operation)) => {
+                    Some(*operation)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    pub(crate) fn random_operations(&self) -> BTreeSet<RandomOperation> {
+        self.intrinsics
+            .values()
+            .filter_map(|intrinsic| match intrinsic {
+                TypedIntrinsic::Capability(CapabilityOperation::Random(operation)) => {
+                    Some(*operation)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn has_filesystem(&self) -> bool {
         self.intrinsics.values().any(|intrinsic| {
             matches!(

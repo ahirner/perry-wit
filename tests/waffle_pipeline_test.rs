@@ -374,11 +374,11 @@ async fn test_waffle_mixed_capabilities_share_text_unwinding_and_invocation_life
             .component_type()
             .imports(&engine)
             .map(|(name, _)| name)
-            .collect::<Vec<_>>(),
-        [
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
             "wasi:random/random@0.3.0",
             "wasi:clocks/monotonic-clock@0.3.0"
-        ]
+        ])
     );
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::clocks::add_to_linker(&mut linker)?;

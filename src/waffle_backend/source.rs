@@ -298,7 +298,17 @@ impl SourceCalls {
                 };
                 let builtin_math = receiver.sym == "Math" && receiver.ctxt == self.unresolved;
                 let builtin_console = receiver.sym == "console" && receiver.ctxt == self.unresolved;
-                if namespace.is_none() && !builtin_math && !builtin_console {
+                let builtin_crypto = receiver.sym == "crypto" && receiver.ctxt == self.unresolved;
+                let builtin_performance =
+                    receiver.sym == "performance" && receiver.ctxt == self.unresolved;
+                let builtin_date = receiver.sym == "Date" && receiver.ctxt == self.unresolved;
+                if namespace.is_none()
+                    && !builtin_math
+                    && !builtin_console
+                    && !builtin_crypto
+                    && !builtin_performance
+                    && !builtin_date
+                {
                     return Ok(None);
                 }
                 let name = match &member.prop {
@@ -317,6 +327,20 @@ impl SourceCalls {
                         "error" | "warn" => StdioOperation::Error,
                         _ => bail!("Unsupported console method '{name}'"),
                     })))
+                } else if builtin_crypto {
+                    Ok(Some(CapabilityOperation::Random(match name {
+                        "getRandomValues" => RandomOperation::Fill,
+                        "randomUUID" => RandomOperation::Uuid,
+                        _ => bail!("Unsupported crypto method '{name}'"),
+                    })))
+                } else if builtin_performance {
+                    ensure!(name == "now", "Unsupported performance method '{name}'");
+                    Ok(Some(CapabilityOperation::Clock(
+                        ClockOperation::MonotonicNow,
+                    )))
+                } else if builtin_date {
+                    ensure!(name == "now", "Unsupported Date static method '{name}'");
+                    Ok(Some(CapabilityOperation::Clock(ClockOperation::DateNow)))
                 } else if name == "random" {
                     Ok(Some(CapabilityOperation::Random(RandomOperation::Number)))
                 } else {
@@ -442,7 +466,15 @@ impl VisitMut for SourceCalls {
     fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
         if matches!(
             ident.sym.as_ref(),
-            "Math" | "RegExp" | "JSON" | "Uint8Array" | "TextDecoder" | "console"
+            "Math"
+                | "RegExp"
+                | "JSON"
+                | "Uint8Array"
+                | "TextDecoder"
+                | "console"
+                | "crypto"
+                | "performance"
+                | "Date"
         ) && ident.ctxt != self.unresolved
         {
             let id = ident.to_id();

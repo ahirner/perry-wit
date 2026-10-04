@@ -12,6 +12,7 @@ mod loops;
 mod objects;
 mod optional;
 mod options;
+mod random;
 mod requirements;
 mod string_ops;
 mod text_or_bytes;
@@ -61,7 +62,10 @@ pub(crate) fn lower_module(
 
     // 2. Scan module for string requirements and build string pool if needed
     let mut reqs = scan_module_string_requirements(hir);
-    reqs.needs_strings |= contract.has_filesystem();
+    reqs.needs_strings |= contract.has_filesystem()
+        || contract
+            .random_operations()
+            .contains(&super::capabilities::RandomOperation::Uuid);
     let mut string_pool = StringPool::new();
     let regex_tables = regex::compile_literals(hir)?;
     let (string_heap_base, regex_programs) = if reqs.needs_strings
@@ -477,6 +481,18 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::Capability(
+                    super::capabilities::CapabilityOperation::Random(
+                        super::capabilities::RandomOperation::Fill
+                    )
+                ))
+            )
+        {
+            return self.random_fill(name, args).map(Some);
+        }
         if let Expr::ExternFuncRef { name, .. } = callee
             && let Some(super::resolve::TypedIntrinsic::Capability(
                 super::capabilities::CapabilityOperation::Filesystem(operation),

@@ -2,8 +2,6 @@
 
 pub(crate) mod forward;
 
-use std::collections::BTreeSet;
-
 use crate::waffle_backend::capabilities::{CapabilityImplementation, LowerCapability};
 use crate::waffle_backend::registry::canonical_param_types;
 use crate::waffle_backend::resolve::{ResolvedContract, TypedIntrinsic};
@@ -49,7 +47,11 @@ pub(crate) fn frame_component(
         "#);
     }
     let mut host_wires = String::new();
-    let mut emitted_operations = BTreeSet::new();
+    host_imports.push_str(&super::capabilities::clocks::declare_adapters(
+        &contract.clock_operations(),
+    )?);
+    let random_operations = contract.random_operations();
+    host_imports.push_str(&super::random::declare_adapters(&random_operations)?);
 
     for (name, intrinsic) in &contract.intrinsics {
         match intrinsic {
@@ -67,14 +69,8 @@ pub(crate) fn frame_component(
             }
             TypedIntrinsic::Capability(operation) => {
                 let plan = operation.lower();
-                if let CapabilityImplementation::Standalone {
-                    adapter,
-                    core_function,
-                } = plan.implementation
+                if let CapabilityImplementation::Standalone { core_function } = plan.implementation
                 {
-                    if emitted_operations.insert(operation) {
-                        host_imports.push_str(adapter);
-                    }
                     host_wires.push_str(&format!("      (export {name:?} {core_function})\n"));
                 }
             }
@@ -99,6 +95,13 @@ pub(crate) fn frame_component(
     } else {
         r#"(with "output" (instance $output-forward))"#.into()
     };
+    if random_operations
+        .iter()
+        .any(|operation| operation.needs_bytes())
+    {
+        guest_adapters.push_str(&super::random::bind_adapters()?);
+        guest_imports.push_str(r#"(with "random" (instance $random-forward))"#);
+    }
     if contract.has_filesystem() {
         host_imports.push_str(&super::filesystem::declare_adapters()?);
         guest_adapters.push_str(&super::filesystem::bind_adapters()?);

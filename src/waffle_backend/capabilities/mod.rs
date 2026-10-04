@@ -1,6 +1,6 @@
 //! Typed capability plans; shared SSA and component code own their execution.
 
-mod clocks;
+pub(crate) mod clocks;
 mod filesystem;
 mod random;
 pub(crate) mod stdio;
@@ -29,12 +29,10 @@ pub(crate) struct CapabilityPlan {
 }
 
 pub(crate) enum CapabilityImplementation {
-    Standalone {
-        adapter: &'static str,
-        core_function: &'static str,
-    },
+    Standalone { core_function: &'static str },
     Stdio(StdioOperation),
     Filesystem,
+    RandomBytes,
 }
 
 /// Describe an operation without owning values, scheduling, or invocation state.
@@ -53,8 +51,8 @@ impl CapabilityOperation {
 
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::Clock(ClockOperation::WaitFor) => "waitFor",
-            Self::Random(RandomOperation::Number) => "randomNumber",
+            Self::Clock(operation) => operation.name(),
+            Self::Random(operation) => operation.name(),
             Self::Stdio(operation) => operation.name(),
             Self::Filesystem(operation) => operation.name(),
         }

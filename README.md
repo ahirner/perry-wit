@@ -166,6 +166,22 @@ Named and namespace imports from `perry:clocks` (`waitFor`) and `perry:random`
 (`randomNumber`) support import aliases and literal member names.
 Include [types/p3.d.ts](types/p3.d.ts) when type-checking these source tasks.
 The zero-argument builtin `Math.random()` uses the same random operation.
+`performance.now()` returns the host monotonic clock in floating-point milliseconds;
+`Date.now()` returns whole UTC epoch milliseconds from the signed P3 system clock.
+Only the selected clock functions are imported, including when reads and waits share
+one component. Date construction, calendar methods, and callback timers remain open
+migration work.
+`crypto.getRandomValues(view)` fills only the visible `Uint8Array` range and returns
+the same view. Empty views make no host call. Invalid supported value kinds throw
+numeric code `1`; views larger than 65,536 bytes throw `2`, before requesting randomness
+or changing bytes. Ordinary literal array arguments preserve their element effects
+before rejection. Other typed-array classes remain unsupported source forms.
+The shared fill loop handles P3 short reads and frees each temporary native byte
+allocation. A zero-length or oversized host result violates the P3 contract and traps,
+as do host failures; traps bypass guest cleanup and require store disposal. Earlier
+writes are not rolled back. `crypto.randomUUID()` uses fresh random bytes, sets the
+v4 version and variant bits, and returns a lowercase 36-character UUID. UUID text and
+filled byte views survive retained Promises, collection, and native suspension.
 Binding resolution distinguishes local shadows from the builtin and imported functions.
 Dynamic member names, capability function values, spread arguments, parameter
 defaults, and class initialization currently produce diagnostics.
