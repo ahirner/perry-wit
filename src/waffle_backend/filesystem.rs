@@ -47,6 +47,10 @@ pub(crate) fn emit_runtime(
     compare: Func,
     keys: &super::strings::StringPool,
 ) -> Result<FilesystemHelpers> {
+    let read_transfer = super::streams::emit_read_transfer(module, memory, imports["read"])?;
+    let read_directory_transfer =
+        super::streams::emit_read_transfer(module, memory, imports["read-entry"])?;
+    let read_buffered = super::streams::buffered::emit(module, memory, allocator, read_transfer)?;
     let mut object_options = include_str!("filesystem/object-options.wat").to_string();
     for key in OPTION_KEYS {
         object_options = object_options.replace(
@@ -63,13 +67,11 @@ pub(crate) fn emit_runtime(
       (import "host" "frame-new" (func $frame-new (param i32) (result i32)))
       (import "host" "frame-drop" (func $frame-drop (param i32)))
       (import "host" "compare" (func $compare (param i32 i32) (result i32)))
-      {} {} {} {} {} {} {} {} {} {} {})"#,
+      (import "host" "read-buffered" (func $read-buffered (param i32 i32) (result i32 i32 i32)))
+      (import "host" "read-directory-transfer" (func $read-directory-transfer (param i32 i32 i32) (result i32 i32)))
+      {} {} {} {} {} {} {} {} {})"#,
         forward::module_imports(&native_functions())?,
         include_str!("streams/write.wat"),
-        include_str!("streams/read.wat"),
-        include_str!("streams/read.wat")
-            .replace("$read-transfer", "$read-directory-transfer")
-            .replace("(call $read ", "(call $read-entry "),
         include_str!("strings/utf8.wat"),
         include_str!("filesystem/options.wat"),
         include_str!("filesystem/path.wat"),
@@ -88,6 +90,8 @@ pub(crate) fn emit_runtime(
         ("frame-new", allocator.frame_new),
         ("frame-drop", allocator.frame_drop),
         ("compare", compare),
+        ("read-buffered", read_buffered),
+        ("read-directory-transfer", read_directory_transfer),
     ]);
     let functions = runtime::emit_functions(module, memory, &wat, &imports)?;
     Ok(FilesystemHelpers {

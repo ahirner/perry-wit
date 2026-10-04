@@ -1,6 +1,6 @@
 (module
   (import "host" "memory" (memory 1))
-  (import "host" "read" (func $read (param i32 i32 i32) (result i32)))
+  (import "host" "read-transfer" (func $read-transfer (param i32 i32 i32) (result i32 i32)))
   (import "host" "drop" (func $drop (param i32)))
   (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
   (import "host" "frame-new" (func $frame-new (param i32) (result i32)))
@@ -35,7 +35,6 @@
     local.set $status local.set $length
     (i32.store (i32.const 64) (local.get $status))
     (local.get $length))
-  ;; READ_TRANSFER
   (func (export "stream.read-chunk") (param $stream i32) (result f64)
     (local $data i32) (local $length i32)
     (call $check-owner (local.get $stream))
