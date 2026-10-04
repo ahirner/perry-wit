@@ -15,6 +15,8 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
+        ty if crate::waffle_backend::filesystem::is_stats(ty) => Some("Stats"),
+        HirType::Array(inner) if **inner == HirType::String => Some("string[]"),
         HirType::Named(name) if name == "ByteStream" => Some("ByteStream"),
         _ => None,
     }
@@ -23,6 +25,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
         ty if crate::waffle_backend::decoder::is_decoder(ty) => true,
+        ty if crate::waffle_backend::filesystem::is_stats(ty) => true,
         HirType::String | HirType::Promise(_) => true,
         HirType::Array(inner) => **inner == HirType::String,
         HirType::Named(name) => name == SCALAR_ITERATION || name == "Uint8Array",
@@ -59,6 +62,13 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::filesystem::is_stats(&self.infer_expr_type(object))
+                && matches!(property.as_str(), "size" | "mtimeMs") =>
+            {
+                HirType::Number
+            }
             Expr::TextDecoderNew { .. } => {
                 HirType::Named(crate::waffle_backend::decoder::DECODER_TYPE.into())
             }
@@ -142,6 +152,11 @@ impl FunctionLowerer<'_> {
                     object, property, ..
                 } = callee.as_ref()
                 {
+                    if crate::waffle_backend::filesystem::is_stats(&self.infer_expr_type(object))
+                        && matches!(property.as_str(), "isFile" | "isDirectory")
+                    {
+                        return HirType::Boolean;
+                    }
                     if crate::waffle_backend::decoder::is_decoder(&self.infer_expr_type(object))
                         && property == "decode"
                     {

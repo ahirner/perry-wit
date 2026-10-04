@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use perry_hir::types::Type as HirType;
 use waffle::{Func, Memory, Module};
 
 use super::{allocation::AllocationFuncs, component::forward, runtime};
@@ -13,6 +14,13 @@ pub(crate) struct FilesystemHelpers {
     pub(crate) write_options: Func,
     pub(crate) read: Func,
     pub(crate) read_options: Func,
+    pub(crate) metadata: Func,
+    pub(crate) read_directory: Func,
+    pub(crate) directory_options: Func,
+}
+
+pub(crate) fn is_stats(ty: &HirType) -> bool {
+    matches!(ty, HirType::Named(name) if name == "Stats")
 }
 
 pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
@@ -30,15 +38,20 @@ pub(crate) fn emit_runtime(
       (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
       (import "host" "frame-new" (func $frame-new (param i32) (result i32)))
       (import "host" "frame-drop" (func $frame-drop (param i32)))
-      {} {} {} {} {} {} {})"#,
+      {} {} {} {} {} {} {} {} {} {})"#,
         forward::module_imports(&native_functions())?,
         include_str!("streams/write.wat"),
         include_str!("streams/read.wat"),
+        include_str!("streams/read.wat")
+            .replace("$read-transfer", "$read-directory-transfer")
+            .replace("(call $read ", "(call $read-entry "),
         include_str!("strings/utf8.wat"),
         include_str!("filesystem/options.wat"),
         include_str!("filesystem/path.wat"),
         include_str!("filesystem/runtime.wat"),
         include_str!("filesystem/read.wat"),
+        include_str!("filesystem/metadata.wat"),
+        include_str!("filesystem/directory.wat"),
     );
     let mut imports: BTreeMap<_, _> = imports
         .iter()
@@ -55,6 +68,9 @@ pub(crate) fn emit_runtime(
         write_options: functions["fs.write-options"],
         read: functions["fs.read"],
         read_options: functions["fs.read-options"],
+        metadata: functions["fs.metadata"],
+        read_directory: functions["fs.read-directory"],
+        directory_options: functions["fs.directory-options"],
     })
 }
 
@@ -76,6 +92,19 @@ pub(crate) fn bind_adapters() -> Result<String> {
       (core func $fs-start-write (canon lower (func $fs-types "[method]descriptor.write-via-stream")))
       (core func $fs-start-read (canon lower (func $fs-types "[method]descriptor.read-via-stream")
         (memory (core memory $guest "memory"))))
+      (core func $fs-stat (canon lower (func $fs-types "[method]descriptor.stat-at")
+        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
+      (core func $fs-mkdir (canon lower (func $fs-types "[method]descriptor.create-directory-at")
+        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
+      (core func $fs-unlink (canon lower (func $fs-types "[method]descriptor.unlink-file-at")
+        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
+      (core func $fs-rmdir (canon lower (func $fs-types "[method]descriptor.remove-directory-at")
+        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
+      (core func $fs-start-directory (canon lower (func $fs-types "[method]descriptor.read-directory")
+        (memory (core memory $guest "memory"))))
+      (core func $fs-read-entry (canon stream.read $fs-entries
+        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
+      (core func $fs-drop-entries (canon stream.drop-readable $fs-entries))
       (core func $fs-drop-descriptor (canon resource.drop $fs-descriptor))
       (core func $fs-await (canon future.read $fs-completion (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
       (core func $fs-drop-future (canon future.drop-readable $fs-completion))
@@ -95,6 +124,13 @@ fn native_functions() -> Vec<forward::Function> {
         ("open", vec!["i32"; 7], vec![]),
         ("start-write", vec!["i32", "i32", "i64"], vec!["i32"]),
         ("start-read", vec!["i32", "i64", "i32"], vec![]),
+        ("stat", vec!["i32"; 5], vec![]),
+        ("mkdir", vec!["i32"; 4], vec![]),
+        ("unlink", vec!["i32"; 4], vec![]),
+        ("rmdir", vec!["i32"; 4], vec![]),
+        ("start-directory", vec!["i32"; 2], vec![]),
+        ("read-entry", vec!["i32"; 3], vec!["i32"]),
+        ("drop-entries", vec!["i32"], vec![]),
         ("drop-descriptor", vec!["i32"], vec![]),
         ("await", vec!["i32"; 2], vec!["i32"]),
         ("drop-future", vec!["i32"], vec![]),

@@ -17,20 +17,22 @@ pub(crate) struct Observations {
     pub(crate) closed: Notify,
 }
 
-pub(crate) struct ControlledProducer {
-    pub(crate) receiver: mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+pub(crate) type ControlledProducer = ControlledStreamProducer<u8>;
+
+pub(crate) struct ControlledStreamProducer<Item> {
+    pub(crate) receiver: mpsc::Receiver<std::result::Result<Vec<Item>, String>>,
     pub(crate) observations: Arc<Observations>,
 }
 
-impl<T> StreamProducer<T> for ControlledProducer {
-    type Item = u8;
-    type Buffer = VecBuffer<u8>;
+impl<T, Item: Send + Sync + 'static> StreamProducer<T> for ControlledStreamProducer<Item> {
+    type Item = Item;
+    type Buffer = VecBuffer<Item>;
 
     fn poll_produce<'a>(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         mut store: StoreContextMut<'a, T>,
-        mut destination: Destination<'a, u8, VecBuffer<u8>>,
+        mut destination: Destination<'a, Item, VecBuffer<Item>>,
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
         if finish {
@@ -63,7 +65,7 @@ impl<T> StreamProducer<T> for ControlledProducer {
     }
 }
 
-impl Drop for ControlledProducer {
+impl<Item> Drop for ControlledStreamProducer<Item> {
     fn drop(&mut self) {
         self.observations.dropped.store(true, Ordering::SeqCst);
         self.observations.closed.notify_one();

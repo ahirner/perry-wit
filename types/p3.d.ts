@@ -55,12 +55,43 @@ declare module "fs" {
     data: string | Uint8Array,
     options?: string | WriteOptions | null,
   ): void;
-  const fs: { writeFileSync: typeof writeFileSync; readFileSync: typeof readFileSync };
+  /** Guest-internal metadata value; component exports and retained Stats Promises
+   * are not yet supported. Identity and fields survive collection. */
+  export interface Stats {
+    readonly size: number;
+    readonly mtimeMs: number;
+    isFile(): boolean;
+    isDirectory(): boolean;
+  }
+  /** Follow confined symlinks and report size, modification milliseconds, and type.
+   * Options must be plain literals. Missing entries throw; bigint is unsupported. */
+  export function statSync(path: string, options?: { bigint?: false; throwIfNoEntry?: true } | null): Stats;
+  /** Return false for filesystem errors, including paths outside available preopens. */
+  export function existsSync(path: string): boolean;
+  /** Create one directory. Recursive creation, permissions, and other options are unsupported. */
+  export function mkdirSync(path: string, options?: undefined): void;
+  export function unlinkSync(path: string, options?: undefined): void;
+  export function rmdirSync(path: string, options?: undefined): void;
+  /** Materialize UTF-8 entry names, excluding dot entries, then await producer completion.
+   * Options must be plain literals; runtime UTF-8 labels are supported. Ordering is host-defined.
+   * String arrays support guest helper calls; component exports and retained array Promises
+   * are not yet supported. */
+  export function readdirSync(path: string, options?: string | { encoding?: string | null; recursive?: false; withFileTypes?: false } | null): string[];
+  const fs: {
+    writeFileSync: typeof writeFileSync;
+    readFileSync: typeof readFileSync;
+    statSync: typeof statSync;
+    existsSync: typeof existsSync;
+    mkdirSync: typeof mkdirSync;
+    unlinkSync: typeof unlinkSync;
+    rmdirSync: typeof rmdirSync;
+    readdirSync: typeof readdirSync;
+  };
   export default fs;
 }
 
 declare module "node:fs" {
-  export { writeFileSync, readFileSync, default } from "fs";
+  export { writeFileSync, readFileSync, statSync, existsSync, mkdirSync, unlinkSync, rmdirSync, readdirSync, Stats, default } from "fs";
 }
 
 /** Opaque readable end of a native byte stream, owned by the entry invocation. */

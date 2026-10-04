@@ -326,7 +326,11 @@ impl<'a> FunctionLowerer<'a> {
                                 self.byte_receiver(expr)
                             } else if super::decoder::is_decoder(self.return_type) {
                                 self.decoder_receiver(expr)
+                            } else if super::filesystem::is_stats(self.return_type) || matches!(self.return_type, HirType::Array(_)) {
+                                ensure!(&self.infer_expr_type(expr) == self.return_type, "Returned value must match {:?}", self.return_type);
+                                self.expression(expr)
                             } else {
+                                ensure!(!super::filesystem::is_stats(&self.infer_expr_type(expr)) && !matches!(self.infer_expr_type(expr), HirType::Array(_)), "Cannot return an object as {:?}", self.return_type);
                                 ensure!(!is_text_or_bytes(&self.infer_expr_type(expr)), "Cannot return a string-or-byte value as {:?}; narrow it first", self.return_type);
                                 ensure!(!super::decoder::is_decoder(&self.infer_expr_type(expr)), "Cannot return a TextDecoder as {:?}", self.return_type);
                                 ensure!(!super::bytes::is_byte_view(&self.infer_expr_type(expr)), "Cannot return a Uint8Array as {:?}", self.return_type);
@@ -475,6 +479,9 @@ impl<'a> FunctionLowerer<'a> {
             object, property, ..
         } = callee
         {
+            if super::filesystem::is_stats(&self.infer_expr_type(object)) {
+                return self.stats_method(object, property, args).map(Some);
+            }
             if super::decoder::is_decoder(&self.infer_expr_type(object)) {
                 ensure!(
                     property == "decode",
@@ -507,6 +514,16 @@ impl<'a> FunctionLowerer<'a> {
                 _ => None,
             };
             let argument_type = self.infer_expr_type(arg);
+            if expected.is_some_and(super::filesystem::is_stats)
+                || super::filesystem::is_stats(&argument_type)
+                || matches!(expected, Some(HirType::Array(_)))
+                || matches!(&argument_type, HirType::Array(_))
+            {
+                ensure!(
+                    expected == Some(&argument_type),
+                    "Object arguments must match their declared parameter types"
+                );
+            }
             if expected.is_some_and(super::decoder::is_decoder) {
                 ensure!(
                     super::decoder::is_decoder(&argument_type),
@@ -1040,6 +1057,11 @@ impl<'a> FunctionLowerer<'a> {
                     payload,
                     true,
                 ))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if super::filesystem::is_stats(&self.infer_expr_type(object)) => {
+                self.stats_property(object, property)
             }
             Expr::PropertyGet {
                 object, property, ..

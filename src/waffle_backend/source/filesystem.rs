@@ -24,7 +24,12 @@ pub(super) fn specialize(
         return Ok(operation);
     };
     validate_plain_options(&options.expr, "Filesystem")?;
-    if filesystem == FilesystemOperation::WriteFile {
+    if !matches!(
+        filesystem,
+        FilesystemOperation::ReadBytes
+            | FilesystemOperation::ReadText
+            | FilesystemOperation::ReadValue
+    ) {
         return Ok(operation);
     }
     let mut encoding = underlying_expression(&options.expr);

@@ -221,8 +221,20 @@ calling methods, or passing the value to a string-only or byte-only consumer.
 Assignments invalidate guards; loops and exception paths preserve the tagged value.
 At component boundaries the union is exported as `text-or-bytes`, a variant with
 `text(string)` and `bytes(list<u8>)` cases, also supported inside numeric-error
-`Result` returns. General option objects, metadata operations, and directory APIs
-remain open in R8.2.
+`Result` returns. `statSync` provides `size`, `mtimeMs`, `isFile()`, and
+`isDirectory()`; signed native timestamps convert to milliseconds, and absent
+modification times return zero. `existsSync` returns false on filesystem errors.
+`mkdirSync`, `unlinkSync`, and `rmdirSync` accept only omitted/undefined options;
+preopen roots cannot be removed. `statSync` accepts null/undefined or plain literal
+options with `bigint: false` and `throwIfNoEntry: true`.
+`readdirSync` materializes UTF-8 names, excludes dot entries, and awaits both the
+entry stream and its separate completion future. Ordering is host-defined. It
+accepts a UTF-8 label or plain literal options with `encoding`, `recursive: false`,
+and `withFileTypes: false`. Argument effects precede validation and I/O; duplicate
+known fields use their last value. All operations share confined, normalized,
+longest-prefix preopen resolution. Directory arrays and Stats values survive
+collection and guest helper calls. General option objects, component boundaries
+for these structured values, and retained Stats/array Promises remain open.
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary
 binary bytes, through shared native stream transfers and wait for the capability's

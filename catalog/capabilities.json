@@ -21,6 +21,30 @@
   ],
   "capabilities": [
     {
+      "id": "compiler.p3_filesystem_metadata",
+      "name": "Native P3 Filesystem Metadata and Directories",
+      "tier": "tier-2-node-core",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: statSync, existsSync, mkdirSync, unlinkSync, rmdirSync, and readdirSync",
+      "invariants": [
+        "Shared normalized longest-prefix preopens confine paths and symlinks; mutation cannot remove preopen roots",
+        "Stats preserve unsigned file sizes, signed modification milliseconds, type predicates, and identity",
+        "Directory listings materialize UTF-8 names, omit dot entries, and await the separate producer completion after EOF",
+        "Options and argument effects precede validation and I/O; known duplicate fields use the last value",
+        "Stats, string arrays, and suspended directory buffers survive helper calls and collection",
+        "Normal and recoverable-error paths release descriptors, entry streams, and completion futures"
+      ],
+      "differences": [
+        "The default CLI remains on the legacy pipeline until R9",
+        "Options objects must be plain literals; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
+        "mkdirSync, unlinkSync, and rmdirSync only accept omitted or undefined options",
+        "Directory order is host-defined, materialization uses memory proportional to contents, and absent modification timestamps return zero",
+        "Stats and string arrays cannot yet cross component boundaries or be retained Promise outcomes",
+        "Errors use one-based WASI 0.3 ordinals; existsSync returns false on filesystem errors, while host traps and cancellation require store disposal"
+      ],
+      "conformance": ["tests/p3_filesystem/source_metadata.rs", "tests/p3_filesystem/source_directory_lifecycle.rs"]
+    },
+    {
       "id": "compiler.p3_filesystem_read",
       "name": "Native P3 Filesystem Reads",
       "tier": "tier-2-node-core",
@@ -42,7 +66,7 @@
         "Options objects must be plain literals with encoding and the default or r flag; general objects remain unsupported",
         "Malformed text throws filesystem error 9 instead of Node replacement decoding",
         "The binary encoding label returns Uint8Array, preserving the existing compiler contract; Node returns Latin-1 text for that label",
-        "Host traps and cancellation require store disposal; metadata and directory operations remain open"
+        "Host traps and cancellation require store disposal"
       ],
       "conformance": ["tests/p3_filesystem/source_reads.rs", "tests/p3_filesystem/source_dynamic_reads.rs", "tests/waffle_stream_test.rs", "tests/waffle_decoder_test.rs"]
     },
@@ -66,7 +90,7 @@
         "Options accept encoding strings, null, undefined, and plain literal objects; general option objects, getters, spreads, computed keys, and custom prototypes are diagnosed",
         "Only the default or w flag is supported; UTF8 labels accept ASCII case, and binary encoding is restricted to byte data",
         "Errors throw the one-based WASI 0.3 filesystem error ordinal; already written bytes are not rolled back",
-        "Host traps and cancellation require store disposal; general option objects, metadata, and directory operations remain open in R8.2"
+        "Host traps and cancellation require store disposal; general option objects remain open in R8.2"
       ],
       "conformance": ["tests/p3_filesystem_test.rs", "tests/p3_filesystem/source.rs", "tests/p3_filesystem/source_lifecycle.rs"]
     },

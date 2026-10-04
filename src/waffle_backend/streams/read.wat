@@ -1,4 +1,4 @@
-  ;; Returns a transferred byte count and whether the readable end closed.
+  ;; Returns a transferred element count and whether the readable end closed.
   (func $read-transfer (param $stream i32) (param $data i32) (param $capacity i32) (result i32 i32)
     (local $status i32) (local $length i32) (local $closed i32)
     (if (i32.eqz (local.get $capacity)) (then (return (i32.const 0) (i32.const 0))))

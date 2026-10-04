@@ -12,6 +12,12 @@ mod lifecycle;
 #[path = "source_reads.rs"]
 mod reads;
 
+#[path = "source_metadata.rs"]
+mod metadata;
+
+#[path = "../support/p3_input.rs"]
+mod input;
+
 #[tokio::test(flavor = "current_thread")]
 async fn source_writes_preserve_binary_subviews_and_exact_utf8_under_repeated_calls() -> Result<()>
 {
@@ -490,7 +496,7 @@ fn unsupported_filesystem_syntax_is_diagnosed_before_frontend_effects_are_lost()
         "const save = fs.writeFileSync; save('/file', 'text')",
         "const options = {flag: 'w'}; fs.writeFileSync('/file', 'text', options)",
         "fs.readFileSync('/file', {get encoding() { return 'utf8'; }})",
-        "fs.mkdirSync('/dir')",
+        "fs.chmodSync('/file', 0)",
         "fs['write' + 'FileSync']('/file', 'text')",
     ] {
         let source =

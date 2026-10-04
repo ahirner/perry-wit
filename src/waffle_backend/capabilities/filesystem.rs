@@ -10,6 +10,12 @@ pub(crate) enum FilesystemOperation {
     ReadBytes,
     ReadText,
     ReadValue,
+    Stat,
+    Exists,
+    MakeDirectory,
+    Unlink,
+    RemoveDirectory,
+    ReadDirectory,
 }
 
 impl FilesystemOperation {
@@ -17,6 +23,12 @@ impl FilesystemOperation {
         match self {
             Self::WriteFile => "writeFileSync",
             Self::ReadBytes | Self::ReadText | Self::ReadValue => "readFileSync",
+            Self::Stat => "statSync",
+            Self::Exists => "existsSync",
+            Self::MakeDirectory => "mkdirSync",
+            Self::Unlink => "unlinkSync",
+            Self::RemoveDirectory => "rmdirSync",
+            Self::ReadDirectory => "readdirSync",
         }
     }
 }
@@ -35,6 +47,25 @@ impl LowerCapability for FilesystemOperation {
                     Self::ReadText => HirType::String,
                     Self::ReadValue => crate::waffle_backend::text_or_bytes::value_type(),
                     _ => HirType::Named("Uint8Array".into()),
+                },
+                implementation: CapabilityImplementation::Filesystem,
+            },
+            Self::Stat
+            | Self::Exists
+            | Self::MakeDirectory
+            | Self::Unlink
+            | Self::RemoveDirectory
+            | Self::ReadDirectory => CapabilityPlan {
+                params: if *self == Self::Exists {
+                    vec![HirType::String]
+                } else {
+                    vec![HirType::String, HirType::Any]
+                },
+                result: match self {
+                    Self::Stat => HirType::Named("Stats".into()),
+                    Self::Exists => HirType::Boolean,
+                    Self::ReadDirectory => HirType::Array(Box::new(HirType::String)),
+                    _ => HirType::Void,
                 },
                 implementation: CapabilityImplementation::Filesystem,
             },

@@ -6,11 +6,8 @@ use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
 use super::instantiate;
 
-#[path = "../support/p3_input.rs"]
-mod input;
-
+use super::input::{ControlledProducer, Observations};
 use super::{Host, instantiate_with};
-use input::{ControlledProducer, Observations};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};

@@ -153,6 +153,8 @@ fn source_type(ty: &HirType) -> Result<String> {
         HirType::Any => Ok("any".into()),
         HirType::Promise(inner) => Ok(format!("Promise<{}>", source_type(inner)?)),
         ty if super::bytes::is_byte_view(ty) => Ok("Uint8Array".into()),
+        ty if super::filesystem::is_stats(ty) => Ok("Stats".into()),
+        HirType::Array(inner) if **inner == HirType::String => Ok("string[]".into()),
         _ => bail!("Unsupported capability source type: {ty:?}"),
     }
 }
@@ -183,6 +185,24 @@ impl CapabilityNamespace {
             )),
             (Self::Filesystem, "readFileSync") => Ok(CapabilityOperation::Filesystem(
                 FilesystemOperation::ReadBytes,
+            )),
+            (Self::Filesystem, "statSync") => {
+                Ok(CapabilityOperation::Filesystem(FilesystemOperation::Stat))
+            }
+            (Self::Filesystem, "existsSync") => {
+                Ok(CapabilityOperation::Filesystem(FilesystemOperation::Exists))
+            }
+            (Self::Filesystem, "mkdirSync") => Ok(CapabilityOperation::Filesystem(
+                FilesystemOperation::MakeDirectory,
+            )),
+            (Self::Filesystem, "unlinkSync") => {
+                Ok(CapabilityOperation::Filesystem(FilesystemOperation::Unlink))
+            }
+            (Self::Filesystem, "rmdirSync") => Ok(CapabilityOperation::Filesystem(
+                FilesystemOperation::RemoveDirectory,
+            )),
+            (Self::Filesystem, "readdirSync") => Ok(CapabilityOperation::Filesystem(
+                FilesystemOperation::ReadDirectory,
             )),
             _ => bail!("Unknown capability member '{name}'"),
         }

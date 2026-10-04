@@ -416,6 +416,8 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
         ty if super::decoder::is_decoder(ty) => Ok(Type::I32),
+        ty if super::filesystem::is_stats(ty) => Ok(Type::I32),
+        HirType::Array(inner) if **inner == HirType::String => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
     }
 }
@@ -429,6 +431,8 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::String => Ok(vec![Type::I32]),
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
         ty if super::decoder::is_decoder(ty) => Ok(vec![Type::I32]),
+        ty if super::filesystem::is_stats(ty) => Ok(vec![Type::I32]),
+        HirType::Array(inner) if **inner == HirType::String => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             Ok(vec![Type::I32])
         }
