@@ -1,5 +1,28 @@
 # Performance measurements
 
+## Production snapshot at `8f916eb`
+
+Measured on 2026-10-04 using the pinned Wasmtime 49.0.2 on arm64 macOS 27.0,
+with the test profile and default Cranelift settings. Both harnesses checked every
+result and required empty native task state after calls. The table uses the median
+of five batches of 50 calls after five warmup calls. [Raw samples](measurements/production-8f916eb.json)
+record the compiler revision and every batch.
+
+| Workload | Stripped component | Linear memory after warmup → after samples | Median time/call |
+| --- | ---: | ---: | ---: |
+| Text, 4 KiB | 10,211 B | 64 → 64 KiB | 0.02311 ms |
+| File I/O, 64 KiB | 25,420 B | 256 → 256 KiB | 0.91783 ms |
+| Promise.all, 1 task | 13,906 B | 64 → 64 KiB | 0.09058 ms |
+| Promise.all, 16 tasks | 13,906 B | 64 → 64 KiB | 1.16282 ms |
+| Promise.all, 64 tasks | 13,906 B | 64 → 64 KiB | 5.29331 ms |
+| Promise.all, 256 tasks | 13,906 B | 128 → 128 KiB | 41.78746 ms |
+
+These are whole-call costs, including source execution, allocation, collection,
+scheduling, canonical transport, and result validation. Linear memory remained
+constant during sampling; host stacks, JIT code, and RSS are excluded. The file
+workload uses cached data. Timing differs from the earlier runs below, and these
+separate local samples do not isolate a particular compiler change.
+
 ## Owned async fan-out
 
 [The scheduling harness](tests/async_measurement.rs) starts typed async functions,

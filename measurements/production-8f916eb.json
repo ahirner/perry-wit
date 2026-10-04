@@ -1,0 +1,98 @@
+{
+  "compiler_revision": "8f916ebd8b0545cc06197da28e93b78d7e95da40",
+  "date": "2026-10-04",
+  "host": "arm64 macOS 27.0",
+  "runtime": "Wasmtime 49.0.2, Cargo test profile, default Cranelift settings",
+  "async": [
+    {
+      "operands": 1,
+      "component_bytes": 13906,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        90.57834000000001,
+        93.26584000000001,
+        88.9475,
+        91.11916,
+        86.95667999999999
+      ]
+    },
+    {
+      "operands": 16,
+      "component_bytes": 13906,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        1183.58084,
+        1194.67,
+        1129.915,
+        1129.28666,
+        1162.81834
+      ]
+    },
+    {
+      "operands": 64,
+      "component_bytes": 13906,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        5342.02416,
+        5293.310839999999,
+        5334.4191599999995,
+        5237.02084,
+        5193.7391800000005
+      ]
+    },
+    {
+      "operands": 256,
+      "component_bytes": 13906,
+      "memory_after_warmup": 131072,
+      "memory_after_samples": 131072,
+      "calls_per_sample": 50,
+      "microseconds_per_call": [
+        41588.72582,
+        41350.29000000001,
+        41787.46332,
+        42117.58667999999,
+        42247.49831999999
+      ]
+    }
+  ],
+  "components": [
+    {
+      "pipeline": "production",
+      "workload": "text",
+      "component_bytes": 10211,
+      "memory_after_warmup": 65536,
+      "memory_after_samples": 65536,
+      "calls_per_sample": 50,
+      "payload_bytes": 4096,
+      "milliseconds_per_call": [
+        0.023471660000000002,
+        0.02310584,
+        0.02342168,
+        0.022842499999999998,
+        0.023019999999999995
+      ]
+    },
+    {
+      "pipeline": "production",
+      "workload": "io",
+      "component_bytes": 25420,
+      "memory_after_warmup": 262144,
+      "memory_after_samples": 262144,
+      "calls_per_sample": 50,
+      "payload_bytes": 65536,
+      "milliseconds_per_call": [
+        0.92372,
+        0.9220766599999999,
+        0.91342834,
+        0.91783084,
+        0.91135916
+      ]
+    }
+  ]
+}

@@ -83,6 +83,9 @@ try {
     rmSync(output, { force: true });
     throw new Error('Source files changed during verification; rerun against a stable checkout');
   }
+  report.source_sha256 = sources;
+  report.compiler_revision = run('git', ['rev-parse', 'HEAD']).trim();
+  writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
   console.log(`${report.passing_capabilities}/${report.supported_capabilities} advertised capability contracts verified; ${output}`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
