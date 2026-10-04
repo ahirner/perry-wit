@@ -198,6 +198,21 @@ lowering. Component parameters and results use `list<u8>`, preserve arbitrary
 bytes, and share canonical allocation and post-return cleanup with text results.
 Byte entry results also work after stored primitive tasks settle. Byte-only tasks
 import no host capability.
+`TextDecoder` supports strict incremental UTF-8 decoding of byte views through
+`decode(bytes, {stream: true})`, followed by `decode()` to finish. It retains split
+scalars, copies pending bytes, preserves immutable text results, and implements
+`ignoreBOM`, `encoding`, and `fatal`. UTF-8 labels accept ASCII case and surrounding
+ASCII whitespace. Under the scalar text contract, `fatal` defaults to true;
+other encodings and replacement mode throw numeric `1`, and malformed or unfinished
+UTF-8 throws numeric `2` through catch/finally and WIT results. Decoder objects and
+pending bytes survive collection and suspension. Source helpers can borrow or return
+decoders internally; component exports and stored tasks cannot carry decoder objects.
+Options accept plain literal objects, null, or undefined; argument effects and
+duplicate properties retain source order. Other option objects, getters, spreads,
+custom prototypes, computed option names, and non-string label coercions are diagnosed. Streaming error
+recovery retains unread bytes according to the
+[Encoding Standard](https://encoding.spec.whatwg.org/#dom-textdecoder-decode);
+the pinned Node version discards those bytes. Tests cover this difference explicitly.
 WAFFLE string storage belongs to a serial invocation. Canonical post-return
 reclaims its arena after the host copies the result, including recoverable WIT
 errors. Raw core callers must invoke the matching `cabi_post_<export>` with the

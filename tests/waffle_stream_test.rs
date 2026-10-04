@@ -16,6 +16,8 @@ use wasmtime::component::{
 };
 use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 
+#[path = "waffle_stream/decoding.rs"]
+mod decoding;
 #[path = "waffle_stream/transfers.rs"]
 mod transfers;
 
@@ -24,6 +26,7 @@ declare function readChunk(input: ByteStream): Promise<number>;
 declare function byteAt(index: number): number;
 async function chunk(input: ByteStream): Promise<number> { return await readChunk(input); }
 export async function run(input: ByteStream): Promise<number> {
+    if (input) {} else { return -1; }
     let total = 0;
     let length = await chunk(input);
     while (length > 0) {

@@ -14,12 +14,15 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
     match ty {
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
+        ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
+        HirType::Named(name) if name == "ByteStream" => Some("ByteStream"),
         _ => None,
     }
 }
 
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
+        ty if crate::waffle_backend::decoder::is_decoder(ty) => true,
         HirType::String | HirType::Promise(_) => true,
         HirType::Array(inner) => **inner == HirType::String,
         HirType::Named(name) => name == SCALAR_ITERATION || name == "Uint8Array",
@@ -56,6 +59,20 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::TextDecoderNew { .. } => {
+                HirType::Named(crate::waffle_backend::decoder::DECODER_TYPE.into())
+            }
+            Expr::TextDecoderDecode { .. } | Expr::TextDecoderEncoding(_) => HirType::String,
+            Expr::TextDecoderFatal(_) | Expr::TextDecoderIgnoreBom(_) => HirType::Boolean,
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::decoder::is_decoder(&self.infer_expr_type(object)) => {
+                if property == "encoding" {
+                    HirType::String
+                } else {
+                    HirType::Boolean
+                }
+            }
             Expr::Uint8ArrayNew(_) => HirType::Named("Uint8Array".into()),
             Expr::Uint8ArrayLength(_) => HirType::Number,
             Expr::PropertyGet {
@@ -110,6 +127,11 @@ impl FunctionLowerer<'_> {
                     object, property, ..
                 } = callee.as_ref()
                 {
+                    if crate::waffle_backend::decoder::is_decoder(&self.infer_expr_type(object))
+                        && property == "decode"
+                    {
+                        return HirType::String;
+                    }
                     if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
                         && matches!(property.as_str(), "subarray" | "slice")
                     {

@@ -6,6 +6,7 @@
 
 mod arrays;
 mod bytes;
+mod decoder;
 mod loops;
 mod optional;
 mod requirements;
@@ -63,6 +64,9 @@ pub(crate) fn lower_module(
         || contract.has_stream_input()
     {
         collect_strings_in_module(hir, &mut string_pool);
+        if reqs.decoder {
+            string_pool.intern("utf-8");
+        }
         string_pool.populate_memory_segments(&mut module.memories[memory]);
         let (regex_programs, next_free) = regex::emit_tables(
             &mut module,
@@ -300,7 +304,10 @@ impl<'a> FunctionLowerer<'a> {
                                 self.string_receiver(expr)
                             } else if super::bytes::is_byte_view(self.return_type) {
                                 self.byte_receiver(expr)
+                            } else if super::decoder::is_decoder(self.return_type) {
+                                self.decoder_receiver(expr)
                             } else {
+                                ensure!(!super::decoder::is_decoder(&self.infer_expr_type(expr)), "Cannot return a TextDecoder as {:?}", self.return_type);
                                 ensure!(!super::bytes::is_byte_view(&self.infer_expr_type(expr)), "Cannot return a Uint8Array as {:?}", self.return_type);
                                 ensure!(
                                     !self.is_string_or_undefined(expr)
@@ -415,10 +422,25 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::DecoderNew)
+            )
+        {
+            return self.new_decoder(args).map(Some);
+        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
         {
+            if super::decoder::is_decoder(&self.infer_expr_type(object)) {
+                ensure!(
+                    property == "decode",
+                    "Unsupported TextDecoder method '{property}'"
+                );
+                return self.decode_bytes(object, args).map(Some);
+            }
             if super::bytes::is_byte_view(&self.infer_expr_type(object)) {
                 return self.byte_method(object, property, args).map(Some);
             }
@@ -444,6 +466,12 @@ impl<'a> FunctionLowerer<'a> {
                 _ => None,
             };
             let argument_type = self.infer_expr_type(arg);
+            if expected.is_some_and(super::decoder::is_decoder) {
+                ensure!(
+                    super::decoder::is_decoder(&argument_type),
+                    "Decoder parameters require TextDecoder arguments"
+                );
+            }
             if matches!(expected, Some(HirType::Named(name)) if name == "ByteStream") {
                 ensure!(
                     matches!(&argument_type, HirType::Named(name) if name == "ByteStream"),
@@ -740,6 +768,8 @@ impl<'a> FunctionLowerer<'a> {
                 let ty = self.body.values[val].ty(&self.body.type_pool);
                 if self.is_string(expr) {
                     Ok(self.string_truthiness(val))
+                } else if types::identity_kind(&self.infer_expr_type(expr)).is_some() {
+                    Ok(self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]))
                 } else if ty == Some(Type::I32) {
                     Ok(val)
                 } else {
@@ -769,6 +799,23 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::TextDecoderNew {
+                label,
+                fatal,
+                ignore_bom,
+            } => self.new_decoder(&[
+                *label.clone(),
+                Expr::Object(vec![
+                    ("fatal".into(), *fatal.clone()),
+                    ("ignoreBOM".into(), *ignore_bom.clone()),
+                ]),
+            ]),
+            Expr::TextDecoderDecode { decoder, input } => {
+                self.decode_bytes(decoder, std::slice::from_ref(input.as_ref()))
+            }
+            Expr::TextDecoderEncoding(decoder) => self.decoder_property(decoder, "encoding"),
+            Expr::TextDecoderFatal(decoder) => self.decoder_property(decoder, "fatal"),
+            Expr::TextDecoderIgnoreBom(decoder) => self.decoder_property(decoder, "ignoreBOM"),
             Expr::Uint8ArrayNew(argument) => self.new_bytes(argument.as_deref()),
             Expr::Uint8ArrayGet { array, index } => self.byte_index(array, index),
             Expr::Uint8ArraySet {
@@ -836,12 +883,17 @@ impl<'a> FunctionLowerer<'a> {
             Expr::LocalSet(id, expr) => {
                 let inferred = self.infer_expr_type(expr);
                 if let Some(previous) = self.local_types.get(id)
-                    && (matches!(previous, HirType::Promise(_))
-                        || matches!(inferred, HirType::Promise(_)))
+                    && let Some(kind) =
+                        types::identity_kind(previous).or_else(|| types::identity_kind(&inferred))
                 {
                     ensure!(
                         previous == &inferred,
-                        "A stored Promise binding cannot change its logical type"
+                        "A {} binding cannot change its logical type",
+                        if kind == "Promise" {
+                            "stored Promise"
+                        } else {
+                            kind
+                        }
                     );
                 }
                 let value = self.expression(expr)?;
@@ -875,6 +927,11 @@ impl<'a> FunctionLowerer<'a> {
                     payload,
                     true,
                 ))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if super::decoder::is_decoder(&self.infer_expr_type(object)) => {
+                self.decoder_property(object, property)
             }
             Expr::PropertyGet {
                 object, property, ..

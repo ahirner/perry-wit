@@ -1,4 +1,7 @@
-//! Resolve capability bindings before Perry's name-based builtin lowering.
+//! Resolve source bindings before Perry's name-based builtin lowering.
+
+mod decoder;
+pub(crate) use decoder::validate_lowering;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -9,16 +12,24 @@ use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-use super::{CapabilityOperation, ClockOperation, LowerCapability, RandomOperation};
+use super::capabilities::{CapabilityOperation, ClockOperation, LowerCapability, RandomOperation};
 
-pub(crate) fn resolve_capabilities(
-    module: &mut ast::Module,
-) -> Result<BTreeMap<String, CapabilityOperation>> {
+#[derive(Default)]
+pub(crate) struct SourceBindings {
+    pub(crate) capabilities: BTreeMap<String, CapabilityOperation>,
+    pub(crate) decoder_constructor: Option<String>,
+}
+
+pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBindings> {
     GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         module.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let mut names = IdentifierNames::default();
         module.visit_with(&mut names);
+        ensure!(
+            !names.0.contains(super::decoder::DECODER_TYPE),
+            "Reserved compiler type name in source"
+        );
         let mut bindings = HashMap::new();
         for item in &module.body {
             let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item else {
@@ -60,19 +71,23 @@ pub(crate) fn resolve_capabilities(
                 ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(_))
             )
         });
-        let mut calls = CapabilityCalls {
+        let mut calls = SourceCalls {
             bindings,
             unresolved: SyntaxContext::empty().apply_mark(unresolved),
             names: names.0,
             shadow_names: HashMap::new(),
             operations: BTreeMap::new(),
+            decoder_constructor: None,
             error: None,
         };
         module.visit_mut_with(&mut calls);
         if let Some(error) = calls.error {
             return Err(error);
         }
-        let mut resolved = BTreeMap::new();
+        let mut resolved = SourceBindings {
+            decoder_constructor: calls.decoder_constructor,
+            ..Default::default()
+        };
         for (operation, name) in calls.operations {
             let plan = operation.lower();
             let parameters = plan
@@ -88,7 +103,16 @@ pub(crate) fn resolve_capabilities(
             );
             let mut declaration = parse_typescript(&declaration, "capability.d.ts")?;
             module.body.append(&mut declaration.body);
-            resolved.insert(name, operation);
+            resolved.capabilities.insert(name, operation);
+        }
+        if let Some(name) = &resolved.decoder_constructor {
+            let declaration = format!(
+                "declare function {name}(label: any, options: any): {};",
+                super::decoder::DECODER_TYPE
+            );
+            module
+                .body
+                .append(&mut parse_typescript(&declaration, "decoder.d.ts")?.body);
         }
         Ok(resolved)
     })
@@ -128,16 +152,17 @@ enum CapabilityBinding {
     Namespace(CapabilityNamespace),
 }
 
-struct CapabilityCalls {
+struct SourceCalls {
     bindings: HashMap<ast::Id, CapabilityBinding>,
     unresolved: SyntaxContext,
     names: HashSet<String>,
     shadow_names: HashMap<ast::Id, String>,
     operations: BTreeMap<CapabilityOperation, String>,
+    decoder_constructor: Option<String>,
     error: Option<anyhow::Error>,
 }
 
-impl CapabilityCalls {
+impl SourceCalls {
     fn validate_json_call(&self, call: &ast::CallExpr, callee: &ast::Expr) -> Result<()> {
         let ast::Expr::Member(member) = callee else {
             return Ok(());
@@ -244,9 +269,13 @@ impl CapabilityCalls {
     }
 }
 
-impl VisitMut for CapabilityCalls {
+impl VisitMut for SourceCalls {
     fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
         call.ctxt = SyntaxContext::empty();
+        if let Err(error) = decoder::validate_decode_options(call) {
+            self.error.get_or_insert(error);
+            return;
+        }
         if let ast::Callee::Expr(callee) = &call.callee
             && let Err(error) = self.validate_json_call(call, callee)
         {
@@ -306,6 +335,10 @@ impl VisitMut for CapabilityCalls {
     }
 
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
+        if let Err(error) = self.rewrite_decoder_constructor(expression) {
+            self.error.get_or_insert(error);
+            return;
+        }
         if !matches!(expression, ast::Expr::Call(_)) {
             match self.operation(expression) {
                 Ok(Some(_)) => {
@@ -325,7 +358,7 @@ impl VisitMut for CapabilityCalls {
     fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
         if matches!(
             ident.sym.as_ref(),
-            "Math" | "RegExp" | "JSON" | "Uint8Array"
+            "Math" | "RegExp" | "JSON" | "Uint8Array" | "TextDecoder"
         ) && ident.ctxt != self.unresolved
         {
             let id = ident.to_id();
@@ -343,6 +376,16 @@ impl VisitMut for CapabilityCalls {
 
     fn visit_mut_syntax_context(&mut self, context: &mut SyntaxContext) {
         *context = SyntaxContext::empty();
+    }
+
+    fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && name.sym == "TextDecoder"
+            && name.ctxt == self.unresolved
+        {
+            name.sym = super::decoder::DECODER_TYPE.into();
+        }
+        reference.visit_mut_children_with(self);
     }
 }
 

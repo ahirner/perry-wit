@@ -32,6 +32,7 @@ pub(crate) enum TypedIntrinsic {
     ReadChunk,
     ReadInto,
     ByteAt,
+    DecoderNew,
     Custom {
         name: String,
         params: Vec<WaffleType>,
@@ -48,6 +49,7 @@ impl TypedIntrinsic {
             Self::ReadChunk => "readChunk",
             Self::ReadInto => "readInto",
             Self::ByteAt => "byteAt",
+            Self::DecoderNew => "TextDecoder",
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -56,7 +58,7 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
-            Self::ByteAt => false,
+            Self::ByteAt | Self::DecoderNew => false,
             Self::Custom { is_async, .. } => *is_async,
         }
     }
@@ -85,6 +87,10 @@ impl TypedIntrinsic {
             Self::HostDouble | Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
             Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
+            Self::DecoderNew => (
+                vec![WaffleType::I32; 3],
+                vec![WaffleType::I32, WaffleType::F64],
+            ),
             Self::Custom {
                 params, returns, ..
             } => (params.clone(), returns.clone()),
@@ -96,6 +102,7 @@ impl TypedIntrinsic {
 /// Validated contract containing typed operations and module signatures.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedContract {
+    pub(crate) literal_shapes: BTreeMap<String, Vec<String>>,
     pub(crate) promises: Option<super::promises::PromisePlan>,
     pub(crate) input_kind: ResolvedInputKind,
     pub(crate) uses_p3_clocks: bool,
@@ -130,7 +137,7 @@ impl ResolvedContract {
 /// Resolves module bindings, shadowing, and contracts for WAFFLE lowering.
 pub(crate) fn resolve_contract(
     hir: &HirModule,
-    capabilities: &BTreeMap<String, CapabilityOperation>,
+    bindings: &super::source::SourceBindings,
 ) -> Result<ResolvedContract> {
     ensure!(
         hir.init.is_empty(),
@@ -141,7 +148,7 @@ pub(crate) fn resolve_contract(
         "Module must declare at least one function"
     );
     ensure!(
-        hir.classes.is_empty(),
+        hir.classes.iter().all(|class| class.is_literal_shape()),
         "Unsupported class initialization in the WAFFLE backend"
     );
 
@@ -166,7 +173,12 @@ pub(crate) fn resolve_contract(
     let mut intrinsics = BTreeMap::new();
 
     for (name, params, ret) in &hir.extern_funcs {
-        if let Some(operation) = capabilities
+        if bindings.decoder_constructor.as_ref() == Some(name) {
+            intrinsics.insert(name.clone(), TypedIntrinsic::DecoderNew);
+            continue;
+        }
+        if let Some(operation) = bindings
+            .capabilities
             .get(name)
             .copied()
             .or_else(|| CapabilityOperation::from_declaration(name))
@@ -321,6 +333,20 @@ pub(crate) fn resolve_contract(
         "Stream operations require a ByteStream entry input"
     );
     Ok(ResolvedContract {
+        literal_shapes: hir
+            .classes
+            .iter()
+            .map(|class| {
+                (
+                    class.name.clone(),
+                    class
+                        .fields
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect(),
+                )
+            })
+            .collect(),
         promises,
         input_kind,
         uses_p3_clocks,

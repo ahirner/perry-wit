@@ -11,6 +11,10 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
 
     for func in &hir.functions {
         for param in &func.params {
+            if super::super::decoder::is_decoder(&param.ty) {
+                reqs.needs_strings = true;
+                reqs.decoder = true;
+            }
             if type_has_string(&param.ty) {
                 reqs.needs_strings = true;
             }
@@ -30,6 +34,14 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
 
 fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
     match expr {
+        Expr::TextDecoderNew { .. }
+        | Expr::TextDecoderDecode { .. }
+        | Expr::TextDecoderEncoding(_)
+        | Expr::TextDecoderFatal(_)
+        | Expr::TextDecoderIgnoreBom(_) => {
+            reqs.needs_strings = true;
+            reqs.decoder = true;
+        }
         Expr::String(_) | Expr::ForOfToArray(_) | Expr::RegExp { .. } => {
             reqs.needs_strings = true;
         }
@@ -45,6 +57,11 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
             reqs.join = true;
         }
         Expr::Call { callee, .. } => {
+            if matches!(callee.as_ref(), Expr::ExternFuncRef { return_type, .. } if super::super::decoder::is_decoder(return_type))
+            {
+                reqs.needs_strings = true;
+                reqs.decoder = true;
+            }
             if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                 match property.as_str() {
                     "indexOf" => {

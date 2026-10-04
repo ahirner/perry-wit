@@ -7,6 +7,7 @@ mod bytes;
 pub(crate) mod capabilities;
 pub(crate) mod component;
 pub(crate) mod control_flow;
+mod decoder;
 pub(crate) mod exceptions;
 pub(crate) mod libraries;
 pub(crate) mod link;
@@ -15,6 +16,7 @@ mod regex;
 pub(crate) mod registry;
 pub(crate) mod resolve;
 mod runtime;
+mod source;
 pub(crate) mod ssa;
 mod streams;
 pub(crate) mod strings;
@@ -22,11 +24,9 @@ pub mod text_contract;
 mod visit;
 
 use anyhow::{Context, Result};
-use capabilities::CapabilityOperation;
 use perry_hir::ir::Module as HirModule;
 use perry_hir::lower_module;
 use perry_parser::parse_typescript;
-use std::collections::BTreeMap;
 
 pub use resolve::ResolvedInputKind;
 
@@ -72,26 +72,27 @@ pub fn compile_typescript(
     let mut ast = parse_typescript(ts_source, file_name)
         .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
     text_contract::validate_ast_text(&ast).context("Source text contract validation failed")?;
-    let capabilities = capabilities::source::resolve_capabilities(&mut ast)?;
+    let bindings = source::resolve_bindings(&mut ast)?;
     let hir = lower_module(&ast, "main", file_name)
         .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
+    source::validate_lowering(&hir)?;
 
-    compile_resolved_hir(hir, options, &capabilities)
+    compile_resolved_hir(hir, options, &bindings)
 }
 
 /// Compiles Perry HIR by taking ownership, avoiding redundant cloning of the HIR.
 pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
-    compile_resolved_hir(hir, options, &BTreeMap::new())
+    compile_resolved_hir(hir, options, &source::SourceBindings::default())
 }
 
 fn compile_resolved_hir(
     hir: HirModule,
     options: &WaffleCompileOptions,
-    capabilities: &BTreeMap<String, CapabilityOperation>,
+    bindings: &source::SourceBindings,
 ) -> Result<WaffleCompiled> {
     text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
-    let contract = resolve::resolve_contract(&hir, capabilities)?;
+    let contract = resolve::resolve_contract(&hir, bindings)?;
     let waffle_mod = ssa::lower_module(&hir, &contract)?;
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod

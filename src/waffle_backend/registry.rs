@@ -73,6 +73,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) promises: Option<PromiseImports>,
     pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
     pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
+    pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
     pub(crate) stream_helpers: Option<super::streams::StreamHelpers>,
@@ -103,7 +104,10 @@ impl ModuleRegistry {
         for (name, intrinsic) in &contract.intrinsics {
             if matches!(
                 intrinsic,
-                TypedIntrinsic::ReadChunk | TypedIntrinsic::ReadInto | TypedIntrinsic::ByteAt
+                TypedIntrinsic::ReadChunk
+                    | TypedIntrinsic::ReadInto
+                    | TypedIntrinsic::ByteAt
+                    | TypedIntrinsic::DecoderNew
             ) {
                 continue;
             }
@@ -186,6 +190,16 @@ impl ModuleRegistry {
                 module,
                 memory,
                 allocator.expect("byte storage requires an allocator"),
+            )?)
+        } else {
+            None
+        };
+
+        let decoder_helpers = if string_reqs.decoder {
+            Some(super::decoder::emit_runtime(
+                module,
+                memory,
+                allocator.expect("decoder storage requires an allocator"),
             )?)
         } else {
             None
@@ -312,6 +326,7 @@ impl ModuleRegistry {
             promises,
             allocator,
             byte_helpers,
+            decoder_helpers,
             functions,
             intrinsics,
             stream_helpers,
@@ -336,6 +351,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         }
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
+        ty if super::decoder::is_decoder(ty) => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
     }
 }
@@ -347,6 +363,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::Boolean => Ok(vec![Type::I32]),
         HirType::String => Ok(vec![Type::I32]),
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
+        ty if super::decoder::is_decoder(ty) => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             Ok(vec![Type::I32])
         }

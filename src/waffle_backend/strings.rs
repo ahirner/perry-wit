@@ -48,6 +48,7 @@ pub(crate) struct RequiredStringHelpers {
     pub case_convert: bool,
     pub split: bool,
     pub join: bool,
+    pub decoder: bool,
 }
 
 /// Base memory address where static string descriptors and data are placed.

@@ -5,7 +5,7 @@
   ;; Block headers: next, span, payload offset, payload size, kind, mark, reserved.
   ;; The word immediately before every payload points back to its block header.
   ;; Kinds: 0 bytes, 1 string, 2 string array, 3 scalar Promise, 4 string Promise,
-  ;; 5 observer, 6 root frame, 7 byte view; -1 free. Marks: 0 white, 1 gray, 2 black.
+  ;; 5 observer, 6 root frame, 7 byte view, 8 decoder; -1 free. Marks: 0 white, 1 gray, 2 black.
 
   (func $aligned (param $value i32) (param $alignment i32) (result i32)
     (local $result i64)
@@ -172,6 +172,8 @@
               (then (call $mark (i32.trunc_f64_u (f64.load offset=8 (local.get $pointer))))))))
           (if (i32.eq (local.get $kind) (i32.const 5)) (then (call $mark (i32.load offset=4 (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 7)) (then (call $mark (i32.load offset=8 (local.get $pointer)))))
+          (if (i32.eq (local.get $kind) (i32.const 8)) (then
+            (if (i32.load offset=16 (local.get $pointer)) (then (call $mark (i32.load offset=12 (local.get $pointer)))))))
           (if (i32.eq (local.get $kind) (i32.const 6)) (then
             (local.set $count (i32.load offset=8 (local.get $pointer)))
             (local.set $pointer (i32.add (local.get $pointer) (i32.const 12)))

@@ -48,7 +48,10 @@ pub(crate) fn frame_component(
                 }
                 host_wires.push_str(&format!("      (export {name:?} {})\n", plan.core_function));
             }
-            TypedIntrinsic::ByteAt | TypedIntrinsic::ReadChunk | TypedIntrinsic::ReadInto => {}
+            TypedIntrinsic::ByteAt
+            | TypedIntrinsic::ReadChunk
+            | TypedIntrinsic::ReadInto
+            | TypedIntrinsic::DecoderNew => {}
             TypedIntrinsic::Custom { .. } => bail!(
                 "Intrinsic '{}' is unsupported in components until its import adapter is implemented",
                 intrinsic.name()
