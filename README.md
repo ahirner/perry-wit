@@ -74,6 +74,9 @@ wasmtime run -C cache=n -S p3=y \
 
 Use the pinned Wasmtime with the async features above for suspending components.
 Network and filesystem access additionally require the corresponding host grants.
+`process.exitCode = 1` sets the command status after execution finishes;
+`process.exit(1)` terminates immediately. Uncaught source failures return a failed
+WASI command result.
 
 ### Compile and call exported functions
 

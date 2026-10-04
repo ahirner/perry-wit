@@ -3,6 +3,7 @@
 pub(crate) mod clocks;
 mod context;
 mod filesystem;
+pub(crate) mod process;
 mod random;
 pub(crate) mod scalars;
 pub(crate) mod stdio;
@@ -12,6 +13,7 @@ use perry_hir::types::Type as HirType;
 pub(crate) use clocks::ClockOperation;
 pub(crate) use context::ContextOperation;
 pub(crate) use filesystem::FilesystemOperation;
+pub(crate) use process::ProcessOperation;
 pub(crate) use random::RandomOperation;
 pub(crate) use stdio::StdioOperation;
 
@@ -26,7 +28,7 @@ pub(crate) enum CapabilityOperation {
     Filesystem(FilesystemOperation),
     FilesystemPromise(FilesystemOperation),
     HttpGet,
-    Exit,
+    Process(ProcessOperation),
 }
 
 /// Pure lowering metadata for source validation, core calls, and component wiring.
@@ -44,6 +46,7 @@ pub(crate) enum CapabilityImplementation {
     Http,
     RandomBytes,
     Context,
+    Process,
 }
 
 /// Describe an operation without owning values, scheduling, or invocation state.
@@ -69,7 +72,7 @@ impl CapabilityOperation {
             Self::Stdio(operation) => operation.name(),
             Self::Filesystem(operation) | Self::FilesystemPromise(operation) => operation.name(),
             Self::HttpGet => "get",
-            Self::Exit => "process.exit",
+            Self::Process(operation) => operation.name(),
         }
     }
 }
@@ -82,11 +85,7 @@ impl LowerCapability for CapabilityOperation {
                 result: HirType::Any,
                 implementation: CapabilityImplementation::Promise,
             },
-            Self::Exit => CapabilityPlan {
-                params: vec![HirType::Number],
-                result: HirType::Void,
-                implementation: CapabilityImplementation::Scalar,
-            },
+            Self::Process(operation) => operation.lower(),
             Self::Clock(operation) => operation.lower(),
             Self::Context(operation) => operation.lower(),
             Self::Random(operation) => operation.lower(),

@@ -202,7 +202,9 @@ impl Aliases {
             ast::Expr::Member(member) => {
                 let object = self.expression(&member.obj);
                 let key = self.member_key(&member.prop);
-                self.writes.push(object);
+                if super::context::process_property(member, self.unresolved) != Some("exitCode") {
+                    self.writes.push(object);
+                }
                 self.stores.push((object, key, value));
             }
             _ => {

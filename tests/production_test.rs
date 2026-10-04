@@ -427,41 +427,7 @@ fn process_exit_uses_standard_wasi_and_matches_node_status() -> Result<()> {
         assert!(core.imports.iter().any(
             |import| import.module == "wasi:cli/exit@0.3.0" && import.name == "exit-with-code"
         ));
-        let directory = tempfile::tempdir()?;
-        let component = directory.path().join("exit.wasm");
-        let script = directory.path().join("exit.ts");
-        std::fs::write(&component, compiled.stripped.unwrap())?;
-        std::fs::write(&script, source)?;
-        let node = std::process::Command::new("node").arg(script).output()?;
-        let wasm = std::process::Command::new("wasmtime")
-            .args([
-                "run",
-                "-C",
-                "cache=n",
-                "-S",
-                "p3=y",
-                "-W",
-                "component-model-async=y",
-                "-W",
-                "component-model-async-stackful=y",
-                "-W",
-                "component-model-more-async-builtins=y",
-            ])
-            .arg(component)
-            .output()?;
-        assert_eq!(node.stdout, b"before\n", "Node argument {argument}");
-        assert_eq!(
-            wasm.stdout,
-            node.stdout,
-            "argument {argument}: {}",
-            String::from_utf8_lossy(&wasm.stderr)
-        );
-        assert_eq!(
-            wasm.status.code(),
-            node.status.code(),
-            "argument {argument}: {}",
-            String::from_utf8_lossy(&wasm.stderr)
-        );
+        compare_cli_with_node(&source, b"before\n")?;
     }
     Ok(())
 }
@@ -529,6 +495,217 @@ fn named_exports_use_standard_wasi_exit_and_validate_its_arguments() -> Result<(
                 || diagnostic.contains("declared static type"),
             "{diagnostic}"
         );
+    }
+    Ok(())
+}
+
+fn compare_cli_with_node(source: &str, stdout: &[u8]) -> Result<()> {
+    let compiled = compile_typescript(
+        source,
+        "command.ts",
+        &CompileOptions {
+            world: Some("command".into()),
+            ..Default::default()
+        },
+    )?;
+    let directory = tempfile::tempdir()?;
+    let component = directory.path().join("command.wasm");
+    let script = directory.path().join("command.ts");
+    std::fs::write(&component, compiled.stripped.unwrap())?;
+    std::fs::write(&script, source)?;
+    let node = std::process::Command::new("node").arg(script).output()?;
+    let wasm = std::process::Command::new("wasmtime")
+        .args([
+            "run",
+            "-C",
+            "cache=n",
+            "-S",
+            "p3=y",
+            "-W",
+            "component-model-async=y",
+            "-W",
+            "component-model-async-stackful=y",
+            "-W",
+            "component-model-more-async-builtins=y",
+        ])
+        .arg(component)
+        .output()?;
+    assert_eq!(node.stdout, stdout, "Node: {source}");
+    assert_eq!(
+        wasm.stdout,
+        node.stdout,
+        "{source}: {}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    assert_eq!(
+        wasm.status.code(),
+        node.status.code(),
+        "{source}: {}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn process_exit_code_preserves_execution_and_matches_node_command_status() -> Result<()> {
+    for source in [
+        "if (process.exitCode === undefined) { console.log('true'); } else { console.log('false'); } process.exitCode = 7; if (process.exitCode === 7) { console.log('true'); } else { console.log('false'); } console.log('after');",
+        "if (process.exitCode === undefined) { console.log('true'); } else { console.log('false'); } process['exitCode'] = 7; if (process.exitCode === 7) { console.log('true'); } else { console.log('false'); } process.exitCode = undefined; console.log('after');",
+        "if (process.exitCode === undefined) { console.log('true'); } else { console.log('false'); } if ((process.exitCode = 260) === 260) { console.log('true'); } else { console.log('false'); } console.log('after');",
+        "if (process.exitCode === undefined) { console.log('true'); } else { console.log('false'); } if ((process.exitCode = -1) === -1) { console.log('true'); } else { console.log('false'); } console.log('after');",
+        "import {setTimeout} from 'node:timers/promises'; if (process.exitCode === undefined) { console.log('true'); } else { console.log('false'); } process.exitCode = 9; await setTimeout(1); if (process.exitCode === 9) { console.log('true'); } else { console.log('false'); } console.log('after');",
+    ] {
+        compare_cli_with_node(source, b"true\ntrue\nafter\n")?;
+    }
+    for argument in ["", "undefined", "0", "3"] {
+        compare_cli_with_node(
+            &format!(
+                "process.exitCode = 7; console.log('before'); process.exit({argument}); console.log('after');"
+            ),
+            b"before\n",
+        )?;
+    }
+    compare_cli_with_node(
+        "process.exitCode = 7; process.exitCode = undefined; if (process.exitCode === undefined) { console.log('true'); } else { console.log('false'); }",
+        b"true\n",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn named_exports_retain_exit_code_without_terminating_the_host() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Engine, Store};
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:status; world task { export set:func(code:f64)->f64; export clear:func(); export matches:func(code:f64)->bool; export unset:func()->bool; }",
+    )?;
+    let options = CompileOptions {
+        wit_dir: directory.path().into(),
+        world: Some("task".into()),
+        ..Default::default()
+    };
+    let source = "export function set(code:number):number { return process.exitCode = code; } export function clear():void { process.exitCode = undefined; } export function matches(code:number):boolean { return process.exitCode === code; } export function unset():boolean { return process.exitCode === undefined; }";
+    let compiled = compile_typescript(source, "status.ts", &options)?;
+    let core = waffle::Module::from_wasm_bytes(&compiled.core, &Default::default())?;
+    assert!(
+        core.imports.is_empty(),
+        "exitCode storage alone requires no host interface"
+    );
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let set = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "set")?;
+    let clear = instance.get_typed_func::<(), ()>(&mut store, "clear")?;
+    let matches = instance.get_typed_func::<(f64,), (bool,)>(&mut store, "matches")?;
+    let unset = instance.get_typed_func::<(), (bool,)>(&mut store, "unset")?;
+    for i in 0..100 {
+        assert!(unset.call(&mut store, ())?.0);
+        assert_eq!(set.call(&mut store, (i as f64,))?.0, i as f64);
+        assert!(!unset.call(&mut store, ())?.0);
+        assert!(matches.call(&mut store, (i as f64,))?.0);
+        clear.call(&mut store, ())?;
+    }
+    for source in [
+        "process.exitCode = '2';",
+        "process.exitCode = {};",
+        "process.exitCode = true;",
+        "process.exitCode += 1;",
+        "process.env.VALUE = '2';",
+        "process.argv[0] = '2';",
+    ] {
+        assert!(
+            compile_typescript(
+                source,
+                "invalid-status.ts",
+                &CompileOptions {
+                    world: Some("command".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn uncaught_cli_failures_return_failed_wit_results_and_preserve_finally() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Config, Engine, Store};
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:command-failure; interface host { trace:func(value:u32); wait:async func(); } world task { import host; export wasi:cli/run@0.3.0; }",
+    )?;
+    let options = CompileOptions {
+        wit_dir: directory.path().into(),
+        world: Some("task".into()),
+        ..Default::default()
+    };
+    let mut config = Config::new();
+    config
+        .wasm_component_model_async(true)
+        .wasm_component_model_async_stackful(true)
+        .wasm_component_model_more_async_builtins(true)
+        .wasm_component_model_threading(true);
+    let engine = Engine::new(&config)?;
+    for (source, trace, once) in [
+        ("trace(1); throw 9;", 1, true),
+        (
+            "export function runRun():{ok:true}|{ok:false} { trace(2); throw 9; }",
+            2,
+            false,
+        ),
+        (
+            "export async function runRun():Promise<{ok:true}|{ok:false}> { try { await wait(); throw 9; } finally { trace(3); } }",
+            3,
+            false,
+        ),
+    ] {
+        let source = format!("import {{trace,wait}} from 'test:command-failure/host'; {source}");
+        let compiled = compile_typescript(&source, "failure.ts", &options)?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut linker = Linker::new(&engine);
+        let mut host = linker.instance("test:command-failure/host")?;
+        host.func_wrap(
+            "trace",
+            |mut store: wasmtime::StoreContextMut<'_, Vec<u32>>, (value,): (u32,)| {
+                store.data_mut().push(value);
+                Ok(())
+            },
+        )?;
+        host.func_wrap_concurrent("wait", |_, (): ()| {
+            Box::pin(async {
+                tokio::task::yield_now().await;
+                Ok(())
+            })
+        })?;
+        let mut store = Store::new(&engine, Vec::new());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let interface = instance
+            .get_export_index(&mut store, None, "wasi:cli/run@0.3.0")
+            .unwrap();
+        let index = instance
+            .get_export_index(&mut store, Some(&interface), "run")
+            .unwrap();
+        let run =
+            instance.get_typed_func::<(), (std::result::Result<(), ()>,)>(&mut store, index)?;
+        for count in 1..=100 {
+            assert_eq!(run.call_async(&mut store, ()).await?.0, Err(()), "{source}");
+            assert_eq!(store.data(), &vec![trace; if once { 1 } else { count }]);
+            store.assert_concurrent_state_empty();
+        }
+    }
+    for source in [
+        "console.log('before'); throw 9;",
+        "process.exitCode = 7; console.log('before'); throw 9;",
+        "import {setTimeout} from 'node:timers/promises'; console.log('before'); await setTimeout(1); throw 9;",
+    ] {
+        compare_cli_with_node(source, b"before\n")?;
     }
     Ok(())
 }

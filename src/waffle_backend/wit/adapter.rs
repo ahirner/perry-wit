@@ -32,8 +32,10 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
 ) -> Result<FunctionBody> {
     let mut sizes = SizeAlign::default();
     sizes.fill(&wit.resolve)?;
-    let body = FunctionBody::new(module, export.sig);
+    let mut body = FunctionBody::new(module, export.sig);
     let block = body.entry;
+    let command_failure =
+        (declaration.core_name == "wasi:cli/run@0.3.0#run").then(|| body.add_block());
     let mut adapter = Adapter {
         body,
         block,
@@ -41,6 +43,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         wit,
         sizes,
         scratch: None,
+        command_failure,
         strings,
     };
     let signature = wit.resolve.wasm_signature(
@@ -94,46 +97,66 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         args.push(adapter.lift(param.ty, &mut source)?);
     }
     if let Some(state) = &registry.module_state {
-        let count = adapter.integer(args.len() as u32);
         let allocator = registry.allocator.unwrap();
-        let roots = adapter.call(allocator.frame_new, &[count]);
+        let roots = if args.is_empty() {
+            None
+        } else {
+            let count = adapter.integer(args.len() as u32);
+            Some(adapter.call(allocator.frame_new, &[count]))
+        };
         for (index, (argument, param)) in args.iter().zip(&declaration.function.params).enumerate()
         {
             if crate::waffle_backend::ssa::types::is_reference(&super::hir_type(
                 &wit.resolve,
                 param.ty,
             )?) {
-                adapter.store_i32(roots, 12 + index as u32 * 4, *argument);
+                adapter.store_i32(roots.unwrap(), 12 + index as u32 * 4, *argument);
             }
         }
         adapter.call_checked(state.evaluate, &[]);
-        adapter.body.add_op(
-            adapter.block,
-            Operator::Call {
-                function_index: allocator.frame_drop,
-            },
-            &[roots],
-            &[],
-        );
+        if let Some(roots) = roots {
+            adapter.body.add_op(
+                adapter.block,
+                Operator::Call {
+                    function_index: allocator.frame_drop,
+                },
+                &[roots],
+                &[],
+            );
+        }
     }
     let payload = adapter.call_checked(callee.func_index, &args);
-    if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
+    let result = declaration
+        .function
+        .result
+        .map(|ty| adapter.decode(ty, payload))
+        .transpose()?;
+    let result_root = if let Some(ty) = declaration.function.result
+        && crate::waffle_backend::ssa::types::is_reference(&super::hir_type(&wit.resolve, ty)?)
+    {
+        let count = adapter.integer(1);
+        let root = adapter.call(registry.allocator.unwrap().frame_new, &[count]);
+        adapter.store_i32(root, 12, result.unwrap());
+        Some(root)
+    } else {
+        None
+    };
+    adapter.finish_invocation();
+    if declaration.core_name == "wasi:cli/run@0.3.0#run"
+        && let Some(function) = registry.finish_command
+    {
         adapter.body.add_op(
             adapter.block,
             Operator::Call {
-                function_index: native.finish,
+                function_index: function,
             },
             &[],
             &[],
         );
-    } else {
-        let address = adapter.integer(32);
-        let zero = adapter.integer(0);
-        adapter.store_i32(address, 0, zero);
     }
     let mut returned = Vec::new();
     if let Some(ty) = declaration.function.result {
-        let value = adapter.decode(ty, payload)?;
+        let value = result.unwrap();
         let size = adapter.sizes.size(&ty).size_wasm32() as u32;
         let alignment = adapter.sizes.align(&ty).align_wasm32() as u32;
         let address = adapter.allocate(size.max(1), alignment);
@@ -144,9 +167,30 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
             adapter.flatten_memory(ty, address, 0, &mut returned)?;
         }
     }
+    if let Some(root) = result_root {
+        adapter.body.add_op(
+            adapter.block,
+            Operator::Call {
+                function_index: registry.allocator.unwrap().frame_drop,
+            },
+            &[root],
+            &[],
+        );
+    }
     adapter
         .body
         .set_terminator(adapter.block, Terminator::Return { values: returned });
+    if let Some(failure) = command_failure {
+        adapter.block = failure;
+        adapter.finish_invocation();
+        let failed = adapter.integer(1);
+        adapter.body.set_terminator(
+            adapter.block,
+            Terminator::Return {
+                values: vec![failed],
+            },
+        );
+    }
     adapter.body.validate()?;
     adapter.body.verify_reducible()?;
     Ok(adapter.body)
@@ -165,9 +209,32 @@ struct Adapter<'a> {
     sizes: SizeAlign,
     scratch: Option<crate::waffle_backend::allocation::scope::ScratchScope>,
     strings: &'a StringPool,
+    command_failure: Option<Block>,
 }
 
 impl Adapter<'_> {
+    fn finish_invocation(&mut self) {
+        if let Some(native) = self
+            .registry
+            .promises
+            .as_ref()
+            .map(|runtime| &runtime.native)
+        {
+            self.body.add_op(
+                self.block,
+                Operator::Call {
+                    function_index: native.finish,
+                },
+                &[],
+                &[],
+            );
+        } else {
+            let address = self.integer(32);
+            let zero = self.integer(0);
+            self.store_i32(address, 0, zero);
+        }
+    }
+
     fn op(&mut self, operator: Operator, args: &[Value], ty: CoreType) -> Value {
         self.body.add_op(self.block, operator, args, &[ty])
     }
@@ -197,8 +264,19 @@ impl Adapter<'_> {
     }
     fn call_checked(&mut self, function: Func, args: &[Value]) -> Value {
         let outcome = abi::emit_fallible_call(&mut self.body, self.block, function, args);
-        self.body
-            .set_terminator(outcome.err_block, Terminator::Unreachable);
+        self.body.set_terminator(
+            outcome.err_block,
+            if let Some(block) = self.command_failure {
+                Terminator::Br {
+                    target: BlockTarget {
+                        block,
+                        args: vec![],
+                    },
+                }
+            } else {
+                Terminator::Unreachable
+            },
+        );
         self.block = outcome.ok_block;
         outcome.payload
     }
@@ -718,6 +796,7 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         wit,
         sizes,
         scratch: Some(scratch),
+        command_failure: None,
         strings,
     };
     let guest_params: Vec<_> = adapter.body.blocks[block]

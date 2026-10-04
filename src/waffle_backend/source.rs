@@ -22,7 +22,7 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use super::capabilities::{
     CapabilityOperation, ClockOperation, ContextOperation, FilesystemOperation, LowerCapability,
-    RandomOperation, StdioOperation,
+    ProcessOperation, RandomOperation, StdioOperation,
 };
 
 #[derive(Default)]
@@ -229,6 +229,9 @@ fn source_type(ty: &HirType) -> Result<String> {
         ty if super::http::is_response(ty) => Ok(super::http::RESPONSE_TYPE.into()),
         ty if *ty == super::http::headers_type() => Ok("{[key: string]: string}".into()),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("string | Uint8Array".into()),
+        ty if *ty == ProcessOperation::GetExitCode.lower().result => {
+            Ok("number | undefined".into())
+        }
         HirType::Number => Ok("number".into()),
         HirType::Boolean => Ok("boolean".into()),
         HirType::String => Ok("string".into()),
@@ -458,7 +461,7 @@ impl SourceCalls {
                 } else if builtin_process {
                     Ok(Some(match name {
                         "cwd" => CapabilityOperation::Context(ContextOperation::InitialCwd),
-                        "exit" => CapabilityOperation::Exit,
+                        "exit" => CapabilityOperation::Process(ProcessOperation::Exit),
                         _ => bail!("Unsupported process operation '{name}'"),
                     }))
                 } else if name == "random" {
@@ -572,17 +575,24 @@ impl VisitMut for SourceCalls {
                 return;
             }
             match self.operation(callee) {
-                Ok(Some(operation)) => {
+                Ok(Some(mut operation)) => {
+                    if operation == CapabilityOperation::Process(ProcessOperation::Exit)
+                        && call.args.is_empty()
+                    {
+                        operation = CapabilityOperation::Process(ProcessOperation::ExitCurrent);
+                    }
                     if matches!(
                         operation,
                         CapabilityOperation::Clock(ClockOperation::Timeout)
-                            | CapabilityOperation::Exit
+                            | CapabilityOperation::Process(ProcessOperation::Exit)
                     ) {
                         let default = ast::ExprOrSpread {
                             spread: None,
                             expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
                                 span: call.span,
-                                value: if operation == CapabilityOperation::Exit {
+                                value: if operation
+                                    == CapabilityOperation::Process(ProcessOperation::Exit)
+                                {
                                     0.0
                                 } else {
                                     1.0
@@ -593,8 +603,7 @@ impl VisitMut for SourceCalls {
                         if call.args.is_empty() {
                             call.args.push(default);
                         } else if call.args.len() == 1
-                            && matches!(call.args[0].expr.as_ref(), ast::Expr::Ident(name)
-                                if name.sym == "undefined" && name.ctxt == self.unresolved)
+                            && matches!(underlying_expression(&call.args[0].expr), ast::Expr::Ident(name) if name.sym == "undefined" && name.ctxt == self.unresolved)
                         {
                             call.args[0] = default;
                         }
@@ -647,6 +656,7 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
+        self.rewrite_process_assignment(expression);
         self.rewrite_process_value(expression);
         if matches!(expression, ast::Expr::Object(_))
             && let Err(error) = options::validate_plain_options(expression, "Object")

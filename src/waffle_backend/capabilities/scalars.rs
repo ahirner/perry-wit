@@ -13,7 +13,6 @@ use waffle::{Func, Memory, Module};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Scalar {
-    Exit,
     Wait,
     Timeout,
     Monotonic,
@@ -23,7 +22,6 @@ pub(crate) enum Scalar {
 impl Scalar {
     fn of(intrinsic: &TypedIntrinsic) -> Option<Self> {
         match intrinsic {
-            TypedIntrinsic::Capability(CapabilityOperation::Exit) => Some(Self::Exit),
             TypedIntrinsic::Capability(CapabilityOperation::Clock(ClockOperation::WaitFor)) => {
                 Some(Self::Wait)
             }
@@ -51,7 +49,6 @@ impl Scalar {
         Vec<&'static str>,
     ) {
         match self {
-            Self::Exit => ("wasi:cli/exit@0.3.0", "exit-with-code", vec!["i32"], vec![]),
             Self::Wait | Self::Timeout => (
                 "wasi:clocks/monotonic-clock@0.3.0",
                 "[async-lower]wait-for",
@@ -126,26 +123,6 @@ pub(in crate::waffle_backend) fn emit(
             )
         };
         let result = match scalar {
-            Scalar::Exit => {
-                let value = b.param(0);
-                let integer = b.op(Op::F64Trunc, &[value], F64);
-                let valid = b.op(Op::F64Eq, &[value, integer], I32);
-                b.require(valid);
-                let maximum = real(&mut b, 9_007_199_254_740_991.0);
-                let magnitude = b.op(Op::F64Abs, &[value], F64);
-                let in_range = b.op(Op::F64Le, &[magnitude, maximum], I32);
-                b.require(in_range);
-                let width = real(&mut b, 256.0);
-                let quotient = b.op(Op::F64Div, &[value, width], F64);
-                let quotient = b.op(Op::F64Floor, &[quotient], F64);
-                let multiple = b.op(Op::F64Mul, &[quotient, width], F64);
-                let code = b.op(Op::F64Sub, &[value, multiple], F64);
-                let code = b.op(Op::I32TruncF64U, &[code], I32);
-                b.call(function, &[code], &[]);
-                let zero = b.integer(0);
-                b.require(zero);
-                vec![]
-            }
             Scalar::Wait | Scalar::Timeout => {
                 let value = b.param(0);
                 let zero = real(&mut b, 0.0);

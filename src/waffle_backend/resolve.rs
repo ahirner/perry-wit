@@ -579,6 +579,7 @@ fn check_stmts_shadowing(
 
 fn map_hir_type_to_waffle(ty: &HirType) -> Result<WaffleType> {
     match ty {
+        HirType::Union(types) if types == &[HirType::Number, HirType::Void] => Ok(WaffleType::F64),
         HirType::Number => Ok(WaffleType::F64),
         HirType::Boolean => Ok(WaffleType::I32),
         HirType::Named(name) if name == "ByteStream" => Ok(WaffleType::I32),

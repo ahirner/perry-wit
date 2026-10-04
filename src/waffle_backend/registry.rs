@@ -77,6 +77,7 @@ impl FunctionInfo {
 
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
+    pub(crate) finish_command: Option<Func>,
     pub(crate) await_subtask: Option<Func>,
     pub(crate) module_state: Option<super::initialization::ModuleState>,
     pub(crate) promises: Option<PromiseImports>,
@@ -121,6 +122,7 @@ impl ModuleRegistry {
     ) -> Result<Self> {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
+        let process_imports = super::capabilities::process::declare(module, contract);
         let scalar_imports = super::capabilities::scalars::declare_imports(module, contract);
         let mut wit_imports = BTreeMap::new();
         for (name, intrinsic) in &contract.intrinsics {
@@ -250,6 +252,13 @@ impl ModuleRegistry {
             None
         };
 
+        let finish_command = if let Some(imports) = process_imports {
+            let (helpers, finish) = super::capabilities::process::emit(module, memory, imports)?;
+            intrinsics.extend(helpers);
+            finish
+        } else {
+            None
+        };
         let await_subtask = subtask_imports
             .map(|imports| {
                 super::runtime::subtasks::emit_wait(module, memory, allocator.unwrap(), imports)
@@ -643,6 +652,7 @@ impl ModuleRegistry {
             .map(|plan| super::initialization::ModuleState::declare(module, plan))
             .transpose()?;
         let mut registry = Self {
+            finish_command,
             await_subtask,
             module_state,
             promises,

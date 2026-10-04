@@ -1365,3 +1365,37 @@ async fn async_lower_uses_indirect_parameters_and_releases_terminal_subtasks() -
     assert_eq!(calls.load(Ordering::SeqCst), 200);
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn export_results_survive_collection_while_ready_work_finishes() -> Result<()> {
+    let compiled = compile(
+        r#"
+        async function cleanup(input:string):Promise<void> {
+            await 0;
+            for(let i=0;i<2000;i++) {
+                const discarded=input.toLowerCase().split('.').join('-');
+            }
+        }
+        export function run(input:string):string {
+            const pending = cleanup(input);
+            return input + ' retained result';
+        }
+        "#,
+        "package test:export-roots; world boundary {export run:async func(input:string)->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = store(&engine);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for _ in 0..50 {
+        assert_eq!(
+            run.call_async(&mut store, ("A.B.C",)).await?.0,
+            "A.B.C retained result"
+        );
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}

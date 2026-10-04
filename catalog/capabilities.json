@@ -75,7 +75,7 @@
         "Repeated calls are tested under a 1 MiB guest memory cap using independent Wasmtime P3 bindings"
       ],
       "differences": [
-        "Explicit request/response byte caps; status 200\u2013599, with empty bodies for 204/205/304",
+        "Explicit request/response byte caps; status 200–599, with empty bodies for 204/205/304",
         "Overflow returns the corresponding WASI body-size error; invalid response metadata and request producer failures return internal-error",
         "Source exceptions and interrupted calls require store disposal; hosts must drive the P3 event loop through completion",
         "Request trailers are consumed but not exposed; source Web Streams, response trailers, and cooperative cancellation are unsupported"
@@ -430,7 +430,8 @@
         "rust:tests/waffle_wit_native_test.rs#timer_delays_map_to_p3_nanoseconds_without_waiting_for_the_clock",
         "rust:tests/waffle_wit_native_test.rs#asynchronous_module_initialization_is_shared_by_named_exports",
         "rust:tests/waffle_wit_native_test.rs#suspended_wit_return_storage_survives_collection_in_another_task",
-        "rust:tests/waffle_wit_native_test.rs#async_lower_uses_indirect_parameters_and_releases_terminal_subtasks"
+        "rust:tests/waffle_wit_native_test.rs#async_lower_uses_indirect_parameters_and_releases_terminal_subtasks",
+        "rust:tests/waffle_wit_native_test.rs#export_results_survive_collection_while_ready_work_finishes"
       ],
       "wasi": []
     },
@@ -705,25 +706,32 @@
     },
     {
       "id": "node.process_exit",
-      "name": "process.exit",
+      "name": "CLI exit status",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "Global process.exit with an omitted, literal undefined, or numeric safe-integer code",
+      "domain": "Global process.exit with omitted, literal undefined, or numeric safe-integer codes; direct process.exitCode reads, numeric assignments, and clearing with literal undefined",
       "invariants": [
         "Maps directly to wasi:cli/exit@0.3.0#exit-with-code with an eight-bit status",
         "Immediately terminates CLI scripts and named component exports without running subsequent statements or finally blocks",
-        "Validates numeric codes before invoking the host; a returning exit host traps"
+        "Validates numeric codes before invoking the host; a returning exit host traps",
+        "process.exitCode starts undefined, retains its assigned integer across named calls, and publishes command status only after source execution and owned work finish",
+        "Omitted process.exit() uses the stored exitCode; an explicit undefined argument selects zero, matching the pinned Node runtime",
+        "Uncaught CLI source failures return the standard failed wasi:cli/run result after source finally cleanup; failed module initialization remains failed on later calls"
       ],
       "differences": [
-        "process.exitCode and guest RangeError objects for invalid numeric codes remain required restoration work",
-        "Nonnumeric values and extra arguments are rejected at compile time; invalid runtime numeric values currently trap"
+        "Finite guest RangeError objects for invalid numeric codes remain required restoration work",
+        "Nonnumeric values, extra exit arguments, compound exitCode assignments, and optional-valued assignment expressions are diagnosed; invalid runtime numeric values currently trap"
       ],
       "conformance": [
         "rust:tests/production_test.rs#process_exit_uses_standard_wasi_and_matches_node_status",
-        "rust:tests/production_test.rs#named_exports_use_standard_wasi_exit_and_validate_its_arguments"
+        "rust:tests/production_test.rs#named_exports_use_standard_wasi_exit_and_validate_its_arguments",
+        "rust:tests/production_test.rs#process_exit_code_preserves_execution_and_matches_node_command_status",
+        "rust:tests/production_test.rs#named_exports_retain_exit_code_without_terminating_the_host",
+        "rust:tests/production_test.rs#uncaught_cli_failures_return_failed_wit_results_and_preserve_finally"
       ],
       "wasi": [
-        "wasi:cli/exit@0.3.0"
+        "wasi:cli/exit@0.3.0",
+        "wasi:cli/run@0.3.0"
       ]
     },
     {
