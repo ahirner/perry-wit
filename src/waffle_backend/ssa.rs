@@ -109,6 +109,10 @@ pub(crate) fn lower_module(
         || contract.has_stream_input()
         || !contract.output_operations().is_empty()
         || contract.has_filesystem()
+        || contract
+            .intrinsics
+            .values()
+            .any(super::resolve::TypedIntrinsic::owns_subtask)
     {
         collect_strings_in_module(hir, &mut string_pool);
         if let Some(wit) = &contract.wit {

@@ -685,9 +685,7 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
     callee: Func,
     strings: &StringPool,
 ) -> Result<Func> {
-    let signature = wit
-        .resolve
-        .wasm_signature(wit_parser::abi::AbiVariant::GuestImport, &import.function);
+    let signature = wit.resolve.wasm_signature(import.abi(), &import.function);
     let params = import
         .function
         .params
@@ -774,6 +772,12 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         &args,
         &results,
     );
+    if import.function.kind.is_async() {
+        let status = adapter.call(registry.await_subtask.unwrap(), &[returned]);
+        let two = adapter.integer(2);
+        let completed = adapter.op(Operator::I32Eq, &[status, two], CoreType::I32);
+        adapter.require(completed);
+    }
     let value = if let Some(ty) = import.function.result {
         let direct = [returned];
         let mut input = if let Some(pointer) = return_pointer {

@@ -1231,7 +1231,7 @@ async fn suspended_wit_return_storage_survives_collection_in_another_task() -> R
     let core = allocation_probe::guard_return_area(
         &compiled.core,
         "test:canonical-roots/work",
-        "load",
+        "[async-lower]load",
         "release",
     )?;
     let directory = tempfile::tempdir()?;
@@ -1272,5 +1272,96 @@ async fn suspended_wit_return_storage_survives_collection_in_another_task() -> R
         );
         store.assert_concurrent_state_empty();
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_lower_uses_indirect_parameters_and_releases_terminal_subtasks() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let compiled = compile(
+        r#"
+        import {score, checkpoint} from 'test:async-abi/work';
+        export async function run(label:string):Promise<number> {
+          const first=score(label,1,2,3,4);
+          const second=score(label,5,6,7,8);
+          await checkpoint();
+          return (await first)+(await second)+(await first);
+        }
+        "#,
+        r#"package test:async-abi;
+        interface work {
+          score:async func(label:string,a:f64,b:f64,c:f64,d:f64)->f64;
+          checkpoint:async func();
+        }
+        world boundary { import work; export run:async func(label:string)->f64; }
+        "#,
+    )?;
+    let module = waffle::Module::from_wasm_bytes(&compiled.core, &Default::default())?;
+    let imports: Vec<_> = module
+        .imports
+        .iter()
+        .filter(|import| import.module == "test:async-abi/work")
+        .collect();
+    assert_eq!(imports.len(), 2);
+    for import in imports {
+        let waffle::ImportKind::Func(function) = import.kind else {
+            panic!("function expected")
+        };
+        let signature = &module.signatures[module.funcs[function].sig()];
+        assert_eq!(signature.returns, [waffle::Type::I32]);
+        match import.name.as_str() {
+            "[async-lower]score" => assert_eq!(signature.params, [waffle::Type::I32; 2]),
+            "[async-lower]checkpoint" => assert!(signature.params.is_empty()),
+            name => panic!("unexpected native import {name}"),
+        }
+    }
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::<Host>::new(&engine);
+    let gate = Arc::new(tokio::sync::Barrier::new(3));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let scores = calls.clone();
+    let pending = gate.clone();
+    linker
+        .instance("test:async-abi/work")?
+        .func_wrap_concurrent(
+            "score",
+            move |_, (label, a, b, c, d): (String, f64, f64, f64, f64)| {
+                let gate = pending.clone();
+                scores.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    gate.wait().await;
+                    Ok((label.chars().count() as f64 + a + b + c + d,))
+                })
+            },
+        )?;
+    linker
+        .instance("test:async-abi/work")?
+        .func_wrap_concurrent("checkpoint", move |_, (): ()| {
+            let gate = gate.clone();
+            Box::pin(async move {
+                gate.wait().await;
+                Ok(())
+            })
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    for _ in 0..100 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                run.call_async(&mut store, ("漢🙂",))
+            )
+            .await??
+            .0,
+            52.0
+        );
+        store.assert_concurrent_state_empty();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 200);
     Ok(())
 }

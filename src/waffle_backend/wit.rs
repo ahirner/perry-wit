@@ -94,6 +94,16 @@ pub(crate) struct WitImport {
     pub(super) function: Function,
 }
 
+impl WitImport {
+    pub(crate) fn abi(&self) -> wit_parser::abi::AbiVariant {
+        if self.function.kind.is_async() {
+            wit_parser::abi::AbiVariant::GuestImportAsync
+        } else {
+            wit_parser::abi::AbiVariant::GuestImport
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct WitExport {
     pub(super) core_name: String,

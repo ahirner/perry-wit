@@ -54,9 +54,9 @@ impl Scalar {
             Self::Exit => ("wasi:cli/exit@0.3.0", "exit-with-code", vec!["i32"], vec![]),
             Self::Wait | Self::Timeout => (
                 "wasi:clocks/monotonic-clock@0.3.0",
-                "wait-for",
+                "[async-lower]wait-for",
                 vec!["i64"],
-                vec![],
+                vec!["i32"],
             ),
             Self::Monotonic => (
                 "wasi:clocks/monotonic-clock@0.3.0",
@@ -104,6 +104,7 @@ pub(in crate::waffle_backend) fn emit(
     memory: Memory,
     allocator: Option<AllocationFuncs>,
     imports: BTreeMap<String, Func>,
+    await_subtask: Option<Func>,
 ) -> Result<BTreeMap<String, Func>> {
     let mut helpers = BTreeMap::new();
     for (name, function) in imports {
@@ -164,7 +165,11 @@ pub(in crate::waffle_backend) fn emit(
                 let million = real(&mut b, 1_000_000.0);
                 let ns = b.op(Op::F64Mul, &[value, million], F64);
                 let ns = b.op(Op::I64TruncF64U, &[ns], I64);
-                b.call(function, &[ns], &[]);
+                let subtask = b.call(function, &[ns], &[I32])[0];
+                let status = b.call(await_subtask.unwrap(), &[subtask], &[I32])[0];
+                let returned = b.integer(2);
+                let success = b.op(Op::I32Eq, &[status, returned], I32);
+                b.require(success);
                 vec![]
             }
             Scalar::Monotonic => {

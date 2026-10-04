@@ -2,6 +2,7 @@
 
 pub(crate) mod builder;
 pub(crate) mod imports;
+pub(crate) mod subtasks;
 
 use std::collections::BTreeMap;
 

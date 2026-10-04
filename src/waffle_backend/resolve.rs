@@ -56,6 +56,16 @@ pub(crate) enum TypedIntrinsic {
 }
 
 impl TypedIntrinsic {
+    pub(crate) fn owns_subtask(&self) -> bool {
+        matches!(
+            self,
+            Self::WitImport { is_async: true, .. }
+                | Self::Capability(CapabilityOperation::Clock(
+                    ClockOperation::WaitFor | ClockOperation::Timeout
+                ))
+        )
+    }
+
     pub(crate) fn has_completion(&self) -> bool {
         matches!(
             self,

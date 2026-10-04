@@ -77,6 +77,7 @@ impl FunctionInfo {
 
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
+    pub(crate) await_subtask: Option<Func>,
     pub(crate) module_state: Option<super::initialization::ModuleState>,
     pub(crate) promises: Option<PromiseImports>,
     pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
@@ -129,9 +130,7 @@ impl ModuleRegistry {
             if let TypedIntrinsic::WitImport { key, .. } = intrinsic {
                 let wit = contract.wit.as_ref().unwrap();
                 let import = &wit.imports[key];
-                let signature = wit
-                    .resolve
-                    .wasm_signature(wit_parser::abi::AbiVariant::GuestImport, &import.function);
+                let signature = wit.resolve.wasm_signature(import.abi(), &import.function);
                 let signature = module.signatures.push(SignatureData {
                     params: signature
                         .params
@@ -147,7 +146,11 @@ impl ModuleRegistry {
                 let function = module.funcs.push(FuncDecl::Import(signature, name.clone()));
                 module.imports.push(Import {
                     module: import.module.clone(),
-                    name: import.function.name.clone(),
+                    name: if import.function.kind.is_async() {
+                        format!("[async-lower]{}", import.function.name)
+                    } else {
+                        import.function.name.clone()
+                    },
                     kind: ImportKind::Func(function),
                 });
                 wit_imports.insert(name.clone(), (key.clone(), function));
@@ -177,6 +180,12 @@ impl ModuleRegistry {
             });
             intrinsics.insert(name.clone(), func);
         }
+
+        let subtask_imports = contract
+            .intrinsics
+            .values()
+            .any(TypedIntrinsic::owns_subtask)
+            .then(|| super::runtime::subtasks::declare(module));
 
         let stream_imports = contract
             .has_stream_input()
@@ -241,12 +250,18 @@ impl ModuleRegistry {
             None
         };
 
+        let await_subtask = subtask_imports
+            .map(|imports| {
+                super::runtime::subtasks::emit_wait(module, memory, allocator.unwrap(), imports)
+            })
+            .transpose()?;
         intrinsics.extend(super::capabilities::scalars::emit(
             module,
             contract,
             memory,
             allocator,
             scalar_imports,
+            await_subtask,
         )?);
 
         let byte_helpers = if super::bytes::required(hir) || contract.has_http() {
@@ -628,6 +643,7 @@ impl ModuleRegistry {
             .map(|plan| super::initialization::ModuleState::declare(module, plan))
             .transpose()?;
         let mut registry = Self {
+            await_subtask,
             module_state,
             promises,
             allocator,
