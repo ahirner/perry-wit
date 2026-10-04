@@ -36,6 +36,7 @@ async fn native_subtask_cancellation_is_acknowledged_before_owner_release() -> R
     config
         .wasm_component_model_async(true)
         .wasm_component_model_more_async_builtins(true)
+        .wasm_component_model_threading(true)
         .wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config)?;
     for asynchronous in [false, true] {
@@ -210,6 +211,7 @@ async fn component_cancellation_reaches_callback_and_releases_native_owner() -> 
     config
         .wasm_component_model_async(true)
         .wasm_component_model_more_async_builtins(true)
+        .wasm_component_model_threading(true)
         .wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, compose_cancellation_probe()?)?;
