@@ -461,6 +461,7 @@ impl ModuleRegistry {
                     imports: &imports,
                     strings: string_helpers.unwrap(),
                     bytes: byte_helpers.unwrap(),
+                    json: json_helpers,
                     pool: string_pool,
                     promises: promises.as_ref(),
                 },
@@ -720,7 +721,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         HirType::Tuple(_) => Ok(Type::I32),
         HirType::Promise(inner) if super::promises::is_task_outcome(inner) => Ok(Type::I32),
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
-        ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
+        ty if super::bytes::is_byte_storage(ty) => Ok(Type::I32),
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)
@@ -745,7 +746,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::Boolean | HirType::BigInt => Ok(vec![Type::I32]),
         ty if super::values::is_string_type(ty) => Ok(vec![Type::I32]),
         HirType::Tuple(_) => Ok(vec![Type::I32]),
-        ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
+        ty if super::bytes::is_byte_storage(ty) => Ok(vec![Type::I32]),
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)

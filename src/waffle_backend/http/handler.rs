@@ -35,6 +35,7 @@ pub(crate) fn emit_entry(
     imports: &BTreeMap<String, Func>,
 ) -> Result<()> {
     let allocator = registry.allocator.unwrap();
+    let finish_write = super::future::emit_finish_write(module, registry.memory, imports)?;
     let functions = native_functions();
     let read = streams::emit_read_transfer(module, registry.memory, imports["read"])?;
     let write = streams::transfer::write(module, registry.memory, imports["write"])?;
@@ -59,6 +60,7 @@ pub(crate) fn emit_entry(
         .collect();
     imports.extend([
         ("read-buffered", buffered),
+        ("finish-write", finish_write),
         ("write-buffer", write),
         ("realloc", allocator.realloc),
         ("frame-new", allocator.frame_new),
@@ -67,12 +69,11 @@ pub(crate) fn emit_entry(
         ("handle", handle.func_index),
     ]);
     let source = format!(
-        "(module {} (import \"host\" \"write-buffer\" (func $write-buffer (param i32 i32 i32) (result i32))) {} {})",
+        "(module {} (import \"host\" \"write-buffer\" (func $write-buffer (param i32 i32 i32) (result i32))) {})",
         imports::module_imports(&functions)?,
         include_str!("handler/runtime.wat")
             .replace("REQUEST_LIMIT", &limits.max_request_bytes.to_string())
-            .replace("RESPONSE_LIMIT", &limits.max_response_bytes.to_string()),
-        include_str!("future.wat")
+            .replace("RESPONSE_LIMIT", &limits.max_response_bytes.to_string())
     );
     let emitted = runtime::emit_functions(module, registry.memory, &source, &imports)?;
     module.exports.push(Export {

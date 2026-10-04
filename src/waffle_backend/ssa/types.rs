@@ -15,6 +15,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::objects::is_object(ty) => Some("object"),
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
+        ty if crate::waffle_backend::bytes::is_array_buffer(ty) => Some("ArrayBuffer"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
         ty if crate::waffle_backend::http::fetch::is_response(ty) => Some("Response"),
         ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
@@ -52,6 +53,7 @@ pub(crate) fn is_reference(ty: &HirType) -> bool {
         HirType::Named(name) => {
             name == SCALAR_ITERATION
                 || name == "Uint8Array"
+                || name == "ArrayBuffer"
                 || name == crate::waffle_backend::values::ARRAY_TYPE
         }
         HirType::Union(types) => types.iter().any(is_reference),
@@ -213,7 +215,7 @@ impl FunctionLowerer<'_> {
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
+            } if crate::waffle_backend::bytes::is_byte_storage(&self.infer_expr_type(object))
                 && matches!(property.as_str(), "length" | "byteLength" | "byteOffset") =>
             {
                 HirType::Number

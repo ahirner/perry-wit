@@ -31,18 +31,25 @@ pub(crate) fn is_response(ty: &perry_hir::types::Type) -> bool {
 pub(crate) enum BodyMethod {
     Bytes,
     Text,
+    Json,
+    ArrayBuffer,
 }
 impl BodyMethod {
+    pub(crate) const ALL: [Self; 4] = [Self::Bytes, Self::Text, Self::Json, Self::ArrayBuffer];
     pub(crate) fn named(name: &str) -> Option<Self> {
         match name {
             "bytes" => Some(Self::Bytes),
             "text" => Some(Self::Text),
+            "json" => Some(Self::Json),
+            "arrayBuffer" => Some(Self::ArrayBuffer),
             _ => None,
         }
     }
     pub(crate) fn result(self) -> perry_hir::types::Type {
         match self {
             Self::Text => perry_hir::types::Type::String,
+            Self::Json => crate::waffle_backend::values::value_type(),
+            Self::ArrayBuffer => perry_hir::types::Type::Named("ArrayBuffer".into()),
             Self::Bytes => perry_hir::types::Type::Named("Uint8Array".into()),
         }
     }
@@ -54,13 +61,15 @@ pub(crate) struct Helpers {
     pub(crate) upload: Func,
     pub(crate) bytes: Func,
     pub(crate) text: Func,
+    json: Option<Func>,
     pub(crate) finish: Func,
 }
 impl Helpers {
     pub(crate) fn body(self, method: BodyMethod) -> Func {
         match method {
-            BodyMethod::Bytes => self.bytes,
+            BodyMethod::Bytes | BodyMethod::ArrayBuffer => self.bytes,
             BodyMethod::Text => self.text,
+            BodyMethod::Json => self.json.unwrap(),
         }
     }
 }
@@ -122,7 +131,7 @@ pub(super) fn emit(
     let transport = Transport {
         native,
         allocator,
-        finish_write: emit_finish_write(module, memory, native)?,
+        finish_write: super::future::emit_finish_write(module, memory, native)?,
         promises,
         consume: body,
         content_type: [
@@ -179,6 +188,29 @@ pub(super) fn emit(
     let payload = b.op(O::F64ConvertI32U, &[descriptor], F64);
     b.ret(&[zero, payload]);
     b.finish(module, text)?;
+    let json = runtime
+        .json
+        .map(|json| {
+            let function = builder::declare(module, "fetch.json", &[I32], &[I32, F64]);
+            let mut b = Builder::new(module, function, memory);
+            let text_result = b.call(text, &[b.param(0)], &[I32, F64]);
+            let failed = b.body.add_block();
+            let parse = b.body.add_block();
+            b.branch(text_result[0], failed, parse);
+            b.block = failed;
+            b.ret(&text_result);
+            b.block = parse;
+            let text = b.op(O::I32TruncF64U, &[text_result[1]], I32);
+            let one = b.integer(1);
+            let frame = b.call(allocator.frame_new, &[one], &[I32])[0];
+            b.store(frame, 12, text, I32);
+            let result = b.call(json.parse, &[text], &[I32, F64]);
+            b.call(allocator.frame_drop, &[frame], &[]);
+            b.ret(&result);
+            b.finish(module, function)?;
+            Ok::<_, anyhow::Error>(function)
+        })
+        .transpose()?;
     let mut b = Builder::new(module, finish, memory);
     let address = b.integer(OWNERS);
     let pending = b.load(address, 0, I32);
@@ -191,6 +223,7 @@ pub(super) fn emit(
         upload,
         bytes: body,
         text,
+        json,
         finish,
     })
 }
@@ -512,49 +545,6 @@ fn emit_body(
     let payload = b.op(O::F64ConvertI32U, &[view], F64);
     b.ret(&[zero, payload]);
     b.finish(module, function)
-}
-
-fn emit_finish_write(
-    module: &mut Module<'static>,
-    memory: Memory,
-    native: &BTreeMap<String, Func>,
-) -> Result<Func> {
-    let function = builder::declare(module, "fetch.finish-write", &[I32, I32, I32], &[]);
-    let mut b = Builder::new(module, function, memory);
-    let writer = b.param(0);
-    let status = b.param(1);
-    let scratch = b.param(2);
-    let blocked = b.integer(u32::MAX);
-    let pending = b.op(O::I32Eq, &[status, blocked], I32);
-    let wait = b.body.add_block();
-    let complete = b.body.add_block();
-    let terminal = b.body.add_blockparam(complete, I32);
-    let immediate = b.body.add_block();
-    b.branch(pending, wait, immediate);
-    b.block = immediate;
-    b.jump(complete, &[status]);
-    b.block = wait;
-    let set = b.call(native["new-set"], &[], &[I32])[0];
-    b.call(native["join"], &[writer, set], &[]);
-    let kind = b.call(native["wait"], &[set, scratch], &[I32])[0];
-    let expected = b.integer(5);
-    let valid = b.op(O::I32Eq, &[kind, expected], I32);
-    b.require(valid);
-    let handle = b.load(scratch, 0, I32);
-    let valid = b.op(O::I32Eq, &[writer, handle], I32);
-    b.require(valid);
-    let status = b.load(scratch, 4, I32);
-    let zero = b.integer(0);
-    b.call(native["join"], &[writer, zero], &[]);
-    b.call(native["drop-set"], &[set], &[]);
-    b.jump(complete, &[status]);
-    b.block = complete;
-    let one = b.integer(1);
-    let valid = b.op(O::I32LeU, &[terminal, one], I32);
-    b.require(valid);
-    b.ret(&[]);
-    b.finish(module, function)?;
-    Ok(function)
 }
 
 #[cfg(test)]

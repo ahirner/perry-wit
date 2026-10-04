@@ -22,6 +22,14 @@ pub(crate) fn is_byte_view(ty: &HirType) -> bool {
     matches!(ty, HirType::Named(name) if name == "Uint8Array")
 }
 
+pub(crate) fn is_array_buffer(ty: &HirType) -> bool {
+    matches!(ty, HirType::Named(name) if name == "ArrayBuffer")
+}
+
+pub(crate) fn is_byte_storage(ty: &HirType) -> bool {
+    is_byte_view(ty) || is_array_buffer(ty)
+}
+
 pub(crate) fn required(hir: &HirModule) -> bool {
     let mut required = hir.extern_funcs.iter().any(|(_, params, result)| {
         params
@@ -52,5 +60,5 @@ pub(crate) fn emit_runtime(
 }
 
 fn contains_byte_view(ty: &HirType) -> bool {
-    visit::contains_type(ty, is_byte_view)
+    visit::contains_type(ty, is_byte_storage)
 }

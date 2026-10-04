@@ -21,6 +21,32 @@ impl FunctionLowerer<'_> {
             .registry
             .byte_helpers
             .expect("byte helpers are registered");
+        if let Some(argument) = argument.filter(|argument| {
+            crate::waffle_backend::bytes::is_array_buffer(&self.infer_expr_type(argument))
+        }) {
+            let buffer = self.expression(argument)?;
+            let mut parts = Vec::new();
+            for offset in [0, 4] {
+                parts.push(self.op(
+                    Operator::I32Load {
+                        memory: MemoryArg {
+                            align: 2,
+                            offset,
+                            memory: self.registry.memory,
+                        },
+                    },
+                    &[buffer],
+                    &[Type::I32],
+                ));
+            }
+            return Ok(self.op(
+                Operator::Call {
+                    function_index: helpers.lift_canonical,
+                },
+                &parts,
+                &[Type::I32],
+            ));
+        }
         if let Some(argument) =
             argument.filter(|argument| is_byte_view(&self.infer_expr_type(argument)))
         {
@@ -100,7 +126,16 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn byte_property(&mut self, array: &Expr, property: &str) -> Result<Value> {
-        let view = self.byte_receiver(array)?;
+        let ty = self.infer_expr_type(array);
+        ensure!(
+            crate::waffle_backend::bytes::is_byte_storage(&ty),
+            "Expected byte storage"
+        );
+        ensure!(
+            !crate::waffle_backend::bytes::is_array_buffer(&ty) || property == "byteLength",
+            "Unsupported ArrayBuffer property '{property}'"
+        );
+        let view = self.expression(array)?;
         let offset = match property {
             "length" | "byteLength" => 4,
             "byteOffset" => 12,

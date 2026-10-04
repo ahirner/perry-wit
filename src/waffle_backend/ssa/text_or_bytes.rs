@@ -220,6 +220,19 @@ impl FunctionLowerer<'_> {
         if let Some((id, label, equal)) = type_guard(expression, truth)
             && let Some(ty) = self.local_types.get(&id)
         {
+            if crate::waffle_backend::values::is_dynamic(ty) && equal {
+                let narrowed = match label {
+                    "string" => Some(HirType::String),
+                    "number" => Some(HirType::Number),
+                    "boolean" => Some(HirType::Boolean),
+                    "undefined" => Some(HirType::Void),
+                    _ => None,
+                };
+                if let Some(narrowed) = narrowed {
+                    self.narrowings.insert(id, narrowed);
+                }
+                return;
+            }
             if crate::waffle_backend::values::is_boxed_union(ty)
                 && let HirType::Union(variants) = self.narrowings.get(&id).unwrap_or(ty)
             {

@@ -74,6 +74,12 @@ pub(crate) fn lower_module(
 
     // 2. Scan module for string requirements and build string pool if needed
     let mut reqs = scan_module_string_requirements(hir);
+    reqs.json |= contract.promises.as_ref().is_some_and(|plan| {
+        plan.tasks
+            .contains_key(&super::promises::TaskTarget::FetchBody(
+                super::http::fetch::BodyMethod::Json,
+            ))
+    });
     reqs.objects |= contract.has_http() || contract.wit.is_some();
     reqs.objects |= contract
         .context_operations()
@@ -625,7 +631,8 @@ impl<'a> FunctionLowerer<'a> {
                 "Object results require object values"
             );
             self.expression(expr)
-        } else if super::filesystem::is_stats(self.return_type)
+        } else if super::bytes::is_array_buffer(self.return_type)
+            || super::filesystem::is_stats(self.return_type)
             || super::date::is_date(self.return_type)
             || super::time::is_time(self.return_type)
             || super::http::is_response(self.return_type)
@@ -1765,7 +1772,7 @@ impl<'a> FunctionLowerer<'a> {
                 if self
                     .local_types
                     .get(id)
-                    .is_some_and(super::values::is_boxed_union)
+                    .is_some_and(super::values::is_boxed)
                     && let Some(narrowed) = self.narrowings.get(id).cloned()
                 {
                     let stored = self.locals[id];
@@ -1832,7 +1839,7 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if super::bytes::is_byte_view(&self.infer_expr_type(object)) => {
+            } if super::bytes::is_byte_storage(&self.infer_expr_type(object)) => {
                 self.byte_property(object, property)
             }
             Expr::PropertyGet {

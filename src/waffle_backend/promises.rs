@@ -167,10 +167,7 @@ pub(crate) fn plan_promises(
         )
     });
     if has_fetch {
-        for method in [
-            super::http::fetch::BodyMethod::Bytes,
-            super::http::fetch::BodyMethod::Text,
-        ] {
+        for method in super::http::fetch::BodyMethod::ALL {
             candidates.insert(
                 TaskTarget::FetchBody(method),
                 TaskPlan {
@@ -260,7 +257,7 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
     matches!(
         ty,
         HirType::Number | HirType::Boolean | HirType::String | HirType::Void
-    ) || super::bytes::is_byte_view(ty)
+    ) || super::bytes::is_byte_storage(ty)
         || super::text_or_bytes::is_text_or_bytes(ty)
         || super::filesystem::is_stats(ty)
         || super::objects::is_object(ty)

@@ -41,6 +41,7 @@ pub(crate) struct SourceRuntime<'a> {
     pub(crate) imports: &'a BTreeMap<String, Func>,
     pub(crate) strings: super::strings::StringHelperFuncs,
     pub(crate) bytes: super::bytes::ByteHelpers,
+    pub(crate) json: Option<super::json::JsonHelpers>,
     pub(crate) pool: &'a super::strings::StringPool,
     pub(crate) promises: Option<&'a super::registry::PromiseImports>,
 }
@@ -96,6 +97,7 @@ pub(crate) fn emit_runtime(
     allocator: AllocationFuncs,
     imports: &BTreeMap<String, Func>,
 ) -> Result<Func> {
+    let finish_write = future::emit_finish_write(module, memory, imports)?;
     let transfer = streams::emit_read_transfer(module, memory, imports["read"])?;
     let buffered = streams::buffered::emit(module, memory, allocator, transfer)?;
     let mut imports: BTreeMap<_, _> = imports
@@ -104,15 +106,15 @@ pub(crate) fn emit_runtime(
         .collect();
     imports.extend([
         ("read-buffered", buffered),
+        ("finish-write", finish_write),
         ("realloc", allocator.realloc),
         ("frame-new", allocator.frame_new),
         ("frame-drop", allocator.frame_drop),
     ]);
     let source = format!(
-        "(module {} {} {})",
+        "(module {} {})",
         imports::module_imports(&native_functions())?,
-        include_str!("http/runtime.wat"),
-        include_str!("http/future.wat")
+        include_str!("http/runtime.wat")
     );
     Ok(runtime::emit_functions(module, memory, &source, &imports)?["http.get"])
 }

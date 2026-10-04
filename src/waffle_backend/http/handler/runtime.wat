@@ -1,3 +1,4 @@
+  (import "host" "finish-write" (func $finish-write (param i32 i32 i32)))
   (import "host" "read-buffered" (func $read-buffered (param i32 i32) (result i32 i32 i32)))
   (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
   (import "host" "frame-new" (func $frame-new (param i32) (result i32)))

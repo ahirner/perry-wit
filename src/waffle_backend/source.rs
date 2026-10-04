@@ -650,7 +650,7 @@ impl VisitMut for SourceCalls {
         {
             let arguments = expression.args.as_deref().unwrap_or_default();
             if arguments.len() > 1 || arguments.iter().any(|argument| argument.spread.is_some()) {
-                self.error.get_or_insert_with(|| anyhow::anyhow!("Uint8Array construction supports one non-spread argument; backing-buffer overloads are unsupported"));
+                self.error.get_or_insert_with(|| anyhow::anyhow!("Uint8Array construction supports one non-spread argument; explicit byteOffset/length overloads are unsupported"));
                 return;
             }
         }
