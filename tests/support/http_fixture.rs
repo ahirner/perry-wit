@@ -1,80 +1,13 @@
 use std::{
-    fs,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    path::Path,
-    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
-
-/// Owns the pinned HTTP host for component tests and releases it even after assertion failures.
-pub struct ServingComponent {
-    pub address: SocketAddr,
-    child: Child,
-}
-
-impl ServingComponent {
-    pub fn new(wasm: &Path, wasmtime: &Path) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        let diagnostic_path = wasm.with_extension("serve.log");
-        let diagnostics = fs::File::create(&diagnostic_path).unwrap();
-        let mut fixture = Self {
-            address,
-            child: Command::new(wasmtime)
-                .args([
-                    "serve",
-                    "-C",
-                    "cache=n",
-                    "-O",
-                    "pooling-max-tables-per-module=2",
-                    "-S",
-                    "cli=y",
-                    "--addr",
-                ])
-                .arg(address.to_string())
-                .args([
-                    "--max-instance-reuse-count",
-                    "10000",
-                    "--idle-instance-timeout",
-                    "30s",
-                    "--max-concurrent-requests",
-                    "1",
-                ])
-                .arg(wasm)
-                .stdout(Stdio::null())
-                .stderr(diagnostics)
-                .spawn()
-                .unwrap(),
-        };
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if TcpStream::connect(address).is_ok() {
-                break;
-            }
-            assert!(
-                fixture.child.try_wait().unwrap().is_none() && Instant::now() < deadline,
-                "HTTP host did not start: {}",
-                fs::read_to_string(&diagnostic_path).unwrap()
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-        fixture
-    }
-}
-
-impl Drop for ServingComponent {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Request {

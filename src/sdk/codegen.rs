@@ -237,18 +237,6 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
             }
             WorldItem::Interface { id, .. } => {
                 let iface = &resolve.interfaces[*id];
-                if crate::abi::export_names::is_incoming_handler(resolve, *id) {
-                    let name = crate::abi::export_names::interface_implementation_name(
-                        resolve,
-                        world,
-                        key,
-                        &iface.functions["handle"],
-                    );
-                    out.push_str(
-                        "/** Buffered guest handler; the runtime owns the WIT resources. */\n",
-                    );
-                    out.push_str(&format!("export declare function {name}(request: Request): Response | Promise<Response>;\n\n"));
-                }
                 let iface_name = match key {
                     WorldKey::Name(n) => to_pascal_case(n),
                     WorldKey::Interface(_) => iface
@@ -284,24 +272,6 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
             WorldItem::Function(function) => vec![(to_camel_case(&function.name), function)],
             WorldItem::Interface { id, .. } => {
                 let interface = &resolve.interfaces[*id];
-                if crate::abi::export_names::is_incoming_handler(resolve, *id) {
-                    let function = &interface.functions["handle"];
-                    let name = crate::abi::export_names::interface_implementation_name(
-                        resolve, world, key, function,
-                    );
-                    out.push_str(&format!(
-                        "  {name}: (request: Request) => Response | Promise<Response>;\n"
-                    ));
-                    continue;
-                }
-                if interface.name.as_deref() == Some("run")
-                    && interface.package.is_some_and(|package| {
-                        let name = &resolve.packages[package].name;
-                        name.namespace == "wasi" && name.name == "cli"
-                    })
-                {
-                    continue;
-                }
                 interface
                     .functions
                     .values()

@@ -20,7 +20,8 @@ fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
     fs::create_dir_all(root.join("deps/custom")).unwrap();
     fs::write(root.join("deps/custom/package.wit"), "package test:custom; interface api { use wasi:io/poll@0.2.6.{pollable}; wait: func(p: borrow<pollable>); }").unwrap();
     fs::write(root.join("world.wit"), "package test:resolution; world test { import test:custom/api; import wasi:http/outgoing-handler@0.2.6; }").unwrap();
-    let ambient = std::env::var_os("WASI_WIT_PATH")
+    let ambient = std::env::var_os("WASI_P2_WIT_PATH")
+        .or_else(|| std::env::var_os("WASI_WIT_PATH"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("wit/deps"));
     fs::create_dir_all(root.join("deps/io")).unwrap();

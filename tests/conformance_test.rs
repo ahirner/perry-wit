@@ -74,12 +74,12 @@ fn test_differential_conformance_suite() {
         "Expected 0 failing capabilities in report"
     );
     // Cargo verifies these suites separately; this runner only executes .ts cases.
-    let integration_only: Vec<_> = catalog
+    let integration_required: Vec<_> = catalog
         .supported_capabilities()
         .into_iter()
         .filter(|capability| {
             !capability.conformance.is_empty()
-                && capability.conformance.iter().all(|reference| {
+                && capability.conformance.iter().any(|reference| {
                     Path::new(reference)
                         .extension()
                         .is_some_and(|ext| ext == "rs")
@@ -87,24 +87,24 @@ fn test_differential_conformance_suite() {
         })
         .map(|capability| capability.id.as_str())
         .collect();
-    assert_eq!(report.missing_capabilities, integration_only.len());
+    assert_eq!(report.missing_capabilities, integration_required.len());
     assert_eq!(
         report.passing_capabilities,
-        report.supported_capabilities - integration_only.len()
+        report.supported_capabilities - integration_required.len()
     );
 
     let json_report = report.render_json().expect("Serializing report to JSON");
-    assert!(json_report.contains("web.object_spread"));
-    assert!(json_report.contains("web.console"));
+    assert!(json_report.contains("compiler.p3_json"));
+    assert!(json_report.contains("compiler.p3_stdio"));
     assert!(json_report.contains("web.promise_all"));
     assert!(json_report.contains("web.fetch"));
-    assert!(json_report.contains("web.response_json"));
+    assert!(json_report.contains("compiler.p3_context"));
     assert!(json_report.contains("node.process_exit"));
-    assert!(json_report.contains("cli.env"));
+    assert!(json_report.contains("compiler.p3_context"));
 
     for ev in &report.evidence {
         if ev.status != EvidenceStatus::Unsupported {
-            let expected = if integration_only.contains(&ev.capability_id.as_str()) {
+            let expected = if integration_required.contains(&ev.capability_id.as_str()) {
                 EvidenceStatus::Missing
             } else {
                 EvidenceStatus::Passed

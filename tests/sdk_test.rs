@@ -7,12 +7,12 @@ use std::process::Command;
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
 #[test]
-fn incoming_handler_contract_accepts_request_response_and_async_results() {
-    let temp_dir = std::env::temp_dir().join(format!("perry-sdk-incoming-{}", std::process::id()));
+fn command_contract_requires_typed_run_export() {
+    let temp_dir = std::env::temp_dir().join(format!("perry-sdk-command-{}", std::process::id()));
     fs::create_dir_all(temp_dir.join("src")).unwrap();
     generate_sdk_files(&SdkOptions {
         wit_dir: PathBuf::from("wit"),
-        world: Some("http-server".into()),
+        world: Some("command".into()),
         out_dir: temp_dir.join(".perry/types"),
         project_root: Some(temp_dir.clone()),
         entry: PathBuf::from("src/index.ts"),
@@ -20,23 +20,19 @@ fn incoming_handler_contract_accepts_request_response_and_async_results() {
     .unwrap();
     for (source, succeeds) in [
         (
-            "export async function incomingHandlerHandle(request: Request): Promise<Response> { return new Response(await request.text()); }",
+            "export async function runRun(): Promise<{ok:true}|{ok:false}> { return {ok:true}; }",
             true,
         ),
         (
-            "export function incomingHandlerHandle(request: Request): Response { return new Response(request.method); }",
+            "export function runRun(): {ok:true}|{ok:false} { return {ok:false}; }",
             true,
         ),
         (
-            "export function incomingHandlerHandle(request: Request): Response { return new Response(request.body); }",
-            true,
-        ),
-        (
-            "export async function incomingHandlerHandle(request: Request): Promise<string> { return request.method; }",
+            "export function runRun(): string { return 'wrong'; }",
             false,
         ),
         (
-            "export function incomingHandlerHandle(request: number): Response { return new Response('wrong'); }",
+            "export function runRun(input: number): {ok:true} { return {ok:true}; }",
             false,
         ),
     ] {
@@ -135,16 +131,6 @@ fn test_generate_sdk_files_for_merge_task() {
     assert!(tsconfig_file.exists(), "tsconfig.json should exist");
 
     let types_content = fs::read_to_string(&types_file).unwrap();
-    assert!(
-        types_content.contains("export interface MergeInput"),
-        "Missing MergeInput interface: {}",
-        types_content
-    );
-    assert!(
-        types_content.contains("export interface MergedDoc"),
-        "Missing MergedDoc interface: {}",
-        types_content
-    );
     assert!(
         types_content.contains("export declare function runTask(input: string): string;"),
         "Missing runTask signature: {}",

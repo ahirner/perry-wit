@@ -1,4 +1,4 @@
-/** Capability imports accepted by the WAFFLE/P3 compiler API.
+/** Capability imports accepted by the production WASI 0.3 compiler.
  * Standard TypeScript library declarations also describe Math.random(),
  * performance.now(), Date.now(), crypto.randomUUID(), and crypto.getRandomValues().
  * This compiler currently accepts only Uint8Array destinations for random filling.
@@ -12,14 +12,13 @@
  * and multi-argument constructors, calendar getters, valueOf(), setters, and
  * string parsing are diagnosed. Component boundaries carry UTC ISO strings.
  * Temporal supports the typed immutable subset declared below.
- * Guest any values preserve their tags and references; public any component
- * boundaries remain numeric.
- * Opaque Promise adoption through any throws 12; callbacks remain migration work.
+ * Unconstrained any coercion, Promise combinators, callbacks, and detached work
+ * are deferred. Standard library declarations do not imply compiler support.
  * JSON.parse accepts strict UTF-8 strings and rejects unpaired surrogate escapes.
- * JSON.stringify supports primitives, plain objects, dense/mixed arrays, string
+ * JSON.stringify supports primitives, plain records, JSON value trees, dense typed arrays, string
  * arrays, and Dates; undefined root/field/element behavior matches ECMAScript.
  * Syntax/surrogate/depth-or-cycle failures throw numeric 1/2/3. Unsupported value
- * kinds throw 12. Revivers, replacers, indentation, custom prototypes, sparse array
+ * kinds throw 12. Runtime delete, revivers, replacers, indentation, custom prototypes, sparse array
  * literals, and byte-view/Stats/Promise serialization are unsupported. Parsed
  * graphs retain guest identity across helpers, collection, and stored Promises;
  * component boundaries carry JSON strings. */

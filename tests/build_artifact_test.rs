@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, process::Command};
 
 #[test]
-fn selected_runtime_artifacts_are_watched_and_copied() {
+fn compute_helpers_are_built_and_sources_are_watched() {
     let scratch = std::env::temp_dir().join(format!("perry-build-artifact-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(scratch.join("out")).unwrap();
@@ -18,7 +18,6 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
     for source in [
         "Cargo.toml",
         "Cargo.lock",
-        "crates/guest-runtime/Cargo.toml",
         "crates/json-helper/Cargo.toml",
         "crates/json-helper/src/lib.rs",
         "crates/json-helper/src/guest.rs",
@@ -38,11 +37,7 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::copy(repo_root.join(source), destination).unwrap();
     }
-    for source in [
-        "src/lib.rs",
-        "src/main.rs",
-        "crates/guest-runtime/src/lib.rs",
-    ] {
+    for source in ["src/lib.rs", "src/main.rs"] {
         let destination = scratch.join(source);
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::write(destination, "").unwrap();
@@ -110,80 +105,37 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
         deps_dir.display()
     );
 
-    for relative in [
-        "override.wasm",
-        "target/wasm32-unknown-unknown/debug/guest_runtime.wasm",
-        "target/wasm32-unknown-unknown/release/guest_runtime.wasm",
+    let output = Command::new(&script)
+        .env("OUT_DIR", scratch.join("out"))
+        .env("CARGO_MANIFEST_DIR", &scratch)
+        .env("RUSTC", &rustc_bin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build-script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for helper in ["search", "text", "json", "time"] {
+        let bytes = fs::read(scratch.join(format!("out/{helper}.wasm"))).unwrap();
+        assert!(wasmparser::Parser::is_core_wasm(&bytes));
+    }
+    for source in [
+        "src/helpers",
+        "src/helpers/search.rs",
+        "src/helpers/text.rs",
     ] {
-        let artifact = scratch.join(relative);
-        fs::create_dir_all(artifact.parent().unwrap()).unwrap();
-        for bytes in [b"first".as_slice(), b"replacement".as_slice()] {
-            fs::write(&artifact, bytes).unwrap();
-            let mut command = Command::new(&script);
-            command
-                .env("OUT_DIR", scratch.join("out"))
-                .env("CARGO_MANIFEST_DIR", &scratch)
-                .env("RUSTC", &rustc_bin)
-                .env_remove("GUEST_RUNTIME_PATH");
-            if relative == "override.wasm" {
-                command.env("GUEST_RUNTIME_PATH", &artifact);
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "build-script failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout_str = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout_str.lines().any(|line| {
-                    line == format!("cargo:rerun-if-changed={}", artifact.display())
-                }),
-                "missing rerun-if-changed for {}",
-                artifact.display()
-            );
-            assert!(
-                stdout_str.lines().any(|line| {
-                    line == format!(
-                        "cargo:rerun-if-changed={}",
-                        scratch.join("src/helpers/search.rs").display()
-                    )
-                }),
-                "missing rerun-if-changed for search.rs"
-            );
-            assert!(
-                stdout_str.lines().any(|line| {
-                    line == format!(
-                        "cargo:rerun-if-changed={}",
-                        scratch.join("src/helpers/text.rs").display()
-                    )
-                }),
-                "missing rerun-if-changed for text.rs"
-            );
-            assert_eq!(
-                fs::read(scratch.join("out/guest_runtime.wasm")).unwrap(),
-                bytes
-            );
-            assert!(scratch.join("out/search.wasm").exists());
-            assert!(scratch.join("out/text.wasm").exists());
-            for helper in ["json", "time"] {
-                assert!(scratch.join(format!("out/{helper}.wasm")).exists());
-                assert!(stdout_str.lines().any(|line| {
-                    line == format!("cargo:rerun-if-changed=crates/{helper}-helper")
-                }));
-            }
-            assert!(stdout_str.lines().any(|line| {
-                line == format!(
-                    "cargo:rerun-if-changed={}",
-                    scratch.join("src/helpers").display()
-                )
-            }));
-            assert!(
-                stdout_str
-                    .lines()
-                    .any(|line| line == "cargo:rerun-if-changed=Cargo.lock")
-            );
-        }
+        assert!(stdout.lines().any(
+            |line| line == format!("cargo:rerun-if-changed={}", scratch.join(source).display())
+        ));
+    }
+    for source in ["crates/json-helper", "crates/time-helper", "Cargo.lock"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("cargo:rerun-if-changed={source}"))
+        );
     }
     fs::remove_dir_all(scratch).unwrap();
 }

@@ -1,4 +1,4 @@
-//! WASI Preview 2 and custom WIT package resolution.
+//! Versioned WASI and custom WIT package resolution.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -47,15 +47,17 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
         available.extend(group.nested.iter().map(|package| package.name.clone()));
     }
 
-    let ambient = std::env::var_os("WASI_WIT_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("wit/deps"));
-    for mut group in read_dependencies(&ambient, &mut resolve)? {
-        if available.insert(group.main.name.clone()) {
-            group
-                .nested
-                .retain(|package| available.insert(package.name.clone()));
-            deps.push(group);
+    for variable in ["WASI_P3_WIT_PATH", "WASI_WIT_PATH", "WASI_P2_WIT_PATH"] {
+        let Some(ambient) = std::env::var_os(variable).map(PathBuf::from) else {
+            continue;
+        };
+        for mut group in read_dependencies(&ambient, &mut resolve)? {
+            if available.insert(group.main.name.clone()) {
+                group
+                    .nested
+                    .retain(|package| available.insert(package.name.clone()));
+                deps.push(group);
+            }
         }
     }
 

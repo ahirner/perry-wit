@@ -82,6 +82,11 @@ impl FunctionLowerer<'_> {
         if crate::waffle_backend::values::is_dynamic(&ty) {
             return self.value_typeof(value);
         }
+        if super::types::StringKind::of(&ty) == Some(super::types::StringKind::Optional) {
+            let text = self.expression(&Expr::String("string".into()))?;
+            let undefined = self.expression(&Expr::String("undefined".into()))?;
+            return Ok(self.op(Operator::Select, &[text, undefined, value], &[Type::I32]));
+        }
         if is_text_or_bytes(&ty) {
             let (_, binary) = self.text_or_bytes_parts(value);
             let text = self.expression(&Expr::String("string".into()))?;
@@ -194,8 +199,12 @@ impl FunctionLowerer<'_> {
                 _ => None,
             };
             if let Some(id) = local
-                && self.local_types.get(id)
-                    == Some(&HirType::Union(vec![HirType::Number, HirType::Void]))
+                && let Some(HirType::Union(types)) = self.local_types.get(id)
+                && types.len() == 2
+                && types.contains(&HirType::Void)
+                && let Some(present) = types
+                    .iter()
+                    .find(|ty| matches!(ty, HirType::Number | HirType::String))
                 && let Expr::Compare { op, .. } = expression
             {
                 self.narrowings.insert(
@@ -203,15 +212,33 @@ impl FunctionLowerer<'_> {
                     if (*op == CompareOp::Eq) == truth {
                         HirType::Void
                     } else {
-                        HirType::Number
+                        present.clone()
                     },
                 );
             }
         }
-        if let Some((id, ty)) = type_guard(expression, truth)
-            && self.local_types.get(&id).is_some_and(is_text_or_bytes)
+        if let Some((id, label, equal)) = type_guard(expression, truth)
+            && let Some(ty) = self.local_types.get(&id)
         {
-            self.narrowings.insert(id, ty);
+            let other = if is_text_or_bytes(ty) {
+                Some(("object", HirType::Named("Uint8Array".into())))
+            } else if super::types::StringKind::of(ty) == Some(super::types::StringKind::Optional) {
+                Some(("undefined", HirType::Void))
+            } else {
+                None
+            };
+            if let Some((other_label, other_type)) = other
+                && (label == "string" || label == other_label)
+            {
+                self.narrowings.insert(
+                    id,
+                    if (label == "string") == equal {
+                        HirType::String
+                    } else {
+                        other_type
+                    },
+                );
+            }
         }
     }
 
@@ -225,7 +252,7 @@ impl FunctionLowerer<'_> {
     }
 }
 
-fn type_guard(expression: &Expr, truth: bool) -> Option<(LocalId, HirType)> {
+fn type_guard(expression: &Expr, truth: bool) -> Option<(LocalId, &str, bool)> {
     if let Expr::Unary {
         op: UnaryOp::Not,
         operand,
@@ -249,17 +276,5 @@ fn type_guard(expression: &Expr, truth: bool) -> Option<(LocalId, HirType)> {
     let Expr::LocalGet(id) = operand.as_ref() else {
         return None;
     };
-    let text = match label.as_str() {
-        "string" => equal,
-        "object" => !equal,
-        _ => return None,
-    };
-    Some((
-        *id,
-        if text {
-            HirType::String
-        } else {
-            HirType::Named("Uint8Array".into())
-        },
-    ))
+    Some((*id, label.as_str(), equal))
 }

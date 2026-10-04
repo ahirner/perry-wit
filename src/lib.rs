@@ -1,19 +1,15 @@
-//! Perry-WIT: Compiles TypeScript directly into WASI Preview 2 WebAssembly components.
+//! Perry-WIT: Compiles TypeScript directly into WASI 0.3 WebAssembly components.
 #![warn(unreachable_pub)]
 
 pub mod abi;
 pub mod compiler;
 pub mod component;
 pub mod conformance;
-pub mod linker;
-pub mod runtime;
 pub mod sdk;
 pub mod strip;
 pub mod waffle_backend;
 
-pub use compiler::{
-    CompileOptions, Compiled, compile_file, compile_typescript, compile_typescript_raw,
-};
+pub use compiler::{CompileOptions, Compiled, compile_file, compile_typescript};
 pub use sdk::{SdkOptions, SdkResult, generate_sdk_files};
 pub use waffle_backend::{
     WaffleCompileOptions, WaffleCompiled, compile_typescript as compile_typescript_waffle,

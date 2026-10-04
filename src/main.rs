@@ -1,4 +1,4 @@
-//! Command-line interface for compiling TypeScript into WASI Preview 2 WebAssembly components.
+//! Command-line interface for compiling TypeScript into WASI 0.3 WebAssembly components.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,9 +25,8 @@ fn run() -> Result<()> {
 
     let mut ts_file_path: Option<String> = None;
     let mut out_file_path: Option<String> = None;
-    let mut runtime_wasm_path: Option<String> = None;
     let mut wit_dir_path = "wit".to_string();
-    let mut world_name = Some("merge-docs".to_string());
+    let mut world_name = Some("command".to_string());
     let mut core_only = false;
 
     let mut i = 1;
@@ -35,10 +34,6 @@ fn run() -> Result<()> {
         match args[i].as_str() {
             "-o" | "--out" if i + 1 < args.len() => {
                 out_file_path = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--runtime" if i + 1 < args.len() => {
-                runtime_wasm_path = Some(args[i + 1].clone());
                 i += 2;
             }
             "--wit" if i + 1 < args.len() => {
@@ -68,13 +63,10 @@ fn run() -> Result<()> {
                 println!();
                 println!("Options:");
                 println!("  -o, --out <PATH>      Output WebAssembly file path");
-                println!("      --runtime <PATH>  Guest runtime WASM module path");
                 println!("      --wit <PATH>      WIT definition directory (default: 'wit')");
+                println!("      --world <NAME>    WIT world name to target (default: 'command')");
                 println!(
-                    "      --world <NAME>    WIT world name to target (default: 'merge-docs')"
-                );
-                println!(
-                    "      --core-only       Output linked Core WebAssembly without component encoding"
+                    "      --core-only       Output Core WebAssembly without component encoding"
                 );
                 println!("  -h, --help            Print help information");
                 return Ok(());
@@ -102,8 +94,6 @@ fn run() -> Result<()> {
     }
 
     let options = CompileOptions {
-        out_path: Some(PathBuf::from(&out_file_path)),
-        runtime_path: runtime_wasm_path.map(PathBuf::from),
         wit_dir: PathBuf::from(wit_dir_path),
         world: world_name,
         core_only,

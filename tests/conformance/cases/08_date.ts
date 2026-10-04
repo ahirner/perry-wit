@@ -1,12 +1,15 @@
-// Conformance Test: Date and Wall Clocks
-// Capability: web.date
+export function runRun(): {ok:true}|{ok:false} {
+  // Conformance Test: Date and Wall Clocks
+  // Capability: web.date
 
-const d = new Date(1711929600000);
-console.log(d.getTime());
-console.log(d.toISOString());
+  const d = new Date(1711929600000);
+  if (d.getTime() === 1711929600000) console.log("EPOCH_OK"); else console.log("EPOCH_FAIL");
+  console.log(d.toISOString());
 
-const d2 = new Date();
-console.log(d2.getTime() > 1700000000000 ? "DATE_NEW_OK" : "DATE_NEW_FAIL");
+  const d2 = new Date(Date.now());
+  if (d2.getTime() > 1700000000000) console.log("DATE_NEW_OK"); else console.log("DATE_NEW_FAIL");
 
-const now = Date.now();
-console.log(now > 1700000000000 ? "DATE_NOW_OK" : "DATE_NOW_FAIL");
+  const now = Date.now();
+  if (now > 1700000000000) console.log("DATE_NOW_OK"); else console.log("DATE_NOW_FAIL");
+  return {ok:true};
+}

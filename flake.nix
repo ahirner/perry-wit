@@ -1,5 +1,5 @@
 {
-  description = "Perry-WIT: Hermetic TypeScript compiler and WASI Preview 2 component toolchain";
+  description = "Perry-WIT: Hermetic TypeScript compiler and WASI 0.3 component toolchain";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -31,7 +31,7 @@
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
-        # Dynamic WASI Preview 2 WIT definitions extracted from official WASI v0.2.6
+        # Official P2 definitions retained for versioned WIT and host coexistence checks.
         # Consolidate each package's WIT files into a deterministic package.wit
         wasiWit = pkgs.runCommand "wasi-preview2-wit" {} ''
           mkdir -p "$out"
@@ -95,29 +95,11 @@
           nativeBuildInputs = with pkgs; [ pkg-config cacert ];
           preBuild = ''
             mkdir -p wit/deps
-            ln -sfn "${wasiWit}"/* wit/deps/
+            ln -sfn "${wasiP3Wit}"/* wit/deps/
           '';
         };
 
-        # Precompiled guest runtime WebAssembly module (wasm32-unknown-unknown with imported memory)
-        guestRuntime = craneLib.buildPackage {
-          inherit src cargoArtifacts;
-          pname = "guest-runtime";
-          version = "0.1.0";
-          cargoExtraArgs = "--package guest-runtime --target wasm32-unknown-unknown";
-          RUSTFLAGS = "-C link-arg=--import-memory -C link-arg=--global-base=1048576 -C link-arg=--no-entry";
-          preBuild = ''
-            mkdir -p wit/deps
-            ln -sfn "${wasiWit}"/* wit/deps/
-          '';
-          doCheck = false;
-          installPhaseCommand = ''
-            mkdir -p "$out/lib"
-            cp target/wasm32-unknown-unknown/release/guest_runtime.wasm "$out/lib/"
-          '';
-        };
-
-        # Perry-WIT CLI binary build (statically embeds guest_runtime.wasm)
+        # Compiler with embedded allocation-free computation helpers
         perryWitBin = craneLib.buildPackage {
           inherit src cargoArtifacts;
           pname = "perry-wit";
@@ -125,21 +107,20 @@
           strictDeps = true;
           doCheck = false;
           nativeBuildInputs = with pkgs; [ pkg-config ];
-          GUEST_RUNTIME_PATH = "${guestRuntime}/lib/guest_runtime.wasm";
         };
 
-        # Example WASIp2 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
+        # Example WASIp3 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
         exampleMergeDocs = pkgs.stdenv.mkDerivation {
           pname = "example-merge-docs";
           version = "0.1.0";
           inherit src;
           nativeBuildInputs = [ perryWitBin ];
           buildPhase = ''
-            export WASI_WIT_PATH="${wasiWit}"
+            export WASI_WIT_PATH="${wasiP3Wit}"
             mkdir -p dist
             perry-wit examples/merge_docs.ts \
               --wit wit \
-              --world merge-docs \
+              --world command \
               -o dist/perry_merge_docs.stripped.wasm
           '';
           installPhase = ''
@@ -148,7 +129,7 @@
           '';
         };
 
-        # Example WASIp2 task component with Canonical ABI export trampolines
+        # Example task component with canonical WIT exports
         exampleMergeTask = pkgs.stdenv.mkDerivation {
           pname = "example-merge-task";
           version = "0.1.0";
@@ -157,13 +138,13 @@
           buildPhase = ''
             export HOME="$TMPDIR"
             export WASMTIME_CACHE_ENABLED=false
-            export WASI_WIT_PATH="${wasiWit}"
+            export WASI_WIT_PATH="${wasiP3Wit}"
             mkdir -p dist
             perry-wit examples/merge_task.ts \
               --wit wit \
               --world task-runner \
               -o dist/perry_merge_task.wasm
-            wasmtime run -C cache=n -S http=y -S inherit-network=y --invoke 'run-task("hermetic-build")' dist/perry_merge_task.wasm
+            wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("hermetic-build")' dist/perry_merge_task.wasm
           '';
           installPhase = ''
             mkdir -p "$out/lib"
@@ -185,7 +166,7 @@
           nativeBuildInputs = [ perryWitBin pkgs.wasm-tools ];
           buildPhase = ''
             export HOME="$TMPDIR"
-            export WASI_WIT_PATH="${wasiWit}"
+            export WASI_WIT_PATH="${wasiP3Wit}"
             mkdir -p dist
             perry-wit ${entry} \
               --wit "${wit}" \
@@ -213,7 +194,7 @@
         } ''
           export HOME="$TMPDIR"
           export WASMTIME_CACHE_ENABLED=false
-          wasmtime run -C cache=n -S http=y -S inherit-network=y --invoke 'run-task("template-hello")' "${templateComponent}/lib/template-task.wasm"
+          wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("template-hello")' "${templateComponent}/lib/template-task.wasm"
           touch "$out"
         '';
 
@@ -222,7 +203,7 @@
           nativeBuildInputs = [ perryWitBin pkgs.typescript ];
         } ''
           export HOME="$TMPDIR"
-          export WASI_WIT_PATH="${wasiWit}"
+          export WASI_WIT_PATH="${wasiP3Wit}"
           mkdir -p work/src work/wit work/.perry/types
           cp -r ${./wit}/* work/wit/
           cp ${./examples/merge_task.ts} work/src/merge_task.ts
@@ -236,7 +217,6 @@
         packages = {
           default = perryWitBin;
           perry-wit = perryWitBin;
-          guest-runtime = guestRuntime;
           example-merge-docs = exampleMergeDocs;
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
@@ -253,7 +233,7 @@
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
-          inherit exampleMergeDocs exampleMergeTask guestRuntime perryWitBin templateComponent checkTemplate sdkSyncCheck;
+          inherit exampleMergeDocs exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
         };
 
         devShells.default = pkgs.mkShell {
@@ -264,18 +244,17 @@
             pkgs.wasm-tools
             pkgs.nodejs
             pkgs.typescript
-            pkgs.wkg
             pkgs.pkg-config
             pkgs.cacert
           ];
 
-          WASI_WIT_PATH = wasiWit;
+          WASI_WIT_PATH = wasiP3Wit;
+          WASI_P2_WIT_PATH = wasiWit;
           WASI_P3_WIT_PATH = wasiP3Wit;
-          GUEST_RUNTIME_PATH = "${guestRuntime}/lib/guest_runtime.wasm";
 
           shellHook = ''
             if [ -d wit ] && [ ! -e wit/deps ]; then
-              ln -sfn "${wasiWit}" wit/deps
+              ln -sfn "${wasiP3Wit}" wit/deps
             fi
             echo "Perry-WIT compiler development: cargo build, cargo test"
           '';
@@ -290,7 +269,8 @@
             pkgs.wasm-tools
           ];
 
-          WASI_WIT_PATH = wasiWit;
+          WASI_WIT_PATH = wasiP3Wit;
+          WASI_P2_WIT_PATH = wasiWit;
           WASI_P3_WIT_PATH = wasiP3Wit;
 
           shellHook = ''
@@ -305,7 +285,7 @@
   in systemOutputs // {
     templates.default = {
       path = ./template;
-      description = "A WASI Preview 2 TypeScript component built with Perry-WIT";
+      description = "A WASI 0.3 TypeScript component built with Perry-WIT";
     };
   };
 }

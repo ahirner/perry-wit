@@ -1,31 +1,18 @@
-//! TypeScript compilation pipeline, HIR rewrites, linking, and component packaging.
+//! Production TypeScript → HIR → WAFFLE → WASI 0.3 compilation.
 
-mod async_lowering;
-mod clocks;
-mod exceptions;
-mod fetch;
-mod rewrites;
-mod timers;
-
-use std::fs;
-use std::path::{Path, PathBuf};
-
+use crate::{
+    component::wit::resolve_wit,
+    strip,
+    waffle_backend::{WaffleCompileOptions, compile_typescript_for_world},
+};
 use anyhow::{Context, Result};
-use perry_codegen_wasm::compile_modules_to_wasm;
-use perry_hir::ir::Function;
-use perry_hir::lower_module;
-use perry_parser::parse_typescript;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-use crate::component;
-use crate::linker;
-use crate::runtime;
-use crate::strip;
-
-/// Options configuring the compilation pipeline.
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
-    pub out_path: Option<PathBuf>,
-    pub runtime_path: Option<PathBuf>,
     pub wit_dir: PathBuf,
     pub world: Option<String>,
     pub core_only: bool,
@@ -34,138 +21,51 @@ pub struct CompileOptions {
 impl Default for CompileOptions {
     fn default() -> Self {
         Self {
-            out_path: None,
-            runtime_path: None,
-            wit_dir: PathBuf::from("wit"),
-            world: Some("merge-docs".to_string()),
+            wit_dir: "wit".into(),
+            world: Some("command".into()),
             core_only: false,
         }
     }
 }
 
-/// Compilation result artifacts.
 #[derive(Debug, Clone)]
 pub struct Compiled {
-    pub raw_core: Vec<u8>,
     pub core: Vec<u8>,
     pub component: Option<Vec<u8>>,
     pub stripped: Option<Vec<u8>>,
 }
 
-/// Unlinked code and the HIR metadata needed by export adapters.
-#[derive(Debug)]
-pub struct RawCompiled {
-    pub core: Vec<u8>,
-    pub exported_functions: Vec<(String, u32)>,
-    pub functions: Vec<Function>,
-}
-
-/// Compiles a TypeScript file according to the provided compile options.
 pub fn compile_file(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
-    let ts_content = fs::read_to_string(input_file)
-        .with_context(|| format!("Failed to read TypeScript source {}", input_file.display()))?;
-    let file_name = input_file
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("module.ts");
-    compile_typescript(&ts_content, file_name, options)
+    let source = fs::read_to_string(input_file)
+        .with_context(|| format!("Reading TypeScript source {}", input_file.display()))?;
+    compile_typescript(&source, &input_file.to_string_lossy(), options)
 }
 
-/// Compiles TypeScript source to an unlinked raw WebAssembly module and its function metadata.
-pub fn compile_typescript_raw(ts_source: &str, file_name: &str) -> Result<RawCompiled> {
-    let mut ast = parse_typescript(ts_source, file_name)
-        .map_err(|e| anyhow::anyhow!("Failed to parse {file_name}: {e:?}"))?;
-    fetch::preserve_calls(&mut ast);
-    clocks::rewrite_performance_now(&mut ast);
-
-    let mut hir = lower_module(&ast, "main", file_name)
-        .map_err(|e| anyhow::anyhow!("Failed to lower {file_name}: {e:?}"))?;
-
-    async_lowering::lower(&mut hir, &ast)?;
-    rewrites::rewrite_program(&mut hir)?;
-
-    let exported_functions = hir.exported_functions.clone();
-    let functions = hir.functions.clone();
-
-    let raw_wasm = compile_modules_to_wasm(&[("main".to_string(), hir)])
-        .map_err(|e| anyhow::anyhow!("Compilation failed: {e:?}"))?;
-    let raw_wasm = exceptions::lower_runtime_exceptions(&raw_wasm)?;
-    let raw_wasm = timers::specialize_timer_calls(&raw_wasm)?;
-
-    // Ensure initial memory has enough pages for guest runtime
-    let wat = wasmprinter::print_bytes(&raw_wasm)
-        .map_err(|e| anyhow::anyhow!("wasmprinter failed: {e}"))?;
-    let wat = wat.replace("(memory (;0;) 2)", "(memory (;0;) 32)");
-    let raw_wasm = wat::parse_str(&wat)
-        .map_err(|e| anyhow::anyhow!("re-parsing raw wasm with adjusted memory failed: {e}"))?;
-
-    Ok(RawCompiled {
-        core: raw_wasm,
-        exported_functions,
-        functions,
-    })
-}
-
-/// Compiles TypeScript source text according to the provided compile options.
 pub fn compile_typescript(
-    ts_source: &str,
+    source: &str,
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let RawCompiled {
-        core: raw_wasm,
-        exported_functions,
-        functions,
-    } = compile_typescript_raw(ts_source, file_name)?;
-
-    let rt_bytes = runtime::resolve_guest_runtime_bytes(options.runtime_path.as_deref())?;
-
-    let wit_exports =
-        crate::abi::extract_world_exports(&options.wit_dir, options.world.as_deref())?;
-    let handler_exports = wit_exports.incoming_handler.as_ref().map(|handler| {
-        [
-            handler.core_name.as_str(),
-            "guest_async_step",
-            "guest_async_result",
-            "guest_async_pending",
-            "guest_stream_step",
-        ]
-    });
-    let merged_core = linker::merge_with_runtime_exports(
-        &raw_wasm,
-        &rt_bytes,
-        handler_exports
-            .as_ref()
-            .map_or(&[], |exports| exports.as_slice()),
-    )
-    .context("Linking TypeScript core wasm with guest runtime")?;
-
-    let ready_core = crate::abi::synthesize_trampolines(
-        &merged_core,
-        &wit_exports,
-        &exported_functions,
-        &functions,
+    let (resolve, package) = resolve_wit(&options.wit_dir)?;
+    let world = resolve.select_world(&[package], options.world.as_deref())?;
+    let compiled = compile_typescript_for_world(
+        source,
+        file_name,
+        &WaffleCompileOptions {
+            componentize: !options.core_only,
+            ..Default::default()
+        },
+        resolve,
+        world,
     )?;
-
-    if options.core_only {
-        return Ok(Compiled {
-            raw_core: raw_wasm,
-            core: ready_core,
-            component: None,
-            stripped: None,
-        });
-    }
-
-    let component_bytes =
-        component::embed_and_encode(&ready_core, &options.wit_dir, options.world.as_deref())?;
-
-    let stripped_bytes =
-        strip::component(&component_bytes).context("Stripping custom sections from component")?;
-
+    let stripped = compiled
+        .component
+        .as_deref()
+        .map(strip::component)
+        .transpose()?;
     Ok(Compiled {
-        raw_core: raw_wasm,
-        core: ready_core,
-        component: Some(component_bytes),
-        stripped: Some(stripped_bytes),
+        core: compiled.core,
+        component: compiled.component,
+        stripped,
     })
 }

@@ -1,4 +1,4 @@
-# WASI Preview 2 TypeScript Component Template
+# WASI 0.3 TypeScript Component Template
 
 This template provides a development environment for authoring hermetic WebAssembly components in TypeScript using Perry-WIT.
 
@@ -42,5 +42,5 @@ To override the configured source for a command, pass
 
 4. **Execute directly with wasmtime:**
    ```bash
-   wasmtime run -S http=y -S inherit-network=y --invoke 'run-task("hello-world")' result/lib/my-task.wasm
+   wasmtime run -S p3=y -W component-model-async=y --invoke 'run-task("hello-world")' result/lib/my-task.wasm
    ```

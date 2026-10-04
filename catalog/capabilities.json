@@ -1,7 +1,7 @@
 {
   "$schema": "./schema.json",
   "version": "0.1.0",
-  "description": "Formal capability catalog for perry-wit AOT TypeScript compiler targeting WASI Preview 2",
+  "description": "Supported static TypeScript contracts for the WASI 0.3 production compiler",
   "tiers": [
     {
       "id": "tier-1-web-primaries",
@@ -11,7 +11,7 @@
     {
       "id": "tier-2-node-core",
       "name": "Tier 2: Node Core Builtins",
-      "description": "Node.js platform primitives mapped to WASI Preview 2 host capabilities"
+      "description": "Node.js platform primitives mapped to WASI 0.3 host capabilities"
     },
     {
       "id": "non-goals",
@@ -25,7 +25,7 @@
       "name": "Bounded P3 HTTP GET",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: perry:http buffered GET",
+      "domain": "Production compiler: perry:http buffered GET",
       "invariants": [
         "Explicit scheme, authority, path/query, string-valued headers, and integer response byte limit are checked before network I/O",
         "Responses preserve status, duplicate headers, exact header bytes, and body bytes; non-2xx status remains a response",
@@ -35,7 +35,6 @@
         "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "GET must be immediately awaited and cannot be combined with stored async tasks",
         "HttpResponse is guest-internal; component wrappers export status, text, or bytes",
         "Numeric failures: 8 overflow, 12 invalid metadata/limit/index, 100 plus WASI HTTP error discriminant, 200 plus header error discriminant",
@@ -59,11 +58,10 @@
         "Repeated calls are tested under a 1 MiB guest memory cap using independent Wasmtime P3 bindings"
       ],
       "differences": [
-        "Explicit request/response byte caps; status 200–599, with empty bodies for 204/205/304",
+        "Explicit request/response byte caps; status 200\u2013599, with empty bodies for 204/205/304",
         "Overflow returns the corresponding WASI body-size error; invalid response metadata and request producer failures return internal-error",
         "Source exceptions and interrupted calls require store disposal; hosts must drive the P3 event loop through completion",
-        "Request trailers are consumed but not exposed; source streams, response trailers, and stored tasks remain unsupported",
-        "The default CLI remains on the legacy pipeline until R9"
+        "Request trailers are consumed but not exposed; source streams, response trailers, and stored tasks remain unsupported"
       ],
       "conformance": [
         "tests/waffle_http_handler_test.rs"
@@ -74,7 +72,7 @@
       "name": "Native P3 Filesystem Metadata and Directories",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: statSync, existsSync, mkdirSync, unlinkSync, rmdirSync, and readdirSync",
+      "domain": "Production compiler: statSync, existsSync, mkdirSync, unlinkSync, rmdirSync, and readdirSync",
       "invariants": [
         "Shared normalized longest-prefix preopens confine paths and symlinks; mutation cannot remove preopen roots",
         "Stats preserve unsigned file sizes, signed modification milliseconds, type predicates, and identity",
@@ -84,21 +82,25 @@
         "Normal and recoverable-error paths release descriptors, entry streams, and completion futures"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "Reusable plain option objects retain aliases, typed mutation, optional undefined fields, and field effects; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
         "mkdirSync, unlinkSync, and rmdirSync only accept omitted or undefined options",
         "Directory order is host-defined, materialization uses memory proportional to contents, and absent modification timestamps return zero",
         "Component Stats use the exported stats record and stats-kind enum; string arrays use list<string>, also inside numeric-error Result returns",
         "Errors use one-based WASI 0.3 ordinals; existsSync returns false on filesystem errors, while host traps and cancellation require store disposal"
       ],
-      "conformance": ["tests/p3_filesystem/source_metadata.rs", "tests/p3_filesystem/source_directory_lifecycle.rs", "tests/p3_filesystem/source_options.rs", "tests/p3_filesystem/source_structured.rs"]
+      "conformance": [
+        "tests/p3_filesystem/source_metadata.rs",
+        "tests/p3_filesystem/source_directory_lifecycle.rs",
+        "tests/p3_filesystem/source_options.rs",
+        "tests/p3_filesystem/source_structured.rs"
+      ]
     },
     {
       "id": "compiler.p3_filesystem_read",
       "name": "Native P3 Filesystem Reads",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: readFileSync with omitted, literal, or runtime string encoding",
+      "domain": "Production compiler: readFileSync with omitted, literal, or runtime string encoding",
       "invariants": [
         "Binary reads preserve arbitrary bytes and return independent mutable views",
         "Text reads preserve BOMs, NULs, and valid UTF-8 with scalar string semantics",
@@ -109,7 +111,6 @@
         "String-or-byte kinds survive aliases, assignments, control flow, retained Promise outcomes, and component parameters/results"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "Runtime string encodings return string-or-byte values; methods, indexing, and type-specific arguments require typeof narrowing",
         "Component unions use the exported text-or-bytes variant with text(string) and bytes(list<u8>) cases",
         "Plain option objects support encoding and the default or r flag, preserve current fields through helpers and mutation, and return a string-or-byte union when reused",
@@ -117,14 +118,20 @@
         "The binary encoding label returns Uint8Array, preserving the existing compiler contract; Node returns Latin-1 text for that label",
         "Host traps and cancellation require store disposal"
       ],
-      "conformance": ["tests/p3_filesystem/source_reads.rs", "tests/p3_filesystem/source_dynamic_reads.rs", "tests/p3_filesystem/source_options.rs", "tests/waffle_stream_test.rs", "tests/waffle_decoder_test.rs"]
+      "conformance": [
+        "tests/p3_filesystem/source_reads.rs",
+        "tests/p3_filesystem/source_dynamic_reads.rs",
+        "tests/p3_filesystem/source_options.rs",
+        "tests/waffle_stream_test.rs",
+        "tests/waffle_decoder_test.rs"
+      ]
     },
     {
       "id": "compiler.p3_filesystem_write",
       "name": "Native P3 Filesystem Writes",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: overwrite-only writeFileSync from fs and node:fs",
+      "domain": "Production compiler: overwrite-only writeFileSync from fs and node:fs",
       "invariants": [
         "Named aliases, namespace imports, and default imports retain binding identity; unused imports add no filesystem capability",
         "String data preserves exact UTF-8 and NUL bytes; Uint8Array data writes only its visible range",
@@ -135,20 +142,24 @@
         "Descriptors, writable ends, and completion futures close on normal and recoverable-error paths; suspended buffers survive sibling collection"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "Options accept encoding strings, null, undefined, and reusable plain objects; runtime delete, getters, setters, methods, spreads, computed literal keys, and custom prototypes are diagnosed",
         "Only the default or w flag is supported; UTF8 labels accept ASCII case, and binary encoding is restricted to byte data",
         "Errors throw the one-based WASI 0.3 filesystem error ordinal; already written bytes are not rolled back",
         "Host traps and cancellation require store disposal; plain objects remain guest-internal with nonrecursive structural types or simple interfaces"
       ],
-      "conformance": ["tests/p3_filesystem_test.rs", "tests/p3_filesystem/source.rs", "tests/p3_filesystem/source_lifecycle.rs", "tests/p3_filesystem/source_options.rs"]
+      "conformance": [
+        "tests/p3_filesystem_test.rs",
+        "tests/p3_filesystem/source.rs",
+        "tests/p3_filesystem/source_lifecycle.rs",
+        "tests/p3_filesystem/source_options.rs"
+      ]
     },
     {
       "id": "compiler.p3_stdio",
       "name": "Native P3 Output",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: perry:stdio byte writes and single-string console logging",
+      "domain": "Production compiler: perry:stdio byte writes and single-string console logging",
       "invariants": [
         "writeStdout and writeStderr preserve arbitrary bytes and visible Uint8Array ranges",
         "Shared native writes retry partial transfers and respect host backpressure",
@@ -158,20 +169,22 @@
         "Normal and recoverable error paths close writable ends and consume and drop completion futures"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "Byte writes must be immediately awaited; console calls return void but may suspend for host output",
         "Console supports exactly one string; formatting and other argument forms are diagnosed",
         "Output errors throw numeric codes: 1 I/O, 2 invalid byte sequence, 3 broken pipe; already written bytes remain visible",
         "Host traps and cancellation require store disposal; returned streams and callbacks need further ownership support"
       ],
-      "conformance": ["tests/waffle_output_test.rs"]
+      "conformance": [
+        "tests/waffle_output_test.rs",
+        "tests/conformance/cases/02_console_streams.ts"
+      ]
     },
     {
       "id": "compiler.p3_text",
       "name": "Scalar UTF-8 Text",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: UTF-8 text operations and component string boundaries",
+      "domain": "Production compiler: UTF-8 text operations and component string boundaries",
       "invariants": [
         "Length, indexing, slicing, search positions, and string iteration count Unicode scalars",
         "String for-of evaluates its input once and retains that snapshot across mutation and P3 waits",
@@ -181,20 +194,22 @@
         "Canonical boundaries retain byte lengths; completed serial calls reclaim their invocation storage"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "Unpaired surrogate escapes and UTF-16 code-unit APIs are diagnosed",
         "Custom iterator protocols, labeled loop exits, and JSON remain unsupported on this path",
         "Regex support is literal string.search with u/s flags; constructors, stored regex values, other flags, lookaround, backreferences, and property escapes are diagnosed",
         "Implicit string coercions are restricted; traced loop collection reclaims dead temporaries, while returned-stream and callback owners remain incomplete"
       ],
-      "conformance": ["tests/waffle_string_test.rs", "tests/text_contract_test.rs", "tests/utf8_probe_test.rs"]
+      "conformance": [
+        "tests/waffle_string_test.rs",
+        "tests/text_contract_test.rs"
+      ]
     },
     {
       "id": "compiler.p3_promises",
       "name": "Stored P3 Promise Outcomes",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: stored named async calls, waitFor, and repeated await",
+      "domain": "Production compiler: stored named async calls, waitFor, and repeated await",
       "invariants": [
         "A source task starts eagerly and its caller continues while native P3 work is pending",
         "Aliases preserve Promise identity and repeated awaits retain numeric, boolean, string, or void success and numeric rejection",
@@ -204,20 +219,21 @@
         "Guest rejection enters catch and finally at await; host traps remain outside the language error channel"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "Stored Promises require the host's component async stackful and threading features",
         "Promise parameters are guest-internal; callbacks, constructors, and combinators are not yet supported",
         "Detached call statements are diagnosed; unobserved pending work or overlapping entry calls trap and require instance disposal",
         "Traced loop collection reclaims dead strings and Promise outcomes; escaped captures and returned streams still need lifetime support"
       ],
-      "conformance": ["tests/p3_promise_test.rs"]
+      "conformance": [
+        "tests/p3_promise_test.rs"
+      ]
     },
     {
       "id": "compiler.p3_primitives",
       "name": "Typed P3 Clock and Random Calls",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: waitFor, performance.now, Date.now, Math.random, crypto.getRandomValues, and crypto.randomUUID",
+      "domain": "Production compiler: waitFor, performance.now, Date.now, Math.random, crypto.getRandomValues, and crypto.randomUUID",
       "invariants": [
         "Clocks and randomness use typed shared lowering plans and WASI 0.3 canonical adapters",
         "Named and namespace imports from perry:clocks and perry:random preserve binding aliases and distinguish local shadows",
@@ -231,7 +247,6 @@
         "Host failures trap independently of guest exception handlers"
       ],
       "differences": [
-        "The default CLI still targets the legacy pipeline; generated WIT SDK signatures also support resolved async WIT, and types/p3.d.ts describes P3 capability imports",
         "Only direct calls and literal namespace member names are supported; dynamic lookup, capability function values, and spread arguments are diagnosed",
         "Invalid or overflowing wait durations trap before the host call",
         "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
@@ -242,7 +257,9 @@
       "conformance": [
         "tests/waffle_pipeline_test.rs",
         "tests/waffle_platform_test.rs",
-        "tests/waffle_string_test.rs"
+        "tests/waffle_string_test.rs",
+        "tests/conformance/cases/07_clocks.ts",
+        "tests/conformance/cases/09_random.ts"
       ]
     },
     {
@@ -250,7 +267,7 @@
       "name": "P3 Immutable Date and Temporal Values",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: immutable UTC Date and typed Temporal.Instant / Temporal.PlainDateTime",
+      "domain": "Production compiler: immutable UTC Date and typed Temporal.Instant / Temporal.PlainDateTime",
       "invariants": [
         "Date.now() reads whole signed UTC epoch milliseconds from the P3 system clock",
         "Construction requires a statically known number and preserves time clipping and invalid dates",
@@ -262,20 +279,24 @@
         "Pure epoch/ISO computations require no WASI imports"
       ],
       "differences": [
-        "The default CLI remains on the legacy pipeline until R9",
         "Date values are guest-internal; component boundaries carry UTC ISO strings",
         "Omitted, copy, nonnumeric, and multi-argument constructors, calendar getters, valueOf, setters, string parsing, dynamic methods, and method arguments are diagnosed",
         "Invalid ISO errors are numeric rather than Error objects",
         "Temporal supports ISO string factories, Instant.fromEpochMilliseconds/epochMilliseconds, PlainDateTime fields/add({days}), and toString(); bracket annotations, options, additional calendars/zones, and implicit JSON serialization are unsupported"
       ],
-      "conformance": ["tests/waffle_platform/date.rs", "tests/waffle_platform/time.rs", "tests/waffle_platform/values.rs"]
+      "conformance": [
+        "tests/waffle_platform/date.rs",
+        "tests/waffle_platform/time.rs",
+        "tests/waffle_platform/values.rs",
+        "tests/conformance/cases/08_date.ts"
+      ]
     },
     {
       "id": "compiler.p3_json",
       "name": "P3 JSON and Shared Guest Graphs",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: strict UTF-8 JSON parsing and compact serialization through the component boundary",
+      "domain": "Production compiler: strict UTF-8 JSON parsing and compact serialization through the component boundary",
       "invariants": [
         "Parsed objects and mixed arrays preserve primitive tags, identity, nested mutation, and retained values across helpers, collection, and native suspension",
         "Serialization preserves ECMAScript number formatting, duplicate-key replacement and property ordering; undefined fields are omitted and undefined array elements or holes become null",
@@ -286,19 +307,23 @@
       ],
       "differences": [
         "Strings count Unicode scalars and reject unpaired surrogate escapes",
-        "Object keys must be strings; mixed arrays support numeric/canonical index keys, numeric length changes, deletion, membership, and Array.isArray",
+        "Object keys must be strings; runtime delete, sparse arrays, and heterogeneous mutation are diagnosed. JSON value-tree reads preserve primitive tags.",
         "Revivers, replacers, indentation, custom prototypes, sparse array literals, general array methods and extra array properties are unsupported",
-        "Unsupported byte-view, Stats, decoder, and Promise serialization throws numeric 12; errors are numbers rather than Error objects",
-        "Graphs remain guest-internal; component parameters/results carry JSON strings. The default CLI remains on the legacy pipeline until R9"
+        "Unsupported byte-view, Stats, decoder, and Promise serialization throws numeric 12; errors are numbers rather than Error objects"
       ],
-      "conformance": ["tests/json_helper_test.rs", "tests/waffle_json_test.rs", "tests/waffle_platform/context.rs"]
+      "conformance": [
+        "tests/json_helper_test.rs",
+        "tests/waffle_json_test.rs",
+        "tests/waffle_platform/context.rs",
+        "tests/conformance/cases/01_json.ts"
+      ]
     },
     {
       "id": "compiler.p3_context",
       "name": "P3 Process Context",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: read-only process.env, process.argv, and process.cwd()",
+      "domain": "Production compiler: read-only process.env, process.argv, and process.cwd()",
       "invariants": [
         "Only selected wasi:cli/environment@0.3.0 functions are imported and read lazily once per instance",
         "Cached argument-array identity and valid UTF-8 values survive component returns, helper calls, retained Promises, collection, and native suspension",
@@ -315,329 +340,72 @@
         "Text operations count Unicode scalars",
         "Missing environment keys return undefined; Object.values throws 12 for nonstring fields in ordinary objects",
         "Numeric-looking dictionary keys keep insertion order; JavaScript integer-key sorting is deferred under D2",
-        "Object.assign accepts plain object targets/sources and ignores nullish sources; other primitive sources, prototypes, and spread arguments remain unsupported",
-        "All environment and argument mutation is deferred; the default CLI remains on the legacy pipeline until R9"
+        "Object.assign accepts plain object targets/sources and ignores nullish sources; other primitive sources, prototypes, and spread arguments remain unsupported"
       ],
-      "conformance": ["tests/waffle_platform/context.rs"]
+      "conformance": [
+        "tests/waffle_platform/context.rs",
+        "tests/conformance/cases/10_env.ts"
+      ]
     },
     {
       "id": "web.guest_callbacks",
       "name": "Guest Function Values",
       "tier": "tier-1-web-primaries",
-      "support": "partial",
+      "support": "unsupported",
       "domain": "Calling synchronous guest function values with retained lexical captures",
-      "invariants": [
-        "Calls arrow/function expressions and aliases of named functions through the TypeScript table while preserving Rust's separate table",
-        "Evaluates the callee and arguments once in source order, pads missing parameters with undefined, and evaluates excess arguments",
-        "Captured strings, objects, and byte views retain identity and remain alive when a callback survives across invocations",
-        "Captured object mutation is visible to callbacks; released callback graphs, including cycles, are reclaimed at invocation cleanup or between timer callbacks",
-        "Guest callback exceptions propagate to surrounding try/catch blocks"
-      ],
+      "invariants": [],
       "differences": [
-        "Shared mutable lexical captures, this/new.target, async/generator function expressions, and rest/default/arguments parameters report compiler diagnostics",
-        "Named function values with captures and calls with spread arguments report compiler diagnostics",
-        "Timers retain callback graphs until delivery or cancellation; bound functions and array callback methods remain separate work",
-        "Guest callbacks do not change WIT export types; SDK declarations continue to describe selected WIT contracts"
+        "Escaped callbacks and captures are deferred under D5."
       ],
-      "conformance": [
-        "tests/runtime_regression_test.rs",
-        "tests/repeated_task_calls_test.rs"
-      ]
+      "conformance": []
     },
     {
       "id": "web.timers",
       "name": "Timers",
       "tier": "tier-1-web-primaries",
-      "support": "partial",
+      "support": "unsupported",
       "domain": "Direct setTimeout/setInterval and clearTimeout/clearInterval calls with synchronous guest callbacks and retained arguments",
-      "invariants": [
-        "Evaluates callback, delay, and extra arguments once in source order; passes the extra arguments to the callback without copying referenced values",
-        "Uses monotonic clock subscriptions in deadline order, with registration order breaking equal-deadline ties; each timeout fires once",
-        "Retains captures and arguments until delivery or cancellation, including shared objects and byte views",
-        "Clearing a pending timer releases its subscription; unknown or expired numeric IDs cannot cancel later work",
-        "Intervals keep the same numeric ID while running; either clear API can cancel a timeout or interval, including from its callback",
-        "Reclaims temporary guest values between completed callbacks while preserving captures, arguments, globals, and the enclosing function's result",
-        "An empty queue returns without polling; uncaught guest exceptions, including initialization failures, cancel pending timers before reaching the existing invocation error path",
-        "Timer-only components retain monotonic-clock and poll interfaces without wall-clock, HTTP, filesystem, randomness, or environment imports"
-      ],
+      "invariants": [],
       "differences": [
-        "CLI and exported component invocations drive pending timers to completion before returning to the host; the synchronous function's return value is computed before callbacks run",
-        "Timer IDs are instance-local numbers and never repeat; Node Timeout objects, unref/ref, globalThis timer methods, and timer functions used as values are outside this subset",
-        "Delays use Node-style whole milliseconds: values below 1, nonfinite values, or values above 2147483647 become 1; other values are truncated",
-        "Intervals rearm from the actual callback start plus the original delay; late delivery does not replay missed ticks, and an uncleared interval keeps the invocation running",
-        "Timer function values report compiler diagnostics; callback forms follow the guest-function subset",
-        "Direct Promise constructors can resolve or reject from timer callbacks; guest microtasks run before the next timer callback"
+        "Callback timers are deferred under D5; direct waits use native P3 clocks."
       ],
-      "conformance": [
-        "tests/clocks_test.rs",
-        "tests/repeated_task_calls_test.rs"
-      ]
-    },
-    {
-      "id": "web.guest_async",
-      "name": "Guest Async Tasks",
-      "tier": "tier-1-web-primaries",
-      "support": "partial",
-      "domain": "Named guest async functions with retained locals and queued await continuations",
-      "invariants": [
-        "Executes named async bodies in WebAssembly without rt:__async JavaScript imports, including functions without await",
-        "Runs the synchronous prefix immediately and queues await continuations in order for ordinary values and guest task Promises",
-        "Each async activation returns a distinct Promise and adopts a returned guest Promise's outcome",
-        "Direct global new Promise(executor) invokes the executor synchronously with callable resolve/reject functions; the first settlement wins, including while adopting another guest Promise",
-        "Timer-produced Promises resume await continuations before the next timer callback; cancellation with no runnable producer reports an error at the synchronous export boundary",
-        "Selected WIT exports drive continuations to completion and marshal the resolved task value through the existing synchronous Preview 2 ABI",
-        "Suspended cells, cyclic objects, and byte views survive continuation execution and are reclaimed after success or rejection",
-        "Generated implementation contracts accept synchronous or Promise results and reject incompatible resolved types"
-      ],
-      "differences": [
-        "Tests cover nested pure and timer-backed awaits, loops, string exceptions, catch/finally, scalar/string/result/unit ABI results, and bounded memory; native HTTP producer readiness remains unfinished",
-        "Async function expressions and class methods, generators, captured named functions, and rest/default/arguments parameters report compiler diagnostics",
-        "Promise static methods in programs using native async or guest constructors report diagnostics; Promise instance methods raise a guest exception",
-        "The existing guest exception bridge uses string payloads; discarded-task rejection reporting and general Promise APIs are outside this initial subset",
-        "Only direct global Promise construction is supported; constructor aliases, subclassing, arbitrary thenables, and legacy top-level await of pending timer Promises are outside the subset",
-        "Pure async continuations do not poll the host; shared cleanup still retains the WASI poll interface"
-      ],
-      "conformance": [
-        "tests/abi_regression_test.rs",
-        "tests/repeated_task_calls_test.rs",
-        "tests/sdk_test.rs"
-      ]
-    },
-    {
-      "id": "web.object_spread",
-      "name": "Object Spread Operator",
-      "tier": "tier-1-web-primaries",
-      "support": "full",
-      "domain": "Shallow object property merging ({ ...a, ...b }) with right-to-left property override semantics",
-      "invariants": [
-        "Evaluates object operands left-to-right",
-        "Produces a new distinct object identity",
-        "Overwrites keys present in earlier objects with keys from later objects",
-        "Preserves string, numeric, boolean, array, and nested object property values",
-        "Shallow copies retain nested object and byte-view identity, including shared mutation"
-      ],
-      "differences": [
-        "Executed natively via guest runtime handle table and NaN-boxing rather than prototype lookups",
-        "Nested reference and byte-view behavior is also exercised by tests/binary_views_test.rs"
-      ],
-      "conformance": [
-        "tests/conformance/cases/01_object_spread.ts"
-      ]
-    },
-    {
-      "id": "web.console",
-      "name": "Console Stream Routing",
-      "tier": "tier-1-web-primaries",
-      "support": "full",
-      "domain": "Writing formatted text to standard I/O streams",
-      "invariants": [
-        "console.log writes UTF-8 text to WASI stdout descriptor with a trailing newline",
-        "console.error writes UTF-8 text to WASI stderr descriptor with a trailing newline",
-        "Writes are immediately flushed to the host stream"
-      ],
-      "differences": [
-        "Supports string primitives directly; object inspection formats via JSON representation"
-      ],
-      "conformance": [
-        "tests/conformance/cases/02_console_streams.ts"
-      ]
+      "conformance": []
     },
     {
       "id": "web.promise_all",
       "name": "Promise.all Concurrency",
       "tier": "tier-1-web-primaries",
-      "support": "partial",
+      "support": "unsupported",
       "domain": "Concurrent dispatch and collection of multiple asynchronous operations",
-      "invariants": [
-        "Dispatches all operand promises concurrently without sequential blocking",
-        "Resolves with an array of resolved values preserving the original input order",
-        "Fails fast upon the first rejected promise"
-      ],
+      "invariants": [],
       "differences": [
-        "Cooperative polling on WASIp2 event loop via wasi:io/poll rather than a JS microtask queue",
-        "Promise.all inside native guest async programs remains diagnosed until guest-task combinators are implemented"
+        "Promise.all and Promise.race are rejected; combinators are deferred under D5."
       ],
-      "conformance": [
-        "tests/conformance/cases/03_promise_all.ts"
-      ]
-    },
-    {
-      "id": "web.incoming_handler",
-      "name": "WASI HTTP incoming handler",
-      "tier": "tier-1-web-primaries",
-      "support": "partial",
-      "domain": "Serving buffered bodies and forwarding request streams through wasi:http/incoming-handler@0.2.6",
-      "invariants": [
-        "The http-server world maps exported incomingHandlerHandle(request) to the generated resource ABI; synchronous Responses and timer-backed guest Promise<Response> results complete through the same boundary",
-        "Request method, absolute URL, read-only headers.get()/has(), body forwarding, and bounded text()/json()/bytes() are available across guest awaits",
-        "Direct global new Response accepts a string, Uint8Array, supported body stream, null, or omitted body; status and headers options are validated before acquiring outgoing resources",
-        "String bodies preserve UTF-8 and binary bodies copy the visible view; headers preserve Latin-1 bytes, validate names/values, and trim surrounding HTTP whitespace",
-        "new Response(request.body) forwards at most one 8192-byte input chunk at a time, respects output permits and flush completion, and can transmit more than the materialized-body limit",
-        "Responses are published before output; stream waits poll alongside guest timers and allow queued microtasks to run at safe frame boundaries",
-        "Request children, streams, bodies, pollables, and outparams are released on success, recoverable failures, and peer cancellation; canceled I/O also releases pending guest work",
-        "Repeated buffered/streaming calls in one instance have bounded memory after warm-up, including retained/released values, rejection, read/write/flush failures, and cancellation"
-      ],
-      "differences": [
-        "Materializing Request bodies or constructing byte/string Response bodies is limited to 1048576 bytes; streamed forwarding does not impose that total-size limit",
-        "Body methods materialize and cache bytes through the guest await bridge and may read repeatedly; retained materialized values remain readable, but unread incoming resources close when their invocation ends",
-        "Forwarding consumes its shared body source; stale or consumed sources raise guest exceptions. Response.body can also forward a constructed byte body. General ReadableStream readers, stream constructors, transforms, abort signals, and bodyUsed compatibility remain outside this subset",
-        "Response statusText is empty; custom statusText options, ArrayBuffer, Blob, FormData, cloning, and unsupported body methods raise diagnostics",
-        "Only the documented direct constructor/method subset is supported; ambient DOM declarations describe a broader API than this runtime implements",
-        "Awaited guest work settles before publishing the response; remaining work runs between stream readiness waits and drains before the handler returns. Uncleared intervals keep successful invocations running; failed I/O cancels them. A Promise without runnable work reports an error",
-        "Failures before response publication use the WASI outparam and become HTTP 500 in the tested host; later body failures close the stream. A failed module initializer is not retried in that instance",
-        "The pinned wasmtime serve command needs -S cli=y and -O pooling-max-tables-per-module=2 for the current runtime interfaces and TypeScript/Rust tables"
-      ],
-      "conformance": [
-        "tests/http_regression_test.rs",
-        "tests/compiler_rewrites_test.rs",
-        "tests/sdk_test.rs"
-      ]
+      "conformance": []
     },
     {
       "id": "web.fetch",
       "name": "global.fetch",
       "tier": "tier-1-web-primaries",
-      "support": "partial",
+      "support": "unsupported",
       "domain": "Asynchronous HTTP network requests using wasi:http/outgoing-handler",
-      "invariants": [
-        "Dispatches GET, POST, HEAD, PUT, PATCH, DELETE, OPTIONS, and valid custom method tokens to absolute HTTP(S) URLs",
-        "Returns a Promise resolving to a Response handle",
-        "Rejects on connection refusal, DNS failure, or network timeout without crashing host",
-        "Response status, ok, url, and read-only headers.get()/has() remain available after buffered body consumption",
-        "Header lookup is case-insensitive; repeated fields are joined with comma and space, and missing fields return null",
-        "Invalid or forbidden methods and bodies on GET/HEAD fail before requests are dispatched",
-        "Uint8Array request bodies transmit only their visible bytes; Response.bytes() returns an independent byte view without UTF-8 conversion",
-        "Buffered text and JSON decode UTF-8 with replacement and remove an initial BOM while preserving cached response bytes"
-      ],
+      "invariants": [],
       "differences": [
-        "Does not support loopback redirects, custom CA stores, or WebSocket upgrades",
-        "WASI Preview 2 does not expose a reason phrase; Response.statusText is always an empty string",
-        "Response headers support get and has; mutation and iteration APIs report unsupported methods",
-        "Method, metadata, header, binary transfer, and resource ownership behavior is exercised by tests/http_regression_test.rs",
-        "Buffered body reads can repeat from cached bytes; single-use bodyUsed semantics and streaming are not implemented",
-        "ArrayBuffer, Blob, FormData, and response cloning APIs report unsupported methods; binary bodies use Uint8Array",
-        "Post-return reclaims guest values; unreachable HTTP resources are released at the next ordinary invocation because component post-return cannot call host imports"
+        "Use the bounded perry:http GET API; general Fetch and Response APIs are deferred under D8."
       ],
-      "conformance": [
-        "tests/conformance/cases/04_fetch_json.ts",
-        "tests/conformance/cases/05_fetch_failure.ts"
-      ]
-    },
-    {
-      "id": "web.response_json",
-      "name": "Response.prototype.json",
-      "tier": "tier-1-web-primaries",
-      "support": "full",
-      "domain": "Consuming HTTP response body stream and parsing UTF-8 JSON into typed structures",
-      "invariants": [
-        "Streams incoming body chunks from wasi:http input-stream",
-        "Parses valid JSON objects, arrays, strings, numbers, and booleans",
-        "Rejects the returned Promise with a SyntaxError when body is malformed JSON"
-      ],
-      "differences": [
-        "Parsed structures are held in guest runtime handles and can be directly splatted or serialized"
-      ],
-      "conformance": [
-        "tests/conformance/cases/04_fetch_json.ts",
-        "tests/conformance/cases/06_json_syntax.ts"
-      ]
+      "conformance": []
     },
     {
       "id": "node.process_exit",
       "name": "process.exit",
       "tier": "tier-2-node-core",
-      "support": "full",
+      "support": "unsupported",
       "domain": "Process termination with an explicit numeric exit code",
-      "invariants": [
-        "Immediately halts execution and propagates code to wasi:cli/exit@0.2.x",
-        "Code 0 denotes success; non-zero codes denote failure"
-      ],
+      "invariants": [],
       "differences": [
-        "Does not invoke Node beforeExit or exit listener hooks"
+        "Return the command world result from runRun; arbitrary exit codes are unsupported."
       ],
-      "conformance": [
-        "tests/conformance/cases/05_fetch_failure.ts"
-      ]
-    },
-    {
-      "id": "web.clocks",
-      "name": "performance.now and Monotonic Clocks",
-      "tier": "tier-1-web-primaries",
-      "support": "full",
-      "domain": "High-resolution monotonic time measurement using wasi:clocks/monotonic-clock",
-      "invariants": [
-        "performance.now() returns monotonic time in milliseconds as a float",
-        "Values never decrease across successive calls"
-      ],
-      "differences": [
-        "Resolution and origin are backed by the host's wasi:clocks/monotonic-clock implementation"
-      ],
-      "conformance": [
-        "tests/conformance/cases/07_clocks.ts"
-      ]
-    },
-    {
-      "id": "web.date",
-      "name": "Date and Wall Clocks",
-      "tier": "tier-1-web-primaries",
-      "support": "partial",
-      "domain": "Legacy P2 CLI date support pending R9 retirement; the production contract is compiler.p3_dates",
-      "invariants": [
-        "Date.now() returns whole UTC milliseconds since the UNIX epoch",
-        "Omitted arguments use current time; numeric timestamps, Date copies, and the tested null/undefined/boolean conversions preserve the supported Date semantics",
-        "getTime() and toISOString() preserve UTC epoch milliseconds; ISO formatting uses the shared datealgo dependency",
-        "Invalid Date toISOString calls raise a guest exception at the call site"
-      ],
-      "differences": [
-        "Legacy constructor coercions are excluded from the P3 cutover contract; calendar getters are diagnosed on both compiler paths",
-        "Date string parsing, multi-argument constructors, setters, and the remaining Date API are outside the supported subset",
-        "Detailed constructor and exception regressions run in tests/clocks_test.rs"
-      ],
-      "conformance": [
-        "tests/conformance/cases/08_date.ts"
-      ]
-    },
-    {
-      "id": "web.random",
-      "name": "Randomness and Cryptography",
-      "tier": "tier-1-web-primaries",
-      "support": "partial",
-      "domain": "Cryptographic and pseudo-random generation using wasi:random",
-      "invariants": [
-        "Math.random() generates floating point numbers in [0.0, 1.0)",
-        "crypto.randomUUID() generates valid RFC 4122 v4 UUID strings",
-        "crypto.getRandomValues(view) fills and returns the supplied Uint8Array, restricted to its visible byte range",
-        "Unsupported arguments and views larger than 65536 bytes fail before host randomness is requested or bytes are mutated"
-      ],
-      "differences": [
-        "Only Uint8Array is supported for getRandomValues; other integer view types are not implemented",
-        "Powered by wasi:random/random and wasi:random/insecure; controlled fill, boundary, and vector tests run in tests/random_test.rs"
-      ],
-      "conformance": [
-        "tests/conformance/cases/09_random.ts"
-      ]
-    },
-    {
-      "id": "cli.env",
-      "name": "Process Environment, Arguments, and CWD",
-      "tier": "tier-2-node-core",
-      "support": "partial",
-      "domain": "Accessing environment variables, command-line arguments, and working directory via wasi:cli/environment",
-      "invariants": [
-        "process.env exposes host environment variables as a JavaScript object",
-        "process.argv exposes command-line arguments as a JavaScript string array",
-        "process.cwd() returns the current working directory string",
-        "The P3 compiler exposes read-only environment and argument snapshots; see compiler.p3_context"
-      ],
-      "differences": [
-        "Environment and arguments are cached guest-local snapshots; P3 context mutation is unsupported",
-        "Arguments are the host-provided WASI list without synthesized Node executable/script prefixes",
-        "Working directory is initial-cwd, with / used when the host supplies none",
-        "Read-only P3 context tests run in tests/waffle_platform/context.rs; tests/env_test.rs covers the retiring legacy path"
-      ],
-      "conformance": [
-        "tests/conformance/cases/10_env.ts"
-      ]
+      "conformance": []
     },
     {
       "id": "web.uint8array",
@@ -657,31 +425,7 @@
         "This evidence is a Rust integration suite; the TypeScript differential report does not execute it"
       ],
       "conformance": [
-        "tests/binary_views_test.rs"
-      ]
-    },
-    {
-      "id": "node.fs",
-      "name": "Sandboxed Synchronous Filesystem",
-      "tier": "tier-2-node-core",
-      "support": "partial",
-      "domain": "Synchronous file and directory operations relative to host-provided WASI preopens",
-      "invariants": [
-        "UTF-8 reads/writes and raw Uint8Array reads/writes work inside supplied preopens",
-        "Byte-view writes preserve offsets, lengths, and arbitrary byte values",
-        "Directory listing, creation, removal, existence checks, and the tested size/time/type metadata are available",
-        "Unsupported write modes, binary string writes, unsupported readFileSync options, and unsupported directory/metadata options (for mkdirSync, readdirSync, statSync, unlinkSync, and rmdirSync) are evaluated and rejected before opening, querying, or mutation"
-      ],
-      "differences": [
-        "UTF-8 reads reject invalid UTF-8; omitted encoding returns Uint8Array; unsupported encodings, flags, or option objects are rejected before opening files",
-        "Binary encoding on reads returns a Uint8Array byte view rather than Node's legacy Latin-1 string coercion",
-        "Write support is overwrite-only; append/exclusive flags, permissions, recursive operations, and filesystem promises are unsupported",
-        "mkdirSync, readdirSync, statSync, unlinkSync, and rmdirSync evaluate arguments in standard order and reject unsupported options before preopen resolution or I/O mutation",
-        "Stats support is limited to size, mtimeMs, isFile(), and isDirectory()",
-        "This evidence is a Rust integration suite using preopened scratch directories; the TypeScript differential report does not execute it"
-      ],
-      "conformance": [
-        "tests/fs_test.rs"
+        "tests/waffle_bytes_test.rs"
       ]
     },
     {
@@ -692,7 +436,7 @@
       "domain": "Runtime evaluation of dynamic JavaScript strings",
       "invariants": [],
       "differences": [
-        "Incompatible with AOT compilation directly to WebAssembly bytecode without embedded interpreter"
+        "Runtime code generation is outside the static TypeScript contract."
       ],
       "conformance": []
     },
@@ -704,7 +448,7 @@
       "domain": "Spawning arbitrary OS processes via fork / exec",
       "invariants": [],
       "differences": [
-        "WASI Preview 2 does not permit unconstrained host process spawning inside the sandbox"
+        "Arbitrary host process spawning is outside the supported capability contract."
       ],
       "conformance": []
     }

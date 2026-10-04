@@ -55,7 +55,13 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         &imports_path,
         codegen::generate_import_declarations(&resolve, &resolve.worlds[world]),
     )?;
-    let dts = format!("/// <reference path=\"./imports.d.ts\" />\n{dts}");
+    fs::write(
+        options.out_dir.join("p3.d.ts"),
+        include_str!("../../types/p3.d.ts"),
+    )?;
+    let dts = format!(
+        "/// <reference path=\"./imports.d.ts\" />\n/// <reference path=\"./p3.d.ts\" />\n{dts}"
+    );
 
     let dts_path = options.out_dir.join("world.d.ts");
     fs::write(&dts_path, dts)

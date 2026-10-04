@@ -1,12 +1,3 @@
-//! Canonical ABI definitions, WIT metadata introspection, and trampoline synthesis.
+//! Canonical export names shared by the compiler and SDK.
 
 pub mod export_names;
-mod http_handler;
-pub mod trampoline;
-pub mod wit_meta;
-
-pub use trampoline::synthesize_trampolines;
-pub use wit_meta::{
-    AbiType, ExportedWitFunction, WitWorldExports, extract_world_exports, matches_export_name,
-    to_kebab_case,
-};

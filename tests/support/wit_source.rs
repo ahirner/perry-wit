@@ -24,7 +24,6 @@ pub(crate) fn check_sdk_source(wit: &str, source: &str) -> Result<()> {
             "esnext",
         ])
         .arg(sdk.check_path)
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .output()?;
     assert!(
         output.status.success(),

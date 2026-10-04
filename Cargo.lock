@@ -654,15 +654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "guest-runtime"
-version = "0.1.0"
-dependencies = [
- "datealgo",
- "serde_json",
- "wit-bindgen",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1157,34 +1148,6 @@ version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"
 
 [[package]]
-name = "perry-base64"
-version = "0.5.1654"
-source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"
-
-[[package]]
-name = "perry-codegen-js"
-version = "0.5.1654"
-source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"
-dependencies = [
- "anyhow",
- "perry-dispatch",
- "perry-hir",
-]
-
-[[package]]
-name = "perry-codegen-wasm"
-version = "0.5.1654"
-source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"
-dependencies = [
- "anyhow",
- "perry-base64",
- "perry-codegen-js",
- "perry-dispatch",
- "perry-hir",
- "wasm-encoder 0.258.3",
-]
-
-[[package]]
 name = "perry-diagnostics"
 version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"
@@ -1248,14 +1211,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perry-transform"
-version = "0.5.1654"
-source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"
-dependencies = [
- "perry-hir",
-]
-
-[[package]]
 name = "perry-ui-model"
 version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"
@@ -1269,11 +1224,9 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "perry-codegen-wasm",
  "perry-hir",
  "perry-json-helper",
  "perry-parser",
- "perry-transform",
  "regex-automata",
  "serde",
  "serde_json",
@@ -1361,16 +1314,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"
 dependencies = [
  "zerovec",
-]
-
-[[package]]
-name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1654,7 +1597,6 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
- "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -2825,57 +2767,6 @@ checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "wit-bindgen"
-version = "0.61.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e473fd0095479f9689ac7d2a52c427cc96bb2b973ace50238dfcc1ab1cd52d93"
-dependencies = [
- "wit-bindgen-rust-macro",
-]
-
-[[package]]
-name = "wit-bindgen-core"
-version = "0.61.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87445680dfe6d6b5369e884bd63c03a3335268e855365b2fc3f7bcdce96a630e"
-dependencies = [
- "anyhow",
- "heck",
- "wit-parser 0.258.3",
-]
-
-[[package]]
-name = "wit-bindgen-rust"
-version = "0.61.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f2fe494de0d898216caf0fd0ae76af75753fcb3ff4f465b46131537cf24cf8"
-dependencies = [
- "anyhow",
- "heck",
- "indexmap",
- "prettyplease",
- "syn 2.0.119",
- "wasm-metadata 0.258.3",
- "wit-bindgen-core",
- "wit-component 0.258.3",
-]
-
-[[package]]
-name = "wit-bindgen-rust-macro"
-version = "0.61.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59283a01aec94f60f92ada22ffe182a5cea8acfce43be3be688de8d52df55312"
-dependencies = [
- "anyhow",
- "prettyplease",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "wit-bindgen-core",
- "wit-bindgen-rust",
 ]
 
 [[package]]

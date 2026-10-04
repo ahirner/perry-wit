@@ -1,5 +1,5 @@
 {
-  description = "WASI Preview 2 TypeScript Component";
+  description = "WASI 0.3 TypeScript Component";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
