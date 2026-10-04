@@ -2,19 +2,16 @@
   (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
   (import "host" "compare" (func $compare (param i32 i32) (result i32)))
   (import "host" "box" (func $box (param i32 f64) (result i32)))
-  {{environment-string}}
   (memory 1)
-  ;; Object: first, last, write policy (0 ordinary, 1 environment).
+  ;; Object: first, last, frozen flag.
   ;; Entry: next, key, tag, padding, f64 payload.
-  (func $new (param $policy i32) (result i32) (local $object i32)
+  (func (export "object.new") (result i32) (local $object i32)
     (local.set $object (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 12)))
     (i32.store offset=16 (i32.load (i32.sub (local.get $object) (i32.const 4))) (i32.const 9))
     (i32.store (local.get $object) (i32.const 0))
     (i32.store offset=4 (local.get $object) (i32.const 0))
-    (i32.store offset=8 (local.get $object) (local.get $policy))
+    (i32.store offset=8 (local.get $object) (i32.const 0))
     (local.get $object))
-  (func (export "object.new") (result i32) (call $new (i32.const 0)))
-  (func (export "object.environment") (result i32) (call $new (i32.const 1)))
 
   (func $get (export "object.get") (param $object i32) (param $key i32) (result i32)
     (local $entry i32)
@@ -26,12 +23,8 @@
       (br $entries)))
     (i32.const 0))
   (func $set (export "object.set") (param $object i32) (param $key i32) (param $tag i32) (param $value f64) (result i32 f64)
-    (local $entry i32) (local $last i32) (local $status i32)
-    (if (i32.load offset=8 (local.get $object)) (then
-      (call $environment-string (local.get $tag) (local.get $value))
-      local.set $value local.set $status
-      (if (local.get $status) (then (return (local.get $status) (local.get $value))))
-      (local.set $tag (i32.const 4))))
+    (local $entry i32) (local $last i32)
+    (if (i32.load offset=8 (local.get $object)) (then (return (i32.const 1) (f64.const 12))))
     (local.set $entry (call $get (local.get $object) (local.get $key)))
     (if (i32.eqz (local.get $entry)) (then
       (local.set $entry (call $realloc (i32.const 0) (i32.const 0) (i32.const 8) (i32.const 24)))
@@ -48,6 +41,7 @@
     (i32.const 0) (f64.const 0))
   (func (export "object.delete") (param $object i32) (param $key i32) (result i32)
     (local $entry i32) (local $previous i32)
+    (if (i32.load offset=8 (local.get $object)) (then (return (i32.const 0))))
     (local.set $entry (i32.load (local.get $object)))
     (block $done (loop $entries
       (br_if $done (i32.eqz (local.get $entry)))

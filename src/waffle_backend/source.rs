@@ -6,6 +6,7 @@ mod decoder;
 mod filesystem;
 mod objects;
 mod options;
+mod readonly;
 pub(crate) use decoder::validate_lowering;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -46,6 +47,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
     GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         module.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
+        readonly::validate(module, SyntaxContext::empty().apply_mark(unresolved))?;
         let mut names = IdentifierNames::default();
         module.visit_with(&mut names);
         ensure!(

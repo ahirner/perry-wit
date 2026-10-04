@@ -23,22 +23,15 @@
  * component boundaries carry JSON strings. */
 declare namespace NodeJS {
   interface ProcessEnv {
-    [key: string]: string | undefined;
+    readonly [key: string]: string | undefined;
   }
   interface Process {
-    /** Cached, guest-local environment; aliases share writes and deletions.
-     * Runtime writes through any stringify undefined, null, booleans, all numbers,
-     * plain objects, and nested arrays. Arrays join with commas; holes/nullish
-     * elements and cyclic references contribute empty text. Array nesting beyond
-     * 128 levels throws 3; unsupported kinds (including Dates/bytes/Promises) throw
-     * 12 before mutation. Object.assign uses the same policy; earlier writes remain
-     * if a later property fails. Object.keys/values return ordered snapshots;
-     * Object.values currently throws 12 for nonstring fields in ordinary objects.
-     * JSON serialization preserves cached mutations; parsed snapshots are independent. */
-    env: ProcessEnv;
-    /** Cached host-provided arguments, with no synthetic Node prefixes.
-     * WAFFLE/P3 currently supports reads; argument-array mutation remains unsupported. */
-    argv: string[];
+    /** Cached read-only environment. Missing keys return undefined.
+     * Enumeration and JSON return independent snapshots. All mutation, including
+     * through aliases or casts, is rejected by the WAFFLE/P3 compiler. */
+    readonly env: ProcessEnv;
+    /** Cached read-only host arguments, with no synthetic Node prefixes. */
+    readonly argv: readonly string[];
     /** Cached initial host directory, or / if absent. A supplied empty string is retained. */
     cwd(): string;
   }

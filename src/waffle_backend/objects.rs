@@ -12,7 +12,6 @@ use waffle::{Func, Memory, Module};
 #[derive(Clone, Copy)]
 pub(crate) struct ObjectHelpers {
     pub(crate) new: Func,
-    pub(crate) environment: Func,
     pub(crate) set: Func,
     pub(crate) get: Func,
     pub(crate) delete: Func,
@@ -109,9 +108,8 @@ pub(crate) fn emit_runtime(
     allocator: AllocationFuncs,
     compare: Func,
     boxed_value: Func,
-    string_coercion: Option<Func>,
 ) -> Result<ObjectHelpers> {
-    let mut wat = format!(
+    let wat = format!(
         "{} {})",
         include_str!("objects/runtime.wat")
             .trim_end()
@@ -119,22 +117,14 @@ pub(crate) fn emit_runtime(
             .unwrap(),
         include_str!("objects/enumerate.wat")
     );
-    let mut imports = BTreeMap::from([
+    let imports = BTreeMap::from([
         ("realloc", allocator.realloc),
         ("compare", compare),
         ("box", boxed_value),
     ]);
-    let coercion = if let Some(function) = string_coercion {
-        imports.insert("coerce", function);
-        "(import \"host\" \"coerce\" (func $environment-string (param i32 f64) (result i32 f64)))"
-    } else {
-        "(func $environment-string (param i32 f64) (result i32 f64) (i32.const 1) (f64.const 12))"
-    };
-    wat = wat.replace("{{environment-string}}", coercion);
     let functions = runtime::emit_functions(module, memory, &wat, &imports)?;
     Ok(ObjectHelpers {
         new: functions["object.new"],
-        environment: functions["object.environment"],
         set: functions["object.set"],
         get: functions["object.get"],
         delete: functions["object.delete"],

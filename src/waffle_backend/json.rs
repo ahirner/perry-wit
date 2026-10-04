@@ -26,10 +26,6 @@ pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<&'static
     .collect()
 }
 
-pub(crate) fn declare_serializer(module: &mut Module<'static>) -> Func {
-    declare_import(module, "json_serialize", 5)
-}
-
 pub(crate) fn emit_runtime(
     module: &mut Module<'static>,
     memory: Memory,

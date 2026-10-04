@@ -21,5 +21,6 @@
       (br $entries)))
     (drop (call $realloc (local.get $data) (i32.mul (local.get $count) (i32.const 16)) (i32.const 4) (i32.const 0)))
     (drop (call $realloc (local.get $result) (i32.const 8) (i32.const 4) (i32.const 0)))
+    (i32.store offset=8 (local.get $value) (i32.const 1))
     (i32.store offset=20 (local.get $cache) (local.get $value))
     (local.get $value))

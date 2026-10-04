@@ -250,25 +250,24 @@
       "name": "P3 Process Context",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: process.env, process.argv reads, and process.cwd()",
+      "domain": "WAFFLE Rust compiler API: read-only process.env, process.argv, and process.cwd()",
       "invariants": [
         "Only selected wasi:cli/environment@0.3.0 functions are imported and read lazily once per instance",
         "Cached argument-array identity and valid UTF-8 values survive component returns, helper calls, retained Promises, collection, and native suspension",
         "Retained heap roots preserve instance-local snapshots while invocation temporaries remain reclaimable",
-        "Environment aliases share guest-local writes, deletion, and own-property membership without changing the host",
-        "Environment writes stringify strings, undefined, null, booleans, all numbers, plain objects, and nested arrays; Object.assign follows the same policy and preserves earlier writes after a later failure",
-        "Number coercions match ECMAScript formatting; arrays join with commas, nullish elements/holes and cyclic references contribute empty text, and output storage is measured before allocation",
+        "Environment and arguments are read-only; assignment, deletion, mutating methods, and bulk writes are diagnosed through aliases, casts, containers, and helper calls",
+        "Environment-only tasks do not link JSON formatting or coercion helpers",
         "Object.keys and string-valued Object.values produce independent snapshots with integer-index keys first and other keys in insertion order; duplicate native environment keys replace values without moving their keys",
-        "JSON snapshots preserve cached environment mutations and parsed copies are independent",
+        "JSON snapshots preserve cached environment values and parsed copies are independent",
         "Host failures trap without running guest finally; store disposal releases pending native work"
       ],
       "differences": [
         "Arguments use the host-provided list without synthetic Node executable/script prefixes",
         "The initial directory defaults to / only when absent; an explicitly empty directory remains empty",
         "Text operations count Unicode scalars",
-        "Environment coercion throws 3 beyond 128 nested arrays and 12 for unsupported kinds including Dates, byte views, and Promises before mutation; Object.values throws 12 for nonstring fields",
+        "Missing environment keys return undefined; Object.values throws 12 for nonstring fields in ordinary objects",
         "Object.assign accepts plain object targets/sources and ignores nullish sources; other primitive sources, prototypes, and spread arguments remain unsupported",
-        "Remaining array operations and argument-array mutation remain open migration work; the default CLI remains on the legacy pipeline until R9"
+        "All environment and argument mutation is deferred; the default CLI remains on the legacy pipeline until R9"
       ],
       "conformance": ["tests/waffle_platform/context.rs"]
     },
@@ -579,13 +578,13 @@
         "process.env exposes host environment variables as a JavaScript object",
         "process.argv exposes command-line arguments as a JavaScript string array",
         "process.cwd() returns the current working directory string",
-        "Guest environment writes coerce the supported values to strings; aliases, deletion, and enumeration observe the same guest-local object"
+        "The P3 compiler exposes read-only environment and argument snapshots; see compiler.p3_context"
       ],
       "differences": [
-        "Environment and arguments are cached guest-local snapshots; mutations do not update the host",
+        "Environment and arguments are cached guest-local snapshots; P3 context mutation is unsupported",
         "Arguments are the host-provided WASI list without synthesized Node executable/script prefixes",
         "Working directory is initial-cwd, with / used when the host supplies none",
-        "Detailed mutation, deletion, and argument tests run in tests/env_test.rs"
+        "Read-only P3 context tests run in tests/waffle_platform/context.rs; tests/env_test.rs covers the retiring legacy path"
       ],
       "conformance": [
         "tests/conformance/cases/10_env.ts"

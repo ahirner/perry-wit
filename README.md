@@ -208,21 +208,13 @@ are the host's string list without synthesized Node executable/script prefixes.
 The working directory uses `/` when the host supplies no initial directory; a
 supplied empty string remains empty. Host failures trap. Retained heap roots keep
 cached values alive while post-return collection reclaims invocation temporaries.
-Environment aliases share guest-local writes and deletions without changing the host.
-Missing properties read as `undefined`. Writes accept strings and coerce undefined,
-null, booleans, all numbers, plain objects, and nested arrays to strings. Numbers
-use ECMAScript formatting. Arrays join with commas; holes and nullish elements
-produce empty fields, and cyclic references produce empty text. Array nesting is
-limited to 128 levels (numeric error `3`); unsupported kinds such as byte views,
-Dates, and Promises throw `12` before changing the property. `Object.assign` applies
-the same write policy, evaluates all arguments before copying, and preserves earlier
-writes if a later property fails. It accepts plain object sources and ignores null or
-undefined sources. `Object.keys`, string-valued `Object.values`, and string-key `in`
-inspect own properties; integer-index keys precede other keys in insertion order.
-Enumeration returns independent string-array snapshots. `Object.values` throws `12`
-for a nonstring property. Environment JSON snapshots are independent of the cached
-environment and preserve its guest-local mutations. Array operations and
-argument-array mutation remain open migration work.
+Environment and argument snapshots are read-only. Assignment, deletion, mutating
+methods, and bulk writes are compile errors, including through aliases, casts,
+containers, and helper calls. Missing environment keys read as `undefined`.
+`Object.keys`, string-valued `Object.values`, and string-key `in` inspect own
+properties. Enumeration and JSON produce independent snapshots; copying a string
+from the environment into an ordinary record does not make that record read-only.
+Environment reads do not link the JSON codec unless the source also uses JSON.
 `crypto.getRandomValues(view)` fills only the visible `Uint8Array` range and returns
 the same view. Empty views make no host call. Invalid supported value kinds throw
 numeric code `1`; views larger than 65,536 bytes throw `2`, before requesting randomness

@@ -87,9 +87,6 @@ pub(crate) fn lower_module(
         collect_strings_in_module(hir, &mut string_pool);
         if reqs.objects {
             string_pool.intern("length");
-            for name in super::coercion::LITERALS {
-                string_pool.intern(name);
-            }
         }
         if contract.has_filesystem() {
             for key in super::filesystem::OPTION_KEYS {
@@ -118,11 +115,7 @@ pub(crate) fn lower_module(
         {
             helper_libraries.push(super::libraries::LibraryId::Text);
         }
-        if reqs.json
-            || contract
-                .context_operations()
-                .contains(&super::capabilities::ContextOperation::Environment)
-        {
+        if reqs.json {
             helper_libraries.push(super::libraries::LibraryId::Json);
         }
         if !helper_libraries.is_empty() {

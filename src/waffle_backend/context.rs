@@ -68,7 +68,7 @@ pub(crate) fn emit_runtime(
     if operations.contains(&ContextOperation::Environment) {
         wat.push_str("(import \"host\" \"environment\" (func $environment (result i32))) (import \"host\" \"set\" (func $set (param i32 i32 i32 f64) (result i32 f64)))");
         let objects = helpers.objects.expect("environment requires objects");
-        imports.insert("environment", objects.environment);
+        imports.insert("environment", objects.new);
         imports.insert("set", objects.set);
     }
     wat.push_str(include_str!("context/cache.wat"));
