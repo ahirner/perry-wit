@@ -14,11 +14,81 @@ use wasmparser::{
 
 pub(crate) const SEARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/search.wasm"));
 pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.wasm"));
+pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {
     Search,
     Text,
+    Json,
+}
+
+impl LibraryId {
+    pub(crate) fn for_entry(entry: &str) -> Result<Self> {
+        Ok(match entry {
+            "str_find_substring" | "str_scalar_to_byte" => Self::Search,
+            "str_code_point_at"
+            | "str_from_code_point"
+            | "str_case_convert"
+            | "str_split_count"
+            | "str_split_populate"
+            | "str_join_total_len"
+            | "str_join" => Self::Text,
+            "json_measure" | "json_populate" | "json_serialized_size" | "json_serialize" => {
+                Self::Json
+            }
+            _ => bail!("unknown helper entry {entry}"),
+        })
+    }
+
+    pub(crate) fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::Search => SEARCH,
+            Self::Text => TEXT,
+            Self::Json => JSON,
+        }
+    }
+}
+
+/// One placement policy for both the guest allocator and linked Rust helpers.
+pub(crate) struct HelperMemory {
+    end: u32,
+    pub(crate) needs_stack: bool,
+}
+
+impl HelperMemory {
+    pub(crate) fn new(data_end: u32) -> Self {
+        Self {
+            end: data_end.max(1024),
+            needs_stack: false,
+        }
+    }
+
+    pub(crate) fn place(&mut self, library: &Library) -> Result<u32> {
+        let base = align_to(self.end, library.data_alignment)?;
+        self.end = base
+            .checked_add(library.data_size)
+            .context("helper data exceeds memory32")?;
+        self.needs_stack |= library.globals.contains(&Global::Stack);
+        Ok(base)
+    }
+
+    pub(crate) fn stack_top(&self) -> Result<u32> {
+        align_to(self.end, 16)?
+            .checked_add(if self.needs_stack { 65_536 } else { 0 })
+            .context("helper stack exceeds memory32")
+    }
+}
+
+pub(crate) fn align_to(value: u32, alignment: u32) -> Result<u32> {
+    ensure!(
+        alignment.is_power_of_two(),
+        "helper alignment must be a power of two"
+    );
+    Ok(value
+        .checked_add(alignment - 1)
+        .context("helper alignment exceeds memory32")?
+        & !(alignment - 1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

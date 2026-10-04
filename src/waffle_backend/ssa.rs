@@ -105,15 +105,24 @@ pub(crate) fn lower_module(
             regex_tables,
             string_pool.next_free_address(),
         )?;
-        let needs_helper_library = reqs.find_substring
-            || reqs.code_point_at
+        let mut helper_libraries = Vec::new();
+        if reqs.find_substring {
+            helper_libraries.push(super::libraries::LibraryId::Search);
+        }
+        if reqs.code_point_at
             || reqs.from_code_point
             || reqs.case_convert
             || reqs.split
-            || reqs.join;
-        if needs_helper_library {
-            let raw_base = next_free + 65_536 + 4096;
-            let aligned_heap_base = (raw_base + 65_535) & !65_535;
+            || reqs.join
+        {
+            helper_libraries.push(super::libraries::LibraryId::Text);
+        }
+        if !helper_libraries.is_empty() {
+            let mut placement = super::libraries::HelperMemory::new(next_free);
+            for id in helper_libraries {
+                placement.place(&super::libraries::Library::parse(id.bytes())?)?;
+            }
+            let aligned_heap_base = super::libraries::align_to(placement.stack_top()?, 65_536)?;
             let needed_pages = (aligned_heap_base / 65_536) as usize + 1;
             if module.memories[memory].initial_pages < needed_pages {
                 module.memories[memory].initial_pages = needed_pages;

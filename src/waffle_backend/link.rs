@@ -14,7 +14,7 @@ use wasm_encoder::{
 };
 use wasmparser::{ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator};
 
-use super::libraries::{Global, Library, LibraryId, Relocations, SEARCH, TEXT};
+use super::libraries::{HelperMemory, Library, LibraryId, Relocations, align_to};
 
 pub(crate) const HELPER_MODULE: &str = "__perry_helper";
 
@@ -152,17 +152,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     // 3. Select and prepare helper libraries
     let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<String>>::new();
     for (_, entry_name, _) in &helper_imports {
-        let lib_id = match entry_name.as_str() {
-            "str_find_substring" | "str_scalar_to_byte" => LibraryId::Search,
-            "str_code_point_at"
-            | "str_from_code_point"
-            | "str_case_convert"
-            | "str_split_count"
-            | "str_split_populate"
-            | "str_join_total_len"
-            | "str_join" => LibraryId::Text,
-            _ => anyhow::bail!("unknown helper entry {entry_name}"),
-        };
+        let lib_id = LibraryId::for_entry(entry_name)?;
         requested_by_lib
             .entry(lib_id)
             .or_default()
@@ -217,11 +207,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     let mut current_helper_func_idx = helper_func_start_idx;
 
     for (lib_id, entries) in requested_by_lib {
-        let lib_bytes = match lib_id {
-            LibraryId::Search => SEARCH,
-            LibraryId::Text => TEXT,
-        };
-        let lib = Library::parse(lib_bytes)?;
+        let lib = Library::parse(lib_id.bytes())?;
         let entry_refs: Vec<&str> = entries.iter().map(|s| s.as_str()).collect();
         let reachable = lib.reachable(&entry_refs)?;
 
@@ -300,14 +286,6 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
         new_code.function(&rewritten);
     }
 
-    fn align_to(value: u32, alignment: u32) -> u32 {
-        if alignment <= 1 {
-            value
-        } else {
-            (value + alignment - 1) & !(alignment - 1)
-        }
-    }
-
     // Determine existing static data extent from core module
     let mut existing_data_end = 1024u32;
     for seg in &core_data {
@@ -325,7 +303,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
         memory_base: u32,
         table_base: u32,
     }
-    let mut current_memory_base = existing_data_end;
+    let mut helper_memory = HelperMemory::new(existing_data_end);
     let mut current_table_size = if !core_tables.is_empty() {
         core_tables[0].ty.initial as u32
     } else {
@@ -333,11 +311,12 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     };
     let mut lib_placements = Vec::new();
     for prep in &prepared_libs {
-        let memory_base = align_to(current_memory_base, prep.lib.data_alignment);
-        current_memory_base = memory_base + prep.lib.data_size;
+        let memory_base = helper_memory.place(&prep.lib)?;
 
-        let table_base = align_to(current_table_size, prep.lib.table_alignment);
-        current_table_size = table_base + prep.lib.table_size;
+        let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
+        current_table_size = table_base
+            .checked_add(prep.lib.table_size)
+            .context("helper table exceeds table32")?;
 
         lib_placements.push(LibPlacement {
             memory_base,
@@ -345,14 +324,9 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
         });
     }
 
-    let needs_stack = prepared_libs
-        .iter()
-        .any(|prep| prep.lib.globals.iter().any(|g| matches!(g, Global::Stack)));
+    let needs_stack = helper_memory.needs_stack;
     let stack_global_index = core_globals.len() as u32;
-
-    // Stack is placed above helper static data, growing downwards
-    let stack_bottom = align_to(current_memory_base, 16);
-    let stack_top = stack_bottom + if needs_stack { 65_536 } else { 0 };
+    let stack_top = helper_memory.stack_top()?;
 
     if needs_stack && !core_memories.is_empty() {
         let needed_pages = stack_top.div_ceil(65_536) as u64;

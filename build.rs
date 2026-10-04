@@ -17,6 +17,7 @@ fn main() {
             compile_helper(&manifest_dir, &out_dir, helper);
         }
     }
+    compile_json_helper(&manifest_dir, &out_dir);
 
     println!("cargo:rerun-if-env-changed=GUEST_RUNTIME_PATH");
     println!("cargo:rerun-if-changed=crates/guest-runtime/Cargo.toml");
@@ -106,4 +107,42 @@ fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
     wasmparser::Validator::new()
         .validate_all(&wasm)
         .expect("validate embedded helper module");
+}
+
+fn compile_json_helper(manifest: &Path, output: &Path) {
+    println!("cargo:rerun-if-changed=crates/json-helper");
+    println!("cargo:rerun-if-changed=Cargo.lock");
+    let target = output.join("json-helper-build");
+    let status = Command::new(env::var_os("CARGO").expect("Cargo sets CARGO"))
+        .current_dir(manifest)
+        .env("CARGO_ENCODED_RUSTFLAGS", "-Crelocation-model=pic")
+        .env_remove("RUSTFLAGS")
+        .args([
+            "rustc",
+            "--locked",
+            "--offline",
+            "--release",
+            "--package=perry-json-helper",
+            "--crate-type=cdylib",
+            "--target=wasm32-unknown-unknown",
+            "--target-dir",
+        ])
+        .arg(&target)
+        .args([
+            "--",
+            "-Clto=fat",
+            "-Clink-arg=--shared",
+            "-Clink-arg=--no-entry",
+            "-Clink-arg=--import-memory",
+        ])
+        .status()
+        .expect("build embedded JSON helper");
+    assert!(status.success(), "compile embedded JSON helper");
+    let source = target.join("wasm32-unknown-unknown/release/perry_json_helper.wasm");
+    let module = output.join("json.wasm");
+    fs::copy(source, &module).expect("copy embedded JSON helper");
+    let wasm = fs::read(module).expect("read embedded JSON helper");
+    wasmparser::Validator::new()
+        .validate_all(&wasm)
+        .expect("validate embedded JSON helper");
 }

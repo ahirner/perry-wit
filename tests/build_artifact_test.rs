@@ -15,6 +15,31 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
         )
         .unwrap();
     }
+    for source in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/guest-runtime/Cargo.toml",
+        "crates/json-helper/Cargo.toml",
+        "crates/json-helper/src/lib.rs",
+        "crates/json-helper/src/guest.rs",
+        "src/helpers/json.rs",
+        "src/helpers/json/parse.rs",
+        "src/helpers/json/serialize.rs",
+        "src/helpers/json/storage.rs",
+    ] {
+        let destination = scratch.join(source);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(repo_root.join(source), destination).unwrap();
+    }
+    for source in [
+        "src/lib.rs",
+        "src/main.rs",
+        "crates/guest-runtime/src/lib.rs",
+    ] {
+        let destination = scratch.join(source);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, "").unwrap();
+    }
 
     let test_binary = std::env::current_exe().expect("locate running test binary");
     let deps_dir = test_binary
@@ -134,6 +159,17 @@ fn selected_runtime_artifacts_are_watched_and_copied() {
             );
             assert!(scratch.join("out/search.wasm").exists());
             assert!(scratch.join("out/text.wasm").exists());
+            assert!(scratch.join("out/json.wasm").exists());
+            assert!(
+                stdout_str
+                    .lines()
+                    .any(|line| line == "cargo:rerun-if-changed=crates/json-helper")
+            );
+            assert!(
+                stdout_str
+                    .lines()
+                    .any(|line| line == "cargo:rerun-if-changed=Cargo.lock")
+            );
         }
     }
     fs::remove_dir_all(scratch).unwrap();
