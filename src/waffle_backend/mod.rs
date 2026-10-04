@@ -27,6 +27,7 @@ pub(crate) mod strings;
 mod structured;
 pub mod text_contract;
 mod text_or_bytes;
+mod values;
 mod visit;
 
 use anyhow::{Context, Result};
@@ -97,6 +98,7 @@ fn compile_resolved_hir(
     bindings: &source::SourceBindings,
 ) -> Result<WaffleCompiled> {
     objects::resolve_declared_types(&mut hir)?;
+    values::resolve_types(&mut hir);
     text_contract::validate_hir_text(&hir).context("HIR text contract validation failed")?;
 
     let contract = resolve::resolve_contract(&hir, bindings)?;

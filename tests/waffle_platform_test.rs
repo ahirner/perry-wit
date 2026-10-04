@@ -13,6 +13,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 #[path = "waffle_platform/date.rs"]
 mod date;
+#[path = "waffle_platform/values.rs"]
+mod values;
 
 struct Host {
     context: WasiCtx,

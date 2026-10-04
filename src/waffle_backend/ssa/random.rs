@@ -34,6 +34,27 @@ impl FunctionLowerer<'_> {
             let view = self.expression(argument)?;
             let valid = self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]);
             (view, valid)
+        } else if crate::waffle_backend::values::is_dynamic(&ty) {
+            let value = self.expression(argument)?;
+            let (tag, payload) = self.value_parts(value);
+            let expected = self.op(
+                Operator::I32Const {
+                    value: crate::waffle_backend::values::ValueTag::Bytes as u32,
+                },
+                &[],
+                &[Type::I32],
+            );
+            let valid = self.op(Operator::I32Eq, &[tag, expected], &[Type::I32]);
+            let empty = self.op(
+                Operator::F64Const {
+                    value: 0.0f64.to_bits(),
+                },
+                &[],
+                &[Type::F64],
+            );
+            let pointer = self.op(Operator::Select, &[payload, empty, valid], &[Type::F64]);
+            let view = self.op(Operator::I32TruncF64U, &[pointer], &[Type::I32]);
+            (view, valid)
         } else if is_text_or_bytes(&ty) {
             let value = self.expression(argument)?;
             self.text_or_bytes_parts(value)

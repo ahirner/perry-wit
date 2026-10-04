@@ -94,6 +94,42 @@ pub(crate) fn visit_statement_nodes(statements: &[Stmt], visitor: &mut dyn FnMut
     }
 }
 
+pub(crate) fn visit_statement_nodes_mut(input: &mut [Stmt], visitor: &mut impl FnMut(&mut Stmt)) {
+    let mut statements: Vec<_> = input.iter_mut().collect();
+    while let Some(statement) = statements.pop() {
+        visitor(statement);
+        match statement {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                statements.extend(then_branch);
+                statements.extend(else_branch.iter_mut().flatten());
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => statements.extend(body),
+            Stmt::For { init, body, .. } => {
+                statements.extend(init.iter_mut().map(Box::as_mut));
+                statements.extend(body);
+            }
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
+                statements.extend(body);
+                statements.extend(catch.iter_mut().flat_map(|catch| &mut catch.body));
+                statements.extend(finally.iter_mut().flatten());
+            }
+            Stmt::Switch { cases, .. } => {
+                statements.extend(cases.iter_mut().flat_map(|case| &mut case.body))
+            }
+            Stmt::Labeled { body, .. } => statements.push(body),
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn visit_expression(expression: &Expr, visitor: &mut dyn FnMut(&Expr)) {
     visitor(expression);
     walk_expr_children(expression, &mut |child| visit_expression(child, visitor));

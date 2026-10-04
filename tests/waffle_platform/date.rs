@@ -252,16 +252,57 @@ async fn utc_calendar_getters_match_node_across_negative_days_and_leap_centuries
     Ok(())
 }
 
-#[test]
-fn dynamic_date_coercion_keeps_the_general_value_abi_gap_explicit() {
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_date_coercion_preserves_mixed_guest_arguments() -> Result<()> {
     let source = r#"
     function time(value:any):number {return new Date(value).getTime();}
-    export function run():number {return time(null)+time(undefined)+time(false)+time(true);}
+    export function run(mode:number):number {
+        if(mode===0) {return time(null);}
+        if(mode===1) {return time(undefined);}
+        if(mode===2) {return time(false);}
+        if(mode===3) {return time(true);}
+        if(mode===4) {return time(1.9);}
+        return time(new Date(-1.9));
+    }
     "#;
+    let (mut store, instance) = instantiate(source, 65536, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    let mut actual_values = Vec::new();
+    for (mode, expected) in [0.0, f64::NAN, 0.0, 1.0, 1.0, -1.0].into_iter().enumerate() {
+        let actual = run.call_async(&mut store, (mode as f64,)).await?.0;
+        if expected.is_nan() {
+            assert!(actual.is_nan());
+        } else {
+            assert_eq!(actual, expected);
+        }
+        actual_values.push(if actual.is_nan() {
+            "NaN".to_string()
+        } else {
+            actual.to_string()
+        });
+    }
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("coercion.mts");
+    std::fs::write(
+        &script,
+        format!(
+            "{source}\nprocess.stdout.write(JSON.stringify([0,1,2,3,4,5].map(mode=>String(run(mode)))));"
+        ),
+    )?;
+    let node = Command::new("node")
+        .arg("--disable-warning=ExperimentalWarning")
+        .arg(script)
+        .output()?;
     assert!(
-        compile_typescript_waffle(source, "dynamic-date.ts", &WaffleCompileOptions::default())
-            .is_err()
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
     );
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&node.stdout)?,
+        actual_values
+    );
+    Ok(())
 }
 
 #[test]
@@ -303,62 +344,72 @@ async fn pending_dates_survive_sibling_collection_and_release_on_disposal() -> R
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
-    for dispose in [false, true] {
-        let entered = Arc::new(Notify::new());
-        let collected = Arc::new(Notify::new());
-        let finish = Arc::new(Notify::new());
-        let dropped = Arc::new(AtomicUsize::new(0));
-        let (mut store, instance) = instantiate(source, 65536, |linker| {
-            let entered = entered.clone();
-            let finish = finish.clone();
-            let dropped = dropped.clone();
-            linker
-                .instance("wasi:clocks/monotonic-clock@0.3.0")?
-                .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
-                    let entered = entered.clone();
-                    let finish = finish.clone();
-                    let dropped = dropped.clone();
-                    Box::pin(async move {
-                        assert_eq!(duration, 2_000_000);
-                        let _owner = WaitOwner(dropped);
-                        entered.notify_one();
-                        finish.notified().await;
-                        Ok(())
-                    })
-                })?;
-            let collected = collected.clone();
-            linker.instance("wasi:random/random@0.3.0")?.func_wrap(
-                "get-random-u64",
-                move |_: StoreContextMut<'_, Host>, (): ()| {
-                    collected.notify_one();
-                    Ok((0u64,))
-                },
-            )?;
-            Ok(())
-        })
-        .await?;
-        let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
-        for index in 0..if dispose { 1 } else { 10 } {
-            let mut invocation = Box::pin(run.call_async(&mut store, ()));
-            tokio::select! {
-                result=&mut invocation=>panic!("returned before controlled wait: {result:?}"),
-                result=timeout(Duration::from_secs(5),async {entered.notified().await;collected.notified().await;})=>{result?;}
+    let dynamic = source
+        .replace("make():Promise<Date>", "make(input:any):Promise<any>")
+        .replace("const date=new Date(-1);", "const date=input;")
+        .replace("const pending=make();", "const pending=make(new Date(-1));")
+        .replace(
+            "return date.toISOString();",
+            "return new Date(date).toISOString();",
+        );
+    for source in [source, dynamic.as_str()] {
+        for dispose in [false, true] {
+            let entered = Arc::new(Notify::new());
+            let collected = Arc::new(Notify::new());
+            let finish = Arc::new(Notify::new());
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let (mut store, instance) = instantiate(source, 65536, |linker| {
+                let entered = entered.clone();
+                let finish = finish.clone();
+                let dropped = dropped.clone();
+                linker
+                    .instance("wasi:clocks/monotonic-clock@0.3.0")?
+                    .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
+                        let entered = entered.clone();
+                        let finish = finish.clone();
+                        let dropped = dropped.clone();
+                        Box::pin(async move {
+                            assert_eq!(duration, 2_000_000);
+                            let _owner = WaitOwner(dropped);
+                            entered.notify_one();
+                            finish.notified().await;
+                            Ok(())
+                        })
+                    })?;
+                let collected = collected.clone();
+                linker.instance("wasi:random/random@0.3.0")?.func_wrap(
+                    "get-random-u64",
+                    move |_: StoreContextMut<'_, Host>, (): ()| {
+                        collected.notify_one();
+                        Ok((0u64,))
+                    },
+                )?;
+                Ok(())
+            })
+            .await?;
+            let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+            for index in 0..if dispose { 1 } else { 10 } {
+                let mut invocation = Box::pin(run.call_async(&mut store, ()));
+                tokio::select! {
+                    result=&mut invocation=>panic!("returned before controlled wait: {result:?}"),
+                    result=timeout(Duration::from_secs(5),async {entered.notified().await;collected.notified().await;})=>{result?;}
+                }
+                if dispose {
+                    drop(invocation);
+                    break;
+                }
+                finish.notify_one();
+                assert_eq!(
+                    timeout(Duration::from_secs(5), invocation).await??.0,
+                    "1969-12-31T23:59:59.999Z"
+                );
+                assert_eq!(dropped.load(Ordering::SeqCst), index + 1);
+                store.assert_concurrent_state_empty();
             }
+            drop(store);
             if dispose {
-                drop(invocation);
-                break;
+                assert_eq!(dropped.load(Ordering::SeqCst), 1);
             }
-            finish.notify_one();
-            assert_eq!(
-                timeout(Duration::from_secs(5), invocation).await??.0,
-                "1969-12-31T23:59:59.999Z"
-            );
-            assert_eq!(dropped.load(Ordering::SeqCst), index + 1);
-            store.assert_concurrent_state_empty();
-        }
-        drop(store);
-        if dispose {
-            assert_eq!(dropped.load(Ordering::SeqCst), 1);
         }
     }
     Ok(())

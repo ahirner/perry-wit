@@ -79,6 +79,9 @@ impl FunctionLowerer<'_> {
     pub(super) fn type_of(&mut self, expression: &Expr) -> Result<Value> {
         let ty = self.infer_expr_type(expression);
         let value = self.expression(expression)?;
+        if crate::waffle_backend::values::is_dynamic(&ty) {
+            return self.value_typeof(value);
+        }
         if is_text_or_bytes(&ty) {
             let (_, binary) = self.text_or_bytes_parts(value);
             let text = self.expression(&Expr::String("string".into()))?;

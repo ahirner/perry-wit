@@ -78,6 +78,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
     pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
     pub(crate) text_or_bytes_lift: Option<Func>,
+    pub(crate) value_helpers: Option<super::values::ValueHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
@@ -262,6 +263,18 @@ impl ModuleRegistry {
             None
         };
 
+        let value_helpers = if super::values::required(hir) {
+            Some(super::values::emit_runtime(
+                module,
+                memory,
+                allocator.expect("dynamic values require storage"),
+                string_helpers
+                    .expect("dynamic text requires comparison")
+                    .str_compare,
+            )?)
+        } else {
+            None
+        };
         let object_helpers = if string_reqs.objects {
             Some(super::objects::emit_runtime(
                 module,
@@ -270,6 +283,7 @@ impl ModuleRegistry {
                 string_helpers
                     .expect("objects require string keys")
                     .str_compare,
+                value_helpers.expect("objects share tagged values").new,
             )?)
         } else {
             None
@@ -378,6 +392,7 @@ impl ModuleRegistry {
                     "WIT Result error payloads must be numeric until the exception ABI preserves primitive type tags"
                 );
                 Some(match &type_args[0] {
+                    ty if super::values::is_dynamic(ty) => ValuePayload::Number,
                     HirType::Number | HirType::Any => ValuePayload::Number,
                     HirType::Boolean => ValuePayload::Boolean,
                     HirType::String => ValuePayload::String,
@@ -461,6 +476,7 @@ impl ModuleRegistry {
             allocator,
             byte_helpers,
             text_or_bytes_lift,
+            value_helpers,
             date_helpers,
             decoder_helpers,
             filesystem_helpers,
@@ -478,6 +494,7 @@ impl ModuleRegistry {
 pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
     match ty {
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(Type::I32),
+        ty if super::values::is_dynamic(ty) => Ok(Type::I32),
         HirType::Number | HirType::Any => Ok(Type::F64),
         HirType::Boolean => Ok(Type::I32),
         HirType::String => Ok(Type::I32),
@@ -496,6 +513,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
     match ty {
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(vec![Type::I32]),
         HirType::Void => Ok(vec![]),
+        ty if super::values::is_dynamic(ty) => Ok(vec![Type::F64]),
         HirType::Number | HirType::Any => Ok(vec![Type::F64]),
         HirType::Boolean => Ok(vec![Type::I32]),
         HirType::String => Ok(vec![Type::I32]),
@@ -516,6 +534,10 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
 pub(crate) fn canonical_param_types(params: &[HirType]) -> Result<Vec<Type>> {
     let mut flat = Vec::new();
     for ty in params {
+        if super::values::is_dynamic(ty) {
+            flat.push(Type::F64);
+            continue;
+        }
         if super::filesystem::is_stats(ty) {
             flat.extend([Type::F64, Type::F64, Type::I32]);
             continue;

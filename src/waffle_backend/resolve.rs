@@ -353,6 +353,7 @@ pub(crate) fn resolve_contract(
     let input_kind = if let Some(first_param) = entry_func.params.first() {
         match &first_param.ty {
             HirType::Named(name) if name == "ByteStream" => ResolvedInputKind::ByteStream,
+            ty if super::values::is_dynamic(ty) => ResolvedInputKind::Number,
             HirType::Number | HirType::Any => ResolvedInputKind::Number,
             HirType::Boolean => ResolvedInputKind::Boolean,
             HirType::String => ResolvedInputKind::String,

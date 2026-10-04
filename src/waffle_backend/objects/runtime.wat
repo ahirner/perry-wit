@@ -1,6 +1,7 @@
 (module
   (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
   (import "host" "compare" (func $compare (param i32 i32) (result i32)))
+  (import "host" "box" (func $box (param i32 f64) (result i32)))
   (memory 1)
   ;; Object: first and last entries. Entry: next, key, tag, padding, f64 payload.
   (func (export "object.new") (result i32) (local $object i32)
@@ -49,6 +50,9 @@
       (local.set $entry (i32.load (local.get $entry)))
       (br $entries)))
     (i32.const 1))
+  (func (export "object.dynamic") (param $entry i32) (result i32)
+    (if (i32.eqz (local.get $entry)) (then (return (call $box (i32.const 0) (f64.const 0)))))
+    (call $box (i32.load offset=8 (local.get $entry)) (f64.load offset=16 (local.get $entry))))
   ;; Tags: undefined=0, null=1, boolean=2, number=3; reference tags start at 4.
   (func (export "object.value") (param $entry i32) (param $tag i32) (param $optional i32) (result i32 f64)
     (if (i32.eqz (local.get $entry)) (then

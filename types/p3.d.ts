@@ -6,11 +6,13 @@
  * for a view over 65536 bytes, and makes no host call for an empty view.
  * Random UUIDs are lowercase v4 strings. Clock reads use milliseconds; Date.now()
  * returns whole signed UTC epoch milliseconds. Date construction accepts omitted,
- * numeric, directly typed null/undefined/boolean, and Date-copy arguments. Calendar
+ * numeric, null/undefined/boolean, and Date-copy arguments, including any helpers. Calendar
  * getters use UTC; invalid getters return NaN and toISOString throws numeric 1.
  * Dates retain guest-local identity in helpers, objects, and Promises. Parsing,
- * setters, multi-argument construction, and component Date values are unsupported;
- * mixed values through any helper parameters and callbacks remain migration work. */
+ * setters, multi-argument construction, and component Date values are unsupported.
+ * Unsupported dynamic Date operands throw numeric 12. Guest any values preserve
+ * their tags and references; public any component boundaries remain numeric.
+ * Opaque Promise adoption through any throws 12; callbacks remain migration work. */
 declare module "perry:clocks" {
   /** Wait in milliseconds. May be stored and awaited repeatedly within one invocation.
    * Invalid or overflowing durations trap before host I/O. */

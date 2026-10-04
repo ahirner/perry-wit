@@ -47,7 +47,8 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         let mut names = IdentifierNames::default();
         module.visit_with(&mut names);
         ensure!(
-            !names.0.contains(super::date::DATE_TYPE)
+            !names.0.contains(super::values::VALUE_TYPE)
+                && !names.0.contains(super::date::DATE_TYPE)
                 && !names.0.contains(super::decoder::DECODER_TYPE)
                 && !names.0.iter().any(|name| name.starts_with("__AnonShape_")),
             "Reserved compiler type name in source"

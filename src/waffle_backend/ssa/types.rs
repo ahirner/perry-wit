@@ -26,6 +26,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 
 pub(super) fn is_reference(ty: &HirType) -> bool {
     match ty {
+        ty if crate::waffle_backend::values::is_dynamic(ty) => true,
         HirType::Object(_) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty)
             || crate::waffle_backend::date::is_date(ty) =>

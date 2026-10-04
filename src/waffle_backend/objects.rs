@@ -16,6 +16,7 @@ pub(crate) struct ObjectHelpers {
     pub(crate) get: Func,
     pub(crate) delete: Func,
     pub(crate) value: Func,
+    pub(crate) dynamic: Func,
 }
 
 pub(crate) fn is_object(ty: &HirType) -> bool {
@@ -86,39 +87,15 @@ pub(crate) fn resolve_declared_types(hir: &mut HirModule) -> Result<()> {
             &definitions,
             &mut BTreeSet::new(),
         )?;
-        let mut statements: Vec<_> = function.body.iter_mut().collect();
-        while let Some(statement) = statements.pop() {
-            match statement {
-                Stmt::Let { ty, .. } => resolve_type(ty, &definitions, &mut BTreeSet::new())?,
-                Stmt::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    statements.extend(then_branch);
-                    statements.extend(else_branch.iter_mut().flatten());
-                }
-                Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => statements.extend(body),
-                Stmt::For { init, body, .. } => {
-                    statements.extend(init.iter_mut().map(Box::as_mut));
-                    statements.extend(body);
-                }
-                Stmt::Try {
-                    body,
-                    catch,
-                    finally,
-                } => {
-                    statements.extend(body);
-                    statements.extend(catch.iter_mut().flat_map(|catch| &mut catch.body));
-                    statements.extend(finally.iter_mut().flatten());
-                }
-                Stmt::Switch { cases, .. } => {
-                    statements.extend(cases.iter_mut().flat_map(|case| &mut case.body))
-                }
-                Stmt::Labeled { body, .. } => statements.push(body),
-                _ => {}
+        let mut result = Ok(());
+        super::visit::visit_statement_nodes_mut(&mut function.body, &mut |statement| {
+            if result.is_ok()
+                && let Stmt::Let { ty, .. } = statement
+            {
+                result = resolve_type(ty, &definitions, &mut BTreeSet::new());
             }
-        }
+        });
+        result?;
     }
     Ok(())
 }
@@ -169,12 +146,17 @@ pub(crate) fn emit_runtime(
     memory: Memory,
     allocator: AllocationFuncs,
     compare: Func,
+    boxed_value: Func,
 ) -> Result<ObjectHelpers> {
     let functions = runtime::emit_functions(
         module,
         memory,
         include_str!("objects/runtime.wat"),
-        &BTreeMap::from([("realloc", allocator.realloc), ("compare", compare)]),
+        &BTreeMap::from([
+            ("realloc", allocator.realloc),
+            ("compare", compare),
+            ("box", boxed_value),
+        ]),
     )?;
     Ok(ObjectHelpers {
         new: functions["object.new"],
@@ -182,5 +164,6 @@ pub(crate) fn emit_runtime(
         get: functions["object.get"],
         delete: functions["object.delete"],
         value: functions["object.value"],
+        dynamic: functions["object.dynamic"],
     })
 }

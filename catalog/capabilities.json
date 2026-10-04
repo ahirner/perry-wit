@@ -201,24 +201,26 @@
       "name": "P3 Date Values and UTC Calendar Operations",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: typed Date construction, copies, time/calendar getters, and ISO serialization",
+      "domain": "WAFFLE Rust compiler API: Date construction, mixed-value coercions, copies, time/calendar getters, and ISO serialization",
       "invariants": [
-        "Omitted arguments read the signed P3 system clock; numeric, directly typed null/undefined/boolean, and Date arguments preserve time clipping and invalid dates",
+        "Omitted arguments read the signed P3 system clock; numeric, null/undefined/boolean, and Date arguments preserve time clipping and invalid dates, including through any helpers",
         "Date copies have distinct object identity and aliases retain identity",
         "getTime and valueOf return the timestamp; calendar getters and their UTC variants use UTC and return NaN for invalid dates",
         "ISO formatting covers the entire clipped range, including negative timestamps, year zero, and signed six-digit years",
         "Invalid ISO serialization throws numeric 1 through shared catch/finally completion handling",
         "Dates and ISO strings survive helpers, object properties, retained Promises, suspension, and repeated allocating loops under a 64 KiB guest cap",
-        "Pure date computations require no WASI imports; only omitted construction reads the clock"
+        "Pure date computations require no WASI imports; only omitted construction reads the clock",
+        "Shared tagged values preserve mixed helper parameters/results, typed any object fields, strict equality, truthiness, typeof, and retained Promise<any> outcomes"
       ],
       "differences": [
         "The default CLI remains on the legacy pipeline until R9",
-        "Mixed primitive/Date values through any helper parameters require the still-open general value ABI",
+        "Unsupported dynamic Date operands and mismatched typed guest boundaries throw numeric 12; public any component boundaries retain their numeric contract",
+        "Awaiting or adopting an opaque Promise hidden inside any throws numeric 12 until dynamic outcome tags are supported",
         "Date values are guest-internal and cannot cross component parameters or results",
         "String parsing, multi-argument construction, setters, dynamic methods, and method arguments are diagnosed",
         "Calendar getters use UTC regardless of the host time zone; invalid ISO errors are numeric rather than Error objects"
       ],
-      "conformance": ["tests/waffle_platform/date.rs"]
+      "conformance": ["tests/waffle_platform/date.rs", "tests/waffle_platform/values.rs"]
     },
     {
       "id": "web.guest_callbacks",

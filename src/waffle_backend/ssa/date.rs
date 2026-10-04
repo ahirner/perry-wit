@@ -14,7 +14,16 @@ impl FunctionLowerer<'_> {
         );
         let argument = &arguments[0];
         let ty = self.infer_expr_type(argument);
-        let time = if is_date(&ty) {
+        let time = if crate::waffle_backend::values::is_dynamic(&ty) {
+            let value = self.expression(argument)?;
+            self.call_completion(
+                self.registry
+                    .value_helpers
+                    .expect("dynamic values have helpers")
+                    .date_number,
+                &[value],
+            )
+        } else if is_date(&ty) {
             self.date_method(argument, "getTime", &[])?
         } else if matches!(ty, HirType::Null) {
             self.op(

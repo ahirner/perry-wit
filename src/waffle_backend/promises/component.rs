@@ -204,6 +204,7 @@ fn entry_adapter(contract: &ResolvedContract) -> Result<String> {
     }
     let (return_params, return_args) = match return_type {
         HirType::Void => ("", String::new()),
+        ty if crate::waffle_backend::values::is_dynamic(ty) => ("f64", "(local.get $result)".into()),
         HirType::Number | HirType::Any => ("f64", "(local.get $result)".into()),
         HirType::Boolean => ("i32", "(local.get $result)".into()),
         ty if crate::waffle_backend::filesystem::is_stats(ty) => (
@@ -221,6 +222,7 @@ fn entry_adapter(contract: &ResolvedContract) -> Result<String> {
         HirType::Generic { base, type_args } if base == "Result" => {
             let tag = "(i32.load8_u (local.get $result))";
             match &type_args[0] {
+                ty if crate::waffle_backend::values::is_dynamic(ty) => ("i32 f64", format!("{tag} (f64.load offset=8 (local.get $result))")),
                 HirType::Number | HirType::Any => (
                     "i32 f64",
                     format!("{tag} (f64.load offset=8 (local.get $result))"),

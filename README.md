@@ -170,7 +170,7 @@ The zero-argument builtin `Math.random()` uses the same random operation.
 `Date.now()` returns whole UTC epoch milliseconds from the signed P3 system clock.
 Only the selected clock functions are imported, including when reads and waits share
 one component. `new Date()` uses that same system-clock import. Numeric construction,
-Date copies, and directly typed null/undefined/boolean arguments preserve clipping
+Date copies, and null/undefined/boolean arguments preserve clipping
 and invalid-date behavior. Dates retain distinct object identity through helper calls,
 plain object properties, stored Promises, and native suspension. `getTime`, `valueOf`,
 calendar getters from `getFullYear` through `getMilliseconds` (and their UTC forms),
@@ -178,9 +178,14 @@ and `toISOString` are supported; all calendar getters use UTC. Invalid getters r
 NaN, while invalid ISO serialization throws numeric code `1` through catch/finally.
 Pure calendar tasks import no WASI capabilities. String parsing, multi-argument
 construction, setters, and Date values at component boundaries are unsupported.
-Mixed primitive/Date arguments passed through `any` helper parameters still need the
-general value ABI; this gap keeps the full Date migration open. Callback timers also
-remain separate migration work.
+Mixed primitive/Date arguments also pass through `any` helper parameters and results.
+Shared tagged values preserve strict equality, truthiness, type tags, typed object
+fields, and retained `Promise<any>` outcomes. Typed boundaries validate the stored
+kind and throw numeric `12` on a mismatch. Unsupported dynamic Date operands also
+throw `12`. Public `any` component parameters/results retain their numeric contract;
+heterogeneous values remain guest-internal. Awaiting or adopting a Promise hidden
+inside `any` throws `12` until dynamic Promise outcome tags are supported. Callback
+timers remain separate migration work.
 `crypto.getRandomValues(view)` fills only the visible `Uint8Array` range and returns
 the same view. Empty views make no host call. Invalid supported value kinds throw
 numeric code `1`; views larger than 65,536 bytes throw `2`, before requesting randomness

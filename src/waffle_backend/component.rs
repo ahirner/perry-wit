@@ -196,6 +196,7 @@ pub(crate) fn entry_signature(contract: &ResolvedContract) -> Result<String> {
 /// Map supported entry values without confusing core handles with component streams.
 pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
     match ty {
+        ty if super::values::is_dynamic(ty) => Ok("f64".into()),
         HirType::Number | HirType::Any => Ok("f64".into()),
         HirType::Boolean => Ok("bool".into()),
         HirType::String => Ok("string".into()),
@@ -215,6 +216,7 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
 
 fn requires_allocation(ty: &HirType) -> bool {
     match ty {
+        ty if super::values::is_dynamic(ty) => true,
         HirType::String => true,
         ty if super::filesystem::is_stats(ty) || super::structured::is_string_array(ty) => true,
         ty if super::text_or_bytes::is_text_or_bytes(ty) => true,

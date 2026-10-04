@@ -18,6 +18,7 @@ mod requirements;
 mod string_ops;
 mod text_or_bytes;
 mod types;
+mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,7 +64,8 @@ pub(crate) fn lower_module(
 
     // 2. Scan module for string requirements and build string pool if needed
     let mut reqs = scan_module_string_requirements(hir);
-    reqs.needs_strings |= super::date::required(hir)
+    reqs.needs_strings |= super::values::required(hir)
+        || super::date::required(hir)
         || contract.has_filesystem()
         || contract
             .random_operations()
@@ -326,52 +328,16 @@ impl<'a> FunctionLowerer<'a> {
                 Stmt::Return(expr) => {
                     let ret_val = expr
                         .as_ref()
-                        .map(|expr| {
-                            if matches!(self.infer_expr_type(expr), HirType::Promise(_)) {
-                                ensure!(
-                                    self.is_async,
-                                    "Returning a stored Promise requires an async function"
-                                );
-                                ensure!(super::text_or_bytes::equivalent(&self.infer_expr_type(expr), &HirType::Promise(Box::new(self.return_type.clone()))), "Returned Promise outcome does not match the function result type");
-                                return self
-                                    .await_expression(expr, false)?
-                                    .ok_or_else(|| anyhow::anyhow!("Promise return has no value"));
-                            }
-                            if is_text_or_bytes(self.return_type) {
-                                self.text_or_bytes_operand(expr)
-                            } else if self.return_type == &HirType::String {
-                                self.string_receiver(expr)
-                            } else if super::bytes::is_byte_view(self.return_type) {
-                                self.byte_receiver(expr)
-                            } else if super::decoder::is_decoder(self.return_type) {
-                                self.decoder_receiver(expr)
-                            } else if super::objects::is_object(self.return_type) {
-                                ensure!(super::objects::is_object(&self.infer_expr_type(expr)), "Object results require object values");
-                                self.expression(expr)
-                            } else if super::filesystem::is_stats(self.return_type) || super::date::is_date(self.return_type) || matches!(self.return_type, HirType::Array(_)) {
-                                ensure!(&self.infer_expr_type(expr) == self.return_type, "Returned value must match {:?}", self.return_type);
-                                self.expression(expr)
-                            } else {
-                                ensure!(!super::objects::is_object(&self.infer_expr_type(expr)), "Cannot return a plain object as {:?}", self.return_type);
-                                ensure!(!super::filesystem::is_stats(&self.infer_expr_type(expr)) && !matches!(self.infer_expr_type(expr), HirType::Array(_)), "Cannot return an object as {:?}", self.return_type);
-                                ensure!(!is_text_or_bytes(&self.infer_expr_type(expr)), "Cannot return a string-or-byte value as {:?}; narrow it first", self.return_type);
-                                ensure!(!super::date::is_date(&self.infer_expr_type(expr)), "Cannot return a Date as {:?}", self.return_type);
-                                ensure!(!super::decoder::is_decoder(&self.infer_expr_type(expr)), "Cannot return a TextDecoder as {:?}", self.return_type);
-                                ensure!(!super::bytes::is_byte_view(&self.infer_expr_type(expr)), "Cannot return a Uint8Array as {:?}", self.return_type);
-                                ensure!(
-                                    !self.is_string_or_undefined(expr)
-                                        || self.return_type == &HirType::Void,
-                                    "Cannot return a string-or-undefined value as {:?}",
-                                    self.return_type
-                                );
-                                self.expression(expr)
-                            }
-                        })
+                        .map(|expr| self.return_expression(expr))
                         .transpose()?;
                     self.emit_return(ret_val);
                 }
                 Stmt::Throw(expr) => {
-                    let err_val = self.expression(expr)?;
+                    let err_val = if super::values::is_dynamic(&self.infer_expr_type(expr)) {
+                        self.unbox_value(expr, &HirType::Number)?
+                    } else {
+                        self.expression(expr)?
+                    };
                     ensure!(
                         self.body.values[err_val].ty(&self.body.type_pool) == Some(Type::F64),
                         "Only numeric thrown payloads are supported until the exception ABI preserves primitive type tags"
@@ -416,6 +382,115 @@ impl<'a> FunctionLowerer<'a> {
             }
         }
         Ok(())
+    }
+
+    fn return_expression(&mut self, expr: &Expr) -> Result<Value> {
+        if let HirType::Promise(result) = self.infer_expr_type(expr) {
+            ensure!(
+                self.is_async,
+                "Returning a stored Promise requires an async function"
+            );
+            let value = self
+                .await_expression(expr, false)?
+                .ok_or_else(|| anyhow::anyhow!("Promise return has no value"))?;
+            if super::values::is_dynamic(self.return_type) {
+                return self.box_typed_value(value, &result);
+            }
+            if super::values::is_dynamic(&result) {
+                return self.extract_value(value, &self.return_type.clone());
+            }
+            ensure!(
+                super::text_or_bytes::equivalent(&result, self.return_type),
+                "Returned Promise outcome does not match the function result type"
+            );
+            return Ok(value);
+        }
+        if super::values::is_dynamic(self.return_type) {
+            let value = self.value_operand(expr)?;
+            if self.is_async {
+                let payload = self.call_completion(
+                    self.registry
+                        .value_helpers
+                        .expect("dynamic values have helpers")
+                        .async_result,
+                    &[value],
+                );
+                return Ok(abi::decode_payload(
+                    &mut self.body,
+                    self.block,
+                    payload,
+                    true,
+                ));
+            }
+            return Ok(value);
+        }
+        if super::values::is_dynamic(&self.infer_expr_type(expr)) {
+            let expected = self.return_type.clone();
+            return self.unbox_value(expr, &expected);
+        }
+        if is_text_or_bytes(self.return_type) {
+            self.text_or_bytes_operand(expr)
+        } else if self.return_type == &HirType::String {
+            self.string_receiver(expr)
+        } else if super::bytes::is_byte_view(self.return_type) {
+            self.byte_receiver(expr)
+        } else if super::decoder::is_decoder(self.return_type) {
+            self.decoder_receiver(expr)
+        } else if super::objects::is_object(self.return_type) {
+            ensure!(
+                super::objects::is_object(&self.infer_expr_type(expr)),
+                "Object results require object values"
+            );
+            self.expression(expr)
+        } else if super::filesystem::is_stats(self.return_type)
+            || super::date::is_date(self.return_type)
+            || matches!(self.return_type, HirType::Array(_))
+        {
+            ensure!(
+                &self.infer_expr_type(expr) == self.return_type,
+                "Returned value must match {:?}",
+                self.return_type
+            );
+            self.expression(expr)
+        } else {
+            ensure!(
+                !super::objects::is_object(&self.infer_expr_type(expr)),
+                "Cannot return a plain object as {:?}",
+                self.return_type
+            );
+            ensure!(
+                !super::filesystem::is_stats(&self.infer_expr_type(expr))
+                    && !matches!(self.infer_expr_type(expr), HirType::Array(_)),
+                "Cannot return an object as {:?}",
+                self.return_type
+            );
+            ensure!(
+                !is_text_or_bytes(&self.infer_expr_type(expr)),
+                "Cannot return a string-or-byte value as {:?}; narrow it first",
+                self.return_type
+            );
+            ensure!(
+                !super::date::is_date(&self.infer_expr_type(expr)),
+                "Cannot return a Date as {:?}",
+                self.return_type
+            );
+            ensure!(
+                !super::decoder::is_decoder(&self.infer_expr_type(expr)),
+                "Cannot return a TextDecoder as {:?}",
+                self.return_type
+            );
+            ensure!(
+                !super::bytes::is_byte_view(&self.infer_expr_type(expr)),
+                "Cannot return a Uint8Array as {:?}",
+                self.return_type
+            );
+            ensure!(
+                !self.is_string_or_undefined(expr) || self.return_type == &HirType::Void,
+                "Cannot return a string-or-undefined value as {:?}",
+                self.return_type
+            );
+            self.expression(expr)
+        }
     }
 
     fn if_statement(
@@ -561,6 +636,19 @@ impl<'a> FunctionLowerer<'a> {
                 _ => None,
             };
             let argument_type = self.infer_expr_type(arg);
+            if expected.is_some_and(super::values::is_dynamic) {
+                arg_vals.push(self.value_operand(arg)?);
+                continue;
+            }
+            if super::values::is_dynamic(&argument_type) {
+                let expected = expected
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Dynamic arguments need a declared parameter type")
+                    })?
+                    .clone();
+                arg_vals.push(self.unbox_value(arg, &expected)?);
+                continue;
+            }
             if expected.is_some_and(super::objects::is_object)
                 || super::objects::is_object(&argument_type)
             {
@@ -759,6 +847,27 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
+        if super::values::is_dynamic(&self.infer_expr_type(expr)) {
+            let value = self.expression(expr)?;
+            let payload = self.call_completion(
+                self.registry
+                    .value_helpers
+                    .expect("dynamic values have helpers")
+                    .async_result,
+                &[value],
+            );
+            let value = abi::decode_payload(&mut self.body, self.block, payload, true);
+            if let Some(runtime) = &self.registry.promises {
+                self.op(
+                    Operator::Call {
+                        function_index: runtime.yield_thread,
+                    },
+                    &[],
+                    &[],
+                );
+            }
+            return Ok(self.continuation(if is_statement { None } else { Some(value) }));
+        }
         if let Some(runtime) = &self.registry.promises {
             let value = self.expression(expr)?;
             let result = if let HirType::Promise(result) = self.infer_expr_type(expr) {
@@ -833,6 +942,12 @@ impl<'a> FunctionLowerer<'a> {
             } => {
                 let value = self.condition(operand)?;
                 Ok(self.op(Operator::I32Eqz, &[value], &[Type::I32]))
+            }
+            Expr::Compare { op, left, right }
+                if super::values::is_dynamic(&self.infer_expr_type(left))
+                    || super::values::is_dynamic(&self.infer_expr_type(right)) =>
+            {
+                self.value_comparison(*op, left, right)
             }
             Expr::Compare { op, left, right }
                 if is_text_or_bytes(&self.infer_expr_type(left))
@@ -910,7 +1025,19 @@ impl<'a> FunctionLowerer<'a> {
             _ => {
                 let val = self.expression(expr)?;
                 let ty = self.body.values[val].ty(&self.body.type_pool);
-                if is_text_or_bytes(&self.infer_expr_type(expr)) {
+                if super::values::is_dynamic(&self.infer_expr_type(expr)) {
+                    Ok(self.op(
+                        Operator::Call {
+                            function_index: self
+                                .registry
+                                .value_helpers
+                                .expect("dynamic values have helpers")
+                                .truthy,
+                        },
+                        &[val],
+                        &[Type::I32],
+                    ))
+                } else if is_text_or_bytes(&self.infer_expr_type(expr)) {
                     Ok(self.text_or_bytes_truthiness(val))
                 } else if self.is_string(expr) {
                     Ok(self.string_truthiness(val))
@@ -1080,6 +1207,21 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(if *prefix { updated } else { previous })
             }
             Expr::LocalSet(id, expr) => {
+                if self
+                    .local_types
+                    .get(id)
+                    .is_some_and(super::values::is_dynamic)
+                {
+                    let (original, tag, payload) = self.tagged_value(expr)?;
+                    let value = if super::values::is_dynamic(&self.infer_expr_type(expr)) {
+                        original
+                    } else {
+                        self.box_value(tag, payload)
+                    };
+                    self.locals.insert(*id, value);
+                    self.narrowings.remove(id);
+                    return Ok(original);
+                }
                 if self.local_types.get(id).is_some_and(is_text_or_bytes) {
                     let inferred = self.infer_expr_type(expr);
                     ensure!(
@@ -1275,8 +1417,8 @@ impl<'a> FunctionLowerer<'a> {
                 ))
             }
             Expr::Binary { op, left, right } => {
-                let left_val = self.expression(left)?;
-                let right_val = self.expression(right)?;
+                let left_val = self.numeric_operand(left)?;
+                let right_val = self.numeric_operand(right)?;
                 ensure!(
                     [left_val, right_val]
                         .into_iter()
@@ -1349,6 +1491,25 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn emit_return(&mut self, ret_val: Option<Value>) {
+        let ret_val = if ret_val.is_none() && super::values::is_dynamic(self.return_type) {
+            let tag = self.op(
+                Operator::I32Const {
+                    value: super::values::ValueTag::Undefined as u32,
+                },
+                &[],
+                &[Type::I32],
+            );
+            let payload = self.op(
+                Operator::F64Const {
+                    value: 0.0f64.to_bits(),
+                },
+                &[],
+                &[Type::F64],
+            );
+            Some(self.box_value(tag, payload))
+        } else {
+            ret_val
+        };
         if types::is_reference(self.return_type)
             && let Some(value) = ret_val
         {

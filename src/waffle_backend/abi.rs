@@ -40,6 +40,31 @@ pub(crate) fn build_export_wrapper(
     let mut args = Vec::new();
     let mut param_cursor = 0;
     for param_ty in &callee.param_types {
+        if super::values::is_dynamic(param_ty) {
+            let value = body.blocks[entry].params[param_cursor].1;
+            param_cursor += 1;
+            let tag = body.add_op(
+                entry,
+                Operator::I32Const {
+                    value: super::values::ValueTag::Number as u32,
+                },
+                &[],
+                &[Type::I32],
+            );
+            let boxed = body.add_op(
+                entry,
+                Operator::Call {
+                    function_index: registry
+                        .value_helpers
+                        .expect("dynamic values require helpers")
+                        .new,
+                },
+                &[tag, value],
+                &[Type::I32],
+            );
+            args.push(boxed);
+            continue;
+        }
         if super::text_or_bytes::is_text_or_bytes(param_ty) || super::filesystem::is_stats(param_ty)
         {
             let values: Vec<_> = body.blocks[entry].params[param_cursor..param_cursor + 3]
@@ -104,7 +129,49 @@ pub(crate) fn build_export_wrapper(
             args.push(val);
         }
     }
-    let outcome = emit_fallible_call(&mut body, entry, callee.func_index, &args);
+    let mut outcome = emit_fallible_call(&mut body, entry, callee.func_index, &args);
+    let mut error_payload = outcome.payload;
+    if super::values::is_dynamic(callee.success_type()) {
+        let value = decode_payload(&mut body, outcome.ok_block, outcome.payload, true);
+        let tag = body.add_op(
+            outcome.ok_block,
+            Operator::I32Const {
+                value: super::values::ValueTag::Number as u32,
+            },
+            &[],
+            &[Type::I32],
+        );
+        let extracted = emit_fallible_call(
+            &mut body,
+            outcome.ok_block,
+            registry
+                .value_helpers
+                .expect("dynamic values require helpers")
+                .extract,
+            &[value, tag],
+        );
+        let errors = body.add_block();
+        error_payload = body.add_blockparam(errors, Type::F64);
+        for (block, payload) in [
+            (outcome.err_block, outcome.payload),
+            (extracted.err_block, extracted.payload),
+        ] {
+            body.set_terminator(
+                block,
+                Terminator::Br {
+                    target: BlockTarget {
+                        block: errors,
+                        args: vec![payload],
+                    },
+                },
+            );
+        }
+        outcome = InternalCallOutcome {
+            ok_block: extracted.ok_block,
+            err_block: errors,
+            payload: extracted.payload,
+        };
+    }
     match export.convention {
         ExportConvention::Direct if super::structured::is_string_array(callee.success_type()) => {
             let block = outcome.ok_block;
@@ -157,16 +224,21 @@ pub(crate) fn build_export_wrapper(
             body.set_terminator(outcome.err_block, Terminator::Unreachable);
         }
         ExportConvention::WitResult { success } => {
-            for (block, status, ty) in [
-                (outcome.ok_block, CompletionStatus::Returned, success),
+            for (block, status, ty, payload) in [
+                (
+                    outcome.ok_block,
+                    CompletionStatus::Returned,
+                    success,
+                    outcome.payload,
+                ),
                 (
                     outcome.err_block,
                     CompletionStatus::Threw,
                     ValuePayload::Number,
+                    error_payload,
                 ),
             ] {
-                let retptr =
-                    emit_retptr_store(&mut body, block, registry, status, outcome.payload, ty);
+                let retptr = emit_retptr_store(&mut body, block, registry, status, payload, ty);
                 body.set_terminator(
                     block,
                     Terminator::Return {
