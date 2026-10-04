@@ -115,6 +115,12 @@ impl Builder {
             })
             .collect()
     }
+    pub(crate) fn allocate(&mut self, realloc: Func, size: u32, alignment: u32) -> Value {
+        let zero = self.integer(0);
+        let alignment = self.integer(alignment);
+        let size = self.integer(size);
+        self.call(realloc, &[zero, zero, alignment, size], &[Type::I32])[0]
+    }
     pub(crate) fn jump(&mut self, block: Block, args: &[Value]) {
         self.body.set_terminator(
             self.block,
