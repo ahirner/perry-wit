@@ -37,9 +37,7 @@ impl LowerCapability for RandomOperation {
                 Self::Uuid => HirType::String,
             },
             implementation: if *self == Self::Number {
-                CapabilityImplementation::Standalone {
-                    core_function: "(func $random-number \"sample\")",
-                }
+                CapabilityImplementation::Scalar
             } else {
                 CapabilityImplementation::RandomBytes
             },

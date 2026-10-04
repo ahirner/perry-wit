@@ -1,13 +1,16 @@
 //! Native subtask protocol probes and stored Promise integration tests.
 
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
+use waffle_fixture::compile_typescript_waffle;
 
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
@@ -385,7 +388,7 @@ async fn one_observers_failure_does_not_cancel_the_shared_operation() -> Result<
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn overlapping_entry_calls_trap_before_starting_another_operation() -> Result<()> {
+async fn component_encoder_serializes_overlapping_entry_calls() -> Result<()> {
     let source = r#"import { waitFor } from "perry:clocks";
         export async function run(): Promise<number> { const pending = waitFor(1); await pending; return 1; }"#;
     let compiled =
@@ -393,11 +396,12 @@ async fn overlapping_entry_calls_trap_before_starting_another_operation() -> Res
     let engine = make_engine()?;
     let component = Component::new(&engine, compiled.component.unwrap())?;
     let counts = Arc::new(OperationCounts::default());
-    let linker = gated_linker(&engine, Arc::new(Notify::new()), counts.clone())?;
+    let gate = Arc::new(Notify::new());
+    let linker = gated_linker(&engine, gate.clone(), counts.clone())?;
     let mut store = Store::new(&engine, StoreLimits::default());
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
-    let result = timeout(
+    timeout(
         Duration::from_secs(2),
         store.run_concurrent(async |accessor| {
             let mut first = Box::pin(run.call_concurrent(accessor, ()));
@@ -406,15 +410,23 @@ async fn overlapping_entry_calls_trap_before_starting_another_operation() -> Res
                     .await
                     .is_err()
             );
-            run.call_concurrent(accessor, ()).await
+            let mut second = Box::pin(run.call_concurrent(accessor, ()));
+            assert!(
+                timeout(Duration::from_millis(10), &mut second)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(counts.started.load(Ordering::SeqCst), 1);
+            gate.notify_one();
+            assert_eq!(first.await?, (1.0,));
+            gate.notify_one();
+            assert_eq!(second.await?, (1.0,));
+            Ok::<_, anyhow::Error>(())
         }),
     )
-    .await?;
-    assert!(
-        !matches!(result, Ok(Ok(_))),
-        "overlapping public calls must trap"
-    );
-    assert_eq!(counts.started.load(Ordering::SeqCst), 1);
+    .await???;
+    assert_eq!(counts.started.load(Ordering::SeqCst), 2);
+    store.assert_concurrent_state_empty();
     drop(store);
     assert_eq!(counts.active.load(Ordering::SeqCst), 0);
     Ok(())

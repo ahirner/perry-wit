@@ -18,10 +18,6 @@ pub(crate) fn is_string_array(ty: &HirType) -> bool {
     matches!(ty,HirType::Array(inner) if **inner == HirType::String)
 }
 
-pub(crate) fn contains_stats(ty: &HirType) -> bool {
-    super::visit::contains_type(ty, is_stats)
-}
-
 pub(crate) fn required(hir: &HirModule) -> bool {
     let needed =
         |ty: &HirType| super::visit::contains_type(ty, |ty| is_stats(ty) || is_string_array(ty));

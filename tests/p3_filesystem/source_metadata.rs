@@ -1,7 +1,8 @@
 use std::fs;
 
+use crate::waffle_fixture::compile_typescript_waffle;
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
 use super::instantiate;

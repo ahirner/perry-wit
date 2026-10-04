@@ -1,5 +1,7 @@
 //! FIFO source reactions share one execution token; native I/O remains concurrent.
-//! A guest worker hands its eager prefix back to its caller at the first await.
+//! Thread startup queues the caller until the child's first native suspension or await.
+//! The shared context marks that eager prefix; once the caller resumes, further
+//! awaits join the reaction queue instead of resuming the caller a second time.
 
 use super::*;
 use waffle::Value;
@@ -49,7 +51,7 @@ fn waiter(b: &mut Builder, registry: &ModuleRegistry, thread: Value) -> Value {
 
 pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
     use Type::I32;
-    let native = registry.promises.as_ref().unwrap().native.as_ref().unwrap();
+    let native = &registry.promises.as_ref().unwrap().native;
     let memory = registry.memory;
     let mut b = Builder::new(module, native.enqueue, memory);
     let thread = b.param(0);
@@ -131,19 +133,19 @@ pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> R
 
     for (function, suspend) in [(native.pause, true), (native.complete, false)] {
         let mut b = Builder::new(module, function, memory);
-        let parent = b.call(native.context_get, &[], &[I32])[0];
+        let context = b.call(native.context_get, &[], &[I32])[0];
+        let inspect = b.body.add_block();
         let handoff = b.body.add_block();
         let release = b.body.add_block();
-        b.branch(parent, handoff, release);
+        b.branch(context, inspect, release);
+        b.block = inspect;
+        let eager = b.load(context, 4, I32);
+        b.branch(eager, handoff, release);
         b.block = handoff;
         let zero = b.integer(0);
-        b.call(native.context_set, &[zero], &[]);
-        let one = b.integer(1);
-        let parent = b.op(Operator::I32Sub, &[parent, one], I32);
+        b.store(context, 4, zero, I32);
         if suspend {
-            b.call(native.switch_to, &[parent], &[I32]);
-        } else {
-            b.call(native.resume, &[parent], &[]);
+            b.call(native.suspend, &[], &[I32]);
         }
         b.ret(&[]);
         b.block = release;

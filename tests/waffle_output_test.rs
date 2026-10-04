@@ -1,5 +1,8 @@
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
+use waffle_fixture::compile_typescript_waffle;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable, StreamReader};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
@@ -193,7 +196,6 @@ fn output_contracts_and_binding_identity_are_checked_before_io() -> Result<()> {
         "export function run(): number { const write = console.log; write('a'); return 0; }",
         "export function run(name: string): number { console[name]('a'); return 0; }",
         "import {writeStdout} from 'perry:stdio'; export async function run(): Promise<number> { await writeStdout(true); return 0; }",
-        "import {writeStdout} from 'perry:stdio'; export async function run(): Promise<number> { const pending = writeStdout(new Uint8Array(2)); await pending; return 0; }",
     ] {
         assert!(
             compile_typescript_waffle(source, "invalid.ts", &WaffleCompileOptions::default())
@@ -238,3 +240,19 @@ async fn instantiate(source: &str, context: WasiCtx) -> Result<(Store<Host>, Ins
     Ok((store, instance))
 }
 use std::{fs, process::Command};
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_output_operations_settle_once_and_preserve_bytes() -> Result<()> {
+    let source = "import {writeStdout} from 'perry:stdio'; export async function run(): Promise<number> { const pending = writeStdout(new Uint8Array([65,0,255])); await pending; await pending; return 1; }";
+    let output = MemoryOutputPipe::new(1024);
+    let context = WasiCtxBuilder::new().stdout(output.clone()).build();
+    let (mut store, instance) = instantiate(source, context).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 1.);
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    assert_eq!(output.contents().as_ref(), [65, 0, 255].repeat(20));
+    Ok(())
+}

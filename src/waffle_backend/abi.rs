@@ -37,6 +37,16 @@ pub(crate) fn build_export_wrapper(
     let lift_text_or_bytes = registry.text_or_bytes_lift;
     let mut body = FunctionBody::new(module, export.sig);
     let entry = body.entry;
+    if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
+        body.add_op(
+            entry,
+            Operator::Call {
+                function_index: native.enter,
+            },
+            &[],
+            &[],
+        );
+    }
     let mut args = Vec::new();
     let mut param_cursor = 0;
     for param_ty in &callee.param_types {
@@ -247,6 +257,23 @@ pub(crate) fn build_export_wrapper(
                     },
                 );
             }
+        }
+    }
+    if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
+        let returns: Vec<_> = body
+            .blocks
+            .iter()
+            .filter(|&block| matches!(body.blocks[block].terminator, Terminator::Return { .. }))
+            .collect();
+        for block in returns {
+            body.add_op(
+                block,
+                Operator::Call {
+                    function_index: native.finish,
+                },
+                &[],
+                &[],
+            );
         }
     }
     body.validate()?;

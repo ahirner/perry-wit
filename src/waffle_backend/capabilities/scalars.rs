@@ -3,9 +3,9 @@
 use super::super::{
     allocation::AllocationFuncs,
     capabilities::{CapabilityOperation, ClockOperation, RandomOperation},
-    component::forward,
     resolve::{ResolvedContract, TypedIntrinsic},
     runtime::builder::{self, Builder},
+    runtime::imports,
 };
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ pub(crate) enum Scalar {
     Wait,
     Timeout,
     Monotonic,
-    Date(DateStorage),
+    Date,
     Random,
 }
 impl Scalar {
@@ -32,7 +32,7 @@ impl Scalar {
                 ClockOperation::MonotonicNow,
             )) => Some(Self::Monotonic),
             TypedIntrinsic::Capability(CapabilityOperation::Clock(ClockOperation::DateNow)) => {
-                Some(Self::Date(DateStorage::GuestHeap))
+                Some(Self::Date)
             }
             TypedIntrinsic::Capability(CapabilityOperation::Random(RandomOperation::Number)) => {
                 Some(Self::Random)
@@ -61,7 +61,7 @@ impl Scalar {
                 vec![],
                 vec!["i64"],
             ),
-            Self::Date(_) => ("wasi:clocks/system-clock@0.3.0", "now", vec!["i32"], vec![]),
+            Self::Date => ("wasi:clocks/system-clock@0.3.0", "now", vec!["i32"], vec![]),
             Self::Random => (
                 "wasi:random/random@0.3.0",
                 "get-random-u64",
@@ -70,76 +70,24 @@ impl Scalar {
             ),
         }
     }
-    pub(crate) fn body(self, export: &str, native: &str) -> String {
-        match self {
-            Self::Wait => format!(
-                r#"(func (export {export:?}) (param $milliseconds f64)
-                (if (f64.lt (local.get $milliseconds) (f64.const 0)) (then unreachable))
-                (call ${native} (i64.trunc_f64_u (f64.mul (local.get $milliseconds) (f64.const 1000000)))))"#
-            ),
-            Self::Timeout => format!(
-                r#"(func (export {export:?}) (param $milliseconds f64)
-                (if (i32.eqz (i32.and (f64.ge (local.get $milliseconds) (f64.const 1)) (f64.le (local.get $milliseconds) (f64.const 2147483647))))
-                  (then (local.set $milliseconds (f64.const 1))))
-                (call ${native} (i64.mul (i64.trunc_f64_u (local.get $milliseconds)) (i64.const 1000000))))"#
-            ),
-            Self::Monotonic => format!(
-                r#"(func (export {export:?}) (result f64)
-                (f64.div (f64.convert_i64_u (call ${native})) (f64.const 1000000)))"#
-            ),
-            Self::Random => format!(
-                r#"(func (export {export:?}) (result f64)
-                (f64.div (f64.convert_i64_u (i64.shr_u (call ${native}) (i64.const 11))) (f64.const 9007199254740992)))"#
-            ),
-            Self::Date(storage) => {
-                let (allocate, release) = match storage {
-                    DateStorage::Standalone => ("", ""),
-                    DateStorage::GuestHeap => (
-                        "(local.set $scratch (call $realloc (i32.const 0) (i32.const 0) (i32.const 8) (i32.const 16)))",
-                        "(drop (call $realloc (local.get $scratch) (i32.const 16) (i32.const 8) (i32.const 0)))",
-                    ),
-                };
-                format!(
-                    r#"(func (export {export:?}) (result f64) (local $scratch i32) (local $value f64)
-                    {allocate}
-                    (call ${native} (local.get $scratch))
-                    (if (i32.ge_u (i32.load offset=8 (local.get $scratch)) (i32.const 1000000000)) (then unreachable))
-                    (local.set $value (f64.add (f64.mul (f64.convert_i64_s (i64.load (local.get $scratch))) (f64.const 1000))
-                        (f64.convert_i32_u (i32.div_u (i32.load offset=8 (local.get $scratch)) (i32.const 1000000)))))
-                    {release}
-                    (local.get $value))"#
-                )
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum DateStorage {
-    Standalone,
-    GuestHeap,
 }
 
 pub(in crate::waffle_backend) fn declare_imports(
     module: &mut Module<'static>,
     contract: &ResolvedContract,
 ) -> BTreeMap<String, Func> {
-    if contract.wit.is_none() {
-        return BTreeMap::new();
-    }
     contract
         .intrinsics
         .iter()
         .filter_map(|(name, intrinsic)| {
             let (interface, function, params, results) = Scalar::of(intrinsic)?.binding();
-            let imports = forward::declare_imports(
+            let imports = imports::declare_imports(
                 module,
                 interface,
-                &[forward::Function {
+                &[imports::Function {
                     name: function.into(),
                     params,
                     results,
-                    target: String::new(),
                 }],
             );
             Some((name.clone(), imports[function]))
@@ -210,7 +158,7 @@ pub(in crate::waffle_backend) fn emit(
                 let scale = real(&mut b, 9007199254740992.0);
                 vec![b.op(Op::F64Div, &[word, scale], F64)]
             }
-            Scalar::Date(_) => {
+            Scalar::Date => {
                 let allocator = allocator.unwrap();
                 let zero = b.integer(0);
                 let eight = b.integer(8);

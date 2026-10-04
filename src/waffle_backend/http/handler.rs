@@ -1,7 +1,7 @@
 //! Bounded HTTP requests and responses share the source guest's canonical heap.
 
 use crate::waffle_backend::{
-    component::forward, registry::ModuleRegistry, runtime, streams, wit::WitWorld,
+    registry::ModuleRegistry, runtime, runtime::imports, streams, wit::WitWorld,
 };
 use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
@@ -66,7 +66,7 @@ pub(crate) fn emit_entry(
     ]);
     let source = format!(
         "(module {} {} {} {})",
-        forward::module_imports(&functions)?,
+        imports::module_imports(&functions)?,
         include_str!("handler/runtime.wat")
             .replace("REQUEST_LIMIT", &limits.max_request_bytes.to_string())
             .replace("RESPONSE_LIMIT", &limits.max_response_bytes.to_string()),
@@ -82,10 +82,10 @@ pub(crate) fn emit_entry(
 }
 
 pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
-    forward::declare_imports(module, "http-server", &native_functions())
+    imports::declare_imports(module, "http-server", &native_functions())
 }
 
-fn native_functions() -> Vec<forward::Function> {
+fn native_functions() -> Vec<imports::Function> {
     [
         ("fields", vec!["i32"; 3], vec![]),
         ("copy-fields", vec!["i32"; 2], vec![]),
@@ -112,12 +112,11 @@ fn native_functions() -> Vec<forward::Function> {
         ),
     ]
     .into_iter()
-    .map(|(name, params, results)| forward::Function {
+    .map(|(name, params, results)| imports::Function {
         name: name.into(),
         params,
         results,
-        target: format!("(func $server-{name})"),
     })
-    .chain(super::future::functions("server"))
+    .chain(super::future::functions())
     .collect()
 }

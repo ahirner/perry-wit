@@ -1,13 +1,12 @@
 //! Invocation-scoped P3 HTTP resources over the shared bounded body transfer.
 
 use std::collections::BTreeMap;
-use std::fmt::Write;
 
 use anyhow::Result;
 use perry_hir::types::{ObjectType, Type as HirType};
 use waffle::{Func, Memory, Module};
 
-use super::{allocation::AllocationFuncs, component::forward, runtime, streams};
+use super::{allocation::AllocationFuncs, runtime, runtime::imports, streams};
 
 mod future;
 pub(crate) mod handler;
@@ -69,7 +68,7 @@ pub(crate) fn emit_source_runtime(
 }
 
 pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
-    forward::declare_imports(module, "http", &native_functions())
+    imports::declare_imports(module, "http", &native_functions())
 }
 
 pub(crate) fn emit_runtime(
@@ -92,53 +91,14 @@ pub(crate) fn emit_runtime(
     ]);
     let source = format!(
         "(module {} {} {})",
-        forward::module_imports(&native_functions())?,
+        imports::module_imports(&native_functions())?,
         include_str!("http/runtime.wat"),
         include_str!("http/future.wat")
     );
     Ok(runtime::emit_functions(module, memory, &source, &imports)?["http.get"])
 }
 
-pub(crate) fn declare_adapters() -> Result<String> {
-    Ok(format!(
-        "{}{}{}",
-        include_str!("http/interfaces.wat"),
-        include_str!("http/client.wat"),
-        forward::declare("http", &native_functions())?
-    ))
-}
-
-pub(crate) fn bind_adapters() -> Result<String> {
-    let mut wat = String::new();
-    for (name, method) in [
-        ("fields", "[static]fields.from-list"),
-        ("copy-fields", "[method]fields.copy-all"),
-        ("request", "[static]request.new"),
-        ("scheme", "[method]request.set-scheme"),
-        ("authority", "[method]request.set-authority"),
-        ("path", "[method]request.set-path-with-query"),
-        ("status", "[method]response.get-status-code"),
-        ("headers", "[method]response.get-headers"),
-        ("consume", "[static]response.consume-body"),
-    ] {
-        writeln!(
-            wat,
-            "(core func $http-{name} (canon lower (func $http-types {method:?}) (memory (core memory $guest \"memory\")) (realloc (core func $guest \"cabi_realloc\"))))"
-        )?;
-    }
-    wat.push_str(r#"
-      (core func $http-send (canon lower (func $http-client "send") (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $http-drop-fields (canon resource.drop $http-fields))
-      (core func $http-drop-request (canon resource.drop $http-request))
-      (core func $http-read (canon stream.read $http-bytes (memory (core memory $guest "memory"))))
-      (core func $http-drop-reader (canon stream.drop-readable $http-bytes))
-    "#);
-    wat.push_str(&future::bindings("http"));
-    wat.push_str(&forward::bind("http", &native_functions())?);
-    Ok(wat)
-}
-
-fn native_functions() -> Vec<forward::Function> {
+fn native_functions() -> Vec<imports::Function> {
     [
         ("fields", vec!["i32"; 3], vec![]),
         ("copy-fields", vec!["i32"; 2], vec![]),
@@ -156,12 +116,11 @@ fn native_functions() -> Vec<forward::Function> {
         ("drop-reader", vec!["i32"], vec![]),
     ]
     .into_iter()
-    .map(|(name, params, results)| forward::Function {
+    .map(|(name, params, results)| imports::Function {
         name: name.into(),
         params,
         results,
-        target: format!("(func $http-{name})"),
     })
-    .chain(future::functions("http"))
+    .chain(future::functions())
     .collect()
 }

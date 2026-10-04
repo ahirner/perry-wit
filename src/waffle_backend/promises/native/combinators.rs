@@ -66,7 +66,7 @@ pub(super) fn emit(
 ) -> Result<Func> {
     use Type::{F64, I32};
     let runtime = registry.promises.as_ref().unwrap();
-    let native = runtime.native.as_ref().unwrap();
+    let native = &runtime.native;
     let combine = native.combine.unwrap();
     let worker = builder::declare(module, "tasks.observe", &[I32], &[]);
     let mut b = Builder::new(module, combine, registry.memory);
@@ -198,7 +198,7 @@ fn emit_observer(
 ) -> Result<()> {
     use Type::{F64, I32};
     let runtime = registry.promises.as_ref().unwrap();
-    let native = runtime.native.as_ref().unwrap();
+    let native = &runtime.native;
     let mut b = Builder::new(module, worker, registry.memory);
     let context = b.param(0);
     let meta = b.load(context, 0, I32);

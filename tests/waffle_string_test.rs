@@ -1,11 +1,13 @@
 //! Integration tests for WAFFLE backend string handling, scalar operations, and component round-trip.
 
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use anyhow::Result;
-use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use waffle_fixture::compile_typescript_waffle;
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};

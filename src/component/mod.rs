@@ -18,16 +18,22 @@ pub fn embed_and_encode(
         .select_world(&[pkg_id], world_name)
         .with_context(|| format!("selecting world {:?}", world_name))?;
 
-    let mut core = core_wasm.to_vec();
-    embed_component_metadata(&mut core, &resolve, world_id, StringEncoding::UTF8, false)
-        .context("embedding component metadata")?;
+    encode_resolved(core_wasm, &resolve, world_id)
+}
 
-    let component = ComponentEncoder::default()
+/// Encodes the exact resolved world without synthesizing or replicating interfaces.
+pub(crate) fn encode_resolved(
+    core_wasm: &[u8],
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+) -> Result<Vec<u8>> {
+    let mut core = core_wasm.to_vec();
+    embed_component_metadata(&mut core, resolve, world, StringEncoding::UTF8, false)
+        .context("embedding component metadata")?;
+    ComponentEncoder::default()
         .module(&core)
         .context("configuring component encoder")?
         .validate(true)
         .encode()
-        .context("encoding component")?;
-
-    Ok(component)
+        .context("encoding component")
 }

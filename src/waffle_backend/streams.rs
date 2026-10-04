@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use waffle::{Func, FuncDecl, Import, ImportKind, Memory, Module, SignatureData, Type};
 
-use super::{allocation::AllocationFuncs, component::forward, runtime};
+use super::{allocation::AllocationFuncs, runtime};
 
 pub(crate) struct StreamImports {
     read: Func,
@@ -88,21 +88,4 @@ pub(crate) fn emit_read_transfer(
         &BTreeMap::from([("read", read)]),
     )?;
     Ok(functions["read-transfer"])
-}
-
-pub(crate) fn forward_functions() -> Vec<forward::Function> {
-    vec![
-        forward::Function {
-            name: "read".into(),
-            params: vec!["i32"; 3],
-            results: vec!["i32"],
-            target: "(func $stream-read)".into(),
-        },
-        forward::Function {
-            name: "drop".into(),
-            params: vec!["i32"],
-            results: vec![],
-            target: "(func $stream-drop)".into(),
-        },
-    ]
 }

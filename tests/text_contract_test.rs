@@ -1,11 +1,13 @@
 //! Unit & integration test suite for R4.1 UTF-8 Scalar Value Contract & Operation Matrix.
 
-use perry_wit::compile_typescript_waffle;
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use perry_wit::waffle_backend::text_contract::{
     IndexUnit, OperationStatus, TextContractMatrix, scalar_char_at, scalar_index_of, scalar_length,
     scalar_slice, validate_hir_text, validate_source_text, validate_utf8_boundary,
 };
+use waffle_fixture::compile_typescript_waffle;
 
 #[test]
 fn test_operation_matrix_completeness_and_units() {

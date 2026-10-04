@@ -37,7 +37,7 @@ pub(crate) struct CapabilityPlan {
 
 pub(crate) enum CapabilityImplementation {
     Promise,
-    Standalone { core_function: &'static str },
+    Scalar,
     Stdio(StdioOperation),
     Filesystem,
     Http,

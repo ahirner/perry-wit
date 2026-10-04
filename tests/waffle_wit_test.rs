@@ -914,3 +914,29 @@ fn top_level_await_requires_asynchronous_wit_exports() {
     .unwrap_err();
     assert!(format!("{error:#}").contains("async func"), "{error:#}");
 }
+
+#[test]
+fn component_compilation_requires_an_explicit_world() -> Result<()> {
+    let source = "export function run():number {return 42;}";
+    let result =
+        perry_wit::compile_typescript_waffle(source, "entry.ts", &WaffleCompileOptions::default());
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("explicitly resolved WIT world")
+    );
+    let core = perry_wit::compile_typescript_waffle(
+        source,
+        "entry.ts",
+        &WaffleCompileOptions {
+            componentize: false,
+            ..Default::default()
+        },
+    )?;
+    assert!(core.component.is_none());
+    assert!(core.component_wat.is_none());
+    wasmparser::Validator::new().validate_all(&core.core)?;
+    Ok(())
+}

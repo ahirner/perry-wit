@@ -1,6 +1,7 @@
 //! Append Wasm support helpers as ordinary, validated WAFFLE functions.
 
 pub(crate) mod builder;
+pub(crate) mod imports;
 
 use std::collections::BTreeMap;
 

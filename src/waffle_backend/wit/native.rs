@@ -18,10 +18,47 @@ enum Payload {
 impl WitWorld {
     pub(in crate::waffle_backend) fn bind_native_imports(
         &self,
-        module: &mut Module<'static>,
+        module: &mut Module<'_>,
     ) -> Result<()> {
         for import in &mut module.imports {
             let binding = match import.module.as_str() {
+                "host" => {
+                    let (key, _) = self
+                        .imports
+                        .iter()
+                        .find(|(_, binding)| {
+                            binding.module == "$root"
+                                && crate::sdk::codegen::to_camel_case(&binding.function.name)
+                                    == import.name
+                        })
+                        .with_context(|| {
+                            format!(
+                                "WIT world has no import for core function '{}'",
+                                import.name
+                            )
+                        })?;
+                    ("$root".into(), key.clone())
+                }
+                "streams" => {
+                    let export = self
+                        .functions
+                        .values()
+                        .find(|export| export.core_name == "run")
+                        .context("Byte stream core entry requires WIT export 'run'")?;
+                    let payloads = export.function.find_futures_and_streams(&self.resolve);
+                    let index = payloads
+                        .iter()
+                        .position(|id| {
+                            matches!(self.resolve.types[*id].kind, TypeDefKind::Stream(_))
+                        })
+                        .context("WIT entry requires a byte stream parameter")?;
+                    let operation = match import.name.as_str() {
+                        "read" => "stream-read",
+                        "drop" => "stream-drop-readable",
+                        other => bail!("Unsupported stream intrinsic '{other}'"),
+                    };
+                    ("[export]$root".into(), format!("[{operation}-{index}]run"))
+                }
                 "http" => self.http_binding(&import.name)?,
                 "http-server" => self.http_handler_binding(&import.name)?,
                 "context" => ("wasi:cli/environment@0.3.0".into(), import.name.clone()),

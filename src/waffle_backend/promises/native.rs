@@ -22,7 +22,6 @@ pub(crate) struct NativeRuntime {
     index: Func,
     suspend: Func,
     resume: Func,
-    switch_to: Func,
     context_get: Func,
     context_set: Func,
     enqueue: Func,
@@ -40,7 +39,6 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
         index: builder::native(module, "[thread-index]", &[], &[I32]),
         suspend: builder::native(module, "[thread-suspend]", &[], &[I32]),
         resume: builder::native(module, "[thread-resume-later]", &[I32], &[]),
-        switch_to: builder::native(module, "[thread-suspend-then-resume]", &[I32], &[I32]),
         context_get: builder::native(module, "[context-get-0]", &[], &[I32]),
         context_set: builder::native(module, "[context-set-0]", &[I32], &[]),
         enqueue: builder::declare(module, "tasks.enqueue", &[I32], &[]),
@@ -69,11 +67,10 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
     }
     Ok(PromiseImports {
         new,
-        bind: None,
         await_result,
         yield_thread,
         starts,
-        native: Some(native),
+        native,
     })
 }
 
@@ -96,7 +93,7 @@ pub(crate) fn emit(
 ) -> Result<()> {
     use Type::{F64, I32};
     let runtime = registry.promises.as_ref().unwrap();
-    let native = runtime.native.as_ref().unwrap();
+    let native = &runtime.native;
     let memory = registry.memory;
     let mut b = Builder::new(module, runtime.new, memory);
     let kind = b.param(0);
@@ -150,26 +147,19 @@ pub(crate) fn emit(
         b.store(context, 0, b.param(0), I32);
         let guest = matches!(target, TaskTarget::Guest(_));
         if guest {
-            let parent = b.call(native.index, &[], &[I32])[0];
-            let one = b.integer(1);
-            let parent = b.op(Operator::I32Add, &[parent, one], I32);
-            b.store(context, 4, parent, I32);
+            let eager = b.integer(1);
+            b.store(context, 4, eager, I32);
         }
         for (index, ty) in parameters.iter().enumerate() {
             b.store(context, 8 * (index as u32 + 1), b.param(index + 1), *ty);
         }
         let index = b.integer(workers.len() as u32);
         let thread = b.call(native.new_thread, &[index, context], &[I32])[0];
-        b.call(
-            if guest {
-                native.switch_to
-            } else {
-                native.resume_now
-            },
-            &[thread],
-            &[I32],
-        );
+        b.call(native.resume_now, &[thread], &[I32]);
         let zero = b.integer(0);
+        if guest {
+            b.store(context, 4, zero, I32);
+        }
         b.ret(&[zero]);
         b.finish(module, start)?;
 
@@ -183,15 +173,14 @@ pub(crate) fn emit(
         let context = b.param(0);
         let record = b.load(context, 0, I32);
         if guest {
-            let parent = b.load(context, 4, I32);
-            b.call(native.context_set, &[parent], &[]);
+            b.call(native.context_set, &[context], &[]);
         }
         let args = parameters
             .iter()
             .enumerate()
             .map(|(index, ty)| b.load(context, 8 * (index as u32 + 1), *ty))
             .collect::<Vec<_>>();
-        let mut roots = vec![record];
+        let mut roots = vec![record, context];
         roots.extend(
             parameters
                 .iter()
@@ -314,7 +303,7 @@ fn filesystem_adapter(
 fn emit_finish(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
     use Type::I32;
     let runtime = registry.promises.as_ref().unwrap();
-    let native = runtime.native.as_ref().unwrap();
+    let native = &runtime.native;
     let function = native.finish;
     let mut b = Builder::new(module, function, registry.memory);
     let check_queue = b.body.add_block();
@@ -359,7 +348,7 @@ fn emit_finish(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
 fn emit_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
     use Type::{F64, I32};
     let runtime = registry.promises.as_ref().unwrap();
-    let native = runtime.native.as_ref().unwrap();
+    let native = &runtime.native;
     let mut b = Builder::new(module, runtime.await_result, registry.memory);
     let record = b.param(0);
     let thread = b.call(native.index, &[], &[I32])[0];
@@ -376,7 +365,7 @@ fn emit_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result
 
 fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
     use Type::{F64, I32};
-    let native = registry.promises.as_ref().unwrap().native.as_ref().unwrap();
+    let native = &registry.promises.as_ref().unwrap().native;
     let mut b = Builder::new(module, native.settle, registry.memory);
     let record = b.param(0);
     let tag = b.param(1);

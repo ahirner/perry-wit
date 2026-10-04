@@ -51,11 +51,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         .iter()
         .map(|param| param.1)
         .collect();
-    if let Some(native) = registry
-        .promises
-        .as_ref()
-        .and_then(|runtime| runtime.native.as_ref())
-    {
+    if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
         adapter.body.add_op(
             adapter.block,
             Operator::Call {
@@ -120,11 +116,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         );
     }
     let payload = adapter.call_checked(callee.func_index, &args);
-    if let Some(native) = registry
-        .promises
-        .as_ref()
-        .and_then(|runtime| runtime.native.as_ref())
-    {
+    if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
         adapter.body.add_op(
             adapter.block,
             Operator::Call {

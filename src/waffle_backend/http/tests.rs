@@ -9,8 +9,11 @@ use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 #[allow(dead_code, unreachable_pub)]
 #[path = "../../../tests/support/http_fixture.rs"]
 mod fixture;
-use crate::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use crate::waffle_backend::WaffleCompileOptions;
+#[path = "../../../tests/support/waffle.rs"]
+mod waffle_fixture;
 use fixture::{HttpFixture, Reply};
+use waffle_fixture::compile_typescript_waffle;
 
 async fn instantiate_source(source: &str, memory: usize) -> Result<(Store<Host>, Instance)> {
     let compiled = compile_typescript_waffle(source, "http.ts", &WaffleCompileOptions::default())?;
@@ -71,7 +74,7 @@ async fn instantiate() -> Result<(Store<Host>, Instance)> {
         (i32.store (local.get $result) (i32.ne (local.get $error) (i32.const 0)))
         (if (local.get $error) (then (i32.store offset=4 (local.get $result) (local.get $error))))
         (local.get $result))
-      (func (export "post") (param i32) (call $post-return)))"#,
+      (func (export "cabi_post_run") (param i32) (call $post-return)))"#,
         &BTreeMap::from([
             ("get", get),
             ("realloc", allocator.realloc),
@@ -84,28 +87,15 @@ async fn instantiate() -> Result<(Store<Host>, Instance)> {
             kind: ExportKind::Func(function),
         });
     }
-    let core = wasmprinter::print_bytes(module.to_wasm_bytes()?)?;
-    let wat = format!(
-        r#"(component {}
-      (core module $guest {})
-      (core instance $guest (instantiate $guest (with "http" (instance $http-forward))))
-      {}
-      (type $response (record (field "status" u16) (field "headers" (list (tuple string (list u8)))) (field "body" (list u8))))
-      (export $buffered-response "buffered-response" (type $response))
-      (func (export "run") async (param "authority" string) (param "path" string)
-        (param "headers" (list (tuple string (list u8)))) (param "limit" u32)
-        (result (result $buffered-response (error u32)))
-        (canon lift (core func $guest "run") (memory (core memory $guest "memory"))
-          (realloc (core func $guest "cabi_realloc")) (post-return (core func $guest "post")))))"#,
-        declare_adapters()?,
-        core.strip_prefix("(module")
-            .unwrap()
-            .trim_end()
-            .strip_suffix(')')
-            .unwrap(),
-        bind_adapters()?
-    );
-    instantiate_component(wat::parse_str(&wat)?, 16 * 1024 * 1024).await
+    let (resolve, package) = crate::component::wit::resolve_source(
+        "package test:http; world fixture {import wasi:http/client@0.3.0;
+        record buffered-response {status:u16,headers:list<tuple<string,list<u8>>>,body:list<u8>}
+        export run:async func(authority:string,path:string,headers:list<tuple<string,list<u8>>>,limit:u32)->result<buffered-response,u32>;}",
+    )?;
+    let world = resolve.select_world(&[package], Some("fixture"))?;
+    let component =
+        crate::waffle_backend::encode_component(&module.to_wasm_bytes()?, resolve, world)?;
+    instantiate_component(component, 16 * 1024 * 1024).await
 }
 
 async fn instantiate_component(bytes: Vec<u8>, memory: usize) -> Result<(Store<Host>, Instance)> {
@@ -536,7 +526,7 @@ async fn json_fetch_checks_status_media_type_and_payload() -> Result<()> {
 }
 
 #[test]
-fn source_http_contract_rejects_unsupported_types_and_retained_requests() {
+fn source_http_contract_rejects_unsupported_types() {
     for (body, diagnostic) in [
         (
             "await get('http','host','/',{x:1},1024);return 0;",
@@ -557,10 +547,6 @@ fn source_http_contract_rejects_unsupported_types_and_retained_requests() {
         (
             "const response=await get('http','host','/',{},1024);response.headerValue('0');return 0;",
             "numeric index",
-        ),
-        (
-            "const request=get('http','host','/',{},1024);return 0;",
-            "Retained native capability Promises",
         ),
     ] {
         let source = format!(
@@ -687,6 +673,52 @@ fn http_sdk_checks_the_document_fixture_and_static_contract() -> Result<()> {
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_http_operations_can_be_observed_repeatedly_but_not_abandoned() -> Result<()> {
+    let server = HttpFixture::new(|_| Reply::Bytes(200, b"owned".to_vec()));
+    let source = r#"
+        import {get} from 'perry:http';
+        export async function run(authority:string):Promise<number> {
+            const pending=get('http',authority,'/',{},1024);
+            const first=await pending;
+            const second=await pending;
+            if(first!==second || first.body!==second.body) {throw 99;}
+            return second.status;
+        }
+    "#;
+    let (mut store, instance) = instantiate_source(source, 65536).await?;
+    let run = instance.get_typed_func::<(String,), (f64,)>(&mut store, "run")?;
+    for _ in 0..10 {
+        assert_eq!(
+            run.call_async(&mut store, (server.address.to_string(),))
+                .await?
+                .0,
+            200.
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let source = r#"
+        import {get} from 'perry:http';
+        export async function run(authority:string):Promise<number> {
+            const pending=get('http',authority,'/',{},1024);
+            return 1;
+        }
+    "#;
+    let server = HttpFixture::new(|_| Reply::Stall);
+    let (mut store, instance) = instantiate_source(source, 65536).await?;
+    let run = instance.get_typed_func::<(String,), (f64,)>(&mut store, "run")?;
+    assert!(
+        timeout(
+            Duration::from_secs(5),
+            run.call_async(&mut store, (server.address.to_string(),))
+        )
+        .await?
+        .is_err()
     );
     Ok(())
 }

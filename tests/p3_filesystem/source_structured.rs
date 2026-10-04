@@ -105,7 +105,7 @@ async fn stats_roundtrip_component_records_and_retained_outcomes_without_filesys
             return holder.value;
         }"#
         };
-        let compiled = perry_wit::compile_typescript_waffle(
+        let compiled = crate::waffle_fixture::compile_typescript_waffle(
             source,
             "stats.ts",
             &perry_wit::waffle_backend::WaffleCompileOptions::default(),

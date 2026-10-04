@@ -1,6 +1,5 @@
 //! Source Promise plans, distinct from the host's one-shot subtask transport.
 
-pub(crate) mod component;
 pub(crate) mod native;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,14 +68,6 @@ pub(crate) enum TaskArguments {
 }
 
 impl TaskArguments {
-    pub(crate) fn source(&self) -> Result<&[HirType]> {
-        match self {
-            Self::Source(types) => Ok(types),
-            Self::Filesystem(_) => {
-                anyhow::bail!("Promise-based filesystem calls require a resolved WIT world")
-            }
-        }
-    }
     pub(crate) fn core_types(&self) -> Result<Vec<waffle::Type>> {
         match self {
             Self::Source(types) => types
@@ -105,7 +96,6 @@ pub(crate) struct PromisePlan {
 pub(crate) fn plan_promises(
     hir: &Module,
     intrinsics: &BTreeMap<String, TypedIntrinsic>,
-    native_threads: bool,
 ) -> Result<Option<PromisePlan>> {
     let mut candidates = BTreeMap::new();
     for function in &hir.functions {
@@ -189,19 +179,10 @@ pub(crate) fn plan_promises(
             TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Promise(_))
         )
     });
-    ensure!(
-        !combinators || native_threads,
-        "Promise combinators require a resolved WIT world"
-    );
     if calls == direct_awaits && !combinators {
         return Ok(None);
     }
-    for (target, task) in &referenced {
-        ensure!(
-            native_threads
-                || !matches!(target, TaskTarget::Intrinsic(name) if intrinsics[name].has_completion()),
-            "Retained native capability Promises require a completion adapter"
-        );
+    for task in referenced.values() {
         ensure!(
             task.arguments.core_types()?.len() < 16,
             "Stored async calls support at most 15 arguments"
@@ -213,11 +194,6 @@ pub(crate) fn plan_promises(
                     .all(|param| (is_task_outcome(param) && param != &HirType::Void)
                         || matches!(param, HirType::Promise(inner) if is_task_outcome(inner))),
                 "Stored async task parameters require supported values or Promises of supported outcomes"
-            );
-        } else {
-            ensure!(
-                native_threads,
-                "Promise-based filesystem calls require a resolved WIT world"
             );
         }
         ensure!(

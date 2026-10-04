@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use crate::waffle_fixture::compile_typescript_waffle;
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::sync::{Notify, oneshot};
 use tokio::time::timeout;
 use wasmtime::component::{

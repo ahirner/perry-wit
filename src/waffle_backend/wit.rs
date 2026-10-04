@@ -383,18 +383,7 @@ impl WitWorld {
     }
 
     pub(super) fn frame(&self, core: &[u8]) -> Result<(String, Vec<u8>)> {
-        let mut core = core.to_vec();
-        wit_component::embed_component_metadata(
-            &mut core,
-            &self.resolve,
-            self.world,
-            wit_component::StringEncoding::UTF8,
-            false,
-        )?;
-        let component = wit_component::ComponentEncoder::default()
-            .module(&core)?
-            .validate(true)
-            .encode()?;
+        let component = crate::component::encode_resolved(core, &self.resolve, self.world)?;
         Ok((wasmprinter::print_bytes(&component)?, component))
     }
 }

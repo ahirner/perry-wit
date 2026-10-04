@@ -165,13 +165,19 @@ pub(crate) struct StringHelperFuncs {
     pub(crate) str_join: Option<Func>,
 }
 
-/// Synthesizes runtime helper functions for strings and memory into the WAFFLE module.
-pub(crate) fn emit_string_runtime(
+pub(crate) struct StringImports {
+    str_find_helper: Option<Func>,
+    code_point_at_import: Option<Func>,
+    from_code_point_import: Option<Func>,
+    case_convert_import: Option<Func>,
+    split_imports: Option<(Func, Func)>,
+    join_imports: Option<(Func, Func)>,
+}
+
+pub(crate) fn declare_imports(
     module: &mut Module<'static>,
-    memory: Memory,
-    initial_heap_base: u32,
     reqs: RequiredStringHelpers,
-) -> Result<StringHelperFuncs> {
+) -> Result<StringImports> {
     // Declare all required helper imports BEFORE emitting any function bodies
     let str_find_helper = if reqs.find_substring {
         Some(declare_index_of_import(module)?)
@@ -204,6 +210,31 @@ pub(crate) fn emit_string_runtime(
         None
     };
 
+    Ok(StringImports {
+        str_find_helper,
+        code_point_at_import,
+        from_code_point_import,
+        case_convert_import,
+        split_imports,
+        join_imports,
+    })
+}
+
+/// Synthesizes runtime helper functions for strings and memory into the WAFFLE module.
+pub(crate) fn emit_string_runtime(
+    module: &mut Module<'static>,
+    memory: Memory,
+    initial_heap_base: u32,
+    imports: StringImports,
+) -> Result<StringHelperFuncs> {
+    let StringImports {
+        str_find_helper,
+        code_point_at_import,
+        from_code_point_import,
+        case_convert_import,
+        split_imports,
+        join_imports,
+    } = imports;
     // Emit core function bodies
     let allocator = emit_allocator(module, memory, initial_heap_base)?;
     let cabi_realloc = allocator.realloc;

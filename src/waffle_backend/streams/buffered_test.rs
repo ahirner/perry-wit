@@ -9,7 +9,7 @@ use waffle::{Export, ExportKind, MemoryData, Module};
 use wasmtime::component::{Component, Instance, Linker, StreamReader};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
-use crate::waffle_backend::{allocation, component::forward, runtime};
+use crate::waffle_backend::{allocation, runtime};
 
 #[path = "../../../tests/support/p3_input.rs"]
 mod input;
@@ -26,10 +26,9 @@ async fn instantiate(cap: usize) -> Result<(Store<StoreLimits>, Instance)> {
         name: "memory".into(),
         kind: ExportKind::Memory(memory),
     });
-    let functions = super::forward_functions();
-    let imports = forward::declare_imports(&mut module, "streams", &functions);
+    let imports = super::declare_imports(&mut module);
     let allocator = allocation::emit_allocator(&mut module, memory, 1024)?;
-    let transfer = super::emit_read_transfer(&mut module, memory, imports["read"])?;
+    let transfer = super::emit_read_transfer(&mut module, memory, imports.read)?;
     let buffered = super::buffered::emit(&mut module, memory, allocator, transfer)?;
     let wrappers = runtime::emit_functions(
         &mut module,
@@ -48,10 +47,10 @@ async fn instantiate(cap: usize) -> Result<(Store<StoreLimits>, Instance)> {
         (i32.store (i32.const 516) (if (result i32) (local.get $error) (then (i32.const 8)) (else (local.get $data))))
         (i32.store (i32.const 520) (local.get $length))
         (i32.const 512))
-      (func (export "post") (param i32) (call $post-return)))"#,
+      (func (export "cabi_post_run") (param i32) (call $post-return)))"#,
         &BTreeMap::from([
             ("buffered", buffered),
-            ("drop", imports["drop"]),
+            ("drop", imports.drop),
             ("post-return", allocator.post_return),
         ]),
     )?;
@@ -61,33 +60,20 @@ async fn instantiate(cap: usize) -> Result<(Store<StoreLimits>, Instance)> {
             kind: ExportKind::Func(function),
         });
     }
-    let core = wasmprinter::print_bytes(module.to_wasm_bytes()?)?;
-    let wat = format!(
-        r#"(component
-      {}
-      (core module $guest {})
-      (core instance $guest (instantiate $guest (with "streams" (instance $streams-forward))))
-      (type $bytes (stream u8))
-      (core func $stream-read (canon stream.read $bytes (memory (core memory $guest "memory"))))
-      (core func $stream-drop (canon stream.drop-readable $bytes))
-      {}
-      (func (export "run") async (param "input" $bytes) (param "limit" u32) (result (result (list u8) (error u32)))
-        (canon lift (core func $guest "run") (memory (core memory $guest "memory"))
-          (realloc (core func $guest "cabi_realloc")) (post-return (core func $guest "post")))))"#,
-        forward::declare("streams", &functions)?,
-        core.strip_prefix("(module")
-            .unwrap()
-            .trim_end()
-            .strip_suffix(')')
-            .unwrap(),
-        forward::bind("streams", &functions)?
-    );
+    let (resolve, package) = crate::component::wit::resolve_source(
+        "package test:buffered-stream; world fixture {
+            export run: async func(input: stream<u8>, limit: u32) -> result<list<u8>, u32>;
+        }",
+    )?;
+    let world = resolve.select_world(&[package], Some("fixture"))?;
+    let component =
+        crate::waffle_backend::encode_component(&module.to_wasm_bytes()?, resolve, world)?;
     let mut config = Config::new();
     config
         .wasm_component_model_async(true)
         .wasm_component_model_more_async_builtins(true);
     let engine = Engine::new(&config)?;
-    let component = Component::new(&engine, wat::parse_str(wat)?)?;
+    let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, StoreLimitsBuilder::new().memory_size(cap).build());
     store.limiter(|limits| limits);
     let instance = Linker::new(&engine)

@@ -44,19 +44,6 @@ pub(crate) fn emit_lift(
     Ok(functions["value.lift"])
 }
 
-pub(crate) fn contains(ty: &HirType) -> bool {
-    if is_text_or_bytes(ty) {
-        return true;
-    }
-    match ty {
-        HirType::Promise(inner) | HirType::Array(inner) => contains(inner),
-        HirType::Generic { type_args, .. } | HirType::Union(type_args) => {
-            type_args.iter().any(contains)
-        }
-        _ => false,
-    }
-}
-
 pub(crate) fn equivalent(left: &HirType, right: &HirType) -> bool {
     left == right
         || (super::objects::is_object(left) && super::objects::is_object(right))

@@ -1,9 +1,12 @@
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
 use std::{fs, process::Command};
+use waffle_fixture::compile_typescript_waffle;
 
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use wasmtime::component::{Component, Linker, StreamReader};

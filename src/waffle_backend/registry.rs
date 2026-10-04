@@ -100,9 +100,8 @@ pub(crate) struct ModuleRegistry {
 }
 
 pub(crate) struct PromiseImports {
-    pub(crate) native: Option<super::promises::native::NativeRuntime>,
+    pub(crate) native: super::promises::native::NativeRuntime,
     pub(crate) new: Func,
-    pub(crate) bind: Option<Func>,
     pub(crate) await_result: Func,
     pub(crate) yield_thread: Func,
     pub(crate) starts: BTreeMap<TaskTarget, Func>,
@@ -165,7 +164,7 @@ impl ModuleRegistry {
             ) || matches!(
                 intrinsic,
                 TypedIntrinsic::Capability(operation)
-                    if !matches!(operation.lower().implementation, CapabilityImplementation::Standalone { .. })
+                    if !matches!(operation.lower().implementation, CapabilityImplementation::Scalar)
             ) {
                 continue;
             }
@@ -215,51 +214,12 @@ impl ModuleRegistry {
             BTreeMap::new()
         };
 
-        let promises = if let Some(plan) = &contract.promises {
-            if contract.wit.is_some() {
-                Some(super::promises::native::declare(module, plan)?)
-            } else {
-                let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
-                    let sig = module.signatures.push(SignatureData { params, returns });
-                    let func = module.funcs.push(FuncDecl::Import(sig, name.into()));
-                    module.imports.push(Import {
-                        module: "promises".into(),
-                        name: name.into(),
-                        kind: ImportKind::Func(func),
-                    });
-                    func
-                };
-                let new = declare("new", vec![Type::I32], vec![Type::I32]);
-                let bind = declare("bind", vec![Type::I32, Type::I32], vec![]);
-                let await_result = declare("await", vec![Type::I32], vec![Type::I32, Type::F64]);
-                let yield_thread = declare("yield", vec![], vec![]);
-                let mut starts = BTreeMap::new();
-                for (target, task) in &plan.tasks {
-                    let mut params = vec![Type::I32];
-                    params.extend(
-                        task.arguments
-                            .source()?
-                            .iter()
-                            .map(map_type_to_waffle)
-                            .collect::<Result<Vec<_>>>()?,
-                    );
-                    starts.insert(
-                        target.clone(),
-                        declare(&task.symbol, params, vec![Type::I32]),
-                    );
-                }
-                Some(PromiseImports {
-                    native: None,
-                    new,
-                    bind: Some(bind),
-                    await_result,
-                    yield_thread,
-                    starts,
-                })
-            }
-        } else {
-            None
-        };
+        let string_imports = super::strings::declare_imports(module, string_reqs)?;
+        let promises = contract
+            .promises
+            .as_ref()
+            .map(|plan| super::promises::native::declare(module, plan))
+            .transpose()?;
 
         // Emit storage helpers only after every function import has been declared.
         let string_helpers =
@@ -268,7 +228,7 @@ impl ModuleRegistry {
                     module,
                     memory,
                     base,
-                    string_reqs,
+                    string_imports,
                 )?)
             } else {
                 None
@@ -577,6 +537,20 @@ impl ModuleRegistry {
                 .map(|p| map_type_to_waffle(&p.ty))
                 .collect::<Result<Vec<_>>>()?;
 
+            if is_exported && contract.wit.is_none() {
+                ensure!(
+                    canonical_param_types(
+                        &func
+                            .params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect::<Vec<_>>()
+                    )?
+                    .len()
+                        <= 16,
+                    "Core-only entry functions with more than 16 flattened parameters require a resolved WIT world for indirect canonical parameters"
+                );
+            }
             let host_returns = if contract.wit.is_none() {
                 map_return_type_to_waffle(&func.return_type)?
             } else {

@@ -1,11 +1,14 @@
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::{
     sync::Notify,
     time::{Duration, timeout},
 };
+use waffle_fixture::compile_typescript_waffle;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p3::bindings::clocks::system_clock::Instant;

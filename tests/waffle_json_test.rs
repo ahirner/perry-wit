@@ -1,6 +1,9 @@
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use std::{fs, process::Command, time::Duration};
+use waffle_fixture::compile_typescript_waffle;
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -393,10 +396,10 @@ async fn instantiate_json(
     let engine = Engine::new(&config)?;
     let core = wasmtime::Module::new(&engine, &compiled.core)?;
     if compiled.uses_p3_clocks {
-        assert!(
-            core.imports()
-                .all(|import| matches!(import.module(), "host" | "promises"))
-        );
+        assert!(core.imports().all(|import| matches!(
+            import.module(),
+            "wasi:clocks/monotonic-clock@0.3.0" | "$root"
+        )));
     } else {
         assert_eq!(core.imports().count(), 0);
     }

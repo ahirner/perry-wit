@@ -1,5 +1,6 @@
+use crate::waffle_fixture::compile_typescript_waffle;
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use std::{fs, process::Command};
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
@@ -468,7 +469,8 @@ async fn filesystem_bindings_preserve_user_functions_and_prune_unused_imports() 
     assert!(wat.contains("wasi:filesystem/preopens@0.3.0"));
     for unrelated in [
         "wasi:cli/",
-        "wasi:clocks/",
+        "wasi:clocks/monotonic-clock",
+        "wasi:clocks/wall-clock",
         "wasi:random/",
         "wasi:http/",
         "@0.2.",

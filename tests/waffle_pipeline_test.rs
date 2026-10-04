@@ -1,14 +1,16 @@
 //! Comprehensive integration test suite for the LLVM-free Perry HIR → WAFFLE SSA backend.
 
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use std::{fs, process::Command};
+use waffle_fixture::compile_typescript_waffle;
 
 use anyhow::Result;
-use perry_wit::compile_typescript_waffle;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use tokio::time::timeout;
 use wasmtime::component::{Component, Linker, ResourceTable, Val};
@@ -80,7 +82,7 @@ fn hir_entry_point_cannot_restore_runtime_delete() -> Result<()> {
         "export function run():number {const value={field:'x'};delete value.field;return 0;}";
     let ast = perry_parser::parse_typescript(source, "delete.ts")?;
     let hir = perry_hir::lower_module(&ast, "main", "delete.ts")?;
-    let error = perry_wit::waffle_backend::compile_hir_owned(hir, &WaffleCompileOptions::default())
+    let error = waffle_fixture::compile_hir(&hir, &WaffleCompileOptions::default())
         .expect_err("direct HIR compilation must also reject runtime delete");
     assert!(
         format!("{error:#}").contains("Runtime delete is unsupported"),
@@ -182,7 +184,7 @@ async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result
         compile_typescript_waffle(source, "effects.ts", &WaffleCompileOptions::default())?;
     let engine = make_async_engine()?;
     let component = Component::new(&engine, compiled.component.unwrap())?;
-    assert_eq!(component.component_type().imports(&engine).count(), 2);
+    assert_eq!(component.component_type().imports(&engine).count(), 3);
     let trace = Arc::new(Mutex::new(Vec::new()));
     let random_trace = trace.clone();
     let wait_trace = trace.clone();
@@ -444,7 +446,8 @@ async fn test_waffle_mixed_capabilities_share_text_unwinding_and_invocation_life
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from([
             "wasi:random/random@0.3.0",
-            "wasi:clocks/monotonic-clock@0.3.0"
+            "wasi:clocks/monotonic-clock@0.3.0",
+            "wasi:clocks/types@0.3.0"
         ])
     );
     let mut linker = Linker::new(&engine);
@@ -1065,11 +1068,9 @@ fn test_waffle_rejects_intrinsics_without_component_wiring() -> Result<()> {
         let error =
             compile_typescript_waffle(&source, "intrinsic.ts", &WaffleCompileOptions::default())
                 .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("Intrinsic '{name}' is unsupported in components"))
-        );
+        assert!(error.to_string().contains(&format!(
+            "WIT world has no import for core function '{name}'"
+        )));
 
         let options = WaffleCompileOptions {
             componentize: false,

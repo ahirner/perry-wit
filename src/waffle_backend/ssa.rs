@@ -78,7 +78,10 @@ pub(crate) fn lower_module(
     reqs.objects |= contract
         .context_operations()
         .contains(&super::capabilities::ContextOperation::Environment);
-    reqs.needs_strings |= contract.wit.is_some()
+    reqs.needs_strings |= contract
+        .clock_operations()
+        .contains(&super::capabilities::ClockOperation::DateNow)
+        || contract.wit.is_some()
         || super::values::required(hir)
         || super::date::required(hir)
         || super::time::required(hir)
@@ -192,11 +195,7 @@ pub(crate) fn lower_module(
         state.emit(&mut module, plan, &registry)?;
     }
     let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
-    if registry
-        .promises
-        .as_ref()
-        .is_some_and(|runtime| runtime.native.is_some())
-    {
+    if registry.promises.is_some() {
         super::promises::native::emit(&mut module, &registry, contract, &string_pool)?;
     }
 
@@ -463,23 +462,13 @@ impl<'a> FunctionLowerer<'a> {
                     self.expression(expr)?;
                 }
                 Stmt::Return(Some(expr))
-                    if matches!(self.infer_expr_type(expr), HirType::Promise(_))
-                        && self
-                            .registry
-                            .promises
-                            .as_ref()
-                            .is_some_and(|runtime| runtime.native.is_some()) =>
+                    if matches!(self.infer_expr_type(expr), HirType::Promise(result)
+                        if super::wit::same_type(&result, self.return_type))
+                        && self.registry.promises.is_some() =>
                 {
-                    let HirType::Promise(result) = self.infer_expr_type(expr) else {
-                        unreachable!()
-                    };
                     ensure!(
                         self.is_async,
                         "Returning a stored Promise requires an async function"
-                    );
-                    ensure!(
-                        super::wit::same_type(&result, self.return_type),
-                        "Returned Promise outcome must match the declared function result type"
                     );
                     let record = self.expression(expr)?;
                     self.reference_values.insert(record);
@@ -1091,22 +1080,13 @@ impl<'a> FunctionLowerer<'a> {
             self.reference_values.insert(record);
             let mut arg_vals = arg_vals.to_vec();
             arg_vals.insert(0, record);
-            let status = self.op(
+            self.op(
                 Operator::Call {
                     function_index: start,
                 },
                 &arg_vals,
                 &[Type::I32],
             );
-            if let Some(bind) = runtime.bind {
-                self.op(
-                    Operator::Call {
-                        function_index: bind,
-                    },
-                    &[record, status],
-                    &[],
-                );
-            }
             return Ok(Some(record));
         }
         Ok(None)
@@ -2174,13 +2154,7 @@ impl<'a> FunctionLowerer<'a> {
                     self.block = block;
                     match reason {
                         ExitReason::Return => self.emit_finally_return(environment.payload),
-                        ExitReason::ReturnPromise
-                            if self
-                                .registry
-                                .promises
-                                .as_ref()
-                                .is_some_and(|runtime| runtime.native.is_some()) =>
-                        {
+                        ExitReason::ReturnPromise if self.registry.promises.is_some() => {
                             self.emit_promise_return(environment.payload)
                         }
                         ExitReason::Throw => self.emit_throw(environment.payload),

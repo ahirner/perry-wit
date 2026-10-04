@@ -5,7 +5,6 @@ pub(crate) mod allocation;
 pub(crate) mod audit;
 mod bytes;
 pub(crate) mod capabilities;
-pub(crate) mod component;
 mod context;
 pub(crate) mod control_flow;
 mod date;
@@ -73,7 +72,8 @@ pub struct WaffleCompiled {
     pub input_kind: ResolvedInputKind,
 }
 
-/// Compiles TypeScript source using the pure WAFFLE SSA backend.
+/// Compiles TypeScript to core Wasm with `componentize: false`.
+/// Use [`compile_typescript_for_world`] for component output with authoritative WIT.
 pub fn compile_typescript(
     ts_source: &str,
     file_name: &str,
@@ -148,7 +148,8 @@ fn compile_source(
     compile_resolved_hir(hir, options, &bindings, exports, http_handler)
 }
 
-/// Compiles Perry HIR by taking ownership, avoiding redundant cloning of the HIR.
+/// Compiles owned Perry HIR to core Wasm with `componentize: false`.
+/// Encode the core with an explicit WIT world using [`encode_component`].
 pub fn compile_hir_owned(hir: HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
     compile_resolved_hir(hir, options, &source::SourceBindings::default(), None, None)
 }
@@ -163,6 +164,10 @@ fn compile_resolved_hir(
     if exports.is_some() {
         initialization::extract(&mut hir)?;
     }
+    anyhow::ensure!(
+        !options.componentize || exports.is_some(),
+        "Component output requires an explicitly resolved WIT world; use compile_typescript_for_world or request core-only output"
+    );
     objects::resolve_declared_types(&mut hir)?;
     if let Some(exports) = &exports {
         exports.validate(&hir)?;
@@ -191,16 +196,11 @@ fn compile_resolved_hir(
     let core = link::link_helpers(&core).context("Linking guest helpers into core Wasm")?;
 
     let (component_wat, component) = if options.componentize {
-        let has_post_return = waffle_mod
-            .exports
-            .iter()
-            .any(|export| export.name == "cabi_post_run");
-        let (wat, bytes) = if let Some(exports) = native_handler.as_ref().or(contract.wit.as_ref())
-        {
-            exports.frame(&core)?
-        } else {
-            component::frame_component(&core, &contract, has_post_return)?
-        };
+        let (wat, bytes) = native_handler
+            .as_ref()
+            .or(contract.wit.as_ref())
+            .unwrap()
+            .frame(&core)?;
         (Some(wat), Some(bytes))
     } else {
         (None, None)
@@ -217,7 +217,20 @@ fn compile_resolved_hir(
     })
 }
 
-/// Compiles Perry HIR using the pure WAFFLE SSA backend.
+/// Compiles borrowed Perry HIR to core Wasm with `componentize: false`.
 pub fn compile_hir(hir: &HirModule, options: &WaffleCompileOptions) -> Result<WaffleCompiled> {
     compile_hir_owned(hir.clone(), options)
+}
+
+/// Encodes a core module against an explicit WIT world using canonical P3 bindings.
+pub fn encode_component(
+    core: &[u8],
+    resolve: wit_parser::Resolve,
+    world: wit_parser::WorldId,
+) -> Result<Vec<u8>> {
+    let wit = wit::WitWorld::for_encoding(resolve, world)?;
+    let mut module = waffle::Module::from_wasm_bytes(core, &Default::default())?;
+    wit.bind_native_imports(&mut module)?;
+    let (_, component) = wit.frame(&module.to_wasm_bytes()?)?;
+    Ok(component)
 }

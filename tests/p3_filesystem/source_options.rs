@@ -200,7 +200,8 @@ async fn typed_property_reads_reject_missing_or_retagged_fields() -> Result<()> 
 
 #[test]
 fn unsupported_objects_are_diagnosed_before_losing_property_effects() {
-    use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+    use crate::waffle_fixture::compile_typescript_waffle;
+    use perry_wit::waffle_backend::WaffleCompileOptions;
     for declaration in [
         "const options={get encoding() {return 'utf8';}};",
         "const options={set encoding(value:string) {}};",
@@ -297,7 +298,7 @@ fn reusable_options_and_structured_promises_match_sdk_declarations() -> Result<(
         const listing:{encoding?:string;recursive?:false}={encoding:'utf8',recursive:false};
         return fs.readdirSync(path,listing);
     }"#;
-    perry_wit::compile_typescript_waffle(
+    crate::waffle_fixture::compile_typescript_waffle(
         source,
         "sdk-options.ts",
         &perry_wit::waffle_backend::WaffleCompileOptions::default(),

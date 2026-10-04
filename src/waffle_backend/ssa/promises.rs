@@ -178,7 +178,7 @@ impl FunctionLowerer<'_> {
             .registry
             .promises
             .as_ref()
-            .and_then(|runtime| runtime.native.as_ref())
+            .map(|runtime| &runtime.native)
             .expect("combinators use resolved P3 threads")
             .combine
             .unwrap();

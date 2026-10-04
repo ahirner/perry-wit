@@ -1,6 +1,9 @@
 //! Perry-WIT: Compiles TypeScript directly into WASI 0.3 WebAssembly components.
 #![warn(unreachable_pub)]
 
+#[cfg(test)]
+extern crate self as perry_wit;
+
 pub mod abi;
 pub mod compiler;
 pub mod component;

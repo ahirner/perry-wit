@@ -302,8 +302,12 @@ fn union_consumers_require_current_type_guards_and_preserve_binding_types() {
         let source =
             format!("export function run(value: string | Uint8Array): number {{ {body} }}");
         assert!(
-            perry_wit::compile_typescript_waffle(&source, "union-errors.ts", &Default::default())
-                .is_err(),
+            crate::waffle_fixture::compile_typescript_waffle(
+                &source,
+                "union-errors.ts",
+                &Default::default()
+            )
+            .is_err(),
             "{body}"
         );
     }

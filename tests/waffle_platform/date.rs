@@ -1,6 +1,7 @@
 use super::{Host, instantiate};
+use crate::waffle_fixture::compile_typescript_waffle;
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use std::{
     process::Command,
     sync::{

@@ -6,7 +6,7 @@ use anyhow::Result;
 use perry_hir::types::Type as HirType;
 use waffle::{Func, Memory, Module};
 
-use super::{allocation::AllocationFuncs, component::forward, runtime};
+use super::{allocation::AllocationFuncs, runtime, runtime::imports};
 
 pub(crate) const OPTION_KEYS: [&str; 6] = [
     "encoding",
@@ -36,7 +36,7 @@ pub(crate) fn is_stats(ty: &HirType) -> bool {
 }
 
 pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
-    forward::declare_imports(module, "filesystem", &native_functions())
+    imports::declare_imports(module, "filesystem", &native_functions())
 }
 
 pub(crate) fn emit_runtime(
@@ -70,7 +70,7 @@ pub(crate) fn emit_runtime(
       (import "host" "read-buffered" (func $read-buffered (param i32 i32) (result i32 i32 i32)))
       (import "host" "read-directory-transfer" (func $read-directory-transfer (param i32 i32 i32) (result i32 i32)))
       {} {} {} {} {} {} {} {} {})"#,
-        forward::module_imports(&native_functions())?,
+        imports::module_imports(&native_functions())?,
         include_str!("streams/write.wat"),
         include_str!("strings/utf8.wat"),
         include_str!("filesystem/options.wat"),
@@ -108,51 +108,7 @@ pub(crate) fn emit_runtime(
     })
 }
 
-pub(crate) fn declare_adapters() -> Result<String> {
-    Ok(format!(
-        "{}{}",
-        include_str!("filesystem/interfaces.wat"),
-        forward::declare("filesystem", &native_functions())?
-    ))
-}
-
-pub(crate) fn bind_adapters() -> Result<String> {
-    Ok(format!(
-        r#"
-      (core func $fs-directories (canon lower (func $fs-preopens "get-directories")
-        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-open (canon lower (func $fs-types "[method]descriptor.open-at")
-        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-start-write (canon lower (func $fs-types "[method]descriptor.write-via-stream")))
-      (core func $fs-start-read (canon lower (func $fs-types "[method]descriptor.read-via-stream")
-        (memory (core memory $guest "memory"))))
-      (core func $fs-stat (canon lower (func $fs-types "[method]descriptor.stat-at")
-        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-mkdir (canon lower (func $fs-types "[method]descriptor.create-directory-at")
-        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-unlink (canon lower (func $fs-types "[method]descriptor.unlink-file-at")
-        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-rmdir (canon lower (func $fs-types "[method]descriptor.remove-directory-at")
-        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-start-directory (canon lower (func $fs-types "[method]descriptor.read-directory")
-        (memory (core memory $guest "memory"))))
-      (core func $fs-read-entry (canon stream.read $fs-entries
-        (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-drop-entries (canon stream.drop-readable $fs-entries))
-      (core func $fs-drop-descriptor (canon resource.drop $fs-descriptor))
-      (core func $fs-await (canon future.read $fs-completion (memory (core memory $guest "memory")) (realloc (core func $guest "cabi_realloc"))))
-      (core func $fs-drop-future (canon future.drop-readable $fs-completion))
-      (core func $fs-new (canon stream.new $fs-bytes))
-      (core func $fs-write (canon stream.write $fs-bytes (memory (core memory $guest "memory"))))
-      (core func $fs-drop-writer (canon stream.drop-writable $fs-bytes))
-      (core func $fs-read (canon stream.read $fs-bytes (memory (core memory $guest "memory"))))
-      (core func $fs-drop-reader (canon stream.drop-readable $fs-bytes))
-      {}"#,
-        forward::bind("filesystem", &native_functions())?
-    ))
-}
-
-fn native_functions() -> Vec<forward::Function> {
+fn native_functions() -> Vec<imports::Function> {
     [
         ("directories", vec!["i32"], vec![]),
         ("open", vec!["i32"; 7], vec![]),
@@ -175,11 +131,10 @@ fn native_functions() -> Vec<forward::Function> {
         ("drop-reader", vec!["i32"], vec![]),
     ]
     .into_iter()
-    .map(|(name, params, results)| forward::Function {
+    .map(|(name, params, results)| imports::Function {
         name: name.into(),
         params,
         results,
-        target: format!("(func $fs-{name})"),
     })
     .collect()
 }

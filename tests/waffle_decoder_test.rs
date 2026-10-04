@@ -1,7 +1,10 @@
+#[path = "support/waffle.rs"]
+mod waffle_fixture;
 use std::{fs, process::Command};
+use waffle_fixture::compile_typescript_waffle;
 
 use anyhow::Result;
-use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+use perry_wit::waffle_backend::WaffleCompileOptions;
 use wasmtime::component::{Component, Instance, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 

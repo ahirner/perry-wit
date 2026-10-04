@@ -258,7 +258,8 @@ async fn static_read_options_and_repeated_reads_keep_their_result_contract() -> 
 
 #[test]
 fn read_result_types_and_unsupported_options_are_explicit() {
-    use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
+    use crate::waffle_fixture::compile_typescript_waffle;
+    use perry_wit::waffle_backend::WaffleCompileOptions;
 
     for function in [
         "export function run(): string { return readFileSync('/file'); }",

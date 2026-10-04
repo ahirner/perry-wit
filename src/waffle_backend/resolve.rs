@@ -41,7 +41,6 @@ pub(crate) enum TypedIntrinsic {
         is_async: bool,
     },
     Capability(CapabilityOperation),
-    HostDouble,
     ReadChunk,
     ReadInto,
     ByteAt,
@@ -76,7 +75,6 @@ impl TypedIntrinsic {
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Capability(operation) => operation.name(),
-            Self::HostDouble => "hostDouble",
             Self::ReadChunk => "readChunk",
             Self::ReadInto => "readInto",
             Self::ByteAt => "byteAt",
@@ -91,7 +89,7 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(CapabilityOperation::Promise(_)) => true,
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
-            Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
+            Self::ReadChunk | Self::ReadInto => true,
             Self::WitImport { is_async, .. } => *is_async,
             Self::ByteAt | Self::DecoderNew | Self::DateNew | Self::Temporal(_) => false,
             Self::Custom { is_async, .. } => *is_async,
@@ -124,7 +122,7 @@ impl TypedIntrinsic {
                     returns,
                 )
             }
-            Self::HostDouble | Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
+            Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
             Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
             Self::DateNew => (vec![WaffleType::F64], vec![WaffleType::I32]),
@@ -162,7 +160,6 @@ pub(crate) struct ResolvedContract {
     pub(crate) functions_by_name: BTreeMap<String, FuncId>,
     pub(crate) entry_func_id: FuncId,
     pub(crate) entry_params: Vec<HirType>,
-    pub(crate) entry_return_type: HirType,
 }
 
 impl ResolvedContract {
@@ -239,18 +236,6 @@ impl ResolvedContract {
         self.entry_params
             .iter()
             .any(|ty| matches!(ty, HirType::Named(name) if name == "ByteStream"))
-    }
-    /// The canonical result type after unwrapping asynchronous transport.
-    pub(crate) fn entry_result_type(&self) -> &HirType {
-        let mut ty = &self.entry_return_type;
-        while let HirType::Promise(inner) = ty {
-            ty = inner;
-        }
-        ty
-    }
-
-    pub(crate) fn entry_returns_wit_result(&self) -> bool {
-        matches!(self.entry_result_type(), HirType::Generic { base, .. } if base == "Result")
     }
 }
 
@@ -338,17 +323,6 @@ pub(crate) fn resolve_contract(
             continue;
         }
         match name.as_str() {
-            "hostDouble" => {
-                ensure!(
-                    params.len() == 1 && matches!(params[0], HirType::Number),
-                    "hostDouble signature must be (value: number) => Promise<number>"
-                );
-                ensure!(
-                    matches!(ret, HirType::Promise(inner) if matches!(**inner, HirType::Number)),
-                    "hostDouble must return Promise<number>"
-                );
-                intrinsics.insert(name.clone(), TypedIntrinsic::HostDouble);
-            }
             "readChunk" => {
                 ensure!(
                     params.len() == 1
@@ -460,7 +434,7 @@ pub(crate) fn resolve_contract(
         )
     });
 
-    let promises = super::promises::plan_promises(hir, &intrinsics, wit.is_some())?;
+    let promises = super::promises::plan_promises(hir, &intrinsics)?;
     let stream_inputs = entry_func
         .params
         .iter()
@@ -512,7 +486,6 @@ pub(crate) fn resolve_contract(
             .iter()
             .map(|param| param.ty.clone())
             .collect(),
-        entry_return_type: entry_func.return_type.clone(),
     })
 }
 
