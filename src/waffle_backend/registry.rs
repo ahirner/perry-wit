@@ -82,6 +82,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) value_access: Option<super::values::ValueAccessHelpers>,
     pub(crate) json_helpers: Option<super::json::JsonHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
+    pub(crate) time_helpers: BTreeMap<&'static str, Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
     pub(crate) object_helpers: Option<super::objects::ObjectHelpers>,
@@ -122,6 +123,7 @@ impl ModuleRegistry {
                     | TypedIntrinsic::ByteAt
                     | TypedIntrinsic::DecoderNew
                     | TypedIntrinsic::DateNew
+                    | TypedIntrinsic::Temporal(_)
             ) || matches!(
                 intrinsic,
                 TypedIntrinsic::Capability(operation)
@@ -202,6 +204,12 @@ impl ModuleRegistry {
             })
         } else {
             None
+        };
+
+        let time_helpers = if super::time::required(hir) {
+            super::time::declare_imports(module)
+        } else {
+            BTreeMap::new()
         };
 
         // Emit storage helpers only after every function import has been declared.
@@ -545,6 +553,7 @@ impl ModuleRegistry {
             text_or_bytes_lift,
             value_helpers,
             date_helpers,
+            time_helpers,
             json_helpers,
             value_access,
             decoder_helpers,
@@ -570,7 +579,12 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         HirType::Promise(inner) if super::promises::is_task_outcome(inner) => Ok(Type::I32),
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
-        ty if super::decoder::is_decoder(ty) || super::date::is_date(ty) => Ok(Type::I32),
+        ty if super::decoder::is_decoder(ty)
+            || super::date::is_date(ty)
+            || super::time::is_time(ty) =>
+        {
+            Ok(Type::I32)
+        }
         ty if super::objects::is_object(ty) => Ok(Type::I32),
         ty if super::filesystem::is_stats(ty) => Ok(Type::I32),
         HirType::Array(inner) if **inner == HirType::String => Ok(Type::I32),
@@ -587,7 +601,12 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         HirType::Boolean => Ok(vec![Type::I32]),
         HirType::String => Ok(vec![Type::I32]),
         ty if super::bytes::is_byte_view(ty) => Ok(vec![Type::I32]),
-        ty if super::decoder::is_decoder(ty) || super::date::is_date(ty) => Ok(vec![Type::I32]),
+        ty if super::decoder::is_decoder(ty)
+            || super::date::is_date(ty)
+            || super::time::is_time(ty) =>
+        {
+            Ok(vec![Type::I32])
+        }
         ty if super::objects::is_object(ty) => Ok(vec![Type::I32]),
         ty if super::filesystem::is_stats(ty) => Ok(vec![Type::I32]),
         HirType::Array(inner) if **inner == HirType::String => Ok(vec![Type::I32]),

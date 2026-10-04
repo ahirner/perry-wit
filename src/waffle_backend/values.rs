@@ -59,6 +59,8 @@ pub(crate) enum ValueTag {
     Promise = 10,
     Date = 11,
     Array = 12,
+    Instant = 13,
+    PlainDateTime = 14,
 }
 
 impl ValueTag {
@@ -77,6 +79,12 @@ impl ValueTag {
             ty if super::decoder::is_decoder(ty) => Self::Decoder,
             HirType::Promise(_) => Self::Promise,
             ty if super::date::is_date(ty) => Self::Date,
+            ty if super::time::TimeKind::of(ty) == Some(super::time::TimeKind::Instant) => {
+                Self::Instant
+            }
+            ty if super::time::TimeKind::of(ty) == Some(super::time::TimeKind::PlainDateTime) => {
+                Self::PlainDateTime
+            }
             _ => bail!("Unsupported tagged value type: {ty:?}"),
         })
     }

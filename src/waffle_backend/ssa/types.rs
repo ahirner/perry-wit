@@ -17,6 +17,12 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
+        ty if crate::waffle_backend::time::is_time(ty) => {
+            crate::waffle_backend::time::TimeKind::of(ty).map(|kind| match kind {
+                crate::waffle_backend::time::TimeKind::Instant => "Temporal.Instant",
+                crate::waffle_backend::time::TimeKind::PlainDateTime => "Temporal.PlainDateTime",
+            })
+        }
         ty if crate::waffle_backend::filesystem::is_stats(ty) => Some("Stats"),
         HirType::Array(inner) if **inner == HirType::String => Some("string[]"),
         HirType::Named(name) if name == "ByteStream" => Some("ByteStream"),
@@ -29,7 +35,8 @@ pub(super) fn is_reference(ty: &HirType) -> bool {
         ty if crate::waffle_backend::values::is_dynamic(ty) => true,
         ty if crate::waffle_backend::objects::is_object(ty) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty)
-            || crate::waffle_backend::date::is_date(ty) =>
+            || crate::waffle_backend::date::is_date(ty)
+            || crate::waffle_backend::time::is_time(ty) =>
         {
             true
         }
@@ -74,6 +81,17 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::Logical { left, right, .. }
+                if self.infer_expr_type(left) == HirType::Boolean
+                    && self.infer_expr_type(right) == HirType::Boolean =>
+            {
+                HirType::Boolean
+            }
+            Expr::PropertyGet { object, .. }
+                if crate::waffle_backend::time::is_time(&self.infer_expr_type(object)) =>
+            {
+                HirType::Number
+            }
             Expr::Array(_) => HirType::Named(crate::waffle_backend::values::ARRAY_TYPE.into()),
             Expr::PropertyGet { object, .. } | Expr::IndexGet { object, .. }
                 if crate::waffle_backend::values::has_dynamic_properties(
@@ -205,6 +223,13 @@ impl FunctionLowerer<'_> {
                     object, property, ..
                 } = callee.as_ref()
                 {
+                    if crate::waffle_backend::time::is_time(&self.infer_expr_type(object)) {
+                        return if property == "toString" {
+                            HirType::String
+                        } else {
+                            self.infer_expr_type(object)
+                        };
+                    }
                     if crate::waffle_backend::date::is_date(&self.infer_expr_type(object)) {
                         return if property == "toISOString" {
                             HirType::String

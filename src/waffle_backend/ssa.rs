@@ -5,6 +5,7 @@
 //! overhead for primitive values.
 
 mod arrays;
+mod boolean;
 mod bytes;
 mod date;
 mod decoder;
@@ -17,6 +18,7 @@ mod random;
 mod requirements;
 mod string_ops;
 mod text_or_bytes;
+mod time;
 mod types;
 mod values;
 
@@ -69,6 +71,7 @@ pub(crate) fn lower_module(
         .contains(&super::capabilities::ContextOperation::Environment);
     reqs.needs_strings |= super::values::required(hir)
         || super::date::required(hir)
+        || super::time::required(hir)
         || !contract.context_operations().is_empty()
         || contract.has_filesystem()
         || contract
@@ -117,6 +120,9 @@ pub(crate) fn lower_module(
         }
         if reqs.json {
             helper_libraries.push(super::libraries::LibraryId::Json);
+        }
+        if super::time::required(hir) {
+            helper_libraries.push(super::libraries::LibraryId::Time);
         }
         if !helper_libraries.is_empty() {
             let mut placement = super::libraries::HelperMemory::new(next_free);
@@ -311,6 +317,12 @@ impl<'a> FunctionLowerer<'a> {
                     ..
                 } => {
                     let inferred = self.infer_expr_type(expr);
+                    if super::time::is_time(ty) {
+                        ensure!(
+                            ty == &inferred,
+                            "Temporal initializers must match their declared type"
+                        );
+                    }
                     let (ty, val) = if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
                         (
                             super::text_or_bytes::value_type(),
@@ -467,6 +479,7 @@ impl<'a> FunctionLowerer<'a> {
             self.expression(expr)
         } else if super::filesystem::is_stats(self.return_type)
             || super::date::is_date(self.return_type)
+            || super::time::is_time(self.return_type)
             || matches!(self.return_type, HirType::Array(_))
         {
             ensure!(
@@ -493,8 +506,9 @@ impl<'a> FunctionLowerer<'a> {
                 self.return_type
             );
             ensure!(
-                !super::date::is_date(&self.infer_expr_type(expr)),
-                "Cannot return a Date as {:?}",
+                !super::date::is_date(&self.infer_expr_type(expr))
+                    && !super::time::is_time(&self.infer_expr_type(expr)),
+                "Cannot return a Date/Temporal value as {:?}",
                 self.return_type
             );
             ensure!(
@@ -583,6 +597,12 @@ impl<'a> FunctionLowerer<'a> {
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
         if let Expr::ExternFuncRef { name, .. } = callee
+            && let Some(super::resolve::TypedIntrinsic::Temporal(operation)) =
+                self.contract.intrinsics.get(name)
+        {
+            return self.new_time(*operation, args).map(Some);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
             && matches!(
                 self.contract.intrinsics.get(name),
                 Some(super::resolve::TypedIntrinsic::Capability(
@@ -621,6 +641,9 @@ impl<'a> FunctionLowerer<'a> {
             object, property, ..
         } = callee
         {
+            if let Some(kind) = super::time::TimeKind::of(&self.infer_expr_type(object)) {
+                return self.time_method(kind, object, property, args).map(Some);
+            }
             if super::date::is_date(&self.infer_expr_type(object)) {
                 return self.date_method(object, property, args).map(Some);
             }
@@ -689,6 +712,12 @@ impl<'a> FunctionLowerer<'a> {
                 ensure!(
                     expected == Some(&argument_type),
                     "Object arguments must match their declared parameter types"
+                );
+            }
+            if expected.is_some_and(super::time::is_time) || super::time::is_time(&argument_type) {
+                ensure!(
+                    expected == Some(&argument_type),
+                    "Temporal arguments must match their declared type"
                 );
             }
             if expected.is_some_and(super::date::is_date) || super::date::is_date(&argument_type) {
@@ -1095,6 +1124,17 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::Logical { op, left, right } => self.boolean_logic(*op, left, right),
+            Expr::PropertyGet {
+                object, property, ..
+            } if super::time::is_time(&self.infer_expr_type(object)) => {
+                self.time_property(object, property)
+            }
+            Expr::PropertySet { object, .. } | Expr::IndexSet { object, .. }
+                if super::time::is_time(&self.infer_expr_type(object)) =>
+            {
+                bail!("Temporal values are immutable")
+            }
             Expr::JsonParseWithReviver(_, reviver) | Expr::JsonParseReviver { reviver, .. }
                 if !matches!(reviver.as_ref(), Expr::Null | Expr::Undefined) =>
             {

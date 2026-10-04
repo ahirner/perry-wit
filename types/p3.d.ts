@@ -11,7 +11,7 @@
  * guest-local identity in helpers, objects, and Promises. Omitted, copy, nonnumeric,
  * and multi-argument constructors, calendar getters, valueOf(), setters, and
  * string parsing are diagnosed. Component boundaries carry UTC ISO strings.
- * Strict timestamp parsing and Temporal operations are planned in R8.1b.ii.
+ * Temporal supports the typed immutable subset declared below.
  * Guest any values preserve their tags and references; public any component
  * boundaries remain numeric.
  * Opaque Promise adoption through any throws 12; callbacks remain migration work.
@@ -39,6 +39,35 @@ declare namespace NodeJS {
   }
 }
 declare var process: NodeJS.Process;
+
+/** ISO-calendar Temporal subset. Parsing/range/unsupported-annotation failures
+ * throw numeric 1/2/3. Bracket annotations and formatting options are unsupported.
+ * Values retain guest identity; component boundaries carry ISO strings. */
+declare namespace Temporal {
+  class Instant {
+    private constructor();
+    static from(text: string): Instant;
+    static fromEpochMilliseconds(milliseconds: number): Instant;
+    readonly epochMilliseconds: number;
+    toString(): string;
+  }
+  /** Calendar fields without a time zone. from() ignores numeric offsets and rejects Z. */
+  class PlainDateTime {
+    private constructor();
+    static from(text: string): PlainDateTime;
+    readonly year: number;
+    readonly month: number;
+    readonly day: number;
+    readonly hour: number;
+    readonly minute: number;
+    readonly second: number;
+    readonly millisecond: number;
+    readonly microsecond: number;
+    readonly nanosecond: number;
+    add(duration: { days: number }): PlainDateTime;
+    toString(): string;
+  }
+}
 
 declare module "perry:clocks" {
   /** Wait in milliseconds. May be stored and awaited repeatedly within one invocation.

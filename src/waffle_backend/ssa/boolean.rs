@@ -1,0 +1,65 @@
+//! Short-circuit boolean expressions with branch-local effects and joined locals.
+
+use super::FunctionLowerer;
+use crate::waffle_backend::control_flow::JoinPoint;
+use anyhow::{Result, ensure};
+use perry_hir::{
+    ir::{Expr, LogicalOp},
+    types::Type as HirType,
+};
+use waffle::{BlockTarget, Terminator, Type, Value};
+
+impl FunctionLowerer<'_> {
+    pub(super) fn boolean_logic(
+        &mut self,
+        operation: LogicalOp,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<Value> {
+        ensure!(
+            matches!(operation, LogicalOp::And | LogicalOp::Or)
+                && self.infer_expr_type(left) == HirType::Boolean
+                && self.infer_expr_type(right) == HirType::Boolean,
+            "Logical operators require statically boolean operands; implicit value selection is unsupported"
+        );
+        let left_value = self.expression(left)?;
+        let incoming_narrowings = self.narrowings.clone();
+        let evaluate_right = self.body.add_block();
+        let join = JoinPoint::new(&mut self.body, "boolean join", &self.locals);
+        let result = self.body.add_blockparam(join.block, Type::I32);
+        let mut shortcut = join.branch_args(&self.locals);
+        shortcut.push(left_value);
+        let shortcut = BlockTarget {
+            block: join.block,
+            args: shortcut,
+        };
+        let evaluate = BlockTarget {
+            block: evaluate_right,
+            args: vec![],
+        };
+        let (if_true, if_false) = if operation == LogicalOp::And {
+            (evaluate, shortcut)
+        } else {
+            (shortcut, evaluate)
+        };
+        self.body.set_terminator(
+            self.block,
+            Terminator::CondBr {
+                cond: left_value,
+                if_true,
+                if_false,
+            },
+        );
+        self.block = evaluate_right;
+        self.narrow_type_guard(left, operation == LogicalOp::And);
+        let right_value = self.expression(right)?;
+        let mut arguments = join.branch_args(&self.locals);
+        arguments.push(right_value);
+        self.branch(join.block, arguments);
+        self.block = join.block;
+        self.locals = join.bindings;
+        self.narrowings
+            .retain(|id, ty| incoming_narrowings.get(id) == Some(ty));
+        Ok(result)
+    }
+}

@@ -237,7 +237,7 @@ fn date_helpers_are_retained_for_emitted_functions_without_constructors() -> Res
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pending_dates_survive_sibling_collection_and_release_on_disposal() -> Result<()> {
+async fn pending_time_values_survive_sibling_collection_and_release_on_disposal() -> Result<()> {
     let source = r#"
     import {waitFor} from 'perry:clocks';
     async function make():Promise<Date> {
@@ -268,13 +268,40 @@ async fn pending_dates_survive_sibling_collection_and_release_on_disposal() -> R
             "return date.toISOString();",
             "return new Date(date.getTime()).toISOString();",
         );
-    for source in [source, parameterized.as_str()] {
+    let instant = source
+        .replace("Promise<Date>", "Promise<Temporal.Instant>")
+        .replace("new Date(", "Temporal.Instant.fromEpochMilliseconds(")
+        .replace("toISOString()", "toString()");
+    let instant_parameterized = parameterized
+        .replace(":Date", ":Temporal.Instant")
+        .replace("Promise<Date>", "Promise<Temporal.Instant>")
+        .replace("new Date(", "Temporal.Instant.fromEpochMilliseconds(")
+        .replace("date.getTime()", "date.epochMilliseconds")
+        .replace("toISOString()", "toString()");
+    let plain = source
+        .replace("Promise<Date>", "Promise<Temporal.PlainDateTime>")
+        .replace(
+            "new Date(-1)",
+            "Temporal.PlainDateTime.from('1969-12-31T23:59:59.999')",
+        )
+        .replace(
+            "new Date(index)",
+            "Temporal.PlainDateTime.from('2000-01-01').add({days:index})",
+        )
+        .replace("toISOString()", "toString()");
+    for (source, memory, expected) in [
+        (source.to_owned(), 65536, "1969-12-31T23:59:59.999Z"),
+        (parameterized, 65536, "1969-12-31T23:59:59.999Z"),
+        (instant, 262144, "1969-12-31T23:59:59.999Z"),
+        (instant_parameterized, 262144, "1969-12-31T23:59:59.999Z"),
+        (plain, 262144, "1969-12-31T23:59:59.999"),
+    ] {
         for dispose in [false, true] {
             let entered = Arc::new(Notify::new());
             let collected = Arc::new(Notify::new());
             let finish = Arc::new(Notify::new());
             let dropped = Arc::new(AtomicUsize::new(0));
-            let (mut store, instance) = instantiate(source, 65536, |linker| {
+            let (mut store, instance) = instantiate(&source, memory, |linker| {
                 let entered = entered.clone();
                 let finish = finish.clone();
                 let dropped = dropped.clone();
@@ -317,7 +344,7 @@ async fn pending_dates_survive_sibling_collection_and_release_on_disposal() -> R
                 finish.notify_one();
                 assert_eq!(
                     timeout(Duration::from_secs(5), invocation).await??.0,
-                    "1969-12-31T23:59:59.999Z"
+                    expected
                 );
                 assert_eq!(dropped.load(Ordering::SeqCst), index + 1);
                 store.assert_concurrent_state_empty();

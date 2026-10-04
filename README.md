@@ -177,8 +177,21 @@ Dates retain distinct identity through helpers, object properties, stored Promis
 and native suspension. Pure epoch/ISO computations import no WASI capabilities.
 Omitted, copy, nonnumeric, and multi-argument constructors, calendar getters,
 `valueOf()`, setters, and string parsing are diagnosed. Dates remain guest-internal;
-use UTC ISO strings at component boundaries. Strict timestamp parsing and typed
-`Temporal.Instant` / `Temporal.PlainDateTime` operations are planned in R8.1b.ii.
+use UTC ISO strings at component boundaries.
+`Temporal.Instant` supports `from(string)`, `fromEpochMilliseconds(number)`,
+`epochMilliseconds`, and `toString()`. Instants retain nanosecond precision;
+`epochMilliseconds` floors toward negative infinity. `Temporal.PlainDateTime`
+supports `from(string)`, ISO date/time fields, `add({days: number})`, and `toString()`.
+It has no time zone: parsing ignores numeric offsets and rejects `Z`.
+Both types are immutable, retain identity through records and stored Promises,
+and survive native suspension and collection under a 256 KiB guest cap.
+Parsing, range, and unsupported bracket annotations throw numeric `1`, `2`, and `3`.
+Object overloads, other duration fields, options, timezone databases, and implicit
+JSON serialization are unsupported; serialize explicitly with `toString()`.
+The [UTC fixture](tests/fixtures/temporal_utc.ts) restricts interchange to
+`YYYY-MM-DDTHH:mm:ss[.1–9 digits]Z`. The [calendar source port](tests/fixtures/temporal_calendar.ts)
+preserves strict years 0001–9999 and checked whole-day offsets. These fixtures use
+P3 string/number/result boundaries; the original production WIT bindings remain R9 work.
 Shared tagged values preserve strict equality, truthiness, type tags, typed object
 fields, and retained `Promise<any>` outcomes. Typed boundaries validate the stored
 kind and throw numeric `12` on a mismatch. Public `any` component parameters/results

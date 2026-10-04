@@ -9,6 +9,8 @@ use perry_hir::{
 use std::collections::{BTreeMap, BTreeSet};
 use waffle::{Func, Memory, Module};
 
+pub(crate) const INFERRED_RECORD_TYPE: &str = "__perry_inferred_record";
+
 #[derive(Clone, Copy)]
 pub(crate) struct ObjectHelpers {
     pub(crate) new: Func,

@@ -29,6 +29,7 @@ pub(crate) mod strings;
 mod structured;
 pub mod text_contract;
 mod text_or_bytes;
+mod time;
 mod values;
 mod visit;
 

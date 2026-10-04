@@ -7,6 +7,7 @@ mod filesystem;
 mod objects;
 mod options;
 mod readonly;
+mod time;
 pub(crate) use decoder::validate_lowering;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -28,6 +29,7 @@ pub(crate) struct SourceBindings {
     pub(crate) capabilities: BTreeMap<String, CapabilityOperation>,
     pub(crate) decoder_constructor: Option<String>,
     pub(crate) date_constructor: Option<String>,
+    pub(crate) time_constructors: BTreeMap<String, super::time::TimeConstructor>,
 }
 
 fn underlying_expression(mut expression: &ast::Expr) -> &ast::Expr {
@@ -54,6 +56,11 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             !names.0.contains(super::values::VALUE_TYPE)
                 && !names.0.contains(super::context::ENVIRONMENT_TYPE)
                 && !names.0.contains(super::date::DATE_TYPE)
+                && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
+                && !names.0.contains(super::time::TimeKind::Instant.type_name())
+                && !names
+                    .0
+                    .contains(super::time::TimeKind::PlainDateTime.type_name())
                 && !names.0.contains(super::decoder::DECODER_TYPE)
                 && !names.0.iter().any(|name| name.starts_with("__AnonShape_")),
             "Reserved compiler type name in source"
@@ -114,6 +121,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             operations: BTreeMap::new(),
             decoder_constructor: None,
             date_constructor: None,
+            time_constructors: BTreeMap::new(),
             error: None,
         };
         module.visit_mut_with(&mut calls);
@@ -123,6 +131,11 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
         let mut resolved = SourceBindings {
             decoder_constructor: calls.decoder_constructor,
             date_constructor: calls.date_constructor,
+            time_constructors: calls
+                .time_constructors
+                .into_iter()
+                .map(|(operation, name)| (name, operation))
+                .collect(),
             ..Default::default()
         };
         for (operation, name) in calls.operations {
@@ -159,6 +172,16 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
             module
                 .body
                 .append(&mut parse_typescript(&declaration, "date.d.ts")?.body);
+        }
+        for (name, operation) in &resolved.time_constructors {
+            let declaration = format!(
+                "declare function {name}(value: {}): {};",
+                source_type(&operation.argument_type())?,
+                operation.kind().type_name()
+            );
+            module
+                .body
+                .append(&mut parse_typescript(&declaration, "temporal.d.ts")?.body);
         }
         Ok(resolved)
     })
@@ -244,6 +267,7 @@ struct SourceCalls {
     operations: BTreeMap<CapabilityOperation, String>,
     decoder_constructor: Option<String>,
     date_constructor: Option<String>,
+    time_constructors: BTreeMap<super::time::TimeConstructor, String>,
     error: Option<anyhow::Error>,
 }
 
@@ -402,6 +426,32 @@ impl SourceCalls {
 }
 
 impl VisitMut for SourceCalls {
+    fn visit_mut_var_declarator(&mut self, declaration: &mut ast::VarDeclarator) {
+        // Perry approximates factory calls in inferred record fields as any.
+        // Preserve explicit annotations; let SSA infer unannotated literal fields.
+        if let ast::Pat::Ident(binding) = &mut declaration.name
+            && binding.type_ann.is_none()
+            && declaration
+                .init
+                .as_deref()
+                .is_some_and(|value| matches!(underlying_expression(value), ast::Expr::Object(_)))
+        {
+            binding.type_ann = Some(Box::new(ast::TsTypeAnn {
+                span: declaration.span,
+                type_ann: Box::new(ast::TsType::TsTypeRef(ast::TsTypeRef {
+                    span: declaration.span,
+                    type_name: ast::TsEntityName::Ident(ast::Ident::new(
+                        super::objects::INFERRED_RECORD_TYPE.into(),
+                        declaration.span,
+                        SyntaxContext::empty(),
+                    )),
+                    type_params: None,
+                })),
+            }));
+        }
+        declaration.visit_mut_children_with(self);
+    }
+
     fn visit_mut_array_lit(&mut self, array: &mut ast::ArrayLit) {
         if array.elems.iter().any(Option::is_none) {
             self.error.get_or_insert_with(|| {
@@ -416,6 +466,17 @@ impl VisitMut for SourceCalls {
 
     fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
         call.ctxt = SyntaxContext::empty();
+        match self.rewrite_time_call(call) {
+            Ok(true) => {
+                call.args.visit_mut_with(self);
+                return;
+            }
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return;
+            }
+            Ok(false) => {}
+        }
         if let Err(error) = self.validate_object_call(call) {
             self.error.get_or_insert(error);
             return;
@@ -517,6 +578,9 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
+        if ident.sym == "Temporal" && ident.ctxt == self.unresolved {
+            self.error.get_or_insert_with(|| anyhow::anyhow!("Temporal supports only direct calls to Instant.from, Instant.fromEpochMilliseconds, and PlainDateTime.from"));
+        }
         if matches!(
             ident.sym.as_ref(),
             "Math"
@@ -528,6 +592,7 @@ impl VisitMut for SourceCalls {
                 | "crypto"
                 | "performance"
                 | "Date"
+                | "Temporal"
                 | "process"
                 | "Object"
                 | "Array"
@@ -551,6 +616,10 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let Err(error) = self.rewrite_time_type(reference) {
+            self.error.get_or_insert(error);
+            return;
+        }
         if let ast::TsEntityName::Ident(name) = &mut reference.type_name
             && name.sym == "TextDecoder"
             && name.ctxt == self.unresolved

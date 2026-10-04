@@ -80,7 +80,8 @@ pub(crate) fn frame_component(
             | TypedIntrinsic::ReadChunk
             | TypedIntrinsic::ReadInto
             | TypedIntrinsic::DecoderNew
-            | TypedIntrinsic::DateNew => {}
+            | TypedIntrinsic::DateNew
+            | TypedIntrinsic::Temporal(_) => {}
             TypedIntrinsic::Custom { .. } => bail!(
                 "Intrinsic '{}' is unsupported in components until its import adapter is implemented",
                 intrinsic.name()

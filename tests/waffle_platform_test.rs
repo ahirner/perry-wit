@@ -15,6 +15,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 mod context;
 #[path = "waffle_platform/date.rs"]
 mod date;
+#[path = "waffle_platform/time.rs"]
+mod time;
 #[path = "waffle_platform/values.rs"]
 mod values;
 

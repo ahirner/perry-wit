@@ -40,6 +40,7 @@ pub(crate) enum TypedIntrinsic {
     ByteAt,
     DecoderNew,
     DateNew,
+    Temporal(super::time::TimeConstructor),
     Custom {
         name: String,
         params: Vec<WaffleType>,
@@ -57,6 +58,7 @@ impl TypedIntrinsic {
                     | CapabilityOperation::Filesystem(_)
                     | CapabilityOperation::Random(RandomOperation::Fill)
             ) | Self::DecoderNew
+                | Self::Temporal(_)
         )
     }
 
@@ -69,6 +71,7 @@ impl TypedIntrinsic {
             Self::ByteAt => "byteAt",
             Self::DecoderNew => "TextDecoder",
             Self::DateNew => "Date",
+            Self::Temporal(operation) => operation.name(),
             Self::Custom { name, .. } => name.as_str(),
         }
     }
@@ -77,7 +80,7 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
             Self::HostDouble | Self::ReadChunk | Self::ReadInto => true,
-            Self::ByteAt | Self::DecoderNew | Self::DateNew => false,
+            Self::ByteAt | Self::DecoderNew | Self::DateNew | Self::Temporal(_) => false,
             Self::Custom { is_async, .. } => *is_async,
         }
     }
@@ -109,6 +112,14 @@ impl TypedIntrinsic {
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
             Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
             Self::DateNew => (vec![WaffleType::F64], vec![WaffleType::I32]),
+            Self::Temporal(operation) => (
+                vec![if operation.argument_type() == HirType::Number {
+                    WaffleType::F64
+                } else {
+                    WaffleType::I32
+                }],
+                vec![WaffleType::I32, WaffleType::F64],
+            ),
             Self::DecoderNew => (
                 vec![WaffleType::I32; 3],
                 vec![WaffleType::I32, WaffleType::F64],
@@ -254,6 +265,10 @@ pub(crate) fn resolve_contract(
     let mut intrinsics = BTreeMap::new();
 
     for (name, params, ret) in &hir.extern_funcs {
+        if let Some(operation) = bindings.time_constructors.get(name) {
+            intrinsics.insert(name.clone(), TypedIntrinsic::Temporal(*operation));
+            continue;
+        }
         if bindings.date_constructor.as_ref() == Some(name) {
             intrinsics.insert(name.clone(), TypedIntrinsic::DateNew);
             continue;

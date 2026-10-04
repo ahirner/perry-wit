@@ -198,10 +198,10 @@
     },
     {
       "id": "compiler.p3_dates",
-      "name": "P3 Immutable UTC Date Values",
+      "name": "P3 Immutable Date and Temporal Values",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "WAFFLE Rust compiler API: Date.now(), new Date(epochMs), getTime(), and toISOString()",
+      "domain": "WAFFLE Rust compiler API: immutable UTC Date and typed Temporal.Instant / Temporal.PlainDateTime",
       "invariants": [
         "Date.now() reads whole signed UTC epoch milliseconds from the P3 system clock",
         "Construction requires a statically known number and preserves time clipping and invalid dates",
@@ -217,9 +217,9 @@
         "Date values are guest-internal; component boundaries carry UTC ISO strings",
         "Omitted, copy, nonnumeric, and multi-argument constructors, calendar getters, valueOf, setters, string parsing, dynamic methods, and method arguments are diagnosed",
         "Invalid ISO errors are numeric rather than Error objects",
-        "Strict timestamp parsing and typed Temporal operations are planned in R8.1b.ii"
+        "Temporal supports ISO string factories, Instant.fromEpochMilliseconds/epochMilliseconds, PlainDateTime fields/add({days}), and toString(); bracket annotations, options, additional calendars/zones, and implicit JSON serialization are unsupported"
       ],
-      "conformance": ["tests/waffle_platform/date.rs", "tests/waffle_platform/values.rs"]
+      "conformance": ["tests/waffle_platform/date.rs", "tests/waffle_platform/time.rs", "tests/waffle_platform/values.rs"]
     },
     {
       "id": "compiler.p3_json",
