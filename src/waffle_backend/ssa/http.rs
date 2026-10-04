@@ -253,7 +253,44 @@ impl FunctionLowerer<'_> {
         ))
     }
 
+    pub(super) fn fetch_header(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Value> {
+        ensure!(
+            matches!(method, "get" | "has"),
+            "Headers.{method} lowering is not implemented yet"
+        );
+        ensure!(args.len() == 1, "Headers.{method} requires one string name");
+        let headers = self.expression(receiver)?;
+        let name = self.string_receiver(&args[0])?;
+        let query = self.op(
+            Operator::I32Const {
+                value: u32::from(method == "has"),
+            },
+            &[],
+            &[Type::I32],
+        );
+        let helpers = self
+            .registry
+            .http_helpers
+            .and_then(|helpers| helpers.fetch)
+            .context("Headers requires a supported HTTP source operation")?;
+        let payload = self.call_completion(helpers.headers, &[headers, name, query]);
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            payload,
+            true,
+        ))
+    }
+
     fn fetch_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {
+        if property == "headers" {
+            return self.expression(receiver);
+        }
         let offset = match property {
             "status" | "ok" => 0,
             "url" => 16,

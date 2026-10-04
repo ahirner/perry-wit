@@ -67,6 +67,7 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::date::DATE_TYPE)
                 && !names.0.contains(super::http::RESPONSE_TYPE)
                 && !names.0.contains(super::http::fetch::RESPONSE_TYPE)
+                && !names.0.contains(super::http::headers::HEADERS_TYPE)
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
                 && !names
@@ -500,6 +501,11 @@ impl SourceCalls {
 }
 
 impl VisitMut for SourceCalls {
+    /// SWC already decoded the literal; Perry's raw-text encoding repair corrupts valid Latin-1 text.
+    fn visit_mut_str(&mut self, literal: &mut ast::Str) {
+        literal.raw = None;
+    }
+
     fn visit_mut_var_declarator(&mut self, declaration: &mut ast::VarDeclarator) {
         // Perry approximates factory calls in inferred record fields as any.
         // Preserve explicit annotations; let SSA infer unannotated literal fields.
@@ -733,6 +739,13 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && name.sym == "Headers"
+            && name.ctxt == self.unresolved
+        {
+            name.sym = super::http::headers::HEADERS_TYPE.into();
+        }
+
         if let ast::TsEntityName::Ident(name) = &mut reference.type_name
             && name.sym == "Response"
             && name.ctxt == self.unresolved

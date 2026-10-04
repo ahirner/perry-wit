@@ -133,6 +133,28 @@ impl FunctionLowerer<'_> {
             self.narrow_declared_union(operand, !truth);
             return;
         }
+        if let Some(guard) = null_guard(expression)
+            && let Some(ty @ HirType::Union(variants)) = self
+                .narrowings
+                .get(&guard.local)
+                .or_else(|| self.local_types.get(&guard.local))
+            && variants.len() == 2
+            && crate::waffle_backend::values::is_boxed_union(ty)
+        {
+            let absent = if guard.kind == AbsenceKind::Null {
+                HirType::Null
+            } else {
+                HirType::Void
+            };
+            if variants.contains(&absent) {
+                let selected = variants
+                    .iter()
+                    .find(|ty| (**ty == absent) == (guard.equal == truth))
+                    .unwrap();
+                self.narrowings.insert(guard.local, selected.clone());
+                return;
+            }
+        }
         if let Expr::Logical { op, left, right } = expression {
             if (*op == LogicalOp::And && truth) || (*op == LogicalOp::Or && !truth) {
                 self.narrow_declared_union(left, truth);

@@ -18,6 +18,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::bytes::is_array_buffer(ty) => Some("ArrayBuffer"),
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
         ty if crate::waffle_backend::http::fetch::is_response(ty) => Some("Response"),
+        ty if crate::waffle_backend::http::headers::is_headers(ty) => Some("Headers"),
         ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::time::is_time(ty) => {
@@ -42,7 +43,8 @@ pub(crate) fn is_reference(ty: &HirType) -> bool {
         ty if crate::waffle_backend::decoder::is_decoder(ty)
             || crate::waffle_backend::date::is_date(ty)
             || crate::waffle_backend::time::is_time(ty)
-            || crate::waffle_backend::http::is_response(ty) =>
+            || crate::waffle_backend::http::is_response(ty)
+            || crate::waffle_backend::http::headers::is_headers(ty) =>
         {
             true
         }
@@ -110,6 +112,9 @@ impl FunctionLowerer<'_> {
             } if crate::waffle_backend::http::fetch::is_response(&self.infer_expr_type(object)) => {
                 match property.as_str() {
                     "url" => HirType::String,
+                    "headers" => {
+                        HirType::Named(crate::waffle_backend::http::headers::HEADERS_TYPE.into())
+                    }
                     "ok" | "bodyUsed" => HirType::Boolean,
                     _ => HirType::Number,
                 }
@@ -281,6 +286,15 @@ impl FunctionLowerer<'_> {
                     object, property, ..
                 } = callee.as_ref()
                 {
+                    if crate::waffle_backend::http::headers::is_headers(
+                        &self.infer_expr_type(object),
+                    ) {
+                        return if property == "has" {
+                            HirType::Boolean
+                        } else {
+                            HirType::Union(vec![HirType::String, HirType::Null])
+                        };
+                    }
                     if crate::waffle_backend::http::fetch::is_response(
                         &self.infer_expr_type(object),
                     ) && let Some(method) =

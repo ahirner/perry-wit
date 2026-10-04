@@ -268,4 +268,5 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || super::structured::is_string_array(ty)
         || matches!(ty, HirType::Array(_) | HirType::Tuple(_))
         || super::http::is_response(ty)
+        || super::http::headers::is_headers(ty)
 }

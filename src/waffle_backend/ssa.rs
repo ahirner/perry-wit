@@ -636,6 +636,7 @@ impl<'a> FunctionLowerer<'a> {
             || super::date::is_date(self.return_type)
             || super::time::is_time(self.return_type)
             || super::http::is_response(self.return_type)
+            || super::http::headers::is_headers(self.return_type)
             || matches!(self.return_type, HirType::Array(_))
         {
             ensure!(
@@ -843,6 +844,9 @@ impl<'a> FunctionLowerer<'a> {
                     "Unsupported TextDecoder method '{property}'"
                 );
                 return self.decode_bytes(object, args).map(Some);
+            }
+            if super::http::headers::is_headers(&self.infer_expr_type(object)) {
+                return self.fetch_header(object, property, args).map(Some);
             }
             if super::bytes::is_byte_view(&self.infer_expr_type(object)) {
                 return self.byte_method(object, property, args).map(Some);
@@ -1252,10 +1256,8 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(self.op(Operator::I32Eqz, &[value], &[Type::I32]))
             }
             Expr::Compare { op, left, right }
-                if super::values::is_dynamic(&self.infer_expr_type(left))
-                    || super::values::is_dynamic(&self.infer_expr_type(right))
-                    || super::nullable::inner(&self.infer_expr_type(left)).is_some()
-                    || super::nullable::inner(&self.infer_expr_type(right)).is_some() =>
+                if super::values::is_boxed(&self.infer_expr_type(left))
+                    || super::values::is_boxed(&self.infer_expr_type(right)) =>
             {
                 self.value_comparison(*op, left, right)
             }

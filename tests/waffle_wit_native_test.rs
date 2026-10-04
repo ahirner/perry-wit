@@ -1824,3 +1824,83 @@ async fn standard_fetch_json_and_array_buffers_preserve_types_identity_and_failu
     assert_eq!(String::from_utf8(output.stdout)?.trim(), "hello🙂:2");
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_headers_match_node_and_retain_metadata_after_consumption() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/headers.ts"),
+        r#"package test:fetch-headers; world boundary {
+        import wasi:http/client@0.3.0;
+        export run:async func(url:string)->string;
+    }"#,
+    )?;
+    let server = fixture::HttpFixture::new(|_| {
+        fixture::Reply::WithHeaders(
+            200,
+            vec![
+                ("X-Value".into(), "hello".into()),
+                ("X-Bytes".into(), "é".into()),
+                ("X-Empty".into(), "".into()),
+                ("X-Separate".into(), "left".into()),
+                ("x-separate".into(), "right".into()),
+            ],
+            "body".into(),
+        )
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let url = format!("http://{}/", server.address);
+    for _ in 0..40 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&url,)))
+                .await??
+                .0,
+            "hello:body"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/headers.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script, &url])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "hello:body");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn decoded_string_literals_preserve_latin1_without_encoding_repair() -> Result<()> {
+    let compiled = compile(
+        r#"
+        export function run():string {
+            if("Ã©" !== "\u00c3\u00a9") return "repaired accent";
+            if("Â£" !== "\u00c2\u00a3") return "repaired currency";
+            return "Ã©|Â£|é|🙂";
+        }
+    "#,
+        "package test:decoded-literals; world boundary { export run:async func()->string; }",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = store(&engine);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, ()).await?.0, "Ã©|Â£|é|🙂");
+    Ok(())
+}

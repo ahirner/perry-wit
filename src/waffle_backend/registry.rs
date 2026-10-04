@@ -462,6 +462,7 @@ impl ModuleRegistry {
                     strings: string_helpers.unwrap(),
                     bytes: byte_helpers.unwrap(),
                     json: json_helpers,
+                    values: value_helpers.unwrap(),
                     pool: string_pool,
                     promises: promises.as_ref(),
                 },
@@ -725,7 +726,8 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)
-            || super::http::is_response(ty) =>
+            || super::http::is_response(ty)
+            || super::http::headers::is_headers(ty) =>
         {
             Ok(Type::I32)
         }
@@ -750,7 +752,8 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)
-            || super::http::is_response(ty) =>
+            || super::http::is_response(ty)
+            || super::http::headers::is_headers(ty) =>
         {
             Ok(vec![Type::I32])
         }

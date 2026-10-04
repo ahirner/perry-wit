@@ -82,6 +82,7 @@ pub(crate) enum ValueTag {
     HttpResponse = 15,
     WitU64 = 16,
     ArrayBuffer = 17,
+    Headers = 18,
 }
 
 impl ValueTag {
@@ -97,6 +98,7 @@ impl ValueTag {
             HirType::Named(name) if name == ARRAY_TYPE => Self::Array,
             ty if super::bytes::is_byte_view(ty) => Self::Bytes,
             ty if super::bytes::is_array_buffer(ty) => Self::ArrayBuffer,
+            ty if super::http::headers::is_headers(ty) => Self::Headers,
             ty if super::objects::is_object(ty) => Self::Object,
             ty if super::filesystem::is_stats(ty) => Self::Stats,
             ty if super::structured::is_string_array(ty) => Self::StringArray,
