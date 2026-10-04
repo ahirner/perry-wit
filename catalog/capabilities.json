@@ -187,7 +187,7 @@
         "Invalid or overflowing wait durations trap before the host call",
         "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
         "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
-        "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; remaining context coercions, JSON consumers, and callback timers remain open migration work",
+        "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; remaining context coercions and callback timers remain open migration work",
         "Instances support serial calls; cancellation discards the store"
       ],
       "conformance": [
@@ -223,6 +223,29 @@
       "conformance": ["tests/waffle_platform/date.rs", "tests/waffle_platform/values.rs"]
     },
     {
+      "id": "compiler.p3_json",
+      "name": "P3 JSON and Shared Guest Graphs",
+      "tier": "tier-1-web-primaries",
+      "support": "partial",
+      "domain": "WAFFLE Rust compiler API: strict UTF-8 JSON parsing and compact serialization through the component boundary",
+      "invariants": [
+        "Parsed objects and mixed arrays preserve primitive tags, identity, nested mutation, and retained values across helpers, collection, and native suspension",
+        "Serialization preserves ECMAScript number formatting, duplicate-key replacement and property ordering; undefined fields are omitted and undefined array elements or holes become null",
+        "Undefined root serialization returns undefined; Dates produce ISO strings or null when invalid",
+        "Numeric error codes 1, 2, and 3 report syntax, unpaired surrogate escapes, and depth/cycles through catch/finally and declared WIT errors",
+        "Checked Rust codec adapters borrow disjoint guest storage outside measured helper data/stack; allocating loops and repeated large inputs reclaim temporary graphs",
+        "Pure JSON source tasks require no WASI imports; selected text helpers and P3 capabilities share the same guest memory"
+      ],
+      "differences": [
+        "Strings count Unicode scalars and reject unpaired surrogate escapes",
+        "Object keys must be strings; mixed arrays support numeric/canonical index keys, numeric length changes, deletion, membership, and Array.isArray",
+        "Revivers, replacers, indentation, custom prototypes, sparse array literals, general array methods and extra array properties are unsupported",
+        "Unsupported byte-view, Stats, decoder, and Promise serialization throws numeric 12; errors are numbers rather than Error objects",
+        "Graphs remain guest-internal; component parameters/results carry JSON strings. The default CLI remains on the legacy pipeline until R9"
+      ],
+      "conformance": ["tests/json_helper_test.rs", "tests/waffle_json_test.rs", "tests/waffle_platform/context.rs"]
+    },
+    {
       "id": "compiler.p3_context",
       "name": "P3 Process Context",
       "tier": "tier-2-node-core",
@@ -235,6 +258,7 @@
         "Environment aliases share guest-local writes, deletion, and own-property membership without changing the host",
         "Environment writes stringify strings, undefined, null, booleans, NaN, infinities, and plain objects; Object.assign follows the same policy and preserves earlier writes after a later failure",
         "Object.keys and string-valued Object.values produce independent snapshots with integer-index keys first and other keys in insertion order; duplicate native environment keys replace values without moving their keys",
+        "JSON snapshots preserve cached environment mutations and parsed copies are independent",
         "Host failures trap without running guest finally; store disposal releases pending native work"
       ],
       "differences": [
@@ -243,7 +267,7 @@
         "Text operations count Unicode scalars",
         "Finite-number and array environment writes throw numeric 12 before mutation; Object.values throws 12 for nonstring fields",
         "Object.assign accepts plain object targets/sources and ignores nullish sources; other primitive sources, prototypes, and spread arguments remain unsupported",
-        "JSON environment consumers, remaining coercions and array operations, and argument-array mutation remain open migration work; the default CLI remains on the legacy pipeline until R9"
+        "Remaining coercions and array operations, and argument-array mutation remain open migration work; the default CLI remains on the legacy pipeline until R9"
       ],
       "conformance": ["tests/waffle_platform/context.rs"]
     },

@@ -13,6 +13,11 @@ use super::types::StringKind;
 impl FunctionLowerer<'_> {
     /// Rejects unsupported coercions before a primitive can become a descriptor address.
     pub(super) fn string_operand(&mut self, expr: &Expr) -> Result<Value> {
+        if StringKind::of(&self.infer_expr_type(expr)) == Some(StringKind::Optional) {
+            let value = self.expression(expr)?;
+            let undefined = self.expression(&Expr::String("undefined".into()))?;
+            return Ok(self.op(Operator::Select, &[value, undefined, value], &[Type::I32]));
+        }
         ensure!(
             self.infer_expr_type(expr) == HirType::String,
             "String coercion is unsupported for {:?}",
@@ -23,6 +28,9 @@ impl FunctionLowerer<'_> {
 
     /// String-only operations trap on undefined instead of reading address zero as a descriptor.
     pub(super) fn string_receiver(&mut self, expr: &Expr) -> Result<Value> {
+        if crate::waffle_backend::values::is_dynamic(&self.infer_expr_type(expr)) {
+            return self.unbox_value(expr, &HirType::String);
+        }
         ensure!(
             self.is_string(expr),
             "Expected a string, got {:?}",
@@ -168,7 +176,8 @@ impl FunctionLowerer<'_> {
         args: &[Expr],
     ) -> Result<Value> {
         ensure!(
-            self.is_string(receiver),
+            self.is_string(receiver)
+                || crate::waffle_backend::values::is_dynamic(&self.infer_expr_type(receiver)),
             "String method '{method}' requires a string receiver"
         );
         let arity = match method {

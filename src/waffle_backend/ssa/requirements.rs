@@ -45,7 +45,17 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
 
 fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
     match expr {
-        Expr::Object(_) => reqs.objects = true,
+        Expr::JsonParse(_)
+        | Expr::JsonParseTyped { .. }
+        | Expr::JsonParseWithReviver(..)
+        | Expr::JsonParseReviver { .. }
+        | Expr::JsonStringify(_)
+        | Expr::JsonStringifyFull(..) => {
+            reqs.json = true;
+            reqs.objects = true;
+            reqs.needs_strings = true;
+        }
+        Expr::Object(_) | Expr::Array(_) | Expr::ArrayIsArray(_) => reqs.objects = true,
         Expr::New { class_name, .. } if class_name.starts_with("__AnonShape_") => {
             reqs.objects = true
         }

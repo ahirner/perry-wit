@@ -15,6 +15,44 @@ use tokio::{
 use wasmtime::StoreContextMut;
 
 #[tokio::test(flavor = "current_thread")]
+async fn environment_json_snapshots_are_independent_and_keep_instance_mutations() -> Result<()> {
+    let source = r#"
+        export function run(first: boolean): string {
+            if (first) { process.env.VALUE = "changed"; }
+            const copy = JSON.parse(JSON.stringify(process.env));
+            copy.VALUE = "snapshot";
+            for (let i = 0; i < 1000; i++) { JSON.stringify(copy); }
+            return JSON.stringify(process.env) + ":" + JSON.stringify(copy);
+        }
+    "#;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (mut store, instance) = instantiate(source, 262_144, |linker| {
+        let calls = calls.clone();
+        linker.instance("wasi:cli/environment@0.3.0")?.func_wrap(
+            "get-environment",
+            move |_: StoreContextMut<'_, Host>, (): ()| {
+                assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0);
+                Ok((vec![
+                    ("VALUE".to_owned(), "initial".to_owned()),
+                    ("UNICODE".to_owned(), "é😀\0".to_owned()),
+                ],))
+            },
+        )?;
+        Ok(())
+    })
+    .await?;
+    let run = instance.get_typed_func::<(bool,), (String,)>(&mut store, "run")?;
+    for index in 0..20 {
+        assert_eq!(
+            run.call_async(&mut store, (index == 0,)).await?.0,
+            r#"{"VALUE":"changed","UNICODE":"é😀\u0000"}:{"VALUE":"snapshot","UNICODE":"é😀\u0000"}"#
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn environment_aliases_preserve_mutation_deletion_and_supported_coercions() -> Result<()> {
     let source = r#"
     function write(env:{[key:string]:string|undefined},key:string,value:any):any {return env[key]=value;}

@@ -12,7 +12,10 @@ impl SourceCalls {
         let ast::Expr::Member(member) = underlying_expression(callee) else {
             return Ok(());
         };
-        if !matches!(underlying_expression(&member.obj),ast::Expr::Ident(name) if name.sym=="Object" && name.ctxt==self.unresolved)
+        let ast::Expr::Ident(receiver) = underlying_expression(&member.obj) else {
+            return Ok(());
+        };
+        if receiver.ctxt != self.unresolved || !matches!(receiver.sym.as_ref(), "Object" | "Array")
         {
             return Ok(());
         }
@@ -24,6 +27,15 @@ impl SourceCalls {
             },
             _ => None,
         };
+        if receiver.sym == "Array" {
+            if name == Some("isArray") {
+                ensure!(
+                    call.args.len() == 1 && call.args[0].spread.is_none(),
+                    "Array.isArray requires one non-spread argument"
+                );
+            }
+            return Ok(());
+        }
         if matches!(name, Some("keys" | "values")) {
             ensure!(
                 call.args.len() == 1 && call.args[0].spread.is_none(),

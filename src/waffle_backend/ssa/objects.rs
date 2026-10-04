@@ -48,10 +48,15 @@ impl FunctionLowerer<'_> {
 
     pub(super) fn object_enumerate(&mut self, receiver: &Expr, values: bool) -> Result<Value> {
         ensure!(
-            is_object(&self.infer_expr_type(receiver)),
+            is_object(&self.infer_expr_type(receiver))
+                || crate::waffle_backend::values::is_dynamic(&self.infer_expr_type(receiver)),
             "Object enumeration requires a plain object"
         );
-        let object = self.expression(receiver)?;
+        let object = if crate::waffle_backend::values::is_dynamic(&self.infer_expr_type(receiver)) {
+            self.unbox_value(receiver, &HirType::Object(ObjectType::default()))?
+        } else {
+            self.expression(receiver)?
+        };
         let values = self.op(
             Operator::I32Const {
                 value: u32::from(values),
@@ -233,6 +238,18 @@ impl FunctionLowerer<'_> {
     pub(super) fn same_object_reference(&self, target: &Expr, receiver: &Expr) -> bool {
         match (target, receiver) {
             (Expr::LocalGet(left), Expr::LocalGet(right)) => left == right,
+            (
+                Expr::PropertyGet {
+                    object: left,
+                    property: left_key,
+                    ..
+                },
+                Expr::PropertyGet {
+                    object: right,
+                    property: right_key,
+                    ..
+                },
+            ) => left_key == right_key && self.same_object_reference(left, right),
             (
                 Expr::Call {
                     callee: left,

@@ -86,6 +86,7 @@ pub(crate) fn lower_module(
     {
         collect_strings_in_module(hir, &mut string_pool);
         if reqs.objects {
+            string_pool.intern("length");
             for name in super::objects::COERCION_LITERALS {
                 string_pool.intern(name);
             }
@@ -116,6 +117,9 @@ pub(crate) fn lower_module(
             || reqs.join
         {
             helper_libraries.push(super::libraries::LibraryId::Text);
+        }
+        if reqs.json {
+            helper_libraries.push(super::libraries::LibraryId::Json);
         }
         if !helper_libraries.is_empty() {
             let mut placement = super::libraries::HelperMemory::new(next_free);
@@ -1094,6 +1098,100 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::JsonParseWithReviver(_, reviver) | Expr::JsonParseReviver { reviver, .. }
+                if !matches!(reviver.as_ref(), Expr::Null | Expr::Undefined) =>
+            {
+                bail!("JSON revivers are unsupported")
+            }
+            Expr::JsonParse(input)
+            | Expr::JsonParseTyped { text: input, .. }
+            | Expr::JsonParseWithReviver(input, _)
+            | Expr::JsonParseReviver { text: input, .. } => {
+                let input = self.string_receiver(input)?;
+                let payload =
+                    self.call_completion(self.registry.json_helpers.unwrap().parse, &[input]);
+                Ok(abi::decode_payload(
+                    &mut self.body,
+                    self.block,
+                    payload,
+                    true,
+                ))
+            }
+            Expr::JsonStringifyFull(_, replacer, space)
+                if !matches!(replacer.as_ref(), Expr::Null | Expr::Undefined)
+                    || !matches!(space.as_ref(), Expr::Null | Expr::Undefined) =>
+            {
+                bail!("JSON replacers and spacing are unsupported")
+            }
+            Expr::JsonStringify(input) | Expr::JsonStringifyFull(input, _, _) => {
+                let input = self.value_operand(input)?;
+                let payload =
+                    self.call_completion(self.registry.json_helpers.unwrap().stringify, &[input]);
+                Ok(abi::decode_payload(
+                    &mut self.body,
+                    self.block,
+                    payload,
+                    true,
+                ))
+            }
+            Expr::Array(items) => self.new_value_array(items),
+            Expr::PropertyGet {
+                object, property, ..
+            } if super::values::has_dynamic_properties(&self.infer_expr_type(object)) => {
+                self.dynamic_get(object, &Expr::String(property.clone()))
+            }
+            Expr::IndexGet { object, index }
+                if super::values::has_dynamic_properties(&self.infer_expr_type(object)) =>
+            {
+                self.dynamic_get(object, index)
+            }
+            Expr::PropertySet {
+                object,
+                property,
+                value,
+            } if super::values::has_dynamic_properties(&self.infer_expr_type(object)) => {
+                self.dynamic_set(object, &Expr::String(property.clone()), value)
+            }
+            Expr::IndexSet {
+                object,
+                index,
+                value,
+            } if super::values::has_dynamic_properties(&self.infer_expr_type(object)) => {
+                self.dynamic_set(object, index, value)
+            }
+            Expr::PutValueSet {
+                target,
+                key,
+                value,
+                receiver,
+                ..
+            } if super::values::has_dynamic_properties(&self.infer_expr_type(target))
+                && self.same_object_reference(target, receiver) =>
+            {
+                self.dynamic_set(target, key, value)
+            }
+            Expr::ArrayIsArray(value) => {
+                let value = self.value_operand(value)?;
+                let (tag, _) = self.value_parts(value);
+                let mut result = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+                for kind in [
+                    super::values::ValueTag::Array,
+                    super::values::ValueTag::StringArray,
+                ] {
+                    let expected =
+                        self.op(Operator::I32Const { value: kind as u32 }, &[], &[Type::I32]);
+                    let matches = self.op(Operator::I32Eq, &[tag, expected], &[Type::I32]);
+                    result = self.op(Operator::I32Or, &[result, matches], &[Type::I32]);
+                }
+                Ok(result)
+            }
+            Expr::In { property, object }
+                if super::values::has_dynamic_properties(&self.infer_expr_type(object)) =>
+            {
+                let key = self.value_operand(property)?;
+                let object = self.value_operand(object)?;
+                self.dynamic_property_operation(object, key, false)
+            }
             Expr::ObjectAssign { target, sources } => self.object_assign(target, sources),
             Expr::ObjectKeys(object) => self.object_enumerate(object, false),
             Expr::ObjectValues(object) => self.object_enumerate(object, true),
@@ -1132,8 +1230,8 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Delete(target) => match target.as_ref() {
                 Expr::PropertyGet {
                     object, property, ..
-                } => self.object_delete(object, &Expr::String(property.clone())),
-                Expr::IndexGet { object, index } => self.object_delete(object, index),
+                } => self.delete_property(object, &Expr::String(property.clone())),
+                Expr::IndexGet { object, index } => self.delete_property(object, index),
                 _ => bail!("delete requires a plain object property"),
             },
             Expr::TypeOf(operand) => self.type_of(operand),
@@ -1693,6 +1791,7 @@ impl<'a> FunctionLowerer<'a> {
 fn collect_strings_in_module(hir: &HirModule, pool: &mut StringPool) {
     pool.intern("");
     pool.intern(",");
+    pool.intern("undefined");
     for class in &hir.classes {
         for field in &class.fields {
             pool.intern(&field.name);

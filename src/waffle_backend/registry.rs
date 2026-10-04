@@ -79,6 +79,8 @@ pub(crate) struct ModuleRegistry {
     pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
     pub(crate) text_or_bytes_lift: Option<Func>,
     pub(crate) value_helpers: Option<super::values::ValueHelpers>,
+    pub(crate) value_access: Option<super::values::ValueAccessHelpers>,
+    pub(crate) json_helpers: Option<super::json::JsonHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
@@ -157,6 +159,10 @@ impl ModuleRegistry {
         let context_operations = contract.context_operations();
         let context_imports = (!context_operations.is_empty())
             .then(|| super::context::declare_imports(module, &context_operations));
+
+        let json_imports = string_reqs
+            .json
+            .then(|| super::json::declare_imports(module));
 
         let promises = if let Some(plan) = &contract.promises {
             let mut declare = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
@@ -248,7 +254,7 @@ impl ModuleRegistry {
             None
         };
 
-        let date_helpers = if super::date::required(hir) {
+        let date_helpers = if super::date::required(hir) || string_reqs.json {
             Some(super::date::emit_runtime(
                 module,
                 memory,
@@ -289,6 +295,36 @@ impl ModuleRegistry {
                     .str_compare,
                 value_helpers.expect("objects share tagged values").new,
                 string_pool,
+            )?)
+        } else {
+            None
+        };
+
+        let value_access = if let Some(objects) = object_helpers {
+            Some(super::values::emit_access_runtime(
+                module,
+                memory,
+                allocator.unwrap(),
+                string_helpers.unwrap(),
+                objects,
+                value_helpers.unwrap().new,
+                string_pool,
+            )?)
+        } else {
+            None
+        };
+
+        let json_helpers = if let Some(mut imports) = json_imports {
+            imports.insert("array-new", value_access.unwrap().array_new);
+            imports.insert("date-iso", date_helpers.unwrap().iso);
+            Some(super::json::emit_runtime(
+                module,
+                memory,
+                allocator.unwrap(),
+                string_helpers.unwrap(),
+                object_helpers.unwrap(),
+                value_helpers.unwrap().new,
+                imports,
             )?)
         } else {
             None
@@ -510,6 +546,8 @@ impl ModuleRegistry {
             text_or_bytes_lift,
             value_helpers,
             date_helpers,
+            json_helpers,
+            value_access,
             decoder_helpers,
             filesystem_helpers,
             object_helpers,

@@ -17,6 +17,115 @@ use perry_hir::{
 use waffle::{MemoryArg, Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
+    pub(super) fn delete_property(&mut self, receiver: &Expr, key: &Expr) -> Result<Value> {
+        if !crate::waffle_backend::values::has_dynamic_properties(&self.infer_expr_type(receiver)) {
+            return self.object_delete(receiver, key);
+        }
+        let receiver = self.value_operand(receiver)?;
+        let key = self.value_operand(key)?;
+        self.dynamic_property_operation(receiver, key, true)
+    }
+
+    pub(super) fn dynamic_property_operation(
+        &mut self,
+        receiver: Value,
+        key: Value,
+        delete: bool,
+    ) -> Result<Value> {
+        let delete = self.op(
+            Operator::I32Const {
+                value: u32::from(delete),
+            },
+            &[],
+            &[Type::I32],
+        );
+        let result = self.call_completion(
+            self.registry.value_access.unwrap().property_operation,
+            &[receiver, key, delete],
+        );
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            result,
+            true,
+        ))
+    }
+
+    pub(super) fn dynamic_get(&mut self, receiver: &Expr, key: &Expr) -> Result<Value> {
+        let receiver = self.value_operand(receiver)?;
+        let key = self.value_operand(key)?;
+        let payload = self.call_completion(
+            self.registry
+                .value_access
+                .expect("dynamic property helpers")
+                .get,
+            &[receiver, key],
+        );
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            payload,
+            true,
+        ))
+    }
+
+    pub(super) fn dynamic_set(
+        &mut self,
+        receiver: &Expr,
+        key: &Expr,
+        expression: &Expr,
+    ) -> Result<Value> {
+        let receiver = self.value_operand(receiver)?;
+        let key = self.value_operand(key)?;
+        let (original, tag, payload) = self.tagged_value(expression)?;
+        let stored = if is_dynamic(&self.infer_expr_type(expression)) {
+            original
+        } else {
+            self.box_value(tag, payload)
+        };
+        self.call_completion(
+            self.registry
+                .value_access
+                .expect("dynamic property helpers")
+                .set,
+            &[receiver, key, stored],
+        );
+        Ok(original)
+    }
+
+    pub(super) fn new_value_array(&mut self, items: &[Expr]) -> Result<Value> {
+        let length = self.op(
+            Operator::I32Const {
+                value: items.len().try_into()?,
+            },
+            &[],
+            &[Type::I32],
+        );
+        let array = self.op(
+            Operator::Call {
+                function_index: self.registry.value_access.unwrap().array_new,
+            },
+            &[length],
+            &[Type::I32],
+        );
+        self.reference_values.insert(array);
+        for (index, item) in items.iter().enumerate() {
+            let value = self.value_operand(item)?;
+            self.op(
+                Operator::I32Store {
+                    memory: MemoryArg {
+                        memory: self.registry.memory,
+                        align: 2,
+                        offset: (8 + index * 4).try_into()?,
+                    },
+                },
+                &[array, value],
+                &[],
+            );
+        }
+        Ok(array)
+    }
+
     pub(super) fn value_operand(&mut self, expression: &Expr) -> Result<Value> {
         if is_dynamic(&self.infer_expr_type(expression)) {
             return self.expression(expression);

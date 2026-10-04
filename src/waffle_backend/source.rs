@@ -247,10 +247,10 @@ struct SourceCalls {
 
 impl SourceCalls {
     fn validate_json_call(&self, call: &ast::CallExpr, callee: &ast::Expr) -> Result<()> {
-        let ast::Expr::Member(member) = callee else {
+        let ast::Expr::Member(member) = underlying_expression(callee) else {
             return Ok(());
         };
-        if !matches!(member.obj.as_ref(), ast::Expr::Ident(name) if name.sym == "JSON" && name.ctxt == self.unresolved)
+        if !matches!(underlying_expression(&member.obj), ast::Expr::Ident(name) if name.sym == "JSON" && name.ctxt == self.unresolved)
         {
             return Ok(());
         }
@@ -400,6 +400,18 @@ impl SourceCalls {
 }
 
 impl VisitMut for SourceCalls {
+    fn visit_mut_array_lit(&mut self, array: &mut ast::ArrayLit) {
+        if array.elems.iter().any(Option::is_none) {
+            self.error.get_or_insert_with(|| {
+                anyhow::anyhow!(
+                    "Array elisions are unsupported; create holes through length or deletion"
+                )
+            });
+            return;
+        }
+        array.visit_mut_children_with(self);
+    }
+
     fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
         call.ctxt = SyntaxContext::empty();
         if let Err(error) = self.validate_object_call(call) {
@@ -516,6 +528,7 @@ impl VisitMut for SourceCalls {
                 | "Date"
                 | "process"
                 | "Object"
+                | "Array"
         ) && ident.ctxt != self.unresolved
         {
             let id = ident.to_id();

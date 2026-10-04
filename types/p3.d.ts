@@ -12,7 +12,15 @@
  * setters, multi-argument construction, and component Date values are unsupported.
  * Unsupported dynamic Date operands throw numeric 12. Guest any values preserve
  * their tags and references; public any component boundaries remain numeric.
- * Opaque Promise adoption through any throws 12; callbacks remain migration work. */
+ * Opaque Promise adoption through any throws 12; callbacks remain migration work.
+ * JSON.parse accepts strict UTF-8 strings and rejects unpaired surrogate escapes.
+ * JSON.stringify supports primitives, plain objects, dense/mixed arrays, string
+ * arrays, and Dates; undefined root/field/element behavior matches ECMAScript.
+ * Syntax/surrogate/depth-or-cycle failures throw numeric 1/2/3. Unsupported value
+ * kinds throw 12. Revivers, replacers, indentation, custom prototypes, sparse array
+ * literals, and byte-view/Stats/Promise serialization are unsupported. Parsed
+ * graphs retain guest identity across helpers, collection, and stored Promises;
+ * component boundaries carry JSON strings. */
 declare namespace NodeJS {
   interface ProcessEnv {
     [key: string]: string | undefined;
@@ -24,7 +32,7 @@ declare namespace NodeJS {
      * before mutation. Object.assign uses the same policy; earlier writes remain
      * if a later property fails. Object.keys/values return ordered snapshots;
      * Object.values currently throws 12 for nonstring fields in ordinary objects.
-     * JSON environment consumers remain unsupported. */
+     * JSON serialization preserves cached mutations; parsed snapshots are independent. */
     env: ProcessEnv;
     /** Cached host-provided arguments, with no synthetic Node prefixes.
      * WAFFLE/P3 currently supports reads; argument-array mutation remains unsupported. */

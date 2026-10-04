@@ -36,7 +36,11 @@ pub(super) fn is_reference(ty: &HirType) -> bool {
         ty if crate::waffle_backend::filesystem::is_stats(ty) => true,
         HirType::String | HirType::Promise(_) => true,
         HirType::Array(inner) => **inner == HirType::String,
-        HirType::Named(name) => name == SCALAR_ITERATION || name == "Uint8Array",
+        HirType::Named(name) => {
+            name == SCALAR_ITERATION
+                || name == "Uint8Array"
+                || name == crate::waffle_backend::values::ARRAY_TYPE
+        }
         HirType::Union(types) => types.iter().any(is_reference),
         _ => false,
     }
@@ -70,11 +74,26 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::Array(_) => HirType::Named(crate::waffle_backend::values::ARRAY_TYPE.into()),
+            Expr::PropertyGet { object, .. } | Expr::IndexGet { object, .. }
+                if crate::waffle_backend::values::has_dynamic_properties(
+                    &self.infer_expr_type(object),
+                ) =>
+            {
+                crate::waffle_backend::values::value_type()
+            }
+            Expr::JsonParse(_)
+            | Expr::JsonParseTyped { .. }
+            | Expr::JsonParseWithReviver(..)
+            | Expr::JsonParseReviver { .. } => crate::waffle_backend::values::value_type(),
+            Expr::JsonStringify(_) | Expr::JsonStringifyFull(..) => {
+                HirType::Union(vec![HirType::String, HirType::Void])
+            }
             Expr::ObjectAssign { target, .. } => self.infer_expr_type(target),
             Expr::ObjectKeys(_) | Expr::ObjectValues(_) => {
                 HirType::Array(Box::new(HirType::String))
             }
-            Expr::In { .. } => HirType::Boolean,
+            Expr::In { .. } | Expr::ArrayIsArray(_) => HirType::Boolean,
             Expr::Null => HirType::Null,
             Expr::Delete(_) => HirType::Boolean,
             Expr::Object(_) => self.object_literal_type(expr),

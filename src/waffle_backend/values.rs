@@ -9,10 +9,16 @@ use perry_hir::{
 use std::collections::BTreeMap;
 use waffle::{Func, Memory, Module};
 
+pub(crate) const ARRAY_TYPE: &str = "__perry_internal_array";
+
 pub(crate) const VALUE_TYPE: &str = "__perry_internal_value";
 
 pub(crate) fn value_type() -> HirType {
     HirType::Named(VALUE_TYPE.into())
+}
+
+pub(crate) fn has_dynamic_properties(ty: &HirType) -> bool {
+    is_dynamic(ty) || matches!(ty, HirType::Named(name) if name == ARRAY_TYPE)
 }
 
 pub(crate) fn is_dynamic(ty: &HirType) -> bool {
@@ -52,6 +58,7 @@ pub(crate) enum ValueTag {
     Decoder = 9,
     Promise = 10,
     Date = 11,
+    Array = 12,
 }
 
 impl ValueTag {
@@ -62,6 +69,7 @@ impl ValueTag {
             HirType::Boolean => Self::Boolean,
             HirType::Number => Self::Number,
             HirType::String => Self::String,
+            HirType::Named(name) if name == ARRAY_TYPE => Self::Array,
             ty if super::bytes::is_byte_view(ty) => Self::Bytes,
             ty if super::objects::is_object(ty) => Self::Object,
             ty if super::filesystem::is_stats(ty) => Self::Stats,
@@ -83,6 +91,55 @@ pub(crate) struct ValueHelpers {
     pub(crate) date_number: Func,
     pub(crate) scalar_number: Func,
     pub(crate) async_result: Func,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ValueAccessHelpers {
+    pub(crate) array_new: Func,
+    pub(crate) property_operation: Func,
+    pub(crate) get: Func,
+    pub(crate) set: Func,
+}
+
+pub(crate) fn emit_access_runtime(
+    module: &mut Module<'static>,
+    memory: Memory,
+    allocator: AllocationFuncs,
+    strings: super::strings::StringHelperFuncs,
+    objects: super::objects::ObjectHelpers,
+    boxed_value: Func,
+    string_pool: &super::strings::StringPool,
+) -> Result<ValueAccessHelpers> {
+    let source = include_str!("values/access.wat")
+        .replace("{{array-tag}}", &(ValueTag::Array as u32).to_string())
+        .replace(
+            "{{length}}",
+            &string_pool
+                .get("length")
+                .expect("dynamic length key")
+                .to_string(),
+        );
+    let functions = runtime::emit_functions(
+        module,
+        memory,
+        &source,
+        &BTreeMap::from([
+            ("realloc", allocator.realloc),
+            ("box", boxed_value),
+            ("compare", strings.str_compare),
+            ("string-index", strings.str_index),
+            ("object-get", objects.get),
+            ("object-set", objects.set),
+            ("object-dynamic", objects.dynamic),
+            ("object-delete", objects.delete),
+        ]),
+    )?;
+    Ok(ValueAccessHelpers {
+        property_operation: functions["value.property-operation"],
+        array_new: functions["value.array-new"],
+        get: functions["value.get"],
+        set: functions["value.set"],
+    })
 }
 
 pub(crate) fn required(hir: &HirModule) -> bool {

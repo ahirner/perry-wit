@@ -186,6 +186,21 @@ throw `12`. Public `any` component parameters/results retain their numeric contr
 heterogeneous values remain guest-internal. Awaiting or adopting a Promise hidden
 inside `any` throws `12` until dynamic Promise outcome tags are supported. Callback
 timers remain separate migration work.
+`JSON.parse(string)` and compact `JSON.stringify(value)` use the Rust UTF-8 codec.
+Parsed objects and mixed arrays share the guest value representation, preserving
+aliases, nested mutation, helper calls, retained Promises, and collection. Plain
+objects, dense array literals, string arrays, primitives, and Dates serialize with
+ECMAScript number formatting and key ordering. Undefined object fields are omitted;
+array holes and undefined elements become null; an undefined root returns undefined.
+Invalid Dates serialize as null. Syntax, unpaired surrogate escapes, and excessive
+depth/cycles throw numeric codes `1`, `2`, and `3`; unsupported value kinds throw `12`.
+Objects accept string property keys. Mixed arrays accept numeric/canonical index
+keys, numeric length changes, deletion, membership, and `Array.isArray`; array
+methods and arbitrary extra properties remain outside this subset. Sparse array
+literals are diagnosed before lowering loses their holes. Revivers, replacers,
+indentation, custom prototypes, and byte-view/Stats/Promise serialization are
+unsupported. JSON graphs remain guest-internal; component boundaries carry JSON
+as strings. Pure JSON tasks import no host capabilities.
 `process.env`, `process.argv`, and `process.cwd()` lazily read the selected functions from
 `wasi:cli/environment@0.3.0`. They cache guest-local values for the instance lifetime,
 including across component returns, collection, and native suspension. Arguments
@@ -202,8 +217,9 @@ writes if a later property fails. It accepts plain object sources and ignores nu
 undefined sources. `Object.keys`, string-valued `Object.values`, and string-key `in`
 inspect own properties; integer-index keys precede other keys in insertion order.
 Enumeration returns independent string-array snapshots. `Object.values` throws `12`
-for a nonstring property. JSON consumers, the remaining coercions and array operations,
-and argument-array mutation remain open migration work.
+for a nonstring property. Environment JSON snapshots are independent of the cached
+environment and preserve its guest-local mutations. Remaining coercions, array
+operations, and argument-array mutation remain open migration work.
 `crypto.getRandomValues(view)` fills only the visible `Uint8Array` range and returns
 the same view. Empty views make no host call. Invalid supported value kinds throw
 numeric code `1`; views larger than 65,536 bytes throw `2`, before requesting randomness

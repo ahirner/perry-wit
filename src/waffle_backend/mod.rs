@@ -12,6 +12,7 @@ mod date;
 mod decoder;
 pub(crate) mod exceptions;
 mod filesystem;
+mod json;
 pub(crate) mod libraries;
 pub(crate) mod link;
 mod objects;
