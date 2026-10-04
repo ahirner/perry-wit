@@ -1,3 +1,5 @@
+#[path = "support/allocation_probe.rs"]
+mod allocation_probe;
 #[path = "support/output_capture.rs"]
 mod output_capture;
 use anyhow::{Context, Result};
@@ -1203,5 +1205,72 @@ async fn asynchronous_module_initialization_is_shared_by_named_exports() -> Resu
         store.assert_concurrent_state_empty();
     }
     assert_eq!(count.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn suspended_wit_return_storage_survives_collection_in_another_task() -> Result<()> {
+    const WIT: &str = "package test:canonical-roots;
+      interface work { load:async func()->list<string>; release:func(); }
+      world boundary { import work; export run:async func(input:string)->string; }";
+    let compiled = compile(
+        r#"
+      import {load,release} from 'test:canonical-roots/work';
+      export async function run(input:string):Promise<string> {
+        const result=load();
+        for(let i=0;i<2000;i++) {
+          const temporary=input.toLowerCase().split('.').join('-');
+        }
+        release();
+        return (await result).join("|");
+      }
+    "#,
+        WIT,
+    )?;
+    let engine = engine()?;
+    let core = allocation_probe::guard_return_area(
+        &compiled.core,
+        "test:canonical-roots/work",
+        "load",
+        "release",
+    )?;
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("world.wit"), WIT)?;
+    let guarded =
+        perry_wit::component::embed_and_encode(&core, directory.path(), Some("boundary"))?;
+    let component = Component::new(&engine, guarded)?;
+    let mut linker = Linker::<Host>::new(&engine);
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let pending = gate.clone();
+    linker
+        .instance("test:canonical-roots/work")?
+        .func_wrap_concurrent("load", move |_, (): ()| {
+            let gate = pending.clone();
+            Box::pin(async move {
+                gate.notified().await;
+                Ok((vec!["answer!".to_string(); 16],))
+            })
+        })?;
+    linker
+        .instance("test:canonical-roots/work")?
+        .func_wrap("release", move |_, (): ()| {
+            gate.notify_one();
+            Ok(())
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                run.call_async(&mut store, ("A.B.C",))
+            )
+            .await??
+            .0,
+            vec!["answer!"; 16].join("|")
+        );
+        store.assert_concurrent_state_empty();
+    }
     Ok(())
 }

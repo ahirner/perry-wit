@@ -40,6 +40,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         registry,
         wit,
         sizes,
+        scratch: None,
         strings,
     };
     let signature = wit.resolve.wasm_signature(
@@ -162,6 +163,7 @@ struct Adapter<'a> {
     registry: &'a ModuleRegistry,
     wit: &'a WitWorld,
     sizes: SizeAlign,
+    scratch: Option<crate::waffle_backend::allocation::scope::ScratchScope>,
     strings: &'a StringPool,
 }
 
@@ -182,7 +184,16 @@ impl Adapter<'_> {
         )
     }
     fn call(&mut self, function_index: Func, args: &[Value]) -> Value {
-        self.op(Operator::Call { function_index }, args, CoreType::I32)
+        let value = self.op(Operator::Call { function_index }, args, CoreType::I32);
+        if self
+            .registry
+            .allocator
+            .is_some_and(|allocator| allocator.realloc == function_index)
+            && let Some(scratch) = &self.scratch
+        {
+            scratch.retain(&mut self.body, self.block, value);
+        }
+        value
     }
     fn call_checked(&mut self, function: Func, args: &[Value]) -> Value {
         let outcome = abi::emit_fallible_call(&mut self.body, self.block, function, args);
@@ -694,14 +705,21 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
     });
     let mut sizes = SizeAlign::default();
     sizes.fill(&wit.resolve)?;
-    let body = FunctionBody::new(module, sig);
+    let mut body = FunctionBody::new(module, sig);
     let block = body.entry;
+    let scratch = crate::waffle_backend::allocation::scope::ScratchScope::new(
+        &mut body,
+        block,
+        registry.memory,
+        registry.allocator.unwrap(),
+    );
     let mut adapter = Adapter {
         body,
         block,
         registry,
         wit,
         sizes,
+        scratch: Some(scratch),
         strings,
     };
     let guest_params: Vec<_> = adapter.body.blocks[block]
@@ -771,6 +789,11 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         None
     };
     let payload = abi::encode_payload(&mut adapter.body, adapter.block, value);
+    adapter.block = adapter
+        .scratch
+        .take()
+        .unwrap()
+        .release(&mut adapter.body, adapter.block);
     abi::emit_completion(
         &mut adapter.body,
         adapter.block,

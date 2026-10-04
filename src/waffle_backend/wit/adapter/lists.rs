@@ -63,6 +63,10 @@ impl Adapter<'_> {
             );
             let data = self.load_i32(list, 0);
             let count = self.load_i32(list, 4);
+            if let Some(scratch) = &self.scratch {
+                scratch.retain(&mut self.body, self.block, list);
+                scratch.retain(&mut self.body, self.block, data);
+            }
             self.store_i32(pointer, offset, data);
             self.store_i32(pointer, offset + 4, count);
             return Ok(());

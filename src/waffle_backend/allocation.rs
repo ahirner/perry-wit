@@ -2,6 +2,7 @@
 
 mod lookup;
 mod roots;
+pub(crate) mod scope;
 pub(crate) use roots::track_roots;
 
 use std::collections::BTreeMap;
