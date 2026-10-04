@@ -205,7 +205,7 @@ WASI 0.3 filesystem error variant, including `1` (access), `12` (invalid options
 and `32` (broken pipe); host traps and cancellation require store disposal.
 Already written bytes are not rolled back.
 `readFileSync(path, options?)` returns an independent `Uint8Array` for omitted/null
-encoding or the literal `binary` label, and a string for literal `utf8`/`utf-8`
+encoding or the `binary` label, and a string for `utf8`/`utf-8`
 labels (all case-insensitive). Plain literal options support `encoding` and the
 default or explicit `r` flag; unsupported options fail before opening a file.
 The `binary` label selects bytes here; Node treats it as Latin-1 text.
@@ -213,10 +213,16 @@ Reads materialize the file with storage proportional to its size, share the nati
 read transfers, and await the producer's separate completion before returning.
 Text reads preserve BOMs and NULs and count Unicode scalars; malformed or unfinished
 UTF-8 throws filesystem error `9` instead of Node's replacement decoding.
-Returned values, pending buffers, and stored text task outcomes survive collection.
-Encoding values selected at runtime still require string-or-byte union lowering;
-they currently produce a diagnostic. Those encodings, general option objects,
-metadata operations, and directory APIs remain open in R8.2.
+Returned values, pending buffers, and stored string/byte task outcomes survive collection.
+Runtime string encoding labels return `string | Uint8Array`. These values support
+`length`, truthiness, strict equality, assignment, helper calls, retained Promises,
+and `writeFileSync`. Use `typeof value === "string"` (or `"object"`) before indexing,
+calling methods, or passing the value to a string-only or byte-only consumer.
+Assignments invalidate guards; loops and exception paths preserve the tagged value.
+At component boundaries the union is exported as `text-or-bytes`, a variant with
+`text(string)` and `bytes(list<u8>)` cases, also supported inside numeric-error
+`Result` returns. General option objects, metadata operations, and directory APIs
+remain open in R8.2.
 `perry:stdio` exports immediately awaited `writeStdout(bytes)` and
 `writeStderr(bytes)`. They write the visible `Uint8Array` range, including arbitrary
 binary bytes, through shared native stream transfers and wait for the capability's

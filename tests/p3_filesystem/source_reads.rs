@@ -260,7 +260,7 @@ async fn static_read_options_and_repeated_reads_keep_their_result_contract() -> 
 }
 
 #[test]
-fn read_result_types_and_unsupported_dynamic_encodings_are_explicit() {
+fn read_result_types_and_unsupported_options_are_explicit() {
     use perry_wit::{compile_typescript_waffle, waffle_backend::WaffleCompileOptions};
 
     for function in [
@@ -365,14 +365,40 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
         try { return readFileSync('/sandbox/input', 'utf8'); }
         catch (error) { if (error === 37) { return 'failed'; } throw error; }
     }
-    export async function run(): Promise<string> {
+    export async function run(encoding: string): Promise<string> {
         const pending = read();
         let index = 0;
         while (index < 2000) { const temporary = new Uint8Array(1024); index = index + 1; }
         console.log('collected');
         return await pending + await pending;
     }"#;
-    for failure in [false, true] {
+    let dynamic = r#"
+    import {readFileSync} from "fs";
+    async function read(encoding: string): Promise<string | Uint8Array> {
+        try { return readFileSync('/sandbox/input', {encoding}); }
+        catch (error) { if (error === 37) { return 'failed'; } throw error; }
+    }
+    function text(value: string | Uint8Array): string {
+        if (typeof value === "string") { return value; }
+        return new TextDecoder('utf8', {ignoreBOM: true}).decode(value);
+    }
+    export async function run(encoding: string): Promise<string> {
+        const pending = read(encoding);
+        let index = 0;
+        while (index < 2000) { const temporary = new Uint8Array(1024); index = index + 1; }
+        console.log('collected');
+        const first = text(await pending);
+        index = 0;
+        while (index < 2000) { const temporary = new Uint8Array(1024); index = index + 1; }
+        return first + text(await pending);
+    }"#;
+    for (source, encoding, failure) in [
+        (source, "utf8", false),
+        (source, "utf8", true),
+        (dynamic, "utf8", false),
+        (dynamic, "binary", false),
+        (dynamic, "binary", true),
+    ] {
         let observations = Arc::new(Observations::default());
         let (sender, receiver) = mpsc::channel(8);
         sender.send(Ok(vec![239, 187, 191, 240])).await?;
@@ -420,8 +446,8 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
             Ok(())
         })
         .await?;
-        let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
-        let mut invocation = Box::pin(run.call_async(&mut store, ()));
+        let run = instance.get_typed_func::<(String,), (String,)>(&mut store, "run")?;
+        let mut invocation = Box::pin(run.call_async(&mut store, (encoding.into(),)));
         tokio::select! {
             result = &mut invocation => panic!("completed before input: {result:?}"),
             () = observations.pending.notified() => {}

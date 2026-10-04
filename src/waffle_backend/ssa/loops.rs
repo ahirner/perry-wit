@@ -23,6 +23,12 @@ impl FunctionLowerer<'_> {
         statements: &[Stmt],
         update: Option<&Expr>,
     ) -> Result<()> {
+        self.invalidate_narrowings(statements);
+        for expression in condition.into_iter().chain(update) {
+            self.invalidate_narrowings(&[Stmt::Expr(expression.clone())]);
+        }
+        let incoming_narrowings = self.narrowings.clone();
+        let guard = condition;
         let header = JoinPoint::new(&mut self.body, "loop header", &self.locals);
         header.emit_branch(&mut self.body, self.block, &self.locals);
         self.block = header.block;
@@ -55,6 +61,9 @@ impl FunctionLowerer<'_> {
             enclosing_try_depth: self.unwind_ctx.depth(),
         });
         self.block = body;
+        if let Some(guard) = guard {
+            self.narrow_type_guard(guard, true);
+        }
         self.statements(statements)?;
         let scope = self.loops.pop().expect("Active loop scope");
         if self.body.blocks[self.block].terminator == Terminator::None {
@@ -65,6 +74,7 @@ impl FunctionLowerer<'_> {
 
         self.block = scope.step.block;
         self.locals = scope.step.bindings;
+        self.narrowings = incoming_narrowings.clone();
         if self.body.blocks[self.block].preds.is_empty() {
             self.body
                 .set_terminator(self.block, Terminator::Unreachable);
@@ -77,6 +87,7 @@ impl FunctionLowerer<'_> {
         }
         self.block = scope.exit.block;
         self.locals = scope.exit.bindings;
+        self.narrowings = incoming_narrowings;
         Ok(())
     }
 

@@ -26,7 +26,7 @@ pub(crate) enum AllocationKind {
     String = 1,
     StringArray = 2,
     ScalarPromise = 3,
-    StringPromise = 4,
+    ReferencePromise = 4,
 }
 
 pub(crate) fn emit_allocator(

@@ -79,6 +79,9 @@ impl FunctionLowerer<'_> {
                 object, property, ..
             } if property == "length"
                 && (self.is_string(object)
+                    || crate::waffle_backend::text_or_bytes::is_text_or_bytes(
+                        &self.infer_expr_type(object),
+                    )
                     || self.is_scalar_iteration(object)
                     || matches!(self.infer_expr_type(object), HirType::Array(_))) =>
             {
@@ -96,7 +99,8 @@ impl FunctionLowerer<'_> {
             Expr::PutValueSet { value, .. } => self.infer_expr_type(value),
             Expr::LocalSet(_, value) => self.infer_expr_type(value),
             Expr::ForOfToArray(_) => HirType::Named(SCALAR_ITERATION.into()),
-            Expr::String(_)
+            Expr::TypeOf(_)
+            | Expr::String(_)
             | Expr::TemplateStringCoerce(_)
             | Expr::StringCoerce(_)
             | Expr::StringFromCodePoint(_)
@@ -106,8 +110,18 @@ impl FunctionLowerer<'_> {
                 result => result,
             },
             Expr::Number(_) | Expr::Integer(_) | Expr::Update { .. } => HirType::Number,
-            Expr::Bool(_) | Expr::Compare { .. } => HirType::Boolean,
-            Expr::LocalGet(id) => self.local_types.get(id).cloned().unwrap_or(HirType::Any),
+            Expr::Bool(_)
+            | Expr::Compare { .. }
+            | Expr::Unary {
+                op: perry_hir::ir::UnaryOp::Not,
+                ..
+            } => HirType::Boolean,
+            Expr::LocalGet(id) => self
+                .narrowings
+                .get(id)
+                .or_else(|| self.local_types.get(id))
+                .cloned()
+                .unwrap_or(HirType::Any),
             Expr::IndexGet { object, .. } if self.is_scalar_iteration(object) => HirType::String,
             Expr::IndexGet { object, .. }
                 if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object)) =>

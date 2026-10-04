@@ -23,7 +23,7 @@ declare module "fs" {
   type Utf8Encoding = `${"u" | "U"}${"t" | "T"}${"f" | "F"}${"" | "-"}8`;
   type BinaryEncoding = `${"b" | "B"}${"i" | "I"}${"n" | "N"}${"a" | "A"}${"r" | "R"}${"y" | "Y"}`;
   /** Materialize exact bytes from a preopen-confined path and await producer completion.
-   * Options must be plain literals; encoding labels must be literal strings. */
+   * Options objects must be plain literals; encoding strings may be selected at runtime. */
   export function readFileSync(
     path: string,
     options?: BinaryEncoding | { encoding?: BinaryEncoding | null; flag?: "r" } | null,
@@ -34,6 +34,13 @@ declare module "fs" {
     path: string,
     options: Utf8Encoding | { encoding: Utf8Encoding; flag?: "r" },
   ): string;
+  /** Runtime encoding strings return a tagged string-or-byte value.
+   * Narrow with typeof before using string-only or byte-only operations.
+   * Unsupported labels throw filesystem error 12 before opening a file. */
+  export function readFileSync(
+    path: string,
+    options: string | { encoding: string; flag?: "r" },
+  ): string | Uint8Array;
   interface WriteOptions {
     /** Case-insensitive utf8 or utf-8; binary is also accepted for byte data. */
     encoding?: string | null;

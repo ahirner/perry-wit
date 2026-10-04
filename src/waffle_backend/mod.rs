@@ -22,6 +22,7 @@ pub(crate) mod ssa;
 mod streams;
 pub(crate) mod strings;
 pub mod text_contract;
+mod text_or_bytes;
 mod visit;
 
 use anyhow::{Context, Result};

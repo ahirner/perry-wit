@@ -9,13 +9,14 @@ pub(crate) enum FilesystemOperation {
     WriteFile,
     ReadBytes,
     ReadText,
+    ReadValue,
 }
 
 impl FilesystemOperation {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::WriteFile => "writeFileSync",
-            Self::ReadBytes | Self::ReadText => "readFileSync",
+            Self::ReadBytes | Self::ReadText | Self::ReadValue => "readFileSync",
         }
     }
 }
@@ -28,12 +29,12 @@ impl LowerCapability for FilesystemOperation {
                 result: HirType::Void,
                 implementation: CapabilityImplementation::Filesystem,
             },
-            Self::ReadBytes | Self::ReadText => CapabilityPlan {
+            Self::ReadBytes | Self::ReadText | Self::ReadValue => CapabilityPlan {
                 params: vec![HirType::String, HirType::Any],
-                result: if *self == Self::ReadText {
-                    HirType::String
-                } else {
-                    HirType::Named("Uint8Array".into())
+                result: match self {
+                    Self::ReadText => HirType::String,
+                    Self::ReadValue => crate::waffle_backend::text_or_bytes::value_type(),
+                    _ => HirType::Named("Uint8Array".into()),
                 },
                 implementation: CapabilityImplementation::Filesystem,
             },

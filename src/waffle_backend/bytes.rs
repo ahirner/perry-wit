@@ -61,6 +61,7 @@ pub(crate) fn emit_runtime(
 
 fn contains_byte_view(ty: &HirType) -> bool {
     match ty {
+        HirType::Union(types) => types.iter().any(contains_byte_view),
         HirType::Promise(inner) => contains_byte_view(inner),
         HirType::Generic { base, type_args } if base == "Result" => {
             type_args.iter().any(contains_byte_view)

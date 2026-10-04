@@ -1,6 +1,6 @@
 //! Preserve read result types before Perry lowers calls to capability declarations.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use perry_parser::swc_ecma_ast as ast;
 use swc_common::SyntaxContext;
 
@@ -49,7 +49,9 @@ pub(super) fn specialize(
         encoding = match selected {
             Some(ast::Prop::KeyValue(pair)) => underlying_expression(&pair.value),
             Some(_) => {
-                bail!("Dynamic readFileSync encodings require string-or-byte result lowering")
+                return Ok(CapabilityOperation::Filesystem(
+                    FilesystemOperation::ReadValue,
+                ));
             }
             None => return Ok(operation),
         };
@@ -60,7 +62,11 @@ pub(super) fn specialize(
         }),
         ast::Expr::Lit(_) => false,
         ast::Expr::Ident(name) if name.sym == "undefined" && name.ctxt == unresolved => false,
-        _ => bail!("Dynamic readFileSync encodings require string-or-byte result lowering"),
+        _ => {
+            return Ok(CapabilityOperation::Filesystem(
+                FilesystemOperation::ReadValue,
+            ));
+        }
     };
     Ok(CapabilityOperation::Filesystem(if text {
         FilesystemOperation::ReadText

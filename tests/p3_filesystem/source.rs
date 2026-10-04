@@ -536,3 +536,6 @@ async fn instantiate_with(
     let instance = linker.instantiate_async(&mut store, &component).await?;
     Ok((store, instance))
 }
+
+#[path = "source_dynamic_reads.rs"]
+mod dynamic_reads;

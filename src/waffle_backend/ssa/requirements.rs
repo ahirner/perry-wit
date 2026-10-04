@@ -2,7 +2,7 @@
 
 use crate::waffle_backend::{strings::RequiredStringHelpers, visit};
 use perry_hir::{
-    ir::{Expr, Module as HirModule},
+    ir::{Expr, Module as HirModule, Stmt},
     types::Type as HirType,
 };
 
@@ -22,6 +22,11 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
         if type_has_string(&func.return_type) {
             reqs.needs_strings = true;
         }
+        visit::visit_statement_nodes(&func.body, &mut |statement| {
+            if let Stmt::Let { ty, .. } = statement {
+                reqs.needs_strings |= type_has_string(ty);
+            }
+        });
         visit::visit_function_expressions(func, &mut |expr| {
             scan_expr_requirements(expr, &mut reqs)
         });
@@ -42,7 +47,7 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
             reqs.needs_strings = true;
             reqs.decoder = true;
         }
-        Expr::String(_) | Expr::ForOfToArray(_) | Expr::RegExp { .. } => {
+        Expr::TypeOf(_) | Expr::String(_) | Expr::ForOfToArray(_) | Expr::RegExp { .. } => {
             reqs.needs_strings = true;
         }
         Expr::StringFromCodePoint(_) => {

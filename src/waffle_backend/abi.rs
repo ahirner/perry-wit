@@ -30,12 +30,32 @@ pub(crate) fn build_export_wrapper(
     memory: waffle::Memory,
     lift_canonical: Option<waffle::Func>,
     lift_bytes: Option<waffle::Func>,
+    lift_text_or_bytes: Option<waffle::Func>,
 ) -> Result<FunctionBody> {
     let mut body = FunctionBody::new(module, export.sig);
     let entry = body.entry;
     let mut args = Vec::new();
     let mut param_cursor = 0;
     for param_ty in &callee.param_types {
+        if super::text_or_bytes::is_text_or_bytes(param_ty) {
+            let values: Vec<_> = body.blocks[entry].params[param_cursor..param_cursor + 3]
+                .iter()
+                .map(|param| param.1)
+                .collect();
+            param_cursor += 3;
+            let value = body.add_op(
+                entry,
+                Operator::Call {
+                    function_index: lift_text_or_bytes.ok_or_else(|| {
+                        anyhow::anyhow!("String-or-byte parameters require canonical lifting")
+                    })?,
+                },
+                &values,
+                &[Type::I32],
+            );
+            args.push(value);
+            continue;
+        }
         let lift = match param_ty {
             HirType::String => {
                 Some(lift_canonical.ok_or_else(|| {
@@ -69,6 +89,21 @@ pub(crate) fn build_export_wrapper(
     }
     let outcome = emit_fallible_call(&mut body, entry, callee.func_index, &args);
     match export.convention {
+        ExportConvention::Direct
+            if super::text_or_bytes::is_text_or_bytes(callee.success_type()) =>
+        {
+            let block = outcome.ok_block;
+            let address = body.add_op(block, Operator::I32Const { value: 8 }, &[], &[Type::I32]);
+            let value = decode_payload(&mut body, block, outcome.payload, true);
+            store_text_or_bytes(&mut body, block, memory, address, value, 0);
+            body.set_terminator(
+                block,
+                Terminator::Return {
+                    values: vec![address],
+                },
+            );
+            body.set_terminator(outcome.err_block, Terminator::Unreachable);
+        }
         ExportConvention::Direct => {
             let values = module.signatures[export.sig]
                 .returns
@@ -231,58 +266,14 @@ fn emit_retptr_store(
             );
         }
         PrimitivePayload::String | PrimitivePayload::Bytes => {
-            let desc_ptr = decode_payload(body, block, payload_f64, true);
-            let data_ptr = body.add_op(
-                block,
-                Operator::I32Load {
-                    memory: waffle::MemoryArg {
-                        align: 2,
-                        offset: 0,
-                        memory,
-                    },
-                },
-                &[desc_ptr],
-                &[Type::I32],
-            );
-            let data_len = body.add_op(
-                block,
-                Operator::I32Load {
-                    memory: waffle::MemoryArg {
-                        align: 2,
-                        offset: 4,
-                        memory,
-                    },
-                },
-                &[desc_ptr],
-                &[Type::I32],
-            );
-            body.add_op(
-                block,
-                Operator::I32Store {
-                    memory: waffle::MemoryArg {
-                        align: 2,
-                        offset: 8,
-                        memory,
-                    },
-                },
-                &[addr, data_ptr],
-                &[],
-            );
-            body.add_op(
-                block,
-                Operator::I32Store {
-                    memory: waffle::MemoryArg {
-                        align: 2,
-                        offset: 12,
-                        memory,
-                    },
-                },
-                &[addr, data_len],
-                &[],
-            );
+            let descriptor = decode_payload(body, block, payload_f64, true);
+            store_sequence(body, block, memory, addr, descriptor, 8);
+        }
+        PrimitivePayload::TextOrBytes => {
+            let value = decode_payload(body, block, payload_f64, true);
+            store_text_or_bytes(body, block, memory, addr, value, 8);
         }
     }
-
     addr
 }
 
@@ -338,5 +329,68 @@ pub(crate) fn emit_fallible_call(
         ok_block,
         err_block,
         payload,
+    }
+}
+
+fn store_text_or_bytes(
+    body: &mut FunctionBody,
+    block: Block,
+    memory: waffle::Memory,
+    address: Value,
+    value: Value,
+    offset: u32,
+) {
+    let one = body.add_op(block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
+    let mask = body.add_op(block, Operator::I32Const { value: !1 }, &[], &[Type::I32]);
+    let tag = body.add_op(block, Operator::I32And, &[value, one], &[Type::I32]);
+    let descriptor = body.add_op(block, Operator::I32And, &[value, mask], &[Type::I32]);
+    body.add_op(
+        block,
+        Operator::I32Store8 {
+            memory: waffle::MemoryArg {
+                align: 0,
+                offset,
+                memory,
+            },
+        },
+        &[address, tag],
+        &[],
+    );
+    store_sequence(body, block, memory, address, descriptor, offset + 4);
+}
+
+fn store_sequence(
+    body: &mut FunctionBody,
+    block: Block,
+    memory: waffle::Memory,
+    address: Value,
+    descriptor: Value,
+    offset: u32,
+) {
+    for field in [0, 4] {
+        let value = body.add_op(
+            block,
+            Operator::I32Load {
+                memory: waffle::MemoryArg {
+                    align: 2,
+                    offset: field,
+                    memory,
+                },
+            },
+            &[descriptor],
+            &[Type::I32],
+        );
+        body.add_op(
+            block,
+            Operator::I32Store {
+                memory: waffle::MemoryArg {
+                    align: 2,
+                    offset: offset + field,
+                    memory,
+                },
+            },
+            &[address, value],
+            &[],
+        );
     }
 }

@@ -112,7 +112,11 @@ pub(crate) fn plan_promises(
     if calls == direct_awaits {
         return Ok(None);
     }
-    for task in referenced.values() {
+    for (target, task) in &referenced {
+        ensure!(
+            !matches!(target, TaskTarget::Intrinsic(name) if intrinsics[name].has_completion()),
+            "Retained native capability Promises require a completion adapter; byte output must remain immediately awaited without stored tasks"
+        );
         ensure!(
             task.params.len() < 16,
             "Stored async calls support at most 15 primitive arguments"
@@ -120,17 +124,23 @@ pub(crate) fn plan_promises(
         ensure!(
             task.params
                 .iter()
-                .all(|param| matches!(param, HirType::Number | HirType::Boolean | HirType::String)
-                    || matches!(param, HirType::Promise(inner) if matches!(inner.as_ref(), HirType::Number | HirType::Boolean | HirType::String | HirType::Void))),
-            "Stored async task parameters require primitives or Promises of primitive outcomes"
+                .all(|param| (is_task_outcome(param) && param != &HirType::Void)
+                    || matches!(param, HirType::Promise(inner) if is_task_outcome(inner))),
+            "Stored async task parameters require supported values or Promises of supported outcomes"
         );
         ensure!(
-            matches!(
-                task.result,
-                HirType::Number | HirType::Boolean | HirType::String | HirType::Void
-            ),
-            "Stored async task results currently support numbers, booleans, strings, and void"
+            is_task_outcome(&task.result),
+            "Stored async task results require numbers, booleans, strings, bytes, string-or-byte values, or void"
         );
     }
     Ok(Some(PromisePlan { tasks: referenced }))
+}
+
+/// Retained outcomes whose value and ownership fit the completion record.
+pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
+    matches!(
+        ty,
+        HirType::Number | HirType::Boolean | HirType::String | HirType::Void
+    ) || super::bytes::is_byte_view(ty)
+        || super::text_or_bytes::is_text_or_bytes(ty)
 }

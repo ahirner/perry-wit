@@ -5,7 +5,9 @@ use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{Operator, Type, Value};
 
 use super::{FunctionLowerer, options::literal_properties};
-use crate::waffle_backend::{abi, bytes::is_byte_view, capabilities::FilesystemOperation};
+use crate::waffle_backend::{
+    abi, bytes::is_byte_view, capabilities::FilesystemOperation, text_or_bytes::is_text_or_bytes,
+};
 
 impl FunctionLowerer<'_> {
     pub(super) fn filesystem_operation(
@@ -21,24 +23,26 @@ impl FunctionLowerer<'_> {
                 );
                 let path = self.string_receiver(&arguments[0])?;
                 let data_type = self.infer_expr_type(&arguments[1]);
-                let binary = is_byte_view(&data_type);
-                ensure!(
-                    binary || data_type == HirType::String,
-                    "writeFileSync data must be a string or Uint8Array"
-                );
-                let data = if binary {
-                    self.byte_receiver(&arguments[1])?
+                let (data, binary) = if is_text_or_bytes(&data_type) {
+                    let value = self.expression(&arguments[1])?;
+                    self.text_or_bytes_parts(value)
                 } else {
-                    self.string_receiver(&arguments[1])?
+                    let binary = is_byte_view(&data_type);
+                    ensure!(
+                        binary || data_type == HirType::String,
+                        "writeFileSync data must be a string or Uint8Array"
+                    );
+                    let data = self.expression(&arguments[1])?;
+                    let binary = self.op(
+                        Operator::I32Const {
+                            value: u32::from(binary),
+                        },
+                        &[],
+                        &[Type::I32],
+                    );
+                    (data, binary)
                 };
                 let (encoding, flag, valid) = self.filesystem_options(arguments.get(2))?;
-                let binary = self.op(
-                    Operator::I32Const {
-                        value: u32::from(binary),
-                    },
-                    &[],
-                    &[Type::I32],
-                );
                 let checked = self.op(
                     Operator::Call {
                         function_index: self.registry.filesystem_helpers.unwrap().write_options,
@@ -53,7 +57,9 @@ impl FunctionLowerer<'_> {
                 );
                 Ok(None)
             }
-            FilesystemOperation::ReadBytes | FilesystemOperation::ReadText => {
+            FilesystemOperation::ReadBytes
+            | FilesystemOperation::ReadText
+            | FilesystemOperation::ReadValue => {
                 ensure!(
                     (1..=2).contains(&arguments.len()),
                     "readFileSync accepts a path and optional encoding/options"
@@ -69,12 +75,14 @@ impl FunctionLowerer<'_> {
                     &[Type::I32],
                 );
                 let payload = self.call_completion(helpers.read, &[path, mode]);
-                Ok(Some(abi::decode_payload(
-                    &mut self.body,
-                    self.block,
-                    payload,
-                    true,
-                )))
+                let descriptor = abi::decode_payload(&mut self.body, self.block, payload, true);
+                let value = if operation == FilesystemOperation::ReadValue {
+                    let binary = self.op(Operator::I32Eqz, &[mode], &[Type::I32]);
+                    self.op(Operator::I32Or, &[descriptor, binary], &[Type::I32])
+                } else {
+                    descriptor
+                };
+                Ok(Some(value))
             }
         }
     }

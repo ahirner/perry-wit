@@ -145,6 +145,7 @@ pub(crate) fn resolve_bindings(module: &mut ast::Module) -> Result<SourceBinding
 
 fn source_type(ty: &HirType) -> Result<String> {
     match ty {
+        ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("string | Uint8Array".into()),
         HirType::Number => Ok("number".into()),
         HirType::Boolean => Ok("boolean".into()),
         HirType::String => Ok("string".into()),

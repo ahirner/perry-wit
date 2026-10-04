@@ -206,6 +206,10 @@ fn entry_adapter(contract: &ResolvedContract) -> Result<String> {
         HirType::Void => ("", String::new()),
         HirType::Number | HirType::Any => ("f64", "(local.get $result)".into()),
         HirType::Boolean => ("i32", "(local.get $result)".into()),
+        ty if crate::waffle_backend::text_or_bytes::is_text_or_bytes(ty) => (
+            "i32 i32 i32",
+            "(i32.load8_u (local.get $result)) (i32.load offset=4 (local.get $result)) (i32.load offset=8 (local.get $result))".into(),
+        ),
         ty if ty == &HirType::String || crate::waffle_backend::bytes::is_byte_view(ty) => (
             "i32 i32",
             "(i32.load (local.get $result)) (i32.load offset=4 (local.get $result))".into(),
@@ -228,6 +232,10 @@ fn entry_adapter(contract: &ResolvedContract) -> Result<String> {
                     format!(
                         "{tag} (if (result i64) {tag} (then (i64.load offset=8 (local.get $result))) (else (i64.extend_i32_u (i32.load offset=8 (local.get $result))))) (if (result i32) {tag} (then (i32.const 0)) (else (i32.load offset=12 (local.get $result))))"
                     ),
+                ),
+                ty if crate::waffle_backend::text_or_bytes::is_text_or_bytes(ty) => (
+                    "i32 i64 i32 i32",
+                    format!("{tag} (if (result i64) {tag} (then (i64.load offset=8 (local.get $result))) (else (i64.extend_i32_u (i32.load8_u offset=8 (local.get $result))))) (if (result i32) {tag} (then (i32.const 0)) (else (i32.load offset=12 (local.get $result)))) (if (result i32) {tag} (then (i32.const 0)) (else (i32.load offset=16 (local.get $result))))"),
                 ),
                 _ => bail!("Unsupported Promise entry result: {return_type:?}"),
             }

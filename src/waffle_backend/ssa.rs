@@ -13,13 +13,14 @@ mod optional;
 mod options;
 mod requirements;
 mod string_ops;
+mod text_or_bytes;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail, ensure};
 use perry_hir::ir::{
-    BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt, UpdateOp,
+    BinaryOp, CatchClause, CompareOp, Expr, Function, Module as HirModule, Stmt, UnaryOp, UpdateOp,
 };
 use perry_hir::types::{LocalId, Type as HirType};
 use waffle::{
@@ -27,6 +28,7 @@ use waffle::{
     Type, Value,
 };
 
+use super::text_or_bytes::is_text_or_bytes;
 use crate::waffle_backend::abi::{self, CompletionStatus};
 use crate::waffle_backend::control_flow::{JoinPoint, create_block_parameters};
 use crate::waffle_backend::exceptions::{
@@ -128,6 +130,7 @@ pub(crate) fn lower_module(
                 registry.memory,
                 lift_fn,
                 lift_bytes,
+                registry.text_or_bytes_lift,
             )?;
             module.funcs[export.func_index] =
                 waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
@@ -165,6 +168,7 @@ struct FunctionLowerer<'a> {
     block: Block,
     locals: BTreeMap<LocalId, Value>,
     local_types: BTreeMap<LocalId, HirType>,
+    narrowings: BTreeMap<LocalId, HirType>,
     stream_parameter: Option<Value>,
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
@@ -216,6 +220,7 @@ fn lower_function_body(
         block: entry,
         locals,
         local_types,
+        narrowings: BTreeMap::new(),
         stream_parameter,
         awaited_calls: 0,
         unwind_ctx: UnwindContext::new(),
@@ -265,12 +270,21 @@ impl<'a> FunctionLowerer<'a> {
             match stmt {
                 Stmt::Let {
                     id,
+                    ty,
                     init: Some(expr),
                     ..
                 } => {
                     let inferred = self.infer_expr_type(expr);
-                    self.local_types.insert(*id, inferred);
-                    let val = self.expression(expr)?;
+                    let (ty, val) = if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
+                        (
+                            super::text_or_bytes::value_type(),
+                            self.text_or_bytes_operand(expr)?,
+                        )
+                    } else {
+                        (inferred, self.expression(expr)?)
+                    };
+                    self.local_types.insert(*id, ty);
+                    self.narrowings.remove(id);
                     ensure!(
                         self.locals.insert(*id, val).is_none(),
                         "Duplicate local binding id: {:?}",
@@ -299,18 +313,21 @@ impl<'a> FunctionLowerer<'a> {
                                     self.is_async,
                                     "Returning a stored Promise requires an async function"
                                 );
-                                ensure!(self.infer_expr_type(expr) == HirType::Promise(Box::new(self.return_type.clone())), "Returned Promise outcome does not match the function result type");
+                                ensure!(super::text_or_bytes::equivalent(&self.infer_expr_type(expr), &HirType::Promise(Box::new(self.return_type.clone()))), "Returned Promise outcome does not match the function result type");
                                 return self
                                     .await_expression(expr, false)?
                                     .ok_or_else(|| anyhow::anyhow!("Promise return has no value"));
                             }
-                            if self.return_type == &HirType::String {
+                            if is_text_or_bytes(self.return_type) {
+                                self.text_or_bytes_operand(expr)
+                            } else if self.return_type == &HirType::String {
                                 self.string_receiver(expr)
                             } else if super::bytes::is_byte_view(self.return_type) {
                                 self.byte_receiver(expr)
                             } else if super::decoder::is_decoder(self.return_type) {
                                 self.decoder_receiver(expr)
                             } else {
+                                ensure!(!is_text_or_bytes(&self.infer_expr_type(expr)), "Cannot return a string-or-byte value as {:?}; narrow it first", self.return_type);
                                 ensure!(!super::decoder::is_decoder(&self.infer_expr_type(expr)), "Cannot return a TextDecoder as {:?}", self.return_type);
                                 ensure!(!super::bytes::is_byte_view(&self.infer_expr_type(expr)), "Cannot return a Uint8Array as {:?}", self.return_type);
                                 ensure!(
@@ -381,6 +398,7 @@ impl<'a> FunctionLowerer<'a> {
     ) -> Result<()> {
         let cond_val = self.condition(condition)?;
         let incoming_locals = self.locals.clone();
+        let incoming_narrowings = self.narrowings.clone();
 
         let then_block = self.body.add_block();
         let else_block = self.body.add_block();
@@ -403,7 +421,10 @@ impl<'a> FunctionLowerer<'a> {
 
         // Lower then branch (self.locals is already incoming_locals)
         self.block = then_block;
+        self.narrow_type_guard(condition, true);
         self.statements(then_branch)?;
+        let then_reaches_join = self.body.blocks[self.block].terminator == Terminator::None;
+        let then_narrowings = self.narrowings.clone();
         if self.body.blocks[self.block].terminator == Terminator::None {
             join.emit_branch(&mut self.body, self.block, &self.locals);
         }
@@ -411,7 +432,10 @@ impl<'a> FunctionLowerer<'a> {
         // Lower else branch (move incoming_locals)
         self.block = else_block;
         self.locals = incoming_locals;
+        self.narrowings = incoming_narrowings;
+        self.narrow_type_guard(condition, false);
         self.statements(else_branch)?;
+        let else_reaches_join = self.body.blocks[self.block].terminator == Terminator::None;
         if self.body.blocks[self.block].terminator == Terminator::None {
             join.emit_branch(&mut self.body, self.block, &self.locals);
         }
@@ -422,6 +446,12 @@ impl<'a> FunctionLowerer<'a> {
         }
         self.block = join.block;
         self.locals = join.bindings;
+        if !else_reaches_join {
+            self.narrowings = then_narrowings;
+        } else if then_reaches_join {
+            self.narrowings
+                .retain(|id, ty| then_narrowings.get(id) == Some(ty));
+        }
         Ok(())
     }
 
@@ -499,11 +529,16 @@ impl<'a> FunctionLowerer<'a> {
                 || matches!(expected, Some(HirType::Promise(_)))
             {
                 ensure!(
-                    expected == Some(&argument_type),
+                    expected.is_some_and(|expected| super::text_or_bytes::equivalent(
+                        expected,
+                        &argument_type
+                    )),
                     "Stored Promise arguments must match their declared outcome type"
                 );
             }
-            let value = if expected == Some(&HirType::String) {
+            let value = if expected.is_some_and(is_text_or_bytes) {
+                self.text_or_bytes_operand(arg)?
+            } else if expected == Some(&HirType::String) {
                 self.string_receiver(arg)?
             } else {
                 ensure!(
@@ -531,8 +566,8 @@ impl<'a> FunctionLowerer<'a> {
                 );
             }
             let task = &self.contract.promises.as_ref().unwrap().tasks[&target];
-            let kind = if task.result == HirType::String {
-                super::allocation::AllocationKind::StringPromise
+            let kind = if types::is_reference(&task.result) {
+                super::allocation::AllocationKind::ReferencePromise
             } else {
                 super::allocation::AllocationKind::ScalarPromise
             };
@@ -658,7 +693,7 @@ impl<'a> FunctionLowerer<'a> {
                         &mut self.body,
                         self.block,
                         payload,
-                        matches!(result.as_ref(), HirType::Boolean | HirType::String),
+                        super::registry::map_type_to_waffle(&result)? == Type::I32,
                     ))
                 }
             } else {
@@ -712,6 +747,19 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Bool(b) => {
                 let v = if *b { 1 } else { 0 };
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
+            }
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => {
+                let value = self.condition(operand)?;
+                Ok(self.op(Operator::I32Eqz, &[value], &[Type::I32]))
+            }
+            Expr::Compare { op, left, right }
+                if is_text_or_bytes(&self.infer_expr_type(left))
+                    || is_text_or_bytes(&self.infer_expr_type(right)) =>
+            {
+                self.text_or_bytes_comparison(*op, left, right)
             }
             Expr::Compare { op, left, right }
                 if types::identity_kind(&self.infer_expr_type(left)).is_some()
@@ -783,7 +831,9 @@ impl<'a> FunctionLowerer<'a> {
             _ => {
                 let val = self.expression(expr)?;
                 let ty = self.body.values[val].ty(&self.body.type_pool);
-                if self.is_string(expr) {
+                if is_text_or_bytes(&self.infer_expr_type(expr)) {
+                    Ok(self.text_or_bytes_truthiness(val))
+                } else if self.is_string(expr) {
                     Ok(self.string_truthiness(val))
                 } else if types::identity_kind(&self.infer_expr_type(expr)).is_some() {
                     Ok(self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]))
@@ -816,6 +866,10 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::TypeOf(operand) => self.type_of(operand),
+            Expr::Unary {
+                op: UnaryOp::Not, ..
+            } => self.condition(expr),
             Expr::TextDecoderNew {
                 label,
                 fatal,
@@ -909,13 +963,31 @@ impl<'a> FunctionLowerer<'a> {
                 Ok(if *prefix { updated } else { previous })
             }
             Expr::LocalSet(id, expr) => {
+                if self.local_types.get(id).is_some_and(is_text_or_bytes) {
+                    let inferred = self.infer_expr_type(expr);
+                    ensure!(
+                        is_text_or_bytes(&inferred)
+                            || inferred == HirType::String
+                            || super::bytes::is_byte_view(&inferred),
+                        "String-or-byte bindings require string or Uint8Array assignments"
+                    );
+                    let original = self.expression(expr)?;
+                    let stored = self.tag_text_or_bytes(original, &inferred);
+                    self.locals.insert(*id, stored);
+                    self.narrowings.remove(id);
+                    return Ok(original);
+                }
                 let inferred = self.infer_expr_type(expr);
+                ensure!(
+                    !is_text_or_bytes(&inferred),
+                    "Assigning a string-or-byte value requires a string-or-byte binding"
+                );
                 if let Some(previous) = self.local_types.get(id)
                     && let Some(kind) =
                         types::identity_kind(previous).or_else(|| types::identity_kind(&inferred))
                 {
                     ensure!(
-                        previous == &inferred,
+                        super::text_or_bytes::equivalent(previous, &inferred),
                         "A {} binding cannot change its logical type",
                         if kind == "Promise" {
                             "stored Promise"
@@ -929,11 +1001,24 @@ impl<'a> FunctionLowerer<'a> {
                 self.locals.insert(*id, value);
                 Ok(value)
             }
-            Expr::LocalGet(id) => self
-                .locals
-                .get(id)
-                .copied()
-                .ok_or_else(|| anyhow::anyhow!("Uninitialized local {:?}", id)),
+            Expr::LocalGet(id) => {
+                let stored = self
+                    .locals
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("Uninitialized local {:?}", id))?;
+                Ok(
+                    if self
+                        .narrowings
+                        .get(id)
+                        .is_some_and(super::bytes::is_byte_view)
+                    {
+                        self.text_or_bytes_parts(stored).0
+                    } else {
+                        stored
+                    },
+                )
+            }
             Expr::StringFromCodePoint(arg) => {
                 let cp = self.expression(arg)?;
                 let helpers = self
@@ -973,6 +1058,9 @@ impl<'a> FunctionLowerer<'a> {
                     !matches!(self.infer_expr_type(object), HirType::Promise(_)),
                     "Promise properties are unsupported; await the retained outcome"
                 );
+                if is_text_or_bytes(&self.infer_expr_type(object)) {
+                    return self.text_or_bytes_length(object);
+                }
                 if self.is_string(object) || self.is_scalar_iteration(object) {
                     let desc = if self.is_scalar_iteration(object) {
                         self.expression(object)?
@@ -1178,6 +1266,14 @@ impl<'a> FunctionLowerer<'a> {
         catch: Option<&CatchClause>,
         finally: Option<&[Stmt]>,
     ) -> Result<()> {
+        self.invalidate_narrowings(body);
+        if let Some(catch) = catch {
+            self.invalidate_narrowings(&catch.body);
+        }
+        if let Some(finally) = finally {
+            self.invalidate_narrowings(finally);
+        }
+        let incoming_narrowings = self.narrowings.clone();
         let blocks = TryClauseBlocks::build(
             &mut self.body,
             &self.locals,
@@ -1206,6 +1302,7 @@ impl<'a> FunctionLowerer<'a> {
             self.block = cb;
             self.unwind_ctx.clear_catch_in_innermost();
             self.locals = blocks.catch_environment(&self.body);
+            self.narrowings = incoming_narrowings.clone();
 
             self.statements(&c_clause.body)?;
             if self.body.blocks[self.block].terminator == Terminator::None {
@@ -1222,6 +1319,7 @@ impl<'a> FunctionLowerer<'a> {
             self.block = fb;
             let environment = blocks.finally_environment(&self.body);
             self.locals = environment.locals;
+            self.narrowings = incoming_narrowings.clone();
 
             self.statements(f_stmts)?;
 
@@ -1257,6 +1355,7 @@ impl<'a> FunctionLowerer<'a> {
             self.locals = blocks.join_environment(&self.body);
         }
         self.block = blocks.join_block;
+        self.narrowings = incoming_narrowings;
         Ok(())
     }
 
@@ -1280,6 +1379,10 @@ fn collect_strings_in_module(hir: &HirModule, pool: &mut StringPool) {
     let mut intern = |expr: &Expr| {
         if let Expr::String(text) = expr {
             pool.intern(text);
+        } else if matches!(expr, Expr::TypeOf(_)) {
+            for label in ["string", "object", "number", "boolean", "undefined"] {
+                pool.intern(label);
+            }
         }
     };
     for function in &hir.functions {

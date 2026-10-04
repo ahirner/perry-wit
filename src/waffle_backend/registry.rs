@@ -30,6 +30,7 @@ pub(crate) enum PrimitivePayload {
     Boolean,
     String,
     Bytes,
+    TextOrBytes,
 }
 
 /// Complete, immutable metadata for a function declaration.
@@ -73,6 +74,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) promises: Option<PromiseImports>,
     pub(crate) allocator: Option<super::allocation::AllocationFuncs>,
     pub(crate) byte_helpers: Option<super::bytes::ByteHelpers>,
+    pub(crate) text_or_bytes_lift: Option<Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
@@ -209,6 +211,26 @@ impl ModuleRegistry {
             None
         };
 
+        let text_or_bytes_lift = if hir.functions.iter().any(|function| {
+            function
+                .params
+                .iter()
+                .any(|param| super::text_or_bytes::is_text_or_bytes(&param.ty))
+        }) {
+            Some(super::text_or_bytes::emit_lift(
+                module,
+                memory,
+                string_helpers
+                    .expect("union values require string helpers")
+                    .lift_canonical,
+                byte_helpers
+                    .expect("union values require byte helpers")
+                    .lift_canonical,
+            )?)
+        } else {
+            None
+        };
+
         let decoder_helpers = if string_reqs.decoder {
             Some(super::decoder::emit_runtime(
                 module,
@@ -294,6 +316,9 @@ impl ModuleRegistry {
                     HirType::Boolean => PrimitivePayload::Boolean,
                     HirType::String => PrimitivePayload::String,
                     ty if super::bytes::is_byte_view(ty) => PrimitivePayload::Bytes,
+                    ty if super::text_or_bytes::is_text_or_bytes(ty) => {
+                        PrimitivePayload::TextOrBytes
+                    }
                     other => bail!("Unsupported WIT Result success payload: {other:?}"),
                 })
             } else {
@@ -369,6 +394,7 @@ impl ModuleRegistry {
             promises,
             allocator,
             byte_helpers,
+            text_or_bytes_lift,
             decoder_helpers,
             filesystem_helpers,
             functions,
@@ -382,17 +408,11 @@ impl ModuleRegistry {
 
 pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
     match ty {
+        ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(Type::I32),
         HirType::Number | HirType::Any => Ok(Type::F64),
         HirType::Boolean => Ok(Type::I32),
         HirType::String => Ok(Type::I32),
-        HirType::Promise(inner)
-            if matches!(
-                inner.as_ref(),
-                HirType::Number | HirType::Boolean | HirType::String | HirType::Void
-            ) =>
-        {
-            Ok(Type::I32)
-        }
+        HirType::Promise(inner) if super::promises::is_task_outcome(inner) => Ok(Type::I32),
         HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_view(ty) => Ok(Type::I32),
         ty if super::decoder::is_decoder(ty) => Ok(Type::I32),
@@ -402,6 +422,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
 
 pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
     match ty {
+        ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(vec![Type::I32]),
         HirType::Void => Ok(vec![]),
         HirType::Number | HirType::Any => Ok(vec![Type::F64]),
         HirType::Boolean => Ok(vec![Type::I32]),
@@ -420,6 +441,10 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
 pub(crate) fn canonical_param_types(params: &[HirType]) -> Result<Vec<Type>> {
     let mut flat = Vec::new();
     for ty in params {
+        if super::text_or_bytes::is_text_or_bytes(ty) {
+            flat.extend([Type::I32; 3]);
+            continue;
+        }
         ensure!(
             !matches!(ty, HirType::Promise(_)),
             "Promise parameters cannot cross the public component boundary"

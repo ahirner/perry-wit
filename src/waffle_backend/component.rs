@@ -23,7 +23,18 @@ pub(crate) fn frame_component(
         .and_then(|b| b.trim_end().strip_suffix(')'))
         .context("Expected a valid core Wasm module")?;
 
-    let mut host_imports = String::new();
+    let mut host_imports = if contract
+        .entry_params
+        .iter()
+        .any(super::text_or_bytes::contains)
+        || super::text_or_bytes::contains(contract.entry_result_type())
+    {
+        String::from(
+            "(type $text-or-bytes-definition (variant (case \"text\" string) (case \"bytes\" (list u8))))\n(export $text-or-bytes \"text-or-bytes\" (type $text-or-bytes-definition))\n",
+        )
+    } else {
+        String::new()
+    };
     let mut host_wires = String::new();
     let mut emitted_operations = BTreeSet::new();
 
@@ -172,6 +183,7 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
         HirType::Boolean => Ok("bool".into()),
         HirType::String => Ok("string".into()),
         ty if super::bytes::is_byte_view(ty) => Ok("(list u8)".into()),
+        ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("$text-or-bytes".into()),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {
             let ok = component_value_type(&type_args[0])?;
             let err = component_value_type(&type_args[1])?;
@@ -185,6 +197,7 @@ pub(crate) fn component_value_type(ty: &HirType) -> Result<String> {
 fn requires_allocation(ty: &HirType) -> bool {
     match ty {
         HirType::String => true,
+        ty if super::text_or_bytes::is_text_or_bytes(ty) => true,
         HirType::Generic { base, type_args } if base == "Result" => {
             type_args.iter().any(requires_allocation)
         }
