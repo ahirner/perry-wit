@@ -1,126 +1,237 @@
 # Perry-WIT architecture
 
-The production path is TypeScript → Perry HIR → WAFFLE SSA → core Wasm →
-Component Model encoding. `src/compiler/mod.rs` supplies the public file/source
-API and `src/main.rs` the CLI. Both use the same WAFFLE implementation.
+Perry-WIT compiles static TypeScript to WASI 0.3 components through Perry HIR and
+WAFFLE SSA. The CLI, public Rust API, Nix builds, HTTP handler compiler, and
+component tests use the same resolved-WIT component encoder.
 
-## Compilation boundaries
+## Architectural principles
 
-1. `src/waffle_backend/source/modules.rs` resolves static local ESM imports and
-   named re-exports. `source.rs` resolves SWC binding identities and normalizes
-   supported capabilities before Perry HIR lowering. Separate checks enforce
-   read-only context, static value types, supported Date/Temporal forms, and
-   evaluation order. Unsupported dynamic forms fail before lowering discards
-   information needed for diagnostics.
-2. `src/waffle_backend/resolve.rs` and `wit.rs` validate function contracts and
-   determine types, capability imports, and canonical adapters. Resolved worlds
-   use SDK implementation names and typed WIT imports. Versioned packages are
-   resolved by `src/component/wit.rs`, with local dependency precedence.
-3. `src/waffle_backend/ssa/` lowers values, branches, loops, exceptions, source
-   calls, and supported awaits to WAFFLE blocks. Primitive locals are SSA values;
-   reference-bearing values use typed root frames. Shared capability plans drive
-   validation, core signatures, and component wiring.
-4. WAFFLE validates and optimizes the SSA module and emits structured core Wasm.
-   WAT helpers implement allocation, UTF-8, values, and transfer operations.
-   Shared typed WAFFLE builders implement task scheduling, combinators, scalar
-   capabilities, and Date storage. Rust helpers supply text/search, JSON, and time codecs.
-   Relocatable helper code is linked to the guest's single managed memory; it
-   does not bring a second allocator or a dynamic JavaScript dispatcher.
-5. `wit.rs` emits canonical adapters for resolved worlds and uses
-   `wit-component::ComponentEncoder`. `wit/native.rs` connects selected P3
-   capabilities to canonical imports. Bounded incoming HTTP resolves the official
-   handler world and uses the same encoder. The lower-level generated-world API
-   still uses `component.rs`. The standard
-   component representation is validated and stripped for CLI output.
+1. **Ahead-of-time execution.** Source operations become Wasm instructions.
+   Primitive locals travel through SSA values and block parameters; aggregates
+   and retained values live in managed guest memory.
+2. **Static source contracts.** Binding-aware checks reject unsupported dynamic
+   forms while the AST still contains the information needed for useful
+   diagnostics. Runtime checks handle data-dependent bounds and finite variants.
+3. **Direct HIR-to-SSA lowering.** Branches, loops, exceptions, calls, and awaits
+   share the same lowering and validation machinery. Typed capability plans
+   connect source validation to implementation signatures and canonical imports.
+4. **Native Component Model async.** Host-managed suspension and native transfer
+   handles carry pending operations. Guest task records and a reaction queue
+   supply source Promise identity, observation, and combinator ordering.
+5. **Authoritative WIT.** Pinned official interfaces define built-in platform
+   capabilities. Application WIT defines application contracts. SDK and compiler
+   share export naming; internal helper names do not create host protocols.
+6. **One guest heap.** Pure algorithms use small Rust helpers linked to the
+   existing memory. Allocation, roots, canonical scratch, and suspended source
+   values follow explicit guest ownership.
+7. **Reproducible builds and evidence.** Nix pins tools and interfaces. Node
+   comparisons establish source behavior; controlled P3 hosts establish ABI,
+   suspension, ownership, and resource cleanup.
 
-The compiler dependency graph is checked for LLVM/inkwell dependencies. The
-compiler backend is pure Rust WAFFLE. Rust's pinned build toolchain still compiles
-the allocation-free Wasm helpers; “LLVM-free” describes the compiler's dependency
-and link graph, not the implementation of rustc itself.
+The compiler's dependency and link graph excludes LLVM and inkwell. WAFFLE is
+the Rust compiler backend; the pinned Rust toolchain still uses its own backend
+to build the allocation-free Wasm helpers.
 
-## Runtime implementation inventory
+## Compilation pipeline
 
-The backend contains 35 WAT files, totaling 2,235 lines. Each has an active
-`include_str!` caller. The table identifies their responsibilities and regression
-coverage; these counts exclude WAT assembled inside Rust functions.
+```text
+ TypeScript entry + static ESM dependencies       Application + official WIT
+                     │                                      │
+          Parse and resolve bindings               Resolve packages/world
+                     │                                      │
+       Validate source forms and normalize capabilities     │
+                     │                                      │
+                 Perry HIR ───── check signatures/effects ───┘
+                     │
+          Lower into typed WAFFLE SSA
+          + canonical ABI adapters
+          + guest runtime and Rust helpers
+                     │
+       Validate/optimize and emit core Wasm
+                     │
+           Embed resolved WIT metadata
+                     │
+       ComponentEncoder → validated P3 component
+```
 
-| WAT directory | Lines | Caller and responsibility | Validation |
-| --- | ---: | --- | --- |
-| `allocation` | 251 | `allocation.rs`: canonical realloc, root frames, graph tracing, reclamation | `waffle_string_test`, `waffle_wit_native_test` |
-| `bytes` | 64 | `bytes.rs`: byte-view allocation, copying, bounds, and wrapping conversion | `waffle_bytes_test` |
-| `context` | 65 | `context.rs`: cached environment, arguments, and cwd with retained guest roots | `waffle_platform/context` |
-| `decoder` | 118 | `decoder.rs`: incremental UTF-8 state and BOM handling | `waffle_decoder_test` |
-| `filesystem` | 484 | `filesystem.rs`: path/option handling, descriptor operations, buffered reads, metadata, directory transfers; `interfaces.wat` supplies lower-level framing | `p3_filesystem_test` |
-| `http` | 345 | `http.rs` and `http/handler.rs`: resource ownership, buffered bodies, completion futures, source records; `interfaces.wat` and `client.wat` supply lower-level framing | `http/tests`, `waffle_http_handler_test`, `waffle_wit_native_test` |
-| `json` | 186 | `json.rs`: marshal guest value trees into the Rust codec and build parsed values | `json_helper_test`, `waffle_json_test` |
-| `objects` | 97 | `objects.rs`: record/dictionary storage and enumeration | `p3_filesystem/source_options`, `waffle_wit_test` |
-| `promises` | 102 | `promises/component.rs`: task runtime for the lower-level generated-world API | `p3_promise_test` |
-| `random` | 51 | `random.rs`: bounded random byte transfers and UUID formatting | `waffle_platform_test` |
-| `regex` | 44 | `regex.rs`: guest descriptor and scratch storage around the Rust search helper | `waffle_string_test` |
-| `streams` | 119 | `streams.rs` and `streams/output.rs`: buffered input, partial writes, output completion | `waffle_stream_test`, `waffle_output_test` |
-| `strings` | 38 | `decoder.rs`, `filesystem.rs`, `structured.rs`: strict UTF-8 validation | `waffle_decoder_test`, `p3_filesystem_test` |
-| `structured` | 76 | `structured.rs`: Stats and string-list boundary storage | `p3_filesystem/source_structured` |
-| `values` | 195 | `values.rs`: tagged values, dense arrays, and checked access | `waffle_wit_test`, `waffle_json_test` |
+### 1. Parse and resolve source
 
-Resolved-world scheduling and combinators use typed WAFFLE builders in
-`promises/native/`. The generated-world framer in `component.rs` and its scalar,
-context, filesystem, HTTP, and output adapters also assemble component WAT in
-Rust. Those adapters are separate from the official-WIT encoder used by the
-CLI and resolved-world API.
+`source/modules.rs` loads static local ESM dependencies and named re-exports.
+SWC binding identities distinguish built-ins from shadowed local names.
+`source.rs` normalizes supported capabilities before Perry HIR lowering;
+specialized checks enforce read-only context, static types, text, and supported
+Date/Temporal forms. Argument and receiver evaluation retain source order.
+
+### 2. Establish contracts and initialization
+
+`resolve.rs` and `wit.rs` validate source functions, WIT shapes, and reachable
+effects before component encoding. `component/wit.rs` resolves versioned packages
+with local dependency precedence and rejects ambiguous world selection.
+
+`initialization.rs` creates a command adapter only for a world exporting the
+standard CLI run interface. It also extracts module evaluation into a guarded
+initializer with uninitialized, running, ready, and failed states. Static
+dependencies initialize once before the first public call. Retained bindings
+persist across calls; accesses before initialization fail. A synchronous WIT
+export cannot depend on initialization that may suspend.
+
+### 3. Lower to WAFFLE SSA
+
+`ssa/` constructs blocks for source control flow. Branch joins and loop headers
+carry local values as block parameters. Shared exception paths preserve
+catch/finally behavior. Source calls, native operations, and Promise observation
+use common type and ownership rules. Reference-bearing values occupy root frames
+that remain linked across suspension.
+
+Typed builders in `runtime/builder.rs` construct scheduling, combinator, scalar
+capability, and Date helpers. Pure text/search, JSON, and time algorithms are
+compiled from Rust and linked into the same module and memory.
+
+### 4. Emit core Wasm
+
+WAFFLE validates SSA and reducible control flow, optimizes the graph, and recovers
+structured Wasm. Core output is available for compiler testing or embedding;
+encoding a component requires an explicit resolved world. Canonical scratch and
+return layouts come from WIT types, not from duplicated interface definitions.
+
+### 5. Encode the component
+
+`wit/adapter.rs` emits import/export marshalling. `wit/native.rs` connects the
+selected P3 capabilities to canonical imports. `component::encode_resolved`
+embeds the resolved world and delegates to `wit_component::ComponentEncoder`.
+HTTP handlers resolve the official handler world and use this same path.
+Component WAT is an inspection artifact, not an intermediate assembly format.
+
+## Source and host conformance
+
+```text
+  Ordinary TypeScript ──────────── Node execution
+          │                            │
+          │       compare supported    │
+          │       source behavior      │
+          ▼                            │
+     Perry compiler                    │
+          │                            │
+          ▼                            │
+     P3 component ────────────── observable results
+          │
+          ▼
+  Controlled Wasmtime host
+  • exact imports/exports and canonical types
+  • gated concurrency, cancellation, and completion
+  • native resource tables and memory limits
+```
+
+Node comparisons cover evaluation order, lexical scope, values, errors, and
+supported standard APIs. CLI fixtures run as scripts; export fixtures use normal
+imports and explicit calls. Application WIT fixtures own their Node bindings.
+
+Host tests separately verify canonical marshalling, capability selection, native
+suspension, partial transfers, separate completion failures, and cleanup across
+serial calls. Deterministic gates establish overlap without relying on elapsed
+time. Cancellation probes exercise the pinned runtime's canonical protocol;
+those probes do not imply source-level AbortController support.
+
+The [capability catalog](catalog/capabilities.json) is the support register.
+Deviations such as Unicode scalar indexing are explicit contracts. Generated
+declarations are type-checking inputs, not evidence of implemented behavior.
+Fixtures are independently authored; Runner source and WIT remain external.
 
 ## Values and memory
 
-Strings contain validated UTF-8 and use scalar indexing. The frontend rejects
-unpaired source surrogates and code-unit operations. Strict JSON, TextDecoder,
-and canonical string boundaries validate external text. Binary payloads remain
-bytes. Rust host diagnostic rendering is separate from guest string semantics.
+Strings store validated UTF-8 and use Unicode scalar indexing. Source surrogates
+and UTF-16 code-unit operations receive diagnostics. Canonical strings, JSON,
+and the current strict TextDecoder validate external text; binary payloads remain
+bytes.
 
-Records, typed dictionaries, finite unions, JSON trees, byte views, and supported
-Promise outcomes share managed guest storage. Runtime tags remain where needed
-for unions and parsed value trees; a static source contract does not eliminate
-all runtime checks. Root frames retain values across calls and suspension. Loop
-collection traces reachable allocations and coalesces dead storage. Post-return
-reclaims invocation temporaries after the host copies canonical results.
+Records, dictionaries, finite unions, JSON trees, byte views, and Promise outcomes
+share a non-moving managed heap. Runtime tags distinguish finite representations
+where static type information alone is insufficient. Loop collection traces
+linked roots and coalesces dead allocations. Canonical import scratch has its
+own root scope, retaining buffers while sibling tasks allocate and collect.
+Module bindings and cached context have instance lifetimes. Canonical post-return
+releases invocation temporaries after results have been copied.
 
-The JSON/time guest adapters borrow validated memory ranges and write to
-caller-owned output. They validate bounds and overlap before creating Rust
-references. These are the explicitly approved unsafe boundaries, without a
-separate runtime allocator. The pure codec logic is tested independently.
+JSON and time guest adapters validate bounds and overlap before borrowing guest
+memory, then write into caller-owned output. Their small unsafe boundary is
+separate from the independently tested pure codecs and introduces no allocator.
 
-## Native async and ownership
+## Async execution and ownership
 
-P3 capabilities use native Component Model streams, futures, and host-managed
-suspension. Shared transfer loops handle partial reads/writes, backpressure, EOF,
-and separate producer/consumer completion. Filesystem descriptors and HTTP
-resources close on supported return/error paths. Validation precedes external
-side effects. A failed write does not roll back bytes already sent.
+Source async functions execute eagerly to their first suspension. Stored tasks
+keep one settlement and shared outcome storage for repeated awaits. A FIFO
+reaction queue schedules source continuations. `all`, `allSettled`, and `race`
+register each operand once; race losers retain ownership and continue executing.
+Returning with unresolved ordinary work traps. Public invocations are serialized.
 
-Resolved worlds support concurrent owned tasks over native P3 threads. Task
-records preserve identity, settlement, rejection, and repeated observation. A FIFO
-reaction queue orders source continuations; eager guest calls hand control back to
-their caller at the first suspension. Native operations can remain pending concurrently.
-`all`, `allSettled`, and `race` register operand observers once and share the
-settlement/result storage. Race losers retain their owners until completion;
-unresolved ordinary work at the call boundary traps. Cooperative cancellation
-and source Web Streams are unsupported. Public calls are serial.
-Traps and host interruption require store disposal; guest finally blocks do not
-execute after disposal.
+Native transfer loops handle partial reads/writes and backpressure, and check
+the associated completion channel as well as EOF. Filesystem descriptors and
+HTTP resources close on supported return/error paths. Validation precedes
+external effects; already transferred bytes cannot be rolled back. The current
+bounded HTTP handler retains its storage through response consumer completion.
 
-## Packaging and verification
+Production suspension uses native stackful workers. Test-owned callback adapters
+also verify acknowledged native subtask cancellation and worker cleanup before
+publishing terminal results. Connecting that cancellation owner to source APIs,
+and exposing Web Streams with returned-stream ownership, remain requirements in
+[TODOs.md](TODOs.md). Traps and interrupted calls require store disposal; disposal
+releases native operations without executing guest `finally` blocks.
 
-`flake.nix` pins the compiler toolchain, P3 WIT, host CLI, SDK, and independent
-example components. The development shell and component tests use the pinned
-WASI 0.3 interfaces.
-The SDK shell and Nix component builder share WIT, world, and entry configuration.
-An exact compiler-flake revision supplies dependency pins to consumers. Disposable
-SDK output lives in ignored `.perry` files; shell entry preserves authored configuration.
-Generated SDK declarations describe WIT signatures and P3 capabilities; the
-compiler remains the authority for the supported static TypeScript subset.
+## Runtime WAT inventory
 
-Tests cover Node comparisons within the matching subset, explicit Unicode
-contract differences, canonical ABI shapes, precise capability imports, native
-suspension, errors/cancellation, resource release, and repeated calls under
-memory caps. Independent source/WIT fixtures encode abstract consumer needs.
-Runner source and WIT stay external. The capability catalog and TODO consumer
-matrix link contracts to evidence; excluded compatibility cases remain deferred
-rather than advertised as supported.
+The following families still contain production WAT. They implement guest
+runtime behavior, not alternative component framers. Their replacement with pure
+Rust algorithms or typed WAFFLE builders remains consolidation work.
+
+| Family | Caller and responsibility | Executable coverage |
+| --- | --- | --- |
+| `allocation` | `allocation.rs`: realloc, tracing, roots, reclamation | `waffle_string_test`, `waffle_wit_native_test` |
+| `bytes` | `bytes.rs`: byte-view allocation, copying, checked access | `waffle_bytes_test` |
+| `context` | `context.rs`: cached environment, arguments, cwd | `waffle_platform/context` |
+| `decoder`, `strings/utf8` | `decoder.rs`, `filesystem.rs`, `structured.rs`: UTF-8 and incremental decoding | `waffle_decoder_test`, `p3_filesystem_test` |
+| `filesystem` | `filesystem.rs`: paths, options, descriptors, metadata, buffered transfers | `p3_filesystem_test` |
+| `http` | `http.rs`, `http/handler.rs`: resources, bodies, completion, source records | `http/tests`, `waffle_http_handler_test`, `waffle_wit_native_test` |
+| `json` | `json.rs`: guest value-tree codec adapter | `json_helper_test`, `waffle_json_test` |
+| `objects` | `objects.rs`: records, dictionaries, enumeration | `p3_filesystem/source_options`, `waffle_wit_test` |
+| `random` | `random.rs`: byte transfers and UUID formatting | `waffle_platform_test` |
+| `regex` | `regex.rs`: search helper descriptors and scratch | `waffle_string_test` |
+| `streams` | `streams.rs`, `streams/output.rs`, `filesystem.rs`, HTTP handler: transfer loops and completion | `waffle_stream_test`, `waffle_output_test` |
+| `structured` | `structured.rs`: Stats and string-list storage | `p3_filesystem/source_structured` |
+| `values` | `values.rs`: tagged values, dense arrays, checked access | `waffle_wit_test`, `waffle_json_test` |
+
+The callers also assemble core runtime fragments in Rust. Moving a WAT body
+into a Rust string does not remove that responsibility. Only small, documented,
+tested ABI bridges are intended to remain after consolidation.
+
+## Module boundaries
+
+| Module | Responsibility |
+| --- | --- |
+| `src/main.rs`, `src/compiler/` | CLI and public file/source compilation |
+| `src/waffle_backend/mod.rs` | Orchestrate lowering and retain inspectable artifacts |
+| `src/waffle_backend/source/`, `resolve.rs` | Static source checks, identities, typed operations |
+| `src/waffle_backend/initialization.rs` | Command adaptation and instance module state |
+| `src/waffle_backend/ssa/` | Shared values, control flow, exceptions, and source calls |
+| `src/waffle_backend/capabilities/` | Pure capability plans and scalar implementations |
+| `src/waffle_backend/promises/native/` | Task records, observers, reaction queue, combinators |
+| `src/waffle_backend/allocation/`, `allocation.rs` | Guest heap, roots, and canonical scratch scopes |
+| `src/waffle_backend/wit/`, `wit.rs` | Canonical layouts, adapters, native capability wiring |
+| `src/component/` | Official/application WIT resolution and component encoding |
+| `src/sdk/` | Generated SDK contracts and shared implementation names |
+| `src/conformance/`, `tests/` | Source comparisons, capability evidence, controlled hosts |
+| `crates/` | Pure algorithms and checked guest adapters |
+
+Internal interfaces are narrow `pub(crate)` or parent-module exports. Runtime
+builders mutate the Wasm module; capability plans and type/layout decisions are
+pure values consumed by those builders.
+
+## Packaging
+
+`flake.nix` pins the toolchain, official P3 WIT, host CLI, and SDK. Component
+builders and SDK shells share entry/WIT/world configuration. An exact compiler
+flake revision supplies its dependency pins to consumers; generated `.perry`
+files are ignored and shell entry preserves authored configuration.
+
+[PERFORMANCE.md](PERFORMANCE.md) records measurement methods and historical
+results. Current tests measure production components without maintaining a
+second compiler or component encoding path.

@@ -1,35 +1,90 @@
 # perry-wit
 
-Perry-WIT compiles static TypeScript into WebAssembly components targeting WASI 0.3.
-WIT defines component imports and exports. The compiler uses Perry HIR and WAFFLE
-SSA, with a Nix SDK for authoring, type checking, and building components.
+Perry-WIT compiles static TypeScript ahead of time into WebAssembly components
+targeting WASI 0.3. It lowers TypeScript through Perry HIR and WAFFLE SSA; WIT
+defines the component's imports and exports.
 
-[Architecture](ARCHITECTURE.md) describes the compiler and runtime boundaries;
-[performance](PERFORMANCE.md) records size, memory, and throughput measurements.
+Write a command as an ordinary TypeScript script, or implement a component with
+named exported functions. Static local ESM imports, aliases, and named re-exports
+let both entry styles share code with Node tests.
 
-## Build and verify
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the compiler, memory, and async model.
+The [capability catalog](catalog/capabilities.json) records supported type shapes,
+WASI mappings, limitations, and tests. TypeScript declarations describe a broader
+API surface than the compiler implements; type checking alone does not establish
+compiler support.
+
+## Environment
+
+For compiler development, enter the repository's pinned environment:
 
 ```sh
 nix develop
-cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
-nix flake check
 ```
 
-The pinned shell supplies Rust, Node, TypeScript, Wasmtime, and wasm-tools.
-`WASI_WIT_PATH` and `WASI_P3_WIT_PATH` select the official WASI 0.3 packages;
-application WIT supplies additional versioned packages through its `deps` directory.
-Project-local WIT dependencies take precedence over ambient packages of the same
-version. Compilation builds and embeds allocation-free text, search, JSON, and
-time helpers.
+It supplies Rust, Node.js, TypeScript, Wasmtime, and wasm-tools. `WASI_WIT_PATH`
+and `WASI_P3_WIT_PATH` identify the official WASI 0.3 packages. Application WIT
+dependencies in `wit/deps` take precedence over ambient packages of the same
+version.
 
-`nix build .#perry-wit` packages the compiler. `.#example-merge-docs`,
-`.#example-merge-task`, and `.#template-component` build independent examples.
-`./scripts/test_e2e.sh` runs the production boundary and P3 HTTP integration tests;
-HTTP fixtures own temporary ports and their server lifetimes.
+For component development, use [the starter template](template/README.md). Its
+`nix develop` supplies the packaged compiler and Node tools and generates the
+selected world's SDK. In this checkout, `nix develop .#sdk` generates the SDK for
+`examples/merge_task.ts`.
 
-## Compile a component
+## Usage
+
+### Build
+
+```sh
+nix build .#perry-wit
+nix build .#example-merge-task
+nix build .#template-component
+```
+
+For a local compiler build inside the development shell:
+
+```sh
+cargo build --release
+```
+
+### Compile and run a script
+
+A world exporting `wasi:cli/run@0.3.0` turns top-level statements and top-level
+`await` into a command. Importing CLI capabilities alone does not create one.
+For example, this script runs directly under Node:
+
+```ts
+import { setTimeout } from "node:timers/promises";
+
+await Promise.all([setTimeout(2), setTimeout(1)]);
+console.log("done");
+```
+
+Save it as `example.ts` in this checkout and select its command world:
+
+```sh
+node example.ts
+cargo run -- example.ts --wit wit --world command -o dist/example.wasm
+wasmtime run -C cache=n -S p3=y \
+  -W component-model-async=y -W component-model-async-stackful=y \
+  -W component-model-more-async-builtins=y -W component-model-threading=y \
+  dist/example.wasm
+```
+
+Use the pinned Wasmtime with the async features above for suspending components.
+Network and filesystem access additionally require the corresponding host grants.
+
+### Compile and call exported functions
+
+WIT is authoritative for names, parameter/result types, and async effects. An
+export such as `run-task: func(input: string) -> string` is implemented with:
+
+```ts
+export function runTask(input: string): string {
+  return "received: " + input;
+}
+```
 
 ```sh
 cargo run -- examples/merge_task.ts --wit wit --world task-runner -o dist/task.wasm
@@ -37,40 +92,65 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
   --invoke 'run-task("hello")' dist/task.wasm
 ```
 
-Select `--world command` to use `wasi:cli/command@0.3.0`. Its
-implementation explicitly exports `runRun(): {ok:true} | {ok:false}` (or a
-Promise of that result). Executable module initialization and top-level await are
-unsupported; put work inside exports. `examples/merge_docs.ts` demonstrates an
-async command making two bounded GET requests to an existing local server.
-Packages with multiple worlds require an explicit world selection in both the
-compiler and SDK generator.
+Components may export multiple functions. Interface members use the SDK's
+prefixed names, such as `apiRunTask` for `api`'s `run-task`.
+`ComponentImplementation` lists the exact names. Missing implementations,
+incompatible signatures, ambiguous worlds, and unsupported export forms receive
+compiler diagnostics.
 
-```sh
-cargo run -- examples/merge_docs.ts --world command -o dist/documents.wasm
-wasmtime run -C cache=n -S p3=y -S http=y -S inherit-network=y \
-  -W component-model-async=y -W component-model-more-async-builtins=y \
-  -W component-model-async-stackful=y -W component-model-threading=y \
-  dist/documents.wasm
-```
-
-Use the pinned Wasmtime and enable those async features when the component needs
-them. Compiled platform capabilities use the standard P3 interfaces.
+Static dependencies and top-level initialization execute once before the first
+public call; module state persists across later calls. A WIT export must be
+`async func` if it can suspend, including during module initialization or through
+filesystem and console operations. Public invocations are serialized.
 
 `--core-only` (also implied by a `.core.wasm` output name) emits core Wasm for
-embedding. Raw core callers must implement the declared canonical imports and
-call the matching `cabi_post_<export>` after consuming results. Prefer components
-for automatic canonical post-return handling.
+embedding. Raw core callers provide the declared canonical imports and call the
+matching `cabi_post_<export>` after consuming results. Component callers get
+canonical result cleanup automatically.
 
-## Authoring and SDK
+### Test
 
-Initialize [the template](template/README.md) with the compiler's flake reference.
-Its `nix build` and `nix develop` use `lib.<system>.buildComponent` and `mkSdkShell`
-with the same entry, WIT directory, and world. Inside this compiler checkout,
-`nix develop .#sdk` generates the SDK for `examples/merge_task.ts`.
-Pin the compiler flake to an exact revision to inherit its toolchain and dependency
-pins. Projects using only those pinned inputs need no separate consumer lockfile.
-Generated `.perry` files are ignored. Use `nix develop --no-write-lock-file` and
-`nix build --no-write-lock-file`.
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+./scripts/test_e2e.sh
+nix flake check
+```
+
+Tests compare supported source behavior with Node and exercise components against
+controlled P3 hosts. HTTP tests own ephemeral endpoints. Performance workloads and
+recorded measurements are described in [PERFORMANCE.md](PERFORMANCE.md).
+
+## Authoring components
+
+Initialize the template from a Perry-WIT flake reference:
+
+```sh
+perry_wit_source="git+file:///absolute/path/to/perry-wit"
+nix flake init -t "$perry_wit_source"
+```
+
+Set `inputs.perry-wit.url` in the generated `flake.nix` to an exact compiler
+revision. The template shares `entry`, `wit`, and `world` between
+`lib.<system>.buildComponent` and `mkSdkShell`. Both generate declarations before
+type checking; shell entry preserves authored configuration.
+
+```sh
+nix develop --no-write-lock-file
+tsc --noEmit -p .perry/types
+nix build --no-write-lock-file
+```
+
+Node tests import an export-based component's module and call its exports.
+Application WIT dependencies need application-owned Node test bindings.
+
+Commit source, application WIT, and configuration. `.perry` is generated and
+ignored. Projects using only an exact Perry revision inherit its dependency pins
+and need no redundant consumer lockfile; independently selected dependencies
+still need their own reproducible configuration.
+
+SDK generation can also run explicitly:
 
 ```sh
 perry-wit gen-types --wit wit --world task --entry src/index.ts
@@ -78,70 +158,31 @@ tsc --noEmit -p .perry/types
 perry-wit src/index.ts --wit wit --world task -o dist/task.wasm
 ```
 
-Generation writes world and import declarations, P3 capability declarations, and
-an implementation check in `.perry/types/`. The generated check configuration
-extends an existing project configuration and always checks the selected entry.
-Explicit generation creates a missing `tsconfig.json`; `--no-tsconfig`, used by
-the SDK shell, leaves authored files alone.
-Interface exports use prefixed implementation names, such as `apiRunTask` for
-`api`'s `run-task`. `ComponentImplementation` lists the exact names.
+The generated check configuration extends the project's configuration and checks
+the selected entry against WIT. Explicit generation creates a missing
+`tsconfig.json`; `--no-tsconfig`, used by the SDK shell, leaves authored files
+alone.
 
-The SDK checks WIT signatures and read-only context. TypeScript's standard library
-is broader than the compiler subset: passing `tsc` alone does not imply an API is
-supported. The compiler diagnoses excluded operations, including aliases/casts of
-read-only context, runtime `delete`, and dynamic coercion. Static local ESM
-imports, named export aliases, and named re-exports share the same source with Node.
+## Language and ownership
 
-## Supported contracts
+The source contract uses declared records, typed dictionaries, dense homogeneous
+arrays, finite unions, and validated JSON value trees. Context is read-only.
+Date uses immutable UTC operations; supported Temporal operations provide explicit
+ISO timestamp and calendar calculations. Dynamic property deletion, arbitrary
+coercion, and other compatibility work are recorded in
+[TODOs.md](TODOs.md#complexity-deferred-until-a-consumer-requires-it).
 
-| Area | Production contract |
-| --- | --- |
-| WIT | Scalars, strings, records, tuples, enums, variants, results, nullable options, dense typed lists, and up to 32 flags. Sync exports and owned async tasks. Lossless `u64` transport via `bigint`, without arithmetic/coercion. Signed 64-bit values, nested options, and guest resource APIs are unsupported. |
-| Records and arrays | Declared fields, typed dictionaries, finite unions, dense homogeneous arrays, checked indices and bounds. No runtime deletion, sparse-array compatibility, or unconstrained `any` coercion. |
-| Text | Valid UTF-8 storage; lengths, indexing, slicing, iteration, search, and ordering use Unicode scalars. Surrogate halves and UTF-16 code-unit APIs are rejected. Literal regex supports the documented bounded subset in [the text contract](src/waffle_backend/text_contract.rs). |
-| JSON | Strict UTF-8 parsing and compact serialization of primitives, records, value trees, dense typed lists, and Date values. Syntax/surrogate/depth-or-cycle errors are numeric `1`/`2`/`3`; unsupported values use `12`. An undefined root produces undefined. No revivers, replacers, indentation, or custom prototype reflection. |
-| Context | Cached read-only `process.env`, `process.argv`, and `process.cwd()`. Missing environment keys are undefined. Host arguments have no synthetic Node prefixes; absent cwd becomes `/`. Dictionary enumeration uses insertion order, including numeric-looking keys. |
-| Date | `Date.now()`, `new Date(epochMs)`, `.getTime()`, `.toISOString()`. Invalid Date preserves NaN and ISO formatting throws `1`. Constructors from strings, setters, calendar getters, and local-timezone behavior are deferred. |
-| Temporal | Immutable `Instant` parsing/epoch/formatting and `PlainDateTime` ISO fields/day-offset subset. No timezone database, other durations, rounding, or options. Strict UTC interchange and day shifts have independent fixtures. |
-| Clocks and random | Millisecond clocks, promise-based `node:timers/promises.setTimeout`, `Math.random`, v4 UUIDs, and `crypto.getRandomValues(Uint8Array)`. Timers clamp and truncate delays using Node's rules. Random fill preserves view identity and checks the 65,536-byte quota before effects. |
-| Bytes | `Uint8Array` allocation, literals, copy, indexing, subarray, slice, and view metadata. `TextDecoder` supports strict incremental UTF-8 and BOM handling; replacement decoding and other encodings are unsupported. |
-| Filesystem | `node:fs/promises` readFile/writeFile/stat/mkdir/unlink/rmdir/readdir, with synchronous spellings under `fs`/`node:fs` and existsSync. Paths are confined to preopens. Reads materialize input; writes accept text or visible byte ranges. Options and flags are validated before I/O. See [declarations](types/p3.d.ts) for overloads and numeric errors. |
-| Output | Single-string console log/error/warn, plus owned `perry:stdio` byte writes. Both stream transfer and separate completion must finish. Multiple arguments and implicit formatting/coercion are unsupported. |
-| HTTP client | Concurrent owned `perry:http.get(scheme, authority, path, headers, maxResponseBytes)` tasks. Explicit limit; status, duplicate header bytes, and body bytes preserved. Native resources close and completion is checked before settlement. Fetch and source Web Streams are not yet implemented. |
-| HTTP handler | Rust `waffle_backend::compile_http_handler` exports `wasi:http/handler@0.3.0`. Typed `handle(Request): Response` may be async; explicit request/response caps are mandatory. Records are declared in `perry:http-handler/types`. |
+Stored async tasks retain their outcomes for repeated observation.
+`Promise.all`, `allSettled`, and `race` register each operand once; execution is
+eager to the first suspension. Race losers continue running and must finish
+before the owning call returns. Unresolved ordinary work at that boundary traps.
+Source-level cooperative cancellation and Web Streams remain implementation work,
+as does standard `fetch`. The catalog describes the currently available bounded
+HTTP facade. Traps and interrupted calls require store disposal, which releases
+native resources without running guest `finally` blocks.
 
-The compiler's [capability catalog](catalog/capabilities.json) records supported
-type shapes, WASI mappings, limitations, and tests.
+## Contributing
 
-## Async ownership and limits
-
-Resolved WIT components support stored typed tasks, multiple observers, and
-`Promise.all`, `Promise.allSettled`, and `Promise.race` over dense typed arrays
-and tuples. Async execution is eager up to suspension, with one settlement and
-retained outcomes for repeated awaits. Combinators register each operand once
-and preserve input order where required. `race` leaves losing operations running;
-callers must await their completion before returning. Cooperative cancellation
-is not yet exposed. Promise constructors, callback reactions, callback timers,
-and detached tasks remain unsupported.
-
-WIT exports that can reach a suspending operation must be declared `async func`,
-including synchronous-looking filesystem and console calls. The compiler checks
-reachable helpers and rejects synchronous WIT exports with those effects.
-The TypeScript implementation itself may use a synchronous filesystem spelling.
-
-Public calls are serial. Guest roots retain values across suspension and
-collection; canonical post-return releases invocation storage after results are
-copied. Cached context survives serial calls. Traps, abandoned pending work, and
-interrupted calls require store disposal. Disposal releases native operations;
-it does not run guest `finally`. Recoverable source errors still run cleanup.
-
-HTTP client errors include `8` for body overflow, `12` for invalid metadata or
-limits, `100 +` the WASI HTTP discriminant, and `200 +` the header discriminant.
-Non-2xx status remains a response. Handlers publish responses before body transfer
-and retain storage through consumer completion. Hosts must drive the P3 event
-loop through completion. Request/response overflow returns the corresponding
-body-size error; invalid response metadata or request producer failure returns
-`internal-error`. Response status is 200–599; 204/205/304 requires an empty body.
-Source Web Streams, response trailers, and cooperative cancellation are unsupported.
-EOF alone never implies successful capability completion. Partial writes remain
-visible on failure; the compiler does not promise rollback.
+Develop inside `nix develop`, add independent fixtures for behavior changes, and
+run formatting, Cargo, strict Clippy, and applicable Nix checks. Keep support
+claims tied to executable evidence in the capability catalog.
