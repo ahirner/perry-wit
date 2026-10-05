@@ -130,6 +130,8 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
 
 Perry-WIT includes unit tests, differential oracle testing against Node.js, and end-to-end integration tests:
 
+The [generative suite](tests/generative/README.md) adds seeded programs, equivalent source transformations, and reduced failure replays within the supported language.
+
 ```sh
 # Run unit and integration tests
 cargo test --workspace
