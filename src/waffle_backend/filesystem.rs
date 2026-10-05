@@ -1,4 +1,6 @@
 //! Preopen-confined filesystem operations over the shared native byte transfers.
+mod object_options;
+pub(crate) mod operations;
 
 use std::collections::BTreeMap;
 
@@ -8,7 +10,8 @@ use waffle::{Func, Memory, Module};
 
 use super::{allocation::AllocationFuncs, runtime, runtime::imports};
 
-pub(crate) const OPTION_KEYS: [&str; 6] = [
+pub(crate) const OPTION_KEYS: [&str; 7] = [
+    "signal",
     "encoding",
     "flag",
     "bigint",
@@ -35,8 +38,29 @@ pub(crate) fn is_stats(ty: &HirType) -> bool {
     matches!(ty, HirType::Named(name) if name == "Stats")
 }
 
-pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
-    imports::declare_imports(module, "filesystem", &native_functions())
+pub(crate) const TRANSFERS: &[runtime::transfers::Definition] = &[
+    ("read", runtime::transfers::Kind::Read),
+    ("write", runtime::transfers::Kind::Write),
+    ("read-entry", runtime::transfers::Kind::Read),
+    ("await", runtime::transfers::Kind::Completion),
+];
+
+pub(crate) fn declare_imports(module: &mut Module<'static>, owned: bool) -> BTreeMap<String, Func> {
+    let mut functions = native_functions();
+    if owned {
+        functions.retain(|function| {
+            !TRANSFERS.iter().any(|(name, _)| function.name == *name)
+                && !operations::CALLS
+                    .iter()
+                    .any(|(name, _)| function.name == *name)
+        });
+    }
+    let mut native = imports::declare_imports(module, "filesystem", &functions);
+    if owned {
+        native.extend(runtime::transfers::declare(module, "filesystem", TRANSFERS));
+        native.extend(operations::declare(module));
+    }
+    native
 }
 
 pub(crate) fn emit_runtime(
@@ -52,16 +76,6 @@ pub(crate) fn emit_runtime(
     let read_directory_transfer =
         super::streams::emit_read_transfer(module, memory, imports["read-entry"])?;
     let read_buffered = super::streams::buffered::emit(module, memory, allocator, read_transfer)?;
-    let mut object_options = include_str!("filesystem/object-options.wat").to_string();
-    for key in OPTION_KEYS {
-        object_options = object_options.replace(
-            &format!("__KEY_{key}__"),
-            &keys
-                .get(key)
-                .expect("filesystem keys are interned")
-                .to_string(),
-        );
-    }
     let wat = format!(
         r#"(module {}
       (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
@@ -71,7 +85,7 @@ pub(crate) fn emit_runtime(
       (import "host" "read-buffered" (func $read-buffered (param i32 i32) (result i32 i32 i32)))
       (import "host" "read-directory-transfer" (func $read-directory-transfer (param i32 i32 i32) (result i32 i32)))
       (import "host" "write-buffer" (func $write-buffer (param i32 i32 i32) (result i32)))
-      {} {} {} {} {} {} {} {})"#,
+      {} {} {} {} {} {} {})"#,
         imports::module_imports(&native_functions())?,
         include_str!("strings/utf8.wat"),
         include_str!("filesystem/options.wat"),
@@ -80,7 +94,6 @@ pub(crate) fn emit_runtime(
         include_str!("filesystem/read.wat"),
         include_str!("filesystem/metadata.wat"),
         include_str!("filesystem/directory.wat"),
-        object_options,
     );
     let mut imports: BTreeMap<_, _> = imports
         .iter()
@@ -95,7 +108,8 @@ pub(crate) fn emit_runtime(
         ("write-buffer", write_buffer),
         ("read-directory-transfer", read_directory_transfer),
     ]);
-    let functions = runtime::emit_functions(module, memory, &wat, &imports)?;
+    let mut functions = runtime::emit_functions(module, memory, &wat, &imports)?;
+    object_options::emit(module, memory, compare, keys, &mut functions)?;
     Ok(FilesystemHelpers {
         write: functions["fs.write"],
         write_options: functions["fs.write-options"],

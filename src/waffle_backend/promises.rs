@@ -99,9 +99,9 @@ impl TaskArguments {
             Self::Filesystem(operation) => Ok(vec![
                 waffle::Type::I32;
                 if *operation == super::capabilities::FilesystemOperation::WriteFile {
-                    3
+                    4
                 } else {
-                    2
+                    3
                 }
             ]),
         }
@@ -248,7 +248,10 @@ pub(crate) fn plan_promises(
     let uses_body = referenced
         .keys()
         .any(|target| matches!(target, TaskTarget::HttpBody(_)));
-    if calls == direct_awaits && !combinators && !has_fetch && !uses_body {
+    let uses_filesystem = referenced
+        .values()
+        .any(|task| matches!(task.arguments, TaskArguments::Filesystem(_)));
+    if calls == direct_awaits && !combinators && !has_fetch && !uses_body && !uses_filesystem {
         return Ok(None);
     }
     for task in referenced.values() {

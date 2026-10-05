@@ -21,6 +21,9 @@ pub(crate) struct NativeRuntime {
     settle: Func,
     new_thread: Func,
     resume_now: Func,
+    suspend_then_promote: Func,
+    yield_then_promote: Func,
+    yield_now: Func,
     index: Func,
     suspend: Func,
     resume: Func,
@@ -38,6 +41,14 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
     let native = NativeRuntime {
         new_thread: builder::native(module, "[thread-new-indirect-v0]", &[I32, I32], &[I32]),
         resume_now: builder::native(module, "[thread-yield-then-resume]", &[I32], &[I32]),
+        suspend_then_promote: builder::native(
+            module,
+            "[thread-suspend-then-promote]",
+            &[I32],
+            &[I32],
+        ),
+        yield_then_promote: builder::native(module, "[thread-yield-then-promote]", &[I32], &[I32]),
+        yield_now: builder::native(module, "[thread-yield]", &[], &[I32]),
         index: builder::native(module, "[thread-index]", &[], &[I32]),
         suspend: builder::native(module, "[thread-suspend]", &[], &[I32]),
         resume: builder::native(module, "[thread-resume-later]", &[I32], &[]),
@@ -146,6 +157,9 @@ pub(crate) fn emit(
     b.store(address, 0, one, I32);
     let active = b.integer(scheduler::ACTIVE);
     b.store(active, 0, one, I32);
+    let workers = b.integer(crate::waffle_backend::runtime::callbacks::LIVE_WORKERS);
+    let zero = b.integer(0);
+    b.store(workers, 0, zero, I32);
     b.ret(&[]);
     b.finish(module, native.enter)?;
 
@@ -163,33 +177,36 @@ pub(crate) fn emit(
         let worker = builder::declare(module, &format!("{}.worker", task.symbol), &[I32], &[]);
         let mut b = Builder::new(module, start, memory);
         let context = allocate(&mut b, registry, 8 * (parameters.len() as u32 + 1));
+        let one = b.integer(1);
+        let start_frame = b.call(registry.allocator.unwrap().frame_new, &[one], &[I32])[0];
+        b.store(start_frame, 12, context, I32);
         b.store(context, 0, b.param(0), I32);
         let guest = matches!(target, TaskTarget::Guest(_));
         if guest {
-            let eager = b.integer(1);
+            let parent = b.call(native.index, &[], &[I32])[0];
+            let eager = b.op(Operator::I32Add, &[parent, one], I32);
             b.store(context, 4, eager, I32);
         }
         for (index, ty) in parameters.iter().enumerate() {
             b.store(context, 8 * (index as u32 + 1), b.param(index + 1), *ty);
         }
         let index = b.integer(workers.len() as u32);
-        if registry.operations.is_some() {
-            crate::waffle_backend::runtime::callbacks::worker_count(
-                &mut b,
-                true,
-                if guest {
-                    crate::waffle_backend::runtime::callbacks::Worker::Source
-                } else {
-                    crate::waffle_backend::runtime::callbacks::Worker::Native
-                },
-            );
-        }
+        crate::waffle_backend::runtime::callbacks::worker_count(
+            &mut b,
+            true,
+            if guest {
+                crate::waffle_backend::runtime::callbacks::Worker::Source
+            } else {
+                crate::waffle_backend::runtime::callbacks::Worker::Native
+            },
+        );
         let thread = b.call(native.new_thread, &[index, context], &[I32])[0];
         b.call(native.resume_now, &[thread], &[I32]);
         let zero = b.integer(0);
         if guest {
             b.store(context, 4, zero, I32);
         }
+        b.call(registry.allocator.unwrap().frame_drop, &[start_frame], &[]);
         b.ret(&[zero]);
         b.finish(module, start)?;
 
@@ -253,17 +270,15 @@ pub(crate) fn emit(
         } else {
             b.call(native.dispatch, &[], &[I32]);
         }
-        if registry.operations.is_some() {
-            crate::waffle_backend::runtime::callbacks::worker_count(
-                &mut b,
-                false,
-                if guest {
-                    crate::waffle_backend::runtime::callbacks::Worker::Source
-                } else {
-                    crate::waffle_backend::runtime::callbacks::Worker::Native
-                },
-            );
-        }
+        crate::waffle_backend::runtime::callbacks::worker_count(
+            &mut b,
+            false,
+            if guest {
+                crate::waffle_backend::runtime::callbacks::Worker::Source
+            } else {
+                crate::waffle_backend::runtime::callbacks::Worker::Native
+            },
+        );
         b.ret(&[]);
         b.finish(module, worker)?;
         workers.push(worker);
@@ -300,9 +315,22 @@ fn filesystem_adapter(
     let function = builder::declare(module, "tasks.filesystem", &parameters, &[I32, F64]);
     let mut b = Builder::new(module, function, registry.memory);
     let helpers = registry.filesystem_helpers.unwrap();
-    let arguments = (0..parameters.len())
+    let arguments = (0..parameters.len() - 1)
         .map(|index| b.param(index))
         .collect::<Vec<_>>();
+    if let Some(operations) = registry.operations {
+        let signal = b.param(parameters.len() - 1);
+        b.call(operations.bind_signal, &[signal], &[]);
+        let aborted = b.call(operations.aborted, &[], &[I32])[0];
+        let failed = b.body.add_block();
+        let start = b.body.add_block();
+        b.branch(aborted, failed, start);
+        b.block = failed;
+        let thrown = b.integer(1);
+        let reason = b.number(20.0);
+        b.ret(&[thrown, reason]);
+        b.block = start;
+    }
     let outcome = match operation {
         F::WriteFile => b.call(helpers.write, &arguments, &[I32, F64]),
         F::ReadBytes | F::ReadText | F::ReadValue => b.call(helpers.read, &arguments, &[I32, F64]),
@@ -323,6 +351,17 @@ fn filesystem_adapter(
             )
         }
     };
+    if let Some(operations) = registry.operations {
+        let aborted = b.call(operations.aborted, &[], &[I32])[0];
+        let failed = b.body.add_block();
+        let complete = b.body.add_block();
+        b.branch(aborted, failed, complete);
+        b.block = failed;
+        let thrown = b.integer(1);
+        let reason = b.number(20.0);
+        b.ret(&[thrown, reason]);
+        b.block = complete;
+    }
     if operation == F::ReadValue {
         let success = b.op(Operator::I32Eqz, &[outcome[0]], I32);
         let convert = b.body.add_block();
@@ -378,6 +417,20 @@ fn emit_finish(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     let record = b.load(record, 16, I32);
     b.jump(next, &[record]);
     b.block = done;
+    if registry.operations.is_none() {
+        let check = b.body.add_block();
+        let drain = b.body.add_block();
+        let finished = b.body.add_block();
+        b.jump(check, &[]);
+        b.block = check;
+        let workers = b.integer(crate::waffle_backend::runtime::callbacks::LIVE_WORKERS);
+        let workers = b.load(workers, 0, I32);
+        b.branch(workers, drain, finished);
+        b.block = drain;
+        b.call(runtime.native.yield_now, &[], &[I32]);
+        b.jump(check, &[]);
+        b.block = finished;
+    }
     let zero = b.integer(0);
     b.store(address, 0, zero, I32);
     let active = b.integer(32);

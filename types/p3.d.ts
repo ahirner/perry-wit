@@ -224,8 +224,8 @@ declare module "fs/promises" {
   /** Materialize the file in guest memory; errors use the numeric WASI filesystem ordinal. */
   export function readFile(path: string, encoding: "utf8" | "utf-8"): Promise<string>;
   export function readFile(path: string, encoding?: null): Promise<Uint8Array>;
-  export function readFile(path: string, options: string | { encoding?: string | null; flag?: "r" }): Promise<string | Uint8Array>;
-  export function writeFile(path: string, data: string | Uint8Array, options?: string | { encoding?: string | null; flag?: "w" } | null): Promise<void>;
+  export function readFile(path: string, options: string | { encoding?: string | null; flag?: "r"; signal?: AbortSignal }): Promise<string | Uint8Array>;
+  export function writeFile(path: string, data: string | Uint8Array, options?: string | { encoding?: string | null; flag?: "w"; signal?: AbortSignal } | null): Promise<void>;
   export function stat(path: string, options?: { bigint?: false; throwIfNoEntry?: true } | null): Promise<Stats>;
   export function mkdir(path: string): Promise<void>;
   export function unlink(path: string): Promise<void>;

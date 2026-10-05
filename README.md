@@ -194,8 +194,9 @@ and wait for P3 transfer completion; uploads retain snapshots through partial wr
 Headers support `get`, `has`, `append`, `set`, and `delete`; fetched response headers
 are immutable. `AbortController` cancels fetch requests sharing its signal, including
 pending body reads. Native owners remain alive through cancellation acknowledgement.
-Promise timers accept typed result values and optional signals. Web Streams and
-filesystem signal support remain implementation work;
+Promise timers accept typed result values and optional signals. Promise-based
+`readFile` and `writeFile` also accept signals and retain transfer storage until the
+filesystem completion arrives. Web Streams and standard incoming handlers remain implementation work;
 the capability catalog records supported shapes and executable evidence.
 
 ## Contributing

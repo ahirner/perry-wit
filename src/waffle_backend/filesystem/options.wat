@@ -1,5 +1,5 @@
   ;; Encoding: 0 UTF-8, 1 raw bytes, -1 unsupported. Zero means the default.
-  (func $encoding (param $label i32) (result i32)
+  (func $encoding (export "fs.encoding") (param $label i32) (result i32)
     (local $length i32) (local $data i32) (local $index i32) (local $byte i32) (local $word i64)
     (if (i32.eqz (local.get $label)) (then (return (i32.const 0))))
     (if (i32.eq (local.get $label) (i32.const -1)) (then (return (i32.const -1))))

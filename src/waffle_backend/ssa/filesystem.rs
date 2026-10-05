@@ -17,6 +17,8 @@ impl FunctionLowerer<'_> {
         operation: FilesystemOperation,
         arguments: &[Expr],
     ) -> Result<Option<Value>> {
+        let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+        let mut signal = zero;
         match operation {
             FilesystemOperation::WriteFile => {
                 ensure!(
@@ -50,6 +52,7 @@ impl FunctionLowerer<'_> {
                     .filter(|options| is_object(&self.infer_expr_type(options)))
                 {
                     let object = self.expression(options)?;
+                    signal = self.filesystem_signal(name, options, object)?;
                     self.op(
                         Operator::Call {
                             function_index: helpers.write_object_options,
@@ -70,7 +73,7 @@ impl FunctionLowerer<'_> {
                 };
                 if let Some(record) = self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
-                    &[path, data, valid],
+                    &[path, data, valid, signal],
                     None,
                 )? {
                     return Ok(Some(record));
@@ -95,6 +98,7 @@ impl FunctionLowerer<'_> {
                     .filter(|options| is_object(&self.infer_expr_type(options)))
                 {
                     let object = self.expression(options)?;
+                    signal = self.filesystem_signal(name, options, object)?;
                     self.op(
                         Operator::Call {
                             function_index: helpers.read_object_options,
@@ -116,7 +120,7 @@ impl FunctionLowerer<'_> {
                 };
                 if let Some(record) = self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
-                    &[path, mode],
+                    &[path, mode, signal],
                     None,
                 )? {
                     return Ok(Some(record));
@@ -151,7 +155,7 @@ impl FunctionLowerer<'_> {
                 let valid = self.filesystem_metadata_options(operation, arguments.get(1))?;
                 if let Some(record) = self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
-                    &[path, valid],
+                    &[path, valid, zero],
                     None,
                 )? {
                     return Ok(Some(record));
@@ -180,6 +184,26 @@ impl FunctionLowerer<'_> {
                 .then(|| abi::decode_payload(&mut self.body, self.block, payload, true)))
             }
         }
+    }
+
+    fn filesystem_signal(&mut self, name: &str, expression: &Expr, object: Value) -> Result<Value> {
+        let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+        let HirType::Object(shape) = self.infer_expr_type(expression) else {
+            return Ok(zero);
+        };
+        let Some(field) = shape.properties.get("signal") else {
+            return Ok(zero);
+        };
+        ensure!(
+            matches!(
+                self.contract.intrinsics.get(name),
+                Some(crate::waffle_backend::resolve::TypedIntrinsic::Capability(
+                    crate::waffle_backend::capabilities::CapabilityOperation::FilesystemPromise(_)
+                ))
+            ),
+            "AbortSignal is supported by promise readFile/writeFile; synchronous filesystem calls do not accept signals"
+        );
+        self.option_signal(object, &field.ty, field.optional, "Filesystem")
     }
 
     pub(super) fn stats_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {

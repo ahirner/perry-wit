@@ -1,5 +1,7 @@
 #[path = "support/allocation_probe.rs"]
 mod allocation_probe;
+#[path = "support/p3_input.rs"]
+mod controlled_input;
 #[path = "support/native_cancellation_composition.rs"]
 mod native_cancellation_composition;
 #[path = "support/output_capture.rs"]
@@ -510,6 +512,310 @@ async fn node_filesystem_promises_preserve_retained_outcomes_and_cleanup() -> Re
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn filesystem_abort_signals_release_pending_descriptors_and_match_node() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use wasmtime::component::Resource;
+    use wasmtime_wasi::filesystem::Descriptor;
+    use wasmtime_wasi::p3::bindings::filesystem::types::{
+        DescriptorFlags, ErrorCode, OpenFlags, PathFlags,
+    };
+    struct Owner(Arc<AtomicUsize>);
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let source = include_str!("fixtures/filesystem_signals.ts");
+    let wit = "package test:filesystem-signals; world boundary { include wasi:cli/imports@0.3.0; export run:async func(path:string)->u32; }";
+    wit_source::check_sdk_source(wit, source)?;
+    let compiled = compile(source, wit)?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let pending = active.clone();
+    let seen = started.clone();
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    linker.allow_shadowing(true);
+    linker
+        .instance("wasi:filesystem/types@0.3.0")?
+        .func_wrap_concurrent(
+            "[method]descriptor.open-at",
+            move |_,
+                  (_descriptor, _path_flags, _path, _open_flags, _flags): (
+                Resource<Descriptor>,
+                PathFlags,
+                String,
+                OpenFlags,
+                DescriptorFlags,
+            )| {
+                pending.fetch_add(1, Ordering::SeqCst);
+                seen.fetch_add(1, Ordering::SeqCst);
+                let owner = Owner(pending.clone());
+                Box::pin(async move {
+                    let _owner = owner;
+                    std::future::pending::<
+                        wasmtime::Result<(Result<Resource<Descriptor>, ErrorCode>,)>,
+                    >()
+                    .await
+                })
+            },
+        )?;
+    let directory = tempfile::tempdir()?;
+    let capture = crate::output_capture::MemoryOutput::new(65536);
+    let mut store = store(&engine);
+    store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
+        .stdout(capture.clone())
+        .preopened_dir(
+            directory.path(),
+            "/sandbox",
+            wasmtime_wasi::FsPerms::ReadWrite,
+        )?
+        .build();
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (u32,)>(&mut store, "run")?;
+    for round in 1..=50 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                run.call_async(&mut store, ("/sandbox/input",))
+            )
+            .await??
+            .0,
+            42
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(started.load(Ordering::SeqCst), round * 2);
+        assert!(store.data().table.is_empty());
+        store.assert_concurrent_state_empty();
+    }
+    assert_eq!(capture.contents(), "cancelled\n".repeat(50).as_bytes());
+    let path = directory.path().join("input");
+    std::fs::write(&path, b"input")?;
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/filesystem_signals.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script])
+        .arg(path)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "cancelled\n42");
+    assert!(!directory.path().join("input.never").exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn filesystem_cancelled_transfers_wait_for_producer_acknowledgement() -> Result<()> {
+    use std::sync::{Arc, Mutex, atomic::Ordering};
+    use tokio::sync::{Notify, mpsc};
+    use wasmtime::component::{FutureReader, Resource, StreamReader};
+    use wasmtime_wasi::filesystem::Descriptor;
+    use wasmtime_wasi::p3::bindings::filesystem::types::ErrorCode;
+    struct Sink {
+        observations: Arc<controlled_input::Observations>,
+        prefix: bool,
+    }
+    impl Drop for Sink {
+        fn drop(&mut self) {
+            self.observations.dropped.store(true, Ordering::SeqCst);
+            self.observations.closed.notify_one();
+        }
+    }
+    impl wasmtime::component::StreamConsumer<Host> for Sink {
+        type Item = u8;
+        fn poll_consume(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            store: wasmtime::StoreContextMut<'_, Host>,
+            source: wasmtime::component::Source<u8>,
+            finish: bool,
+        ) -> std::task::Poll<wasmtime::Result<wasmtime::component::StreamResult>> {
+            use std::task::Poll;
+            use wasmtime::component::StreamResult;
+            if finish {
+                return Poll::Ready(Ok(StreamResult::Cancelled));
+            }
+            if self.prefix {
+                self.observations.pending.notify_one();
+                return Poll::Pending;
+            }
+            let mut source = source.as_direct(store);
+            let count = source.remaining().len().min(3);
+            source.mark_read(count);
+            self.observations.bytes.fetch_add(count, Ordering::SeqCst);
+            self.prefix = true;
+            Poll::Ready(Ok(StreamResult::Completed))
+        }
+    }
+    for write in [false, true] {
+        let source = r#"
+      import {readFile,writeFile} from 'node:fs/promises';
+      import {checkpoint} from 'test:file-transfers/host';
+      export async function run():Promise<number> {
+        const controller=new AbortController();
+        const reading=readFile('/sandbox/input',{signal:controller.signal});
+        let index=0;
+        while(index<2000){const temporary=new Uint8Array(256);index++;}
+        await checkpoint();
+        controller.abort();
+        let rejected=0;
+        try {await reading;} catch {rejected++;}
+        try {await reading;} catch {rejected++;}
+        if(rejected!==2)throw rejected;
+        console.log('acknowledged');
+        return 42;
+      }
+    "#;
+        let source = if write {
+            source.replace(
+                "readFile('/sandbox/input',{signal:controller.signal})",
+                "writeFile('/sandbox/input',new Uint8Array(65536),{signal:controller.signal})",
+            )
+        } else {
+            source.into()
+        };
+        let compiled = compile(
+            &source,
+            "package test:file-transfers; interface host {checkpoint:async func();} world boundary {include wasi:cli/imports@0.3.0; import host; export run:async func()->u32;}",
+        )?;
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let control = Arc::new(Mutex::new(Arc::new(
+            controlled_input::Observations::default(),
+        )));
+        let senders = Arc::new(Mutex::new(Vec::new()));
+        let pending = Arc::new(Notify::new());
+        let finish = Arc::new(Notify::new());
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+        linker.allow_shadowing(true);
+        let sent = senders.clone();
+        let observed = control.clone();
+        let completion_pending = pending.clone();
+        let completion_finish = finish.clone();
+        linker.instance("wasi:filesystem/types@0.3.0")?.func_wrap(
+            "[method]descriptor.read-via-stream",
+            move |mut store: wasmtime::StoreContextMut<'_, Host>,
+                  (descriptor, _): (Resource<Descriptor>, u64)| {
+                store.data().table.get(&descriptor)?;
+                let observed = observed.lock().unwrap().clone();
+                let (sender, receiver) = mpsc::channel(1);
+                sender.try_send(Ok(vec![1u8, 2, 3]))?;
+                sent.lock().unwrap().push(sender);
+                let stream = StreamReader::new(
+                    &mut store,
+                    controlled_input::ControlledProducer {
+                        receiver,
+                        observations: observed.clone(),
+                    },
+                )?;
+                let observed = observed.clone();
+                let pending = completion_pending.clone();
+                let finish = completion_finish.clone();
+                let future = FutureReader::new(&mut store, async move {
+                    observed.closed.notified().await;
+                    pending.notify_one();
+                    finish.notified().await;
+                    wasmtime::error::Ok(Err::<(), ErrorCode>(ErrorCode::Interrupted))
+                })?;
+                Ok(((stream, future),))
+            },
+        )?;
+        let observed = control.clone();
+        let completion_pending = pending.clone();
+        let completion_finish = finish.clone();
+        linker.instance("wasi:filesystem/types@0.3.0")?.func_wrap("[method]descriptor.write-via-stream", move |mut store:wasmtime::StoreContextMut<'_,Host>,(descriptor,reader,_):(Resource<Descriptor>,StreamReader<u8>,u64)| {
+        store.data().table.get(&descriptor)?;
+        let observed=observed.lock().unwrap().clone();
+        reader.pipe(&mut store,Sink{observations:observed.clone(),prefix:false})?;
+        let pending=completion_pending.clone();
+        let finish=completion_finish.clone();
+        let future=FutureReader::new(&mut store,async move {
+            observed.closed.notified().await;
+            pending.notify_one();
+            finish.notified().await;
+            wasmtime::error::Ok(Err::<(),ErrorCode>(ErrorCode::Interrupted))
+        })?;
+        Ok((future,))
+    })?;
+        let observed = control.clone();
+        linker
+            .instance("test:file-transfers/host")?
+            .func_wrap_concurrent("checkpoint", move |_, (): ()| {
+                let observed = observed.lock().unwrap().clone();
+                Box::pin(async move {
+                    observed.pending.notified().await;
+                    Ok(())
+                })
+            })?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("input"), b"controlled")?;
+        let output = crate::output_capture::MemoryOutput::new(65536);
+        let mut store = store(&engine);
+        store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
+            .stdout(output.clone())
+            .preopened_dir(
+                directory.path(),
+                "/sandbox",
+                wasmtime_wasi::FsPerms::ReadWrite,
+            )?
+            .build();
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+        for round in 1..=30 {
+            let observations = Arc::new(controlled_input::Observations::default());
+            *control.lock().unwrap() = observations.clone();
+            let mut invocation = Box::pin(run.call_async(&mut store, ()));
+            tokio::select! {
+                result=&mut invocation=>panic!("returned before producer completion: {result:?}"),
+                result=tokio::time::timeout(Duration::from_secs(3),pending.notified())=>{result?;}
+            }
+            assert!(observations.dropped.load(Ordering::SeqCst));
+            assert!(
+                senders
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|sender| sender.is_closed())
+            );
+            senders.lock().unwrap().clear();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), &mut invocation)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                output.contents(),
+                "acknowledged\n".repeat(round - 1).as_bytes()
+            );
+            finish.notify_one();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), invocation)
+                    .await??
+                    .0,
+                42
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+            assert_eq!(observations.bytes.load(Ordering::SeqCst), 3);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn asynchronous_wit_traps_and_disposal_release_pending_host_calls() -> Result<()> {
     use std::sync::{
         Arc,
@@ -904,9 +1210,13 @@ async fn promise_combinators_preserve_results_and_release_native_threads() -> Re
     ] {
         let source = format!(
             r#"
-          import {{setTimeout}} from 'node:timers/promises';
-          async function task(value:number,delay:number):Promise<number> {{ await setTimeout(delay); return value; }}
-          async function text(value:string,delay:number):Promise<string> {{ await setTimeout(delay); return value; }}
+          async function turns(count:number):Promise<void> {{
+            await 0;
+            let index=0;
+            while(index<count) {{await 0;index++;}}
+          }}
+          async function task(value:number,delay:number):Promise<number> {{ await turns(delay); return value; }}
+          async function text(value:string,delay:number):Promise<string> {{ await turns(delay); return value; }}
           async function failed():Promise<number> {{ throw 7; }}
           export async function run():Promise<number> {{ {body} }}
         "#
@@ -928,7 +1238,8 @@ async fn promise_combinators_preserve_results_and_release_native_threads() -> Re
         for _ in 0..40 {
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, ()))
-                    .await??
+                    .await?
+                    .map_err(|error| anyhow::anyhow!("{body}: {error:#}"))?
                     .0,
                 expected,
                 "{body}"
@@ -955,6 +1266,7 @@ async fn promise_combinators_preserve_results_and_release_native_threads() -> Re
 #[tokio::test(flavor = "current_thread")]
 async fn resolved_task_reaction_order_matches_node() -> Result<()> {
     for body in [
+        "const pending=middle(state);state.text=state.text+'root;';await pending;return state.text;",
         "const a=child(state,'a'); const b=child(state,'b'); const first=observe(a,state,'one'); const second=observe(a,state,'two'); const both=Promise.all([a,b]); state.text=state.text+'parent;'; await both; state.text=state.text+'all;'; await first; await second; return state.text;",
         "const a=child(state,'a'); const adopted=adopt(a,state); const observer=observe(a,state,'observed'); state.text=state.text+'parent;'; await adopted; state.text=state.text+'adopted;'; await observer; return state.text;",
         "const adopted=adopt(rejected(),state); state.text=state.text+'parent;'; try {await adopted;} catch(e) {state.text=state.text+'rejected;';} return state.text;",
@@ -973,6 +1285,8 @@ async fn resolved_task_reaction_order_matches_node() -> Result<()> {
           await task;
           state.text=state.text+name+';';
         }}
+        async function immediate(state:Trace):Promise<string> {{state.text=state.text+'immediate;';return 'x';}}
+        async function middle(state:Trace):Promise<void> {{const value=immediate(state);state.text=state.text+'middle;';await value;}}
         async function rejected():Promise<string> {{throw 7;}}
         async function adopt(task:Promise<string>,state:Trace):Promise<string> {{
           try {{return task;}} catch(e) {{state.text=state.text+'caught;'; return 'bad';}}
@@ -1303,6 +1617,62 @@ fn unsupported_timer_values_and_options_receive_source_diagnostics() {
             "{body}: {error:#}"
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timer_signal_scope_does_not_cancel_later_native_calls() -> Result<()> {
+    let source = include_str!("fixtures/timer_signal_scope.ts");
+    let compiled = compile(
+        source,
+        "package test:timer-scope; world boundary {include wasi:cli/imports@0.3.0; export run:async func(path:string)->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("input");
+    std::fs::write(&path, b"ok")?;
+    let mut store = store(&engine);
+    store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
+        .preopened_dir(
+            directory.path(),
+            "/sandbox",
+            wasmtime_wasi::FsPerms::ReadOnly,
+        )?
+        .build();
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for _ in 0..30 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                run.call_async(&mut store, ("/sandbox/input",))
+            )
+            .await??
+            .0,
+            "okok"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/timer_signal_scope.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script])
+        .arg(path)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "okok");
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

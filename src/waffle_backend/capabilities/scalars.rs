@@ -138,6 +138,8 @@ pub(in crate::waffle_backend) fn emit(
                     b.block = cancelled;
                     let thrown = b.integer(1);
                     let reason = b.number(20.0);
+                    let zero = b.integer(0);
+                    b.call(operations.bind_signal, &[zero], &[]);
                     b.ret(&[thrown, reason]);
                     b.block = begin;
                 }
@@ -161,6 +163,10 @@ pub(in crate::waffle_backend) fn emit(
                 let ns = b.op(Op::I64TruncF64U, &[ns], I64);
                 let subtask = b.call(function, &[ns], &[I32])[0];
                 let status = b.call(native.wait.unwrap(), &[subtask], &[I32])[0];
+                if let Some(operations) = native.operations {
+                    let zero = b.integer(0);
+                    b.call(operations.bind_signal, &[zero], &[]);
+                }
                 let returned = b.integer(2);
                 let success = b.op(Op::I32Eq, &[status, returned], I32);
                 let complete = b.body.add_block();

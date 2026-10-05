@@ -25,9 +25,7 @@ pub(crate) fn enabled(contract: &ResolvedContract) -> bool {
         wit.functions
             .values()
             .any(|export| export.function.kind.is_async())
-    }) && !contract.has_filesystem()
-        && !contract.has_stream_input()
-        && contract.output_operations().is_empty()
+    }) && !contract.has_stream_input()
         && contract.http_handler.is_none()
 }
 
@@ -326,6 +324,10 @@ pub(crate) fn emit(
         let active_work = b.op(O::I32Or, &[active_source, workers], I32);
         let source_idle = b.op(O::I32Eqz, &[active_work], I32);
         let idle_turn = b.op(O::I32And, &[idle_turn, source_idle], I32);
+        let done_address = b.integer(DONE);
+        let done = b.load(done_address, 0, I32);
+        let running = b.op(O::I32Eqz, &[done], I32);
+        let idle_turn = b.op(O::I32And, &[idle_turn, running], I32);
         let idle = b.body.add_block();
         let active = b.body.add_block();
         b.branch(idle_turn, idle, active);

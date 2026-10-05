@@ -1,7 +1,7 @@
 //! FIFO source reactions share one execution token; native I/O remains concurrent.
 //! Thread startup queues the caller until the child's first native suspension or await.
-//! The shared context marks that eager prefix; once the caller resumes, further
-//! awaits join the reaction queue instead of resuming the caller a second time.
+//! The shared context retains the immediate parent during that eager prefix;
+//! the first await resumes that parent explicitly before entering queued reactions.
 
 use super::*;
 use waffle::Value;
@@ -144,8 +144,12 @@ pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> R
         b.block = handoff;
         let zero = b.integer(0);
         b.store(context, 4, zero, I32);
+        let one = b.integer(1);
+        let parent = b.op(Operator::I32Sub, &[eager, one], I32);
         if suspend {
-            b.call(native.suspend, &[], &[I32]);
+            b.call(native.suspend_then_promote, &[parent], &[I32]);
+        } else {
+            b.call(native.yield_then_promote, &[parent], &[I32]);
         }
         b.ret(&[]);
         b.block = release;

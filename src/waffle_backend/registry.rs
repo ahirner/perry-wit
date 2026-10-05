@@ -213,8 +213,9 @@ impl ModuleRegistry {
             .then(|| super::streams::declare_imports(module));
 
         let output_operations = contract.output_operations();
-        let output_imports = (!output_operations.is_empty())
-            .then(|| super::streams::output::declare_imports(module, &output_operations));
+        let output_imports = (!output_operations.is_empty()).then(|| {
+            super::streams::output::declare_imports(module, &output_operations, callbacks.is_some())
+        });
         let headers_imports = contract
             .has_headers()
             .then(|| super::http::headers::declare_helpers(module));
@@ -250,7 +251,7 @@ impl ModuleRegistry {
         });
         let filesystem_imports = contract
             .has_filesystem()
-            .then(|| super::filesystem::declare_imports(module));
+            .then(|| super::filesystem::declare_imports(module, callbacks.is_some()));
 
         let random_imports = contract
             .random_operations()
@@ -308,12 +309,30 @@ impl ModuleRegistry {
         } else {
             None
         };
+        let mut transfers = Vec::new();
+        let mut filesystem_transfer_base = 0;
+        let mut output_transfer_base = 0;
+        if callbacks.is_some() {
+            if let Some(imports) = &http_imports {
+                transfers.extend(super::http::operations::controllers(imports));
+            }
+            filesystem_transfer_base = transfers.len() as u32;
+            if let Some(imports) = &filesystem_imports {
+                transfers.extend(super::runtime::transfers::controllers(
+                    imports,
+                    super::filesystem::TRANSFERS,
+                ));
+            }
+            output_transfer_base = transfers.len() as u32;
+            if let Some(imports) = &output_imports {
+                transfers.extend(super::runtime::transfers::controllers(
+                    imports,
+                    super::streams::output::TRANSFERS,
+                ));
+            }
+        }
         let operations = operation_imports
             .map(|imports| {
-                let transfers = http_imports
-                    .as_ref()
-                    .map(super::http::operations::controllers)
-                    .unwrap_or_default();
                 super::runtime::operations::emit(
                     module,
                     memory,
@@ -512,7 +531,20 @@ impl ModuleRegistry {
             None
         };
 
-        if let Some(imports) = output_imports {
+        if let Some(mut imports) = output_imports {
+            if let Some(owners) = operations {
+                super::runtime::transfers::emit(
+                    module,
+                    memory,
+                    super::runtime::transfers::Adapters {
+                        namespace: "output",
+                        native: &mut imports,
+                        owners,
+                        first_index: output_transfer_base,
+                    },
+                    super::streams::output::TRANSFERS,
+                )?;
+            }
             let helpers = super::streams::output::emit_runtime(
                 module,
                 memory,
@@ -623,7 +655,27 @@ impl ModuleRegistry {
                 )
             })
             .transpose()?;
-        let filesystem_helpers = if let Some(imports) = filesystem_imports {
+        let filesystem_helpers = if let Some(mut imports) = filesystem_imports {
+            if let Some(owners) = operations {
+                super::filesystem::operations::emit(
+                    module,
+                    memory,
+                    &mut imports,
+                    owners,
+                    allocator.unwrap(),
+                )?;
+                super::runtime::transfers::emit(
+                    module,
+                    memory,
+                    super::runtime::transfers::Adapters {
+                        namespace: "filesystem",
+                        native: &mut imports,
+                        owners,
+                        first_index: filesystem_transfer_base,
+                    },
+                    super::filesystem::TRANSFERS,
+                )?;
+            }
             Some(super::filesystem::emit_runtime(
                 module,
                 memory,

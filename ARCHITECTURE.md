@@ -174,15 +174,16 @@ HTTP resources close on supported return/error paths. Validation precedes
 external effects; already transferred bytes cannot be rolled back. The current
 bounded HTTP handler retains its storage through response consumer completion.
 
-Production suspension uses native stackful workers. Async WIT, timer, and HTTP components
+Production suspension uses native stackful workers. Async WIT, timer, HTTP, filesystem, and console components
 use callback exports with shared operation owners. Host cancellation wakes guest
 observers, runs cleanup, and retains native storage until cancellation or completion
 is acknowledged. Completion futures deliver their outcomes during cleanup; cancelled
 reads never expose uninitialized results or successful EOF. Canonical backpressure
-serializes public calls. Filesystem and public stream transfers still require the
-same cancellation ownership integration. Fetch signals select native operation
-owners by a shared signal identity; unrelated operations continue. Filesystem
-signals and Web Streams with returned-stream ownership remain requirements in
+serializes public calls. Fetch, timer, and filesystem signals select native operation
+owners by a shared signal identity; unrelated operations continue. File and console
+completion futures drain after the byte transfer closes. Public streams and incoming
+handlers still require ownership integration; Web Streams and returned-stream
+ownership remain requirements in
 [TODOs.md](TODOs.md). Traps and host disposal do not run guest `finally` blocks.
 
 ## Runtime WAT inventory

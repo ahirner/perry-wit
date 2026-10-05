@@ -527,6 +527,8 @@ fn compare_cli_with_node(source: &str, stdout: &[u8]) -> Result<()> {
             "component-model-async-stackful=y",
             "-W",
             "component-model-more-async-builtins=y",
+            "-W",
+            "component-model-threading=y",
         ])
         .arg(component)
         .output()?;

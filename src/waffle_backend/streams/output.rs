@@ -20,9 +20,31 @@ use crate::waffle_backend::{
 pub(crate) fn declare_imports(
     module: &mut Module<'static>,
     operations: &BTreeSet<StdioOperation>,
+    owned: bool,
 ) -> BTreeMap<String, Func> {
-    imports::declare_imports(module, "output", &native_functions(operations))
+    let mut functions = native_functions(operations);
+    if owned {
+        functions.retain(|function| !TRANSFERS.iter().any(|(name, _)| function.name == *name));
+    }
+    let mut native = imports::declare_imports(module, "output", &functions);
+    if owned {
+        native.extend(crate::waffle_backend::runtime::transfers::declare(
+            module, "output", TRANSFERS,
+        ));
+    }
+    native
 }
+
+pub(crate) const TRANSFERS: &[crate::waffle_backend::runtime::transfers::Definition] = &[
+    (
+        "write",
+        crate::waffle_backend::runtime::transfers::Kind::Write,
+    ),
+    (
+        "await",
+        crate::waffle_backend::runtime::transfers::Kind::Completion,
+    ),
+];
 
 pub(crate) fn emit_runtime(
     module: &mut Module<'static>,

@@ -5,6 +5,7 @@ pub(crate) mod callbacks;
 pub(crate) mod imports;
 pub(crate) mod operations;
 pub(crate) mod subtasks;
+pub(crate) mod transfers;
 
 use std::collections::BTreeMap;
 

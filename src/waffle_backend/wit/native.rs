@@ -258,6 +258,10 @@ impl WitWorld {
     }
 
     fn filesystem_binding(&self, name: &str) -> Result<(String, String)> {
+        if let Some(name) = name.strip_prefix("async-") {
+            let (interface, function) = self.filesystem_binding(name)?;
+            return Ok((interface, format!("[async-lower]{function}")));
+        }
         let function = match name {
             "directories" => {
                 return Ok((
@@ -274,15 +278,15 @@ impl WitWorld {
             "rmdir" => "[method]descriptor.remove-directory-at",
             "start-directory" => "[method]descriptor.read-directory",
             "drop-descriptor" => "[resource-drop]descriptor",
-            "read-entry" | "drop-entries" => {
+            "read-entry" | "cancel-read-entry" | "drop-entries" => {
                 return self.payload_binding(
                     FILESYSTEM,
                     "[method]descriptor.read-directory",
                     Payload::Stream,
-                    if name == "read-entry" {
-                        "stream-read"
-                    } else {
-                        "stream-drop-readable"
+                    match name {
+                        "read-entry" => "stream-read",
+                        "cancel-read-entry" => "async-stream-cancel-read",
+                        _ => "stream-drop-readable",
                     },
                 );
             }
@@ -298,13 +302,19 @@ impl WitWorld {
                     },
                 );
             }
-            "new" | "write" | "read" | "drop-reader" | "drop-writer" => {
+            "new" | "write" | "read" | "cancel-read" | "cancel-write" | "drop-reader"
+            | "drop-writer" => {
                 return self.payload_binding(
                     FILESYSTEM,
                     "[method]descriptor.write-via-stream",
                     Payload::Stream,
                     &format!(
-                        "stream-{}",
+                        "{}stream-{}",
+                        if name.starts_with("cancel-") {
+                            "async-"
+                        } else {
+                            ""
+                        },
                         match name {
                             "drop-reader" => "drop-readable",
                             "drop-writer" => "drop-writable",
@@ -319,6 +329,10 @@ impl WitWorld {
     }
 
     fn output_binding(&self, name: &str) -> Result<(String, String)> {
+        if let Some(name) = name.strip_prefix("async-") {
+            let (interface, function) = self.output_binding(name)?;
+            return Ok((interface, format!("[async-lower]{function}")));
+        }
         if matches!(name, "stdout" | "stderr") {
             return Ok((format!("wasi:cli/{name}@0.3.0"), "write-via-stream".into()));
         }
@@ -332,6 +346,7 @@ impl WitWorld {
         let (payload, operation) = match name {
             "new" => (Payload::Stream, "stream-new"),
             "write" => (Payload::Stream, "stream-write"),
+            "cancel-write" => (Payload::Stream, "async-stream-cancel-write"),
             "drop-writer" => (Payload::Stream, "stream-drop-writable"),
             "await" => (Payload::Completion, "future-read"),
             "drop-future" => (Payload::Completion, "future-drop-readable"),

@@ -111,52 +111,6 @@ impl FunctionLowerer<'_> {
         let Some(field) = shape.properties.get("signal") else {
             return Ok(zero);
         };
-        let (ty, optional) = super::types::optional_field_type(&field.ty, field.optional);
-        ensure!(
-            ty == &HirType::Void
-                || crate::waffle_backend::abort::Kind::of(ty)
-                    == Some(crate::waffle_backend::abort::Kind::Signal),
-            "Timer signal must be AbortSignal or undefined"
-        );
-        ensure!(
-            self.registry.operations.is_some(),
-            "Timer signals require acknowledged native operation ownership; filesystem and public stream compositions are still being integrated"
-        );
-        let helpers = self.registry.object_helpers.unwrap();
-        let key = self.expression(&Expr::String("signal".into()))?;
-        let entry = self.op(
-            Operator::Call {
-                function_index: helpers.get,
-            },
-            &[object, key],
-            &[Type::I32],
-        );
-        let tag = self.op(
-            Operator::I32Const {
-                value: crate::waffle_backend::values::ValueTag::of(ty)? as u32,
-            },
-            &[],
-            &[Type::I32],
-        );
-        let optional = self.op(
-            Operator::I32Const {
-                value: u32::from(optional),
-            },
-            &[],
-            &[Type::I32],
-        );
-        let payload = self.call_completion(helpers.value, &[entry, tag, optional]);
-        let signal = abi::decode_payload(&mut self.body, self.block, payload, true);
-        if let Some(helpers) = self.registry.abort_helpers {
-            Ok(self.op(
-                Operator::Call {
-                    function_index: helpers.root,
-                },
-                &[signal],
-                &[Type::I32],
-            ))
-        } else {
-            Ok(zero)
-        }
+        self.option_signal(object, &field.ty, field.optional, "Timer")
     }
 }
