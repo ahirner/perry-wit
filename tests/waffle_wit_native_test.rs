@@ -2215,7 +2215,7 @@ async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_own
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    for phase in ["headers", "body", "unused"] {
+    for phase in ["headers", "body", "unused", "reader"] {
         let ready = Arc::new(tokio::sync::Notify::new());
         let started = ready.clone();
         let server = fixture::HttpFixture::new(move |request| {
@@ -2225,7 +2225,7 @@ async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_own
             if phase == "headers" {
                 started.notify_one();
                 fixture::Reply::Stall
-            } else if phase == "body" {
+            } else if matches!(phase, "body" | "reader") {
                 fixture::Reply::StallBody
             } else {
                 fixture::Reply::Body(200, "unused".into())
@@ -2234,10 +2234,15 @@ async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_own
         let url = serde_json::to_string(&format!("http://{}", server.address))?;
         let checkpoint = if phase == "unused" {
             "await wait(0);"
-        } else if phase == "body" {
+        } else if matches!(phase, "body" | "reader") {
             "await wait(4);"
         } else {
             ""
+        };
+        let consume = if phase == "reader" {
+            "const body=response.body; if(body===null)throw 2; const reader=body.getReader(); try { while(true){const chunk=await reader.read();if(chunk.done)break;} } finally {reader.releaseLock();}"
+        } else {
+            "await response.text();"
         };
         let source = format!(
             r#"
@@ -2249,7 +2254,7 @@ async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_own
                 try {{
                     const response = await fetch({url} + (mode === 1 ? '/ok' : '/pending'));
                     if(mode !== 1) {{ {checkpoint} }}
-                    await response.text();
+                    {consume}
                     return 42;
                 }} finally {{ running = false; await wait(5); }}
             }}
@@ -3536,4 +3541,225 @@ async fn standard_response_values_and_bodies_match_node_without_host_imports() -
     );
     assert_eq!(String::from_utf8(output.stdout)?.trim(), "ok\nok");
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_byte_readers_preserve_body_identity_and_consumption() -> Result<()> {
+    let source = r#"
+      async function drain(stream:ReadableStream<Uint8Array>):Promise<number> {
+        const reader=stream.getReader();
+        if(!stream.locked)throw 99;
+        let total=0;
+        while(true) {
+          const chunk=await reader.read();
+          if(chunk.done)break;
+          const value=chunk.value;
+          if(value===undefined)throw 98;
+          total=total+value.length;
+        }
+        const end=await reader.read();
+        if(!end.done||end.value!==undefined)throw 97;
+        reader.releaseLock();
+        if(stream.locked)throw 96;
+        return total;
+      }
+      export async function run():Promise<number> {
+        const response=new Response('abc');
+        if(response.body!==response.body)throw 89;
+        const body=response.body;
+        if(body===null)throw 95;
+        const count=await drain(body);
+        if(!response.bodyUsed)throw 94;
+        const request=new Request('https://example.invalid/',{method:'POST',body:'hello'});
+        const requestBody=request.body;
+        if(requestBody===null)throw 93;
+        const other=await drain(requestBody);
+        const empty=new Response(null);
+        if(empty.body!==null)throw 92;
+        const original=new Request('https://example.invalid/',{method:'POST',body:'owned'});
+        const originalBody=original.body;
+        if(originalBody===null)throw 88;
+        const locked=originalBody.getReader();
+        let invalid=false;
+        try {new Request(original);} catch {invalid=true;}
+        if(!invalid)throw 87;
+        locked.releaseLock();
+        const transferred=new Request(original);
+        if(!originalBody.locked||!original.bodyUsed)throw 86;
+        if(await transferred.text()!=='owned')throw 85;
+        return count+other;
+      }
+    "#;
+    let compiled = compile(
+        source,
+        "package test:byte-readers; world boundary {export run:async func()->f64;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = store(&engine);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..40 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 8.0);
+        store.assert_concurrent_state_empty();
+    }
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("readers.ts");
+    std::fs::write(&path, format!("{source}\nconsole.log(await run());"))?;
+    let node = std::process::Command::new("node").arg(path).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(String::from_utf8(node.stdout)?.trim(), "8");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_byte_readers_release_pending_requests_and_cancel_owned_transfers() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let compiled = compile(
+        include_str!("fixtures/fetch/readers.ts"),
+        "package test:reader-ownership; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->f64;}",
+    )?;
+    let released = Arc::new(AtomicBool::new(false));
+    let gate = released.clone();
+    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+        "/gated" => fixture::Reply::GatedResponse(200, vec![], b"hello".to_vec(), gate.clone()),
+        "/release" => {
+            gate.store(true, Ordering::Release);
+            fixture::Reply::Body(200, "ok".into())
+        }
+        "/stall" => fixture::Reply::StallBody,
+        _ => fixture::Reply::Disconnect,
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    for _ in 0..20 {
+        released.store(false, Ordering::Release);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            5.0
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    released.store(false, Ordering::Release);
+    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/readers.ts");
+    let script = format!(
+        "import {{run}} from {};console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let node = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script, &base])
+        .output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(String::from_utf8(node.stdout)?.trim(), "5");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_byte_readers_stream_beyond_guest_memory_and_reject_completion_failure()
+-> Result<()> {
+    let source = r#"
+      export async function run(url:string):Promise<number> {
+        const response=await fetch(url);
+        const body=response.body;
+        if(body===null)throw 90;
+        const reader=body.getReader();
+        let total=0;
+        try {
+          while(true) {
+            const chunk=await reader.read();
+            if(chunk.done)break;
+            const value=chunk.value;
+            if(value===undefined)throw 91;
+            if(value.length>0&&(value[0]!==120||value[value.length-1]!==120))throw 92;
+            total+=value.length;
+          }
+        } catch {total=-1;}
+        reader.releaseLock();
+        return total;
+      }
+    "#;
+    let compiled = compile(
+        source,
+        "package test:reader-storage; world boundary {import wasi:http/client@0.3.0;export run:async func(url:string)->f64;}",
+    )?;
+    let size = 8 * 1024 * 1024;
+    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+        "/complete" => fixture::Reply::Bytes(200, vec![b'x'; size]),
+        _ => fixture::Reply::TruncatedBody(vec![b'x'; 20], 100),
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    for _ in 0..3 {
+        for (path, expected) in [("complete", size as f64), ("truncated", -1.0)] {
+            let url = format!("http://{}/{path}", server.address);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), run.call_async(&mut store, (&url,)))
+                    .await??
+                    .0,
+                expected
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn native_byte_streams_reject_invalid_shapes_and_synchronous_effects() {
+    for (source, asynchronous, expected) in [
+        (
+            "export function run():void {const response=new Response('x');const body=response.body;if(body===null)throw 1;const reader=body.getReader();const read=reader.read();}",
+            false,
+            "async func",
+        ),
+        (
+            "export async function run():Promise<void> {const response=new Response('x');const body=response.body;if(body===null)throw 1;body.locked=true;}",
+            true,
+            "properties are read-only",
+        ),
+        (
+            "function bad(stream:ReadableStream<string>):void{} export function run():void{}",
+            false,
+            "Uint8Array chunks",
+        ),
+        (
+            "export async function run():Promise<void> {const response=new Response('x');const body=response.body;if(body===null)throw 1;body.getReader({mode:'byob'});}",
+            true,
+            "takes no arguments",
+        ),
+    ] {
+        let kind = if asynchronous { "async " } else { "" };
+        let wit =
+            format!("package test:stream-diagnostics; world boundary {{export run:{kind}func();}}");
+        let error = compile(source, &wit).expect_err("unsupported stream shape must be diagnosed");
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }

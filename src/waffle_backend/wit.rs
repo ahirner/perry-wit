@@ -286,12 +286,21 @@ impl WitWorld {
                         Expr::FuncRef(callee) => pending.push(*callee),
                         Expr::Call { callee, .. } => {
                             if let Some(target) = super::promises::TaskTarget::http_body(callee)
+                                .or_else(|| super::promises::TaskTarget::web_stream(callee))
                                 && contract
                                     .promises
                                     .as_ref()
                                     .is_some_and(|plan| plan.tasks.contains_key(&target))
                             {
-                                suspending = Some("HTTP body consumption".to_owned());
+                                suspending = Some(
+                                    match target {
+                                        super::promises::TaskTarget::WebStream(_) => {
+                                            "Web Stream operation"
+                                        }
+                                        _ => "HTTP body consumption",
+                                    }
+                                    .to_owned(),
+                                );
                             }
                         }
 

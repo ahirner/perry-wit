@@ -253,7 +253,7 @@ impl FunctionLowerer<'_> {
             &[object, key],
             &[Type::I32],
         );
-        if crate::waffle_backend::values::is_dynamic(&ty)
+        if crate::waffle_backend::values::is_boxed(&ty)
             || crate::waffle_backend::nullable::inner(&ty).is_some()
         {
             return Ok(self.op(

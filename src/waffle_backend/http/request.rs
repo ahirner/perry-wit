@@ -27,6 +27,7 @@ pub(crate) const METHOD_TAG: u32 = 36;
 pub(crate) const URL_PARTS: u32 = 40;
 pub(crate) const REDIRECT_MODE: u32 = 44;
 pub(crate) const SIGNAL: u32 = 48;
+pub(crate) const STREAM: u32 = 52;
 pub(crate) fn is_request(ty: &perry_hir::types::Type) -> bool {
     matches!(ty, perry_hir::types::Type::Named(name) if name == REQUEST_TYPE)
 }
@@ -154,11 +155,17 @@ pub(crate) fn emit(
     b.block = check_body;
     let used = b.load(input, BODY_USED, I32);
     reject(&mut b, r, frame, used);
+    let stream = b.load(input, STREAM, I32);
+    let check_lock = b.body.add_block();
+    b.branch(stream, check_lock, metadata);
+    b.block = check_lock;
+    let locked = b.load(stream, crate::waffle_backend::streams::web::LOCK, I32);
+    reject(&mut b, r, frame, locked);
     b.jump(metadata, &[]);
     b.block = metadata;
-    let request = b.allocate(r.allocator.realloc, 52, 4);
+    let request = b.allocate(r.allocator.realloc, 56, 4);
     b.store(frame, 32, request, I32);
-    let size = b.integer(52);
+    let size = b.integer(56);
     b.effect(O::MemoryFill { mem: memory }, &[request, zero, size]);
     let four = b.integer(4);
     let backlink = b.op(O::I32Sub, &[request, four], I32);
@@ -259,6 +266,15 @@ pub(crate) fn emit(
     b.branch(inherited, share, snapshot);
     b.block = share;
     b.store(input, BODY_USED, one, I32);
+    let stream = b.load(input, STREAM, I32);
+    let lock = b.body.add_block();
+    let transferred = b.body.add_block();
+    b.branch(stream, lock, transferred);
+    b.block = lock;
+    b.store(stream, crate::waffle_backend::streams::web::LOCK, one, I32);
+    b.store(stream, crate::waffle_backend::streams::web::STATE, one, I32);
+    b.jump(transferred, &[]);
+    b.block = transferred;
     b.jump(stored, &[body]);
     b.block = snapshot;
     let copied = b.call(r.bytes.copy, &[body], &[I32])[0];

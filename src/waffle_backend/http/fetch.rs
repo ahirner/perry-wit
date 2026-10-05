@@ -30,6 +30,7 @@ pub(crate) fn is_response(ty: &perry_hir::types::Type) -> bool {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Helpers {
+    pub(crate) stream: Option<streams::web::NativeBody>,
     pub(crate) fetch: Func,
     pub(crate) upload: Func,
     pub(crate) consume: Func,
@@ -126,6 +127,13 @@ pub(super) fn emit(
     b.ret(&[]);
     b.finish(module, finish)?;
     Ok(Helpers {
+        stream: runtime
+            .operations
+            .map(|operations| streams::web::NativeBody {
+                read: native["async-read"],
+                release,
+                operations,
+            }),
         fetch,
         upload,
         consume: body,

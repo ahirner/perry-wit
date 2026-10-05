@@ -137,6 +137,8 @@ pub(crate) fn lower_module(
             );
         }
         if contract.has_http() || contract.has_body() {
+            string_pool.intern("done");
+            string_pool.intern("value");
             for method in ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"] {
                 string_pool.intern(method);
             }
@@ -925,6 +927,11 @@ impl<'a> FunctionLowerer<'a> {
                     &[Type::F64],
                 )));
             }
+            if let Some(kind) = super::streams::web::Kind::of(&self.infer_expr_type(object)) {
+                return self
+                    .web_stream_method(kind, object, property, args)
+                    .map(Some);
+            }
             if let Some(kind) = super::time::TimeKind::of(&self.infer_expr_type(object)) {
                 return self.time_method(kind, object, property, args).map(Some);
             }
@@ -1498,6 +1505,13 @@ impl<'a> FunctionLowerer<'a> {
             Expr::PropertySet { object, .. }
             | Expr::IndexSet { object, .. }
             | Expr::PutValueSet { target: object, .. }
+                if super::streams::web::Kind::of(&self.infer_expr_type(object)).is_some() =>
+            {
+                bail!("Web Stream properties are read-only")
+            }
+            Expr::PropertySet { object, .. }
+            | Expr::IndexSet { object, .. }
+            | Expr::PutValueSet { target: object, .. }
                 if super::abort::Kind::of(&self.infer_expr_type(object)).is_some() =>
             {
                 bail!("AbortController and AbortSignal properties are read-only")
@@ -1946,6 +1960,30 @@ impl<'a> FunctionLowerer<'a> {
                 object, property, ..
             } if super::objects::is_object(&self.infer_expr_type(object)) => {
                 self.object_get(object, &Expr::String(property.clone()))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if super::streams::web::Kind::of(&self.infer_expr_type(object)).is_some() => {
+                ensure!(
+                    super::streams::web::Kind::of(&self.infer_expr_type(object))
+                        == Some(super::streams::web::Kind::Readable)
+                        && property == "locked",
+                    "Unsupported Web Stream property '{property}'"
+                );
+                let stream = self.expression(object)?;
+                let lock = self.op(
+                    Operator::I32Load {
+                        memory: MemoryArg {
+                            memory: self.registry.memory,
+                            offset: super::streams::web::LOCK,
+                            align: 2,
+                        },
+                    },
+                    &[stream],
+                    &[Type::I32],
+                );
+                let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+                Ok(self.op(Operator::I32Ne, &[lock, zero], &[Type::I32]))
             }
             Expr::PropertyGet {
                 object, property, ..

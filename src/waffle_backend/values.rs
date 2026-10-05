@@ -86,6 +86,8 @@ pub(crate) enum ValueTag {
     Request = 19,
     AbortController = 20,
     AbortSignal = 21,
+    ReadableStream = 22,
+    StreamReader = 23,
 }
 
 impl ValueTag {
@@ -96,6 +98,14 @@ impl ValueTag {
             HirType::Boolean => Self::Boolean,
             HirType::Number => Self::Number,
             HirType::BigInt => Self::WitU64,
+            ty if super::streams::web::Kind::of(ty)
+                == Some(super::streams::web::Kind::Readable) =>
+            {
+                Self::ReadableStream
+            }
+            ty if super::streams::web::Kind::of(ty) == Some(super::streams::web::Kind::Reader) => {
+                Self::StreamReader
+            }
             ty if is_string_type(ty) => Self::String,
             HirType::Tuple(_) => Self::Array,
             HirType::Named(name) if name == ARRAY_TYPE => Self::Array,

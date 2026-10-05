@@ -198,7 +198,9 @@ pending body reads. Native owners remain alive through cancellation acknowledgem
 Promise timers accept typed result values and optional signals. Filesystem calls
 use `node:fs/promises` or `fs/promises`; synchronous and callback APIs receive
 compiler diagnostics. `readFile` and `writeFile` also accept signals and retain transfer storage until the
-filesystem completion arrives. Web Streams and standard incoming handlers remain implementation work;
+filesystem completion arrives. Request and Response bodies expose byte-stream
+readers with locking and explicit cancellation. Writers, piping, async iteration,
+returned streams, and standard incoming handlers remain implementation work;
 the capability catalog records supported shapes and executable evidence.
 
 ## Contributing

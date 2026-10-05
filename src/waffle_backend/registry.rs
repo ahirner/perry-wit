@@ -93,6 +93,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
     pub(crate) headers_helpers: Option<super::http::headers::Helpers>,
     pub(crate) body_helpers: Option<super::http::body::Helpers>,
+    pub(crate) web_streams: Option<super::streams::web::Helpers>,
     pub(crate) request_helpers: Option<super::http::request::Helpers>,
     pub(crate) response_constructor: Option<Func>,
     pub(crate) time_helpers: BTreeMap<&'static str, Func>,
@@ -637,6 +638,23 @@ impl ModuleRegistry {
         } else {
             None
         };
+        let web_streams = contract
+            .has_body()
+            .then(|| {
+                super::streams::web::emit(
+                    module,
+                    memory,
+                    &super::streams::web::Runtime {
+                        allocator: allocator.unwrap(),
+                        bytes: byte_helpers.unwrap(),
+                        objects: object_helpers.unwrap(),
+                        promises: promises.as_ref(),
+                        pool: string_pool,
+                        native: http_helpers.and_then(|h| h.fetch).and_then(|h| h.stream),
+                    },
+                )
+            })
+            .transpose()?;
         let body_helpers = body_decode
             .map(|decode| {
                 super::http::body::emit(
@@ -897,6 +915,7 @@ impl ModuleRegistry {
             request_helpers,
             response_constructor,
             body_helpers,
+            web_streams,
             http_helpers,
             filesystem_helpers,
             object_helpers,
@@ -945,6 +964,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
             Ok(Type::I32)
         }
         ty if super::objects::is_object(ty) => Ok(Type::I32),
+        ty if super::streams::web::Kind::of(ty).is_some() => Ok(Type::I32),
         ty if super::filesystem::is_stats(ty) => Ok(Type::I32),
         HirType::Array(_) => Ok(Type::I32),
         _ => bail!("Unsupported parameter type in WAFFLE lowering: {ty:?}"),
@@ -972,6 +992,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
             Ok(vec![Type::I32])
         }
         ty if super::objects::is_object(ty) => Ok(vec![Type::I32]),
+        ty if super::streams::web::Kind::of(ty).is_some() => Ok(vec![Type::I32]),
         ty if super::filesystem::is_stats(ty) => Ok(vec![Type::I32]),
         HirType::Array(_) => Ok(vec![Type::I32]),
         HirType::Generic { base, type_args } if base == "Result" && type_args.len() == 2 => {

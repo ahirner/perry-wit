@@ -811,6 +811,33 @@ impl VisitMut for SourceCalls {
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
         if let ast::TsEntityName::Ident(name) = &mut reference.type_name
             && name.ctxt == self.unresolved
+            && matches!(
+                name.sym.as_ref(),
+                "ReadableStream" | "ReadableStreamDefaultReader"
+            )
+        {
+            let bytes = reference.type_params.as_ref().is_some_and(|params| {
+                params.params.len() == 1
+                    && matches!(params.params[0].as_ref(),
+                    ast::TsType::TsTypeRef(ty) if matches!(&ty.type_name,
+                        ast::TsEntityName::Ident(name) if name.sym == "Uint8Array"))
+            });
+            if !bytes {
+                self.error.get_or_insert_with(|| {
+                    anyhow::anyhow!("Native Web Streams require Uint8Array chunks")
+                });
+                return;
+            }
+            let kind = if name.sym == "ReadableStream" {
+                super::streams::web::Kind::Readable
+            } else {
+                super::streams::web::Kind::Reader
+            };
+            name.sym = kind.name().into();
+            reference.type_params = None;
+        }
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && name.ctxt == self.unresolved
         {
             match name.sym.as_ref() {
                 "AbortController" => name.sym = super::abort::Kind::Controller.type_name().into(),

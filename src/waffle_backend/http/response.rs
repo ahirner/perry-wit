@@ -20,7 +20,8 @@ pub(crate) const NATIVE: u32 = 72;
 pub(crate) const STATUS_TEXT: u32 = 76;
 pub(crate) const SIGNAL: u32 = 88;
 pub(crate) const READER_DROPPED: u32 = 92;
-pub(crate) const SIZE: u32 = 96;
+pub(crate) const STREAM: u32 = 96;
+pub(crate) const SIZE: u32 = 100;
 
 pub(crate) struct Runtime<'a> {
     pub(crate) allocator: AllocationFuncs,

@@ -12,6 +12,7 @@ const SCALAR_ITERATION: &str = "perry:scalar-iteration";
 
 pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
     match ty {
+        ty if crate::waffle_backend::streams::web::Kind::of(ty).is_some() => Some("stream"),
         ty if crate::waffle_backend::objects::is_object(ty) => Some("object"),
         HirType::Promise(_) => Some("Promise"),
         ty if crate::waffle_backend::bytes::is_byte_view(ty) => Some("Uint8Array"),
@@ -39,6 +40,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
 
 pub(crate) fn is_reference(ty: &HirType) -> bool {
     match ty {
+        ty if crate::waffle_backend::streams::web::Kind::of(ty).is_some() => true,
         ty if crate::waffle_backend::nullable::inner(ty).is_some() => true,
         ty if crate::waffle_backend::values::is_boxed(ty) => true,
         ty if crate::waffle_backend::objects::is_object(ty) => true,
@@ -95,6 +97,25 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::PropertyGet {
+                object, property, ..
+            } if property == "body"
+                && (crate::waffle_backend::http::fetch::is_response(
+                    &self.infer_expr_type(object),
+                ) || crate::waffle_backend::http::request::is_request(
+                    &self.infer_expr_type(object),
+                )) =>
+            {
+                crate::waffle_backend::streams::web::body_type()
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if property == "locked"
+                && crate::waffle_backend::streams::web::Kind::of(&self.infer_expr_type(object))
+                    .is_some() =>
+            {
+                HirType::Boolean
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if crate::waffle_backend::abort::Kind::of(&self.infer_expr_type(object))
@@ -337,6 +358,17 @@ impl FunctionLowerer<'_> {
                             "has" => HirType::Boolean,
                             "get" => HirType::Union(vec![HirType::String, HirType::Null]),
                             _ => HirType::Void,
+                        };
+                    }
+                    if crate::waffle_backend::streams::web::Kind::of(&self.infer_expr_type(object))
+                        .is_some()
+                    {
+                        return match property.as_str() {
+                            "getReader" => crate::waffle_backend::streams::web::Kind::Reader.ty(),
+                            "releaseLock" => HirType::Void,
+                            name => crate::waffle_backend::streams::web::Method::named(name)
+                                .map(|m| HirType::Promise(Box::new(m.result())))
+                                .unwrap_or(HirType::Unknown),
                         };
                     }
                     if (crate::waffle_backend::http::fetch::is_response(

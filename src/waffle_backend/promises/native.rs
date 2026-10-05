@@ -19,7 +19,7 @@ pub(crate) struct NativeRuntime {
     pub finish: Func,
     pub validate: Func,
     pub cancel_all: Func,
-    settle: Func,
+    pub(crate) settle: Func,
     new_thread: Func,
     resume_now: Func,
     suspend_then_promote: Func,
@@ -216,7 +216,7 @@ pub(crate) fn emit(
         if guest {
             b.call(native.context_set, &[context], &[]);
         }
-        let args = parameters
+        let mut args = parameters
             .iter()
             .enumerate()
             .map(|(index, ty)| b.load(context, 8 * (index as u32 + 1), *ty))
@@ -234,6 +234,10 @@ pub(crate) fn emit(
             b.store(frame, 12 + 4 * index as u32, *value, I32);
         }
         let (callee, completion) = match target {
+            TaskTarget::WebStream(method) => {
+                args.push(record);
+                (registry.web_streams.unwrap().method(*method), true)
+            }
             TaskTarget::Guest(id) => (registry.functions[id].func_index, true),
             TaskTarget::FetchUpload => (registry.http_helpers.unwrap().fetch.unwrap().upload, true),
             TaskTarget::HttpBody(method) => (registry.body_helpers.unwrap().method(*method), true),
@@ -257,7 +261,23 @@ pub(crate) fn emit(
             };
             (tag, payload)
         };
-        b.call(native.settle, &[record, tag, payload], &[]);
+        if matches!(
+            target,
+            TaskTarget::WebStream(super::super::streams::web::Method::Read)
+        ) {
+            let state = b.load(record, 4, I32);
+            let two = b.integer(2);
+            let pending = b.op(Operator::I32Eq, &[state, two], I32);
+            let settle = b.body.add_block();
+            let done = b.body.add_block();
+            b.branch(pending, settle, done);
+            b.block = settle;
+            b.call(native.settle, &[record, tag, payload], &[]);
+            b.jump(done, &[]);
+            b.block = done;
+        } else {
+            b.call(native.settle, &[record, tag, payload], &[]);
+        }
         b.call(registry.allocator.unwrap().frame_drop, &[frame], &[]);
         if guest {
             b.call(native.complete, &[], &[]);

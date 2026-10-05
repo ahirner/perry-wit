@@ -4,6 +4,7 @@ pub(crate) mod buffered;
 mod input;
 pub(crate) mod output;
 pub(crate) mod transfer;
+pub(crate) mod web;
 
 pub(crate) use transfer::read as emit_read_transfer;
 

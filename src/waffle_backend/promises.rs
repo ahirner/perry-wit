@@ -43,6 +43,7 @@ pub(crate) enum TaskTarget {
     Guest(FuncId),
     Intrinsic(String),
     HttpBody(super::http::body::BodyMethod),
+    WebStream(super::streams::web::Method),
     FetchUpload,
 }
 
@@ -50,6 +51,13 @@ impl TaskTarget {
     pub(crate) fn http_body(callee: &Expr) -> Option<Self> {
         if let Expr::PropertyGet { property, .. } = callee {
             super::http::body::BodyMethod::named(property).map(Self::HttpBody)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn web_stream(callee: &Expr) -> Option<Self> {
+        if let Expr::PropertyGet { property, .. } = callee {
+            super::streams::web::Method::named(property).map(Self::WebStream)
         } else {
             None
         }
@@ -76,6 +84,7 @@ pub(crate) enum TaskArguments {
     Fetch,
     FetchUpload,
     HttpBody,
+    WebStream,
     Filesystem(super::capabilities::FilesystemOperation),
     TimerValue,
 }
@@ -91,7 +100,7 @@ impl TaskArguments {
             ]),
             Self::Fetch => Ok(vec![waffle::Type::I32; 9]),
             Self::FetchUpload => Ok(vec![waffle::Type::I32; 3]),
-            Self::HttpBody => Ok(vec![waffle::Type::I32; 2]),
+            Self::HttpBody | Self::WebStream => Ok(vec![waffle::Type::I32; 2]),
             Self::Source(types) => types
                 .iter()
                 .map(super::registry::map_type_to_waffle)
@@ -195,6 +204,19 @@ pub(crate) fn plan_promises(
             )
         });
     if has_body {
+        for method in [
+            super::streams::web::Method::Read,
+            super::streams::web::Method::Cancel,
+        ] {
+            candidates.insert(
+                TaskTarget::WebStream(method),
+                TaskPlan {
+                    symbol: format!("__perry.stream.{method:?}"),
+                    arguments: TaskArguments::WebStream,
+                    result: method.result(),
+                },
+            );
+        }
         for method in super::http::body::BodyMethod::ALL {
             candidates.insert(
                 TaskTarget::HttpBody(method),
@@ -218,6 +240,7 @@ pub(crate) fn plan_promises(
             if let Expr::Call { callee, .. } = expression
                 && let Some(target) = TaskTarget::from_callee(callee)
                     .or_else(|| has_body.then(|| TaskTarget::http_body(callee)).flatten())
+                    .or_else(|| has_body.then(|| TaskTarget::web_stream(callee)).flatten())
                 && let Some(plan) = candidates.get(&target)
             {
                 if awaited {
@@ -247,7 +270,7 @@ pub(crate) fn plan_promises(
     }
     let uses_body = referenced
         .keys()
-        .any(|target| matches!(target, TaskTarget::HttpBody(_)));
+        .any(|target| matches!(target, TaskTarget::HttpBody(_) | TaskTarget::WebStream(_)));
     let uses_filesystem = referenced
         .values()
         .any(|task| matches!(task.arguments, TaskArguments::Filesystem(_)));
@@ -305,4 +328,5 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || super::http::is_response(ty)
         || super::http::headers::is_headers(ty)
         || super::http::request::is_request(ty)
+        || super::streams::web::Kind::of(ty).is_some()
 }

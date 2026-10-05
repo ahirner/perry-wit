@@ -53,6 +53,43 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn http_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {
+        if property == "body"
+            && (http::request::is_request(&self.infer_expr_type(receiver))
+                || http::fetch::is_response(&self.infer_expr_type(receiver)))
+        {
+            let value = self.expression(receiver)?;
+            let kind = self.op(
+                Operator::I32Const {
+                    value: u32::from(http::fetch::is_response(&self.infer_expr_type(receiver))),
+                },
+                &[],
+                &[Type::I32],
+            );
+            let stream = self.op(
+                Operator::Call {
+                    function_index: self.registry.web_streams.unwrap().body,
+                },
+                &[value, kind],
+                &[Type::I32],
+            );
+            let present = self.op(
+                Operator::I32Const {
+                    value: crate::waffle_backend::values::ValueTag::ReadableStream as u32,
+                },
+                &[],
+                &[Type::I32],
+            );
+            let null = self.op(
+                Operator::I32Const {
+                    value: crate::waffle_backend::values::ValueTag::Null as u32,
+                },
+                &[],
+                &[Type::I32],
+            );
+            let tag = self.op(Operator::Select, &[present, null, stream], &[Type::I32]);
+            let payload = self.op(Operator::F64ConvertI32U, &[stream], &[Type::F64]);
+            return Ok(self.box_value(tag, payload));
+        }
         if http::request::is_request(&self.infer_expr_type(receiver)) {
             let value = self.expression(receiver)?;
             if property == "headers" {
@@ -412,6 +449,57 @@ impl FunctionLowerer<'_> {
             payload,
             true,
         ))
+    }
+
+    pub(super) fn web_stream_method(
+        &mut self,
+        kind: crate::waffle_backend::streams::web::Kind,
+        receiver: &Expr,
+        method: &str,
+        arguments: &[Expr],
+    ) -> Result<Value> {
+        use crate::waffle_backend::streams::web::{Kind, Method};
+        ensure!(
+            arguments.is_empty(),
+            "Web Stream {method} takes no arguments in the supported byte-stream surface"
+        );
+        let helpers = self
+            .registry
+            .web_streams
+            .context("Web Stream methods require a native body")?;
+        let value = self.expression(receiver)?;
+        let sync = match (kind, method) {
+            (Kind::Readable, "getReader") => Some((helpers.reader, true)),
+            (Kind::Reader, "releaseLock") => Some((helpers.release, false)),
+            _ => None,
+        };
+        if let Some((function, reference)) = sync {
+            let payload = self.call_completion(function, &[value]);
+            return Ok(abi::decode_payload(
+                &mut self.body,
+                self.block,
+                payload,
+                reference,
+            ));
+        }
+        let method = match (kind, method) {
+            (Kind::Reader, "read") => Method::Read,
+            (_, "cancel") => Method::Cancel,
+            _ => bail!("Unsupported native Web Stream method '{method}'"),
+        };
+        let reader = self.op(
+            Operator::I32Const {
+                value: u32::from(kind == Kind::Reader),
+            },
+            &[],
+            &[Type::I32],
+        );
+        self.start_task(
+            &crate::waffle_backend::promises::TaskTarget::WebStream(method),
+            &[value, reader],
+            None,
+        )?
+        .context("Web Stream operation requires a retained task")
     }
 
     pub(super) fn http_body(

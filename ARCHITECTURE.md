@@ -185,6 +185,12 @@ Filesystem source operations use `node:fs/promises` or `fs/promises`. One typed
 capability path creates retained tasks for reads, writes, and metadata operations;
 synchronous and callback filesystem calls are rejected before lowering.
 
+HTTP byte readers separate public read promises from private transfer completion.
+Releasing a lock rejects pending public reads while retaining native buffers;
+subsequent readers receive any completed chunk. Explicit cancellation retains the
+transfer owner through acknowledgement. Buffered body consumption and Request
+body transfer use the same body identity and locking state.
+
 Native transfer loops handle partial reads/writes and backpressure, and check
 the associated completion channel as well as EOF. Filesystem descriptors and
 HTTP resources close on supported return/error paths. Validation precedes

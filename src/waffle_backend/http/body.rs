@@ -66,7 +66,8 @@ pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) ->
     let strings = r.strings;
     let body = builder::declare(module, "body.bytes", &[I32; 2], &[I32, F64]);
     let text = builder::declare(module, "body.text", &[I32; 2], &[I32, F64]);
-    let mut b = Builder::new(module, body, memory);
+    let consume = builder::declare(module, "body.consume-bytes", &[I32; 2], &[I32, F64]);
+    let mut b = Builder::new(module, consume, memory);
     let kind = b.param(1);
     let one = b.integer(1);
     let valid = b.op(O::I32LeU, &[kind, one], I32);
@@ -124,6 +125,71 @@ pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) ->
     let payload = b.op(O::F64ConvertI32U, &[bytes], F64);
     let zero = b.integer(0);
     b.ret(&[zero, payload]);
+    b.finish(module, consume)?;
+    let mut b = Builder::new(module, body, memory);
+    let receiver = b.param(0);
+    let kind = b.param(1);
+    let request_slot = b.integer(super::request::STREAM);
+    let response_slot = b.integer(super::response::STREAM);
+    let offset = b.op(O::Select, &[response_slot, request_slot, kind], I32);
+    let slot = b.op(O::I32Add, &[receiver, offset], I32);
+    let stream = b.load(slot, 0, I32);
+    let inspect = b.body.add_block();
+    let read = b.body.add_block();
+    b.branch(stream, inspect, read);
+    b.block = inspect;
+    let locked = b.load(stream, crate::waffle_backend::streams::web::LOCK, I32);
+    let reject = b.body.add_block();
+    b.branch(locked, reject, read);
+    b.block = reject;
+    let one = b.integer(1);
+    let error = b.number(12.0);
+    b.ret(&[one, error]);
+    b.block = read;
+    let request_used = b.integer(super::request::BODY_USED);
+    let response_used = b.integer(20);
+    let offset = b.op(O::Select, &[response_used, request_used, kind], I32);
+    let used_address = b.op(O::I32Add, &[receiver, offset], I32);
+    let used = b.load(used_address, 0, I32);
+    let one = b.integer(1);
+    let frame = b.call(allocator.frame_new, &[one], &[I32])[0];
+    b.store(frame, 12, stream, I32);
+    let fresh = b.op(O::I32Eqz, &[used], I32);
+    let zero = b.integer(0);
+    let cached = b.op(O::I32Ne, &[stream, zero], I32);
+    let update = b.op(O::I32And, &[cached, fresh], I32);
+    let lock = b.body.add_block();
+    let consume_body = b.body.add_block();
+    b.branch(update, lock, consume_body);
+    b.block = lock;
+    b.store(stream, crate::waffle_backend::streams::web::LOCK, one, I32);
+    b.jump(consume_body, &[]);
+    b.block = consume_body;
+    let result = b.call(consume, &[receiver, kind], &[I32, F64]);
+    let consumed = b.body.add_block();
+    let done = b.body.add_block();
+    b.branch(update, consumed, done);
+    b.block = consumed;
+    let two = b.integer(2);
+    let state = b.op(O::Select, &[two, one, result[0]], I32);
+    b.store(
+        stream,
+        crate::waffle_backend::streams::web::STATE,
+        state,
+        I32,
+    );
+    let error = b.op(O::I32TruncSatF64U, &[result[1]], I32);
+    let error = b.op(O::Select, &[error, zero, result[0]], I32);
+    b.store(
+        stream,
+        crate::waffle_backend::streams::web::ERROR,
+        error,
+        I32,
+    );
+    b.jump(done, &[]);
+    b.block = done;
+    b.call(allocator.frame_drop, &[frame], &[]);
+    b.ret(&result);
     b.finish(module, body)?;
     let mut b = Builder::new(module, text, memory);
     let result = b.call(body, &[b.param(0), b.param(1)], &[I32, F64]);
