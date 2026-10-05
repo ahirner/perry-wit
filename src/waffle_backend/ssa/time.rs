@@ -159,14 +159,13 @@ impl FunctionLowerer<'_> {
     }
 
     fn time_days(&mut self, expression: &Expr) -> Result<Value> {
-        if let Some(fields) = literal_properties(self.contract, expression)? {
-            ensure!(
-                fields.len() == 1
-                    && fields[0].0 == "days"
-                    && self.infer_expr_type(fields[0].1) == HirType::Number,
-                "Temporal.add supports only {{days: number}}"
-            );
-            return self.expression(fields[0].1);
+        if let Some(mut fields) = literal_properties(self.contract, expression)? {
+            if let (Some(("days", days)), None) = (fields.next(), fields.next())
+                && self.infer_expr_type(days) == HirType::Number
+            {
+                return self.expression(days);
+            }
+            bail!("Temporal.add supports only {{days: number}}");
         }
         let HirType::Object(fields) = self.infer_expr_type(expression) else {
             bail!("Temporal.PlainDateTime.add requires a statically typed {{days: number}} record");

@@ -1,6 +1,6 @@
 //! Statically typed Promise combinators; no thenable or iterator reflection.
 
-use super::FunctionLowerer;
+use super::{FunctionLowerer, values::ArrayElementTypes};
 use crate::waffle_backend::{
     capabilities::CapabilityOperation, promises::Combinator, resolve::TypedIntrinsic,
     values::ValueTag,
@@ -146,7 +146,7 @@ impl FunctionLowerer<'_> {
                     .iter()
                     .map(|ty| Ok(Expr::Number(outcome_tag(ty)? as f64)))
                     .collect::<Result<Vec<_>>>()?;
-                self.new_value_array(&tags, Some(&vec![HirType::Number; tags.len()]))?
+                self.new_value_array(&tags, ArrayElementTypes::Uniform(&HirType::Number))?
             }
             _ => unreachable!(),
         };
@@ -154,7 +154,7 @@ impl FunctionLowerer<'_> {
             let HirType::Tuple(types) = &input_ty else {
                 unreachable!()
             };
-            self.new_value_array(items, Some(types))?
+            self.new_value_array(items, ArrayElementTypes::Tuple(types))?
         } else {
             self.expression(&args[0])?
         };

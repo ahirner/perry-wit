@@ -808,27 +808,14 @@ impl ModuleRegistry {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            if is_exported && contract.wit.is_none() {
-                ensure!(
-                    canonical_param_types(
-                        &func
-                            .params
-                            .iter()
-                            .map(|param| param.ty.clone())
-                            .collect::<Vec<_>>()
-                    )?
-                    .len()
-                        <= 16,
-                    "Core-only entry functions with more than 16 flattened parameters require a resolved WIT world for indirect canonical parameters"
-                );
-            }
+            let param_types: Vec<_> = func.params.iter().map(|param| param.ty.clone()).collect();
             let host_returns = if contract.wit.is_none() {
                 map_return_type_to_waffle(&func.return_type)?
             } else {
                 vec![]
             };
             let sig = module.signatures.push(SignatureData {
-                params: params.clone(),
+                params,
                 returns: vec![Type::I32, Type::F64],
             });
             let mut body = FunctionBody::new(module, sig);
@@ -855,12 +842,16 @@ impl ModuleRegistry {
                 } else {
                     ExportConvention::Direct
                 };
-                let param_types: Vec<_> = func.params.iter().map(|p| p.ty.clone()).collect();
                 let signature = if let Some(export) = wit_export {
                     contract.wit.as_ref().unwrap().signature(export)
                 } else {
+                    let params = canonical_param_types(&param_types)?;
+                    ensure!(
+                        params.len() <= 16,
+                        "Core-only entry functions with more than 16 flattened parameters require a resolved WIT world for indirect canonical parameters"
+                    );
                     SignatureData {
-                        params: canonical_param_types(&param_types)?,
+                        params,
                         returns: host_returns,
                     }
                 };
@@ -886,7 +877,7 @@ impl ModuleRegistry {
                 FunctionInfo {
                     func_index,
                     sig,
-                    param_types: func.params.iter().map(|p| p.ty.clone()).collect(),
+                    param_types,
                     return_type: func.return_type.clone(),
                     export,
                 },

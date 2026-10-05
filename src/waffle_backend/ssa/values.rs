@@ -16,6 +16,12 @@ use perry_hir::{
 };
 use waffle::{MemoryArg, Operator, Type, Value};
 
+pub(super) enum ArrayElementTypes<'a> {
+    Inferred,
+    Uniform(&'a HirType),
+    Tuple(&'a [HirType]),
+}
+
 impl FunctionLowerer<'_> {
     pub(super) fn dynamic_has(&mut self, receiver: Value, key: Value) -> Result<Value> {
         let result =
@@ -75,7 +81,7 @@ impl FunctionLowerer<'_> {
     pub(super) fn new_value_array(
         &mut self,
         items: &[Expr],
-        types: Option<&[HirType]>,
+        types: ArrayElementTypes<'_>,
     ) -> Result<Value> {
         let length = self.op(
             Operator::I32Const {
@@ -93,9 +99,14 @@ impl FunctionLowerer<'_> {
         );
         self.reference_values.insert(array);
         for (index, item) in items.iter().enumerate() {
-            let value = if let Some(types) = types {
-                let value = self.typed_operand(item, &types[index])?;
-                self.box_typed_value(value, &types[index])?
+            let expected = match types {
+                ArrayElementTypes::Inferred => None,
+                ArrayElementTypes::Uniform(ty) => Some(ty),
+                ArrayElementTypes::Tuple(types) => Some(&types[index]),
+            };
+            let value = if let Some(ty) = expected {
+                let value = self.typed_operand(item, ty)?;
+                self.box_typed_value(value, ty)?
             } else {
                 self.value_operand(item)?
             };

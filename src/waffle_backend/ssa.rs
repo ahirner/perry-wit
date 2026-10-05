@@ -1613,7 +1613,7 @@ impl<'a> FunctionLowerer<'a> {
             {
                 bail!("Typed array properties are read-only; use push to append elements")
             }
-            Expr::Array(items) => self.new_value_array(items, None),
+            Expr::Array(items) => self.new_value_array(items, values::ArrayElementTypes::Inferred),
             Expr::PropertyGet {
                 object, property, ..
             } if super::values::has_dynamic_properties(&self.infer_expr_type(object)) => {

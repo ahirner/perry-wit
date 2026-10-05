@@ -1,6 +1,6 @@
 //! Structural checks for values used by resolved WIT implementations.
 
-use super::{FunctionLowerer, options::literal_properties};
+use super::{FunctionLowerer, options::literal_properties, values::ArrayElementTypes};
 use anyhow::{Result, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
 
@@ -42,8 +42,8 @@ impl FunctionLowerer<'_> {
             return self.expression(expression);
         }
         if let HirType::Union(variants) = expected {
-            if let Ok(Some(fields)) = literal_properties(self.contract, expression)
-                && let Some((_, Expr::Bool(ok))) = fields.iter().find(|(name, _)| name == "ok")
+            if let Ok(Some(mut fields)) = literal_properties(self.contract, expression)
+                && let Some((_, Expr::Bool(ok))) = fields.find(|(name, _)| *name == "ok")
                 && let Some(variant) = result_variant(variants, *ok)
             {
                 return self.typed_operand(expression, variant);
@@ -60,9 +60,11 @@ impl FunctionLowerer<'_> {
                 self.new_string_array(items)
             }
             (Expr::Array(items), HirType::Array(inner)) => {
-                self.new_value_array(items, Some(&vec![(**inner).clone(); items.len()]))
+                self.new_value_array(items, ArrayElementTypes::Uniform(inner))
             }
-            (Expr::Array(items), HirType::Tuple(types)) => self.new_value_array(items, Some(types)),
+            (Expr::Array(items), HirType::Tuple(types)) => {
+                self.new_value_array(items, ArrayElementTypes::Tuple(types))
+            }
             (_, HirType::Object(record))
                 if literal_properties(self.contract, expression)?.is_some() =>
             {
@@ -125,8 +127,8 @@ impl FunctionLowerer<'_> {
             return true;
         }
         if let HirType::Union(variants) = expected {
-            if let Ok(Some(fields)) = literal_properties(self.contract, expression)
-                && let Some((_, Expr::Bool(ok))) = fields.iter().find(|(name, _)| name == "ok")
+            if let Ok(Some(mut fields)) = literal_properties(self.contract, expression)
+                && let Some((_, Expr::Bool(ok))) = fields.find(|(name, _)| *name == "ok")
                 && let Some(variant) = result_variant(variants, *ok)
             {
                 return self.matches_typed_value(expression, variant);
@@ -148,9 +150,9 @@ impl FunctionLowerer<'_> {
                         .all(|(item, ty)| self.matches_typed_value(item, ty))
             }
             (_, HirType::Object(expected)) => {
-                if let Ok(Some(fields)) = literal_properties(self.contract, expression) {
+                if let Ok(Some(mut fields)) = literal_properties(self.contract, expression) {
                     return expected.properties.iter().all(|(name, field)| {
-                        fields.iter().find(|(key, _)| key == name).map_or(
+                        fields.clone().find(|(key, _)| *key == name).map_or(
                             field.optional,
                             |(_, value)| {
                                 self.matches_typed_value(
@@ -159,9 +161,7 @@ impl FunctionLowerer<'_> {
                                 )
                             },
                         )
-                    }) && fields
-                        .iter()
-                        .all(|(name, _)| expected.properties.contains_key(name));
+                    }) && fields.all(|(name, _)| expected.properties.contains_key(name));
                 }
                 if let HirType::Object(actual) = actual {
                     return expected.properties.iter().all(|(name, field)| {
@@ -205,12 +205,17 @@ impl FunctionLowerer<'_> {
                 let narrowed = if guard.equal == truth {
                     absent
                 } else {
-                    let non_absent: Vec<_> =
-                        variants.iter().filter(|t| **t != absent).cloned().collect();
-                    if non_absent.len() == 1 {
-                        non_absent.into_iter().next().unwrap()
-                    } else {
-                        HirType::Union(non_absent)
+                    let mut non_absent = variants.iter().filter(|ty| **ty != absent);
+                    match (non_absent.next(), non_absent.next()) {
+                        (Some(only), None) => only.clone(),
+                        (first, second) => HirType::Union(
+                            first
+                                .into_iter()
+                                .chain(second)
+                                .chain(non_absent)
+                                .cloned()
+                                .collect(),
+                        ),
                     }
                 };
                 self.narrowings.insert(guard.local, narrowed);
@@ -284,21 +289,17 @@ impl FunctionLowerer<'_> {
         let Some(label) = label else {
             return;
         };
-        let selected: Vec<_> = variants
-            .iter()
-            .filter(|ty| {
-                let HirType::Object(record) = ty else {
-                    return false;
-                };
-                let Some(field) = record.properties.get(member.1) else {
-                    return false;
-                };
-                matches!(&field.ty, HirType::StringLiteral(found) if (found == label) == equal)
-            })
-            .cloned()
-            .collect();
-        if selected.len() == 1 {
-            self.narrowings.insert(*id, selected[0].clone());
+        let mut selected = variants.iter().filter(|ty| {
+            let HirType::Object(record) = ty else {
+                return false;
+            };
+            let Some(field) = record.properties.get(member.1) else {
+                return false;
+            };
+            matches!(&field.ty, HirType::StringLiteral(found) if (found == label) == equal)
+        });
+        if let (Some(selected), None) = (selected.next(), selected.next()) {
+            self.narrowings.insert(*id, selected.clone());
         }
     }
 }

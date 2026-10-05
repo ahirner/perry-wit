@@ -98,13 +98,13 @@ impl FunctionLowerer<'_> {
         let fields = literal_properties(self.contract, expression)
             .ok()
             .flatten()
-            .unwrap_or_default();
+            .into_iter()
+            .flatten();
         HirType::Object(ObjectType {
             properties: fields
-                .into_iter()
                 .map(|(name, value)| {
                     (
-                        name,
+                        name.to_owned(),
                         PropertyInfo {
                             ty: self.infer_expr_type(value),
                             optional: false,
@@ -182,9 +182,9 @@ impl FunctionLowerer<'_> {
         self.reference_values.insert(object);
         for (name, expression) in fields {
             let field_type = expected
-                .and_then(|record| record.properties.get(&name))
+                .and_then(|record| record.properties.get(name))
                 .map(crate::waffle_backend::objects::property_type);
-            let key = self.expression(&Expr::String(name))?;
+            let key = self.expression(&Expr::String(name.into()))?;
             let (tag, payload) = if let Some(ty) = field_type {
                 let (_, tag, payload) = self.typed_field_parts(expression, &ty)?;
                 (tag, payload)

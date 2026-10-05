@@ -9,16 +9,11 @@ use waffle::{Operator, Type, Value};
 use crate::waffle_backend::resolve::ResolvedContract;
 
 pub(super) fn literal_properties<'a>(
-    contract: &ResolvedContract,
+    contract: &'a ResolvedContract,
     expression: &'a Expr,
-) -> Result<Option<Vec<(String, &'a Expr)>>> {
-    Ok(match expression {
-        Expr::Object(properties) => Some(
-            properties
-                .iter()
-                .map(|(name, value)| (name.clone(), value))
-                .collect(),
-        ),
+) -> Result<Option<impl ExactSizeIterator<Item = (&'a str, &'a Expr)> + Clone>> {
+    let properties = match expression {
+        Expr::Object(properties) => LiteralProperties::Object(properties),
         Expr::New {
             class_name, args, ..
         } if contract.literal_shapes.contains_key(class_name) => {
@@ -27,10 +22,24 @@ pub(super) fn literal_properties<'a>(
                 fields.len() == args.len(),
                 "Literal object shape does not match its values"
             );
-            Some(fields.iter().cloned().zip(args).collect())
+            LiteralProperties::Constructed(fields, args)
         }
-        _ => None,
-    })
+        _ => return Ok(None),
+    };
+    let length = match properties {
+        LiteralProperties::Object(fields) => fields.len(),
+        LiteralProperties::Constructed(fields, _) => fields.len(),
+    };
+    Ok(Some((0..length).map(move |index| match properties {
+        LiteralProperties::Object(fields) => (fields[index].0.as_str(), &fields[index].1),
+        LiteralProperties::Constructed(fields, values) => (fields[index].as_str(), &values[index]),
+    })))
+}
+
+#[derive(Clone, Copy)]
+enum LiteralProperties<'a> {
+    Object(&'a [(String, Expr)]),
+    Constructed(&'a [String], &'a [Expr]),
 }
 
 impl FunctionLowerer<'_> {
