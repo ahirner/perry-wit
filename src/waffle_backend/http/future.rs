@@ -39,6 +39,9 @@ pub(super) fn emit_finish_write(
     memory: Memory,
     native: &BTreeMap<String, Func>,
 ) -> Result<Func> {
+    if let Some(function) = native.get("finish-write") {
+        return Ok(*function);
+    }
     let function = builder::declare(module, "http.finish-write", &[I32, I32, I32], &[]);
     let mut b = Builder::new(module, function, memory);
     let writer = b.param(0);

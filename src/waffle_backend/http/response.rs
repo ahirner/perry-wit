@@ -18,7 +18,7 @@ use waffle::{
 pub(crate) const HEADERS: u32 = 68;
 pub(crate) const NATIVE: u32 = 72;
 pub(crate) const STATUS_TEXT: u32 = 76;
-pub(crate) const SIZE: u32 = 80;
+pub(crate) const SIZE: u32 = 88;
 
 pub(crate) struct Runtime<'a> {
     pub(crate) allocator: AllocationFuncs,

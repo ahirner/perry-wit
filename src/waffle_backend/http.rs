@@ -13,6 +13,7 @@ pub(crate) mod fetch;
 mod future;
 pub(crate) mod handler;
 pub(crate) mod headers;
+pub(crate) mod operations;
 pub(crate) mod request;
 pub(crate) mod response;
 
@@ -49,6 +50,7 @@ pub(crate) struct SourceRuntime<'a> {
     pub(crate) request: Option<request::Helpers>,
     pub(crate) pool: &'a super::strings::StringPool,
     pub(crate) promises: Option<&'a super::registry::PromiseImports>,
+    pub(crate) operations: Option<super::runtime::operations::Operations>,
 }
 
 pub(crate) fn emit_source_runtime(
@@ -92,8 +94,22 @@ pub(crate) fn emit_source_runtime(
     })
 }
 
-pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<String, Func> {
-    imports::declare_imports(module, "http", &native_functions())
+pub(crate) fn declare_imports(module: &mut Module<'static>, owned: bool) -> BTreeMap<String, Func> {
+    let mut functions = native_functions();
+    if owned {
+        functions.retain(|function| {
+            !matches!(
+                function.name.as_str(),
+                "send"
+                    | "read"
+                    | "read-trailers"
+                    | "read-completion"
+                    | "write-trailers"
+                    | "write-completion"
+            )
+        });
+    }
+    imports::declare_imports(module, "http", &functions)
 }
 
 pub(crate) fn emit_runtime(

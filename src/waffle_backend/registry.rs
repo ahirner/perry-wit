@@ -234,9 +234,15 @@ impl ModuleRegistry {
             .has_request()
             .then(|| super::http::request::declare_helpers(module));
         let http_imports = contract.has_http().then(|| {
-            let mut imports = super::http::declare_imports(module);
+            let mut imports = super::http::declare_imports(module, callbacks.is_some());
+            if callbacks.is_some() {
+                imports.extend(super::http::operations::declare(module));
+            }
             if contract.has_fetch() {
-                imports.extend(super::http::fetch::declare_helpers(module));
+                imports.extend(super::http::fetch::declare_helpers(
+                    module,
+                    callbacks.is_some(),
+                ));
             }
             imports
         });
@@ -302,7 +308,17 @@ impl ModuleRegistry {
         };
         let operations = operation_imports
             .map(|imports| {
-                super::runtime::operations::emit(module, memory, allocator.unwrap(), imports, &[])
+                let transfers = http_imports
+                    .as_ref()
+                    .map(super::http::operations::controllers)
+                    .unwrap_or_default();
+                super::runtime::operations::emit(
+                    module,
+                    memory,
+                    allocator.unwrap(),
+                    imports,
+                    &transfers,
+                )
             })
             .transpose()?;
         let await_subtask = if let Some(operations) = operations {
@@ -556,7 +572,10 @@ impl ModuleRegistry {
                 )
             })
             .transpose()?;
-        let http_helpers = if let Some(imports) = http_imports {
+        let http_helpers = if let Some(mut imports) = http_imports {
+            if let Some(operations) = operations {
+                super::http::operations::emit(module, memory, &mut imports, operations)?;
+            }
             Some(super::http::emit_source_runtime(
                 module,
                 memory,
@@ -569,6 +588,7 @@ impl ModuleRegistry {
                     request: request_helpers,
                     pool: string_pool,
                     promises: promises.as_ref(),
+                    operations,
                 },
             )?)
         } else {

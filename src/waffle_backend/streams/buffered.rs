@@ -8,7 +8,7 @@ use waffle::{
 
 use crate::waffle_backend::allocation::AllocationFuncs;
 
-/// Return (limit-exceeded, data, length). The caller owns the stream and its
+/// Return (error: 0 success, 1 limit, 2 cancellation; data; length). The caller owns the stream and its
 /// separate capability completion. No result bytes are exposed on overflow.
 pub(crate) fn emit(
     module: &mut Module<'static>,
@@ -140,12 +140,21 @@ pub(crate) fn emit(
     );
     let count = body.add_value(ValueDef::PickOutput(probe_call, 0, Type::I32));
     body.append_to_block(check_eof, count);
+    let status = body.add_value(ValueDef::PickOutput(probe_call, 1, Type::I32));
+    body.append_to_block(check_eof, status);
+    let cancelled = body.add_op(check_eof, Operator::I32Eq, &[status, two], &[Type::I32]);
+    let probe_error = body.add_op(
+        check_eof,
+        Operator::Select,
+        &[two, count, cancelled],
+        &[Type::I32],
+    );
     body.set_terminator(
         check_eof,
         Terminator::Br {
             target: BlockTarget {
                 block: finished,
-                args: vec![count, data, capacity, length],
+                args: vec![probe_error, data, capacity, length],
             },
         },
     );
@@ -240,6 +249,13 @@ pub(crate) fn emit(
     body.append_to_block(read, count);
     let closed = body.add_value(ValueDef::PickOutput(call, 1, Type::I32));
     body.append_to_block(read, closed);
+    let cancelled = body.add_op(read, Operator::I32Eq, &[closed, two], &[Type::I32]);
+    let read_error = body.add_op(
+        read,
+        Operator::Select,
+        &[two, zero, cancelled],
+        &[Type::I32],
+    );
     let length = body.add_op(read, Operator::I32Add, &[length, count], &[Type::I32]);
     body.set_terminator(
         read,
@@ -247,7 +263,7 @@ pub(crate) fn emit(
             cond: closed,
             if_true: BlockTarget {
                 block: finished,
-                args: vec![zero, data, capacity, length],
+                args: vec![read_error, data, capacity, length],
             },
             if_false: BlockTarget {
                 block: next,
@@ -283,7 +299,7 @@ pub(crate) fn emit(
     body.set_terminator(
         failure,
         Terminator::Return {
-            values: vec![one, zero, zero],
+            values: vec![error, zero, zero],
         },
     );
     let empty = body.add_op(success, Operator::I32Eqz, &[final_length], &[Type::I32]);

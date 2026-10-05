@@ -156,6 +156,33 @@ impl WitWorld {
     }
 
     fn http_binding(&self, name: &str) -> Result<(String, String)> {
+        if name == "async-send" {
+            return Ok(("wasi:http/client@0.3.0".into(), "[async-lower]send".into()));
+        }
+        if let Some(operation) = name
+            .strip_prefix("async-")
+            .or_else(|| name.strip_prefix("cancel-"))
+        {
+            let (operation, payload, family) =
+                if let Some(operation) = operation.strip_suffix("-trailers") {
+                    (operation, Payload::Trailers, "future")
+                } else if let Some(operation) = operation.strip_suffix("-completion") {
+                    (operation, Payload::Completion, "future")
+                } else {
+                    (operation, Payload::Stream, "stream")
+                };
+            let cancel = if name.starts_with("cancel-") {
+                "cancel-"
+            } else {
+                ""
+            };
+            return self.payload_binding(
+                HTTP,
+                "[static]request.consume-body",
+                payload,
+                &format!("async-{family}-{cancel}{operation}"),
+            );
+        }
         let function = match name {
             "fields" => "[static]fields.from-list",
             "copy-fields" => "[method]fields.copy-all",

@@ -5,7 +5,8 @@ use waffle::{Func, Memory, Module, Operator as Op, Type::I32};
 
 use crate::waffle_backend::runtime::builder::{self, Builder};
 
-/// Returns (transferred count, readable end closed). Zero-capacity reads do no I/O.
+/// Returns (transferred count, status: 0 open, 1 closed, 2 cancelled).
+/// Zero-capacity reads do no I/O.
 pub(crate) fn read(module: &mut Module<'static>, memory: Memory, native: Func) -> Result<Func> {
     let function = builder::declare(module, "stream.read-transfer", &[I32; 3], &[I32; 2]);
     let mut b = Builder::new(module, function, memory);
@@ -13,7 +14,6 @@ pub(crate) fn read(module: &mut Module<'static>, memory: Memory, native: Func) -
     let data = b.param(1);
     let capacity = b.param(2);
     let zero = b.integer(0);
-    let one = b.integer(1);
     let mask = b.integer(15);
     let shift = b.integer(4);
     let empty = b.body.add_block();
@@ -25,7 +25,8 @@ pub(crate) fn read(module: &mut Module<'static>, memory: Memory, native: Func) -
     b.block = read;
     let packed = b.call(native, &[stream, data, capacity], &[I32])[0];
     let status = b.op(Op::I32And, &[packed, mask], I32);
-    let valid = b.op(Op::I32LeU, &[status, one], I32);
+    let two = b.integer(2);
+    let valid = b.op(Op::I32LeU, &[status, two], I32);
     b.require(valid);
     let count = b.op(Op::I32ShrU, &[packed, shift], I32);
     let in_bounds = b.op(Op::I32LeU, &[count, capacity], I32);
@@ -46,7 +47,6 @@ pub(crate) fn write(module: &mut Module<'static>, memory: Memory, native: Func) 
     let data = b.param(1);
     let length = b.param(2);
     let zero = b.integer(0);
-    let one = b.integer(1);
     let mask = b.integer(15);
     let shift = b.integer(4);
     let batch = b.integer(65536);
@@ -70,7 +70,8 @@ pub(crate) fn write(module: &mut Module<'static>, memory: Memory, native: Func) 
     let pointer = b.op(Op::I32Add, &[data, offset], I32);
     let packed = b.call(native, &[stream, pointer, requested], &[I32])[0];
     let status = b.op(Op::I32And, &[packed, mask], I32);
-    let valid = b.op(Op::I32LeU, &[status, one], I32);
+    let two = b.integer(2);
+    let valid = b.op(Op::I32LeU, &[status, two], I32);
     b.require(valid);
     let count = b.op(Op::I32ShrU, &[packed, shift], I32);
     let in_bounds = b.op(Op::I32LeU, &[count, requested], I32);

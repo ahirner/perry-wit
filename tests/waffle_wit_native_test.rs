@@ -1,5 +1,7 @@
 #[path = "support/allocation_probe.rs"]
 mod allocation_probe;
+#[path = "support/native_cancellation_composition.rs"]
+mod native_cancellation_composition;
 #[path = "support/output_capture.rs"]
 mod output_capture;
 use anyhow::{Context, Result};
@@ -1590,6 +1592,154 @@ async fn standard_fetch_consumes_body_once_and_preserves_http_status() -> Result
             .iter()
             .all(|request| request.method == "GET" && request.target == "/test?q=hello%20world")
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_owners() -> Result<()>
+{
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for phase in ["headers", "body", "unused"] {
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let started = ready.clone();
+        let server = fixture::HttpFixture::new(move |request| {
+            if request.target == "/ok" {
+                return fixture::Reply::Body(200, "ok".into());
+            }
+            if phase == "headers" {
+                started.notify_one();
+                fixture::Reply::Stall
+            } else if phase == "body" {
+                fixture::Reply::StallBody
+            } else {
+                fixture::Reply::Body(200, "unused".into())
+            }
+        });
+        let url = serde_json::to_string(&format!("http://{}", server.address))?;
+        let checkpoint = if phase == "unused" {
+            "await wait(0);"
+        } else if phase == "body" {
+            "await wait(4);"
+        } else {
+            ""
+        };
+        let source = format!(
+            r#"
+            import {{wait}} from 'test:fetch-cancel/host';
+            let running = false;
+            export async function run(mode:number):Promise<number> {{
+                if(running) throw 1;
+                running = true;
+                try {{
+                    const response = await fetch({url} + (mode === 1 ? '/ok' : '/pending'));
+                    if(mode !== 1) {{ {checkpoint} }}
+                    await response.text();
+                    return 42;
+                }} finally {{ running = false; await wait(5); }}
+            }}
+        "#
+        );
+        let callee = compile(&source, r#"package test:fetch-cancel;
+            interface host { wait:async func(mode:u32)->u32; }
+            world boundary { import host; import wasi:http/client@0.3.0; export run:async func(mode:u32)->u32; }
+        "#)?.component.unwrap();
+        let mut transfers = 0;
+        for payload in wasmparser::Parser::new(0).parse_all(&callee) {
+            if let wasmparser::Payload::ComponentCanonicalSection(section) = payload? {
+                for function in section {
+                    use wasmparser::CanonicalFunction as Canonical;
+                    if let Canonical::StreamRead { options, .. }
+                    | Canonical::StreamWrite { options, .. }
+                    | Canonical::FutureRead { options, .. }
+                    | Canonical::FutureWrite { options, .. } = function?
+                    {
+                        assert!(
+                            options.contains(&wasmparser::CanonicalOption::Async),
+                            "owned HTTP transfer must be asynchronous"
+                        );
+                        transfers += 1;
+                    }
+                }
+            }
+        }
+        assert!(transfers >= 5, "expected body and both completion payloads");
+        let wit = tempfile::tempdir()?;
+        std::fs::write(
+            wit.path().join("world.wit"),
+            "package test:cancel; world caller { import wait:async func(mode:u32)->u32; import operation:async func(mode:u32)->u32; export run:async func(mode:u32)->u32; }",
+        )?;
+        let caller = perry_wit::component::embed_and_encode(
+            &wat::parse_str(include_str!("fixtures/cancellation/caller.wat"))?,
+            wit.path(),
+            Some("caller"),
+        )?;
+        let engine = engine()?;
+        let component = Component::new(
+            &engine,
+            native_cancellation_composition::compose(&callee, &caller)?,
+        )?;
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+        let checkpoint = ready.clone();
+        linker
+            .root()
+            .func_wrap_concurrent("wait", move |_, (_mode,): (u32,)| {
+                let ready = checkpoint.clone();
+                Box::pin(async move {
+                    ready.notified().await;
+                    Ok((0u32,))
+                })
+            })?;
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let observed = cleaned.clone();
+        linker
+            .instance("test:fetch-cancel/host")?
+            .func_wrap_concurrent("wait", move |_, (mode,): (u32,)| {
+                let ready = ready.clone();
+                let cleaned = observed.clone();
+                Box::pin(async move {
+                    if mode == 5 {
+                        cleaned.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        ready.notify_one();
+                    }
+                    if mode == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok((0u32,))
+                })
+            })?;
+        let mut store = store(&engine);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+        for round in 0..10 {
+            for mode in [2, 1] {
+                let status = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    run.call_async(&mut store, (mode,)),
+                )
+                .await
+                .with_context(|| {
+                    format!("{phase} cancellation round {round} mode {mode} timed out")
+                })??
+                .0;
+                assert_eq!(
+                    status,
+                    if mode == 2 { 4 } else { 2 },
+                    "{phase} round {round}"
+                );
+                store.assert_concurrent_state_empty();
+                assert!(
+                    store.data().table.is_empty(),
+                    "{phase} retained native resources"
+                );
+            }
+            assert_eq!(cleaned.load(Ordering::SeqCst), (round + 1) * 2);
+        }
+    }
     Ok(())
 }
 

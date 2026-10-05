@@ -49,14 +49,14 @@
         "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
-        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect fields. Web Streams, cancellation, and finite Error objects remain unfinished R8.3 work",
+        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect fields. Web Streams, AbortSignal, and finite Error objects remain unfinished R8.3 work",
         "One URL codec normalizes ASCII and percent-encoded hosts, numeric IPv4, bracketed IPv6, ports, dot segments, HTTP backslashes, path/query escaping, whitespace, and fragments. Internationalized domains and noncanonical scheme separators remain unsupported",
         "Constructed Response values preserve statusText; fetched responses expose an empty statusText because the standard WASI HTTP response carries no reason phrase",
         "Every non-null acquired fetch body must be consumed before the owning call returns; otherwise the invocation traps instead of abandoning its native owner",
         "Tasks may overlap in resolved WIT components and must finish before the owning invocation returns",
         "HttpResponse is guest-internal; component wrappers export status, text, or bytes",
         "Numeric failures: 8 overflow, 12 invalid metadata/limit/index, 100 plus WASI HTTP error discriminant, 200 plus header error discriminant",
-        "Traps and interrupted calls require store disposal"
+        "Host cancellation acknowledges HTTP send, body transfers, and completion channels before instance reuse; traps and host disposal require a fresh store"
       ],
       "conformance": [
         "rust:src/lib.rs#waffle_backend::http::tests::buffered_get_uses_real_p3_http_resources_and_preserves_headers_status_and_bytes",
@@ -76,6 +76,7 @@
         "rust:tests/waffle_wit_native_test.rs#resolved_world_http_domain_failures_release_resources_before_reuse",
         "rust:tests/waffle_wit_native_test.rs#resolved_world_http_disposal_releases_suspended_headers_and_body",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_consumes_body_once_and_preserves_http_status",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_owners",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_resolves_at_headers_and_matches_node",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_releases_failures_and_grows_bodies_incrementally",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_rejects_unconsumed_body_at_call_boundary",
@@ -442,7 +443,7 @@
         "Stored Promises require the host's component async stackful and threading features",
         "Promise parameters are guest-internal; constructors and callback reactions remain unsupported",
         "Detached call statements are diagnosed; unresolved work at return traps. Public calls execute serially; entries that bypass host serialization trap on the invocation guard",
-        "Host cancellation runs guest cleanup and drains acknowledged native owners in components without HTTP, filesystem, or stream transfers. AbortSignal and returned-stream ownership remain unfinished; traps and host disposal require a fresh store"
+        "Host cancellation runs guest cleanup and drains acknowledged native owners in components without filesystem or public stream transfers. AbortSignal and returned-stream ownership remain unfinished; traps and host disposal require a fresh store"
       ],
       "conformance": [
         "rust:tests/p3_promise_test.rs#long_invocations_reclaim_dead_promises_and_retain_shared_outcomes",
@@ -732,7 +733,7 @@
       "differences": [
         "Requires a resolved WIT world and the pinned host threading features",
         "Arbitrary iterables and thenables are unsupported; rejection payloads are numeric",
-        "Host cancellation drains the owning call, including empty races, in components without HTTP, filesystem, or stream transfers; AbortSignal and returned-stream ownership remain unfinished"
+        "Host cancellation drains the owning call, including empty races, in components without filesystem or public stream transfers; AbortSignal and returned-stream ownership remain unfinished"
       ],
       "conformance": [
         "rust:tests/waffle_wit_native_test.rs#promise_combinators_preserve_results_and_release_native_threads",

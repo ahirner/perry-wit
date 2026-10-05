@@ -148,7 +148,11 @@ pub(super) fn emit(
     }
     let worker_index = b.integer(worker_index);
     if registry.operations.is_some() {
-        crate::waffle_backend::runtime::callbacks::worker_count(&mut b, true);
+        crate::waffle_backend::runtime::callbacks::worker_count(
+            &mut b,
+            true,
+            crate::waffle_backend::runtime::callbacks::Worker::Source,
+        );
     }
     let thread = b.call(native.new_thread, &[worker_index, context], &[I32])[0];
     let input_tag = b.load(input_value, 0, I32);
@@ -382,7 +386,11 @@ fn emit_observer(
     b.call(registry.allocator.unwrap().frame_drop, &[frame], &[]);
     b.call(native.complete, &[], &[]);
     if registry.operations.is_some() {
-        crate::waffle_backend::runtime::callbacks::worker_count(&mut b, false);
+        crate::waffle_backend::runtime::callbacks::worker_count(
+            &mut b,
+            false,
+            crate::waffle_backend::runtime::callbacks::Worker::Source,
+        );
     }
     b.ret(&[]);
     b.finish(module, worker)

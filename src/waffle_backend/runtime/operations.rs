@@ -23,7 +23,14 @@ const TERMINAL: u32 = 2;
 
 pub(crate) struct Transfer {
     pub(crate) event: u32,
-    pub(crate) cancel: Func,
+    pub(crate) cancellation: Cancellation,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Cancellation {
+    Cancel(Func),
+    /// Completion futures must deliver their outcome even during cancellation.
+    Complete,
 }
 
 pub(crate) struct Imports {
@@ -381,8 +388,8 @@ pub(crate) fn emit(
     let control = b.load(node, CONTROL, I32);
     let acknowledged = b.body.add_block();
     let status = b.body.add_blockparam(acknowledged, I32);
-    for (index, cancel) in std::iter::once(i.cancel)
-        .chain(transfers.iter().map(|transfer| transfer.cancel))
+    for (index, cancellation) in std::iter::once(Cancellation::Cancel(i.cancel))
+        .chain(transfers.iter().map(|transfer| transfer.cancellation))
         .enumerate()
     {
         let code = b.integer(index as u32);
@@ -391,7 +398,10 @@ pub(crate) fn emit(
         let following = b.body.add_block();
         b.branch(same, selected, following);
         b.block = selected;
-        let status = b.call(cancel, &[handle], &[I32])[0];
+        let status = match cancellation {
+            Cancellation::Cancel(cancel) => b.call(cancel, &[handle], &[I32])[0],
+            Cancellation::Complete => b.integer(u32::MAX),
+        };
         b.jump(acknowledged, &[status]);
         b.block = following;
     }

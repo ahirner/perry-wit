@@ -192,7 +192,8 @@ supports redirect modes, and exposes response metadata and single-consumption
 and wait for P3 transfer completion; uploads retain snapshots through partial writes.
 `Request`, `Response`, and `Headers` support construction and buffered body values.
 Headers support `get`, `has`, `append`, `set`, and `delete`; fetched response headers
-are immutable. HTTP cancellation and Web Streams remain implementation work;
+are immutable. Host cancellation drains HTTP owners before acknowledging the call.
+AbortSignal and Web Streams remain implementation work;
 the capability catalog records supported shapes and executable evidence.
 
 ## Contributing

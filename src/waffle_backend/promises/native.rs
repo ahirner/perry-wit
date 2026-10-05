@@ -174,7 +174,15 @@ pub(crate) fn emit(
         }
         let index = b.integer(workers.len() as u32);
         if registry.operations.is_some() {
-            crate::waffle_backend::runtime::callbacks::worker_count(&mut b, true);
+            crate::waffle_backend::runtime::callbacks::worker_count(
+                &mut b,
+                true,
+                if guest {
+                    crate::waffle_backend::runtime::callbacks::Worker::Source
+                } else {
+                    crate::waffle_backend::runtime::callbacks::Worker::Native
+                },
+            );
         }
         let thread = b.call(native.new_thread, &[index, context], &[I32])[0];
         b.call(native.resume_now, &[thread], &[I32]);
@@ -246,7 +254,15 @@ pub(crate) fn emit(
             b.call(native.dispatch, &[], &[I32]);
         }
         if registry.operations.is_some() {
-            crate::waffle_backend::runtime::callbacks::worker_count(&mut b, false);
+            crate::waffle_backend::runtime::callbacks::worker_count(
+                &mut b,
+                false,
+                if guest {
+                    crate::waffle_backend::runtime::callbacks::Worker::Source
+                } else {
+                    crate::waffle_backend::runtime::callbacks::Worker::Native
+                },
+            );
         }
         b.ret(&[]);
         b.finish(module, worker)?;

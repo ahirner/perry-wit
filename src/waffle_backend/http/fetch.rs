@@ -17,6 +17,7 @@ use waffle::{
     Value,
 };
 
+mod owners;
 mod redirects;
 mod upload;
 
@@ -33,6 +34,7 @@ pub(crate) struct Helpers {
     pub(crate) upload: Func,
     pub(crate) consume: Func,
     pub(crate) finish: Func,
+    pub(crate) cancel_unused: Option<Func>,
 }
 
 fn offset(b: &mut Builder, pointer: Value, offset: u32) -> Value {
@@ -99,12 +101,15 @@ pub(super) fn emit(
         finish_write: super::future::emit_finish_write(module, memory, native)?,
         promises,
         consume: body,
+        release,
+        operations: runtime.operations,
     };
     emit_fetch(module, memory, send, &transport, strings)?;
     let upload = upload::emit(module, memory, native)?;
     let transfer = streams::emit_read_transfer(module, memory, native["read"])?;
     let buffered = streams::buffered::emit(module, memory, allocator, transfer)?;
     emit_release(module, memory, release, &transport)?;
+    let cancel_unused = owners::emit_cancel_unused(module, memory, &transport, release)?;
     emit_body(module, memory, body, &transport, bytes, buffered, release)?;
     redirects::emit_discard(module, memory, discard, &transport, release)?;
     redirects::emit(module, memory, fetch, send, discard, &transport, runtime)?;
@@ -120,6 +125,7 @@ pub(super) fn emit(
         upload,
         consume: body,
         finish,
+        cancel_unused,
     })
 }
 
@@ -130,7 +136,9 @@ struct Transport<'a> {
     allocator: AllocationFuncs,
     finish_write: Func,
     consume: Func,
+    release: Func,
     promises: &'a crate::waffle_backend::registry::PromiseImports,
+    operations: Option<crate::waffle_backend::runtime::operations::Operations>,
 }
 impl Transport<'_> {
     fn finish_request(&self, b: &mut Builder, response: Value, scratch: Value) -> Value {
@@ -338,10 +346,20 @@ fn emit_fetch(
     let trailers = b.load(scratch, 4, I32);
     b.store(response, 24, stream, I32);
     b.store(response, 28, trailers, I32);
-    let address = b.integer(OWNERS);
-    let count = b.load(address, 0, I32);
-    let count = b.op(O::I32Add, &[count, one], I32);
-    b.store(address, 0, count, I32);
+    owners::retain(&mut b, response);
+    if let Some(operations) = t.operations {
+        let cancelled = b.call(operations.cancelled, &[], &[I32])[0];
+        let cleanup = b.body.add_block();
+        let ready = b.body.add_block();
+        b.branch(cancelled, cleanup, ready);
+        b.block = cleanup;
+        b.store(response, 20, one, I32);
+        b.call(t.release, &[response], &[I32]);
+        b.call(t.allocator.frame_drop, &[frame], &[]);
+        let error = b.number(20.0);
+        b.ret(&[one, error]);
+        b.block = ready;
+    }
     let head = b.op(O::I32Eq, &[method[0], one], I32);
     let mut null_body = head;
     for code in [204, 205, 304] {
@@ -401,6 +419,12 @@ fn emit_body(
     let result = b.call(buffered, &[stream, limit], &[I32, I32, I32]);
     b.store(frame, 24, result[1], I32);
     let error = b.call(release, &[response], &[I32])[0];
+    let two = b.integer(2);
+    let cancelled = b.op(O::I32Eq, &[result[0], two], I32);
+    let aborted = b.integer(20);
+    let overflow = b.integer(8);
+    let read_error = b.op(O::Select, &[aborted, overflow, cancelled], I32);
+    let error = b.op(O::Select, &[read_error, error, result[0]], I32);
     let failed = b.body.add_block();
     let ready = b.body.add_block();
     b.branch(error, failed, ready);
@@ -465,10 +489,7 @@ fn emit_release(
     b.call(t.native["drop-completion-writer"], &[writer], &[]);
     let request_error = t.finish_request(&mut b, response, scratch);
     let error = b.op(O::Select, &[error, request_error, error], I32);
-    let address = b.integer(OWNERS);
-    let count = b.load(address, 0, I32);
-    let count = b.op(O::I32Sub, &[count, one], I32);
-    b.store(address, 0, count, I32);
+    owners::release(&mut b, response);
     b.ret(&[error]);
     b.finish(module, function)
 }
@@ -477,7 +498,7 @@ fn emit_release(
 #[path = "../../helpers/fetch.rs"]
 mod algorithms;
 
-pub(crate) fn declare_helpers(module: &mut Module<'static>) -> BTreeMap<String, Func> {
+pub(crate) fn declare_helpers(module: &mut Module<'static>, owned: bool) -> BTreeMap<String, Func> {
     let mut functions = imports::declare_imports(
         module,
         crate::waffle_backend::link::HELPER_MODULE,
@@ -502,16 +523,22 @@ pub(crate) fn declare_helpers(module: &mut Module<'static>) -> BTreeMap<String, 
                 results: vec!["i64"],
             },
             imports::Function {
-                name: "write".into(),
-                params: vec!["i32"; 3],
-                results: vec!["i32"],
-            },
-            imports::Function {
                 name: "drop-writer".into(),
                 params: vec!["i32"],
                 results: vec![],
             },
         ],
     ));
+    if !owned {
+        functions.extend(imports::declare_imports(
+            module,
+            "http",
+            &[imports::Function {
+                name: "write".into(),
+                params: vec!["i32"; 3],
+                results: vec!["i32"],
+            }],
+        ));
+    }
     functions
 }

@@ -15,6 +15,7 @@ use waffle::{
 };
 
 pub(crate) const LIVE_WORKERS: u32 = 120;
+const NATIVE_WORKERS: u32 = 136;
 const CONTEXT: u32 = 124;
 const DONE: u32 = 128;
 const FRAME: u32 = 132;
@@ -24,8 +25,7 @@ pub(crate) fn enabled(contract: &ResolvedContract) -> bool {
         wit.functions
             .values()
             .any(|export| export.function.kind.is_async())
-    }) && !contract.has_http()
-        && !contract.has_filesystem()
+    }) && !contract.has_filesystem()
         && !contract.has_stream_input()
         && contract.output_operations().is_empty()
         && contract.http_handler.is_none()
@@ -87,19 +87,29 @@ pub(crate) fn declare(module: &mut Module<'static>, contract: &ResolvedContract)
     }
 }
 
-pub(crate) fn worker_count(b: &mut Builder, started: bool) {
-    let address = b.integer(LIVE_WORKERS);
-    let count = b.load(address, 0, I32);
-    let one = b.integer(1);
-    if !started {
-        b.require(count);
+#[derive(Clone, Copy)]
+pub(crate) enum Worker {
+    Source,
+    Native,
+}
+
+pub(crate) fn worker_count(b: &mut Builder, started: bool, kind: Worker) {
+    for address in std::iter::once(LIVE_WORKERS)
+        .chain(matches!(kind, Worker::Native).then_some(NATIVE_WORKERS))
+    {
+        let address = b.integer(address);
+        let count = b.load(address, 0, I32);
+        let one = b.integer(1);
+        if !started {
+            b.require(count);
+        }
+        let count = b.op(
+            if started { O::I32Add } else { O::I32Sub },
+            &[count, one],
+            I32,
+        );
+        b.store(address, 0, count, I32);
     }
-    let count = b.op(
-        if started { O::I32Add } else { O::I32Sub },
-        &[count, one],
-        I32,
-    );
-    b.store(address, 0, count, I32);
 }
 
 pub(crate) fn emit(
@@ -137,6 +147,13 @@ pub(crate) fn emit(
     let returned = b.call(export.func_index, &args, &signature.returns);
     for (index, (value, ty)) in returned.iter().zip(&signature.returns).enumerate() {
         b.store(context, result_offset + 8 * index as u32, *value, *ty);
+    }
+    if let Some(cancel) = registry
+        .http_helpers
+        .and_then(|http| http.fetch)
+        .and_then(|fetch| fetch.cancel_unused)
+    {
+        b.call(cancel, &[], &[]);
     }
     if let Some(promises) = &registry.promises {
         b.call(promises.native.complete, &[], &[]);
@@ -185,6 +202,9 @@ pub(crate) fn emit(
     let action = b.call(operations.action, &[], &[I32])[0];
     b.ret(&[action]);
     b.block = finish;
+    if let Some(fetch) = registry.http_helpers.and_then(|http| http.fetch) {
+        b.call(fetch.finish, &[], &[]);
+    }
     if let Some(promises) = &registry.promises {
         b.call(promises.native.finish, &[], &[]);
     }
@@ -256,7 +276,7 @@ pub(crate) fn emit(
     let address = b.integer(CONTEXT);
     b.store(address, 0, context, I32);
     let zero = b.integer(0);
-    for address in [DONE, LIVE_WORKERS] {
+    for address in [DONE, LIVE_WORKERS, NATIVE_WORKERS] {
         let address = b.integer(address);
         b.store(address, 0, zero, I32);
     }
@@ -294,21 +314,26 @@ pub(crate) fn emit(
     b.jump(finish, &[]);
     b.block = finish;
     let action = b.call(publish, &[], &[I32])[0];
-    let one = b.integer(1);
-    let yielded = b.op(O::I32Eq, &[action, one], I32);
-    let idle_turn = b.op(O::I32Eqz, &[b.param(0)], I32);
-    let idle_turn = b.op(O::I32And, &[yielded, idle_turn], I32);
-    let active_address = b.integer(crate::waffle_backend::promises::native::ACTIVE_SOURCE);
-    let active_source = b.load(active_address, 0, I32);
-    let source_idle = b.op(O::I32Eqz, &[active_source], I32);
-    let idle_turn = b.op(O::I32And, &[idle_turn, source_idle], I32);
-    let idle = b.body.add_block();
-    let active = b.body.add_block();
-    b.branch(idle_turn, idle, active);
-    b.block = idle;
-    let idle_action = b.call(operations.idle, &[], &[I32])[0];
-    b.ret(&[idle_action]);
-    b.block = active;
+    if registry.promises.is_some() {
+        let one = b.integer(1);
+        let yielded = b.op(O::I32Eq, &[action, one], I32);
+        let idle_turn = b.op(O::I32Eqz, &[b.param(0)], I32);
+        let idle_turn = b.op(O::I32And, &[yielded, idle_turn], I32);
+        let active_address = b.integer(crate::waffle_backend::promises::native::ACTIVE_SOURCE);
+        let active_source = b.load(active_address, 0, I32);
+        let workers_address = b.integer(NATIVE_WORKERS);
+        let workers = b.load(workers_address, 0, I32);
+        let active_work = b.op(O::I32Or, &[active_source, workers], I32);
+        let source_idle = b.op(O::I32Eqz, &[active_work], I32);
+        let idle_turn = b.op(O::I32And, &[idle_turn, source_idle], I32);
+        let idle = b.body.add_block();
+        let active = b.body.add_block();
+        b.branch(idle_turn, idle, active);
+        b.block = idle;
+        let idle_action = b.call(operations.idle, &[], &[I32])[0];
+        b.ret(&[idle_action]);
+        b.block = active;
+    }
     b.ret(&[action]);
     b.finish(module, callback)?;
     for (name, function) in [(entry_name, entry), (callback_name, callback)] {

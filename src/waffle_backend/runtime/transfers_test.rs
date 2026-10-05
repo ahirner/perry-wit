@@ -106,7 +106,7 @@ fn component(probe: Probe) -> Result<Vec<u8>> {
         i,
         &[Transfer {
             event: probe.event(),
-            cancel: native[&cancel_name],
+            cancellation: Cancellation::Cancel(native[&cancel_name]),
         }],
     )?;
     let worker = builder::declare(&mut module, "transfer.worker", &[I32], &[]);

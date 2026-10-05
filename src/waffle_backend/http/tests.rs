@@ -54,7 +54,7 @@ async fn instantiate() -> Result<(Store<Host>, Instance)> {
         name: "memory".into(),
         kind: ExportKind::Memory(memory),
     });
-    let imports = declare_imports(&mut module);
+    let imports = declare_imports(&mut module, false);
     let allocator = super::super::allocation::emit_allocator(&mut module, memory, 1024)?;
     let get = emit_runtime(&mut module, memory, allocator, &imports)?;
     let wrappers = runtime::emit_functions(
