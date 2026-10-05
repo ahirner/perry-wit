@@ -16,6 +16,7 @@ impl SourceCalls {
             return Ok(());
         }
         let (minimum, maximum, existing) = match name.sym.as_ref() {
+            "AbortController" => (0, 0, &mut self.abort_constructor),
             "Headers" => (0, 1, &mut self.headers_constructor),
             "Request" => (1, 2, &mut self.request_constructor),
             "Response" => (0, 2, &mut self.response_constructor),
@@ -35,6 +36,7 @@ impl SourceCalls {
             let symbol = name.sym.clone();
             let name = self.fresh_name();
             match symbol.as_ref() {
+                "AbortController" => self.abort_constructor = Some(name.clone()),
                 "Headers" => self.headers_constructor = Some(name.clone()),
                 "Request" => self.request_constructor = Some(name.clone()),
                 "Response" => self.response_constructor = Some(name.clone()),

@@ -26,6 +26,7 @@ pub(crate) const BODY_USED: u32 = 32;
 pub(crate) const METHOD_TAG: u32 = 36;
 pub(crate) const URL_PARTS: u32 = 40;
 pub(crate) const REDIRECT_MODE: u32 = 44;
+pub(crate) const SIGNAL: u32 = 48;
 pub(crate) fn is_request(ty: &perry_hir::types::Type) -> bool {
     matches!(ty, perry_hir::types::Type::Named(name) if name == REQUEST_TYPE)
 }
@@ -40,6 +41,7 @@ pub(crate) struct Runtime<'a> {
     pub(crate) headers: super::headers::Helpers,
     pub(crate) imports: &'a BTreeMap<String, Func>,
     pub(crate) pool: &'a StringPool,
+    pub(crate) abort: crate::waffle_backend::abort::Helpers,
 }
 pub(crate) fn declare_helpers(module: &mut Module<'static>) -> BTreeMap<String, Func> {
     imports::declare_imports(
@@ -76,14 +78,14 @@ pub(crate) fn emit(
     r: &Runtime<'_>,
 ) -> Result<Helpers> {
     // input, is-Request, method, headers, header-mode, body, body-kind, redirect.
-    let function = builder::declare(module, "request.new", &[I32; 8], &[I32, F64]);
+    let function = builder::declare(module, "request.new", &[I32; 9], &[I32, F64]);
     let mut b = Builder::new(module, function, memory);
     let zero = b.integer(0);
     let one = b.integer(1);
     let three = b.integer(3);
-    let count = b.integer(8);
+    let count = b.integer(9);
     let frame = b.call(r.allocator.frame_new, &[count], &[I32])[0];
-    for (at, index) in [(12, 0), (16, 2), (20, 3), (24, 5), (28, 7)] {
+    for (at, index) in [(12, 0), (16, 2), (20, 3), (24, 5), (28, 7), (44, 8)] {
         b.store(frame, at, b.param(index), I32);
     }
     let input = b.param(0);
@@ -97,18 +99,20 @@ pub(crate) fn emit(
         inherited_body,
         inherited_kind,
         inherited_redirect,
-    ] = [(); 6].map(|_| b.body.add_blockparam(defaults, I32));
+        inherited_signal,
+    ] = [(); 7].map(|_| b.body.add_blockparam(defaults, I32));
     b.branch(b.param(1), source, url_input);
     b.block = url_input;
     let get = b.integer(r.pool.get("GET").unwrap());
     let follow = b.integer(r.pool.get("follow").unwrap());
-    b.jump(defaults, &[input, get, zero, zero, zero, follow]);
+    b.jump(defaults, &[input, get, zero, zero, zero, follow, zero]);
     b.block = source;
     let source_url = b.load(input, URL, I32);
     let source_method = b.load(input, METHOD, I32);
     let source_body = b.load(input, BODY, I32);
     let source_kind = b.load(input, BODY_KIND, I32);
     let source_redirect = b.load(input, REDIRECT, I32);
+    let source_signal = b.load(input, SIGNAL, I32);
     b.jump(
         defaults,
         &[
@@ -118,6 +122,7 @@ pub(crate) fn emit(
             source_body,
             source_kind,
             source_redirect,
+            source_signal,
         ],
     );
     b.block = defaults;
@@ -151,9 +156,9 @@ pub(crate) fn emit(
     reject(&mut b, r, frame, used);
     b.jump(metadata, &[]);
     b.block = metadata;
-    let request = b.allocate(r.allocator.realloc, 48, 4);
+    let request = b.allocate(r.allocator.realloc, 52, 4);
     b.store(frame, 32, request, I32);
-    let size = b.integer(48);
+    let size = b.integer(52);
     b.effect(O::MemoryFill { mem: memory }, &[request, zero, size]);
     let four = b.integer(4);
     let backlink = b.op(O::I32Sub, &[request, four], I32);
@@ -162,6 +167,11 @@ pub(crate) fn emit(
     b.store(header, 16, kind, I32);
     b.store(request, METHOD, method, I32);
     b.store(request, REDIRECT, redirect, I32);
+    let signal = b.op(O::Select, &[b.param(8), inherited_signal, b.param(8)], I32);
+    let reset = b.op(O::I32Eq, &[signal, one], I32);
+    let signal = b.op(O::Select, &[zero, signal, reset], I32);
+    let signal = b.call(r.abort.follow, &[signal], &[I32])[0];
+    b.store(request, SIGNAL, signal, I32);
     let data = b.load(url, 0, I32);
     let length = b.load(url, 4, I32);
     let maximum = b.integer((u32::MAX - 64) / 4);

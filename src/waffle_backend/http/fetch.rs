@@ -87,7 +87,7 @@ pub(super) fn emit(
     let bytes = runtime.bytes;
     let native = runtime.imports;
     let promises = runtime.promises.unwrap();
-    let fetch = builder::declare(module, "fetch", &[I32; 8], &[I32, F64]);
+    let fetch = builder::declare(module, "fetch", &[I32; 9], &[I32, F64]);
     let send = builder::declare(module, "fetch.send", &[I32], &[I32, F64]);
     let release = builder::declare(module, "fetch.release", &[I32], &[I32]);
     let discard = builder::declare(module, "fetch.discard", &[I32], &[I32, F64]);
@@ -103,17 +103,22 @@ pub(super) fn emit(
         consume: body,
         release,
         operations: runtime.operations,
+        abort: runtime.abort.unwrap(),
     };
     emit_fetch(module, memory, send, &transport, strings)?;
-    let upload = upload::emit(module, memory, native)?;
+    let upload = upload::emit(module, memory, native, runtime.operations)?;
     let transfer = streams::emit_read_transfer(module, memory, native["read"])?;
     let buffered = streams::buffered::emit(module, memory, allocator, transfer)?;
     emit_release(module, memory, release, &transport)?;
     let cancel_unused = owners::emit_cancel_unused(module, memory, &transport, release)?;
+    owners::emit_abort_notify(module, memory, &transport)?;
     emit_body(module, memory, body, &transport, bytes, buffered, release)?;
     redirects::emit_discard(module, memory, discard, &transport, release)?;
     redirects::emit(module, memory, fetch, send, discard, &transport, runtime)?;
     let mut b = Builder::new(module, finish, memory);
+    if let Some(cleanup) = cancel_unused {
+        b.call(cleanup, &[], &[]);
+    }
     let address = b.integer(OWNERS);
     let pending = b.load(address, 0, I32);
     let clear = b.op(O::I32Eqz, &[pending], I32);
@@ -139,6 +144,7 @@ struct Transport<'a> {
     release: Func,
     promises: &'a crate::waffle_backend::registry::PromiseImports,
     operations: Option<crate::waffle_backend::runtime::operations::Operations>,
+    abort: crate::waffle_backend::abort::Helpers,
 }
 impl Transport<'_> {
     fn finish_request(&self, b: &mut Builder, response: Value, scratch: Value) -> Value {
@@ -174,6 +180,13 @@ fn emit_fetch(
 ) -> Result<()> {
     let mut b = Builder::new(module, function, memory);
     let request_value = b.param(0);
+    let signal = b.load(request_value, super::request::SIGNAL, I32);
+    let signal = b.call(t.abort.root, &[signal], &[I32])[0];
+    if let Some(operations) = t.operations {
+        b.call(operations.bind_signal, &[signal], &[]);
+        let aborted = b.call(operations.aborted, &[], &[I32])[0];
+        reject(&mut b, aborted, 20);
+    }
     let zero = b.integer(0);
     let one = b.integer(1);
     let code = b.number(12.0);
@@ -190,6 +203,7 @@ fn emit_fetch(
     let kind = b.integer(14);
     b.store(header, 16, kind, I32);
     b.store(response, 56, frame, I32);
+    b.store(response, super::response::SIGNAL, signal, I32);
     b.store(response, super::response::NATIVE, one, I32);
     let empty = b.integer(t.pool.get("").unwrap());
     b.store(response, super::response::STATUS_TEXT, empty, I32);
@@ -319,6 +333,13 @@ fn emit_fetch(
     b.branch(error, failed, received);
     b.block = failed;
     t.finish_request(&mut b, response, scratch);
+    let error = if let Some(operations) = t.operations {
+        let aborted = b.call(operations.aborted, &[], &[I32])[0];
+        let code = b.integer(20);
+        b.op(O::Select, &[code, error, aborted], I32)
+    } else {
+        error
+    };
     b.call(t.allocator.frame_drop, &[frame], &[]);
     let payload = b.op(O::F64ConvertI32U, &[error], F64);
     b.ret(&[one, payload]);
@@ -348,7 +369,7 @@ fn emit_fetch(
     b.store(response, 28, trailers, I32);
     owners::retain(&mut b, response);
     if let Some(operations) = t.operations {
-        let cancelled = b.call(operations.cancelled, &[], &[I32])[0];
+        let cancelled = b.call(operations.aborted, &[], &[I32])[0];
         let cleanup = b.body.add_block();
         let ready = b.body.add_block();
         b.branch(cancelled, cleanup, ready);
@@ -410,11 +431,27 @@ fn emit_body(
     let payload = b.op(O::F64ConvertI32U, &[empty_bytes], F64);
     b.ret(&[zero, payload]);
     b.block = consume;
+    if let Some(operations) = t.operations {
+        let signal = b.load(response, super::response::SIGNAL, I32);
+        b.call(operations.bind_signal, &[signal], &[]);
+    }
     let used = b.load(response, 20, I32);
     reject(&mut b, used, 12);
     b.store(response, 20, one, I32);
     let frame = b.load(response, 56, I32);
     let stream = b.load(response, 24, I32);
+    if let Some(operations) = t.operations {
+        let aborted = b.call(operations.aborted, &[], &[I32])[0];
+        let close = b.body.add_block();
+        let read = b.body.add_block();
+        b.branch(aborted, close, read);
+        b.block = close;
+        b.call(release, &[response], &[I32]);
+        b.call(t.allocator.frame_drop, &[frame], &[]);
+        let error = b.number(20.0);
+        b.ret(&[one, error]);
+        b.block = read;
+    }
     let limit = b.integer(u32::MAX);
     let result = b.call(buffered, &[stream, limit], &[I32, I32, I32]);
     b.store(frame, 24, result[1], I32);
@@ -424,7 +461,11 @@ fn emit_body(
     let aborted = b.integer(20);
     let overflow = b.integer(8);
     let read_error = b.op(O::Select, &[aborted, overflow, cancelled], I32);
-    let error = b.op(O::Select, &[read_error, error, result[0]], I32);
+    let mut error = b.op(O::Select, &[read_error, error, result[0]], I32);
+    if let Some(operations) = t.operations {
+        let cancelled = b.call(operations.aborted, &[], &[I32])[0];
+        error = b.op(O::Select, &[aborted, error, cancelled], I32);
+    }
     let failed = b.body.add_block();
     let ready = b.body.add_block();
     b.branch(error, failed, ready);
@@ -452,13 +493,22 @@ fn emit_release(
     let scratch = b.load(response, 48, I32);
     let stream = b.load(response, 24, I32);
     let one = b.integer(1);
-    b.call(t.native["drop-reader"], &[stream], &[]);
+    if let Some(operations) = t.operations {
+        let signal = b.load(response, super::response::SIGNAL, I32);
+        b.call(operations.bind_signal, &[signal], &[]);
+    }
+    owners::drop_reader(&mut b, t, response, stream);
     let trailers = b.load(response, 28, I32);
     let status = b.call(t.native["read-trailers"], &[trailers, scratch], &[I32])[0];
     let done = b.op(O::I32Eqz, &[status], I32);
     b.require(done);
     b.call(t.native["drop-trailers-reader"], &[trailers], &[]);
-    let error = error_code(&mut b, scratch);
+    let mut error = error_code(&mut b, scratch);
+    if let Some(operations) = t.operations {
+        let aborted = b.call(operations.aborted, &[], &[I32])[0];
+        let code = b.integer(20);
+        error = b.op(O::Select, &[code, error, aborted], I32);
+    }
     let has_error = b.body.add_block();
     let success = b.body.add_block();
     let acknowledged = b.body.add_block();

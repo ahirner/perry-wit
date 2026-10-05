@@ -49,13 +49,14 @@
         "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
-        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect fields. Web Streams, AbortSignal, and finite Error objects remain unfinished R8.3 work",
+        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect/signal fields. Web Streams and finite Error objects remain unfinished R8.3 work",
         "One URL codec normalizes ASCII and percent-encoded hosts, numeric IPv4, bracketed IPv6, ports, dot segments, HTTP backslashes, path/query escaping, whitespace, and fragments. Internationalized domains and noncanonical scheme separators remain unsupported",
         "Constructed Response values preserve statusText; fetched responses expose an empty statusText because the standard WASI HTTP response carries no reason phrase",
-        "Every non-null acquired fetch body must be consumed before the owning call returns; otherwise the invocation traps instead of abandoning its native owner",
+        "Every non-null acquired fetch body must be consumed or explicitly aborted before the owning call returns; otherwise the invocation traps instead of abandoning its native owner",
         "Tasks may overlap in resolved WIT components and must finish before the owning invocation returns",
         "HttpResponse is guest-internal; component wrappers export status, text, or bytes",
         "Numeric failures: 8 overflow, 12 invalid metadata/limit/index, 100 plus WASI HTTP error discriminant, 200 plus header error discriminant",
+        "AbortController.abort() cancels fetch owners sharing its signal, including pending headers/body reads and unused responses; unrelated requests continue. Request signals have distinct identity and follow their parent; signal:null creates an independent signal. Custom abort reasons and signal callbacks are not implemented",
         "Host cancellation acknowledges HTTP send, body transfers, and completion channels before instance reuse; traps and host disposal require a fresh store"
       ],
       "conformance": [
@@ -77,6 +78,9 @@
         "rust:tests/waffle_wit_native_test.rs#resolved_world_http_disposal_releases_suspended_headers_and_body",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_consumes_body_once_and_preserves_http_status",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_owners",
+        "rust:tests/waffle_wit_native_test.rs#abort_signals_preserve_identity_follow_requests_and_survive_collection",
+        "rust:tests/waffle_wit_native_test.rs#fetch_abort_signals_cancel_selected_native_owners_and_match_node",
+        "rust:tests/waffle_wit_native_test.rs#abort_signals_reject_invalid_types_and_mutation",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_resolves_at_headers_and_matches_node",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_releases_failures_and_grows_bodies_incrementally",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_rejects_unconsumed_body_at_call_boundary",

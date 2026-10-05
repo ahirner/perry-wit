@@ -117,6 +117,7 @@ pub(crate) fn lower_module(
         || contract.has_stream_input()
         || !contract.output_operations().is_empty()
         || contract.has_filesystem()
+        || contract.has_abort()
         || contract
             .intrinsics
             .values()
@@ -855,6 +856,22 @@ impl<'a> FunctionLowerer<'a> {
         if let Expr::ExternFuncRef { name, .. } = callee
             && matches!(
                 self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::AbortNew)
+            )
+        {
+            ensure!(args.is_empty(), "AbortController accepts no arguments");
+            let function = self.registry.abort_helpers.unwrap().new;
+            return Ok(Some(self.op(
+                Operator::Call {
+                    function_index: function,
+                },
+                &[],
+                &[Type::I32],
+            )));
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
                 Some(super::resolve::TypedIntrinsic::DateNew)
             )
         {
@@ -888,6 +905,27 @@ impl<'a> FunctionLowerer<'a> {
             object, property, ..
         } = callee
         {
+            if let Some(kind) = super::abort::Kind::of(&self.infer_expr_type(object)) {
+                ensure!(
+                    kind == super::abort::Kind::Controller
+                        && property == "abort"
+                        && args.is_empty(),
+                    "Only AbortController.abort() without a custom reason is currently supported"
+                );
+                let controller = self.expression(object)?;
+                self.op(
+                    Operator::Call {
+                        function_index: self.registry.abort_helpers.unwrap().abort,
+                    },
+                    &[controller],
+                    &[],
+                );
+                return Ok(Some(self.op(
+                    Operator::F64Const { value: 0 },
+                    &[],
+                    &[Type::F64],
+                )));
+            }
             if let Some(kind) = super::time::TimeKind::of(&self.infer_expr_type(object)) {
                 return self.time_method(kind, object, property, args).map(Some);
             }
@@ -1458,6 +1496,13 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::PropertySet { object, .. }
+            | Expr::IndexSet { object, .. }
+            | Expr::PutValueSet { target: object, .. }
+                if super::abort::Kind::of(&self.infer_expr_type(object)).is_some() =>
+            {
+                bail!("AbortController and AbortSignal properties are read-only")
+            }
             Expr::Conditional {
                 condition,
                 then_expr,
@@ -1902,6 +1947,33 @@ impl<'a> FunctionLowerer<'a> {
                 object, property, ..
             } if super::objects::is_object(&self.infer_expr_type(object)) => {
                 self.object_get(object, &Expr::String(property.clone()))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if super::abort::Kind::of(&self.infer_expr_type(object)).is_some() => {
+                let kind = super::abort::Kind::of(&self.infer_expr_type(object)).unwrap();
+                let value = self.expression(object)?;
+                match (kind, property.as_str()) {
+                    (super::abort::Kind::Controller, "signal") => Ok(self.op(
+                        Operator::I32Load {
+                            memory: MemoryArg {
+                                memory: self.registry.memory,
+                                offset: 4,
+                                align: 2,
+                            },
+                        },
+                        &[value],
+                        &[Type::I32],
+                    )),
+                    (super::abort::Kind::Signal, "aborted") => Ok(self.op(
+                        Operator::Call {
+                            function_index: self.registry.abort_helpers.unwrap().aborted,
+                        },
+                        &[value],
+                        &[Type::I32],
+                    )),
+                    _ => bail!("Unsupported abort property {property}"),
+                }
             }
             Expr::PropertyGet {
                 object, property, ..

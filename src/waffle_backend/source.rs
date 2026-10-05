@@ -35,6 +35,7 @@ pub(crate) struct SourceBindings {
     pub(crate) headers_constructor: Option<String>,
     pub(crate) request_constructor: Option<String>,
     pub(crate) response_constructor: Option<String>,
+    pub(crate) abort_constructor: Option<String>,
     pub(crate) time_constructors: BTreeMap<String, super::time::TimeConstructor>,
 }
 
@@ -66,7 +67,9 @@ pub(crate) fn resolve_bindings(
         let mut names = IdentifierNames::default();
         module.visit_with(&mut names);
         ensure!(
-            !names.0.contains(super::values::VALUE_TYPE)
+            !names.0.contains(super::abort::Kind::Controller.type_name())
+                && !names.0.contains(super::abort::Kind::Signal.type_name())
+                && !names.0.contains(super::values::VALUE_TYPE)
                 && !names.0.contains(super::context::ENVIRONMENT_TYPE)
                 && !names.0.contains(super::date::DATE_TYPE)
                 && !names.0.contains(super::http::RESPONSE_TYPE)
@@ -167,6 +170,7 @@ pub(crate) fn resolve_bindings(
             headers_constructor: None,
             request_constructor: None,
             response_constructor: None,
+            abort_constructor: None,
             time_constructors: BTreeMap::new(),
             error: None,
         };
@@ -181,6 +185,7 @@ pub(crate) fn resolve_bindings(
             headers_constructor: calls.headers_constructor,
             request_constructor: calls.request_constructor,
             response_constructor: calls.response_constructor,
+            abort_constructor: calls.abort_constructor,
             time_constructors: calls
                 .time_constructors
                 .into_iter()
@@ -204,6 +209,15 @@ pub(crate) fn resolve_bindings(
             let mut declaration = parse_typescript(&declaration, "capability.d.ts")?;
             module.body.append(&mut declaration.body);
             resolved.capabilities.insert(name, operation);
+        }
+        if let Some(name) = &resolved.abort_constructor {
+            let declaration = format!(
+                "declare function {name}(): {};",
+                super::abort::Kind::Controller.type_name()
+            );
+            module
+                .body
+                .append(&mut parse_typescript(&declaration, "abort.d.ts")?.body);
         }
         if let Some(name) = &resolved.decoder_constructor {
             let declaration = format!(
@@ -373,6 +387,7 @@ struct SourceCalls {
     headers_constructor: Option<String>,
     request_constructor: Option<String>,
     response_constructor: Option<String>,
+    abort_constructor: Option<String>,
     time_constructors: BTreeMap<super::time::TimeConstructor, String>,
     error: Option<anyhow::Error>,
 }
@@ -815,6 +830,15 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && name.ctxt == self.unresolved
+        {
+            match name.sym.as_ref() {
+                "AbortController" => name.sym = super::abort::Kind::Controller.type_name().into(),
+                "AbortSignal" => name.sym = super::abort::Kind::Signal.type_name().into(),
+                _ => {}
+            }
+        }
         if let ast::TsEntityName::Ident(name) = &mut reference.type_name
             && name.sym == "Request"
             && name.ctxt == self.unresolved

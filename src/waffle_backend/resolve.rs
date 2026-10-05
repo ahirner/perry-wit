@@ -46,6 +46,7 @@ pub(crate) enum TypedIntrinsic {
     ByteAt,
     DecoderNew,
     DateNew,
+    AbortNew,
     HeadersNew,
     RequestNew,
     ResponseNew,
@@ -103,6 +104,7 @@ impl TypedIntrinsic {
             Self::ByteAt => "byteAt",
             Self::DecoderNew => "TextDecoder",
             Self::DateNew => "Date",
+            Self::AbortNew => "AbortController",
             Self::HeadersNew => "Headers",
             Self::RequestNew => "Request",
             Self::ResponseNew => "Response",
@@ -120,6 +122,7 @@ impl TypedIntrinsic {
             Self::ByteAt
             | Self::DecoderNew
             | Self::DateNew
+            | Self::AbortNew
             | Self::HeadersNew
             | Self::RequestNew
             | Self::ResponseNew
@@ -162,8 +165,9 @@ impl TypedIntrinsic {
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
             Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
             Self::DateNew => (vec![WaffleType::F64], vec![WaffleType::I32]),
+            Self::AbortNew => (vec![], vec![WaffleType::I32]),
             Self::RequestNew => (
-                vec![WaffleType::I32; 8],
+                vec![WaffleType::I32; 9],
                 vec![WaffleType::I32, WaffleType::F64],
             ),
             Self::ResponseNew => (
@@ -234,6 +238,13 @@ impl ResolvedContract {
                 .intrinsics
                 .values()
                 .any(|intrinsic| matches!(intrinsic, TypedIntrinsic::RequestNew))
+    }
+    pub(crate) fn has_abort(&self) -> bool {
+        self.has_request()
+            || self
+                .intrinsics
+                .values()
+                .any(|intrinsic| matches!(intrinsic, TypedIntrinsic::AbortNew))
     }
     pub(crate) fn has_fetch(&self) -> bool {
         self.intrinsics.values().any(|intrinsic| {
@@ -386,6 +397,10 @@ pub(crate) fn resolve_contract(
         }
         if bindings.request_constructor.as_ref() == Some(name) {
             intrinsics.insert(name.clone(), TypedIntrinsic::RequestNew);
+            continue;
+        }
+        if bindings.abort_constructor.as_ref() == Some(name) {
+            intrinsics.insert(name.clone(), TypedIntrinsic::AbortNew);
             continue;
         }
         if bindings.headers_constructor.as_ref() == Some(name) {

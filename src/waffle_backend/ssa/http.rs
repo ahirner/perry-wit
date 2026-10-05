@@ -63,6 +63,7 @@ impl FunctionLowerer<'_> {
                 "method" => http::request::METHOD,
                 "redirect" => http::request::REDIRECT,
                 "bodyUsed" => http::request::BODY_USED,
+                "signal" => http::request::SIGNAL,
                 _ => bail!("Request.{property} lowering is not implemented yet"),
             };
             return Ok(self.op(
@@ -150,7 +151,7 @@ impl FunctionLowerer<'_> {
 }
 
 impl FunctionLowerer<'_> {
-    fn request_arguments(&mut self, arguments: &[Expr]) -> Result<[Value; 8]> {
+    fn request_arguments(&mut self, arguments: &[Expr]) -> Result<[Value; 9]> {
         ensure!(
             !arguments.is_empty() && arguments.len() <= 2,
             "Request and fetch require a URL or Request and optional typed RequestInit record"
@@ -169,7 +170,7 @@ impl FunctionLowerer<'_> {
             &[Type::I32],
         );
         let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-        let mut values = [input, kind, zero, zero, zero, zero, zero, zero];
+        let mut values = [input, kind, zero, zero, zero, zero, zero, zero, zero];
         if let Some(options) = arguments.get(1)
             && self.infer_expr_type(options) == HirType::Void
         {
@@ -184,7 +185,10 @@ impl FunctionLowerer<'_> {
             };
             for (key, field) in &shape.properties {
                 ensure!(
-                    matches!(key.as_str(), "method" | "headers" | "body" | "redirect"),
+                    matches!(
+                        key.as_str(),
+                        "method" | "headers" | "body" | "redirect" | "signal"
+                    ),
                     "fetch option '{key}' is not implemented yet"
                 );
 
@@ -193,6 +197,12 @@ impl FunctionLowerer<'_> {
                     "method" | "redirect" => ensure!(
                         (crate::waffle_backend::values::is_string_type(ty) || *ty == HirType::Void),
                         "fetch method and redirect mode must be strings"
+                    ),
+                    "signal" => ensure!(
+                        matches!(ty, HirType::Null | HirType::Void)
+                            || crate::waffle_backend::abort::Kind::of(ty)
+                                == Some(crate::waffle_backend::abort::Kind::Signal),
+                        "fetch signal must be AbortSignal or null"
                     ),
                     "headers" => {
                         header_shape(ty)?;
@@ -208,7 +218,13 @@ impl FunctionLowerer<'_> {
             }
             let object = self.expression(options)?;
             let helpers = self.registry.object_helpers.unwrap();
-            for (name, index) in [("method", 2), ("headers", 3), ("body", 5), ("redirect", 7)] {
+            for (name, index) in [
+                ("method", 2),
+                ("headers", 3),
+                ("body", 5),
+                ("redirect", 7),
+                ("signal", 8),
+            ] {
                 if let Some(field) = shape.properties.get(name) {
                     let (ty, optional) = fetch_option_type(&field.ty, field.optional);
                     let key = self.expression(&Expr::String(name.into()))?;
@@ -230,6 +246,9 @@ impl FunctionLowerer<'_> {
                     );
                     let payload = self.call_completion(helpers.value, &[entry, tag, optional]);
                     values[index] = abi::decode_payload(&mut self.body, self.block, payload, true);
+                    if name == "signal" && *ty == HirType::Null {
+                        values[index] = self.op(Operator::I32Const { value: 1 }, &[], &[Type::I32]);
+                    }
                     if name == "headers" {
                         let mode = header_shape(ty)?;
                         let mode = self.op(Operator::I32Const { value: mode }, &[], &[Type::I32]);

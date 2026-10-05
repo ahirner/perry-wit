@@ -16,7 +16,8 @@ const FRAME: u32 = 24;
 const OWNER_SCOPE: u32 = 28;
 const CONTROL: u32 = 32;
 const EVENT: u32 = 36;
-const SIZE: u32 = 40;
+const SIGNAL: u32 = 40;
+const SIZE: u32 = 44;
 const PENDING: u32 = 0;
 const CANCELLING: u32 = 1;
 const TERMINAL: u32 = 2;
@@ -44,6 +45,8 @@ pub(crate) struct Imports {
     index: Func,
     suspend: Func,
     resume: Func,
+    signal: Func,
+    bind_signal: Func,
 }
 pub(crate) fn declare(module: &mut Module<'static>) -> Imports {
     Imports {
@@ -57,11 +60,16 @@ pub(crate) fn declare(module: &mut Module<'static>) -> Imports {
         index: builder::native(module, "[thread-index]", &[], &[I32]),
         suspend: builder::native(module, "[thread-suspend]", &[], &[I32]),
         resume: builder::native(module, "[thread-resume-later]", &[I32], &[]),
+        signal: builder::native(module, "[context-get-1]", &[], &[I32]),
+        bind_signal: builder::native(module, "[context-set-1]", &[I32], &[]),
     }
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Operations {
     pub(crate) cancelled: Func,
+    pub(crate) aborted: Func,
+    pub(crate) bind_signal: Func,
+    pub(crate) abort_signal: Func,
     pub(crate) pending: Func,
     pub(crate) enter: Func,
     pub(crate) register: Func,
@@ -93,6 +101,9 @@ pub(crate) fn emit(
     );
     let r = Operations {
         cancelled: builder::declare(module, "operations.cancelled", &[], &[I32]),
+        aborted: builder::declare(module, "operations.aborted", &[], &[I32]),
+        bind_signal: i.bind_signal,
+        abort_signal: builder::declare(module, "operations.abort-signal", &[I32], &[]),
         pending: builder::declare(module, "operations.pending", &[], &[I32]),
         enter: builder::declare(module, "operations.enter", &[], &[]),
         register: builder::declare(module, "operations.register", &[I32], &[I32]),
@@ -120,6 +131,19 @@ pub(crate) fn emit(
         b.ret(&[value]);
         b.finish(module, function)?;
     }
+    let mut b = Builder::new(module, r.aborted, memory);
+    let cancelled = b.call(r.cancelled, &[], &[I32])[0];
+    let signal = b.call(i.signal, &[], &[I32])[0];
+    let supplied = b.body.add_block();
+    let absent = b.body.add_block();
+    b.branch(signal, supplied, absent);
+    b.block = absent;
+    b.ret(&[cancelled]);
+    b.block = supplied;
+    let aborted = b.load(signal, 0, I32);
+    let aborted = b.op(O::I32Or, &[aborted, cancelled], I32);
+    b.ret(&[aborted]);
+    b.finish(module, r.aborted)?;
     let settle = builder::declare(module, "operations.settle", &[I32; 2], &[]);
     let mut b = Builder::new(module, r.enter, memory);
     let address = b.integer(SCOPE);
@@ -194,7 +218,8 @@ pub(crate) fn emit(
     let status = b.param(1);
     let terminal = b.integer(TERMINAL);
     let one = b.integer(1);
-    let frame = b.call(a.frame_new, &[one], &[I32])[0];
+    let two = b.integer(2);
+    let frame = b.call(a.frame_new, &[two], &[I32])[0];
     let node = b.allocate(a.realloc, SIZE, 4);
     b.store(frame, 12, node, I32);
     let zero = b.integer(0);
@@ -202,6 +227,9 @@ pub(crate) fn emit(
     b.effect(O::MemoryFill { mem: memory }, &[node, zero, size]);
     b.store(node, FRAME, frame, I32);
     b.store(node, OWNER_SCOPE, scope, I32);
+    let signal = b.call(i.signal, &[], &[I32])[0];
+    b.store(node, SIGNAL, signal, I32);
+    b.store(frame, 16, signal, I32);
     let none = b.integer(u32::MAX);
     b.store(node, THREAD, none, I32);
     b.store(node, CONTROL, b.param(2), I32);
@@ -231,7 +259,7 @@ pub(crate) fn emit(
     b.store(scope, 12, count, I32);
     let set = b.load(scope, 4, I32);
     b.call(i.join, &[handle, set], &[]);
-    let cancelled = b.load(scope, 8, I32);
+    let cancelled = b.call(r.aborted, &[], &[I32])[0];
     let cancel = b.body.add_block();
     let done = b.body.add_block();
     b.branch(cancelled, cancel, done);
@@ -449,6 +477,45 @@ pub(crate) fn emit(
     b.call(a.frame_drop, &[frame], &[]);
     b.ret(&[]);
     b.finish(module, r.cancel_all)?;
+
+    let mut b = Builder::new(module, r.abort_signal, memory);
+    let signal = b.param(0);
+    b.require(signal);
+    let three = b.integer(3);
+    let frame = b.call(a.frame_new, &[three], &[I32])[0];
+    b.store(frame, 12, signal, I32);
+    let one = b.integer(1);
+    b.store(signal, 0, one, I32);
+    let scope = current_scope(&mut b);
+    let walk = b.body.add_block();
+    let done = b.body.add_block();
+    b.branch(scope, walk, done);
+    b.block = walk;
+    let head = b.load(scope, 0, I32);
+    let next = b.body.add_block();
+    let node = b.body.add_blockparam(next, I32);
+    b.jump(next, &[head]);
+    b.block = next;
+    let inspect = b.body.add_block();
+    b.branch(node, inspect, done);
+    b.block = inspect;
+    let owner_signal = b.load(node, SIGNAL, I32);
+    let following = b.load(node, NEXT, I32);
+    b.store(frame, 16, node, I32);
+    b.store(frame, 20, following, I32);
+    let same = b.op(O::I32Eq, &[signal, owner_signal], I32);
+    let cancel = b.body.add_block();
+    let skip = b.body.add_block();
+    b.branch(same, cancel, skip);
+    b.block = cancel;
+    b.call(r.cancel, &[node], &[]);
+    b.jump(skip, &[]);
+    b.block = skip;
+    b.jump(next, &[following]);
+    b.block = done;
+    b.call(a.frame_drop, &[frame], &[]);
+    b.ret(&[]);
+    b.finish(module, r.abort_signal)?;
 
     let mut b = Builder::new(module, r.action, memory);
     let scope = current_scope(&mut b);

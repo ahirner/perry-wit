@@ -1596,6 +1596,143 @@ async fn standard_fetch_consumes_body_once_and_preserves_http_status() -> Result
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn abort_signals_preserve_identity_follow_requests_and_survive_collection() -> Result<()> {
+    let source = include_str!("fixtures/fetch/abort_signals.ts");
+    let compiled = compile(
+        source,
+        "package test:signals; world boundary {export run:func()->u32;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = store(&engine);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+    for _ in 0..30 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 42);
+        store.assert_concurrent_state_empty();
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/abort_signals.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(run());",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "42");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_abort_signals_cancel_selected_native_owners_and_match_node() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let started = Arc::new(AtomicBool::new(false));
+    let gate = started.clone();
+    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+        "/pending" => {
+            gate.store(true, Ordering::Release);
+            fixture::Reply::Stall
+        }
+        "/body" => fixture::Reply::StallBody,
+        "/gate" => fixture::Reply::GatedResponse(200, vec![], b"ready".to_vec(), gate.clone()),
+        _ => fixture::Reply::Body(200, "ok".into()),
+    });
+    let source = include_str!("fixtures/fetch/abort_requests.ts");
+    let compiled = compile(
+        source,
+        "package test:fetch-abort; world boundary {import wasi:http/client@0.3.0; export run:async func(base:string)->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    for _ in 0..20 {
+        started.store(false, Ordering::Release);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            "cancelled"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    started.store(false, Ordering::Release);
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/abort_requests.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script, &base])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "cancelled");
+    assert!(
+        !server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.target == "/never")
+    );
+    Ok(())
+}
+
+#[test]
+fn abort_signals_reject_invalid_types_and_mutation() {
+    let wit = "package test:abort-errors; world boundary {import wasi:http/client@0.3.0; export run:async func();}";
+    for (body, diagnostic) in [
+        (
+            "const controller = new AbortController(); controller.signal = null;",
+            "properties are read-only",
+        ),
+        (
+            "const controller = new AbortController(); controller.signal.aborted = true;",
+            "properties are read-only",
+        ),
+        (
+            "await fetch('http://example.test', {signal: 1});",
+            "fetch signal must be AbortSignal or null",
+        ),
+        (
+            "new AbortController().abort('reason');",
+            "without a custom reason",
+        ),
+    ] {
+        let error = compile(
+            &format!("export async function run():Promise<void>{{{body}}}"),
+            wit,
+        )
+        .expect_err("invalid cancellation source must fail before emission");
+        assert!(
+            format!("{error:#}").contains(diagnostic),
+            "{body}: {error:#}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_owners() -> Result<()>
 {
     use std::sync::{

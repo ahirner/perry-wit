@@ -77,6 +77,7 @@ impl FunctionInfo {
 
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
+    pub(crate) abort_helpers: Option<super::abort::Helpers>,
     pub(crate) operations: Option<super::runtime::operations::Operations>,
     pub(crate) callbacks: Option<super::runtime::callbacks::Imports>,
     pub(crate) finish_command: Option<Func>,
@@ -172,6 +173,7 @@ impl ModuleRegistry {
                     | TypedIntrinsic::ByteAt
                     | TypedIntrinsic::DecoderNew
                     | TypedIntrinsic::DateNew
+                    | TypedIntrinsic::AbortNew
                     | TypedIntrinsic::HeadersNew
                     | TypedIntrinsic::RequestNew
                     | TypedIntrinsic::ResponseNew
@@ -320,6 +322,10 @@ impl ModuleRegistry {
                     &transfers,
                 )
             })
+            .transpose()?;
+        let abort_helpers = contract
+            .has_abort()
+            .then(|| super::abort::emit(module, memory, allocator.unwrap(), operations))
             .transpose()?;
         let await_subtask = if let Some(operations) = operations {
             use super::runtime::builder::{self, Builder};
@@ -546,6 +552,7 @@ impl ModuleRegistry {
                     module,
                     memory,
                     &super::http::request::Runtime {
+                        abort: abort_helpers.unwrap(),
                         allocator: allocator.unwrap(),
                         bytes: byte_helpers.unwrap(),
                         strings: string_helpers.unwrap(),
@@ -580,6 +587,7 @@ impl ModuleRegistry {
                 module,
                 memory,
                 super::http::SourceRuntime {
+                    abort: abort_helpers,
                     allocator: allocator.unwrap(),
                     imports: &imports,
                     strings: string_helpers.unwrap(),
@@ -814,6 +822,7 @@ impl ModuleRegistry {
             .map(|plan| super::initialization::ModuleState::declare(module, plan))
             .transpose()?;
         let mut registry = Self {
+            abort_helpers,
             operations,
             callbacks,
             finish_command,

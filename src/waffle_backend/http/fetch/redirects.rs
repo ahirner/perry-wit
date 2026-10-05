@@ -54,12 +54,12 @@ pub(super) fn emit(
     let zero = b.integer(0);
     let one = b.integer(1);
     let two = b.integer(2);
-    let count = b.integer(9);
+    let count = b.integer(10);
     let frame = b.call(t.allocator.frame_new, &[count], &[I32])[0];
-    for (at, index) in [(12, 0), (16, 2), (20, 3), (24, 5), (28, 7)] {
+    for (at, index) in [(12, 0), (16, 2), (20, 3), (24, 5), (28, 7), (48, 8)] {
         b.store(frame, at, b.param(index), I32);
     }
-    let args = (0..8).map(|index| b.param(index)).collect::<Vec<_>>();
+    let args = (0..9).map(|index| b.param(index)).collect::<Vec<_>>();
     let prepared = b.call(r.request.unwrap().new, &args, &[I32, F64]);
     propagate(&mut b, t, frame, &prepared);
     let request = b.op(O::I32TruncF64U, &[prepared[1]], I32);

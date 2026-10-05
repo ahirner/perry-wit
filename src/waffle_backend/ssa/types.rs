@@ -21,6 +21,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::http::headers::is_headers(ty) => Some("Headers"),
         ty if crate::waffle_backend::http::request::is_request(ty) => Some("Request"),
         ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
+        ty if crate::waffle_backend::abort::Kind::of(ty).is_some() => Some("abort object"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::time::is_time(ty) => {
             crate::waffle_backend::time::TimeKind::of(ty).map(|kind| match kind {
@@ -42,6 +43,7 @@ pub(crate) fn is_reference(ty: &HirType) -> bool {
         ty if crate::waffle_backend::values::is_boxed(ty) => true,
         ty if crate::waffle_backend::objects::is_object(ty) => true,
         ty if crate::waffle_backend::decoder::is_decoder(ty)
+            || crate::waffle_backend::abort::Kind::of(ty).is_some()
             || crate::waffle_backend::date::is_date(ty)
             || crate::waffle_backend::time::is_time(ty)
             || crate::waffle_backend::http::is_response(ty)
@@ -93,6 +95,21 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::abort::Kind::of(&self.infer_expr_type(object))
+                .is_some() =>
+            {
+                match property.as_str() {
+                    "signal" => HirType::Named(
+                        crate::waffle_backend::abort::Kind::Signal
+                            .type_name()
+                            .into(),
+                    ),
+                    "aborted" => HirType::Boolean,
+                    _ => HirType::Unknown,
+                }
+            }
             Expr::ArrayPush { .. } => HirType::Number,
             Expr::IndexGet { object, .. } if matches!(self.infer_expr_type(object),HirType::Array(inner) if *inner!=HirType::String) =>
             {
@@ -120,6 +137,11 @@ impl FunctionLowerer<'_> {
                         HirType::Named(crate::waffle_backend::http::headers::HEADERS_TYPE.into())
                     }
                     "bodyUsed" => HirType::Boolean,
+                    "signal" => HirType::Named(
+                        crate::waffle_backend::abort::Kind::Signal
+                            .type_name()
+                            .into(),
+                    ),
                     _ => HirType::String,
                 }
             }

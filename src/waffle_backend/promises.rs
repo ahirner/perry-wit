@@ -88,8 +88,9 @@ impl TaskArguments {
                 waffle::Type::F64,
                 waffle::Type::I32,
             ]),
-            Self::Fetch => Ok(vec![waffle::Type::I32; 8]),
-            Self::FetchUpload | Self::HttpBody => Ok(vec![waffle::Type::I32; 2]),
+            Self::Fetch => Ok(vec![waffle::Type::I32; 9]),
+            Self::FetchUpload => Ok(vec![waffle::Type::I32; 3]),
+            Self::HttpBody => Ok(vec![waffle::Type::I32; 2]),
             Self::Source(types) => types
                 .iter()
                 .map(super::registry::map_type_to_waffle)

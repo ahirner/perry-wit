@@ -1,6 +1,7 @@
 //! LLVM-free Perry HIR → WAFFLE SSA → WASI 0.3 compiler backend.
 
 pub(crate) mod abi;
+mod abort;
 pub(crate) mod allocation;
 pub(crate) mod audit;
 mod bytes;

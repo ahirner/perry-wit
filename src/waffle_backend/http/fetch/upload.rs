@@ -17,9 +17,10 @@ pub(super) fn start(
     let kind = b.integer(3);
     let record = b.call(t.promises.new, &[kind], &[I32])[0];
     b.store(response, 60, record, I32);
+    let signal = b.load(response, super::super::response::SIGNAL, I32);
     b.call(
         t.promises.starts[&crate::waffle_backend::promises::TaskTarget::FetchUpload],
-        &[record, writer, body],
+        &[record, writer, body, signal],
         &[I32],
     );
     b.jump(ready, &[]);
@@ -30,12 +31,16 @@ pub(super) fn emit(
     module: &mut Module<'static>,
     memory: Memory,
     native: &BTreeMap<String, Func>,
+    operations: Option<crate::waffle_backend::runtime::operations::Operations>,
 ) -> Result<Func> {
     let write = streams::transfer::write(module, memory, native["write"])?;
-    let function = builder::declare(module, "fetch.upload", &[I32; 2], &[I32, F64]);
+    let function = builder::declare(module, "fetch.upload", &[I32; 3], &[I32, F64]);
     let mut b = Builder::new(module, function, memory);
     let writer = b.param(0);
     let body = b.param(1);
+    if let Some(operations) = operations {
+        b.call(operations.bind_signal, &[b.param(2)], &[]);
+    }
     let data = b.load(body, 0, I32);
     let length = b.load(body, 4, I32);
     let written = b.call(write, &[writer, data, length], &[I32])[0];

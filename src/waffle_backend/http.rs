@@ -42,6 +42,7 @@ pub(crate) struct HttpHelpers {
 }
 
 pub(crate) struct SourceRuntime<'a> {
+    pub(crate) abort: Option<super::abort::Helpers>,
     pub(crate) allocator: AllocationFuncs,
     pub(crate) imports: &'a BTreeMap<String, Func>,
     pub(crate) strings: super::strings::StringHelperFuncs,

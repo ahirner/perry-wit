@@ -130,8 +130,8 @@ imports and explicit calls. Application WIT fixtures own their Node bindings.
 Host tests separately verify canonical marshalling, capability selection, native
 suspension, partial transfers, separate completion failures, and cleanup across
 serial calls. Deterministic gates establish overlap without relying on elapsed
-time. Cancellation probes exercise the pinned runtime's canonical protocol;
-those probes do not imply source-level AbortController support.
+time. Cancellation probes exercise the pinned runtime's canonical protocol; Node
+comparisons also verify source AbortController signals for fetch and Request.
 
 The [capability catalog](catalog/capabilities.json) is the support register.
 `scripts/check_conformance.mjs` discovers current Cargo test executables, validates
@@ -180,8 +180,9 @@ observers, runs cleanup, and retains native storage until cancellation or comple
 is acknowledged. Completion futures deliver their outcomes during cleanup; cancelled
 reads never expose uninitialized results or successful EOF. Canonical backpressure
 serializes public calls. Filesystem and public stream transfers still require the
-same cancellation ownership integration;
-AbortSignal and Web Streams with returned-stream ownership remain requirements in
+same cancellation ownership integration. Fetch signals select native operation
+owners by a shared signal identity; unrelated operations continue. Timer/filesystem
+signals and Web Streams with returned-stream ownership remain requirements in
 [TODOs.md](TODOs.md). Traps and host disposal do not run guest `finally` blocks.
 
 ## Runtime WAT inventory
