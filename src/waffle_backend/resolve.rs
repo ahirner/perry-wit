@@ -64,7 +64,9 @@ impl TypedIntrinsic {
             self,
             Self::WitImport { is_async: true, .. }
                 | Self::Capability(CapabilityOperation::Clock(
-                    ClockOperation::WaitFor | ClockOperation::Timeout
+                    ClockOperation::WaitFor
+                        | ClockOperation::Timeout
+                        | ClockOperation::TimeoutValue
                 ))
         )
     }
@@ -124,6 +126,10 @@ impl TypedIntrinsic {
 
     pub(crate) fn core_signature(&self) -> Result<waffle::SignatureData> {
         let (params, returns) = match self {
+            Self::Capability(CapabilityOperation::Clock(ClockOperation::TimeoutValue)) => (
+                vec![WaffleType::F64, WaffleType::F64, WaffleType::I32],
+                vec![WaffleType::F64],
+            ),
             Self::WitImport { params, .. } => {
                 (params.clone(), vec![WaffleType::I32, WaffleType::F64])
             }

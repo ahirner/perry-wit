@@ -674,10 +674,20 @@ impl VisitMut for SourceCalls {
                         };
                         if call.args.is_empty() {
                             call.args.push(default);
-                        } else if call.args.len() == 1
-                            && matches!(underlying_expression(&call.args[0].expr), ast::Expr::Ident(name) if name.sym == "undefined" && name.ctxt == self.unresolved)
+                        } else if matches!(underlying_expression(&call.args[0].expr), ast::Expr::Ident(name) if name.sym == "undefined" && name.ctxt == self.unresolved)
                         {
                             call.args[0] = default;
+                        }
+                    }
+                    if operation == CapabilityOperation::Clock(ClockOperation::Timeout) {
+                        if call.args.len() > 2 {
+                            self.error.get_or_insert_with(|| anyhow::anyhow!(
+                                "Promise timer options are not yet supported; cancellation remains required work"
+                            ));
+                            return;
+                        }
+                        if call.args.len() == 2 {
+                            operation = CapabilityOperation::Clock(ClockOperation::TimeoutValue);
                         }
                     }
                     let operation =

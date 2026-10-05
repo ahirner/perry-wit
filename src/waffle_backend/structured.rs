@@ -33,6 +33,9 @@ pub(crate) fn required(hir: &HirModule) -> bool {
                     required |= needed(ty);
                 }
             });
+            super::visit::visit_function_expressions(function, &mut |expression| {
+                required |= matches!(expression, perry_hir::ir::Expr::Array(_));
+            });
             required
         })
 }

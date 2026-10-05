@@ -71,6 +71,7 @@ impl FunctionLowerer<'_> {
                 if let Some(record) = self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
                     &[path, data, valid],
+                    None,
                 )? {
                     return Ok(Some(record));
                 }
@@ -116,6 +117,7 @@ impl FunctionLowerer<'_> {
                 if let Some(record) = self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
                     &[path, mode],
+                    None,
                 )? {
                     return Ok(Some(record));
                 }
@@ -150,6 +152,7 @@ impl FunctionLowerer<'_> {
                 if let Some(record) = self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
                     &[path, valid],
+                    None,
                 )? {
                     return Ok(Some(record));
                 }

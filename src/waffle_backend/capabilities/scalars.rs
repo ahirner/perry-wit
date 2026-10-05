@@ -15,6 +15,7 @@ use waffle::{Func, Memory, Module};
 pub(crate) enum Scalar {
     Wait,
     Timeout,
+    TimeoutValue,
     Monotonic,
     Date,
     Random,
@@ -28,6 +29,9 @@ impl Scalar {
             TypedIntrinsic::Capability(CapabilityOperation::Clock(ClockOperation::Timeout)) => {
                 Some(Self::Timeout)
             }
+            TypedIntrinsic::Capability(CapabilityOperation::Clock(
+                ClockOperation::TimeoutValue,
+            )) => Some(Self::TimeoutValue),
             TypedIntrinsic::Capability(CapabilityOperation::Clock(
                 ClockOperation::MonotonicNow,
             )) => Some(Self::Monotonic),
@@ -49,7 +53,7 @@ impl Scalar {
         Vec<&'static str>,
     ) {
         match self {
-            Self::Wait | Self::Timeout => (
+            Self::Wait | Self::Timeout | Self::TimeoutValue => (
                 "wasi:clocks/monotonic-clock@0.3.0",
                 "[async-lower]wait-for",
                 vec!["i64"],
@@ -114,10 +118,10 @@ pub(in crate::waffle_backend) fn emit(
         let helper = builder::declare(module, &name, &signature.params, &signature.returns);
         let mut b = Builder::new(module, helper, memory);
         let result = match scalar {
-            Scalar::Wait | Scalar::Timeout => {
+            Scalar::Wait | Scalar::Timeout | Scalar::TimeoutValue => {
                 let value = b.param(0);
                 let zero = b.number(0.0);
-                let value = if matches!(scalar, Scalar::Timeout) {
+                let value = if matches!(scalar, Scalar::Timeout | Scalar::TimeoutValue) {
                     let minimum = b.number(1.0);
                     let maximum = b.number(2147483647.0);
                     let low = b.op(Op::F64Ge, &[value, minimum], I32);
@@ -138,7 +142,11 @@ pub(in crate::waffle_backend) fn emit(
                 let returned = b.integer(2);
                 let success = b.op(Op::I32Eq, &[status, returned], I32);
                 b.require(success);
-                vec![]
+                if matches!(scalar, Scalar::TimeoutValue) {
+                    vec![b.param(1)]
+                } else {
+                    vec![]
+                }
             }
             Scalar::Monotonic => {
                 let nanos = b.call(function, &[], &[I64])[0];

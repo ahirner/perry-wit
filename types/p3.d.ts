@@ -76,9 +76,7 @@ declare module "perry:clocks" {
 }
 
 declare module "node:timers/promises" {
-  /** Millisecond wait with Node delay clamping/truncation. Optional result values
-   * and AbortSignal options are not yet supported. */
-  export function setTimeout(milliseconds?: number): Promise<void>;
+  export function setTimeout<T = void>(milliseconds?: number, value?: T): Promise<T>;
 }
 
 declare module "perry:http-handler/types" {

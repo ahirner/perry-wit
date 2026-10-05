@@ -286,6 +286,12 @@ impl FunctionLowerer<'_> {
             Expr::IndexGet { .. } => HirType::Union(vec![HirType::String, HirType::Void]),
             Expr::Undefined => HirType::Void,
             Expr::Call { callee, args, .. } => {
+                if self.timer_value(callee).is_some() {
+                    return self
+                        .timer_value_type(args)
+                        .map(|ty| HirType::Promise(Box::new(ty)))
+                        .unwrap_or(HirType::Any);
+                }
                 if let Some(operation) = self.combinator(callee) {
                     return self
                         .combinator_type(operation, args)

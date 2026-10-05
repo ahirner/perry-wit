@@ -77,11 +77,17 @@ pub(crate) enum TaskArguments {
     FetchUpload,
     HttpBody,
     Filesystem(super::capabilities::FilesystemOperation),
+    TimerValue,
 }
 
 impl TaskArguments {
     pub(crate) fn core_types(&self) -> Result<Vec<waffle::Type>> {
         match self {
+            Self::TimerValue => Ok(vec![
+                waffle::Type::F64,
+                waffle::Type::F64,
+                waffle::Type::I32,
+            ]),
             Self::Fetch => Ok(vec![waffle::Type::I32; 8]),
             Self::FetchUpload | Self::HttpBody => Ok(vec![waffle::Type::I32; 2]),
             Self::Source(types) => types
@@ -155,6 +161,11 @@ pub(crate) fn plan_promises(
                 TaskPlan {
                     symbol: format!("__perry.import.{index}"),
                     arguments: match intrinsic {
+                        TypedIntrinsic::Capability(
+                            super::capabilities::CapabilityOperation::Clock(
+                                super::capabilities::ClockOperation::TimeoutValue,
+                            ),
+                        ) => TaskArguments::TimerValue,
                         TypedIntrinsic::Capability(
                             super::capabilities::CapabilityOperation::Fetch,
                         ) => TaskArguments::Fetch,
@@ -253,7 +264,7 @@ pub(crate) fn plan_promises(
             );
         }
         ensure!(
-            is_task_outcome(&task.result),
+            matches!(task.arguments, TaskArguments::TimerValue) || is_task_outcome(&task.result),
             "Stored async task results require supported scalar, text, byte, object, or list values"
         );
     }
@@ -270,7 +281,12 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
     }
     matches!(
         ty,
-        HirType::Number | HirType::Boolean | HirType::BigInt | HirType::String | HirType::Void
+        HirType::Number
+            | HirType::Boolean
+            | HirType::BigInt
+            | HirType::String
+            | HirType::Void
+            | HirType::Null
     ) || super::bytes::is_byte_storage(ty)
         || super::text_or_bytes::is_text_or_bytes(ty)
         || super::filesystem::is_stats(ty)

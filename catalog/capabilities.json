@@ -501,7 +501,8 @@
       ],
       "differences": [
         "Only direct calls and literal namespace member names are supported; dynamic lookup, capability function values, and spread arguments are diagnosed",
-        "The timer subset accepts one numeric delay; value and AbortSignal options are unsupported. The lower-level waitFor facade traps on invalid or overflowing durations",
+        "Timer results preserve supported static scalar, string, byte, record, array, tuple, and opaque-value types and identity, including undefined and null; native waits retain result storage through suspension and collection",
+        "AbortSignal options remain required work. The lower-level waitFor facade traps on invalid or overflowing durations",
         "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
         "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
         "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; context mutation and callback timers are deferred under D1/D5",
@@ -529,7 +530,10 @@
         "node:tests/conformance/cases/07_clocks.ts",
         "node:tests/conformance/cases/09_random.ts",
         "rust:tests/waffle_wit_native_test.rs#stored_native_timers_handle_immediate_rejection_and_repeated_awaits",
-        "rust:tests/waffle_wit_native_test.rs#timer_delays_map_to_p3_nanoseconds_without_waiting_for_the_clock"
+        "rust:tests/waffle_wit_native_test.rs#timer_delays_map_to_p3_nanoseconds_without_waiting_for_the_clock",
+        "rust:tests/waffle_wit_native_test.rs#timer_values_preserve_types_identity_and_pending_storage",
+        "rust:tests/waffle_wit_native_test.rs#directly_awaited_timer_values_preserve_their_static_return_type",
+        "rust:tests/waffle_wit_native_test.rs#unsupported_timer_values_and_options_receive_source_diagnostics"
       ],
       "wasi": [
         "wasi:clocks/monotonic-clock@0.3.0",

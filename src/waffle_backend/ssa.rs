@@ -22,6 +22,7 @@ mod requirements;
 mod string_ops;
 mod text_or_bytes;
 mod time;
+mod timers;
 mod tuples;
 mod typed;
 pub(crate) mod types;
@@ -774,6 +775,9 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn call_operation(&mut self, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Some(name) = self.timer_value(callee) {
+            return self.start_timer_value(name, args).map(Some);
+        }
         if let Expr::ExternFuncRef { name, .. } = callee
             && matches!(
                 self.contract.intrinsics.get(name),
@@ -1044,7 +1048,7 @@ impl<'a> FunctionLowerer<'a> {
         }
 
         if let Some(target) = super::promises::TaskTarget::from_callee(callee)
-            && let Some(record) = self.start_task(&target, &arg_vals)?
+            && let Some(record) = self.start_task(&target, &arg_vals, None)?
         {
             return Ok(Some(record));
         }
@@ -1138,6 +1142,7 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         target: &super::promises::TaskTarget,
         arg_vals: &[Value],
+        result_type: Option<&HirType>,
     ) -> Result<Option<Value>> {
         if let Some(runtime) = &self.registry.promises
             && let Some(&start) = runtime.starts.get(target)
@@ -1154,7 +1159,7 @@ impl<'a> FunctionLowerer<'a> {
                 );
             }
             let task = &self.contract.promises.as_ref().unwrap().tasks[target];
-            let kind = if types::is_reference(&task.result) {
+            let kind = if types::is_reference(result_type.unwrap_or(&task.result)) {
                 super::allocation::AllocationKind::ReferencePromise
             } else {
                 super::allocation::AllocationKind::ScalarPromise

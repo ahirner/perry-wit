@@ -1161,6 +1161,145 @@ async fn timer_delays_map_to_p3_nanoseconds_without_waiting_for_the_clock() -> R
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn timer_values_preserve_types_identity_and_pending_storage() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let source = include_str!("fixtures/timer_values.ts");
+    let wit = "package test:timer-values; world boundary { import wasi:clocks/monotonic-clock@0.3.0; export run:async func(input:string)->string; }";
+    wit_source::check_sdk_source(wit, source)?;
+    let compiled = compile(source, wit)?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let pending = Arc::new(AtomicUsize::new(0));
+    let observed = pending.clone();
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (nanos,): (u64,)| {
+            let gate = gate.clone();
+            let pending = observed.clone();
+            if nanos == 10_000_000 {
+                pending.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    gate.acquire().await?.forget();
+                    pending.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            } else {
+                assert_eq!(nanos, 1_000_000);
+                if pending.load(Ordering::SeqCst) == 2 && gate.available_permits() == 0 {
+                    gate.add_permits(2);
+                }
+                Box::pin(async {
+                    tokio::task::yield_now().await;
+                    Ok(())
+                })
+            }
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let input = "A.雪🦀";
+    let expected = format!("{input} value|{input} record retained");
+    for _ in 0..100 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, (input,)))
+                .await??
+                .0,
+            expected
+        );
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+        store.assert_concurrent_state_empty();
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/timer_values.ts");
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e"])
+        .arg(format!(
+            "import {{run}} from {}; console.log(await run({}));",
+            serde_json::to_string(&path.display().to_string())?,
+            serde_json::to_string(input)?
+        ))
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn directly_awaited_timer_values_preserve_their_static_return_type() -> Result<()> {
+    let wit = "package test:timer-value-direct; world boundary { import wasi:clocks/monotonic-clock@0.3.0; export run:async func(input:string)->string; }";
+    for body in [
+        "return await setTimeout(1,input+' result');",
+        "const value=await setTimeout(1, {text:input+' result'}); return value.text;",
+        "await setTimeout(1, undefined); return input+' result';",
+        "const value=await setTimeout(1, [input+' result']); const first=value[0]; if(typeof first!=='string')throw 1; return first;",
+        "const value=await setTimeout(1, [40,2]); if(value[0]+value[1]!==42)throw 1; return input+' result';",
+        "const value:[number,string]=[42,input+' result']; const retained=await setTimeout(1,value); if(retained!==value)throw 1; return retained[1];",
+    ] {
+        let compiled = compile(
+            &format!(
+                "import {{setTimeout}} from 'node:timers/promises'; export async function run(input:string):Promise<string>{{{body}}}"
+            ),
+            wit,
+        )?;
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut linker = Linker::new(&engine);
+        linker
+            .instance("wasi:clocks/monotonic-clock@0.3.0")?
+            .func_wrap_concurrent("wait-for", |_, (_nanos,): (u64,)| {
+                Box::pin(async {
+                    tokio::task::yield_now().await;
+                    Ok(())
+                })
+            })?;
+        let mut store = store(&engine);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+        assert_eq!(run.call_async(&mut store, ("雪",)).await?.0, "雪 result");
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
+#[test]
+fn unsupported_timer_values_and_options_receive_source_diagnostics() {
+    let wit = "package test:timer-value-errors; world boundary { import wasi:clocks/monotonic-clock@0.3.0; export run:async func(); }";
+    for (body, diagnostic) in [
+        ("await setTimeout('1', 42);", "Timer delay must be a number"),
+        (
+            "await setTimeout(1, setTimeout(1));",
+            "Timer results require supported static values",
+        ),
+        (
+            "await setTimeout(1, [1,'x']);",
+            "Timer result array literals must be homogeneous",
+        ),
+        (
+            "await setTimeout(1, []);",
+            "An empty timer result array requires a declared element type",
+        ),
+        (
+            "await setTimeout(1, 42, {ref:false});",
+            "Promise timer options are not yet supported",
+        ),
+    ] {
+        let error = compile(&format!("import {{setTimeout}} from 'node:timers/promises'; export async function run():Promise<void>{{{body}}}"), wit).expect_err("unsupported timer form must fail before emission");
+        assert!(
+            format!("{error:#}").contains(diagnostic),
+            "{body}: {error:#}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn asynchronous_module_initialization_is_shared_by_named_exports() -> Result<()> {
     use std::sync::{
         Arc,
