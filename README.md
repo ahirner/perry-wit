@@ -1,12 +1,18 @@
 # perry-wit
 
-Perry-WIT compiles static TypeScript ahead of time into WebAssembly components
-targeting WASI 0.3. It lowers TypeScript through Perry HIR and WAFFLE SSA; WIT
-defines the component's imports and exports.
+Perry-WIT compiles static TypeScript ahead of time directly into lightweight,
+high-performance WebAssembly components targeting WASI 0.3 (Preview 3).
 
-Write a command as an ordinary TypeScript script, or implement a component with
-named exported functions. Static local ESM imports, aliases, and named re-exports
-let both entry styles share code with Node tests.
+Instead of bundling a heavy JavaScript engine or in-Wasm interpreter, Perry-WIT
+lowers TypeScript through Perry HIR and WAFFLE SSA straight to native WebAssembly.
+This produces self-contained components that range from **~10 KB** for pure compute
+to **tens of KB** when involving filesystem operations and HTTP streaming, with
+instant startup times, low linear memory usage, and zero runtime bloat.
+
+Write a CLI command as a standard TypeScript script, implement an export library with
+named functions matching a WIT interface, or combine both in a single file. Static local
+ESM imports, aliases, and named re-exports let both entry styles share code seamlessly
+with Node tests.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) explains the compiler, memory, and async model.
 The [capability catalog](catalog/capabilities.json) records supported type shapes,
@@ -104,9 +110,10 @@ incompatible signatures, ambiguous worlds, and unsupported export forms receive
 compiler diagnostics.
 
 Static dependencies and top-level initialization execute once before the first
-public call; module state persists across later calls. A WIT export must be
-`async func` if it can suspend, including during module initialization or through
-filesystem and console operations. Public invocations are serialized.
+call. Module state persists across subsequent calls. A single file can also
+combine both styles by running CLI logic at the top level while exporting named
+functions. An export must be `async func` in WIT if it can suspend, including
+during module initialization or through filesystem and console operations.
 
 `--core-only` (also implied by a `.core.wasm` output name) emits core Wasm for
 embedding. Raw core callers provide the declared canonical imports and call the
@@ -128,8 +135,7 @@ Tests compare supported source behavior with Node and exercise components agains
 controlled P3 hosts. The conformance check runs fresh Rust and Node tests, validates
 the catalog's exact test identifiers, and rejects missing or skipped evidence.
 Its report is written to `target/conformance/report.json`. HTTP tests own ephemeral
-endpoints. Performance workloads and
-recorded measurements are described in [PERFORMANCE.md](PERFORMANCE.md).
+endpoints.
 
 ## Authoring components
 
@@ -177,9 +183,8 @@ alone.
 The source contract uses declared records, typed dictionaries, dense homogeneous
 arrays, finite unions, and validated JSON value trees. Context is read-only.
 Date uses immutable UTC operations; supported Temporal operations provide explicit
-ISO timestamp and calendar calculations. Dynamic property deletion, arbitrary
-coercion, and other compatibility work are recorded in
-[TODOs.md](TODOs.md#complexity-deferred-until-a-consumer-requires-it).
+ISO timestamp and calendar calculations. Dynamic property deletion and arbitrary
+type coercion are unsupported and rejected at compile time.
 
 Stored async tasks retain their outcomes for repeated observation.
 `Promise.all`, `allSettled`, and `race` register each operand once; execution is

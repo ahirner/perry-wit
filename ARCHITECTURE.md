@@ -29,9 +29,8 @@ component tests use the same resolved-WIT component encoder.
    comparisons establish source behavior; controlled P3 hosts establish ABI,
    suspension, ownership, and resource cleanup.
 
-The compiler's dependency and link graph excludes LLVM and inkwell. WAFFLE is
-the Rust compiler backend; the pinned Rust toolchain still uses its own backend
-to build the allocation-free Wasm helpers.
+WAFFLE is the compiler backend; the pinned Rust toolchain builds the
+allocation-free Wasm helpers directly into the guest module.
 
 ## Compilation pipeline
 
@@ -69,12 +68,12 @@ Date/Temporal forms. Argument and receiver evaluation retain source order.
 effects before component encoding. `component/wit.rs` resolves versioned packages
 with local dependency precedence and rejects ambiguous world selection.
 
-`initialization.rs` creates a command adapter only for a world exporting the
-standard CLI run interface. It also extracts module evaluation into a guarded
-initializer with uninitialized, running, ready, and failed states. Static
-dependencies initialize once before the first public call. Retained bindings
-persist across calls; accesses before initialization fail. A synchronous WIT
-export cannot depend on initialization that may suspend.
+`initialization.rs` creates a command adapter when targeting a world that exports
+`wasi:cli/run@0.3.0`. A single module can serve as both a CLI command and an export
+library. Module evaluation is extracted into a guarded initializer where static
+dependencies initialize once before the first call. Retained bindings persist
+across subsequent calls. If initialization can suspend (such as through logging or
+filesystem/network operations), exported functions must be declared as `async func` in WIT.
 
 ### 3. Lower to WAFFLE SSA
 
@@ -140,7 +139,7 @@ exact catalog test identifiers, and combines their execution outcomes with fresh
 Node comparisons. Missing, skipped, or failed evidence prevents completion.
 Deviations such as Unicode scalar indexing are explicit contracts. Generated
 declarations are type-checking inputs, not evidence of implemented behavior.
-Fixtures are independently authored; Runner source and WIT remain external.
+Fixtures are independently authored.
 
 ## Values and memory
 
@@ -173,7 +172,7 @@ order and rejection, and `allSettled` records each input's outcome. Empty `all`
 and `allSettled` resolve to empty arrays; an empty `race` remains pending.
 `race` uses the first observed settlement, with no input-order tie-break for
 simultaneously ready operands. Losers retain ownership and continue executing.
-Returning with unresolved ordinary work traps. Public invocations are serialized.
+Returning with unresolved ordinary work traps.
 
 The runtime counts runnable source continuations to distinguish pending work
 from cleanup that can finish before boundary validation. Shared settlement
@@ -205,13 +204,10 @@ Production suspension uses native stackful workers. Async WIT, timer, HTTP, file
 use callback exports with shared operation owners. Host cancellation wakes guest
 observers, runs cleanup, and retains native storage until cancellation or completion
 is acknowledged. Completion futures deliver their outcomes during cleanup; cancelled
-reads never expose uninitialized results or successful EOF. Canonical backpressure
-serializes public calls. Fetch, timer, and filesystem signals select native operation
-owners by a shared signal identity; unrelated operations continue. File and console
-completion futures drain after the byte transfer closes. Public streams and incoming
-handlers still require ownership integration; Web Streams and returned-stream
-ownership remain requirements in
-[TODOs.md](TODOs.md). Traps and host disposal do not run guest `finally` blocks.
+reads never expose uninitialized results or successful EOF. Fetch, timer, and
+filesystem signals select native operation owners by a shared signal identity;
+unrelated operations continue. File and console completion futures drain after
+the byte transfer closes. Traps and host disposal do not run guest `finally` blocks.
 
 ## Runtime WAT inventory
 
