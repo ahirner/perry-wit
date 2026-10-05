@@ -88,6 +88,24 @@ impl Adapter<'_> {
     }
 
     pub(super) fn extract(&mut self, ty: Type, boxed: Value) -> Result<Value> {
+        if matches!(self.alias(ty), Type::Id(id) if matches!(self.wit.resolve.types[id].kind,TypeDefKind::List(Type::U8)))
+        {
+            let tag = self.load_i32(boxed, 0);
+            let string = self.integer(ValueTag::String as u32);
+            let bytes = self.integer(ValueTag::Bytes as u32);
+            let is_string = self.op(Operator::I32Eq, &[tag, string], CoreType::I32);
+            let is_bytes = self.op(Operator::I32Eq, &[tag, bytes], CoreType::I32);
+            let valid = self.op(Operator::I32Or, &[is_string, is_bytes], CoreType::I32);
+            self.require(valid);
+            let payload = self.op(
+                Operator::F64Load {
+                    memory: self.memory(8),
+                },
+                &[boxed],
+                CoreType::F64,
+            );
+            return self.decode(ty, payload);
+        }
         if self.is_nullable(ty) {
             return Ok(boxed);
         }
@@ -124,12 +142,42 @@ impl Adapter<'_> {
     }
 
     pub(super) fn read_field(&mut self, object: Value, key: &str, ty: Type) -> Result<Value> {
-        if self.is_nullable(ty) {
+        if self.is_nullable(ty)
+            || matches!(self.alias(ty), Type::Id(id) if matches!(self.wit.resolve.types[id].kind,TypeDefKind::List(Type::U8)))
+        {
             let key = self.integer(self.strings.get(key).unwrap());
             let entry = self.call(self.registry.object_helpers.unwrap().get, &[object, key]);
-            return Ok(self.call(self.registry.object_helpers.unwrap().dynamic, &[entry]));
+            let boxed = self.call(self.registry.object_helpers.unwrap().dynamic, &[entry]);
+            return self.extract(ty, boxed);
         }
         Ok(self.field(object, key, self.tag(ty)?))
+    }
+
+    pub(super) fn extract_outbound(
+        &mut self,
+        ty: Type,
+        boxed: Value,
+        source: &HirType,
+    ) -> Result<Value> {
+        if crate::waffle_backend::structured::is_string_array(source) {
+            let tag = self.integer(ValueTag::StringArray as u32);
+            let payload =
+                self.call_checked(self.registry.value_helpers.unwrap().extract, &[boxed, tag]);
+            return self.decode(ty, payload);
+        }
+        self.extract(ty, boxed)
+    }
+    pub(super) fn read_outbound_field(
+        &mut self,
+        object: Value,
+        key: &str,
+        ty: Type,
+        source: &HirType,
+    ) -> Result<Value> {
+        if crate::waffle_backend::structured::is_string_array(source) {
+            return Ok(self.field(object, key, ValueTag::StringArray));
+        }
+        self.read_field(object, key, ty)
     }
 
     pub(super) fn flat_types(&self, ty: Type) -> Result<Vec<CoreType>> {
@@ -296,6 +344,7 @@ impl Adapter<'_> {
         value: Value,
         pointer: Value,
         offset: u32,
+        source_type: &HirType,
     ) -> Result<()> {
         let discriminant = match shape.kind {
             VariantKind::Option => {
@@ -367,12 +416,68 @@ impl Adapter<'_> {
         for ((name, ty), block) in shape.cases.iter().zip(blocks) {
             self.block = block;
             if let Some(ty) = ty {
-                let child = match shape.kind {
-                    VariantKind::Option => self.extract(*ty, value)?,
-                    VariantKind::Result => self.read_field(value, name, *ty)?,
-                    VariantKind::Named => self.read_field(value, "val", *ty)?,
+                let child_type = match shape.kind {
+                    VariantKind::Option => {
+                        let HirType::Union(types) = source_type else {
+                            bail!("WIT option needs a nullable source")
+                        };
+                        let mut types: Vec<_> = types
+                            .iter()
+                            .filter(|ty| !matches!(ty, HirType::Null | HirType::Void))
+                            .cloned()
+                            .collect();
+                        if types.len() == 1 {
+                            types.pop().unwrap()
+                        } else {
+                            HirType::Union(types)
+                        }
+                    }
+                    VariantKind::Result | VariantKind::Named => {
+                        let types = match source_type {
+                            HirType::Union(types) => types.as_slice(),
+                            other => std::slice::from_ref(other),
+                        };
+                        types
+                            .iter()
+                            .find_map(|ty| {
+                                let HirType::Object(record) = ty else {
+                                    return None;
+                                };
+                                let field = if matches!(shape.kind, VariantKind::Result) {
+                                    name.as_str()
+                                } else {
+                                    "val"
+                                };
+                                if matches!(shape.kind, VariantKind::Named)
+                                    && !record.properties.get("tag").is_some_and(|tag| {
+                                        tag.ty == HirType::StringLiteral(name.clone())
+                                    })
+                                {
+                                    return None;
+                                }
+                                record.properties.get(field).map(|field| field.ty.clone())
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("WIT variant needs its source payload type")
+                            })?
+                    }
                 };
-                self.lower(*ty, child, pointer, offset + shape.payload_offset)?;
+                let child = match shape.kind {
+                    VariantKind::Option => self.extract_outbound(*ty, value, &child_type)?,
+                    VariantKind::Result => {
+                        self.read_outbound_field(value, name, *ty, &child_type)?
+                    }
+                    VariantKind::Named => {
+                        self.read_outbound_field(value, "val", *ty, &child_type)?
+                    }
+                };
+                self.lower(
+                    *ty,
+                    child,
+                    pointer,
+                    offset + shape.payload_offset,
+                    &child_type,
+                )?;
             }
             self.body.set_terminator(
                 self.block,

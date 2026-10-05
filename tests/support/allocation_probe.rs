@@ -154,3 +154,143 @@ pub fn guard_return_area(
     );
     module.to_wasm_bytes()
 }
+
+/// Force collection at ownership handoffs, not only at source loop backedges.
+pub fn collect_at_result_handoffs(
+    compiled: &perry_wit::waffle_backend::WaffleCompiled,
+) -> Result<Vec<u8>> {
+    let mut module = Module::from_wasm_bytes(&compiled.core, &Default::default())?;
+    module.expand_all_funcs()?;
+    // Linking preserves the order of core definitions, then appends helper bodies.
+    let names = compiled
+        .waffle_ir
+        .lines()
+        .filter(|line| line.starts_with("  func") && line.contains(" = #"))
+        .map(|line| line.split('"').nth(1).context("missing function name"))
+        .collect::<Result<Vec<_>>>()?;
+    let definitions = module
+        .funcs
+        .entries_mut()
+        .filter_map(|(_, function)| match function {
+            FuncDecl::Body(_, name, _) => Some(name),
+            _ => None,
+        });
+    for (name, original) in definitions.zip(names) {
+        *name = original.into();
+    }
+    let collect = module
+        .funcs
+        .entries()
+        .find_map(|(id, function)| match function {
+            FuncDecl::Body(_, name, _) if name == "collect" || name == "$collect" => Some(id),
+            _ => None,
+        })
+        .context("missing collector")?;
+    // Poison reclaimed payloads so dangling pointers fail even before allocator reuse.
+    let poison = wat::parse_str(
+        r#"(module
+      (import "probe" "collect" (func $collect))
+      (memory 1)
+      (func (export "poison") (local $block i32)
+        (call $collect)
+        (local.set $block (i32.load (i32.const 36)))
+        (block $done (loop $scan
+          (br_if $done (i32.eqz (local.get $block)))
+          (if (i32.eq (i32.load offset=16 (local.get $block)) (i32.const -1)) (then
+            (memory.fill (i32.add (local.get $block) (i32.const 32)) (i32.const 165)
+              (i32.sub (i32.load offset=4 (local.get $block)) (i32.const 32)))))
+          (local.set $block (i32.load (local.get $block)))
+          (br $scan)))))"#,
+    )?;
+    let mut poison = Module::from_wasm_bytes(&poison, &Default::default())?;
+    poison.expand_all_funcs()?;
+    let body = poison
+        .funcs
+        .entries()
+        .find_map(|(_, function)| match function {
+            FuncDecl::Body(_, _, body) => Some(body.clone()),
+            _ => None,
+        })
+        .context("missing poison body")?;
+    let mut body = body;
+    let memory = module.memories.iter().next().context("missing memory")?;
+    for (_, value) in body.values.entries_mut() {
+        if let ValueDef::Operator(operator, _, _) = value {
+            match operator {
+                Operator::Call { function_index } => *function_index = collect,
+                Operator::I32Load { memory: argument } => argument.memory = memory,
+                Operator::MemoryFill { mem } => *mem = memory,
+                _ => {}
+            }
+        }
+    }
+    let signature = module.funcs[collect].sig();
+    let collect = module.funcs.push(FuncDecl::Body(
+        signature,
+        "probe.poison-collected".into(),
+        body,
+    ));
+    let targets: std::collections::BTreeSet<_> = module
+        .funcs
+        .entries()
+        .filter_map(|(id, function)| match function {
+            FuncDecl::Body(_, name, _)
+                if name.ends_with(".export")
+                    || name.ends_with(".task-return")
+                    || name == "tasks.validate"
+                    || name == "tasks.finish" =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+        .collect();
+    let mut sites = 0;
+    for (_, function) in module.funcs.entries_mut() {
+        let FuncDecl::Body(_, name, body) = function else {
+            continue;
+        };
+        let worker = name.ends_with(".worker");
+        let blocks: Vec<_> = body.blocks.iter().collect();
+        for block in blocks {
+            let instructions = std::mem::take(&mut body.blocks[block].insts);
+            for instruction in instructions {
+                let target = match &body.values[instruction] {
+                    ValueDef::Operator(Operator::Call { function_index }, _, _) => {
+                        targets.contains(function_index)
+                    }
+                    _ => false,
+                };
+                if target && !worker {
+                    body.add_op(
+                        block,
+                        Operator::Call {
+                            function_index: collect,
+                        },
+                        &[],
+                        &[],
+                    );
+                    sites += 1;
+                }
+                body.blocks[block].insts.push(instruction);
+                if target && worker {
+                    body.add_op(
+                        block,
+                        Operator::Call {
+                            function_index: collect,
+                        },
+                        &[],
+                        &[],
+                    );
+                    sites += 1;
+                }
+            }
+        }
+        body.validate()?;
+    }
+    ensure!(
+        sites >= 2,
+        "expected worker and publication collection sites, found {sites}"
+    );
+    module.to_wasm_bytes()
+}

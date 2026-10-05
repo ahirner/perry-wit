@@ -3903,3 +3903,231 @@ async fn fetch_buffering_grows_with_received_data_and_available_guest_memory() -
     assert_eq!(String::from_utf8(node.stdout)?.trim(), large.to_string());
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn outbound_utf8_bytes_survive_suspension_and_allocation() -> Result<()> {
+    let compiled = compile(
+        r#"
+        import {echo} from 'test:bytes/transport';
+        export async function run(input:string, text:boolean):Promise<string|Uint8Array> {
+            const request=input+'漢🙂';
+            const pending=echo(request);
+            for(let i=0;i<300;i++) { const temporary=input+' discarded '+JSON.stringify(i); }
+            const response=await pending;
+            if(new TextDecoder().decode(response)!==request) throw 99;
+            if(text) return request;
+            return response;
+        }"#,
+        "package test:bytes; interface transport {echo:async func(value:list<u8>)->list<u8>;}
+         world boundary {import transport; export run:async func(input:string,text:bool)->list<u8>;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::<Host>::new(&engine);
+    linker
+        .instance("test:bytes/transport")?
+        .func_wrap_concurrent("echo", |_, (value,): (Vec<u8>,)| {
+            Box::pin(async move {
+                assert_eq!(value, "Grüße漢🙂".as_bytes(), "import argument");
+                tokio::task::yield_now().await;
+                Ok((value,))
+            })
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, bool), (Vec<u8>,)>(&mut store, "run")?;
+    for _ in 0..100 {
+        for text in [true, false] {
+            assert_eq!(
+                run.call_async(&mut store, ("Grüße", text)).await?.0,
+                "Grüße漢🙂".as_bytes(),
+                "text={text}"
+            );
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, ComponentType, Lift, Lower)]
+#[component(record)]
+struct PendingPacket {
+    label: String,
+    names: Vec<String>,
+    chunks: Vec<Vec<u8>>,
+    note: Option<String>,
+    pair: (String, Vec<u8>),
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_results_own_nested_canonical_values_at_every_handoff() -> Result<()> {
+    const WIT: &str = "package test:pending;
+      interface transport {
+        record packet { label:string, names:list<string>, chunks:list<list<u8>>, note:option<string>, pair:tuple<string,list<u8>> }
+        echo:async func(key:string)->result<option<packet>,string>;
+      }
+      world boundary {
+        import transport;
+        use transport.{packet};
+        export run:async func(key:string)->result<option<packet>,string>;
+      }";
+    for source in [
+        r#"
+      import {echo, type Packet} from 'test:pending/transport';
+      export async function run(key:string):Promise<{ok:true,value:Packet|null|undefined}|{ok:false,error:string}> {
+        const pending=echo(key);
+        for(let i=0;i<300;i++) {const discarded=key+JSON.stringify(i);}
+        return await pending;
+      }
+    "#,
+        r#"
+      import type {PacketInput} from 'test:pending/transport';
+      export function run(key:string):{ok:true,value:PacketInput|null|undefined}|{ok:false,error:string} {
+        if(key==='empty') return {ok:true,value:null};
+        if(key==='error') return {ok:false,error:key+' 漢🙂'};
+        return {ok:true,value:{
+          label:key+' 漢🙂', names:[key+' first', key+' second'], chunks:[key+' αβγ', '', new Uint8Array([0,255,127])],
+          note:key+' retained', pair:[key+' tuple', key+' 🍲'],
+        }};
+      }
+    "#,
+    ] {
+        let compiled = compile(source, WIT)?;
+        let core = allocation_probe::collect_at_result_handoffs(&compiled)?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("world.wit"), WIT)?;
+        let encoded =
+            perry_wit::component::embed_and_encode(&core, directory.path(), Some("boundary"))?;
+        let engine = engine()?;
+        let component = Component::new(&engine, encoded)?;
+        let expected = PendingPacket {
+            label: "packet 漢🙂".into(),
+            names: vec!["packet first".into(), "packet second".into()],
+            chunks: vec!["packet αβγ".as_bytes().to_vec(), vec![], vec![0, 255, 127]],
+            note: Some("packet retained".into()),
+            pair: ("packet tuple".into(), "packet 🍲".as_bytes().to_vec()),
+        };
+        let reply = expected.clone();
+        let mut linker = Linker::<Host>::new(&engine);
+        linker
+            .instance("test:pending/transport")?
+            .func_wrap_concurrent("echo", move |_, (key,): (String,)| {
+                let result: Result<Option<PendingPacket>, String> = match key.as_str() {
+                    "empty" => Ok(None),
+                    "error" => Err("error 漢🙂".into()),
+                    _ => Ok(Some(reply.clone())),
+                };
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    Ok((result,))
+                })
+            })?;
+        let mut store = store(&engine);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(&str,), (Result<Option<PendingPacket>, String>,)>(
+            &mut store, "run",
+        )?;
+        for _ in 0..100 {
+            for (key, expected) in [
+                ("packet", Ok(Some(expected.clone()))),
+                ("empty", Ok(None)),
+                ("error", Err("error 漢🙂".into())),
+            ] {
+                assert_eq!(
+                    run.call_async(&mut store, (key,))
+                        .await
+                        .map_err(|error| anyhow::anyhow!(
+                            "key={key}, imported={}: {error:?}",
+                            source.contains("return await pending")
+                        ))?
+                        .0,
+                    expected
+                );
+                store.assert_concurrent_state_empty();
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_export_ownership_releases_after_cancellation_acknowledgement() -> Result<()> {
+    const WIT: &str = "package test:pending-cancel;
+      interface host {wait:async func(mode:u32)->u32;}
+      world boundary { import host; export run:async func(mode:u32)->list<u8>; }";
+    let compiled = compile(
+        r#"
+      import {wait} from 'test:pending-cancel/host';
+      async function background(mode:number):Promise<void> {
+        await wait(mode);
+        for(let i=0;i<300;i++) {const discarded='temporary '+JSON.stringify(i);}
+      }
+      export function run(mode:number):string {
+        const pending=background(mode);
+        return 'retained export 漢🙂';
+      }
+    "#,
+        WIT,
+    )?;
+    let core = allocation_probe::collect_at_result_handoffs(&compiled)?;
+    let wit = tempfile::tempdir()?;
+    std::fs::write(wit.path().join("world.wit"), WIT)?;
+    let callee = perry_wit::component::embed_and_encode(&core, wit.path(), Some("boundary"))?;
+    std::fs::write(
+        wit.path().join("world.wit"),
+        "package test:cancel; world caller { import wait:async func(mode:u32)->u32; import operation:async func(mode:u32)->list<u8>; export run:async func(mode:u32)->u32; }",
+    )?;
+    let caller = include_str!("fixtures/cancellation/caller.wat").replace(
+        "(memory (export \"memory\") 1)",
+        "(memory (export \"memory\") 1) (func (export \"cabi_realloc\") (param i32 i32 i32 i32) (result i32) i32.const 4096)",
+    );
+    let caller = perry_wit::component::embed_and_encode(
+        &wat::parse_str(caller)?,
+        wit.path(),
+        Some("caller"),
+    )?;
+    let engine = engine()?;
+    let component = Component::new(
+        &engine,
+        native_cancellation_composition::compose(&callee, &caller)?,
+    )?;
+    let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+    let checkpoint = ready.clone();
+    let mut linker = Linker::<Host>::new(&engine);
+    linker
+        .root()
+        .func_wrap_concurrent("wait", move |_, (_mode,): (u32,)| {
+            let ready = checkpoint.clone();
+            Box::pin(async move {
+                ready.notified().await;
+                Ok((0u32,))
+            })
+        })?;
+    linker
+        .instance("test:pending-cancel/host")?
+        .func_wrap_concurrent("wait", move |_, (mode,): (u32,)| {
+            let ready = ready.clone();
+            Box::pin(async move {
+                if mode == 2 {
+                    ready.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok((0u32,))
+            })
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+    for _ in 0..100 {
+        for mode in [2, 1] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, (mode,)))
+                    .await??
+                    .0,
+                if mode == 2 { 4 } else { 2 }
+            );
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}

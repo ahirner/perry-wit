@@ -263,7 +263,9 @@ impl FunctionLowerer<'_> {
                     HirType::Boolean
                 }
             }
-            Expr::Uint8ArrayNew(_) => HirType::Named("Uint8Array".into()),
+            Expr::Uint8ArrayNew(_) | Expr::TextEncoderEncode(_) => {
+                HirType::Named("Uint8Array".into())
+            }
             Expr::Uint8ArrayLength(_) => HirType::Number,
             Expr::PropertyGet {
                 object, property, ..
@@ -302,6 +304,7 @@ impl FunctionLowerer<'_> {
                 HirType::Promise(result) => *result,
                 result => result,
             },
+            Expr::BigIntCoerce(_) => HirType::BigInt,
             Expr::Number(_)
             | Expr::Integer(_)
             | Expr::Update { .. }

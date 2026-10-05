@@ -1,6 +1,7 @@
 //! Callback exports keep native operation owners alive through cancellation acknowledgement.
 
 use super::builder::{self, Builder};
+use super::pending_result::PendingExportResult;
 use crate::waffle_backend::{
     registry::{FunctionExport, ModuleRegistry},
     resolve::ResolvedContract,
@@ -226,6 +227,7 @@ pub(crate) fn emit(
     b.call(publisher, &returned, &[]);
     b.jump(cleanup, &[]);
     b.block = cleanup;
+    PendingExportResult::release(&mut b, allocator, memory);
     // No guest thread or native operation may retain an invocation frame here.
     let next = b.body.add_block();
     let release = b.body.add_block();
@@ -252,6 +254,7 @@ pub(crate) fn emit(
     let entry = builder::declare(module, &entry_name, &signature.params, &[I32]);
     let mut b = Builder::new(module, entry, memory);
     b.call(operations.enter, &[], &[]);
+    PendingExportResult::require_vacant(&mut b);
     let references = signature.params.iter().filter(|ty| **ty == I32).count() as u32;
     let count = b.integer(references + 1);
     let frame = b.call(allocator.frame_new, &[count], &[I32])[0];

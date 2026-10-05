@@ -118,6 +118,46 @@
       (if (i32.eqz (i32.load offset=20 (local.get $block)))
         (then (i32.store offset=20 (local.get $block) (i32.const 1)))))))
 
+  ;; Schema-guided ownership of canonical arguments and results.
+  ;; 1: buffer(stride, child), 2: record(offset/child pairs), 3: variant(width, payload, cases).
+  (func $mark-canonical (param $data i32) (param $base i32) (param $index i32)
+    (local $schema i32) (local $kind i32) (local $pointer i32) (local $count i32)
+    (local $child i32) (local $stride i32) (local $i i32) (local $tag i32)
+    (if (i32.eqz (local.get $index)) (then return))
+    (local.set $schema (i32.add (local.get $base) (local.get $index)))
+    (local.set $kind (i32.load (local.get $schema)))
+    (if (i32.eq (local.get $kind) (i32.const 1)) (then
+      (local.set $count (i32.load offset=4 (local.get $data)))
+      (if (i32.eqz (local.get $count)) (then return))
+      (local.set $pointer (i32.load (local.get $data)))
+      (call $mark (local.get $pointer))
+      (local.set $child (i32.load offset=8 (local.get $schema)))
+      (if (i32.eqz (local.get $child)) (then return))
+      (local.set $stride (i32.load offset=4 (local.get $schema)))
+      (loop $elements
+        (call $mark-canonical (local.get $pointer) (local.get $base) (local.get $child))
+        (local.set $pointer (i32.add (local.get $pointer) (local.get $stride)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br_if $elements (i32.lt_u (local.get $i) (local.get $count))))
+      return))
+    (if (i32.eq (local.get $kind) (i32.const 2)) (then
+      (local.set $count (i32.load offset=4 (local.get $schema)))
+      (local.set $schema (i32.add (local.get $schema) (i32.const 8)))
+      (loop $fields
+        (call $mark-canonical (i32.add (local.get $data) (i32.load (local.get $schema))) (local.get $base) (i32.load offset=4 (local.get $schema)))
+        (local.set $schema (i32.add (local.get $schema) (i32.const 8)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br_if $fields (i32.lt_u (local.get $i) (local.get $count))))
+      return))
+    (local.set $stride (i32.load offset=4 (local.get $schema)))
+    (local.set $tag (if (result i32) (i32.eq (local.get $stride) (i32.const 1))
+      (then (i32.load8_u (local.get $data)))
+      (else (if (result i32) (i32.eq (local.get $stride) (i32.const 2))
+        (then (i32.load16_u (local.get $data))) (else (i32.load (local.get $data)))))))
+    (if (i32.lt_u (local.get $tag) (i32.load offset=12 (local.get $schema))) (then
+      (local.set $child (i32.load (i32.add (local.get $schema) (i32.add (i32.const 16) (i32.mul (local.get $tag) (i32.const 4))))))
+      (call $mark-canonical (i32.add (local.get $data) (i32.load offset=8 (local.get $schema))) (local.get $base) (local.get $child)))))
+
   (func $mark-frames (param $head i32) (local $pointer i32)
     (local.set $pointer (i32.load (local.get $head)))
     (block $done (loop $frames
@@ -216,6 +256,10 @@
             (call $mark (i32.load offset=68 (local.get $pointer)))
             (call $mark (i32.load offset=76 (local.get $pointer)))
             (call $mark (i32.load offset=88 (local.get $pointer)))))
+          (if (i32.eq (local.get $kind) (i32.const 19)) (then
+            (call $mark (i32.load (local.get $pointer)))
+            (call $mark (i32.load offset=4 (local.get $pointer)))
+            (call $mark-canonical (i32.load (local.get $pointer)) (i32.load offset=4 (local.get $pointer)) (i32.load offset=8 (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 17)) (then
             (call $mark (i32.load (local.get $pointer)))
             (call $mark (i32.load offset=4 (local.get $pointer)))

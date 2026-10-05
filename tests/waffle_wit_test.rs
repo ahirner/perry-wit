@@ -1109,3 +1109,267 @@ fn builtin_names_remain_literal_record_fields() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn text_encoder_returns_independent_utf8_bytes() -> Result<()> {
+    let compiled = compile_world(
+        "export function run(value:string):Uint8Array { const bytes=new TextEncoder().encode(value); const other=new TextEncoder().encode(value); if(other.length>0) other[0]=0; return bytes; }",
+        "package test:boundary; world boundary {export run:func(value:string)->list<u8>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(&str,), (Vec<u8>,)>(&mut store, "run")?;
+    for value in ["", "ASCII", "Grüße 漢字🙂"] {
+        assert_eq!(run.call(&mut store, (value,))?.0, value.as_bytes());
+    }
+    Ok(())
+}
+
+const RESOURCE_WIT: &str = "package test:boundary;
+interface secrets {
+    resource secret;
+    get: func(value:u32)->secret;
+    reveal: func(value:borrow<secret>)->u32;
+    take: func(value:secret)->u32;
+}
+world boundary { import secrets; export run:func(value:u32)->u32; }";
+
+#[test]
+fn imported_resources_borrow_transfer_and_dispose() -> Result<()> {
+    use wasmtime::component::{Resource, ResourceType};
+    struct Secret;
+    for (body, expected, drops) in [
+        (
+            "const a=get(value); const b=reveal(a); dropSecret(a); return b;",
+            42,
+            1,
+        ),
+        ("const a=get(value); return take(a);", 42, 0),
+    ] {
+        let source = format!(
+            "import {{get,reveal,take,dropSecret}} from 'test:boundary/secrets'; export function run(value:number):number {{{body}}}"
+        );
+        check_sdk_source(RESOURCE_WIT, &source)?;
+        let compiled = compile_world(&source, RESOURCE_WIT)?;
+        let engine = Engine::default();
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, 0u32);
+        let mut linker = Linker::new(&engine);
+        let mut secrets = linker.instance("test:boundary/secrets")?;
+        secrets.resource("secret", ResourceType::host::<Secret>(), |mut store, _| {
+            *store.data_mut() += 1;
+            Ok(())
+        })?;
+        secrets.func_wrap("get", |_, (value,): (u32,)| {
+            Ok((Resource::<Secret>::new_own(value),))
+        })?;
+        secrets.func_wrap("reveal", |_, (value,): (Resource<Secret>,)| {
+            assert!(!value.owned());
+            Ok((value.rep(),))
+        })?;
+        secrets.func_wrap("take", |_, (value,): (Resource<Secret>,)| {
+            assert!(value.owned());
+            Ok((value.rep(),))
+        })?;
+        let instance = linker.instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+        assert_eq!(run.call(&mut store, (42,))?.0, expected);
+        assert_eq!(*store.data(), drops);
+    }
+    Ok(())
+}
+
+#[test]
+fn consumed_resource_aliases_trap_before_reaching_host() -> Result<()> {
+    use wasmtime::component::{Resource, ResourceType};
+    struct Secret;
+    for action in ["dropSecret(a)", "take(a)"] {
+        let source = format!(
+            "import {{get,reveal,take,dropSecret}} from 'test:boundary/secrets'; export function run(value:number):number {{const a=get(value); const alias=a; {action}; return reveal(alias);}}"
+        );
+        let compiled = compile_world(&source, RESOURCE_WIT)?;
+        let engine = Engine::default();
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, ());
+        let mut linker = Linker::new(&engine);
+        let mut secrets = linker.instance("test:boundary/secrets")?;
+        secrets.resource("secret", ResourceType::host::<Secret>(), |_, _| Ok(()))?;
+        secrets.func_wrap("get", |_, (value,): (u32,)| {
+            Ok((Resource::<Secret>::new_own(value),))
+        })?;
+        secrets.func_wrap(
+            "reveal",
+            |_, (_value,): (Resource<Secret>,)| -> wasmtime::Result<(u32,)> {
+                panic!("use-after-consume reached host")
+            },
+        )?;
+        secrets.func_wrap("take", |_, (value,): (Resource<Secret>,)| {
+            Ok((value.rep(),))
+        })?;
+        let instance = linker.instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+        assert!(run.call(&mut store, (42,)).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn exported_resources_preserve_representations_and_expire_borrows() -> Result<()> {
+    use wasmtime::component::ResourceAny;
+    let wit = "package test:boundary; interface secrets {resource secret; get:func(value:u32)->secret; reveal:func(value:borrow<secret>)->u32;} world boundary {export secrets;}";
+    let source = "import type {Secret} from 'test:boundary/secrets'; import {newSecret,secretRep} from 'test:boundary/secrets'; export function secretsGet(value:number):Secret {return newSecret(value);} export function secretsReveal(value:Secret):number {return secretRep(value);}";
+    check_sdk_source(wit, source)?;
+    let compiled = compile_world(source, wit)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let (_, interface) = instance
+        .get_export(&mut store, None, "test:boundary/secrets")
+        .unwrap();
+    let (_, get) = instance
+        .get_export(&mut store, Some(&interface), "get")
+        .unwrap();
+    let (_, reveal) = instance
+        .get_export(&mut store, Some(&interface), "reveal")
+        .unwrap();
+    let get = instance.get_typed_func::<(u32,), (ResourceAny,)>(&mut store, get)?;
+    let reveal = instance.get_typed_func::<(ResourceAny,), (u32,)>(&mut store, reveal)?;
+    for value in [0, 42, u32::MAX] {
+        let secret = get.call(&mut store, (value,))?.0;
+        for _ in 0..3 {
+            assert_eq!(reveal.call(&mut store, (secret,))?.0, value);
+        }
+        secret.resource_drop(&mut store)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn outbound_bytes_accept_utf8_text_and_keep_inbound_bytes_mutable() -> Result<()> {
+    let wit = "package test:boundary; interface sink { record document {bytes:list<u8>} write:func(value:document)->list<u8>; } world boundary {import sink; export run:func(input:list<u8>)->list<u8>;}";
+    for source in [
+        "import {write} from 'test:boundary/sink'; export function run(input:Uint8Array):string { input[0]=65; const copy=write({bytes:'Grüße 🙂'}); copy[0]=66; return 'Grüße 🙂';}",
+        "import {write} from 'test:boundary/sink'; import type {DocumentInput} from 'test:boundary/sink'; export function run(input:Uint8Array):Uint8Array {const document:DocumentInput={bytes:'Grüße 🙂'}; return write(document);}",
+    ] {
+        check_sdk_source(wit, source)?;
+        let compiled = compile_world(source, wit)?;
+        let engine = Engine::default();
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, ());
+        let mut linker = Linker::new(&engine);
+        linker
+            .instance("test:boundary/sink")?
+            .func_new("write", |_, _, args, results| {
+                let Val::Record(fields) = &args[0] else {
+                    panic!()
+                };
+                let Val::List(bytes) = &fields[0].1 else {
+                    panic!()
+                };
+                let bytes: Vec<u8> = bytes
+                    .iter()
+                    .map(|b| match b {
+                        Val::U8(b) => *b,
+                        _ => panic!(),
+                    })
+                    .collect();
+                assert_eq!(bytes, "Grüße 🙂".as_bytes());
+                results[0] = fields[0].1.clone();
+                Ok(())
+            })?;
+        let instance = linker.instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(Vec<u8>,), (Vec<u8>,)>(&mut store, "run")?;
+        for _ in 0..200 {
+            assert_eq!(run.call(&mut store, (vec![0],))?.0, "Grüße 🙂".as_bytes());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn numeric_bigint_construction_preserves_safe_integers_and_rejects_invalid_values() -> Result<()> {
+    let compiled = compile_world(
+        "export function run(value:number):bigint|null|undefined {try {return BigInt(value);} catch {return null;}}",
+        "package test:boundary; world boundary {export run:func(value:f64)->option<s64>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(f64,), (Option<i64>,)>(&mut store, "run")?;
+    for value in [
+        -9007199254740991.0,
+        -42.0,
+        0.0,
+        1791230000.0,
+        9007199254740991.0,
+    ] {
+        assert_eq!(run.call(&mut store, (value,))?.0, Some(value as i64));
+    }
+    for value in [f64::NAN, f64::INFINITY, 1.5, 9007199254740992.0] {
+        assert_eq!(run.call(&mut store, (value,))?.0, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn nested_outbound_byte_lists_support_text_arrays_and_optional_payloads() -> Result<()> {
+    let wit = "package test:boundary; interface documents {record packet {body:list<u8>, chunks:list<list<u8>>, optional:option<list<u8>>} } world boundary {use documents.{packet}; export run:func()->packet;}";
+    for source in [
+        "export function run():{body:string,chunks:string[],optional:string|null|undefined} {return {body:'ä🙂',chunks:['one','漢字'],optional:'yes'};}",
+        "import type {PacketInput} from 'test:boundary/documents'; export function run():PacketInput {return {body:'ä🙂',chunks:['one','漢字'],optional:'yes'};}",
+    ] {
+        check_sdk_source(wit, source)?;
+        let compiled = compile_world(source, wit)?;
+        let engine = Engine::default();
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let run = instance.get_func(&mut store, "run").unwrap();
+        let mut result = [Val::Bool(false)];
+        run.call(&mut store, &[], &mut result)?;
+        let bytes = |s: &str| Val::List(s.as_bytes().iter().map(|b| Val::U8(*b)).collect());
+        assert_eq!(
+            result[0],
+            Val::Record(vec![
+                ("body".into(), bytes("ä🙂")),
+                (
+                    "chunks".into(),
+                    Val::List(vec![bytes("one"), bytes("漢字")])
+                ),
+                ("optional".into(), Val::Option(Some(Box::new(bytes("yes")))))
+            ])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn borrowed_imported_resources_expire_when_the_export_returns() -> Result<()> {
+    use wasmtime::component::{Resource, ResourceType};
+    struct Secret;
+    let wit = "package test:boundary; interface secrets {resource secret; reveal:func(value:borrow<secret>)->u32;} world boundary {import secrets;use secrets.{secret};export remember:func(value:borrow<secret>);export stale:func()->u32;}";
+    let source = "import type {Secret} from 'test:boundary/secrets';import {reveal} from 'test:boundary/secrets';let saved:Secret|null=null;export function remember(value:Secret):void {saved=value;}export function stale():number {const value=saved;if(value===null)return 0;return reveal(value);}";
+    let compiled = compile_world(source, wit)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let mut linker = Linker::new(&engine);
+    let mut secrets = linker.instance("test:boundary/secrets")?;
+    secrets.resource("secret", ResourceType::host::<Secret>(), |_, _| Ok(()))?;
+    secrets.func_wrap(
+        "reveal",
+        |_, (_value,): (Resource<Secret>,)| -> wasmtime::Result<(u32,)> {
+            panic!("expired borrow reached host")
+        },
+    )?;
+    let instance = linker.instantiate(&mut store, &component)?;
+    let remember = instance.get_typed_func::<(Resource<Secret>,), ()>(&mut store, "remember")?;
+    remember.call(&mut store, (Resource::new_borrow(42),))?;
+    let stale = instance.get_typed_func::<(), (u32,)>(&mut store, "stale")?;
+    assert!(stale.call(&mut store, ()).is_err());
+    Ok(())
+}

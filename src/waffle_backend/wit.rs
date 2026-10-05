@@ -2,6 +2,7 @@
 
 mod adapter;
 mod native;
+pub(super) mod resources;
 mod source;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -86,11 +87,13 @@ pub(crate) struct WitWorld {
     pub(super) world: WorldId,
     pub(super) functions: BTreeMap<String, WitExport>,
     pub(super) imports: BTreeMap<String, WitImport>,
+    pub(super) resources: BTreeMap<wit_parser::TypeId, resources::Resource>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct WitImport {
     pub(super) module: String,
+    pub(super) resource: Option<(wit_parser::TypeId, resources::Operation)>,
     pub(super) function: Function,
 }
 
@@ -131,7 +134,7 @@ impl WitWorld {
         Ok(resolved)
     }
 
-    pub(super) fn for_encoding(resolve: Resolve, world: WorldId) -> Result<Self> {
+    pub(super) fn for_encoding(mut resolve: Resolve, world: WorldId) -> Result<Self> {
         let contract = &resolve.worlds[world];
         export_names::validate_implementation_names(&resolve, contract)?;
         let mut imports = BTreeMap::new();
@@ -144,6 +147,7 @@ impl WitWorld {
                             format!("{module}#{}", function.name),
                             WitImport {
                                 module: module.clone(),
+                                resource: None,
                                 function: function.clone(),
                             },
                         );
@@ -154,6 +158,7 @@ impl WitWorld {
                         function.name.clone(),
                         WitImport {
                             module: "$root".into(),
+                            resource: None,
                             function: function.clone(),
                         },
                     );
@@ -190,7 +195,9 @@ impl WitWorld {
             }
         }
         ensure!(!functions.is_empty(), "WIT world must export a function");
+        let resources = resources::bindings(&mut resolve, world, &mut imports)?;
         Ok(Self {
+            resources,
             resolve,
             world,
             functions,
@@ -239,7 +246,7 @@ impl WitWorld {
                 ty => ty,
             };
             ensure!(
-                same_type(result, &expected),
+                outbound_matches(result, &expected),
                 "WIT export '{name}' result must match {expected:?}, found {:?}",
                 function.return_type
             );
@@ -329,6 +336,10 @@ impl WitWorld {
     }
 
     pub(super) fn intern_keys(&self, pool: &mut StringPool, used: impl Iterator<Item = String>) {
+        for id in self.resources.keys() {
+            pool.intern(&resources::key(*id));
+        }
+        pool.intern(resources::STATE);
         for name in used {
             let function = &self.imports[&name].function;
             for param in &function.params {
@@ -476,6 +487,10 @@ fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
                 }
                 HirType::Object(object)
             }
+            TypeDefKind::Resource => resources::hir_type(id),
+            TypeDefKind::Handle(handle) => {
+                resources::hir_type(resources::handle_id(resolve, *handle))
+            }
             TypeDefKind::List(Type::U8) => HirType::Named("Uint8Array".into()),
             TypeDefKind::List(inner) => HirType::Array(Box::new(hir_type(resolve, *inner)?)),
             TypeDefKind::Type(ty) => return hir_type(resolve, *ty),
@@ -571,6 +586,89 @@ pub(super) fn same_type(actual: &HirType, expected: &HirType) -> bool {
                     .all(|a| expected.iter().any(|b| same_type(a, b)))
         }
         _ => actual == expected,
+    }
+}
+
+pub(super) fn outbound_type(ty: HirType) -> HirType {
+    match ty {
+        HirType::Named(ref name) if name == "Uint8Array" => super::text_or_bytes::value_type(),
+        HirType::Array(inner) => HirType::Array(Box::new(outbound_type(*inner))),
+        HirType::Tuple(types) => HirType::Tuple(types.into_iter().map(outbound_type).collect()),
+        HirType::Union(types) => HirType::Union(types.into_iter().map(outbound_type).collect()),
+        HirType::Object(mut record) => {
+            for field in record.properties.values_mut() {
+                field.ty = outbound_type(field.ty.clone());
+            }
+            HirType::Object(record)
+        }
+        other => other,
+    }
+}
+
+pub(super) fn input_assignable(actual: &HirType, expected: &HirType) -> bool {
+    if same_type(actual, expected) {
+        return true;
+    }
+    if super::text_or_bytes::is_text_or_bytes(expected) {
+        return super::values::is_string_type(actual) || super::bytes::is_byte_view(actual);
+    }
+    if let HirType::Union(variants) = expected
+        && !matches!(actual, HirType::Union(_))
+    {
+        return variants
+            .iter()
+            .any(|expected| input_assignable(actual, expected));
+    }
+    match (actual, expected) {
+        (HirType::Object(a), HirType::Object(e)) => {
+            a.properties.len() == e.properties.len()
+                && e.properties.iter().all(|(key, field)| {
+                    a.properties.get(key).is_some_and(|a| {
+                        (!a.optional || field.optional)
+                            && input_assignable(
+                                &super::objects::property_type(a),
+                                &super::objects::property_type(field),
+                            )
+                    })
+                })
+        }
+        (HirType::Array(a), HirType::Array(e)) => {
+            !super::structured::is_string_array(actual) && input_assignable(a, e)
+        }
+        (HirType::Tuple(a), HirType::Tuple(e)) => {
+            a.len() == e.len() && a.iter().zip(e).all(|(a, e)| input_assignable(a, e))
+        }
+        (HirType::Union(a), HirType::Union(e)) => {
+            a.iter().all(|a| e.iter().any(|e| input_assignable(a, e)))
+        }
+        _ => false,
+    }
+}
+
+fn outbound_matches(actual: &HirType, expected: &HirType) -> bool {
+    if super::bytes::is_byte_view(expected) {
+        return super::bytes::is_byte_view(actual)
+            || super::values::is_string_type(actual)
+            || super::text_or_bytes::is_text_or_bytes(actual);
+    }
+    match (actual, expected) {
+        (HirType::Object(a), HirType::Object(e)) => {
+            a.properties.len() == e.properties.len()
+                && e.properties.iter().all(|(name, field)| {
+                    a.properties.get(name).is_some_and(|a| {
+                        a.optional == field.optional && outbound_matches(&a.ty, &field.ty)
+                    })
+                })
+        }
+        (HirType::Union(a), HirType::Union(e)) => {
+            a.iter().all(|a| e.iter().any(|e| outbound_matches(a, e)))
+                && e.iter().all(|e| a.iter().any(|a| outbound_matches(a, e)))
+        }
+        (HirType::Array(a), HirType::Array(e)) => outbound_matches(a, e),
+        (HirType::Tuple(a), HirType::Tuple(e)) => {
+            a.len() == e.len() && a.iter().zip(e).all(|(a, e)| outbound_matches(a, e))
+        }
+        _ => same_type(actual, expected),
     }
 }
 

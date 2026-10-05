@@ -5,6 +5,7 @@
 //! overhead for primitive values.
 
 mod arrays;
+mod bigint;
 mod boolean;
 mod bytes;
 mod date;
@@ -1735,6 +1736,7 @@ impl<'a> FunctionLowerer<'a> {
                     ("ignoreBOM".into(), *ignore_bom.clone()),
                 ]),
             ]),
+            Expr::TextEncoderEncode(input) => self.encode_bytes(input),
             Expr::TextDecoderDecode { decoder, input } => {
                 self.decode_bytes(decoder, std::slice::from_ref(input.as_ref()))
             }
@@ -1769,6 +1771,7 @@ impl<'a> FunctionLowerer<'a> {
             Expr::TemplateStringCoerce(inner) | Expr::StringCoerce(inner) => {
                 self.string_operand(inner)
             }
+            Expr::BigIntCoerce(inner) => self.number_to_bigint(inner),
             Expr::NumberCoerce(inner) => {
                 let ty = self.infer_expr_type(inner);
                 if ty == HirType::Number {

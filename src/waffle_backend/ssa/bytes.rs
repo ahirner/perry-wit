@@ -8,6 +8,43 @@ use super::FunctionLowerer;
 use crate::waffle_backend::{abi, bytes::is_byte_view};
 
 impl FunctionLowerer<'_> {
+    pub(super) fn encode_bytes(&mut self, input: &Expr) -> Result<Value> {
+        ensure!(
+            self.is_string(input),
+            "TextEncoder.encode requires a string"
+        );
+        let string = self.expression(input)?;
+        let mut parts = Vec::new();
+        for offset in [0, 4] {
+            parts.push(self.op(
+                Operator::I32Load {
+                    memory: MemoryArg {
+                        memory: self.registry.memory,
+                        offset,
+                        align: 2,
+                    },
+                },
+                &[string],
+                &[Type::I32],
+            ));
+        }
+        let helpers = self.registry.byte_helpers.unwrap();
+        let view = self.op(
+            Operator::Call {
+                function_index: helpers.lift_canonical,
+            },
+            &parts,
+            &[Type::I32],
+        );
+        Ok(self.op(
+            Operator::Call {
+                function_index: helpers.copy,
+            },
+            &[view],
+            &[Type::I32],
+        ))
+    }
+
     pub(super) fn byte_receiver(&mut self, expression: &Expr) -> Result<Value> {
         ensure!(
             is_byte_view(&self.infer_expr_type(expression)),

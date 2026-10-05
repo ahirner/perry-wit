@@ -77,6 +77,7 @@ impl FunctionInfo {
 
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
+    pub(crate) resource_functions: BTreeMap<wit_parser::TypeId, super::wit::resources::Functions>,
     pub(crate) abort_helpers: Option<super::abort::Helpers>,
     pub(crate) operations: Option<super::runtime::operations::Operations>,
     pub(crate) callbacks: Option<super::runtime::callbacks::Imports>,
@@ -134,6 +135,7 @@ impl ModuleRegistry {
         let mut intrinsics = BTreeMap::new();
         let process_imports = super::capabilities::process::declare(module, contract);
         let scalar_imports = super::capabilities::scalars::declare_imports(module, contract);
+        let resource_functions = super::wit::resources::declare(module, contract);
         let mut wit_imports = BTreeMap::new();
         for (name, intrinsic) in &contract.intrinsics {
             if scalar_imports.contains_key(name) {
@@ -142,6 +144,17 @@ impl ModuleRegistry {
             if let TypedIntrinsic::WitImport { key, .. } = intrinsic {
                 let wit = contract.wit.as_ref().unwrap();
                 let import = &wit.imports[key];
+                if let Some((id, operation)) = import.resource {
+                    use super::wit::resources::Operation;
+                    let functions = resource_functions[&id];
+                    let function = match operation {
+                        Operation::New => functions.new.unwrap(),
+                        Operation::Rep => functions.rep.unwrap(),
+                        Operation::Drop => functions.drop,
+                    };
+                    wit_imports.insert(name.clone(), (key.clone(), function));
+                    continue;
+                }
                 let signature = wit.resolve.wasm_signature(import.abi(), &import.function);
                 let signature = module.signatures.push(SignatureData {
                     params: signature
@@ -890,6 +903,7 @@ impl ModuleRegistry {
             .map(|plan| super::initialization::ModuleState::declare(module, plan))
             .transpose()?;
         let mut registry = Self {
+            resource_functions,
             abort_helpers,
             operations,
             callbacks,

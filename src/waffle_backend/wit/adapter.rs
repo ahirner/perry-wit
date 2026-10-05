@@ -12,6 +12,7 @@ use crate::{
     },
 };
 use anyhow::{Result, bail, ensure};
+use perry_hir::types::Type as HirType;
 use waffle::{
     Block, BlockTarget, Func, FunctionBody, MemoryArg, Module, Operator, Terminator,
     Type as CoreType, Value,
@@ -20,6 +21,8 @@ use wit_parser::{Int, SizeAlign, Type, TypeDefKind};
 
 mod flags;
 mod lists;
+mod resources;
+mod roots;
 mod variants;
 
 pub(in crate::waffle_backend) fn build_export_wrapper(
@@ -43,17 +46,26 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         } else {
             None
         };
+    let scratch = crate::waffle_backend::allocation::scope::ScratchScope::new(
+        &mut body,
+        block,
+        registry.memory,
+        registry.allocator.unwrap(),
+    );
     let mut adapter = Adapter {
+        borrowed: None,
+        exporting: true,
         cancellation_failure,
         body,
         block,
         registry,
         wit,
         sizes,
-        scratch: None,
+        scratch: Some(scratch),
         command_failure,
         strings,
     };
+    adapter.initialize_resources();
     let signature = wit.resolve.wasm_signature(
         wit_parser::abi::AbiVariant::GuestExport,
         &declaration.function,
@@ -135,19 +147,16 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         .result
         .map(|ty| adapter.decode(ty, payload))
         .transpose()?;
-    let result_root = if let Some(ty) = declaration.function.result
+    if let Some(ty) = declaration.function.result
         && crate::waffle_backend::ssa::types::is_reference(&super::hir_type(&wit.resolve, ty)?)
     {
-        Some(RetainedValues::new(
-            &mut adapter.body,
-            adapter.block,
-            registry.memory,
-            registry.allocator.unwrap(),
-            &[result.unwrap()],
-        ))
-    } else {
-        None
-    };
+        adapter
+            .scratch
+            .as_ref()
+            .unwrap()
+            .retain(&mut adapter.body, adapter.block, result.unwrap());
+    }
+    adapter.finish_resources()?;
     adapter.finish_invocation();
     if declaration.core_name == "wasi:cli/run@0.3.0#run"
         && let Some(function) = registry.finish_command
@@ -167,15 +176,23 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         let size = adapter.sizes.size(&ty).size_wasm32() as u32;
         let alignment = adapter.sizes.align(&ty).align_wasm32() as u32;
         let address = adapter.allocate(size.max(1), alignment);
-        adapter.lower(ty, value, address, 0)?;
+        adapter.lower(ty, value, address, 0, callee.success_type())?;
+        adapter.retain_canonical_value(ty, address, 0);
         if signature.retptr {
             returned.push(address);
         } else {
             adapter.flatten_memory(ty, address, 0, &mut returned)?;
         }
     }
-    if let Some(root) = result_root {
-        root.release(&mut adapter.body, adapter.block);
+    let retained = adapter.scratch.take().unwrap();
+    if cancellation_failure.is_some() {
+        crate::waffle_backend::runtime::pending_result::PendingExportResult::new(retained).handoff(
+            &mut adapter.body,
+            adapter.block,
+            registry.memory,
+        );
+    } else {
+        adapter.block = retained.release(&mut adapter.body, adapter.block);
     }
     adapter
         .body
@@ -221,6 +238,8 @@ enum Input<'a> {
 }
 
 struct Adapter<'a> {
+    borrowed: Option<Value>,
+    exporting: bool,
     body: FunctionBody,
     block: Block,
     registry: &'a ModuleRegistry,
@@ -457,6 +476,9 @@ impl Adapter<'_> {
             Type::U16 => (Operator::I32Load16U { memory }, CoreType::I32),
             Type::S16 => (Operator::I32Load16S { memory }, CoreType::I32),
             Type::U32 | Type::S32 => (Operator::I32Load { memory }, CoreType::I32),
+            Type::Id(id) if matches!(self.wit.resolve.types[id].kind, TypeDefKind::Handle(_)) => {
+                (Operator::I32Load { memory }, CoreType::I32)
+            }
             Type::F32 => (Operator::F32Load { memory }, CoreType::F32),
             Type::F64 => (Operator::F64Load { memory }, CoreType::F64),
             Type::U64 | Type::S64 => (Operator::I64Load { memory }, CoreType::I64),
@@ -491,6 +513,7 @@ impl Adapter<'_> {
         }
         if let Type::Id(id) = ty {
             return match self.wit.resolve.types[id].kind.clone() {
+                TypeDefKind::Handle(handle) => self.lift_resource(ty, handle, source),
                 TypeDefKind::Flags(flags) => self.lift_flags(&flags, source),
                 TypeDefKind::Record(record) => {
                     let object = self.call(self.registry.object_helpers.unwrap().new, &[]);
@@ -625,7 +648,14 @@ impl Adapter<'_> {
             tag as u32 != ValueTag::Number as u32,
         )
     }
-    fn lower(&mut self, ty: Type, value: Value, pointer: Value, offset: u32) -> Result<()> {
+    fn lower(
+        &mut self,
+        ty: Type,
+        value: Value,
+        pointer: Value,
+        offset: u32,
+        source_type: &HirType,
+    ) -> Result<()> {
         let ty = self.alias(ty);
         let memory = self.memory(offset);
         if matches!(ty, Type::U64 | Type::S64) {
@@ -639,24 +669,35 @@ impl Adapter<'_> {
             return Ok(());
         }
         if let Some(shape) = self.variant(ty) {
-            return self.lower_variant(shape, value, pointer, offset);
+            return self.lower_variant(shape, value, pointer, offset, source_type);
         }
         if let Type::Id(id) = ty {
             match self.wit.resolve.types[id].kind.clone() {
+                TypeDefKind::Handle(handle) => {
+                    let raw = self.lower_resource(handle, value)?;
+                    self.store_i32(pointer, offset, raw);
+                }
                 TypeDefKind::Flags(flags) => self.lower_flags(&flags, value, pointer, offset)?,
-                TypeDefKind::List(inner) => self.lower_list(inner, value, pointer, offset)?,
+                TypeDefKind::List(inner) => {
+                    self.lower_list(inner, value, pointer, offset, source_type)?
+                }
                 TypeDefKind::Record(record) => {
                     let offsets = self
                         .sizes
                         .field_offsets(record.fields.iter().map(|field| &field.ty));
                     for (field, (position, _)) in record.fields.iter().zip(offsets) {
-                        let child =
-                            self.read_field(value, &to_camel_case(&field.name), field.ty)?;
+                        let name = to_camel_case(&field.name);
+                        let HirType::Object(source) = source_type else {
+                            bail!("WIT record needs a source record")
+                        };
+                        let child_type = &source.properties[&name].ty;
+                        let child = self.read_outbound_field(value, &name, field.ty, child_type)?;
                         self.lower(
                             field.ty,
                             child,
                             pointer,
                             offset + position.size_wasm32() as u32,
+                            child_type,
                         )?;
                     }
                 }
@@ -673,8 +714,18 @@ impl Adapter<'_> {
                         .enumerate()
                     {
                         let boxed = self.load_i32(data, index as u32 * 4);
-                        let child = self.extract(*ty, boxed)?;
-                        self.lower(*ty, child, pointer, offset + position.size_wasm32() as u32)?;
+                        let HirType::Tuple(types) = source_type else {
+                            bail!("WIT tuple needs a source tuple")
+                        };
+                        let child_type = &types[index];
+                        let child = self.extract_outbound(*ty, boxed, child_type)?;
+                        self.lower(
+                            *ty,
+                            child,
+                            pointer,
+                            offset + position.size_wasm32() as u32,
+                            child_type,
+                        )?;
                     }
                 }
                 TypeDefKind::Enum(enumeration) => {
@@ -815,7 +866,7 @@ impl Adapter<'_> {
                 TypeDefKind::Record(record) => {
                     Some(record.fields.iter().map(|field| field.ty).collect())
                 }
-                TypeDefKind::Enum(_) => None,
+                TypeDefKind::Enum(_) | TypeDefKind::Handle(_) => None,
                 _ => bail!("WIT aggregate requires an indirect result"),
             };
             if let Some(fields) = fields {
@@ -854,10 +905,9 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         .params
         .iter()
         .map(|param| {
-            crate::waffle_backend::registry::map_type_to_waffle(&super::hir_type(
-                &wit.resolve,
-                param.ty,
-            )?)
+            crate::waffle_backend::registry::map_type_to_waffle(&super::outbound_type(
+                super::hir_type(&wit.resolve, param.ty)?,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     let sig = module.signatures.push(waffle::SignatureData {
@@ -875,6 +925,8 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         registry.allocator.unwrap(),
     );
     let mut adapter = Adapter {
+        borrowed: None,
+        exporting: false,
         body,
         block,
         registry,
@@ -885,11 +937,33 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         cancellation_failure: None,
         strings,
     };
+    adapter.initialize_resources();
     let guest_params: Vec<_> = adapter.body.blocks[block]
         .params
         .iter()
         .map(|param| param.1)
         .collect();
+    if let Some((id, super::resources::Operation::Rep)) = import.resource {
+        let raw = adapter.resource_rep(id, guest_params[0])?;
+        let number = adapter.op(Operator::F64ConvertI32U, &[raw], CoreType::F64);
+        adapter.block = adapter
+            .scratch
+            .take()
+            .unwrap()
+            .release(&mut adapter.body, adapter.block);
+        abi::emit_completion(
+            &mut adapter.body,
+            adapter.block,
+            abi::CompletionStatus::Returned,
+            number,
+        );
+        adapter.body.validate()?;
+        return Ok(module.funcs.push(waffle::FuncDecl::Body(
+            sig,
+            format!("{}.import", import.function.name),
+            adapter.body,
+        )));
+    }
     let layout = adapter
         .sizes
         .params(import.function.params.iter().map(|param| &param.ty));
@@ -905,7 +979,14 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         import.function.params.iter().zip(guest_params).zip(offsets)
     {
         let offset = offset.size_wasm32() as u32;
-        adapter.lower(param.ty, value, pointer, offset)?;
+        adapter.lower(
+            param.ty,
+            value,
+            pointer,
+            offset,
+            &super::outbound_type(super::hir_type(&wit.resolve, param.ty)?),
+        )?;
+        adapter.retain_canonical_value(param.ty, pointer, offset);
         if !signature.indirect_params {
             adapter.flatten_memory(param.ty, pointer, offset, &mut args)?;
         }
@@ -915,10 +996,7 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
     }
     let return_pointer = if signature.retptr {
         let ty = import.function.result.unwrap();
-        let pointer = adapter.allocate(
-            (adapter.sizes.size(&ty).size_wasm32() as u32).max(1),
-            adapter.sizes.align(&ty).align_wasm32() as u32,
-        );
+        let pointer = adapter.allocate_canonical_result(ty);
         args.push(pointer);
         Some(pointer)
     } else {
@@ -972,6 +1050,7 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         );
         adapter.block = success;
     }
+    adapter.finish_resources()?;
     let value = if let Some(ty) = import.function.result {
         let direct = [returned];
         let mut input = if let Some(pointer) = return_pointer {
@@ -1030,6 +1109,8 @@ pub(in crate::waffle_backend) fn build_task_return(
     let body = FunctionBody::new(module, module.funcs[function].sig());
     let block = body.entry;
     let mut adapter = Adapter {
+        borrowed: None,
+        exporting: false,
         body,
         block,
         registry,

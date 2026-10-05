@@ -75,6 +75,31 @@ wasmtime run -C cache=n -S p3=y \
 
 Use `process.exitCode = 1` to set the exit status when execution finishes, or call `process.exit(1)` to terminate immediately.
 
+### Text and resource boundaries
+
+Outbound WIT `list<u8>` values accept `string | Uint8Array`. This applies recursively to import arguments and exported results, including records, options, variants, and lists. Incoming byte lists remain mutable `Uint8Array` values. The generated SDK provides `WitInput<T>` and named `TInput` aliases for outbound values:
+
+```ts
+import { submit, type DocumentInput } from "example:documents/store";
+
+const document: DocumentInput = { bytes: JSON.stringify({ message: "Grüße" }) };
+submit(document);
+```
+
+Strings lower using their existing UTF-8 pointer and byte length, with their storage retained for the call. No intermediate encoding buffer is created. Component-to-component transfer may still copy into the receiving memory. Explicit `TextEncoder.encode` returns an independent, mutable copy.
+
+Opaque interface resources have nominal SDK types. An imported resource `secret` exposes `dropSecret`; an exported resource additionally exposes `newSecret(representation)` and `secretRep(secret)`. Transferring or disposing ownership invalidates all aliases. Borrowed handles expire when the exporting call returns and cannot be disposed or transferred as owned handles. Dispose owned imports explicitly, normally in `finally`:
+
+```ts
+const result = await get("api-key");
+if (!result.ok) throw new Error("secret unavailable");
+const secret = result.value;
+try { return await reveal(secret); }
+finally { dropSecret(secret); }
+```
+
+Resource constructors and methods declared in WIT still require freestanding wrapper functions. Numeric `BigInt(value)` construction supports finite safe integers for WIT `u64`/`s64` fields; arbitrary-precision arithmetic and bigint literals are not implemented.
+
 ### Library Exports
 
 When implementing WIT interface exports, WIT is authoritative for names, parameter/result types, and async effects. An export such as `run-task: func(input: string) -> string` is implemented as:

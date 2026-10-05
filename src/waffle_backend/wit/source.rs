@@ -52,30 +52,46 @@ impl WitWorld {
                             |name| name.atom().to_string(),
                         );
                         if import.type_only || named.is_type_only {
-                            let ty = interface
-                                .types
-                                .iter()
-                                .find_map(|(name, id)| {
-                                    (crate::sdk::codegen::to_pascal_case(name) == original)
-                                        .then_some(*id)
+                            let exact = interface.types.iter().find_map(|(name, id)| {
+                                (crate::sdk::codegen::to_pascal_case(name) == original)
+                                    .then_some(*id)
+                            });
+                            let ty = exact
+                                .or_else(|| {
+                                    interface.types.iter().find_map(|(name, id)| {
+                                        (format!(
+                                            "{}Input",
+                                            crate::sdk::codegen::to_pascal_case(name)
+                                        ) == original)
+                                            .then_some(*id)
+                                    })
                                 })
                                 .with_context(|| {
                                     format!("Unknown WIT type '{original}' in '{name}'")
                                 })?;
+                            let ty = hir_type(&self.resolve, Type::Id(ty))?;
+                            let ty = if exact.is_some() {
+                                ty
+                            } else {
+                                outbound_type(ty)
+                            };
                             declarations.push_str(&format!(
                                 "type {} = {};\n",
                                 named.local.sym,
-                                source_type(&hir_type(&self.resolve, Type::Id(ty))?)?
+                                source_type(&ty)?
                             ));
                         } else {
-                            let function = interface
-                                .functions
-                                .values()
-                                .find(|function| to_camel_case(&function.name) == original)
+                            let key = self
+                                .imports
+                                .iter()
+                                .find_map(|(key, import)| {
+                                    (key.starts_with(&format!("{name}#"))
+                                        && to_camel_case(&import.function.name) == original)
+                                        .then_some(key.clone())
+                                })
                                 .with_context(|| {
                                     format!("Unknown WIT import '{original}' in '{name}'")
                                 })?;
-                            let key = format!("{name}#{}", function.name);
                             ensure!(
                                 self.imports.contains_key(&key),
                                 "Interface '{name}' is not imported by the WIT world"
@@ -86,10 +102,7 @@ impl WitWorld {
                     ast::ImportSpecifier::Namespace(namespace) => {
                         ensure!(!import.type_only, "Import WIT types by name");
                         ensure!(
-                            world
-                                .imports
-                                .iter()
-                                .any(|(key, _)| self.resolve.name_world_key(key) == name),
+                            self.imports.values().any(|import| import.module == name),
                             "Interface '{name}' is not imported by the WIT world"
                         );
                         namespaces.insert(namespace.local.to_id(), name.to_string());
@@ -128,7 +141,7 @@ impl WitWorld {
                 .map(|(index, param)| {
                     Ok(format!(
                         "arg{index}: {}",
-                        source_type(&hir_type(&self.resolve, param.ty)?)?
+                        source_type(&outbound_type(hir_type(&self.resolve, param.ty)?))?
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?

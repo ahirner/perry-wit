@@ -11,10 +11,19 @@ impl FunctionLowerer<'_> {
         expected: &HirType,
     ) -> Result<waffle::Value> {
         self.check_typed_value(expression, expected)?;
+        let actual = self.infer_expr_type(expression);
         if crate::waffle_backend::values::is_boxed(expected) {
+            if !crate::waffle_backend::values::is_boxed(&actual)
+                && let HirType::Union(variants) = expected
+                && let Some(variant) = variants
+                    .iter()
+                    .find(|ty| self.matches_typed_value(expression, ty))
+            {
+                let value = self.typed_operand(expression, variant)?;
+                return self.box_typed_value(value, variant);
+            }
             return self.value_operand(expression);
         }
-        let actual = self.infer_expr_type(expression);
         if crate::waffle_backend::values::is_boxed(&actual)
             && !crate::waffle_backend::values::is_boxed(expected)
         {
@@ -95,10 +104,10 @@ impl FunctionLowerer<'_> {
             return true;
         }
         if let Some(expected_inner) = crate::waffle_backend::nullable::inner(expected) {
-            if let Some(actual_inner) = crate::waffle_backend::nullable::inner(&actual) {
-                if crate::waffle_backend::wit::same_type(actual_inner, expected_inner) {
-                    return true;
-                }
+            if let Some(actual_inner) = crate::waffle_backend::nullable::inner(&actual)
+                && crate::waffle_backend::wit::same_type(actual_inner, expected_inner)
+            {
+                return true;
             }
             if matches!(actual, HirType::Null | HirType::Void) {
                 return true;
@@ -107,16 +116,15 @@ impl FunctionLowerer<'_> {
                 return true;
             }
         }
-        if let HirType::Union(actual_variants) = &actual {
-            if let HirType::Union(expected_variants) = expected {
-                if actual_variants.iter().all(|a| {
-                    expected_variants
-                        .iter()
-                        .any(|e| crate::waffle_backend::wit::same_type(a, e))
-                }) {
-                    return true;
-                }
-            }
+        if let HirType::Union(actual_variants) = &actual
+            && let HirType::Union(expected_variants) = expected
+            && actual_variants.iter().all(|actual| {
+                expected_variants
+                    .iter()
+                    .any(|expected| crate::waffle_backend::wit::same_type(actual, expected))
+            })
+        {
+            return true;
         }
         if expected == &HirType::String
             && matches!(
@@ -161,13 +169,21 @@ impl FunctionLowerer<'_> {
                                 )
                             },
                         )
-                    }) && fields.all(|(name, _)| expected.properties.contains_key(name));
+                    }) && fields.all(|(name, value)| {
+                        expected.properties.contains_key(name)
+                            || expected
+                                .index_signature
+                                .as_ref()
+                                .is_some_and(|ty| self.matches_typed_value(value, ty))
+                    });
                 }
                 if let HirType::Object(actual) = actual {
                     return expected.properties.iter().all(|(name, field)| {
                         actual.properties.get(name).is_some_and(|found| {
-                            crate::waffle_backend::wit::same_type(&found.ty, &field.ty)
-                                && (!found.optional || field.optional)
+                            crate::waffle_backend::wit::input_assignable(
+                                &crate::waffle_backend::objects::property_type(found),
+                                &crate::waffle_backend::objects::property_type(field),
+                            ) && (!found.optional || field.optional)
                         })
                     });
                 }

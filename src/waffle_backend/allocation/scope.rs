@@ -34,6 +34,18 @@ impl ScratchScope {
         }
     }
 
+    pub(crate) fn into_anchor(self) -> Value {
+        self.anchor
+    }
+
+    pub(crate) fn from_anchor(anchor: Value, memory: Memory, allocator: AllocationFuncs) -> Self {
+        Self {
+            anchor,
+            memory,
+            allocator,
+        }
+    }
+
     /// Each allocation gets a root, including repeated allocations in a canonical list loop.
     pub(crate) fn retain(&self, body: &mut FunctionBody, block: Block, pointer: Value) {
         let two = body.add_op(block, Operator::I32Const { value: 2 }, &[], &[Type::I32]);

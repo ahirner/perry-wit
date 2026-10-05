@@ -67,7 +67,11 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
             reqs.needs_strings = true;
             reqs.decoder = true;
         }
-        Expr::TypeOf(_) | Expr::String(_) | Expr::ForOfToArray(_) | Expr::RegExp { .. } => {
+        Expr::TextEncoderEncode(_)
+        | Expr::TypeOf(_)
+        | Expr::String(_)
+        | Expr::ForOfToArray(_)
+        | Expr::RegExp { .. } => {
             reqs.needs_strings = true;
         }
         Expr::StringFromCodePoint(_) => {

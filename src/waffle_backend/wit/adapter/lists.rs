@@ -48,29 +48,33 @@ impl Adapter<'_> {
         array: Value,
         pointer: Value,
         offset: u32,
+        source_type: &HirType,
     ) -> Result<()> {
         if element == Type::U8 {
+            let mask = self.integer(!1);
+            let array = self.op(Operator::I32And, &[array, mask], CoreType::I32);
             let data = self.load_i32(array, 0);
             let count = self.load_i32(array, 4);
             self.store_i32(pointer, offset, data);
             self.store_i32(pointer, offset + 4, count);
             return Ok(());
         }
-        if self.alias(element) == Type::String {
+        if self.alias(element) == Type::String
+            || crate::waffle_backend::structured::is_string_array(source_type)
+        {
             let list = self.call(
                 self.registry.structured_helpers.unwrap().lower_strings,
                 &[array],
             );
             let data = self.load_i32(list, 0);
             let count = self.load_i32(list, 4);
-            if let Some(scratch) = &self.scratch {
-                scratch.retain(&mut self.body, self.block, list);
-                scratch.retain(&mut self.body, self.block, data);
-            }
             self.store_i32(pointer, offset, data);
             self.store_i32(pointer, offset + 4, count);
             return Ok(());
         }
+        let HirType::Array(child_type) = source_type else {
+            bail!("WIT list needs a source array")
+        };
         let count = self.load_i32(array, 4);
         let source = self.load_i32(array, 0);
         let stride = self.sizes.size(&element).size_wasm32() as u32;
@@ -105,9 +109,9 @@ impl Adapter<'_> {
         self.list_loop(count, |adapter, index| {
             let slot = adapter.list_address(source, index, 4);
             let boxed = adapter.load_i32(slot, 0);
-            let value = adapter.extract(element, boxed)?;
+            let value = adapter.extract_outbound(element, boxed, child_type)?;
             let pointer = adapter.list_address(data, index, stride);
-            adapter.lower(element, value, pointer, 0)
+            adapter.lower(element, value, pointer, 0, child_type)
         })
     }
 

@@ -128,6 +128,12 @@ Records, dictionaries, finite unions, JSON trees, byte views, and Promise outcom
 
 Runtime tags differentiate dynamic representations when static types alone do not provide enough specificity. Loop-level garbage collection traces active root frames and coalesces dead allocations. Canonical import scratch buffers use dedicated root scopes, keeping buffers valid while sibling tasks allocate and collect.
 
+Canonical values use one schema-guided ownership rule for outgoing arguments, incoming results, and exported results. The collector follows the WIT layout through strings, byte buffers, nested lists, records, tuples, options, results, and variants. Incoming return areas are initialized and owned before the host fills them; outgoing graphs are owned before the adapter can suspend or transfer them. This replaces string-list-specific backing-storage roots. A return-area address alone does not own the allocations referenced by that area.
+
+`PendingExportResult` owns both the returned source graph and canonical scratch storage. The earlier adapter-local result root is part of this same scope. The export adapter transfers its retained scope to the callback; the worker's raw ABI values never outlive that owner. Publication releases the owner only after `task.return` consumes the result. Cancellation uses the same release path after all operations acknowledge cancellation. Entry checks require an empty ownership slot before the next call.
+
+Regression probes force collection and poison reclaimed storage at worker and callback handoffs. They exercise freshly constructed and imported graphs, text and bytes, nested aggregate results, repeated calls under a memory limit, and cancellation followed by successful reuse.
+
 ### Scopes
 Module-level bindings and cached process context persist for the lifetime of the component instance. Per-call temporary objects are reclaimed by the canonical post-return hook after results have been transferred to the caller.
 
