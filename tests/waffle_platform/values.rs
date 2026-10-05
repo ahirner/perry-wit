@@ -268,3 +268,85 @@ async fn boxed_arguments_and_numeric_errors_survive_later_argument_effects_and_c
     }
     Ok(())
 }
+#[tokio::test(flavor = "current_thread")]
+async fn optional_primitive_storage_survives_properties_calls_and_narrowing() -> anyhow::Result<()>
+{
+    let source = r#"
+    function text(value:string|undefined):number {
+        if(value===undefined) {return -1;}
+        return value.length;
+    }
+    function number(value:number|undefined):number {
+        if(value===undefined) {return -1;}
+        return value;
+    }
+    function narrow(value:string|null|undefined):number {
+        if(value===null) {return -2;}
+        if(value===undefined) {return -1;}
+        return value.length;
+    }
+    export function run():number {
+        const missing:{s?:string,n?:number,b?:boolean}={};
+        const absent:{s?:string,n?:number,b?:boolean}={s:undefined,n:undefined,b:undefined};
+        const present:{s?:string,n?:number,b?:boolean}={s:'',n:0,b:true};
+        const falsy:{b?:boolean}={b:false};
+        if(missing.s!==undefined || missing.n!==undefined || missing.b!==undefined) {throw 1;}
+        if(absent.s!==undefined || absent.n!==undefined || absent.b!==undefined) {throw 2;}
+        if(present.s!=='' || present.n!==0 || present.b!==true || falsy.b!==false) {throw 3;}
+        if(text(undefined)!==-1 || text(present.s)!==0 || text('abc')!==3) {throw 4;}
+        if(number(undefined)!==-1 || number(missing.n)!==-1 || number(present.n)!==0) {throw 5;}
+        if(narrow(undefined)!==-1 || narrow(null)!==-2 || narrow('abc')!==3) {throw 6;}
+        return 1;
+    }"#;
+    let (mut store, instance) = super::instantiate(source, 131072, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, ()).await?.0, 1.0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_arguments_are_checked_and_extracted_for_static_parameters() -> anyhow::Result<()> {
+    let source = r#"
+    function increment(value:number):number {return value+1;}
+    function length(value:string):number {return value.length;}
+    function field(value:{x:number}):number {return value.x;}
+    function optional(value:string|undefined):number {
+        if(value===undefined) {return -1;} return value.length;
+    }
+    export function run():number {
+        if(increment(JSON.parse('42'))!==43) {throw 1;}
+        if(length(JSON.parse('"abc"'))!==3) {throw 2;}
+        if(field(JSON.parse('{"x":7}'))!==7) {throw 3;}
+        const missing=JSON.parse('{}');
+        if(optional(missing.value)!==-1) {throw 4;}
+        let caught=0;
+        try {increment(JSON.parse('"wrong"'));} catch {caught=caught+1;}
+        try {length(JSON.parse('42'));} catch {caught=caught+1;}
+        try {field(JSON.parse('42'));} catch {caught=caught+1;}
+        return caught;
+    }"#;
+    let (mut store, instance) = super::instantiate(source, 131072, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, ()).await?.0, 3.0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_string_values_remain_undefined_when_inspected_and_serialized() -> anyhow::Result<()>
+{
+    let source = r#"
+    export function run():string {
+        const obj=JSON.parse('{}');
+        if(typeof JSON.stringify(obj.missing)!=='undefined') {throw 1;}
+        const strings:string[]=['a'];
+        if(typeof strings[9]!=='undefined') {throw 2;}
+        if(strings[0]!=='a') {throw 3;}
+        const encoded=JSON.stringify({value:strings[9]});
+        if(encoded===undefined) {throw 4;}
+        return encoded;
+    }"#;
+    let (mut store, instance) = super::instantiate(source, 131072, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, ()).await?.0, "{}");
+    Ok(())
+}

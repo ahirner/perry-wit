@@ -29,6 +29,14 @@ fn temporal_sdk_declares_only_the_supported_immutable_surface() -> Result<()> {
         r#"
         const instant=Temporal.Instant.fromEpochMilliseconds(0);
         const plain=Temporal.PlainDateTime.from('2024-01-01');
+        const date=Temporal.PlainDate.from('2024-01-01');
+        const next:Temporal.PlainDate=date.add({days:1});
+        const week:number=date.dayOfWeek+plain.dayOfWeek;
+        const text:string=next.toString();
+        // @ts-expect-error: immutable property
+        date.dayOfWeek=1;
+        // @ts-expect-error: no time fields on a plain date
+        date.hour;
         // @ts-expect-error: immutable property
         instant.epochMilliseconds=1;
         // @ts-expect-error: immutable property
@@ -57,6 +65,38 @@ fn temporal_sdk_declares_only_the_supported_immutable_surface() -> Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn plain_dates_survive_tagged_storage_and_reject_utc_designators() -> Result<()> {
+    let source = r#"
+    export function run(count:number):Result<string,number> {
+        const date=Temporal.PlainDate.from('2024-01-01T23:59:59+03:00');
+        if(date.dayOfWeek!==1) {throw 70;}
+        const object={date:date};
+        if(object.date.dayOfWeek!==1) {throw 71;}
+        const array:Temporal.PlainDate[]=[date];
+        let index=0;
+        while(index<count) {Temporal.PlainDate.from('2000-01-01').toString();index=index+1;}
+        if(object.date!==date || array[0]!==date) {throw 99;}
+        if(object.date.dayOfWeek!==1) {throw 72;}
+        if(array[0].day!==1) {throw 73;}
+        let caught=0;
+        try {Temporal.PlainDate.from('2024-01-01T00:00Z');} catch {caught=caught+1;}
+        try {Temporal.PlainDate.from('2024-01-01T00:00z');} catch {caught=caught+1;}
+        if(caught!==2) {throw 97;}
+        return object.date.add({days:1}).toString();
+    }"#;
+    let (mut store, instance) = instantiate(source, 131072, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(f64,), (Result<String, f64>,)>(&mut store, "run")?;
+    for count in [0.0, 1.0, 3000.0] {
+        assert_eq!(
+            run.call_async(&mut store, (count,)).await?.0,
+            Ok("2024-01-02".into()),
+            "{count}"
+        );
+    }
     Ok(())
 }
 

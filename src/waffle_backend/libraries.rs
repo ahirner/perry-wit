@@ -17,6 +17,7 @@ pub(crate) const SEARCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/searc
 pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.wasm"));
 pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/time.wasm"));
 pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
+pub(crate) const NUMBER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/number.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {
@@ -25,11 +26,13 @@ pub(crate) enum LibraryId {
     Text,
     Json,
     Time,
+    Number,
 }
 
 impl LibraryId {
     pub(crate) fn for_entry(entry: &str) -> Result<Self> {
         Ok(match entry {
+            "number_remainder" => Self::Number,
             "fetch_status_text" | "fetch_url" | "fetch_redirect" | "fetch_decode"
             | "fetch_method" | "fetch_header_value" | "fetch_header_size" | "fetch_header_get"
             | "fetch_header_name" | "fetch_header_edit" => Self::Fetch,
@@ -45,15 +48,19 @@ impl LibraryId {
                 Self::Json
             }
             "time_date_iso"
+            | "time_date_parse"
+            | "time_date_part"
             | "time_instant_parse"
             | "time_utc_parse"
             | "time_instant_from_ms"
             | "time_instant_ms"
             | "time_instant_format"
             | "time_plain_parse"
+            | "time_plain_date_parse"
             | "time_plain_add_days"
             | "time_plain_part"
-            | "time_plain_format" => Self::Time,
+            | "time_plain_format"
+            | "time_plain_date_format" => Self::Time,
             _ => bail!("unknown helper entry {entry}"),
         })
     }
@@ -65,6 +72,7 @@ impl LibraryId {
             Self::Text => TEXT,
             Self::Json => JSON,
             Self::Time => TIME,
+            Self::Number => NUMBER,
         }
     }
 }

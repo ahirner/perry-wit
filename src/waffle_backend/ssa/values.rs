@@ -174,13 +174,20 @@ impl FunctionLowerer<'_> {
         if is_boxed(expected) {
             return Ok(value);
         }
+        let optional = crate::waffle_backend::values::sentinel_inner(expected);
+        let expected = optional.unwrap_or(expected);
         let tag = ValueTag::of(expected)? as u32;
         let tag = self.op(Operator::I32Const { value: tag }, &[], &[Type::I32]);
+        let helpers = self
+            .registry
+            .value_helpers
+            .expect("value helpers are registered");
         let payload = self.call_completion(
-            self.registry
-                .value_helpers
-                .expect("value helpers are registered")
-                .extract,
+            if optional.is_some() {
+                helpers.extract_optional
+            } else {
+                helpers.extract
+            },
             &[value, tag],
         );
         let value = abi::decode_payload(
@@ -254,7 +261,8 @@ impl FunctionLowerer<'_> {
                 self.op(Operator::Select, &[text, undefined, original], &[Type::I32]),
                 original,
             )
-        } else if ty == &HirType::Union(vec![HirType::Number, HirType::Void]) {
+        } else if matches!(ty, HirType::Union(types) if types.len() == 2 && types.contains(&HirType::Number) && types.contains(&HirType::Void))
+        {
             let defined = self.op(Operator::F64Eq, &[original, original], &[Type::I32]);
             let number = self.op(
                 Operator::I32Const {

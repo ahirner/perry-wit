@@ -89,7 +89,7 @@ fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
             }
             if let Expr::PropertyGet { property, .. } = callee.as_ref() {
                 match property.as_str() {
-                    "indexOf" => {
+                    "indexOf" | "startsWith" | "includes" => {
                         reqs.needs_strings = true;
                         reqs.find_substring = true;
                     }

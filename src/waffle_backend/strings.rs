@@ -15,7 +15,7 @@ mod comparison;
 mod concat;
 mod descriptor;
 mod positions;
-pub(crate) use positions::valid_index;
+pub(crate) use positions::{PositionMode, bounded_position, valid_index};
 mod search;
 mod slicing;
 mod text_ops;

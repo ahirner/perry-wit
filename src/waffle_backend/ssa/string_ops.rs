@@ -19,7 +19,7 @@ impl FunctionLowerer<'_> {
             return Ok(self.op(Operator::Select, &[value, undefined, value], &[Type::I32]));
         }
         ensure!(
-            self.infer_expr_type(expr) == HirType::String,
+            crate::waffle_backend::values::is_string_type(&self.infer_expr_type(expr)),
             "String coercion is unsupported for {:?}",
             self.infer_expr_type(expr)
         );
@@ -184,6 +184,7 @@ impl FunctionLowerer<'_> {
             "slice" => 0..=2,
             "charAt" | "codePointAt" => 0..=1,
             "indexOf" => 1..=2,
+            "startsWith" | "includes" => 1..=2,
             "toLowerCase" | "toUpperCase" => 0..=0,
             "split" | "search" => 1..=1,
             _ => bail!("Unsupported string method: {method}"),
@@ -198,6 +199,54 @@ impl FunctionLowerer<'_> {
             .string_helpers
             .expect("String runtime is registered");
         let desc = self.string_receiver(receiver)?;
+        if method == "startsWith" {
+            ensure!(
+                self.is_string(&args[0]),
+                "startsWith requires a string search operand"
+            );
+            let search = self.string_receiver(&args[0])?;
+            let position = self.position_argument(args.get(1), 0.0)?;
+            let length = self.string_length(desc);
+            let position = crate::waffle_backend::strings::bounded_position(
+                &mut self.body,
+                self.block,
+                position,
+                length,
+                crate::waffle_backend::strings::PositionMode::Clamped,
+            );
+            let position = self.op(Operator::F64ConvertI32U, &[position], &[Type::F64]);
+            let idx = self.op(
+                Operator::Call {
+                    function_index: helpers.str_index_of.expect("indexOf helper available"),
+                },
+                &[desc, search, position],
+                &[Type::F64],
+            );
+            return Ok(self.op(Operator::F64Eq, &[idx, position], &[Type::I32]));
+        }
+        if method == "includes" {
+            ensure!(
+                self.is_string(&args[0]),
+                "includes requires a string search operand"
+            );
+            let search = self.string_receiver(&args[0])?;
+            let position = self.position_argument(args.get(1), 0.0)?;
+            let idx = self.op(
+                Operator::Call {
+                    function_index: helpers.str_index_of.expect("indexOf helper available"),
+                },
+                &[desc, search, position],
+                &[Type::F64],
+            );
+            let zero = self.op(
+                Operator::F64Const {
+                    value: 0.0f64.to_bits(),
+                },
+                &[],
+                &[Type::F64],
+            );
+            return Ok(self.op(Operator::F64Ge, &[idx, zero], &[Type::I32]));
+        }
         let (function_index, values, result_type) = match method {
             "search" => {
                 let Expr::RegExp { pattern, flags } = &args[0] else {

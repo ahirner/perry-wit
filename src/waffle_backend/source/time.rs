@@ -26,8 +26,9 @@ impl SourceCalls {
             (Some("Instant"), Some("from")) => TimeConstructor::InstantFrom,
             (Some("Instant"), Some("fromEpochMilliseconds")) => TimeConstructor::InstantFromMs,
             (Some("PlainDateTime"), Some("from")) => TimeConstructor::PlainFrom,
+            (Some("PlainDate"), Some("from")) => TimeConstructor::PlainDateFrom,
             _ => bail!(
-                "Unsupported Temporal factory; use Instant.from(string), Instant.fromEpochMilliseconds(number), or PlainDateTime.from(string)"
+                "Unsupported Temporal factory; use Instant.from(string), Instant.fromEpochMilliseconds(number), PlainDateTime.from(string), or PlainDate.from(string)"
             ),
         };
         ensure!(
@@ -62,6 +63,7 @@ impl SourceCalls {
         let kind = match qualified.right.sym.as_ref() {
             "Instant" => TimeKind::Instant,
             "PlainDateTime" => TimeKind::PlainDateTime,
+            "PlainDate" => TimeKind::PlainDate,
             name => bail!("Unsupported Temporal type '{name}'"),
         };
         ensure!(

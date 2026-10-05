@@ -11,19 +11,35 @@ impl FunctionLowerer<'_> {
         expected: &HirType,
     ) -> Result<waffle::Value> {
         self.check_typed_value(expression, expected)?;
-        if crate::waffle_backend::values::is_boxed_union(expected) {
+        if crate::waffle_backend::values::is_boxed(expected) {
             return self.value_operand(expression);
         }
-        if let Some(inner) = crate::waffle_backend::nullable::inner(expected) {
-            let actual = self.infer_expr_type(expression);
-            if crate::waffle_backend::nullable::inner(&actual).is_some() {
-                return self.expression(expression);
+        let actual = self.infer_expr_type(expression);
+        if crate::waffle_backend::values::is_boxed(&actual)
+            && !crate::waffle_backend::values::is_boxed(expected)
+        {
+            return self.unbox_value(expression, expected);
+        }
+        if let Some(inner) = crate::waffle_backend::values::sentinel_inner(expected) {
+            if actual == HirType::Void {
+                self.expression(expression)?;
+                return Ok(if inner == &HirType::Number {
+                    self.op(
+                        waffle::Operator::F64Const {
+                            value: f64::NAN.to_bits(),
+                        },
+                        &[],
+                        &[waffle::Type::F64],
+                    )
+                } else {
+                    self.op(
+                        waffle::Operator::I32Const { value: 0 },
+                        &[],
+                        &[waffle::Type::I32],
+                    )
+                });
             }
-            if matches!(actual, HirType::Null | HirType::Void) {
-                return self.value_operand(expression);
-            }
-            let value = self.typed_operand(expression, inner)?;
-            return self.box_typed_value(value, inner);
+            return self.expression(expression);
         }
         if let HirType::Union(variants) = expected {
             if let Ok(Some(fields)) = literal_properties(self.contract, expression)
@@ -59,7 +75,7 @@ impl FunctionLowerer<'_> {
     pub(super) fn check_typed_value(&self, expression: &Expr, expected: &HirType) -> Result<()> {
         ensure!(
             self.matches_typed_value(expression, expected),
-            "Value does not match its declared static type {expected:?}; found {:?}",
+            "Value does not match its declared static type {expected:?}; found {:?} for expr {expression:?}",
             self.infer_expr_type(expression)
         );
         Ok(())
@@ -67,7 +83,45 @@ impl FunctionLowerer<'_> {
 
     fn matches_typed_value(&self, expression: &Expr, expected: &HirType) -> bool {
         let actual = self.infer_expr_type(expression);
+        if crate::waffle_backend::values::is_dynamic(expected) {
+            return true;
+        }
         if crate::waffle_backend::wit::same_type(&actual, expected) {
+            return true;
+        }
+        if crate::waffle_backend::values::is_dynamic(&actual) {
+            return true;
+        }
+        if let Some(expected_inner) = crate::waffle_backend::nullable::inner(expected) {
+            if let Some(actual_inner) = crate::waffle_backend::nullable::inner(&actual) {
+                if crate::waffle_backend::wit::same_type(actual_inner, expected_inner) {
+                    return true;
+                }
+            }
+            if matches!(actual, HirType::Null | HirType::Void) {
+                return true;
+            }
+            if crate::waffle_backend::wit::same_type(&actual, expected_inner) {
+                return true;
+            }
+        }
+        if let HirType::Union(actual_variants) = &actual {
+            if let HirType::Union(expected_variants) = expected {
+                if actual_variants.iter().all(|a| {
+                    expected_variants
+                        .iter()
+                        .any(|e| crate::waffle_backend::wit::same_type(a, e))
+                }) {
+                    return true;
+                }
+            }
+        }
+        if expected == &HirType::String
+            && matches!(
+                expression,
+                Expr::JsonStringify(_) | Expr::JsonStringifyFull(..)
+            )
+        {
             return true;
         }
         if let HirType::Union(variants) = expected {
@@ -137,12 +191,10 @@ impl FunctionLowerer<'_> {
             return;
         }
         if let Some(guard) = null_guard(expression)
-            && let Some(ty @ HirType::Union(variants)) = self
+            && let Some(HirType::Union(variants)) = self
                 .narrowings
                 .get(&guard.local)
                 .or_else(|| self.local_types.get(&guard.local))
-            && variants.len() == 2
-            && crate::waffle_backend::values::is_boxed_union(ty)
         {
             let absent = if guard.kind == AbsenceKind::Null {
                 HirType::Null
@@ -150,11 +202,18 @@ impl FunctionLowerer<'_> {
                 HirType::Void
             };
             if variants.contains(&absent) {
-                let selected = variants
-                    .iter()
-                    .find(|ty| (**ty == absent) == (guard.equal == truth))
-                    .unwrap();
-                self.narrowings.insert(guard.local, selected.clone());
+                let narrowed = if guard.equal == truth {
+                    absent
+                } else {
+                    let non_absent: Vec<_> =
+                        variants.iter().filter(|t| **t != absent).cloned().collect();
+                    if non_absent.len() == 1 {
+                        non_absent.into_iter().next().unwrap()
+                    } else {
+                        HirType::Union(non_absent)
+                    }
+                };
+                self.narrowings.insert(guard.local, narrowed);
                 return;
             }
         }

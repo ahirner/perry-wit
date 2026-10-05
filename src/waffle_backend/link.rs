@@ -635,8 +635,9 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     }
 
     let result = module.finish();
-    Validator::new()
-        .validate_all(&result)
-        .context("Validating linked Wasm output")?;
+    if let Err(e) = Validator::new().validate_all(&result) {
+        std::fs::write("/tmp/debug_linked.wasm", &result).ok();
+        anyhow::bail!("Validating linked Wasm output: {e:?} (wrote /tmp/debug_linked.wasm)");
+    }
     Ok(result)
 }

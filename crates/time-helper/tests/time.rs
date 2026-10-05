@@ -238,3 +238,19 @@ fn excluded_annotations_and_short_destinations_fail_explicitly_without_writes() 
         assert_eq!(output, [0xa5; 33]);
     }
 }
+#[test]
+fn plain_date_discards_time_but_preserves_offset_validation() {
+    let parsed = PlainDateTime::parse_plain_date(b"2024-01-01T23:45:01.123+01:00").unwrap();
+    assert_eq!(parsed.date(), (2024, 1, 1));
+    assert_eq!(parsed.time(), (0, 0, 0, 0));
+    for input in [
+        "2024-01-01T00:00Z",
+        "2024-01-01T00:00z",
+        "2024-01-01T00:00+24:00",
+    ] {
+        assert!(
+            PlainDateTime::parse_plain_date(input.as_bytes()).is_err(),
+            "{input}"
+        );
+    }
+}

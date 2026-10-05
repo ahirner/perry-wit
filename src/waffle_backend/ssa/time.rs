@@ -42,10 +42,11 @@ impl FunctionLowerer<'_> {
                     &[Type::I32],
                 )
             });
-            let name = if operation == TimeConstructor::InstantFrom {
-                "time_instant_parse"
-            } else {
-                "time_plain_parse"
+            let name = match operation {
+                TimeConstructor::InstantFrom => "time_instant_parse",
+                TimeConstructor::PlainFrom => "time_plain_parse",
+                TimeConstructor::PlainDateFrom => "time_plain_date_parse",
+                TimeConstructor::InstantFromMs => unreachable!(),
             };
             (name, vec![fields[0], fields[1], output])
         };
@@ -67,11 +68,22 @@ impl FunctionLowerer<'_> {
                     "Temporal.toString options are unsupported"
                 );
                 let value = self.expression(receiver)?;
-                let output = self.time_storage(33);
-                let capacity = self.op(Operator::I32Const { value: 33 }, &[], &[Type::I32]);
+                let capacity_val = match kind {
+                    TimeKind::PlainDate => 16,
+                    _ => 33,
+                };
+                let output = self.time_storage(capacity_val);
+                let capacity = self.op(
+                    Operator::I32Const {
+                        value: capacity_val,
+                    },
+                    &[],
+                    &[Type::I32],
+                );
                 let name = match kind {
                     TimeKind::Instant => "time_instant_format",
                     TimeKind::PlainDateTime => "time_plain_format",
+                    TimeKind::PlainDate => "time_plain_date_format",
                 };
                 let length = self.time_codec(name, &[value, output, capacity]);
                 Ok(self.op(
@@ -82,10 +94,10 @@ impl FunctionLowerer<'_> {
                     &[Type::I32],
                 ))
             }
-            "add" if kind == TimeKind::PlainDateTime => {
+            "add" if kind == TimeKind::PlainDateTime || kind == TimeKind::PlainDate => {
                 ensure!(
                     arguments.len() == 1,
-                    "Temporal.PlainDateTime.add requires one {{days: number}} record"
+                    "Temporal.add requires one {{days: number}} record"
                 );
                 let value = self.expression(receiver)?;
                 let days = self.time_days(&arguments[0])?;
@@ -119,7 +131,19 @@ impl FunctionLowerer<'_> {
                     "millisecond" => 6,
                     "microsecond" => 7,
                     "nanosecond" => 8,
+                    "dayOfWeek" => 9,
                     _ => bail!("Unsupported Temporal.PlainDateTime property '{property}'"),
+                };
+                let part = self.op(Operator::I32Const { value: part }, &[], &[Type::I32]);
+                ("time_plain_part", vec![value, part])
+            }
+            TimeKind::PlainDate => {
+                let part = match property {
+                    "year" => 0,
+                    "month" => 1,
+                    "day" => 2,
+                    "dayOfWeek" => 9,
+                    _ => bail!("Unsupported Temporal.PlainDate property '{property}'"),
                 };
                 let part = self.op(Operator::I32Const { value: part }, &[], &[Type::I32]);
                 ("time_plain_part", vec![value, part])
@@ -140,7 +164,7 @@ impl FunctionLowerer<'_> {
                 fields.len() == 1
                     && fields[0].0 == "days"
                     && self.infer_expr_type(fields[0].1) == HirType::Number,
-                "Temporal.PlainDateTime.add supports only {{days: number}}"
+                "Temporal.add supports only {{days: number}}"
             );
             return self.expression(fields[0].1);
         }

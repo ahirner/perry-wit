@@ -2259,3 +2259,29 @@ async fn test_unicode_casing_expansions_and_context() -> Result<()> {
     )
     .await
 }
+#[tokio::test(flavor = "current_thread")]
+async fn starts_with_normalizes_positions_before_comparing_absolute_indices() -> Result<()> {
+    let mut cases = vec![];
+    for (search, position, expected) in [
+        ("b", 1.0, true),
+        ("b", 1.9, true),
+        ("a", -1.0, true),
+        ("a", f64::NAN, true),
+        ("a", f64::NEG_INFINITY, true),
+        ("c", 1.0, false),
+        ("a", f64::INFINITY, false),
+        ("", 99.0, true),
+        ("", f64::INFINITY, true),
+        ("", -99.0, true),
+        ("", f64::NAN, true),
+    ] {
+        cases.push((
+            vec![Val::String(search.into()), Val::Float64(position)],
+            Val::Bool(expected),
+        ));
+    }
+    run_cases(
+        "export function run(search:string,position:number):boolean {return 'abc'.startsWith(search,position);}",
+        &cases,
+    ).await
+}

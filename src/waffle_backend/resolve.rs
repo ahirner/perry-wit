@@ -359,7 +359,8 @@ pub(crate) fn resolve_contract(
             func.params
                 .iter()
                 .all(|param| param.default.is_none() && !param.is_rest),
-            "Unsupported default or rest parameters in the WAFFLE backend"
+            "Unsupported default or rest parameters in func '{}'",
+            func.name
         );
         ensure!(
             functions_by_name

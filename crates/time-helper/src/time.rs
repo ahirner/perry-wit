@@ -139,6 +139,15 @@ impl PlainDateTime {
         )
     }
 
+    /// Temporal.PlainDate.from: validates like PlainDateTime, then discards the time.
+    pub fn parse_plain_date(input: &[u8]) -> Result<Self, Error> {
+        let value = Self::parse(input)?;
+        Ok(Self {
+            nanosecond: 0,
+            ..value
+        })
+    }
+
     /// The supported Temporal.add({days}) operation, preserving all time fields.
     pub fn add_days(self, days: i64) -> Result<Self, Error> {
         let day = i64::from(self.day).checked_add(days).ok_or(Error::Range)?;
@@ -148,6 +157,10 @@ impl PlainDateTime {
 
     pub fn date(self) -> (i32, u8, u8) {
         datealgo::rd_to_date(self.day)
+    }
+
+    pub fn weekday(self) -> u8 {
+        datealgo::rd_to_weekday(self.day)
     }
 
     pub fn time(self) -> (u8, u8, u8, u32) {
@@ -162,6 +175,10 @@ impl PlainDateTime {
 
     pub fn format(self, output: &mut [u8]) -> Result<usize, Error> {
         format::date_time(self, false, output)
+    }
+
+    pub fn format_plain_date(self, output: &mut [u8]) -> Result<usize, Error> {
+        format::plain_date(self, output)
     }
 
     fn checked(self) -> Result<Self, Error> {

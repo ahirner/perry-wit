@@ -42,6 +42,14 @@ pub(crate) fn date_time_precision(
     Ok(length)
 }
 
+pub(crate) fn plain_date(value: PlainDateTime, output: &mut [u8]) -> Result<usize, Error> {
+    let mut bytes = [0; 16];
+    let length = date(value.date(), &mut bytes);
+    let destination = output.get_mut(..length).ok_or(Error::Capacity)?;
+    destination.copy_from_slice(&bytes[..length]);
+    Ok(length)
+}
+
 pub(crate) fn date((year, month, day): (i32, u8, u8), output: &mut [u8]) -> usize {
     let year_length = if (0..=9999).contains(&year) {
         decimal(year as u32, &mut output[..4]);

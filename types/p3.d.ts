@@ -6,11 +6,13 @@
  * for a view over 65536 bytes, and makes no host call for an empty view.
  * Random UUIDs are lowercase v4 strings. Clock reads use milliseconds; Date.now()
  * returns whole signed UTC epoch milliseconds. Date supports new Date(epochMs)
- * with a statically known number, getTime(), and toISOString(). Invalid dates
+ * and ISO string construction, getTime(), toISOString(), getUTCFullYear(),
+ * getUTCMonth(), getUTCDate(), getUTCDay(), and setUTCDate(). Offset-free ISO
+ * date-times use UTC, the guest's supported local time zone. Invalid dates
  * return NaN from getTime() and throw numeric 1 from toISOString(). Dates retain
- * guest-local identity in helpers, objects, and Promises. Omitted, copy, nonnumeric,
- * and multi-argument constructors, calendar getters, valueOf(), setters, and
- * string parsing are diagnosed. Component boundaries carry UTC ISO strings.
+ * guest-local identity in helpers, objects, and Promises. Omitted, copy, dynamic,
+ * and multi-argument constructors, other calendar methods, and valueOf() are
+ * diagnosed. Component boundaries carry UTC ISO strings.
  * Temporal supports the typed immutable subset declared below.
  * Unconstrained any coercion, callbacks, and detached work
  * are deferred. Standard library declarations do not imply compiler support.
@@ -58,6 +60,7 @@ declare namespace Temporal {
     readonly year: number;
     readonly month: number;
     readonly day: number;
+    readonly dayOfWeek: number;
     readonly hour: number;
     readonly minute: number;
     readonly second: number;
@@ -65,6 +68,17 @@ declare namespace Temporal {
     readonly microsecond: number;
     readonly nanosecond: number;
     add(duration: { days: number }): PlainDateTime;
+    toString(): string;
+  }
+  /** ISO calendar date. from() ignores time and numeric offsets, and rejects Z. */
+  class PlainDate {
+    private constructor();
+    static from(text: string): PlainDate;
+    readonly year: number;
+    readonly month: number;
+    readonly day: number;
+    readonly dayOfWeek: number;
+    add(duration: { days: number }): PlainDate;
     toString(): string;
   }
 }

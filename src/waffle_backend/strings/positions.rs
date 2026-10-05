@@ -6,7 +6,7 @@ use waffle::{
     SignatureData, Terminator, Type, Value,
 };
 
-pub(super) enum PositionMode {
+pub(crate) enum PositionMode {
     Relative,
     Clamped,
 }
@@ -25,7 +25,7 @@ pub(super) fn integer_position(body: &mut FunctionBody, block: Block, value: Val
 }
 
 /// Applies relative or absolute bounds before narrowing a position to a memory-sized integer.
-pub(super) fn bounded_position(
+pub(crate) fn bounded_position(
     body: &mut FunctionBody,
     block: Block,
     value: Value,

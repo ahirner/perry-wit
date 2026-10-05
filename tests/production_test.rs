@@ -115,7 +115,7 @@ fn production_rejects_deferred_operations_before_creating_output() -> Result<()>
         ("process.env.KEY = 'value';", "read-only"),
         ("Promise.resolve(1);", "D5"),
         ("new Promise(() => {});", "Promise"),
-        ("new Date('2024-01-01');", "Date"),
+        ("new Date({});", "Date"),
     ] {
         fs::write(
             &source,

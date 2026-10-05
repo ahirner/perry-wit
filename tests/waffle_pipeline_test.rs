@@ -284,7 +284,7 @@ fn test_waffle_capability_dynamic_forms_and_initialization_are_diagnosed() {
         ),
         (
             "declare function randomNumber(): number; export function run(value: number = randomNumber()): number { return value; }",
-            "Unsupported default or rest parameters in the WAFFLE backend",
+            "Unsupported default or rest parameters in func 'run'",
         ),
         (
             "class Example { static value = Math.random(); } export function run(): number { return 1; }",

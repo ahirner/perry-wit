@@ -11,6 +11,7 @@ use waffle::{Func, FuncDecl, Import, ImportKind, Module, SignatureData, Type};
 pub(crate) enum TimeKind {
     Instant,
     PlainDateTime,
+    PlainDate,
 }
 
 impl TimeKind {
@@ -20,6 +21,7 @@ impl TimeKind {
             HirType::Named(name) if name == Self::PlainDateTime.type_name() => {
                 Some(Self::PlainDateTime)
             }
+            HirType::Named(name) if name == Self::PlainDate.type_name() => Some(Self::PlainDate),
             _ => None,
         }
     }
@@ -28,6 +30,7 @@ impl TimeKind {
         match self {
             Self::Instant => "__perry_internal_instant",
             Self::PlainDateTime => "__perry_internal_plain_date_time",
+            Self::PlainDate => "__perry_internal_plain_date",
         }
     }
 }
@@ -37,6 +40,7 @@ pub(crate) enum TimeConstructor {
     InstantFrom,
     InstantFromMs,
     PlainFrom,
+    PlainDateFrom,
 }
 
 impl TimeConstructor {
@@ -45,6 +49,7 @@ impl TimeConstructor {
             Self::InstantFrom => "Temporal.Instant.from",
             Self::InstantFromMs => "Temporal.Instant.fromEpochMilliseconds",
             Self::PlainFrom => "Temporal.PlainDateTime.from",
+            Self::PlainDateFrom => "Temporal.PlainDate.from",
         }
     }
 
@@ -52,6 +57,7 @@ impl TimeConstructor {
         match self {
             Self::InstantFrom | Self::InstantFromMs => TimeKind::Instant,
             Self::PlainFrom => TimeKind::PlainDateTime,
+            Self::PlainDateFrom => TimeKind::PlainDate,
         }
     }
 
@@ -92,6 +98,7 @@ pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<&'static
         ("time_instant_ms", vec![Type::I32], Type::F64),
         ("time_instant_format", vec![Type::I32; 3], Type::I64),
         ("time_plain_parse", vec![Type::I32; 3], Type::I64),
+        ("time_plain_date_parse", vec![Type::I32; 3], Type::I64),
         (
             "time_plain_add_days",
             vec![Type::I32, Type::F64, Type::I32],
@@ -99,6 +106,7 @@ pub(crate) fn declare_imports(module: &mut Module<'static>) -> BTreeMap<&'static
         ),
         ("time_plain_part", vec![Type::I32; 2], Type::F64),
         ("time_plain_format", vec![Type::I32; 3], Type::I64),
+        ("time_plain_date_format", vec![Type::I32; 3], Type::I64),
     ]
     .into_iter()
     .map(|(name, params, result)| {

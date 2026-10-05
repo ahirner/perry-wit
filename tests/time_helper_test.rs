@@ -113,7 +113,7 @@ fn plain_calendar_days_and_fields_preserve_nanoseconds_without_a_zone() -> Resul
     );
     let original = guest.bytes(VALUE, 16).to_vec();
     assert_eq!(add.call(&mut guest.store, (VALUE, 2.0, VALUE + 16))?, 16);
-    for (index, expected) in [2024.0, 3.0, 1.0, 23.0, 58.0, 57.0, 123.0, 456.0, 789.0]
+    for (index, expected) in [2024.0, 3.0, 1.0, 23.0, 58.0, 57.0, 123.0, 456.0, 789.0, 5.0]
         .into_iter()
         .enumerate()
     {
@@ -137,7 +137,8 @@ fn plain_calendar_days_and_fields_preserve_nanoseconds_without_a_zone() -> Resul
         );
         assert_eq!(guest.bytes(VALUE + 16, 16), unchanged);
     }
-    assert!(part.call(&mut guest.store, (VALUE, 9))?.is_nan());
+    assert_eq!(part.call(&mut guest.store, (VALUE, 9))?, 3.0);
+    assert!(part.call(&mut guest.store, (VALUE, 10))?.is_nan());
     Ok(())
 }
 

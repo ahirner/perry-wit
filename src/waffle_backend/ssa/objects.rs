@@ -1,6 +1,6 @@
 //! Evaluate plain object fields in source order and check tags at typed reads.
 
-use super::{FunctionLowerer, options::literal_properties, types::StringKind};
+use super::{FunctionLowerer, options::literal_properties};
 use crate::waffle_backend::{
     abi,
     capabilities::{CapabilityOperation, ContextOperation},
@@ -127,16 +127,25 @@ impl FunctionLowerer<'_> {
                 return HirType::Any;
             };
             let mut types = Vec::new();
+            let mut missing = false;
             for variant in variants {
                 let HirType::Object(record) = variant else {
                     return HirType::Any;
                 };
-                let Some(field) = record.properties.get(key) else {
-                    return HirType::Any;
-                };
-                if !types.contains(&field.ty) {
-                    types.push(field.ty.clone());
+                if let Some(field) = record.properties.get(key) {
+                    let field_ty = crate::waffle_backend::objects::property_type(field);
+                    if !types.contains(&field_ty) {
+                        types.push(field_ty);
+                    }
+                } else {
+                    missing = true;
                 }
+            }
+            if missing && !types.contains(&HirType::Void) {
+                types.push(HirType::Void);
+            }
+            if types.is_empty() {
+                return HirType::Any;
             }
             return if types.len() == 1 {
                 types.remove(0)
@@ -241,8 +250,8 @@ impl FunctionLowerer<'_> {
             ty != HirType::Any,
             "Object property reads need a declared property or index type"
         );
-        let optional = StringKind::of(&ty) == Some(StringKind::Optional);
-        let value_type = if optional { &HirType::String } else { &ty };
+        let optional = crate::waffle_backend::values::sentinel_inner(&ty);
+        let value_type = optional.unwrap_or(&ty);
         let object = self.expression(receiver)?;
         let key = self.string_receiver(key)?;
         let helpers = self.registry.object_helpers.unwrap();
@@ -253,9 +262,7 @@ impl FunctionLowerer<'_> {
             &[object, key],
             &[Type::I32],
         );
-        if crate::waffle_backend::values::is_boxed(&ty)
-            || crate::waffle_backend::nullable::inner(&ty).is_some()
-        {
+        if crate::waffle_backend::values::is_boxed(&ty) {
             return Ok(self.op(
                 Operator::Call {
                     function_index: helpers.dynamic,
@@ -268,7 +275,7 @@ impl FunctionLowerer<'_> {
         let tag = self.op(Operator::I32Const { value: tag }, &[], &[Type::I32]);
         let optional = self.op(
             Operator::I32Const {
-                value: u32::from(optional),
+                value: u32::from(optional.is_some()),
             },
             &[],
             &[Type::I32],

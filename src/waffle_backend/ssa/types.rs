@@ -28,6 +28,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
             crate::waffle_backend::time::TimeKind::of(ty).map(|kind| match kind {
                 crate::waffle_backend::time::TimeKind::Instant => "Temporal.Instant",
                 crate::waffle_backend::time::TimeKind::PlainDateTime => "Temporal.PlainDateTime",
+                crate::waffle_backend::time::TimeKind::PlainDate => "Temporal.PlainDate",
             })
         }
         ty if crate::waffle_backend::filesystem::is_stats(ty) => Some("Stats"),
@@ -131,8 +132,8 @@ impl FunctionLowerer<'_> {
                     _ => HirType::Unknown,
                 }
             }
-            Expr::ArrayPush { .. } => HirType::Number,
-            Expr::IndexGet { object, .. } if matches!(self.infer_expr_type(object),HirType::Array(inner) if *inner!=HirType::String) =>
+            Expr::ArrayPush { .. } | Expr::ErrorNew(_) => HirType::Number,
+            Expr::IndexGet { object, .. } if matches!(self.infer_expr_type(object), HirType::Array(inner) if *inner != HirType::String) =>
             {
                 let HirType::Array(inner) = self.infer_expr_type(object) else {
                     unreachable!()
@@ -299,7 +300,19 @@ impl FunctionLowerer<'_> {
                 HirType::Promise(result) => *result,
                 result => result,
             },
-            Expr::Number(_) | Expr::Integer(_) | Expr::Update { .. } => HirType::Number,
+            Expr::Number(_)
+            | Expr::Integer(_)
+            | Expr::Update { .. }
+            | Expr::NumberCoerce(_)
+            | Expr::Unary {
+                op: perry_hir::ir::UnaryOp::Neg | perry_hir::ir::UnaryOp::Pos,
+                ..
+            }
+            | Expr::MathFloor(_)
+            | Expr::MathCeil(_)
+            | Expr::MathRound(_)
+            | Expr::MathTrunc(_)
+            | Expr::MathAbs(_) => HirType::Number,
             Expr::Bool(_)
             | Expr::Compare { .. }
             | Expr::Unary {
@@ -425,6 +438,8 @@ impl FunctionLowerer<'_> {
                         return HirType::String;
                     } else if property == "codePointAt" {
                         return HirType::Union(vec![HirType::Number, HirType::Void]);
+                    } else if property == "startsWith" || property == "includes" {
+                        return HirType::Boolean;
                     } else if property == "indexOf" || property == "search" {
                         return HirType::Number;
                     } else if property == "split" {

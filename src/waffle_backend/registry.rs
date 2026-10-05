@@ -91,6 +91,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) value_access: Option<super::values::ValueAccessHelpers>,
     pub(crate) json_helpers: Option<super::json::JsonHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
+    pub(crate) number_remainder: Option<Func>,
     pub(crate) headers_helpers: Option<super::http::headers::Helpers>,
     pub(crate) body_helpers: Option<super::http::body::Helpers>,
     pub(crate) web_streams: Option<super::streams::web::Helpers>,
@@ -268,8 +269,9 @@ impl ModuleRegistry {
             .json
             .then(|| super::json::declare_imports(module));
 
+        let number_remainder = super::number::declare_remainder(module, hir);
         let date_import = (super::date::required(hir) || string_reqs.json)
-            .then(|| super::date::declare_import(module));
+            .then(|| super::date::declare_imports(module));
         let time_helpers = if super::time::required(hir) {
             super::time::declare_imports(module)
         } else {
@@ -799,7 +801,11 @@ impl ModuleRegistry {
             let params = func
                 .params
                 .iter()
-                .map(|p| map_type_to_waffle(&p.ty))
+                .map(|p| {
+                    map_type_to_waffle(&p.ty).map_err(|e| {
+                        anyhow::anyhow!("In func '{}' param '{:?}': {}", func.name, p.name, e)
+                    })
+                })
                 .collect::<Result<Vec<_>>>()?;
 
             if is_exported && contract.wit.is_none() {
@@ -905,6 +911,7 @@ impl ModuleRegistry {
             text_or_bytes_lift,
             value_helpers,
             date_helpers,
+            number_remainder,
             time_helpers,
             json_helpers,
             value_access,
@@ -941,6 +948,9 @@ impl ModuleRegistry {
 }
 
 pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
+    if let Some(inner) = super::values::sentinel_inner(ty) {
+        return map_type_to_waffle(inner);
+    }
     match ty {
         ty if super::nullable::inner(ty).is_some() => Ok(Type::I32),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(Type::I32),
@@ -970,6 +980,9 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
 }
 
 pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
+    if let Some(inner) = super::values::sentinel_inner(ty) {
+        return map_return_type_to_waffle(inner);
+    }
     match ty {
         ty if super::nullable::inner(ty).is_some() => Ok(vec![Type::I32]),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok(vec![Type::I32]),

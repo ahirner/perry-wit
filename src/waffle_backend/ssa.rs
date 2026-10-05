@@ -201,6 +201,9 @@ pub(crate) fn lower_module(
         if super::time::required(hir) || super::date::required(hir) || reqs.json {
             helper_libraries.push(super::libraries::LibraryId::Time);
         }
+        if super::number::remainder_required(hir) {
+            helper_libraries.push(super::libraries::LibraryId::Number);
+        }
         if !helper_libraries.is_empty() {
             let mut placement = super::libraries::HelperMemory::new(next_free);
             for id in helper_libraries {
@@ -475,9 +478,11 @@ impl<'a> FunctionLowerer<'a> {
                             "HTTP response initializers must match their declared type"
                         );
                     }
-                    let (ty, val) = if self.contract.wit.is_some()
+                    let (ty, val) = if (self.contract.wit.is_some()
                         && (super::objects::is_object(ty)
-                            || matches!(ty, HirType::Array(_) | HirType::Tuple(_)))
+                            || matches!(ty, HirType::Array(_) | HirType::Tuple(_))))
+                        || (matches!(ty, HirType::Array(_) | HirType::Tuple(_))
+                            && matches!(expr, Expr::Array(_)))
                     {
                         (ty.clone(), self.typed_operand(expr, ty)?)
                     } else if super::values::is_boxed_union(ty) {
@@ -597,7 +602,9 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn return_expression(&mut self, expr: &Expr) -> Result<Value> {
-        if super::values::is_boxed_union(self.return_type) {
+        if super::values::is_boxed_union(self.return_type)
+            || super::values::sentinel_inner(self.return_type).is_some()
+        {
             return self.typed_operand(expr, &self.return_type.clone());
         }
         if self.contract.wit.is_some() {
@@ -994,10 +1001,10 @@ impl<'a> FunctionLowerer<'a> {
                 continue;
             }
             if let Some(expected) = expected
-                && super::nullable::inner(expected).is_some()
+                && (super::nullable::inner(expected).is_some()
+                    || super::values::sentinel_inner(expected).is_some())
             {
-                self.check_typed_value(arg, expected)?;
-                arg_vals.push(self.value_operand(arg)?);
+                arg_vals.push(self.typed_operand(arg, expected)?);
                 continue;
             }
             let argument_type = self.infer_expr_type(arg);
@@ -1706,6 +1713,17 @@ impl<'a> FunctionLowerer<'a> {
             Expr::Unary {
                 op: UnaryOp::Not, ..
             } => self.condition(expr),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => {
+                let val = self.numeric_operand(operand)?;
+                Ok(self.op(Operator::F64Neg, &[val], &[Type::F64]))
+            }
+            Expr::Unary {
+                op: UnaryOp::Pos,
+                operand,
+            } => self.numeric_operand(operand),
             Expr::TextDecoderNew {
                 label,
                 fatal,
@@ -1750,6 +1768,17 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::TemplateStringCoerce(inner) | Expr::StringCoerce(inner) => {
                 self.string_operand(inner)
+            }
+            Expr::NumberCoerce(inner) => {
+                let ty = self.infer_expr_type(inner);
+                if ty == HirType::Number {
+                    self.expression(inner)
+                } else if ty == HirType::Boolean {
+                    let val = self.expression(inner)?;
+                    Ok(self.op(Operator::F64ConvertI32U, &[val], &[Type::F64]))
+                } else {
+                    bail!("Unsupported Number() coercion from type {ty:?}")
+                }
             }
             Expr::Number(n) => {
                 Ok(self.op(Operator::F64Const { value: n.to_bits() }, &[], &[Type::F64]))
@@ -1913,6 +1942,7 @@ impl<'a> FunctionLowerer<'a> {
                     .get(id)
                     .is_some_and(super::values::is_boxed)
                     && let Some(narrowed) = self.narrowings.get(id).cloned()
+                    && !super::values::is_boxed(&narrowed)
                 {
                     let stored = self.locals[id];
                     return self.extract_value(stored, &narrowed);
@@ -2053,13 +2083,15 @@ impl<'a> FunctionLowerer<'a> {
                     let scalar_len = self.string_length(desc);
                     Ok(self.op(Operator::F64ConvertI32U, &[scalar_len], &[Type::F64]))
                 } else {
-                    ensure!(
-                        matches!(
-                            self.infer_expr_type(object),
-                            HirType::Tuple(_) | HirType::Array(_)
-                        ),
-                        "Unsupported length receiver"
-                    );
+                    if !matches!(
+                        self.infer_expr_type(object),
+                        HirType::Tuple(_) | HirType::Array(_)
+                    ) {
+                        bail!(
+                            "Unsupported length receiver for type: {:?}",
+                            self.infer_expr_type(object)
+                        );
+                    }
                     let arr_ptr = self.expression(object)?;
                     let count = self.op(
                         Operator::I32Load {
@@ -2149,6 +2181,18 @@ impl<'a> FunctionLowerer<'a> {
                             == Some(Type::F64)),
                     "Arithmetic operands must be numeric"
                 );
+                if *op == BinaryOp::Mod {
+                    return Ok(self.op(
+                        Operator::Call {
+                            function_index: self
+                                .registry
+                                .number_remainder
+                                .expect("remainder helper"),
+                        },
+                        &[left_val, right_val],
+                        &[Type::F64],
+                    ));
+                }
                 let operator = match op {
                     BinaryOp::Add => Operator::F64Add,
                     BinaryOp::Sub => Operator::F64Sub,
@@ -2173,6 +2217,57 @@ impl<'a> FunctionLowerer<'a> {
                         &[Type::F64],
                     )
                 }))
+            }
+            Expr::MathFloor(inner) => {
+                let val = self.numeric_operand(inner)?;
+                Ok(self.op(Operator::F64Floor, &[val], &[Type::F64]))
+            }
+            Expr::MathCeil(inner) => {
+                let val = self.numeric_operand(inner)?;
+                Ok(self.op(Operator::F64Ceil, &[val], &[Type::F64]))
+            }
+            Expr::MathTrunc(inner) => {
+                let val = self.numeric_operand(inner)?;
+                Ok(self.op(Operator::F64Trunc, &[val], &[Type::F64]))
+            }
+            Expr::MathAbs(inner) => {
+                let val = self.numeric_operand(inner)?;
+                Ok(self.op(Operator::F64Abs, &[val], &[Type::F64]))
+            }
+            Expr::MathRound(inner) => {
+                let val = self.numeric_operand(inner)?;
+                let floor = self.op(Operator::F64Floor, &[val], &[Type::F64]);
+                let fraction = self.op(Operator::F64Sub, &[val, floor], &[Type::F64]);
+                let half = self.op(
+                    Operator::F64Const {
+                        value: 0.5f64.to_bits(),
+                    },
+                    &[],
+                    &[Type::F64],
+                );
+                let up = self.op(Operator::F64Ge, &[fraction, half], &[Type::I32]);
+                let one = self.op(
+                    Operator::F64Const {
+                        value: 1f64.to_bits(),
+                    },
+                    &[],
+                    &[Type::F64],
+                );
+                let next = self.op(Operator::F64Add, &[floor, one], &[Type::F64]);
+                let rounded = self.op(Operator::Select, &[next, floor, up], &[Type::F64]);
+                Ok(self.op(Operator::F64Copysign, &[rounded, val], &[Type::F64]))
+            }
+            Expr::ErrorNew(message) => {
+                if let Some(message) = message {
+                    self.expression(message)?;
+                }
+                Ok(self.op(
+                    Operator::F64Const {
+                        value: 1f64.to_bits(),
+                    },
+                    &[],
+                    &[Type::F64],
+                ))
             }
             _ => bail!("Unsupported expression in WAFFLE lowering: {expr:?}"),
         }

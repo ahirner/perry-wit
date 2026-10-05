@@ -165,13 +165,9 @@ fn unsupported_date_forms_are_diagnosed_before_frontend_argument_loss() {
         "new Date(new Date(0))",
         "new Date(0).valueOf()",
         "new Date(0).getFullYear()",
-        "new Date(0).getUTCFullYear()",
         "new Date(0).getMonth()",
-        "new Date(0).getUTCMonth()",
         "new Date(0).getDate()",
-        "new Date(0).getUTCDate()",
         "new Date(0).getDay()",
-        "new Date(0).getUTCDay()",
         "new Date(0).getHours()",
         "new Date(0).getUTCHours()",
         "new Date(0).getMinutes()",
@@ -184,7 +180,6 @@ fn unsupported_date_forms_are_diagnosed_before_frontend_argument_loss() {
         "new Date(0).toString()",
         "new Date(0).toLocaleString()",
         "new Date(...[0])",
-        "new Date('2024-01-01')",
         "new Date({})",
         "new Date(0).getTime(42)",
         "new Date(0).getTime(...[])",
@@ -354,6 +349,80 @@ async fn pending_time_values_survive_sibling_collection_and_release_on_disposal(
             if dispose {
                 assert_eq!(dropped.load(Ordering::SeqCst), 1);
             }
+        }
+    }
+    Ok(())
+}
+#[tokio::test(flavor = "current_thread")]
+async fn date_strings_match_node_without_throwing_for_invalid_input() -> Result<()> {
+    let source = "export function run(input:string):number {return new Date(input).getTime();}";
+    let (mut store, instance) = instantiate(source, 131072, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    let inputs = [
+        "1970",
+        "1970-01",
+        "1970-01-01",
+        "1970-01-01T00:00",
+        "1970-01-01T24:00:00Z",
+        "1970-01-01T01:30+01:30",
+        "1969-12-31T23:59:59.9999Z",
+        "2024-02-30",
+        "2024-01-01T12:34:56.1Z",
+        "+275760-09-13T00:00:00Z",
+        "-271821-04-20T00:00:00Z",
+        "+275760-09-13T00:00:00.001Z",
+        "invalid",
+        "",
+        "2024-13-01",
+        "2024-01-32",
+        "2024-01-01T24:01Z",
+        "2024-01-01T00:00:60Z",
+    ];
+    let node = Command::new("node").env("TZ", "UTC").args([
+        "--eval", "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(s=>new Date(s).getTime())))",
+        &serde_json::to_string(&inputs)?,
+    ]).output()?;
+    assert!(node.status.success());
+    let expected: Vec<Option<f64>> = serde_json::from_slice(&node.stdout)?;
+    for (input, expected) in inputs.into_iter().zip(expected) {
+        let actual = run.call_async(&mut store, (input,)).await?.0;
+        match expected {
+            Some(expected) => assert_eq!(actual, expected, "{input}"),
+            None => assert!(actual.is_nan(), "{input}: {actual}"),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn utc_date_setter_truncates_clips_and_updates_aliases() -> Result<()> {
+    let source = r#"
+    export function run(time:number,day:number):number {
+        const date=new Date(time);
+        const alias=date;
+        const changed=date.setUTCDate(day);
+        if(changed===changed) {if(alias.getTime()!==changed) {throw 99;}}
+        else {if(alias.getTime()===alias.getTime()) {throw 98;}}
+        return changed;
+    }"#;
+    let (mut store, instance) = instantiate(source, 65536, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(f64, f64), (f64,)>(&mut store, "run")?;
+    for (time, day, expected) in [
+        (0.0, 1.5, 0.0),
+        (0.0, 0.9, -86400000.0),
+        (0.0, -1.9, -172800000.0),
+        (1234.0, 2.9, 86401234.0),
+        (8640000000000000.0, 14.0, f64::NAN),
+        (-8640000000000000.0, 19.0, f64::NAN),
+        (f64::NAN, 1.0, f64::NAN),
+        (0.0, f64::NAN, f64::NAN),
+        (0.0, f64::INFINITY, f64::NAN),
+    ] {
+        let actual = run.call_async(&mut store, (time, day)).await?.0;
+        if expected.is_nan() {
+            assert!(actual.is_nan());
+        } else {
+            assert_eq!(actual.to_bits(), expected.to_bits());
         }
     }
     Ok(())

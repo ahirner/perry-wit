@@ -2,6 +2,8 @@
 
 mod time;
 pub use time::*;
+mod date;
+pub use date::parse_date_milliseconds;
 
 #[cfg(target_arch = "wasm32")]
 mod guest;

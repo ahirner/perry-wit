@@ -18,6 +18,7 @@ mod json;
 pub(crate) mod libraries;
 pub(crate) mod link;
 mod nullable;
+mod number;
 mod objects;
 pub(crate) mod promises;
 mod random;

@@ -45,10 +45,12 @@
   ;; Tags: undefined=0, null=1, boolean=2, number=3; reference tags start at 4.
   (func (export "object.value") (param $entry i32) (param $tag i32) (param $optional i32) (result i32 f64)
     (if (i32.eqz (local.get $entry)) (then
-      (if (local.get $optional) (then (return (i32.const 0) (f64.const 0))))
+      (if (local.get $optional) (then (return (i32.const 0)
+        (select (f64.const nan) (f64.const 0) (i32.eq (local.get $tag) (i32.const 3))))))
       (return (i32.const 1) (f64.const 12))))
     (if (i32.and (local.get $optional) (i32.eqz (i32.load offset=8 (local.get $entry))))
-      (then (return (i32.const 0) (f64.const 0))))
+      (then (return (i32.const 0)
+        (select (f64.const nan) (f64.const 0) (i32.eq (local.get $tag) (i32.const 3))))))
     (if (i32.ne (i32.load offset=8 (local.get $entry)) (local.get $tag))
       (then (return (i32.const 1) (f64.const 12))))
     (i32.const 0) (f64.load offset=16 (local.get $entry)))

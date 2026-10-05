@@ -30,13 +30,27 @@ pub(crate) fn is_dynamic(ty: &HirType) -> bool {
     matches!(ty, HirType::Named(name) if name == VALUE_TYPE)
 }
 
+/// Optional strings and numbers encode undefined in their primitive storage.
+pub(crate) fn sentinel_inner(ty: &HirType) -> Option<&HirType> {
+    let HirType::Union(types) = ty else {
+        return None;
+    };
+    if types.len() == 2 && types.contains(&HirType::Void) {
+        types
+            .iter()
+            .find(|ty| matches!(ty, HirType::String | HirType::Number))
+    } else {
+        None
+    }
+}
+
 /// Finite unions with different storage representations keep an explicit value tag.
 pub(crate) fn is_boxed_union(ty: &HirType) -> bool {
     matches!(ty, HirType::Union(types) if types.len() > 1)
         && !is_string_type(ty)
         && !super::objects::is_object(ty)
         && !super::text_or_bytes::is_text_or_bytes(ty)
-        && !matches!(ty, HirType::Union(types) if types.len() == 2 && types.contains(&HirType::Void) && (types.contains(&HirType::String) || types.contains(&HirType::Number)))
+        && sentinel_inner(ty).is_none()
 }
 
 pub(crate) fn is_boxed(ty: &HirType) -> bool {
@@ -88,6 +102,7 @@ pub(crate) enum ValueTag {
     AbortSignal = 21,
     ReadableStream = 22,
     StreamReader = 23,
+    PlainDate = 24,
 }
 
 impl ValueTag {
@@ -133,6 +148,9 @@ impl ValueTag {
             ty if super::time::TimeKind::of(ty) == Some(super::time::TimeKind::PlainDateTime) => {
                 Self::PlainDateTime
             }
+            ty if super::time::TimeKind::of(ty) == Some(super::time::TimeKind::PlainDate) => {
+                Self::PlainDate
+            }
             _ => bail!("Unsupported tagged value type: {ty:?}"),
         })
     }
@@ -142,6 +160,7 @@ impl ValueTag {
 pub(crate) struct ValueHelpers {
     pub(crate) new: Func,
     pub(crate) extract: Func,
+    pub(crate) extract_optional: Func,
     pub(crate) truthy: Func,
     pub(crate) equal: Func,
     pub(crate) scalar_number: Func,
@@ -227,6 +246,7 @@ pub(crate) fn emit_runtime(
     Ok(ValueHelpers {
         new: functions["value.new"],
         extract: functions["value.extract"],
+        extract_optional: functions["value.extract-optional"],
         truthy: functions["value.truthy"],
         equal: functions["value.equal"],
         scalar_number: functions["value.scalar-number"],

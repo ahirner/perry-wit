@@ -14,6 +14,66 @@ fn compile_records(source: &str) -> Result<WaffleCompiled> {
 }
 
 #[test]
+fn enum_contracts_reject_nonmember_literals() {
+    let wit = "package test:boundary; world boundary {
+        enum answer { yes, no }
+        export run:func()->answer;
+    }";
+    for source in [
+        "export function run():'maybe' {return 'maybe';}",
+        "export function run():'yes'|'no' {return 'maybe';}",
+        "export function run():string {return 'yes';}",
+    ] {
+        assert!(compile_world(source, wit).is_err(), "{source}");
+    }
+    compile_world("export function run():'yes'|'no' {return 'yes';}", wit)
+        .expect("a member of the declared enum is valid");
+}
+
+#[test]
+fn generated_sdk_exposes_plain_date_and_weekday_properties() -> Result<()> {
+    check_sdk_source(
+        "package test:boundary; world boundary {export run:func()->string;}",
+        "export function run():string {
+            const date:Temporal.PlainDate=Temporal.PlainDate.from('2024-01-01');
+            const datetime=Temporal.PlainDateTime.from('2024-01-01T12:00');
+            return date.add({days:date.dayOfWeek+datetime.dayOfWeek}).toString();
+        }",
+    )
+}
+
+#[test]
+fn resolved_guest_calls_extract_dynamic_json_arguments_and_reject_wrong_tags() -> Result<()> {
+    let source = r#"
+    function increment(value:number):number {return value+1;}
+    function length(value:string):number {return value.length;}
+    function field(value:{x:number}):number {return value.x;}
+    export function run(input:string):{ok:true,value:number}|{ok:false,error:number} {
+        const value=JSON.parse(input);
+        try {return {ok:true,value:increment(value.n)+length(value.s)+field(value.obj)};}
+        catch(error) {return {ok:false,error:error};}
+    }"#;
+    let compiled = compile_world(
+        source,
+        "package test:boundary; world boundary {export run:func(input:string)->result<f64,f64>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(&str,), (Result<f64, f64>,)>(&mut store, "run")?;
+    for (input, expected) in [
+        (r#"{"n":42,"s":"abc","obj":{"x":7}}"#, Ok(53.0)),
+        (r#"{"n":"42","s":"abc","obj":{"x":7}}"#, Err(12.0)),
+        (r#"{"n":42,"s":3,"obj":{"x":7}}"#, Err(12.0)),
+        (r#"{"n":42,"s":"abc","obj":7}"#, Err(12.0)),
+    ] {
+        assert_eq!(run.call(&mut store, (input,))?.0, expected);
+    }
+    Ok(())
+}
+
+#[test]
 fn record_tuple_and_result_exports_remain_valid_under_bounded_memory() -> Result<()> {
     use records::exports::test::records::transform::{Failure, Input};
     let compiled = compile_records(include_str!("fixtures/record_boundary.ts"))?;

@@ -11,10 +11,16 @@
     (f64.store offset=8 (local.get $value) (local.get $payload))
     (local.get $value))
 
-  (func (export "value.extract") (param $value i32) (param $tag i32) (result i32 f64)
+  (func $extract (export "value.extract") (param $value i32) (param $tag i32) (result i32 f64)
     (if (i32.ne (i32.load (local.get $value)) (local.get $tag))
       (then (return (i32.const 1) (f64.const 12))))
     (i32.const 0) (f64.load offset=8 (local.get $value)))
+
+  (func (export "value.extract-optional") (param $value i32) (param $tag i32) (result i32 f64)
+    (if (i32.eqz (i32.load (local.get $value))) (then
+      (return (i32.const 0)
+        (select (f64.const nan) (f64.const 0) (i32.eq (local.get $tag) (i32.const 3))))))
+    (call $extract (local.get $value) (local.get $tag)))
 
   (func (export "value.truthy") (param $value i32) (result i32)
     (local $tag i32) (local $payload f64)

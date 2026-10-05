@@ -1,4 +1,4 @@
-//! Immutable Date values, UTC calendar arithmetic, and ISO formatting.
+//! Date storage, timestamp clipping, UTC calendar arithmetic, and ISO formatting.
 
 use super::{
     allocation::AllocationFuncs,
@@ -17,6 +17,16 @@ pub(crate) const DATE_TYPE: &str = "__perry_internal_date";
 pub(crate) struct DateHelpers {
     pub(crate) new: Func,
     pub(crate) iso: Func,
+    pub(crate) parse: Func,
+    pub(crate) clip: Func,
+    pub(crate) part: Func,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DateImports {
+    pub(crate) iso: Func,
+    pub(crate) parse: Func,
+    pub(crate) part: Func,
 }
 
 pub(crate) fn is_date(ty: &HirType) -> bool {
@@ -36,35 +46,59 @@ pub(crate) fn required(hir: &HirModule) -> bool {
     })
 }
 
-pub(crate) fn declare_import(module: &mut Module<'static>) -> Func {
-    let sig = module.signatures.push(SignatureData {
+pub(crate) fn declare_imports(module: &mut Module<'static>) -> DateImports {
+    let sig_iso = module.signatures.push(SignatureData {
         params: vec![Type::F64, Type::I32, Type::I32],
         returns: vec![Type::I64],
     });
-    let function = module
+    let iso = module
         .funcs
-        .push(FuncDecl::Import(sig, "time_date_iso".into()));
+        .push(FuncDecl::Import(sig_iso, "time_date_iso".into()));
     module.imports.push(Import {
         module: super::link::HELPER_MODULE.into(),
         name: "time_date_iso".into(),
-        kind: ImportKind::Func(function),
+        kind: ImportKind::Func(iso),
     });
-    function
+
+    let sig_parse = module.signatures.push(SignatureData {
+        params: vec![Type::I32, Type::I32],
+        returns: vec![Type::F64],
+    });
+    let parse = module
+        .funcs
+        .push(FuncDecl::Import(sig_parse, "time_date_parse".into()));
+    module.imports.push(Import {
+        module: super::link::HELPER_MODULE.into(),
+        name: "time_date_parse".into(),
+        kind: ImportKind::Func(parse),
+    });
+
+    let sig_part = module.signatures.push(SignatureData {
+        params: vec![Type::F64, Type::I32],
+        returns: vec![Type::F64],
+    });
+    let part = module
+        .funcs
+        .push(FuncDecl::Import(sig_part, "time_date_part".into()));
+    module.imports.push(Import {
+        module: super::link::HELPER_MODULE.into(),
+        name: "time_date_part".into(),
+        kind: ImportKind::Func(part),
+    });
+
+    DateImports { iso, parse, part }
 }
 
 pub(crate) fn emit_runtime(
     module: &mut Module<'static>,
     memory: Memory,
     allocator: AllocationFuncs,
-    format: Func,
+    imports: DateImports,
 ) -> Result<DateHelpers> {
     use Type::{F64, I32, I64};
-    let new = builder::declare(module, "date.new", &[F64], &[I32]);
-    let mut b = Builder::new(module, new, memory);
+    let clip = builder::declare(module, "date.clip", &[F64], &[F64]);
+    let mut b = Builder::new(module, clip, memory);
     let time = b.param(0);
-    let zero = b.integer(0);
-    let eight = b.integer(8);
-    let date = b.call(allocator.realloc, &[zero, zero, eight, eight], &[I32])[0];
     let absolute = b.op(Operator::F64Abs, &[time], F64);
     let limit = b.op(
         Operator::F64Const {
@@ -85,6 +119,15 @@ pub(crate) fn emit_runtime(
         F64,
     );
     let time = b.op(Operator::Select, &[time, invalid, valid], F64);
+    b.ret(&[time]);
+    b.finish(module, clip)?;
+
+    let new = builder::declare(module, "date.new", &[F64], &[I32]);
+    let mut b = Builder::new(module, new, memory);
+    let time = b.call(clip, &[b.param(0)], &[F64])[0];
+    let zero = b.integer(0);
+    let eight = b.integer(8);
+    let date = b.call(allocator.realloc, &[zero, zero, eight, eight], &[I32])[0];
     b.store(date, 0, time, F64);
     b.ret(&[date]);
     b.finish(module, new)?;
@@ -99,7 +142,7 @@ pub(crate) fn emit_runtime(
     let twelve = b.integer(12);
     let output = b.op(Operator::I32Add, &[string, twelve], I32);
     let capacity = b.integer(27);
-    let packed = b.call(format, &[time, output, capacity], &[I64])[0];
+    let packed = b.call(imports.iso, &[time, output, capacity], &[I64])[0];
     let shift = b.op(Operator::I64Const { value: 32 }, &[], I64);
     let error = b.op(Operator::I64ShrU, &[packed, shift], I64);
     let error = b.op(Operator::I32WrapI64, &[error], I32);
@@ -128,7 +171,13 @@ pub(crate) fn emit_runtime(
     let payload = b.op(Operator::F64ConvertI32U, &[string], F64);
     b.ret(&[zero, payload]);
     b.finish(module, iso)?;
-    Ok(DateHelpers { new, iso })
+    Ok(DateHelpers {
+        new,
+        iso,
+        parse: imports.parse,
+        clip,
+        part: imports.part,
+    })
 }
 
 fn contains_date(ty: &HirType) -> bool {
