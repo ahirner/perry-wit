@@ -49,70 +49,28 @@ pub(super) fn emit(
     t: &Transport<'_>,
     r: &super::super::SourceRuntime<'_>,
 ) -> Result<()> {
+    use super::super::request as request_value;
     let mut b = Builder::new(module, function, memory);
     let zero = b.integer(0);
     let one = b.integer(1);
     let two = b.integer(2);
-    let three = b.integer(3);
     let count = b.integer(9);
     let frame = b.call(t.allocator.frame_new, &[count], &[I32])[0];
-    for (offset, index) in [(12, 0), (16, 1), (20, 2), (24, 3), (28, 6)] {
-        b.store(frame, offset, b.param(index), I32);
+    for (at, index) in [(12, 0), (16, 2), (20, 3), (24, 5), (28, 7)] {
+        b.store(frame, at, b.param(index), I32);
     }
-    let supplied = b.body.add_block();
-    let default = b.body.add_block();
-    let checked = b.body.add_block();
-    let mode = b.body.add_blockparam(checked, I32);
-    b.branch(b.param(6), supplied, default);
-    b.block = default;
-    b.jump(checked, &[zero]);
-    b.block = supplied;
-    let mut valid = zero;
-    let mut selected = zero;
-    for (index, name) in ["follow", "manual", "error"].into_iter().enumerate() {
-        let name = b.integer(r.pool.get(name).unwrap());
-        let difference = b.call(r.strings.str_compare, &[b.param(6), name], &[I32])[0];
-        let matches = b.op(O::I32Eqz, &[difference], I32);
-        valid = b.op(O::I32Or, &[valid, matches], I32);
-        let index = b.integer(index as u32);
-        selected = b.op(O::Select, &[index, selected, matches], I32);
-    }
-    let invalid = b.op(O::I32Eqz, &[valid], I32);
-    super::request::invalid(&mut b, t, frame, invalid);
-    b.jump(checked, &[selected]);
-    b.block = checked;
-    let headers = b.call(t.headers.new, &[b.param(5), b.param(2)], &[I32, F64]);
-    propagate(&mut b, t, frame, &headers);
-    let headers = b.op(O::I32TruncF64U, &[headers[1]], I32);
-    b.store(frame, 20, headers, I32);
-    let byte_body = b.op(O::I32Eq, &[b.param(4), two], I32);
-    let copy = b.body.add_block();
-    let immutable = b.body.add_block();
-    let prepared = b.body.add_block();
-    let body = b.body.add_blockparam(prepared, I32);
-    b.branch(byte_body, copy, immutable);
-    b.block = copy;
-    let snapshot = b.call(r.bytes.copy, &[b.param(3)], &[I32])[0];
-    b.jump(prepared, &[snapshot]);
-    b.block = immutable;
-    b.jump(prepared, &[b.param(3)]);
-    b.block = prepared;
+    let args = (0..8).map(|index| b.param(index)).collect::<Vec<_>>();
+    let prepared = b.call(r.request.unwrap().new, &args, &[I32, F64]);
+    propagate(&mut b, t, frame, &prepared);
+    let request = b.op(O::I32TruncF64U, &[prepared[1]], I32);
+    b.store(frame, 12, request, I32);
+    let headers = request;
+    let mode = b.load(request, request_value::REDIRECT_MODE, I32);
     let next = b.body.add_block();
-    let url = b.body.add_blockparam(next, I32);
-    let method = b.body.add_blockparam(next, I32);
-    let next_body = b.body.add_blockparam(next, I32);
-    let body_kind = b.body.add_blockparam(next, I32);
     let followed = b.body.add_blockparam(next, I32);
-    b.jump(next, &[b.param(0), b.param(1), body, b.param(4), zero]);
+    b.jump(next, &[zero]);
     b.block = next;
-    for (at, value) in [(12, url), (16, method), (24, next_body)] {
-        b.store(frame, at, value, I32);
-    }
-    let result = b.call(
-        send,
-        &[url, method, headers, next_body, body_kind, three],
-        &[I32, F64],
-    );
+    let result = b.call(send, &[request], &[I32, F64]);
     propagate(&mut b, t, frame, &result);
     let response = b.op(O::I32TruncF64U, &[result[1]], I32);
     b.store(frame, 32, response, I32);
@@ -201,19 +159,9 @@ pub(super) fn emit(
     b.store(frame, 44, target, I32);
     let closed = b.call(discard, &[response], &[I32, F64]);
     propagate(&mut b, t, frame, &closed);
-    let explicit = b.body.add_block();
-    let default = b.body.add_block();
-    let classified = b.body.add_block();
-    let method_tag = b.body.add_blockparam(classified, I32);
-    b.branch(method, explicit, default);
-    b.block = default;
-    b.jump(classified, &[zero]);
-    b.block = explicit;
-    let data = b.load(method, 0, I32);
-    let length = b.load(method, 4, I32);
-    let tag = b.call(t.native["fetch_method"], &[data, length], &[I32])[0];
-    b.jump(classified, &[tag]);
-    b.block = classified;
+    b.store(request, request_value::URL, target, I32);
+    b.store(request, request_value::URL_PARTS, output, I32);
+    let method_tag = b.load(request, request_value::METHOD_TAG, I32);
     let post = b.op(O::I32Eq, &[method_tag, two], I32);
     let s302 = b.integer(302);
     let s303 = b.integer(303);
@@ -227,6 +175,16 @@ pub(super) fn emit(
     let origin = b.body.add_block();
     b.branch(rewrite, remove_body, origin);
     b.block = remove_body;
+    let get = b.integer(r.pool.get("GET").unwrap());
+    b.store(request, request_value::METHOD, get, I32);
+    for field in [
+        request_value::METHOD_TAG,
+        request_value::BODY,
+        request_value::BODY_KIND,
+    ] {
+        b.store(request, field, zero, I32);
+    }
+
     for key in [
         "content-encoding",
         "content-language",
@@ -251,12 +209,9 @@ pub(super) fn emit(
     }
     b.jump(repeat, &[]);
     b.block = repeat;
-    let method = b.op(O::Select, &[zero, method, rewrite], I32);
-    let body = b.op(O::Select, &[zero, next_body, rewrite], I32);
-    let kind = b.op(O::Select, &[zero, body_kind, rewrite], I32);
     let count = b.op(O::I32Add, &[followed, one], I32);
     b.store(frame, 32, zero, I32);
     b.store(frame, 36, zero, I32);
-    b.jump(next, &[target, method, body, kind, count]);
+    b.jump(next, &[count]);
     b.finish(module, function)
 }

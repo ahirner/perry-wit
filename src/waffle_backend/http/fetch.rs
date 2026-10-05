@@ -8,7 +8,6 @@ use crate::waffle_backend::{
         imports,
     },
     streams,
-    strings::StringHelperFuncs,
 };
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -19,7 +18,7 @@ use waffle::{
 };
 
 mod redirects;
-mod request;
+mod upload;
 
 pub(crate) const RESPONSE_TYPE: &str = "__perry_fetch_response";
 pub(crate) const OWNERS: u32 = 104;
@@ -28,51 +27,12 @@ pub(crate) fn is_response(ty: &perry_hir::types::Type) -> bool {
     matches!(ty, perry_hir::types::Type::Named(name) if name == RESPONSE_TYPE)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum BodyMethod {
-    Bytes,
-    Text,
-    Json,
-    ArrayBuffer,
-}
-impl BodyMethod {
-    pub(crate) const ALL: [Self; 4] = [Self::Bytes, Self::Text, Self::Json, Self::ArrayBuffer];
-    pub(crate) fn named(name: &str) -> Option<Self> {
-        match name {
-            "bytes" => Some(Self::Bytes),
-            "text" => Some(Self::Text),
-            "json" => Some(Self::Json),
-            "arrayBuffer" => Some(Self::ArrayBuffer),
-            _ => None,
-        }
-    }
-    pub(crate) fn result(self) -> perry_hir::types::Type {
-        match self {
-            Self::Text => perry_hir::types::Type::String,
-            Self::Json => crate::waffle_backend::values::value_type(),
-            Self::ArrayBuffer => perry_hir::types::Type::Named("ArrayBuffer".into()),
-            Self::Bytes => perry_hir::types::Type::Named("Uint8Array".into()),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct Helpers {
     pub(crate) fetch: Func,
     pub(crate) upload: Func,
-    pub(crate) bytes: Func,
-    pub(crate) text: Func,
-    json: Option<Func>,
+    pub(crate) consume: Func,
     pub(crate) finish: Func,
-}
-impl Helpers {
-    pub(crate) fn body(self, method: BodyMethod) -> Func {
-        match method {
-            BodyMethod::Bytes | BodyMethod::ArrayBuffer => self.bytes,
-            BodyMethod::Text => self.text,
-            BodyMethod::Json => self.json.unwrap(),
-        }
-    }
 }
 
 fn offset(b: &mut Builder, pointer: Value, offset: u32) -> Value {
@@ -125,12 +85,11 @@ pub(super) fn emit(
     let bytes = runtime.bytes;
     let native = runtime.imports;
     let promises = runtime.promises.unwrap();
-    let fetch = builder::declare(module, "fetch", &[I32; 7], &[I32, F64]);
-    let send = builder::declare(module, "fetch.send", &[I32; 6], &[I32, F64]);
+    let fetch = builder::declare(module, "fetch", &[I32; 8], &[I32, F64]);
+    let send = builder::declare(module, "fetch.send", &[I32], &[I32, F64]);
     let release = builder::declare(module, "fetch.release", &[I32], &[I32]);
     let discard = builder::declare(module, "fetch.discard", &[I32], &[I32, F64]);
     let body = builder::declare(module, "fetch.consume", &[I32], &[I32, F64]);
-    let text = builder::declare(module, "fetch.text", &[I32], &[I32, F64]);
     let finish = builder::declare(module, "fetch.finish", &[], &[]);
     let transport = Transport {
         native,
@@ -139,85 +98,15 @@ pub(super) fn emit(
         finish_write: super::future::emit_finish_write(module, memory, native)?,
         promises,
         consume: body,
-        content_type: [
-            runtime.pool.get("content-type").unwrap(),
-            runtime.pool.get("text/plain;charset=UTF-8").unwrap(),
-        ],
     };
-    emit_fetch(
-        module,
-        memory,
-        send,
-        &transport,
-        strings,
-        native["fetch_url"],
-    )?;
-    let upload = request::emit_upload(module, memory, native)?;
+    emit_fetch(module, memory, send, &transport, strings)?;
+    let upload = upload::emit(module, memory, native)?;
     let transfer = streams::emit_read_transfer(module, memory, native["read"])?;
     let buffered = streams::buffered::emit(module, memory, allocator, transfer)?;
     emit_release(module, memory, release, &transport)?;
     emit_body(module, memory, body, &transport, bytes, buffered, release)?;
     redirects::emit_discard(module, memory, discard, &transport, release)?;
     redirects::emit(module, memory, fetch, send, discard, &transport, runtime)?;
-    let mut b = Builder::new(module, text, memory);
-    let result = b.call(body, &[b.param(0)], &[I32, F64]);
-    let failed = b.body.add_block();
-    let ready = b.body.add_block();
-    b.branch(result[0], failed, ready);
-    b.block = failed;
-    b.ret(&result);
-    b.block = ready;
-    let view = b.op(O::I32TruncF64U, &[result[1]], I32);
-    let count = b.integer(2);
-    let frame = b.call(allocator.frame_new, &[count], &[I32])[0];
-    b.store(frame, 12, view, I32);
-    let data = b.load(view, 0, I32);
-    let length = b.load(view, 4, I32);
-    let max = b.integer(u32::MAX / 3);
-    let fits = b.op(O::I32LeU, &[length, max], I32);
-    b.require(fits);
-    let three = b.integer(3);
-    let capacity = b.op(O::I32Mul, &[length, three], I32);
-    let zero = b.integer(0);
-    let one = b.integer(1);
-    let output = b.call(allocator.realloc, &[zero, zero, one, capacity], &[I32])[0];
-    b.store(frame, 16, output, I32);
-    let length = b.call(
-        native["fetch_decode"],
-        &[data, length, output, capacity],
-        &[I32],
-    )[0];
-    let invalid = b.integer(u32::MAX);
-    let valid = b.op(O::I32Ne, &[length, invalid], I32);
-    b.require(valid);
-    let descriptor = b.call(strings.lift_canonical, &[output, length], &[I32])[0];
-    b.call(allocator.frame_drop, &[frame], &[]);
-    let payload = b.op(O::F64ConvertI32U, &[descriptor], F64);
-    b.ret(&[zero, payload]);
-    b.finish(module, text)?;
-    let json = runtime
-        .json
-        .map(|json| {
-            let function = builder::declare(module, "fetch.json", &[I32], &[I32, F64]);
-            let mut b = Builder::new(module, function, memory);
-            let text_result = b.call(text, &[b.param(0)], &[I32, F64]);
-            let failed = b.body.add_block();
-            let parse = b.body.add_block();
-            b.branch(text_result[0], failed, parse);
-            b.block = failed;
-            b.ret(&text_result);
-            b.block = parse;
-            let text = b.op(O::I32TruncF64U, &[text_result[1]], I32);
-            let one = b.integer(1);
-            let frame = b.call(allocator.frame_new, &[one], &[I32])[0];
-            b.store(frame, 12, text, I32);
-            let result = b.call(json.parse, &[text], &[I32, F64]);
-            b.call(allocator.frame_drop, &[frame], &[]);
-            b.ret(&result);
-            b.finish(module, function)?;
-            Ok::<_, anyhow::Error>(function)
-        })
-        .transpose()?;
     let mut b = Builder::new(module, finish, memory);
     let address = b.integer(OWNERS);
     let pending = b.load(address, 0, I32);
@@ -228,9 +117,7 @@ pub(super) fn emit(
     Ok(Helpers {
         fetch,
         upload,
-        bytes: body,
-        text,
-        json,
+        consume: body,
         finish,
     })
 }
@@ -241,7 +128,6 @@ struct Transport<'a> {
     allocator: AllocationFuncs,
     finish_write: Func,
     consume: Func,
-    content_type: [u32; 2],
     promises: &'a crate::waffle_backend::registry::PromiseImports,
 }
 impl Transport<'_> {
@@ -274,20 +160,16 @@ fn emit_fetch(
     memory: Memory,
     function: Func,
     t: &Transport<'_>,
-    strings: StringHelperFuncs,
-    normalize: Func,
+    strings: crate::waffle_backend::strings::StringHelperFuncs,
 ) -> Result<()> {
     let mut b = Builder::new(module, function, memory);
-    let url = b.param(0);
+    let request_value = b.param(0);
     let zero = b.integer(0);
     let one = b.integer(1);
     let code = b.number(12.0);
     let count = b.integer(8);
     let frame = b.call(t.allocator.frame_new, &[count], &[I32])[0];
-    b.store(frame, 12, url, I32);
-    b.store(frame, 28, b.param(1), I32);
-    b.store(frame, 32, b.param(2), I32);
-    b.store(frame, 36, b.param(3), I32);
+    b.store(frame, 12, request_value, I32);
     let response = b.allocate(t.allocator.realloc, 72, 4);
     b.store(frame, 16, response, I32);
     let size = b.integer(72);
@@ -303,42 +185,40 @@ fn emit_fetch(
     b.store(response, 48, scratch, I32);
     let size = b.integer(256);
     b.effect(O::MemoryFill { mem: memory }, &[scratch, zero, size]);
-    let data = b.load(url, 0, I32);
-    let length = b.load(url, 4, I32);
-    let max = b.integer((u32::MAX - 64) / 4);
-    let fits = b.op(O::I32LeU, &[length, max], I32);
-    b.require(fits);
-    let expansion = b.integer(4);
-    let capacity = b.op(O::I32Mul, &[length, expansion], I32);
-    let capacity = offset(&mut b, capacity, 64);
-    let normalized = b.call(t.allocator.realloc, &[zero, zero, one, capacity], &[I32])[0];
-    b.store(frame, 24, normalized, I32);
-    let invalid = b.call(normalize, &[data, length, normalized, capacity], &[I32])[0];
-    let invalid_url = b.body.add_block();
-    let valid_url = b.body.add_block();
-    b.branch(invalid, invalid_url, valid_url);
-    b.block = invalid_url;
+    let normalized = b.load(request_value, super::request::URL_PARTS, I32);
+    let normalized_data = offset(&mut b, normalized, 32);
+    let url_length = b.load(normalized, 16, I32);
+    let url = b.call(
+        strings.lift_canonical,
+        &[normalized_data, url_length],
+        &[I32],
+    )[0];
+    b.store(response, 16, url, I32);
+    let method_tag = b.load(request_value, super::request::METHOD_TAG, I32);
+    let method_text = b.load(request_value, super::request::METHOD, I32);
+    let method = [
+        method_tag,
+        b.load(method_text, 0, I32),
+        b.load(method_text, 4, I32),
+    ];
+    let fields_data = b.load(request_value, 4, I32);
+    let fields_count = b.load(request_value, 8, I32);
+    b.call(
+        t.native["fields"],
+        &[fields_data, fields_count, scratch],
+        &[],
+    );
+    let failed = byte(&mut b, scratch, 0);
+    let invalid_fields = b.body.add_block();
+    let ready_fields = b.body.add_block();
+    b.branch(failed, invalid_fields, ready_fields);
+    b.block = invalid_fields;
     b.call(t.allocator.frame_drop, &[frame], &[]);
     b.ret(&[one, code]);
-    b.block = valid_url;
-    let normalized_data = offset(&mut b, normalized, 32);
-    let length = b.load(normalized, 16, I32);
-    let url = b.call(strings.lift_canonical, &[normalized_data, length], &[I32])[0];
-    b.store(response, 16, url, I32);
-    let method = request::method(&mut b, t, frame)?;
-    let headers = b.call(t.headers.new, &[b.param(5), b.param(2)], &[I32, F64]);
-    let bad_headers = b.body.add_block();
-    let ready_headers = b.body.add_block();
-    b.branch(headers[0], bad_headers, ready_headers);
-    b.block = bad_headers;
-    b.call(t.allocator.frame_drop, &[frame], &[]);
-    b.ret(&headers);
-    b.block = ready_headers;
-    let headers = b.op(O::I32TruncF64U, &[headers[1]], I32);
-    b.store(frame, 32, headers, I32);
-    request::fields(&mut b, t, frame, scratch, response)?;
+    b.block = ready_fields;
     let fields = b.load(scratch, 4, I32);
-    let has_body = b.op(O::I32Ne, &[b.param(4), zero], I32);
+    let body_kind = b.load(request_value, super::request::BODY_KIND, I32);
+    let has_body = b.op(O::I32Ne, &[body_kind, zero], I32);
     let stream = b.body.add_block();
     let empty_body = b.body.add_block();
     let request_body = b.body.add_block();
@@ -414,7 +294,8 @@ fn emit_fetch(
     b.call(t.allocator.frame_drop, &[frame], &[]);
     b.ret(&[one, code]);
     b.block = send;
-    request::start_upload(&mut b, t, response, body_writer, has_body);
+    let upload_body = b.load(request_value, super::request::BODY, I32);
+    upload::start(&mut b, t, response, body_writer, has_body, upload_body);
     let empty = offset(&mut b, scratch, 64);
     let status = b.call(t.native["write-trailers"], &[writer, empty], &[I32])[0];
     b.store(response, 44, status, I32);
@@ -588,33 +469,11 @@ pub(crate) fn declare_helpers(module: &mut Module<'static>) -> BTreeMap<String, 
     let mut functions = imports::declare_imports(
         module,
         crate::waffle_backend::link::HELPER_MODULE,
-        &[
-            imports::Function {
-                name: "fetch_url".into(),
-                params: vec!["i32"; 4],
-                results: vec!["i32"],
-            },
-            imports::Function {
-                name: "fetch_redirect".into(),
-                params: vec!["i32"; 6],
-                results: vec!["i32"],
-            },
-            imports::Function {
-                name: "fetch_header".into(),
-                params: vec!["i32"; 2],
-                results: vec!["i32"],
-            },
-            imports::Function {
-                name: "fetch_method".into(),
-                params: vec!["i32"; 2],
-                results: vec!["i32"],
-            },
-            imports::Function {
-                name: "fetch_decode".into(),
-                params: vec!["i32"; 4],
-                results: vec!["i32"],
-            },
-        ],
+        &[imports::Function {
+            name: "fetch_redirect".into(),
+            params: vec!["i32"; 6],
+            results: vec!["i32"],
+        }],
     );
     functions.extend(imports::declare_imports(
         module,

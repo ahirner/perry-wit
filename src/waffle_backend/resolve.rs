@@ -47,6 +47,7 @@ pub(crate) enum TypedIntrinsic {
     DecoderNew,
     DateNew,
     HeadersNew,
+    RequestNew,
     Temporal(super::time::TimeConstructor),
     Custom {
         name: String,
@@ -80,6 +81,7 @@ impl TypedIntrinsic {
                         | CapabilityOperation::Random(RandomOperation::Fill)
                 )
                 | Self::HeadersNew
+                | Self::RequestNew
                 | Self::DecoderNew
                 | Self::Temporal(_)
         )
@@ -94,6 +96,7 @@ impl TypedIntrinsic {
             Self::DecoderNew => "TextDecoder",
             Self::DateNew => "Date",
             Self::HeadersNew => "Headers",
+            Self::RequestNew => "Request",
             Self::Temporal(operation) => operation.name(),
             Self::Custom { name, .. } | Self::WitImport { name, .. } => name.as_str(),
         }
@@ -109,6 +112,7 @@ impl TypedIntrinsic {
             | Self::DecoderNew
             | Self::DateNew
             | Self::HeadersNew
+            | Self::RequestNew
             | Self::Temporal(_) => false,
             Self::Custom { is_async, .. } => *is_async,
         }
@@ -144,6 +148,10 @@ impl TypedIntrinsic {
             Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
             Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
             Self::DateNew => (vec![WaffleType::F64], vec![WaffleType::I32]),
+            Self::RequestNew => (
+                vec![WaffleType::I32; 8],
+                vec![WaffleType::I32, WaffleType::F64],
+            ),
             Self::HeadersNew => (
                 vec![WaffleType::I32; 2],
                 vec![WaffleType::I32, WaffleType::F64],
@@ -186,11 +194,18 @@ pub(crate) struct ResolvedContract {
 
 impl ResolvedContract {
     pub(crate) fn has_headers(&self) -> bool {
-        self.has_fetch()
+        self.has_request()
             || self
                 .intrinsics
                 .values()
                 .any(|intrinsic| matches!(intrinsic, TypedIntrinsic::HeadersNew))
+    }
+    pub(crate) fn has_request(&self) -> bool {
+        self.has_fetch()
+            || self
+                .intrinsics
+                .values()
+                .any(|intrinsic| matches!(intrinsic, TypedIntrinsic::RequestNew))
     }
     pub(crate) fn has_fetch(&self) -> bool {
         self.intrinsics.values().any(|intrinsic| {
@@ -335,6 +350,10 @@ pub(crate) fn resolve_contract(
         }
         if let Some(operation) = bindings.time_constructors.get(name) {
             intrinsics.insert(name.clone(), TypedIntrinsic::Temporal(*operation));
+            continue;
+        }
+        if bindings.request_constructor.as_ref() == Some(name) {
+            intrinsics.insert(name.clone(), TypedIntrinsic::RequestNew);
             continue;
         }
         if bindings.headers_constructor.as_ref() == Some(name) {

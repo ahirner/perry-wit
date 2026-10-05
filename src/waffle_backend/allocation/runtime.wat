@@ -202,11 +202,16 @@
               (local.set $pointer (i32.add (local.get $pointer) (i32.const 4)))
               (local.set $index (i32.add (local.get $index) (i32.const 1)))
               (br $values)))))
+          (if (i32.eq (local.get $kind) (i32.const 15)) (then
+            (call $mark (i32.load offset=16 (local.get $pointer)))
+            (call $mark (i32.load offset=20 (local.get $pointer)))
+            (call $mark (i32.load offset=24 (local.get $pointer)))
+            (call $mark (i32.load offset=40 (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 14)) (then
             (call $mark (i32.load offset=16 (local.get $pointer)))
             (call $mark (i32.load offset=48 (local.get $pointer)))
             (call $mark (i32.load offset=60 (local.get $pointer)))))
-          (if (i32.or (i32.eq (local.get $kind) (i32.const 13)) (i32.eq (local.get $kind) (i32.const 14))) (then
+          (if (i32.and (i32.ge_u (local.get $kind) (i32.const 13)) (i32.le_u (local.get $kind) (i32.const 15))) (then
             (call $mark (i32.load offset=12 (local.get $pointer)))
             (local.set $count (i32.load offset=8 (local.get $pointer)))
             (local.set $pointer (i32.load offset=4 (local.get $pointer)))

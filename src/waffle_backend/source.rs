@@ -4,7 +4,7 @@ mod context;
 mod date;
 mod decoder;
 mod filesystem;
-mod headers;
+mod http;
 pub(crate) mod modules;
 mod objects;
 mod options;
@@ -33,6 +33,7 @@ pub(crate) struct SourceBindings {
     pub(crate) decoder_constructor: Option<String>,
     pub(crate) date_constructor: Option<String>,
     pub(crate) headers_constructor: Option<String>,
+    pub(crate) request_constructor: Option<String>,
     pub(crate) time_constructors: BTreeMap<String, super::time::TimeConstructor>,
 }
 
@@ -70,6 +71,7 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::http::RESPONSE_TYPE)
                 && !names.0.contains(super::http::fetch::RESPONSE_TYPE)
                 && !names.0.contains(super::http::headers::HEADERS_TYPE)
+                && !names.0.contains(super::http::request::REQUEST_TYPE)
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
                 && !names
@@ -162,6 +164,7 @@ pub(crate) fn resolve_bindings(
             decoder_constructor: None,
             date_constructor: None,
             headers_constructor: None,
+            request_constructor: None,
             time_constructors: BTreeMap::new(),
             error: None,
         };
@@ -174,6 +177,7 @@ pub(crate) fn resolve_bindings(
             decoder_constructor: calls.decoder_constructor,
             date_constructor: calls.date_constructor,
             headers_constructor: calls.headers_constructor,
+            request_constructor: calls.request_constructor,
             time_constructors: calls
                 .time_constructors
                 .into_iter()
@@ -224,6 +228,15 @@ pub(crate) fn resolve_bindings(
             module
                 .body
                 .append(&mut parse_typescript(&declaration, "headers.d.ts")?.body);
+        }
+        if let Some(name) = &resolved.request_constructor {
+            let declaration = format!(
+                "declare function {name}(input: any, init: any): {};",
+                super::http::request::REQUEST_TYPE
+            );
+            module
+                .body
+                .append(&mut parse_typescript(&declaration, "request.d.ts")?.body);
         }
         for (name, operation) in &resolved.time_constructors {
             let declaration = format!(
@@ -346,6 +359,7 @@ struct SourceCalls {
     decoder_constructor: Option<String>,
     date_constructor: Option<String>,
     headers_constructor: Option<String>,
+    request_constructor: Option<String>,
     time_constructors: BTreeMap<super::time::TimeConstructor, String>,
     error: Option<anyhow::Error>,
 }
@@ -709,7 +723,7 @@ impl VisitMut for SourceCalls {
             self.error.get_or_insert(error);
             return;
         }
-        if let Err(error) = self.rewrite_headers_constructor(expression) {
+        if let Err(error) = self.rewrite_http_constructor(expression) {
             self.error.get_or_insert(error);
             return;
         }
@@ -778,6 +792,13 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && name.sym == "Request"
+            && name.ctxt == self.unresolved
+        {
+            name.sym = super::http::request::REQUEST_TYPE.into();
+        }
+
         if let ast::TsEntityName::Ident(name) = &mut reference.type_name
             && name.sym == "Headers"
             && name.ctxt == self.unresolved

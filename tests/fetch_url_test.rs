@@ -140,3 +140,26 @@ fn relative_redirect_locations_match_node() {
         );
     }
 }
+
+#[test]
+fn request_urls_retain_fragments_while_transport_coordinates_exclude_them() {
+    for input in [
+        "http://example.com/a#é quote ",
+        "https://example.com/#",
+        "http://example.com/#a#b?{}'`\"",
+        "http://example.com/a#x\ny",
+    ] {
+        let expected = std::process::Command::new("node")
+            .args(["-e", "console.log(new Request(process.argv[1]).url)", input])
+            .output()
+            .unwrap();
+        assert!(expected.status.success());
+        let mut output = [0; 1024];
+        let metadata = url::normalize_request(input.as_bytes(), &mut output).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&output[..metadata[5] as usize]).unwrap(),
+            String::from_utf8(expected.stdout).unwrap().trim()
+        );
+        assert!(!output[..metadata[4] as usize].contains(&b'#'));
+    }
+}

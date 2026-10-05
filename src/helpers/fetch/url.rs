@@ -384,3 +384,39 @@ pub(super) fn resolve(base: &[u8], location: &[u8], output: &mut [u8]) -> Result
     source[prefix + extra..].copy_from_slice(location);
     normalize(source, target)
 }
+
+/// Request.url retains its fragment, while the transport metadata excludes it.
+pub(super) fn normalize_request(input: &[u8], output: &mut [u8]) -> Result<[u32; 6], ()> {
+    let metadata = normalize(input, output)?;
+    let start = input.iter().position(|byte| *byte > 32).ok_or(())?;
+    let end = input.iter().rposition(|byte| *byte > 32).ok_or(())? + 1;
+    let input = &input[start..end];
+    let mut out = Output {
+        bytes: output,
+        length: metadata[4] as usize,
+    };
+    if let Some(hash) = input.iter().position(|byte| *byte == b'#') {
+        out.byte(b'#')?;
+        for byte in input[hash + 1..]
+            .iter()
+            .copied()
+            .filter(|byte| !matches!(byte, b'\t' | b'\r' | b'\n'))
+        {
+            if byte <= 32 || byte >= 127 || matches!(byte, b'"' | b'<' | b'>' | b'`') {
+                out.byte(b'%')?;
+                out.byte(b"0123456789ABCDEF"[(byte >> 4) as usize])?;
+                out.byte(b"0123456789ABCDEF"[(byte & 15) as usize])?;
+            } else {
+                out.byte(byte)?;
+            }
+        }
+    }
+    Ok([
+        metadata[0],
+        metadata[1],
+        metadata[2],
+        metadata[3],
+        metadata[4],
+        out.length as u32,
+    ])
+}

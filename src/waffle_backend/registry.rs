@@ -89,6 +89,8 @@ pub(crate) struct ModuleRegistry {
     pub(crate) json_helpers: Option<super::json::JsonHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
     pub(crate) headers_helpers: Option<super::http::headers::Helpers>,
+    pub(crate) body_helpers: Option<super::http::body::Helpers>,
+    pub(crate) request_helpers: Option<super::http::request::Helpers>,
     pub(crate) time_helpers: BTreeMap<&'static str, Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) http_helpers: Option<super::http::HttpHelpers>,
@@ -168,6 +170,7 @@ impl ModuleRegistry {
                     | TypedIntrinsic::DecoderNew
                     | TypedIntrinsic::DateNew
                     | TypedIntrinsic::HeadersNew
+                    | TypedIntrinsic::RequestNew
                     | TypedIntrinsic::Temporal(_)
             ) || matches!(
                 intrinsic,
@@ -202,6 +205,20 @@ impl ModuleRegistry {
         let headers_imports = contract
             .has_headers()
             .then(|| super::http::headers::declare_helpers(module));
+        let body_decode = contract.has_request().then(|| {
+            super::runtime::imports::declare_imports(
+                module,
+                super::link::HELPER_MODULE,
+                &[super::runtime::imports::Function {
+                    name: "fetch_decode".into(),
+                    params: vec!["i32"; 4],
+                    results: vec!["i32"],
+                }],
+            )["fetch_decode"]
+        });
+        let request_imports = contract
+            .has_request()
+            .then(|| super::http::request::declare_helpers(module));
         let http_imports = contract.has_http().then(|| {
             let mut imports = super::http::declare_imports(module);
             if contract.has_fetch() {
@@ -283,15 +300,16 @@ impl ModuleRegistry {
             await_subtask,
         )?);
 
-        let byte_helpers = if super::bytes::required(hir) || contract.has_http() {
-            Some(super::bytes::emit_runtime(
-                module,
-                memory,
-                allocator.expect("byte storage requires an allocator"),
-            )?)
-        } else {
-            None
-        };
+        let byte_helpers =
+            if super::bytes::required(hir) || contract.has_http() || contract.has_request() {
+                Some(super::bytes::emit_runtime(
+                    module,
+                    memory,
+                    allocator.expect("byte storage requires an allocator"),
+                )?)
+            } else {
+                None
+            };
 
         let text_or_bytes_lift = if hir.functions.iter().any(|function| {
             function
@@ -475,6 +493,23 @@ impl ModuleRegistry {
             }
         }
 
+        let request_helpers = request_imports
+            .as_ref()
+            .map(|imports| {
+                super::http::request::emit(
+                    module,
+                    memory,
+                    &super::http::request::Runtime {
+                        allocator: allocator.unwrap(),
+                        bytes: byte_helpers.unwrap(),
+                        strings: string_helpers.unwrap(),
+                        headers: headers_helpers.unwrap(),
+                        imports,
+                        pool: string_pool,
+                    },
+                )
+            })
+            .transpose()?;
         let http_helpers = if let Some(imports) = http_imports {
             Some(super::http::emit_source_runtime(
                 module,
@@ -484,8 +519,8 @@ impl ModuleRegistry {
                     imports: &imports,
                     strings: string_helpers.unwrap(),
                     bytes: byte_helpers.unwrap(),
-                    json: json_helpers,
                     headers: headers_helpers,
+                    request: request_helpers,
                     pool: string_pool,
                     promises: promises.as_ref(),
                 },
@@ -493,6 +528,24 @@ impl ModuleRegistry {
         } else {
             None
         };
+        let body_helpers = body_decode
+            .map(|decode| {
+                super::http::body::emit(
+                    module,
+                    memory,
+                    &super::http::body::Runtime {
+                        allocator: allocator.unwrap(),
+                        strings: string_helpers.unwrap(),
+                        json: json_helpers,
+                        decode,
+                        request: request_helpers.unwrap().consume,
+                        response: http_helpers
+                            .and_then(|helpers| helpers.fetch)
+                            .map(|helpers| helpers.consume),
+                    },
+                )
+            })
+            .transpose()?;
         let filesystem_helpers = if let Some(imports) = filesystem_imports {
             Some(super::filesystem::emit_runtime(
                 module,
@@ -709,6 +762,8 @@ impl ModuleRegistry {
             value_access,
             decoder_helpers,
             headers_helpers,
+            request_helpers,
+            body_helpers,
             http_helpers,
             filesystem_helpers,
             object_helpers,
@@ -751,7 +806,8 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
             || super::date::is_date(ty)
             || super::time::is_time(ty)
             || super::http::is_response(ty)
-            || super::http::headers::is_headers(ty) =>
+            || super::http::headers::is_headers(ty)
+            || super::http::request::is_request(ty) =>
         {
             Ok(Type::I32)
         }
@@ -777,7 +833,8 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
             || super::date::is_date(ty)
             || super::time::is_time(ty)
             || super::http::is_response(ty)
-            || super::http::headers::is_headers(ty) =>
+            || super::http::headers::is_headers(ty)
+            || super::http::request::is_request(ty) =>
         {
             Ok(vec![Type::I32])
         }

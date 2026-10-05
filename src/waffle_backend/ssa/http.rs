@@ -52,6 +52,31 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn http_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {
+        if http::request::is_request(&self.infer_expr_type(receiver)) {
+            let value = self.expression(receiver)?;
+            if property == "headers" {
+                return Ok(value);
+            }
+            let offset = match property {
+                "url" => http::request::URL,
+                "method" => http::request::METHOD,
+                "redirect" => http::request::REDIRECT,
+                "bodyUsed" => http::request::BODY_USED,
+                _ => bail!("Request.{property} lowering is not implemented yet"),
+            };
+            return Ok(self.op(
+                Operator::I32Load {
+                    memory: MemoryArg {
+                        align: 2,
+                        offset,
+                        memory: self.registry.memory,
+                    },
+                },
+                &[value],
+                &[Type::I32],
+            ));
+        }
+
         if http::fetch::is_response(&self.infer_expr_type(receiver)) {
             return self.fetch_property(receiver, property);
         }
@@ -124,14 +149,26 @@ impl FunctionLowerer<'_> {
 }
 
 impl FunctionLowerer<'_> {
-    pub(super) fn fetch(&mut self, name: &str, arguments: &[Expr]) -> Result<Value> {
+    fn request_arguments(&mut self, arguments: &[Expr]) -> Result<[Value; 8]> {
         ensure!(
             !arguments.is_empty() && arguments.len() <= 2,
-            "fetch requires a URL and optional typed RequestInit record"
+            "Request and fetch require a URL or Request and optional typed RequestInit record"
         );
-        let url = self.string_receiver(&arguments[0])?;
+        let request = http::request::is_request(&self.infer_expr_type(&arguments[0]));
+        let input = if request {
+            self.expression(&arguments[0])?
+        } else {
+            self.string_receiver(&arguments[0])?
+        };
+        let kind = self.op(
+            Operator::I32Const {
+                value: u32::from(request),
+            },
+            &[],
+            &[Type::I32],
+        );
         let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-        let mut values = [url, zero, zero, zero, zero, zero, zero];
+        let mut values = [input, kind, zero, zero, zero, zero, zero, zero];
         if let Some(options) = arguments.get(1)
             && self.infer_expr_type(options) == HirType::Void
         {
@@ -170,7 +207,7 @@ impl FunctionLowerer<'_> {
             }
             let object = self.expression(options)?;
             let helpers = self.registry.object_helpers.unwrap();
-            for (name, index) in [("method", 1), ("headers", 2), ("body", 3), ("redirect", 6)] {
+            for (name, index) in [("method", 2), ("headers", 3), ("body", 5), ("redirect", 7)] {
                 if let Some(field) = shape.properties.get(name) {
                     let (ty, optional) = fetch_option_type(&field.ty, field.optional);
                     let key = self.expression(&Expr::String(name.into()))?;
@@ -195,7 +232,7 @@ impl FunctionLowerer<'_> {
                     if name == "headers" {
                         let mode = header_shape(ty)?;
                         let mode = self.op(Operator::I32Const { value: mode }, &[], &[Type::I32]);
-                        values[5] =
+                        values[4] =
                             self.op(Operator::Select, &[mode, zero, values[index]], &[Type::I32]);
                     }
                     if name == "body" {
@@ -205,12 +242,28 @@ impl FunctionLowerer<'_> {
                             1
                         };
                         let kind = self.op(Operator::I32Const { value: kind }, &[], &[Type::I32]);
-                        values[4] =
+                        values[6] =
                             self.op(Operator::Select, &[kind, zero, values[index]], &[Type::I32]);
                     }
                 }
             }
         }
+        Ok(values)
+    }
+
+    pub(super) fn new_request(&mut self, arguments: &[Expr]) -> Result<Value> {
+        let values = self.request_arguments(arguments)?;
+        let payload = self.call_completion(self.registry.request_helpers.unwrap().new, &values);
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            payload,
+            true,
+        ))
+    }
+
+    pub(super) fn fetch(&mut self, name: &str, arguments: &[Expr]) -> Result<Value> {
+        let values = self.request_arguments(arguments)?;
         if let Some(record) = self.start_task(
             &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
             &values,
@@ -229,33 +282,32 @@ impl FunctionLowerer<'_> {
         ))
     }
 
-    pub(super) fn fetch_body(
+    pub(super) fn http_body(
         &mut self,
         receiver: &Expr,
         method: &str,
         arguments: &[Expr],
     ) -> Result<Value> {
-        let method = http::fetch::BodyMethod::named(method)
-            .with_context(|| format!("Response.{method} lowering is not implemented yet"))?;
-        ensure!(
-            arguments.is_empty(),
-            "Response body methods take no arguments"
-        );
+        let method = http::body::BodyMethod::named(method)
+            .with_context(|| format!("HTTP body method '{method}' is not implemented yet"))?;
+        ensure!(arguments.is_empty(), "HTTP body methods take no arguments");
         let response = self.expression(receiver)?;
+        let kind = self.op(
+            Operator::I32Const {
+                value: u32::from(http::fetch::is_response(&self.infer_expr_type(receiver))),
+            },
+            &[],
+            &[Type::I32],
+        );
         if let Some(record) = self.start_task(
-            &crate::waffle_backend::promises::TaskTarget::FetchBody(method),
-            &[response],
+            &crate::waffle_backend::promises::TaskTarget::HttpBody(method),
+            &[response, kind],
         )? {
             return Ok(record);
         }
         let payload = self.call_completion(
-            self.registry
-                .http_helpers
-                .unwrap()
-                .fetch
-                .unwrap()
-                .body(method),
-            &[response],
+            self.registry.body_helpers.unwrap().method(method),
+            &[response, kind],
         );
         Ok(abi::decode_payload(
             &mut self.body,

@@ -1,30 +1,48 @@
-//! Resolve the standard constructor before name-based HIR lowering.
+//! Resolve standard HTTP constructors before name-based HIR lowering.
 use super::{SourceCalls, underlying_expression};
 use anyhow::{Result, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use swc_common::SyntaxContext;
 
 impl SourceCalls {
-    pub(super) fn rewrite_headers_constructor(&mut self, expression: &mut ast::Expr) -> Result<()> {
+    pub(super) fn rewrite_http_constructor(&mut self, expression: &mut ast::Expr) -> Result<()> {
         let ast::Expr::New(constructor) = expression else {
             return Ok(());
         };
-        if !matches!(underlying_expression(&constructor.callee), ast::Expr::Ident(name) if name.sym == "Headers" && name.ctxt == self.unresolved)
-        {
+        let ast::Expr::Ident(name) = underlying_expression(&constructor.callee) else {
+            return Ok(());
+        };
+        if name.ctxt != self.unresolved {
             return Ok(());
         }
+        let request = match name.sym.as_ref() {
+            "Headers" => false,
+            "Request" => true,
+            _ => return Ok(()),
+        };
         let arguments = constructor.args.as_deref().unwrap_or_default();
         ensure!(
-            arguments.len() <= 1
+            arguments.len() <= if request { 2 } else { 1 }
+                && (!request || !arguments.is_empty())
                 && constructor.type_args.is_none()
                 && arguments.iter().all(|argument| argument.spread.is_none()),
-            "Headers construction accepts one optional record, pair array, or Headers value"
+            "{} constructor received unsupported arguments",
+            name.sym
         );
-        let name = if let Some(name) = &self.headers_constructor {
+        let existing = if request {
+            &self.request_constructor
+        } else {
+            &self.headers_constructor
+        };
+        let name = if let Some(name) = existing {
             name.clone()
         } else {
             let name = self.fresh_name();
-            self.headers_constructor = Some(name.clone());
+            if request {
+                self.request_constructor = Some(name.clone());
+            } else {
+                self.headers_constructor = Some(name.clone());
+            }
             name
         };
         *expression = ast::Expr::Call(ast::CallExpr {

@@ -2447,3 +2447,154 @@ async fn standard_fetch_redirects_close_gated_bodies_without_buffering_them() ->
     assert_eq!(String::from_utf8(output.stdout)?.trim(), "ok");
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_request_values_validate_and_snapshot_without_host_imports() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/request_values.ts"),
+        "package test:request-values; world boundary {export run:func(base:string)->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = Linker::<Host>::new(&engine);
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for _ in 0..100 {
+        assert_eq!(
+            run.call_async(&mut store, ("https://example.com",))
+                .await?
+                .0,
+            "ok"
+        );
+        store.assert_concurrent_state_empty();
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/request_values.ts");
+    let script = format!(
+        "import {{run}} from {};console.log(run('https://example.com'));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "ok");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_request_snapshots_transfers_and_reuse_match_node() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/requests.ts"),
+        "package test:requests; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->string;}",
+    )?;
+    let server = fixture::HttpFixture::new(|request| {
+        let header = |name: &str| {
+            request
+                .headers
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        fixture::Reply::Body(
+            200,
+            format!(
+                "{}|{}|{}|{}",
+                request.method,
+                String::from_utf8_lossy(&request.body),
+                header("x-test"),
+                header("content-type")
+            ),
+        )
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/requests.ts");
+    let script = format!(
+        "import {{run}} from {};console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script, &base])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = String::from_utf8(output.stdout)?;
+    assert!(expected.trim().ends_with(";ok"), "{expected}");
+    for _ in 0..40 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            expected.trim()
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_request_body_methods_share_decoding_and_consumption_without_host_imports()
+-> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/request_bodies.ts"),
+        "package test:request-bodies; world boundary {export run:async func()->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = Linker::<Host>::new(&engine);
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    for _ in 0..100 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, "ok");
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/request_bodies.ts");
+    let script = format!(
+        "import {{run}} from {};console.log(await run());",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "ok");
+    Ok(())
+}
+
+#[test]
+fn standard_request_body_consumption_requires_async_wit_effects() {
+    let error = compile(
+        "function consume(value:Request):void {value.text();} export function run():boolean {const request=new Request('https://example.com',{method:'POST',body:'x'});consume(request);return request.bodyUsed;}",
+        "package test:request-effects; world boundary {export run:func()->bool;}",
+    ).expect_err("body consumption requires an async boundary");
+    let diagnostic = format!("{error:#}");
+    assert!(
+        diagnostic.contains("HTTP body consumption") && diagnostic.contains("async func"),
+        "{diagnostic}"
+    );
+}

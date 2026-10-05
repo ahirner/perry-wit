@@ -76,8 +76,8 @@ pub(crate) fn lower_module(
     let mut reqs = scan_module_string_requirements(hir);
     reqs.json |= contract.promises.as_ref().is_some_and(|plan| {
         plan.tasks
-            .contains_key(&super::promises::TaskTarget::FetchBody(
-                super::http::fetch::BodyMethod::Json,
+            .contains_key(&super::promises::TaskTarget::HttpBody(
+                super::http::body::BodyMethod::Json,
             ))
     });
     reqs.objects |= contract.has_http() || contract.has_headers() || contract.wit.is_some();
@@ -134,7 +134,10 @@ pub(crate) fn lower_module(
                     }),
             );
         }
-        if contract.has_http() {
+        if contract.has_http() || contract.has_request() {
+            for method in ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"] {
+                string_pool.intern(method);
+            }
             string_pool.intern("http");
             string_pool.intern("https");
             string_pool.intern("content-type");
@@ -653,6 +656,7 @@ impl<'a> FunctionLowerer<'a> {
             || super::time::is_time(self.return_type)
             || super::http::is_response(self.return_type)
             || super::http::headers::is_headers(self.return_type)
+            || super::http::request::is_request(self.return_type)
             || matches!(self.return_type, HirType::Array(_))
         {
             ensure!(
@@ -838,6 +842,14 @@ impl<'a> FunctionLowerer<'a> {
         if let Expr::ExternFuncRef { name, .. } = callee
             && matches!(
                 self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::RequestNew)
+            )
+        {
+            return self.new_request(args).map(Some);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
                 Some(super::resolve::TypedIntrinsic::HeadersNew)
             )
         {
@@ -850,8 +862,10 @@ impl<'a> FunctionLowerer<'a> {
             if let Some(kind) = super::time::TimeKind::of(&self.infer_expr_type(object)) {
                 return self.time_method(kind, object, property, args).map(Some);
             }
-            if super::http::fetch::is_response(&self.infer_expr_type(object)) {
-                return self.fetch_body(object, property, args).map(Some);
+            if super::http::fetch::is_response(&self.infer_expr_type(object))
+                || super::http::request::is_request(&self.infer_expr_type(object))
+            {
+                return self.http_body(object, property, args).map(Some);
             }
             if super::http::is_response(&self.infer_expr_type(object)) {
                 return self.http_header(object, property, args).map(Some);
@@ -954,6 +968,8 @@ impl<'a> FunctionLowerer<'a> {
             }
             if expected.is_some_and(super::http::is_response)
                 || super::http::is_response(&argument_type)
+                || expected.is_some_and(super::http::request::is_request)
+                || super::http::request::is_request(&argument_type)
                 || expected.is_some_and(super::http::headers::is_headers)
                 || super::http::headers::is_headers(&argument_type)
             {
@@ -1857,7 +1873,9 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if super::http::is_response(&self.infer_expr_type(object)) => {
+            } if super::http::is_response(&self.infer_expr_type(object))
+                || super::http::request::is_request(&self.infer_expr_type(object)) =>
+            {
                 self.http_property(object, property)
             }
             Expr::PropertyGet {

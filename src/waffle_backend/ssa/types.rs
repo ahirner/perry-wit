@@ -19,6 +19,7 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::decoder::is_decoder(ty) => Some("TextDecoder"),
         ty if crate::waffle_backend::http::fetch::is_response(ty) => Some("Response"),
         ty if crate::waffle_backend::http::headers::is_headers(ty) => Some("Headers"),
+        ty if crate::waffle_backend::http::request::is_request(ty) => Some("Request"),
         ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::time::is_time(ty) => {
@@ -44,7 +45,8 @@ pub(crate) fn is_reference(ty: &HirType) -> bool {
             || crate::waffle_backend::date::is_date(ty)
             || crate::waffle_backend::time::is_time(ty)
             || crate::waffle_backend::http::is_response(ty)
-            || crate::waffle_backend::http::headers::is_headers(ty) =>
+            || crate::waffle_backend::http::headers::is_headers(ty)
+            || crate::waffle_backend::http::request::is_request(ty) =>
         {
             true
         }
@@ -106,6 +108,20 @@ impl FunctionLowerer<'_> {
                     unreachable!()
                 };
                 super::tuples::element_type(&types, index).unwrap_or(HirType::Unknown)
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if crate::waffle_backend::http::request::is_request(
+                &self.infer_expr_type(object),
+            ) =>
+            {
+                match property.as_str() {
+                    "headers" => {
+                        HirType::Named(crate::waffle_backend::http::headers::HEADERS_TYPE.into())
+                    }
+                    "bodyUsed" => HirType::Boolean,
+                    _ => HirType::String,
+                }
             }
             Expr::PropertyGet {
                 object, property, ..
@@ -295,10 +311,12 @@ impl FunctionLowerer<'_> {
                             _ => HirType::Void,
                         };
                     }
-                    if crate::waffle_backend::http::fetch::is_response(
+                    if (crate::waffle_backend::http::fetch::is_response(
                         &self.infer_expr_type(object),
-                    ) && let Some(method) =
-                        crate::waffle_backend::http::fetch::BodyMethod::named(property)
+                    ) || crate::waffle_backend::http::request::is_request(
+                        &self.infer_expr_type(object),
+                    )) && let Some(method) =
+                        crate::waffle_backend::http::body::BodyMethod::named(property)
                     {
                         return HirType::Promise(Box::new(method.result()));
                     }

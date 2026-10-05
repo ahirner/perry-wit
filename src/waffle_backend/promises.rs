@@ -42,11 +42,18 @@ use super::visit::visit_function_expressions;
 pub(crate) enum TaskTarget {
     Guest(FuncId),
     Intrinsic(String),
-    FetchBody(super::http::fetch::BodyMethod),
+    HttpBody(super::http::body::BodyMethod),
     FetchUpload,
 }
 
 impl TaskTarget {
+    pub(crate) fn http_body(callee: &Expr) -> Option<Self> {
+        if let Expr::PropertyGet { property, .. } = callee {
+            super::http::body::BodyMethod::named(property).map(Self::HttpBody)
+        } else {
+            None
+        }
+    }
     pub(crate) fn from_callee(callee: &Expr) -> Option<Self> {
         match callee {
             Expr::FuncRef(id) => Some(Self::Guest(*id)),
@@ -68,14 +75,15 @@ pub(crate) enum TaskArguments {
     Source(Vec<HirType>),
     Fetch,
     FetchUpload,
+    HttpBody,
     Filesystem(super::capabilities::FilesystemOperation),
 }
 
 impl TaskArguments {
     pub(crate) fn core_types(&self) -> Result<Vec<waffle::Type>> {
         match self {
-            Self::Fetch => Ok(vec![waffle::Type::I32; 7]),
-            Self::FetchUpload => Ok(vec![waffle::Type::I32; 2]),
+            Self::Fetch => Ok(vec![waffle::Type::I32; 8]),
+            Self::FetchUpload | Self::HttpBody => Ok(vec![waffle::Type::I32; 2]),
             Self::Source(types) => types
                 .iter()
                 .map(super::registry::map_type_to_waffle)
@@ -166,15 +174,17 @@ pub(crate) fn plan_promises(
             TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Fetch)
         )
     });
-    if has_fetch {
-        for method in super::http::fetch::BodyMethod::ALL {
+    let has_body = has_fetch
+        || intrinsics
+            .values()
+            .any(|intrinsic| matches!(intrinsic, TypedIntrinsic::RequestNew));
+    if has_body {
+        for method in super::http::body::BodyMethod::ALL {
             candidates.insert(
-                TaskTarget::FetchBody(method),
+                TaskTarget::HttpBody(method),
                 TaskPlan {
-                    symbol: format!("__perry.fetch.{method:?}"),
-                    arguments: TaskArguments::Source(vec![HirType::Named(
-                        super::http::fetch::RESPONSE_TYPE.into(),
-                    )]),
+                    symbol: format!("__perry.body.{method:?}"),
+                    arguments: TaskArguments::HttpBody,
                     result: method.result(),
                 },
             );
@@ -190,13 +200,8 @@ pub(crate) fn plan_promises(
                 expression => (expression, false),
             };
             if let Expr::Call { callee, .. } = expression
-                && let Some(target) = TaskTarget::from_callee(callee).or_else(|| {
-                    if has_fetch && let Expr::PropertyGet { property, .. } = callee.as_ref() {
-                        super::http::fetch::BodyMethod::named(property).map(TaskTarget::FetchBody)
-                    } else {
-                        None
-                    }
-                })
+                && let Some(target) = TaskTarget::from_callee(callee)
+                    .or_else(|| has_body.then(|| TaskTarget::http_body(callee)).flatten())
                 && let Some(plan) = candidates.get(&target)
             {
                 if awaited {
@@ -224,7 +229,10 @@ pub(crate) fn plan_promises(
             },
         );
     }
-    if calls == direct_awaits && !combinators && !has_fetch {
+    let uses_body = referenced
+        .keys()
+        .any(|target| matches!(target, TaskTarget::HttpBody(_)));
+    if calls == direct_awaits && !combinators && !has_fetch && !uses_body {
         return Ok(None);
     }
     for task in referenced.values() {
@@ -272,4 +280,5 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || matches!(ty, HirType::Array(_) | HirType::Tuple(_))
         || super::http::is_response(ty)
         || super::http::headers::is_headers(ty)
+        || super::http::request::is_request(ty)
 }

@@ -284,6 +284,17 @@ impl WitWorld {
                             suspending = Some("module initialization".to_owned());
                         }
                         Expr::FuncRef(callee) => pending.push(*callee),
+                        Expr::Call { callee, .. } => {
+                            if let Some(target) = super::promises::TaskTarget::http_body(callee)
+                                && contract
+                                    .promises
+                                    .as_ref()
+                                    .is_some_and(|plan| plan.tasks.contains_key(&target))
+                            {
+                                suspending = Some("HTTP body consumption".to_owned());
+                            }
+                        }
+
                         Expr::ExternFuncRef { name, .. } => {
                             if let Some(intrinsic) = contract.intrinsics.get(name)
                                 && (intrinsic.is_async()

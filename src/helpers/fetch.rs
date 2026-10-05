@@ -128,7 +128,7 @@ pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32)
         if output.len() < 32 {
             return Err(());
         }
-        let metadata = normalize(input, &mut output[32..])?;
+        let metadata = url::normalize_request(input, &mut output[32..])?;
         for (index, value) in metadata.iter().enumerate() {
             output[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
@@ -467,6 +467,14 @@ mod tests {
     use super::*;
     #[test]
     fn redirect_codec_rejects_short_storage_and_non_http_targets() {
+        let mut request = [0; 256];
+        let parts =
+            url::normalize_request(b"https://example.com/a#fragment", &mut request).unwrap();
+        assert_eq!(&request[..parts[4] as usize], b"https://example.com/a");
+        assert_eq!(
+            &request[..parts[5] as usize],
+            b"https://example.com/a#fragment"
+        );
         let base = b"https://example.com/a/b";
         let mut output = [0; 512];
         assert!(url::resolve(base, b"file:///secret", &mut output).is_err());

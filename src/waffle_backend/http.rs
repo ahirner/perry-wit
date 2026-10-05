@@ -8,10 +8,12 @@ use waffle::{Func, Memory, Module};
 
 use super::{allocation::AllocationFuncs, runtime, runtime::imports, streams};
 
+pub(crate) mod body;
 pub(crate) mod fetch;
 mod future;
 pub(crate) mod handler;
 pub(crate) mod headers;
+pub(crate) mod request;
 
 #[cfg(test)]
 #[path = "http/tests.rs"]
@@ -42,8 +44,8 @@ pub(crate) struct SourceRuntime<'a> {
     pub(crate) imports: &'a BTreeMap<String, Func>,
     pub(crate) strings: super::strings::StringHelperFuncs,
     pub(crate) bytes: super::bytes::ByteHelpers,
-    pub(crate) json: Option<super::json::JsonHelpers>,
     pub(crate) headers: Option<headers::Helpers>,
+    pub(crate) request: Option<request::Helpers>,
     pub(crate) pool: &'a super::strings::StringPool,
     pub(crate) promises: Option<&'a super::registry::PromiseImports>,
 }
@@ -82,7 +84,7 @@ pub(crate) fn emit_source_runtime(
     Ok(HttpHelpers {
         get: functions["get"],
         fetch: imports
-            .contains_key("fetch_url")
+            .contains_key("fetch_redirect")
             .then(|| fetch::emit(module, memory, &runtime))
             .transpose()?,
         header: functions["header"],
