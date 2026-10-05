@@ -254,9 +254,12 @@ pub(crate) fn plan_promises(
 
 /// Retained outcomes whose value and ownership fit the completion record.
 pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
+    if super::values::is_string_type(ty) {
+        return true;
+    }
     matches!(
         ty,
-        HirType::Number | HirType::Boolean | HirType::String | HirType::Void
+        HirType::Number | HirType::Boolean | HirType::BigInt | HirType::String | HirType::Void
     ) || super::bytes::is_byte_storage(ty)
         || super::text_or_bytes::is_text_or_bytes(ty)
         || super::filesystem::is_stats(ty)

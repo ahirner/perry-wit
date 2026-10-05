@@ -2124,3 +2124,133 @@ async fn standard_fetch_normalizes_runtime_urls_before_native_io_and_matches_nod
     assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_bigint_tasks_preserve_signed_and_unsigned_bits_across_repeated_awaits() -> Result<()>
+{
+    use std::sync::Arc;
+    let compiled = compile(
+        r#"import {signed, unsigned} from 'test:bigint/work';
+        async function keep(value:bigint):Promise<bigint> {return value;}
+        export async function run(left:bigint,right:bigint):Promise<[bigint,bigint,bigint,bigint]> {
+            const first=signed(left);
+            const second=unsigned(right);
+            const leftValue=await first;
+            const rightValue=await second;
+            const retained=keep(leftValue);
+            return [await retained,await first,rightValue,await second];
+        }"#,
+        "package test:bigint; interface work { signed:async func(value:s64)->s64; unsigned:async func(value:u64)->u64; } world boundary { import work; export run:async func(left:s64,right:u64)->tuple<s64,s64,u64,u64>; }",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::<Host>::new(&engine);
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let signed_gate = gate.clone();
+    linker.instance("test:bigint/work")?.func_wrap_concurrent(
+        "signed",
+        move |_, (value,): (i64,)| {
+            let gate = signed_gate.clone();
+            Box::pin(async move {
+                gate.wait().await;
+                Ok((value,))
+            })
+        },
+    )?;
+    linker.instance("test:bigint/work")?.func_wrap_concurrent(
+        "unsigned",
+        move |_, (value,): (u64,)| {
+            let gate = gate.clone();
+            Box::pin(async move {
+                gate.wait().await;
+                Ok((value,))
+            })
+        },
+    )?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(i64, u64), ((i64, i64, u64, u64),)>(&mut store, "run")?;
+    for left in [
+        i64::MIN,
+        -9_007_199_254_740_993,
+        -1,
+        0,
+        1,
+        9_007_199_254_740_993,
+        i64::MAX,
+    ] {
+        for right in [0, 9_007_199_254_740_993, u64::MAX] {
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    run.call_async(&mut store, (left, right))
+                )
+                .await??
+                .0,
+                (left, left, right, right)
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[derive(ComponentType, Lift, Lower, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(enum)]
+#[repr(u8)]
+enum Dataset {
+    #[component(name = "articles")]
+    Articles,
+    #[component(name = "groups")]
+    Groups,
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stored_enum_tasks_overlap_and_preserve_repeated_outcomes() -> Result<()> {
+    use std::sync::Arc;
+    let compiled = compile(
+        r#"import {echo} from 'test:enum-tasks/work';
+        import type {Dataset} from 'test:enum-tasks/work';
+        async function keep(value:Dataset):Promise<Dataset> {return await echo(value);}
+        export async function run():Promise<[Dataset,Dataset,Dataset,Dataset]> {
+            const first=keep('articles');
+            const second=keep('groups');
+            return [await first,await second,await first,await second];
+        }"#,
+        "package test:enum-tasks; interface work { enum dataset { articles, groups } echo:async func(value:dataset)->dataset; } world boundary { import work; use work.{dataset}; export run:async func()->tuple<dataset,dataset,dataset,dataset>; }",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::<Host>::new(&engine);
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    linker
+        .instance("test:enum-tasks/work")?
+        .func_wrap_concurrent("echo", move |_, (value,): (Dataset,)| {
+            let gate = gate.clone();
+            Box::pin(async move {
+                gate.wait().await;
+                Ok((value,))
+            })
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance
+        .get_typed_func::<(), ((Dataset, Dataset, Dataset, Dataset),)>(&mut store, "run")?;
+    for _ in 0..30 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, ()))
+                .await??
+                .0,
+            (
+                Dataset::Articles,
+                Dataset::Groups,
+                Dataset::Articles,
+                Dataset::Groups
+            )
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    Ok(())
+}
