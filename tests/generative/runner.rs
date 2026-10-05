@@ -15,7 +15,7 @@ use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 use super::model::{Form, Generator, INPUTS, Number, Program, WIT, node_inputs};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observation {
     pub value: String,
     pub trace: Vec<String>,
@@ -99,31 +99,32 @@ pub fn campaign() -> Result<()> {
         .tempdir_in(root)?
         .keep();
     eprintln!("Generative artifacts: {}", directory.display());
-    let programs = if let Some(path) = env::var_os("PERRY_GENERATIVE_REPLAY") {
-        vec![serde_json::from_slice::<Program>(&fs::read(path)?)?]
+    let (mut programs, forms) = if let Some(path) = env::var_os("PERRY_GENERATIVE_REPLAY") {
+        let program = serde_json::from_slice::<Program>(&fs::read(path)?)?;
+        let forms = vec![program.form];
+        (vec![program], forms)
     } else {
-        (0..count)
-            .flat_map(|index| {
-                let expression = Generator::new(seed.wrapping_add(index as u64)).number(depth);
-                Form::ALL.map(|form| Program {
-                    expression: expression.clone(),
-                    form,
+        (
+            (0..count)
+                .map(|index| Program {
+                    expression: Generator::new(seed.wrapping_add(index as u64)).number(depth),
+                    form: Form::Direct,
                 })
-            })
-            .collect()
+                .collect::<Vec<_>>(),
+            Form::ALL.to_vec(),
+        )
     };
-    let paths: Vec<_> = programs
-        .iter()
-        .enumerate()
-        .map(|(index, _)| directory.join(format!("case-{index}.ts")))
-        .collect();
-    for (program, path) in programs.iter().zip(&paths) {
-        fs::write(path, program.source())?;
+    for (case, program) in programs.iter_mut().enumerate() {
+        for (variant, &form) in forms.iter().enumerate() {
+            program.form = form;
+            let index = case * forms.len() + variant;
+            fs::write(directory.join(format!("case-{index}.ts")), program.source())?;
+        }
     }
     fs::write(directory.join("world.wit"), WIT)?;
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
     fs::write(directory.join("inputs.json"), node_inputs())?;
-    let mut report = json!({"seed":seed, "count":programs.len(), "depth":depth, "completed":0, "status":"running"});
+    let mut report = json!({"seed":seed, "count":programs.len() * forms.len(), "depth":depth, "completed":0, "status":"running"});
     fs::write(
         directory.join("report.json"),
         serde_json::to_vec_pretty(&report)?,
@@ -146,67 +147,72 @@ pub fn campaign() -> Result<()> {
         "compiler": env!("CARGO_PKG_VERSION"),
     });
     report["versions"] = versions;
-    let mut baseline = None;
-    for (index, (program, path)) in programs.into_iter().zip(paths).enumerate() {
-        report["active"] = json!({"index":index,"form":program.form});
-        fs::write(
-            directory.join("report.json"),
-            serde_json::to_vec_pretty(&report)?,
-        )?;
-        let expected = oracle(&path, &directory)?;
-        if matches!(program.form, Form::Direct) {
-            baseline = Some(expected.clone());
-        }
-        if let Some(baseline) = &baseline {
-            ensure!(
-                *baseline == expected,
-                "metamorphic transformation changed Node observations: {path:?}"
-            );
-        }
-        if let Some(failure) = compare(&path, &directory, &expected)? {
-            fs::write(directory.join("original.ts"), program.source())?;
-            fs::write(
-                directory.join("original.json"),
-                serde_json::to_vec_pretty(&program)?,
-            )?;
-            fs::write(
-                directory.join("failure.json"),
-                serde_json::to_vec_pretty(&failure)?,
-            )?;
-            let (minimal, attempts) = reduce(program, shrink_limit, |candidate| {
-                let path = directory.join("candidate.ts");
-                fs::write(&path, candidate.source())?;
-                let expected = oracle(&path, &directory)?;
-                Ok(compare(&path, &directory, &expected)?
-                    .is_some_and(|next| next.kind == failure.kind))
-            })?;
-            let minimal_path = directory.join("minimal.ts");
-            fs::write(&minimal_path, minimal.source())?;
-            fs::write(
-                directory.join("minimal.json"),
-                serde_json::to_vec_pretty(&minimal)?,
-            )?;
-            let expected = oracle(&minimal_path, &directory)?;
-            let reproduced = compare(&minimal_path, &directory, &expected)?
-                .context("reduction stopped reproducing")?;
-            ensure!(
-                reproduced.kind == failure.kind,
-                "reduction changed failure category"
-            );
-            report["status"] = json!("failed");
-            report["failure"] = serde_json::to_value(&reproduced)?;
-            report["shrinkAttempts"] = json!(attempts);
+    for (case, mut program) in programs.into_iter().enumerate() {
+        let mut baseline = None;
+        for (variant, &form) in forms.iter().enumerate() {
+            program.form = form;
+            let index = case * forms.len() + variant;
+            let path = directory.join(format!("case-{index}.ts"));
+            report["active"] = json!({"index":index,"form":program.form});
             fs::write(
                 directory.join("report.json"),
                 serde_json::to_vec_pretty(&report)?,
             )?;
-            bail!(
-                "{reproduced:?}\nArtifacts: {}\nReplay: PERRY_GENERATIVE_REPLAY={} cargo test --test generative_test generated_programs_match_node -- --nocapture",
-                directory.display(),
-                directory.join("minimal.json").display()
-            );
+            let expected = oracle(&path, &directory)?;
+            if let Some(baseline) = &baseline {
+                ensure!(
+                    *baseline == expected,
+                    "metamorphic transformation changed Node observations: {path:?}"
+                );
+            }
+            if let Some(failure) = compare(&path, &directory, &expected)? {
+                fs::write(directory.join("original.ts"), program.source())?;
+                fs::write(
+                    directory.join("original.json"),
+                    serde_json::to_vec_pretty(&program)?,
+                )?;
+                fs::write(
+                    directory.join("failure.json"),
+                    serde_json::to_vec_pretty(&failure)?,
+                )?;
+                let (minimal, attempts) = reduce(program, shrink_limit, |candidate| {
+                    let path = directory.join("candidate.ts");
+                    fs::write(&path, candidate.source())?;
+                    let expected = oracle(&path, &directory)?;
+                    Ok(compare(&path, &directory, &expected)?
+                        .is_some_and(|next| next.kind == failure.kind))
+                })?;
+                let minimal_path = directory.join("minimal.ts");
+                fs::write(&minimal_path, minimal.source())?;
+                fs::write(
+                    directory.join("minimal.json"),
+                    serde_json::to_vec_pretty(&minimal)?,
+                )?;
+                let expected = oracle(&minimal_path, &directory)?;
+                let reproduced = compare(&minimal_path, &directory, &expected)?
+                    .context("reduction stopped reproducing")?;
+                ensure!(
+                    reproduced.kind == failure.kind,
+                    "reduction changed failure category"
+                );
+                report["status"] = json!("failed");
+                report["failure"] = serde_json::to_value(&reproduced)?;
+                report["shrinkAttempts"] = json!(attempts);
+                fs::write(
+                    directory.join("report.json"),
+                    serde_json::to_vec_pretty(&report)?,
+                )?;
+                bail!(
+                    "{reproduced:?}\nArtifacts: {}\nReplay: PERRY_GENERATIVE_REPLAY={} cargo test --test generative_test generated_programs_match_node -- --nocapture",
+                    directory.display(),
+                    directory.join("minimal.json").display()
+                );
+            }
+            report["completed"] = json!(index + 1);
+            if baseline.is_none() {
+                baseline = Some(expected);
+            }
         }
-        report["completed"] = json!(index + 1);
     }
     report["status"] = json!("passed");
     report["active"] = json!(null);
