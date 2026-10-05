@@ -300,11 +300,11 @@ fn emit_fetch(
     b.effect(O::MemoryFill { mem: memory }, &[scratch, zero, size]);
     let data = b.load(url, 0, I32);
     let length = b.load(url, 4, I32);
-    let max = b.integer((u32::MAX - 64) / 3);
+    let max = b.integer((u32::MAX - 64) / 4);
     let fits = b.op(O::I32LeU, &[length, max], I32);
     b.require(fits);
-    let three = b.integer(3);
-    let capacity = b.op(O::I32Mul, &[length, three], I32);
+    let expansion = b.integer(4);
+    let capacity = b.op(O::I32Mul, &[length, expansion], I32);
     let capacity = offset(&mut b, capacity, 64);
     let normalized = b.call(t.allocator.realloc, &[zero, zero, one, capacity], &[I32])[0];
     b.store(frame, 24, normalized, I32);

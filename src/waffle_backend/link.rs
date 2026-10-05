@@ -438,13 +438,23 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                 } else {
                     table.ty.initial
                 };
+                let maximum = table
+                    .ty
+                    .maximum
+                    .map(|maximum| {
+                        maximum
+                            .checked_add(initial - table.ty.initial)
+                            .filter(|maximum| table.ty.table64 || *maximum <= u64::from(u32::MAX))
+                            .context("Helper function table exceeds its address space")
+                    })
+                    .transpose()?;
                 new_tables.table(wasm_encoder::TableType {
                     element_type: match table.ty.element_type {
                         wasmparser::RefType::FUNCREF => wasm_encoder::RefType::FUNCREF,
                         _ => wasm_encoder::RefType::EXTERNREF,
                     },
                     minimum: initial,
-                    maximum: table.ty.maximum,
+                    maximum,
                     table64: table.ty.table64,
                     shared: table.ty.shared,
                 });

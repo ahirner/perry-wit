@@ -2079,3 +2079,48 @@ async fn standard_fetch_optional_fields_and_validation_rejections_match_node() -
     assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_normalizes_runtime_urls_before_native_io_and_matches_node() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/url_normalization.ts"),
+        "package test:fetch-url; world boundary {import wasi:http/client@0.3.0;export run:async func(url:string)->string;}",
+    )?;
+    let server =
+        fixture::HttpFixture::new(|request| fixture::Reply::Body(200, request.target.clone()));
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    let expected = "/a/%C3%A9?key=%27{}|/a//z?quoted=%22x%22&raw=`{}";
+    for _ in 0..30 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            expected
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/url_normalization.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script, &base])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
+    Ok(())
+}
