@@ -7,6 +7,7 @@ use perry_hir::{
     ir::{Expr, LogicalOp},
     types::Type as HirType,
 };
+use std::mem;
 use waffle::{BlockTarget, Terminator, Type, Value};
 
 impl FunctionLowerer<'_> {
@@ -80,8 +81,7 @@ impl FunctionLowerer<'_> {
         );
         let core = crate::waffle_backend::registry::map_type_to_waffle(&ty)?;
         let value = self.expression(condition)?;
-        let incoming_locals = self.locals.clone();
-        let incoming_narrowings = self.narrowings.clone();
+        let incoming_narrowings = mem::take(&mut self.narrowings);
         let then_block = self.body.add_block();
         let else_block = self.body.add_block();
         let join = JoinPoint::new(&mut self.body, "conditional join", &self.locals);
@@ -100,12 +100,16 @@ impl FunctionLowerer<'_> {
                 },
             },
         );
-        for (block, expression, truth) in [
+        let branch_locals = [self.locals.clone(), mem::take(&mut self.locals)];
+        for ((block, expression, truth), locals) in [
             (then_block, then_expr, true),
             (else_block, else_expr, false),
-        ] {
+        ]
+        .into_iter()
+        .zip(branch_locals)
+        {
             self.block = block;
-            self.locals = incoming_locals.clone();
+            self.locals = locals;
             self.narrowings = incoming_narrowings.clone();
             self.narrow_type_guard(condition, truth);
             let value = self.typed_operand(expression, &ty)?;
