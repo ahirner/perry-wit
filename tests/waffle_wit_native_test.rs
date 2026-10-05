@@ -2598,3 +2598,40 @@ fn standard_request_body_consumption_requires_async_wit_effects() {
         "{diagnostic}"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_response_values_and_bodies_match_node_without_host_imports() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/responses.ts"),
+        "package test:responses; world boundary {export metadata:func()->string;export run:async func()->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let linker = Linker::<Host>::new(&engine);
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let metadata = instance.get_typed_func::<(), (String,)>(&mut store, "metadata")?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    for _ in 0..100 {
+        assert_eq!(metadata.call_async(&mut store, ()).await?.0, "ok");
+        assert_eq!(run.call_async(&mut store, ()).await?.0, "ok");
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/responses.ts");
+    let script = format!(
+        "import {{metadata,run}} from {};console.log(metadata());console.log(await run());",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "ok\nok");
+    Ok(())
+}

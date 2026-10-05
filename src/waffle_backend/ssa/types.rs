@@ -127,7 +127,7 @@ impl FunctionLowerer<'_> {
                 object, property, ..
             } if crate::waffle_backend::http::fetch::is_response(&self.infer_expr_type(object)) => {
                 match property.as_str() {
-                    "url" => HirType::String,
+                    "url" | "statusText" => HirType::String,
                     "headers" => {
                         HirType::Named(crate::waffle_backend::http::headers::HEADERS_TYPE.into())
                     }

@@ -15,33 +15,30 @@ impl SourceCalls {
         if name.ctxt != self.unresolved {
             return Ok(());
         }
-        let request = match name.sym.as_ref() {
-            "Headers" => false,
-            "Request" => true,
+        let (minimum, maximum, existing) = match name.sym.as_ref() {
+            "Headers" => (0, 1, &mut self.headers_constructor),
+            "Request" => (1, 2, &mut self.request_constructor),
+            "Response" => (0, 2, &mut self.response_constructor),
             _ => return Ok(()),
         };
         let arguments = constructor.args.as_deref().unwrap_or_default();
         ensure!(
-            arguments.len() <= if request { 2 } else { 1 }
-                && (!request || !arguments.is_empty())
+            (minimum..=maximum).contains(&arguments.len())
                 && constructor.type_args.is_none()
                 && arguments.iter().all(|argument| argument.spread.is_none()),
             "{} constructor received unsupported arguments",
             name.sym
         );
-        let existing = if request {
-            &self.request_constructor
-        } else {
-            &self.headers_constructor
-        };
         let name = if let Some(name) = existing {
             name.clone()
         } else {
+            let symbol = name.sym.clone();
             let name = self.fresh_name();
-            if request {
-                self.request_constructor = Some(name.clone());
-            } else {
-                self.headers_constructor = Some(name.clone());
+            match symbol.as_ref() {
+                "Headers" => self.headers_constructor = Some(name.clone()),
+                "Request" => self.request_constructor = Some(name.clone()),
+                "Response" => self.response_constructor = Some(name.clone()),
+                _ => unreachable!(),
             }
             name
         };

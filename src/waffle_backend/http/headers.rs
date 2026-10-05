@@ -105,6 +105,7 @@ pub(crate) struct Helpers {
     pub(crate) new: Func,
     pub(crate) lookup: Func,
     pub(crate) edit: Func,
+    pub(crate) default_type: Func,
 }
 
 pub(crate) fn declare_helpers(module: &mut Module<'static>) -> BTreeMap<String, Func> {
@@ -324,9 +325,50 @@ pub(crate) fn emit(
     let payload = b.op(O::F64ConvertI32U, &[headers], F64);
     b.ret(&[zero, payload]);
     b.finish(module, function)?;
+    let default_type = emit_default_type(module, memory, lookup, edit)?;
     Ok(Helpers {
+        default_type,
         new: function,
         lookup,
         edit,
     })
+}
+
+fn emit_default_type(
+    module: &mut Module<'static>,
+    memory: Memory,
+    lookup: Func,
+    edit: Func,
+) -> Result<Func> {
+    let function = builder::declare(module, "headers.default-type", &[I32; 4], &[I32, F64]);
+    let mut b = Builder::new(module, function, memory);
+    let one = b.integer(1);
+    let text = b.op(O::I32Eq, &[b.param(1), one], I32);
+    let inspect = b.body.add_block();
+    let done = b.body.add_block();
+    b.branch(text, inspect, done);
+    b.block = inspect;
+    let present = b.call(lookup, &[b.param(0), b.param(2), one], &[I32, F64]);
+    let failed = b.body.add_block();
+    let valid = b.body.add_block();
+    b.branch(present[0], failed, valid);
+    b.block = failed;
+    b.ret(&present);
+    b.block = valid;
+    let present = b.op(O::I32TruncF64U, &[present[1]], I32);
+    let insert = b.body.add_block();
+    b.branch(present, done, insert);
+    b.block = insert;
+    let result = b.call(
+        edit,
+        &[b.param(0), b.param(2), b.param(3), one],
+        &[I32, F64],
+    );
+    b.ret(&result);
+    b.block = done;
+    let zero = b.integer(0);
+    let payload = b.number(0.0);
+    b.ret(&[zero, payload]);
+    b.finish(module, function)?;
+    Ok(function)
 }

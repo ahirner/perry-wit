@@ -177,8 +177,8 @@ impl FunctionLowerer<'_> {
                 .map(crate::waffle_backend::objects::property_type);
             let key = self.expression(&Expr::String(name))?;
             let (tag, payload) = if let Some(ty) = field_type {
-                let value = self.typed_operand(expression, &ty)?;
-                self.typed_value_parts(value, &ty)?
+                let (_, tag, payload) = self.typed_field_parts(expression, &ty)?;
+                (tag, payload)
             } else {
                 let (_, tag, payload) = self.tagged_value(expression)?;
                 (tag, payload)
@@ -186,6 +186,25 @@ impl FunctionLowerer<'_> {
             self.call_completion(helpers.set, &[object, key, tag, payload]);
         }
         Ok(object)
+    }
+
+    fn typed_field_parts(
+        &mut self,
+        expression: &Expr,
+        expected: &HirType,
+    ) -> Result<(Value, Value, Value)> {
+        self.check_typed_value(expression, expected)?;
+        if matches!(expected, HirType::Union(types) if types.len()==2 && types.contains(&HirType::Number) && types.contains(&HirType::Void))
+            && matches!(
+                self.infer_expr_type(expression),
+                HirType::Number | HirType::Void
+            )
+        {
+            return self.tagged_value(expression);
+        }
+        let value = self.typed_operand(expression, expected)?;
+        let (tag, payload) = self.typed_value_parts(value, expected)?;
+        Ok((value, tag, payload))
     }
 
     pub(super) fn object_set(
@@ -205,9 +224,7 @@ impl FunctionLowerer<'_> {
         let object = self.expression(receiver)?;
         let key = self.string_receiver(key)?;
         let (original, tag, payload) = if self.contract.wit.is_some() {
-            let value = self.typed_operand(expression, &expected)?;
-            let (tag, payload) = self.typed_value_parts(value, &expected)?;
-            (value, tag, payload)
+            self.typed_field_parts(expression, &expected)?
         } else {
             self.tagged_value(expression)?
         };

@@ -175,9 +175,12 @@ pub(crate) fn plan_promises(
         )
     });
     let has_body = has_fetch
-        || intrinsics
-            .values()
-            .any(|intrinsic| matches!(intrinsic, TypedIntrinsic::RequestNew));
+        || intrinsics.values().any(|intrinsic| {
+            matches!(
+                intrinsic,
+                TypedIntrinsic::RequestNew | TypedIntrinsic::ResponseNew
+            )
+        });
     if has_body {
         for method in super::http::body::BodyMethod::ALL {
             candidates.insert(

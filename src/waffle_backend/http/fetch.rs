@@ -93,6 +93,7 @@ pub(super) fn emit(
     let finish = builder::declare(module, "fetch.finish", &[], &[]);
     let transport = Transport {
         native,
+        pool: runtime.pool,
         headers: runtime.headers.unwrap(),
         allocator,
         finish_write: super::future::emit_finish_write(module, memory, native)?,
@@ -123,6 +124,7 @@ pub(super) fn emit(
 }
 
 struct Transport<'a> {
+    pool: &'a crate::waffle_backend::strings::StringPool,
     native: &'a BTreeMap<String, Func>,
     headers: super::headers::Helpers,
     allocator: AllocationFuncs,
@@ -170,9 +172,9 @@ fn emit_fetch(
     let count = b.integer(8);
     let frame = b.call(t.allocator.frame_new, &[count], &[I32])[0];
     b.store(frame, 12, request_value, I32);
-    let response = b.allocate(t.allocator.realloc, 72, 4);
+    let response = b.allocate(t.allocator.realloc, super::response::SIZE, 4);
     b.store(frame, 16, response, I32);
-    let size = b.integer(72);
+    let size = b.integer(super::response::SIZE);
     b.effect(O::MemoryFill { mem: memory }, &[response, zero, size]);
     let backlink = b.integer(4);
     let backlink = b.op(O::I32Sub, &[response, backlink], I32);
@@ -180,6 +182,9 @@ fn emit_fetch(
     let kind = b.integer(14);
     b.store(header, 16, kind, I32);
     b.store(response, 56, frame, I32);
+    b.store(response, super::response::NATIVE, one, I32);
+    let empty = b.integer(t.pool.get("").unwrap());
+    b.store(response, super::response::STATUS_TEXT, empty, I32);
     let scratch = b.allocate(t.allocator.realloc, 256, 8);
     b.store(frame, 20, scratch, I32);
     b.store(response, 48, scratch, I32);
@@ -317,6 +322,13 @@ fn emit_fetch(
     let out = offset(&mut b, response, 4);
     b.call(t.native["copy-fields"], &[headers, out], &[]);
     b.call(t.native["drop-fields"], &[headers], &[]);
+    let copy = b.integer(3);
+    let fields = b.call(t.headers.new, &[copy, response], &[I32, F64]);
+    let valid = b.op(O::I32Eqz, &[fields[0]], I32);
+    b.require(valid);
+    let fields = b.op(O::I32TruncF64U, &[fields[1]], I32);
+    b.store(fields, 0, one, I32);
+    b.store(response, super::response::HEADERS, fields, I32);
     let ack = b.call(t.native["new-completion"], &[], &[I64])[0];
     let reader = low(&mut b, ack);
     let writer = high(&mut b, ack);

@@ -14,6 +14,7 @@ mod future;
 pub(crate) mod handler;
 pub(crate) mod headers;
 pub(crate) mod request;
+pub(crate) mod response;
 
 #[cfg(test)]
 #[path = "http/tests.rs"]

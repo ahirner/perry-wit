@@ -24,11 +24,12 @@
       "name": "P3 HTTP client",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "fetch with string URLs or Request values, standard Request/Headers, and the perry:http buffered GET facade",
+      "domain": "fetch with string URLs or Request values, standard Request/Response/Headers, and the perry:http buffered GET facade",
       "invariants": [
         "Request construction validates synchronously without host imports; fetch uses the same preparation inside its retained Promise. URL fragments remain in Request.url and are omitted from transport coordinates and Response.url",
         "Request values snapshot headers and byte bodies, normalize methods, transfer inherited bodies exactly once, permit explicit body overrides, and retain metadata through stored tasks and collection; null bodies remain reusable",
-        "Request and Response share single-consumption body codecs; Request text/json/bytes/arrayBuffer methods require no host imports and receive async-effect checks before component encoding",
+        "Request and constructed Response values share single-consumption body codecs without host imports; body methods receive async-effect checks before component encoding",
+        "Response construction snapshots string/byte bodies and header records/pairs/Headers, validates status and statusText, keeps null bodies reusable, and exposes mutable headers independently of the input",
         "fetch resolves at response headers and retains native body, trailers, upload task, and request completion ownership until acknowledged completion",
         "GET/HEAD/POST/PUT/DELETE/OPTIONS/PATCH and permitted extension methods accept typed required or optional method/header/body fields; string and Uint8Array bodies upload concurrently with response headers, and byte bodies snapshot the selected view before suspension",
         "follow/manual/error redirect modes preserve Node HTTP status behavior, final URL, redirect count limits, POST/303 method and body-header rewrites, buffered body replay, and cross-origin credential removal; intermediate bodies close through P3 completion channels without buffering",
@@ -48,8 +49,9 @@
         "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
-        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect fields. Response construction, Web Streams, cancellation, and finite Error objects remain unfinished R8.3 work",
+        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect fields. Web Streams, cancellation, and finite Error objects remain unfinished R8.3 work",
         "One URL codec normalizes ASCII and percent-encoded hosts, numeric IPv4, bracketed IPv6, ports, dot segments, HTTP backslashes, path/query escaping, whitespace, and fragments. Internationalized domains and noncanonical scheme separators remain unsupported",
+        "Constructed Response values preserve statusText; fetched responses expose an empty statusText because the standard WASI HTTP response carries no reason phrase",
         "Every non-null acquired fetch body must be consumed before the owning call returns; otherwise the invocation traps instead of abandoning its native owner",
         "Tasks may overlap in resolved WIT components and must finish before the owning invocation returns",
         "HttpResponse is guest-internal; component wrappers export status, text, or bytes",
@@ -93,6 +95,7 @@
         "rust:tests/fetch_url_test.rs#relative_redirect_locations_match_node",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_redirect_modes_replay_cleanup_and_origin_rules_match_node",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_redirects_close_gated_bodies_without_buffering_them",
+        "rust:tests/waffle_wit_native_test.rs#standard_response_values_and_bodies_match_node_without_host_imports",
         "rust:tests/waffle_wit_native_test.rs#standard_request_values_validate_and_snapshot_without_host_imports",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_request_snapshots_transfers_and_reuse_match_node",
         "rust:tests/waffle_wit_native_test.rs#standard_request_body_methods_share_decoding_and_consumption_without_host_imports",
@@ -738,12 +741,12 @@
       "name": "global.fetch",
       "tier": "tier-1-web-primaries",
       "support": "partial",
-      "domain": "fetch with string URLs or Request values, standard Request/Headers, and the perry:http buffered GET facade",
+      "domain": "fetch with string URLs or Request values, standard Request/Response/Headers, and the perry:http buffered GET facade",
       "invariants": [
         "Standard fetch lowers directly to wasi:http/client@0.3.0; compiler.p3_http_get records the supported request and response shapes"
       ],
       "differences": [
-        "Response construction, cancellation, and Web Streams remain unfinished; see compiler.p3_http_get for current limitations"
+        "Cancellation and Web Streams remain unfinished; see compiler.p3_http_get for current limitations"
       ],
       "conformance": [
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_json_and_array_buffers_preserve_types_identity_and_failures",

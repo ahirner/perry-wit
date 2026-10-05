@@ -91,6 +91,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) headers_helpers: Option<super::http::headers::Helpers>,
     pub(crate) body_helpers: Option<super::http::body::Helpers>,
     pub(crate) request_helpers: Option<super::http::request::Helpers>,
+    pub(crate) response_constructor: Option<Func>,
     pub(crate) time_helpers: BTreeMap<&'static str, Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
     pub(crate) http_helpers: Option<super::http::HttpHelpers>,
@@ -171,6 +172,7 @@ impl ModuleRegistry {
                     | TypedIntrinsic::DateNew
                     | TypedIntrinsic::HeadersNew
                     | TypedIntrinsic::RequestNew
+                    | TypedIntrinsic::ResponseNew
                     | TypedIntrinsic::Temporal(_)
             ) || matches!(
                 intrinsic,
@@ -205,7 +207,10 @@ impl ModuleRegistry {
         let headers_imports = contract
             .has_headers()
             .then(|| super::http::headers::declare_helpers(module));
-        let body_decode = contract.has_request().then(|| {
+        let response_validation = contract
+            .has_response()
+            .then(|| super::http::response::declare(module));
+        let body_decode = contract.has_body().then(|| {
             super::runtime::imports::declare_imports(
                 module,
                 super::link::HELPER_MODULE,
@@ -301,7 +306,7 @@ impl ModuleRegistry {
         )?);
 
         let byte_helpers =
-            if super::bytes::required(hir) || contract.has_http() || contract.has_request() {
+            if super::bytes::required(hir) || contract.has_http() || contract.has_body() {
                 Some(super::bytes::emit_runtime(
                     module,
                     memory,
@@ -510,6 +515,22 @@ impl ModuleRegistry {
                 )
             })
             .transpose()?;
+        let response_constructor = contract
+            .has_response()
+            .then(|| {
+                super::http::response::emit(
+                    module,
+                    memory,
+                    &super::http::response::Runtime {
+                        allocator: allocator.unwrap(),
+                        bytes: byte_helpers.unwrap(),
+                        headers: headers_helpers.unwrap(),
+                        validate_text: response_validation.unwrap(),
+                        pool: string_pool,
+                    },
+                )
+            })
+            .transpose()?;
         let http_helpers = if let Some(imports) = http_imports {
             Some(super::http::emit_source_runtime(
                 module,
@@ -538,7 +559,7 @@ impl ModuleRegistry {
                         strings: string_helpers.unwrap(),
                         json: json_helpers,
                         decode,
-                        request: request_helpers.unwrap().consume,
+                        bytes: byte_helpers.unwrap(),
                         response: http_helpers
                             .and_then(|helpers| helpers.fetch)
                             .map(|helpers| helpers.consume),
@@ -763,6 +784,7 @@ impl ModuleRegistry {
             decoder_helpers,
             headers_helpers,
             request_helpers,
+            response_constructor,
             body_helpers,
             http_helpers,
             filesystem_helpers,

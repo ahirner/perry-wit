@@ -58,7 +58,7 @@ pub(crate) struct Runtime {
     pub(crate) strings: StringHelperFuncs,
     pub(crate) json: Option<JsonHelpers>,
     pub(crate) decode: Func,
-    pub(crate) request: Func,
+    pub(crate) bytes: crate::waffle_backend::bytes::ByteHelpers,
     pub(crate) response: Option<Func>,
 }
 pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) -> Result<Helpers> {
@@ -71,19 +71,59 @@ pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) ->
     let one = b.integer(1);
     let valid = b.op(O::I32LeU, &[kind, one], I32);
     b.require(valid);
+    let receiver = b.param(0);
     let response = b.body.add_block();
     let request = b.body.add_block();
+    let buffered = b.body.add_block();
+    let present = b.body.add_blockparam(buffered, I32);
+    let used_address = b.body.add_blockparam(buffered, I32);
     b.branch(kind, response, request);
     b.block = request;
-    let result = b.call(r.request, &[b.param(0)], &[I32, F64]);
-    b.ret(&result);
+    let has_body = b.load(receiver, super::request::BODY_KIND, I32);
+    let used_offset = b.integer(super::request::BODY_USED);
+    let used = b.op(O::I32Add, &[receiver, used_offset], I32);
+    b.jump(buffered, &[has_body, used]);
     b.block = response;
+    let native = b.load(receiver, super::response::NATIVE, I32);
+    let transport = b.body.add_block();
+    let constructed = b.body.add_block();
+    b.branch(native, transport, constructed);
+    b.block = transport;
     if let Some(consume) = r.response {
-        let result = b.call(consume, &[b.param(0)], &[I32, F64]);
+        let result = b.call(consume, &[receiver], &[I32, F64]);
         b.ret(&result);
     } else {
         b.body.set_terminator(b.block, Terminator::Unreachable);
     }
+    b.block = constructed;
+    let null_body = b.load(receiver, 52, I32);
+    let has_body = b.op(O::I32Eqz, &[null_body], I32);
+    let used_offset = b.integer(20);
+    let used = b.op(O::I32Add, &[receiver, used_offset], I32);
+    b.jump(buffered, &[has_body, used]);
+    b.block = buffered;
+    let content = b.body.add_block();
+    let empty = b.body.add_block();
+    b.branch(present, content, empty);
+    b.block = empty;
+    let length = b.number(0.0);
+    let bytes = b.call(r.bytes.new, &[length], &[I32, F64]);
+    b.ret(&bytes);
+    b.block = content;
+    let used = b.load(used_address, 0, I32);
+    let fail = b.body.add_block();
+    let copy = b.body.add_block();
+    b.branch(used, fail, copy);
+    b.block = fail;
+    let error = b.number(12.0);
+    b.ret(&[one, error]);
+    b.block = copy;
+    b.store(used_address, 0, one, I32);
+    let source = b.load(receiver, 12, I32);
+    let bytes = b.call(r.bytes.copy, &[source], &[I32])[0];
+    let payload = b.op(O::F64ConvertI32U, &[bytes], F64);
+    let zero = b.integer(0);
+    b.ret(&[zero, payload]);
     b.finish(module, body)?;
     let mut b = Builder::new(module, text, memory);
     let result = b.call(body, &[b.param(0), b.param(1)], &[I32, F64]);

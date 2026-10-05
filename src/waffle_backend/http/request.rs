@@ -32,7 +32,6 @@ pub(crate) fn is_request(ty: &perry_hir::types::Type) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) struct Helpers {
     pub(crate) new: Func,
-    pub(crate) consume: Func,
 }
 pub(crate) struct Runtime<'a> {
     pub(crate) allocator: AllocationFuncs,
@@ -227,23 +226,14 @@ pub(crate) fn emit(
     reject(&mut b, r, frame, fields[0]);
     let fields = b.op(O::I32TruncF64U, &[fields[1]], I32);
     b.store(frame, 36, fields, I32);
-    let text_body = b.op(O::I32Eq, &[body_kind, one], I32);
-    let inspect = b.body.add_block();
-    let ready_headers = b.body.add_block();
-    b.branch(text_body, inspect, ready_headers);
-    b.block = inspect;
     let name = b.integer(r.pool.get("content-type").unwrap());
-    let present = b.call(r.headers.lookup, &[fields, name, one], &[I32, F64]);
-    reject(&mut b, r, frame, present[0]);
-    let present = b.op(O::I32TruncF64U, &[present[1]], I32);
-    let add_type = b.body.add_block();
-    b.branch(present, ready_headers, add_type);
-    b.block = add_type;
     let value = b.integer(r.pool.get("text/plain;charset=UTF-8").unwrap());
-    let result = b.call(r.headers.edit, &[fields, name, value, one], &[I32, F64]);
+    let result = b.call(
+        r.headers.default_type,
+        &[fields, body_kind, name, value],
+        &[I32, F64],
+    );
     reject(&mut b, r, frame, result[0]);
-    b.jump(ready_headers, &[]);
-    b.block = ready_headers;
     for at in [4, 8] {
         let value = b.load(fields, at, I32);
         b.store(request, at, value, I32);
@@ -272,41 +262,5 @@ pub(crate) fn emit(
     let payload = b.op(O::F64ConvertI32U, &[request], F64);
     b.ret(&[zero, payload]);
     b.finish(module, function)?;
-    let consume = emit_consume(module, memory, r)?;
-    Ok(Helpers {
-        new: function,
-        consume,
-    })
-}
-
-fn emit_consume(module: &mut Module<'static>, memory: Memory, r: &Runtime<'_>) -> Result<Func> {
-    let function = builder::declare(module, "request.consume", &[I32], &[I32, F64]);
-    let mut b = Builder::new(module, function, memory);
-    let request = b.param(0);
-    let zero = b.integer(0);
-    let one = b.integer(1);
-    let kind = b.load(request, BODY_KIND, I32);
-    let present = b.body.add_block();
-    let empty = b.body.add_block();
-    b.branch(kind, present, empty);
-    b.block = empty;
-    let length = b.number(0.0);
-    let bytes = b.call(r.bytes.new, &[length], &[I32, F64]);
-    b.ret(&bytes);
-    b.block = present;
-    let used = b.load(request, BODY_USED, I32);
-    let fail = b.body.add_block();
-    let copy = b.body.add_block();
-    b.branch(used, fail, copy);
-    b.block = fail;
-    let error = b.number(12.0);
-    b.ret(&[one, error]);
-    b.block = copy;
-    b.store(request, BODY_USED, one, I32);
-    let source = b.load(request, BODY, I32);
-    let bytes = b.call(r.bytes.copy, &[source], &[I32])[0];
-    let payload = b.op(O::F64ConvertI32U, &[bytes], F64);
-    b.ret(&[zero, payload]);
-    b.finish(module, function)?;
-    Ok(function)
+    Ok(Helpers { new: function })
 }

@@ -210,7 +210,9 @@
           (if (i32.eq (local.get $kind) (i32.const 14)) (then
             (call $mark (i32.load offset=16 (local.get $pointer)))
             (call $mark (i32.load offset=48 (local.get $pointer)))
-            (call $mark (i32.load offset=60 (local.get $pointer)))))
+            (call $mark (i32.load offset=60 (local.get $pointer)))
+            (call $mark (i32.load offset=68 (local.get $pointer)))
+            (call $mark (i32.load offset=76 (local.get $pointer)))))
           (if (i32.and (i32.ge_u (local.get $kind) (i32.const 13)) (i32.le_u (local.get $kind) (i32.const 15))) (then
             (call $mark (i32.load offset=12 (local.get $pointer)))
             (local.set $count (i32.load offset=8 (local.get $pointer)))

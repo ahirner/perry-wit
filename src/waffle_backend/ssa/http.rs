@@ -251,6 +251,115 @@ impl FunctionLowerer<'_> {
         Ok(values)
     }
 
+    pub(super) fn new_response(&mut self, arguments: &[Expr]) -> Result<Value> {
+        use crate::waffle_backend::{bytes, values};
+        ensure!(
+            arguments.len() <= 2,
+            "Response requires an optional body and typed ResponseInit record"
+        );
+        let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+        let mut values = [zero; 6];
+        if let Some(body) = arguments.first() {
+            let ty = self.infer_expr_type(body);
+            let kind = if matches!(ty, HirType::Null | HirType::Void) {
+                0
+            } else if values::is_string_type(&ty) {
+                1
+            } else if bytes::is_byte_view(&ty) {
+                2
+            } else {
+                bail!("Response body must be string, Uint8Array, null, or undefined");
+            };
+            let body = self.expression(body)?;
+            if kind != 0 {
+                values[0] = body;
+            }
+            values[1] = self.op(Operator::I32Const { value: kind }, &[], &[Type::I32]);
+        }
+        if let Some(options) = arguments.get(1) {
+            if matches!(self.infer_expr_type(options), HirType::Void | HirType::Null) {
+                self.expression(options)?;
+            } else {
+                let HirType::Object(shape) = self.infer_expr_type(options) else {
+                    bail!("Response options require a statically typed ResponseInit record");
+                };
+                ensure!(
+                    shape.index_signature.is_none(),
+                    "Response options must have statically declared fields"
+                );
+                for (key, field) in &shape.properties {
+                    let (ty, _) = fetch_option_type(&field.ty, field.optional);
+                    match key.as_str() {
+                        "status" => ensure!(
+                            matches!(ty, HirType::Number | HirType::Void),
+                            "Response status must be a number"
+                        ),
+                        "statusText" => ensure!(
+                            values::is_string_type(ty) || *ty == HirType::Void,
+                            "Response statusText must be a string"
+                        ),
+                        "headers" => {
+                            header_shape(ty)?;
+                        }
+                        _ => bail!("Response option '{key}' is not implemented yet"),
+                    }
+                }
+                let object = self.expression(options)?;
+                let helpers = self.registry.object_helpers.unwrap();
+                for (name, index) in [("status", 2), ("headers", 3), ("statusText", 5)] {
+                    if let Some(field) = shape.properties.get(name) {
+                        let (ty, optional) = fetch_option_type(&field.ty, field.optional);
+                        let key = self.expression(&Expr::String(name.into()))?;
+                        let entry = self.op(
+                            Operator::Call {
+                                function_index: helpers.get,
+                            },
+                            &[object, key],
+                            &[Type::I32],
+                        );
+                        let tag = values::ValueTag::of(ty)? as u32;
+                        let tag = self.op(Operator::I32Const { value: tag }, &[], &[Type::I32]);
+                        let optional = self.op(
+                            Operator::I32Const {
+                                value: u32::from(optional),
+                            },
+                            &[],
+                            &[Type::I32],
+                        );
+                        let payload = self.call_completion(helpers.value, &[entry, tag, optional]);
+                        if name == "status" {
+                            values[index] = entry;
+                        } else {
+                            values[index] =
+                                abi::decode_payload(&mut self.body, self.block, payload, true);
+                        }
+                        if name == "headers" {
+                            let mode = self.op(
+                                Operator::I32Const {
+                                    value: header_shape(ty)?,
+                                },
+                                &[],
+                                &[Type::I32],
+                            );
+                            values[4] = self.op(
+                                Operator::Select,
+                                &[mode, zero, values[index]],
+                                &[Type::I32],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let payload = self.call_completion(self.registry.response_constructor.unwrap(), &values);
+        Ok(abi::decode_payload(
+            &mut self.body,
+            self.block,
+            payload,
+            true,
+        ))
+    }
+
     pub(super) fn new_request(&mut self, arguments: &[Expr]) -> Result<Value> {
         let values = self.request_arguments(arguments)?;
         let payload = self.call_completion(self.registry.request_helpers.unwrap().new, &values);
@@ -414,10 +523,9 @@ impl FunctionLowerer<'_> {
     }
 
     fn fetch_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {
-        if property == "headers" {
-            return self.expression(receiver);
-        }
         let offset = match property {
+            "headers" => http::response::HEADERS,
+            "statusText" => http::response::STATUS_TEXT,
             "status" | "ok" => 0,
             "url" => 16,
             "bodyUsed" => 20,
@@ -437,7 +545,7 @@ impl FunctionLowerer<'_> {
             &[Type::I32],
         );
         Ok(match property {
-            "url" | "bodyUsed" | "redirected" => value,
+            "url" | "bodyUsed" | "redirected" | "headers" | "statusText" => value,
             "ok" => {
                 let lower = self.op(Operator::I32Const { value: 200 }, &[], &[Type::I32]);
                 let upper = self.op(Operator::I32Const { value: 299 }, &[], &[Type::I32]);

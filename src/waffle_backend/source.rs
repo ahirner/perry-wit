@@ -34,6 +34,7 @@ pub(crate) struct SourceBindings {
     pub(crate) date_constructor: Option<String>,
     pub(crate) headers_constructor: Option<String>,
     pub(crate) request_constructor: Option<String>,
+    pub(crate) response_constructor: Option<String>,
     pub(crate) time_constructors: BTreeMap<String, super::time::TimeConstructor>,
 }
 
@@ -165,6 +166,7 @@ pub(crate) fn resolve_bindings(
             date_constructor: None,
             headers_constructor: None,
             request_constructor: None,
+            response_constructor: None,
             time_constructors: BTreeMap::new(),
             error: None,
         };
@@ -178,6 +180,7 @@ pub(crate) fn resolve_bindings(
             date_constructor: calls.date_constructor,
             headers_constructor: calls.headers_constructor,
             request_constructor: calls.request_constructor,
+            response_constructor: calls.response_constructor,
             time_constructors: calls
                 .time_constructors
                 .into_iter()
@@ -237,6 +240,15 @@ pub(crate) fn resolve_bindings(
             module
                 .body
                 .append(&mut parse_typescript(&declaration, "request.d.ts")?.body);
+        }
+        if let Some(name) = &resolved.response_constructor {
+            let declaration = format!(
+                "declare function {name}(body: any, init: any): {};",
+                super::http::fetch::RESPONSE_TYPE
+            );
+            module
+                .body
+                .append(&mut parse_typescript(&declaration, "response.d.ts")?.body);
         }
         for (name, operation) in &resolved.time_constructors {
             let declaration = format!(
@@ -360,6 +372,7 @@ struct SourceCalls {
     date_constructor: Option<String>,
     headers_constructor: Option<String>,
     request_constructor: Option<String>,
+    response_constructor: Option<String>,
     time_constructors: BTreeMap<super::time::TimeConstructor, String>,
     error: Option<anyhow::Error>,
 }

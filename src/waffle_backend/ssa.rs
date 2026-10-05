@@ -134,7 +134,7 @@ pub(crate) fn lower_module(
                     }),
             );
         }
-        if contract.has_http() || contract.has_request() {
+        if contract.has_http() || contract.has_body() {
             for method in ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"] {
                 string_pool.intern(method);
             }
@@ -838,6 +838,14 @@ impl<'a> FunctionLowerer<'a> {
             )
         {
             return self.new_date(args).map(Some);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(super::resolve::TypedIntrinsic::ResponseNew)
+            )
+        {
+            return self.new_response(args).map(Some);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
             && matches!(
@@ -1677,7 +1685,9 @@ impl<'a> FunctionLowerer<'a> {
                 let v = if *b { 1 } else { 0 };
                 Ok(self.op(Operator::I32Const { value: v }, &[], &[Type::I32]))
             }
-            Expr::Undefined => Ok(self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])),
+            Expr::Undefined | Expr::Null => {
+                Ok(self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]))
+            }
             Expr::ForOfToArray(input) => self.string_receiver(input),
             Expr::ArrayJoin { array, separator } => self.array_join(
                 array,

@@ -30,6 +30,24 @@ fn header_value(input: &[u8], output: &mut [u8]) -> Result<usize, ()> {
     Ok(length)
 }
 
+fn status_text(input: &[u8]) -> Result<u32, ()> {
+    let text = core::str::from_utf8(input).map_err(|_| ())?;
+    if text
+        .chars()
+        .all(|ch| ch == '\t' || (' '..='~').contains(&ch) || ('\u{80}'..='\u{ff}').contains(&ch))
+    {
+        Ok(0)
+    } else {
+        Err(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fetch_status_text(input: u32, length: u32) -> u32 {
+    borrow(input, length, 0, 0, |input, _| status_text(input))
+}
+
 fn method(input: &[u8]) -> Result<u32, ()> {
     if input.is_empty()
         || !input
@@ -197,17 +215,6 @@ pub extern "C" fn fetch_method(input: u32, length: u32) -> u32 {
         let input = guest_memory::GuestRange::new(input, length)?;
         // SAFETY: validated initialized guest input, read without allocation or suspension.
         method(unsafe { input.bytes() })
-    })();
-    result.unwrap_or(u32::MAX)
-}
-
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn fetch_header(input: u32, length: u32) -> u32 {
-    let result = (|| {
-        let input = guest_memory::GuestRange::new(input, length)?;
-        // SAFETY: validated initialized guest input, read without allocation or suspension.
-        header(unsafe { input.bytes() })
     })();
     result.unwrap_or(u32::MAX)
 }
@@ -484,6 +491,12 @@ mod tests {
     }
     #[test]
     fn methods_and_header_bytes_follow_fetch_validation() {
+        for valid in ["", "OK", "Créé\tOK", "\u{80}"] {
+            assert_eq!(status_text(valid.as_bytes()), Ok(0));
+        }
+        for invalid in ["bad\rtext", "bad\ntext", "\0", "\u{7f}", "Ā"] {
+            assert!(status_text(invalid.as_bytes()).is_err());
+        }
         let fields = [
             ([1, 1, 2, 1], b"X".as_slice()),
             ([3, 1, 4, 1], b"x".as_slice()),
