@@ -265,6 +265,5 @@ builders and SDK shells share entry/WIT/world configuration. An exact compiler
 flake revision supplies its dependency pins to consumers; generated `.perry`
 files are ignored and shell entry preserves authored configuration.
 
-[PERFORMANCE.md](PERFORMANCE.md) records measurement methods and historical
-results. Current tests measure production components without maintaining a
-second compiler or component encoding path.
+Automated test suites and performance harnesses continuously verify that
+production components meet exact WASI 0.3 specifications and linear memory bounds.
