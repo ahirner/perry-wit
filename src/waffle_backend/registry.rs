@@ -666,9 +666,7 @@ impl ModuleRegistry {
                         json: json_helpers,
                         decode,
                         bytes: byte_helpers.unwrap(),
-                        response: http_helpers
-                            .and_then(|helpers| helpers.fetch)
-                            .map(|helpers| helpers.consume),
+                        streams: web_streams.unwrap(),
                     },
                 )
             })

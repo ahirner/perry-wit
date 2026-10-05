@@ -2,7 +2,6 @@
 
 use crate::waffle_backend::{
     allocation::AllocationFuncs,
-    bytes::ByteHelpers,
     runtime::{
         builder::{self, Builder},
         imports,
@@ -33,7 +32,6 @@ pub(crate) struct Helpers {
     pub(crate) stream: Option<streams::web::NativeBody>,
     pub(crate) fetch: Func,
     pub(crate) upload: Func,
-    pub(crate) consume: Func,
     pub(crate) finish: Func,
     pub(crate) cancel_unused: Option<Func>,
 }
@@ -85,14 +83,12 @@ pub(super) fn emit(
 ) -> Result<Helpers> {
     let allocator = runtime.allocator;
     let strings = runtime.strings;
-    let bytes = runtime.bytes;
     let native = runtime.imports;
     let promises = runtime.promises.unwrap();
     let fetch = builder::declare(module, "fetch", &[I32; 9], &[I32, F64]);
     let send = builder::declare(module, "fetch.send", &[I32], &[I32, F64]);
     let release = builder::declare(module, "fetch.release", &[I32], &[I32]);
     let discard = builder::declare(module, "fetch.discard", &[I32], &[I32, F64]);
-    let body = builder::declare(module, "fetch.consume", &[I32], &[I32, F64]);
     let finish = builder::declare(module, "fetch.finish", &[], &[]);
     let transport = Transport {
         native,
@@ -101,19 +97,15 @@ pub(super) fn emit(
         allocator,
         finish_write: super::future::emit_finish_write(module, memory, native)?,
         promises,
-        consume: body,
         release,
         operations: runtime.operations,
         abort: runtime.abort.unwrap(),
     };
     emit_fetch(module, memory, send, &transport, strings)?;
     let upload = upload::emit(module, memory, native, runtime.operations)?;
-    let transfer = streams::emit_read_transfer(module, memory, native["read"])?;
-    let buffered = streams::buffered::emit(module, memory, allocator, transfer)?;
     emit_release(module, memory, release, &transport)?;
     let cancel_unused = owners::emit_cancel_unused(module, memory, &transport, release)?;
     owners::emit_abort_notify(module, memory, &transport)?;
-    emit_body(module, memory, body, &transport, bytes, buffered, release)?;
     redirects::emit_discard(module, memory, discard, &transport, release)?;
     redirects::emit(module, memory, fetch, send, discard, &transport, runtime)?;
     let mut b = Builder::new(module, finish, memory);
@@ -136,7 +128,6 @@ pub(super) fn emit(
             }),
         fetch,
         upload,
-        consume: body,
         finish,
         cancel_unused,
     })
@@ -148,7 +139,6 @@ struct Transport<'a> {
     headers: super::headers::Helpers,
     allocator: AllocationFuncs,
     finish_write: Func,
-    consume: Func,
     release: Func,
     promises: &'a crate::waffle_backend::registry::PromiseImports,
     operations: Option<crate::waffle_backend::runtime::operations::Operations>,
@@ -400,92 +390,20 @@ fn emit_fetch(
     let ready = b.body.add_block();
     b.branch(null_body, empty, ready);
     b.block = empty;
-    let consumed = b.call(t.consume, &[response], &[I32, F64]);
+    let error = b.call(t.release, &[response], &[I32])[0];
+    b.call(t.allocator.frame_drop, &[frame], &[]);
     let failed = b.body.add_block();
     let consumed_ok = b.body.add_block();
-    b.branch(consumed[0], failed, consumed_ok);
+    b.branch(error, failed, consumed_ok);
     b.block = failed;
-    b.ret(&consumed);
+    let payload = b.op(O::F64ConvertI32U, &[error], F64);
+    b.ret(&[one, payload]);
     b.block = consumed_ok;
     b.store(response, 20, zero, I32);
     b.store(response, 52, one, I32);
     b.jump(ready, &[]);
     b.block = ready;
     let payload = b.op(O::F64ConvertI32U, &[response], F64);
-    b.ret(&[zero, payload]);
-    b.finish(module, function)
-}
-
-fn emit_body(
-    module: &mut Module<'static>,
-    memory: Memory,
-    function: Func,
-    t: &Transport<'_>,
-    bytes: ByteHelpers,
-    buffered: Func,
-    release: Func,
-) -> Result<()> {
-    let mut b = Builder::new(module, function, memory);
-    let response = b.param(0);
-    let zero = b.integer(0);
-    let one = b.integer(1);
-    let null_body = b.load(response, 52, I32);
-    let empty = b.body.add_block();
-    let consume = b.body.add_block();
-    b.branch(null_body, empty, consume);
-    b.block = empty;
-    let empty_bytes = b.load(response, 12, I32);
-    let empty_bytes = b.call(bytes.copy, &[empty_bytes], &[I32])[0];
-    let payload = b.op(O::F64ConvertI32U, &[empty_bytes], F64);
-    b.ret(&[zero, payload]);
-    b.block = consume;
-    if let Some(operations) = t.operations {
-        let signal = b.load(response, super::response::SIGNAL, I32);
-        b.call(operations.bind_signal, &[signal], &[]);
-    }
-    let used = b.load(response, 20, I32);
-    reject(&mut b, used, 12);
-    b.store(response, 20, one, I32);
-    let frame = b.load(response, 56, I32);
-    let stream = b.load(response, 24, I32);
-    if let Some(operations) = t.operations {
-        let aborted = b.call(operations.aborted, &[], &[I32])[0];
-        let close = b.body.add_block();
-        let read = b.body.add_block();
-        b.branch(aborted, close, read);
-        b.block = close;
-        b.call(release, &[response], &[I32]);
-        b.call(t.allocator.frame_drop, &[frame], &[]);
-        let error = b.number(20.0);
-        b.ret(&[one, error]);
-        b.block = read;
-    }
-    let limit = b.integer(u32::MAX);
-    let result = b.call(buffered, &[stream, limit], &[I32, I32, I32]);
-    b.store(frame, 24, result[1], I32);
-    let error = b.call(release, &[response], &[I32])[0];
-    let two = b.integer(2);
-    let cancelled = b.op(O::I32Eq, &[result[0], two], I32);
-    let aborted = b.integer(20);
-    let overflow = b.integer(8);
-    let read_error = b.op(O::Select, &[aborted, overflow, cancelled], I32);
-    let mut error = b.op(O::Select, &[read_error, error, result[0]], I32);
-    if let Some(operations) = t.operations {
-        let cancelled = b.call(operations.aborted, &[], &[I32])[0];
-        error = b.op(O::Select, &[aborted, error, cancelled], I32);
-    }
-    let failed = b.body.add_block();
-    let ready = b.body.add_block();
-    b.branch(error, failed, ready);
-    b.block = failed;
-    b.call(t.allocator.frame_drop, &[frame], &[]);
-    let payload = b.op(O::F64ConvertI32U, &[error], F64);
-    b.ret(&[one, payload]);
-    b.block = ready;
-    let view = b.call(bytes.lift_canonical, &[result[1], result[2]], &[I32])[0];
-    b.store(response, 12, view, I32);
-    b.call(t.allocator.frame_drop, &[frame], &[]);
-    let payload = b.op(O::F64ConvertI32U, &[view], F64);
     b.ret(&[zero, payload]);
     b.finish(module, function)
 }

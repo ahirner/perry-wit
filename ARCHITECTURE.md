@@ -189,7 +189,9 @@ HTTP byte readers separate public read promises from private transfer completion
 Releasing a lock rejects pending public reads while retaining native buffers;
 subsequent readers receive any completed chunk. Explicit cancellation retains the
 transfer owner through acknowledgement. Buffered body consumption and Request
-body transfer use the same body identity and locking state. `for await` lowers to
+body transfer use the same body identity and locking state. Buffered body methods
+materialize chunks through that same pull/completion path, growing from received
+bytes without reserving Content-Length. `for await` lowers to
 these readers with structured cleanup: early exits cancel the native owner and
 release the lock; exceptions from the loop body survive cancellation failures.
 

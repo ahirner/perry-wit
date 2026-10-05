@@ -111,6 +111,7 @@ pub(crate) struct Helpers {
     pub(crate) release: Func,
     pub(crate) read: Func,
     pub(crate) cancel: Func,
+    pub(crate) pull: Func,
 }
 impl Helpers {
     pub(crate) fn method(self, method: Method) -> Func {
@@ -201,16 +202,16 @@ pub(crate) fn emit(
         release: builder::declare(module, "web.release-reader", &[I32], &[I32, F64]),
         read: builder::declare(module, "web.read", &[I32; 3], &[I32, F64]),
         cancel: builder::declare(module, "web.cancel", &[I32; 3], &[I32, F64]),
+        pull: builder::declare(module, "web.pull", &[I32], &[I32; 3]),
     };
     let finish = builder::declare(module, "web.finish", &[I32], &[I32]);
-    let pull = builder::declare(module, "web.pull", &[I32], &[I32; 3]);
     let result = builder::declare(module, "web.read-result", &[I32; 2], &[I32]);
     emit_body(module, memory, r, h.body)?;
     emit_reader(module, memory, r, h)?;
     read::emit_finish(module, memory, r, finish)?;
-    read::emit_pull(module, memory, r, pull, finish)?;
+    read::emit_pull(module, memory, r, h.pull, finish)?;
     read::emit_result(module, memory, r, result)?;
-    read::emit_read(module, memory, r, h.read, pull, result)?;
+    read::emit_read(module, memory, r, h.read, h.pull, result)?;
     read::emit_cancel(module, memory, r, h.cancel, finish)?;
     Ok(h)
 }

@@ -3823,3 +3823,83 @@ async fn byte_stream_iteration_preserves_exits_errors_and_bounded_ownership() ->
     assert_eq!(String::from_utf8(node.stdout)?.trim(), size.to_string());
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_buffering_grows_with_received_data_and_available_guest_memory() -> Result<()> {
+    let source = r#"
+      export async function run(url:string):Promise<number> {
+        const response=await fetch(url);
+        try {
+          const bytes=await response.bytes();
+          if(bytes[0]!==120||bytes[bytes.length-1]!==120)throw 90;
+          return bytes.length;
+        } catch {return -1;}
+      }
+    "#;
+    let compiled = compile(
+        source,
+        "package test:fetch-buffering; world boundary {import wasi:http/client@0.3.0;export run:async func(url:string)->f64;}",
+    )?;
+    let large = 8 * 1024 * 1024;
+    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+        "/large" => fixture::Reply::Bytes(200, vec![b'x'; large]),
+        "/declared" => fixture::Reply::TruncatedBody(vec![b'x'; 20], 1_000_000_000),
+        _ => fixture::Reply::Bytes(200, vec![b'x'; 70001]),
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        for (path, expected) in [("small", 70001.0), ("declared", -1.0)] {
+            let url = format!("http://{}/{path}", server.address);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&url,)))
+                    .await??
+                    .0,
+                expected
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+        }
+    }
+    let url = format!("http://{}/large", server.address);
+    let error = run
+        .call_async(&mut store, (&url,))
+        .await
+        .expect_err("body exceeds guest memory");
+    assert!(format!("{error:#}").contains("unreachable"), "{error:#}");
+    drop(store);
+
+    let mut roomy = self::store(&engine);
+    roomy.data_mut().limits = StoreLimitsBuilder::new()
+        .memory_size(64 * 1024 * 1024)
+        .build();
+    let instance = linker.instantiate_async(&mut roomy, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut roomy, "run")?;
+    for _ in 0..3 {
+        assert_eq!(run.call_async(&mut roomy, (&url,)).await?.0, large as f64);
+        roomy.assert_concurrent_state_empty();
+        assert!(roomy.data().table.is_empty());
+    }
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("buffering.ts");
+    std::fs::write(
+        &path,
+        format!("{source}\nconsole.log(await run(process.argv[2]));"),
+    )?;
+    let node = std::process::Command::new("node")
+        .arg(path)
+        .arg(&url)
+        .output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(String::from_utf8(node.stdout)?.trim(), large.to_string());
+    Ok(())
+}

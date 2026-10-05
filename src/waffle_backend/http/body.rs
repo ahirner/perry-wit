@@ -7,7 +7,7 @@ use crate::waffle_backend::{
 };
 use anyhow::Result;
 use waffle::{
-    Func, Memory, Module, Operator as O, Terminator,
+    Func, Memory, Module, Operator as O,
     Type::{F64, I32},
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,138 +59,14 @@ pub(crate) struct Runtime {
     pub(crate) json: Option<JsonHelpers>,
     pub(crate) decode: Func,
     pub(crate) bytes: crate::waffle_backend::bytes::ByteHelpers,
-    pub(crate) response: Option<Func>,
+    pub(crate) streams: crate::waffle_backend::streams::web::Helpers,
 }
 pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) -> Result<Helpers> {
     let allocator = r.allocator;
     let strings = r.strings;
     let body = builder::declare(module, "body.bytes", &[I32; 2], &[I32, F64]);
     let text = builder::declare(module, "body.text", &[I32; 2], &[I32, F64]);
-    let consume = builder::declare(module, "body.consume-bytes", &[I32; 2], &[I32, F64]);
-    let mut b = Builder::new(module, consume, memory);
-    let kind = b.param(1);
-    let one = b.integer(1);
-    let valid = b.op(O::I32LeU, &[kind, one], I32);
-    b.require(valid);
-    let receiver = b.param(0);
-    let response = b.body.add_block();
-    let request = b.body.add_block();
-    let buffered = b.body.add_block();
-    let present = b.body.add_blockparam(buffered, I32);
-    let used_address = b.body.add_blockparam(buffered, I32);
-    b.branch(kind, response, request);
-    b.block = request;
-    let has_body = b.load(receiver, super::request::BODY_KIND, I32);
-    let used_offset = b.integer(super::request::BODY_USED);
-    let used = b.op(O::I32Add, &[receiver, used_offset], I32);
-    b.jump(buffered, &[has_body, used]);
-    b.block = response;
-    let native = b.load(receiver, super::response::NATIVE, I32);
-    let transport = b.body.add_block();
-    let constructed = b.body.add_block();
-    b.branch(native, transport, constructed);
-    b.block = transport;
-    if let Some(consume) = r.response {
-        let result = b.call(consume, &[receiver], &[I32, F64]);
-        b.ret(&result);
-    } else {
-        b.body.set_terminator(b.block, Terminator::Unreachable);
-    }
-    b.block = constructed;
-    let null_body = b.load(receiver, 52, I32);
-    let has_body = b.op(O::I32Eqz, &[null_body], I32);
-    let used_offset = b.integer(20);
-    let used = b.op(O::I32Add, &[receiver, used_offset], I32);
-    b.jump(buffered, &[has_body, used]);
-    b.block = buffered;
-    let content = b.body.add_block();
-    let empty = b.body.add_block();
-    b.branch(present, content, empty);
-    b.block = empty;
-    let length = b.number(0.0);
-    let bytes = b.call(r.bytes.new, &[length], &[I32, F64]);
-    b.ret(&bytes);
-    b.block = content;
-    let used = b.load(used_address, 0, I32);
-    let fail = b.body.add_block();
-    let copy = b.body.add_block();
-    b.branch(used, fail, copy);
-    b.block = fail;
-    let error = b.number(12.0);
-    b.ret(&[one, error]);
-    b.block = copy;
-    b.store(used_address, 0, one, I32);
-    let source = b.load(receiver, 12, I32);
-    let bytes = b.call(r.bytes.copy, &[source], &[I32])[0];
-    let payload = b.op(O::F64ConvertI32U, &[bytes], F64);
-    let zero = b.integer(0);
-    b.ret(&[zero, payload]);
-    b.finish(module, consume)?;
-    let mut b = Builder::new(module, body, memory);
-    let receiver = b.param(0);
-    let kind = b.param(1);
-    let request_slot = b.integer(super::request::STREAM);
-    let response_slot = b.integer(super::response::STREAM);
-    let offset = b.op(O::Select, &[response_slot, request_slot, kind], I32);
-    let slot = b.op(O::I32Add, &[receiver, offset], I32);
-    let stream = b.load(slot, 0, I32);
-    let inspect = b.body.add_block();
-    let read = b.body.add_block();
-    b.branch(stream, inspect, read);
-    b.block = inspect;
-    let locked = b.load(stream, crate::waffle_backend::streams::web::LOCK, I32);
-    let reject = b.body.add_block();
-    b.branch(locked, reject, read);
-    b.block = reject;
-    let one = b.integer(1);
-    let error = b.number(12.0);
-    b.ret(&[one, error]);
-    b.block = read;
-    let request_used = b.integer(super::request::BODY_USED);
-    let response_used = b.integer(20);
-    let offset = b.op(O::Select, &[response_used, request_used, kind], I32);
-    let used_address = b.op(O::I32Add, &[receiver, offset], I32);
-    let used = b.load(used_address, 0, I32);
-    let one = b.integer(1);
-    let frame = b.call(allocator.frame_new, &[one], &[I32])[0];
-    b.store(frame, 12, stream, I32);
-    let fresh = b.op(O::I32Eqz, &[used], I32);
-    let zero = b.integer(0);
-    let cached = b.op(O::I32Ne, &[stream, zero], I32);
-    let update = b.op(O::I32And, &[cached, fresh], I32);
-    let lock = b.body.add_block();
-    let consume_body = b.body.add_block();
-    b.branch(update, lock, consume_body);
-    b.block = lock;
-    b.store(stream, crate::waffle_backend::streams::web::LOCK, one, I32);
-    b.jump(consume_body, &[]);
-    b.block = consume_body;
-    let result = b.call(consume, &[receiver, kind], &[I32, F64]);
-    let consumed = b.body.add_block();
-    let done = b.body.add_block();
-    b.branch(update, consumed, done);
-    b.block = consumed;
-    let two = b.integer(2);
-    let state = b.op(O::Select, &[two, one, result[0]], I32);
-    b.store(
-        stream,
-        crate::waffle_backend::streams::web::STATE,
-        state,
-        I32,
-    );
-    let error = b.op(O::I32TruncSatF64U, &[result[1]], I32);
-    let error = b.op(O::Select, &[error, zero, result[0]], I32);
-    b.store(
-        stream,
-        crate::waffle_backend::streams::web::ERROR,
-        error,
-        I32,
-    );
-    b.jump(done, &[]);
-    b.block = done;
-    b.call(allocator.frame_drop, &[frame], &[]);
-    b.ret(&result);
-    b.finish(module, body)?;
+    emit_bytes(module, memory, body, r)?;
     let mut b = Builder::new(module, text, memory);
     let result = b.call(body, &[b.param(0), b.param(1)], &[I32, F64]);
     let failed = b.body.add_block();
@@ -252,4 +128,107 @@ pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) ->
         text,
         json,
     })
+}
+
+/// Materialize through byte-stream demand; never reserve an advertised HTTP length.
+fn emit_bytes(module: &mut Module<'static>, memory: Memory, f: Func, r: &Runtime) -> Result<()> {
+    use crate::waffle_backend::streams::web;
+    let mut b = Builder::new(module, f, memory);
+    let receiver = b.param(0);
+    let kind = b.param(1);
+    let zero = b.integer(0);
+    let one = b.integer(1);
+    let stream = b.call(r.streams.body, &[receiver, kind], &[I32])[0];
+    let consume = b.body.add_block();
+    let empty = b.body.add_block();
+    b.branch(stream, consume, empty);
+    b.block = empty;
+    let length = b.number(0.0);
+    let result = b.call(r.bytes.new, &[length], &[I32, F64]);
+    b.ret(&result);
+    b.block = consume;
+    let locked = b.load(stream, web::LOCK, I32);
+    let request_used = b.integer(super::request::BODY_USED);
+    let response_used = b.integer(20);
+    let offset = b.op(O::Select, &[response_used, request_used, kind], I32);
+    let used_address = b.op(O::I32Add, &[receiver, offset], I32);
+    let used = b.load(used_address, 0, I32);
+    let unusable = b.op(O::I32Or, &[locked, used], I32);
+    let reject = b.body.add_block();
+    let start = b.body.add_block();
+    b.branch(unusable, reject, start);
+    b.block = reject;
+    let error = b.number(12.0);
+    b.ret(&[one, error]);
+    b.block = start;
+    b.store(stream, web::LOCK, one, I32);
+    let count = b.integer(3);
+    let frame = b.call(r.allocator.frame_new, &[count], &[I32])[0];
+    b.store(frame, 12, stream, I32);
+    let next = b.body.add_block();
+    let data = b.body.add_blockparam(next, I32);
+    let capacity = b.body.add_blockparam(next, I32);
+    let length = b.body.add_blockparam(next, I32);
+    b.jump(next, &[zero, zero, zero]);
+    b.block = next;
+    b.store(frame, 16, data, I32);
+    b.store(frame, 20, zero, I32);
+    let read = b.call(r.streams.pull, &[stream], &[I32; 3]);
+    let failed = b.body.add_block();
+    let received = b.body.add_block();
+    b.branch(read[0], failed, received);
+    b.block = failed;
+    b.call(r.allocator.frame_drop, &[frame], &[]);
+    let reason = b.op(O::F64ConvertI32U, &[read[0]], F64);
+    b.ret(&[one, reason]);
+    b.block = received;
+    let done = b.body.add_block();
+    let chunk = b.body.add_block();
+    b.branch(read[2], done, chunk);
+    b.block = done;
+    let view = b.call(r.bytes.lift_canonical, &[data, length], &[I32])[0];
+    b.call(r.allocator.frame_drop, &[frame], &[]);
+    let payload = b.op(O::F64ConvertI32U, &[view], F64);
+    b.ret(&[zero, payload]);
+    b.block = chunk;
+    b.store(frame, 20, read[1], I32);
+    let source = b.load(read[1], 0, I32);
+    let count = b.load(read[1], 4, I32);
+    let first = b.body.add_block();
+    let append = b.body.add_block();
+    b.branch(length, append, first);
+    b.block = first;
+    b.jump(next, &[source, count, count]);
+    b.block = append;
+    let needed = b.op(O::I32Add, &[length, count], I32);
+    let fits = b.op(O::I32GeU, &[needed, length], I32);
+    b.require(fits);
+    let grow = b.op(O::I32GtU, &[needed, capacity], I32);
+    let allocate = b.body.add_block();
+    let keep = b.body.add_block();
+    let copy = b.body.add_block();
+    let target = b.body.add_blockparam(copy, I32);
+    let target_capacity = b.body.add_blockparam(copy, I32);
+    b.branch(grow, allocate, keep);
+    b.block = keep;
+    b.jump(copy, &[data, capacity]);
+    b.block = allocate;
+    let double = b.op(O::I32Add, &[capacity, capacity], I32);
+    let within = b.op(O::I32GeU, &[double, capacity], I32);
+    let enough = b.op(O::I32GeU, &[double, needed], I32);
+    let usable = b.op(O::I32And, &[within, enough], I32);
+    let size = b.op(O::Select, &[double, needed, usable], I32);
+    let larger = b.call(r.allocator.realloc, &[data, capacity, one, size], &[I32])[0];
+    b.jump(copy, &[larger, size]);
+    b.block = copy;
+    let end = b.op(O::I32Add, &[target, length], I32);
+    b.effect(
+        O::MemoryCopy {
+            src_mem: memory,
+            dst_mem: memory,
+        },
+        &[end, source, count],
+    );
+    b.jump(next, &[target, target_capacity, needed]);
+    b.finish(module, f)
 }
