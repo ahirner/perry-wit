@@ -87,6 +87,7 @@ impl TaskArguments {
                 waffle::Type::F64,
                 waffle::Type::F64,
                 waffle::Type::I32,
+                waffle::Type::I32,
             ]),
             Self::Fetch => Ok(vec![waffle::Type::I32; 9]),
             Self::FetchUpload => Ok(vec![waffle::Type::I32; 3]),

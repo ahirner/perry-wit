@@ -192,7 +192,7 @@ impl FunctionLowerer<'_> {
                     "fetch option '{key}' is not implemented yet"
                 );
 
-                let (ty, _) = fetch_option_type(&field.ty, field.optional);
+                let (ty, _) = super::types::optional_field_type(&field.ty, field.optional);
                 match key.as_str() {
                     "method" | "redirect" => ensure!(
                         (crate::waffle_backend::values::is_string_type(ty) || *ty == HirType::Void),
@@ -226,7 +226,8 @@ impl FunctionLowerer<'_> {
                 ("signal", 8),
             ] {
                 if let Some(field) = shape.properties.get(name) {
-                    let (ty, optional) = fetch_option_type(&field.ty, field.optional);
+                    let (ty, optional) =
+                        super::types::optional_field_type(&field.ty, field.optional);
                     let key = self.expression(&Expr::String(name.into()))?;
                     let entry = self.op(
                         Operator::Call {
@@ -308,7 +309,7 @@ impl FunctionLowerer<'_> {
                     "Response options must have statically declared fields"
                 );
                 for (key, field) in &shape.properties {
-                    let (ty, _) = fetch_option_type(&field.ty, field.optional);
+                    let (ty, _) = super::types::optional_field_type(&field.ty, field.optional);
                     match key.as_str() {
                         "status" => ensure!(
                             matches!(ty, HirType::Number | HirType::Void),
@@ -328,7 +329,8 @@ impl FunctionLowerer<'_> {
                 let helpers = self.registry.object_helpers.unwrap();
                 for (name, index) in [("status", 2), ("headers", 3), ("statusText", 5)] {
                     if let Some(field) = shape.properties.get(name) {
-                        let (ty, optional) = fetch_option_type(&field.ty, field.optional);
+                        let (ty, optional) =
+                            super::types::optional_field_type(&field.ty, field.optional);
                         let key = self.expression(&Expr::String(name.into()))?;
                         let entry = self.op(
                             Operator::Call {
@@ -608,17 +610,4 @@ fn header_shape(ty: &HirType) -> Result<u32> {
         return Ok(2);
     }
     bail!("Headers initializer requires a string record, [string, string][] pairs, or Headers")
-}
-
-fn fetch_option_type(ty: &HirType, optional: bool) -> (&HirType, bool) {
-    if let HirType::Union(variants) = ty
-        && variants.len() == 2
-        && variants.contains(&HirType::Void)
-    {
-        return (
-            variants.iter().find(|ty| **ty != HirType::Void).unwrap(),
-            true,
-        );
-    }
-    (ty, optional)
 }

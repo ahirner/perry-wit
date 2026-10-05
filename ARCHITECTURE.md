@@ -181,7 +181,7 @@ is acknowledged. Completion futures deliver their outcomes during cleanup; cance
 reads never expose uninitialized results or successful EOF. Canonical backpressure
 serializes public calls. Filesystem and public stream transfers still require the
 same cancellation ownership integration. Fetch signals select native operation
-owners by a shared signal identity; unrelated operations continue. Timer/filesystem
+owners by a shared signal identity; unrelated operations continue. Filesystem
 signals and Web Streams with returned-stream ownership remain requirements in
 [TODOs.md](TODOs.md). Traps and host disposal do not run guest `finally` blocks.
 

@@ -695,13 +695,13 @@ impl VisitMut for SourceCalls {
                         }
                     }
                     if operation == CapabilityOperation::Clock(ClockOperation::Timeout) {
-                        if call.args.len() > 2 {
+                        if call.args.len() > 3 {
                             self.error.get_or_insert_with(|| anyhow::anyhow!(
-                                "Promise timer options are not yet supported; cancellation remains required work"
+                                "setTimeout accepts a delay, result value, and optional timer options"
                             ));
                             return;
                         }
-                        if call.args.len() == 2 {
+                        if call.args.len() >= 2 {
                             operation = CapabilityOperation::Clock(ClockOperation::TimeoutValue);
                         }
                     }

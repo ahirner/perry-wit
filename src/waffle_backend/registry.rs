@@ -349,7 +349,10 @@ impl ModuleRegistry {
             memory,
             allocator,
             scalar_imports,
-            await_subtask,
+            super::capabilities::scalars::NativeWait {
+                wait: await_subtask,
+                operations,
+            },
         )?);
 
         let byte_helpers =

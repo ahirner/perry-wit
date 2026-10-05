@@ -7,7 +7,7 @@ use crate::waffle_backend::{
     promises::{TaskTarget, is_task_outcome},
     resolve::TypedIntrinsic,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{Operator, Type, Value};
 
@@ -27,8 +27,8 @@ impl FunctionLowerer<'_> {
 
     pub(super) fn timer_value_type(&self, args: &[Expr]) -> Result<HirType> {
         ensure!(
-            args.len() == 2,
-            "setTimeout expects a delay and a typed result value"
+            (2..=3).contains(&args.len()),
+            "setTimeout expects a delay, typed result value, and optional timer options"
         );
         ensure!(
             self.infer_expr_type(&args[0]) == HirType::Number,
@@ -72,7 +72,8 @@ impl FunctionLowerer<'_> {
             self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])
         };
         let payload = abi::encode_payload(&mut self.body, self.block, Some(value));
-        let args = [delay, payload, owner];
+        let signal = self.timer_options(args.get(2))?;
+        let args = [delay, payload, owner, signal];
         if let Some(record) =
             self.start_task(&TaskTarget::Intrinsic(name.into()), &args, Some(&ty))?
         {
@@ -86,5 +87,76 @@ impl FunctionLowerer<'_> {
             ty == HirType::Void
                 || crate::waffle_backend::registry::map_type_to_waffle(&ty)? == Type::I32,
         ))
+    }
+
+    fn timer_options(&mut self, options: Option<&Expr>) -> Result<Value> {
+        let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+        let Some(options) = options else {
+            return Ok(zero);
+        };
+        if self.infer_expr_type(options) == HirType::Void {
+            self.expression(options)?;
+            return Ok(zero);
+        }
+        let HirType::Object(shape) = self.infer_expr_type(options) else {
+            bail!("Timer options require a statically typed record");
+        };
+        for key in shape.properties.keys() {
+            ensure!(
+                key == "signal",
+                "Timer option '{key}' is unsupported; timers belong to the owning call"
+            );
+        }
+        let object = self.expression(options)?;
+        let Some(field) = shape.properties.get("signal") else {
+            return Ok(zero);
+        };
+        let (ty, optional) = super::types::optional_field_type(&field.ty, field.optional);
+        ensure!(
+            ty == &HirType::Void
+                || crate::waffle_backend::abort::Kind::of(ty)
+                    == Some(crate::waffle_backend::abort::Kind::Signal),
+            "Timer signal must be AbortSignal or undefined"
+        );
+        ensure!(
+            self.registry.operations.is_some(),
+            "Timer signals require acknowledged native operation ownership; filesystem and public stream compositions are still being integrated"
+        );
+        let helpers = self.registry.object_helpers.unwrap();
+        let key = self.expression(&Expr::String("signal".into()))?;
+        let entry = self.op(
+            Operator::Call {
+                function_index: helpers.get,
+            },
+            &[object, key],
+            &[Type::I32],
+        );
+        let tag = self.op(
+            Operator::I32Const {
+                value: crate::waffle_backend::values::ValueTag::of(ty)? as u32,
+            },
+            &[],
+            &[Type::I32],
+        );
+        let optional = self.op(
+            Operator::I32Const {
+                value: u32::from(optional),
+            },
+            &[],
+            &[Type::I32],
+        );
+        let payload = self.call_completion(helpers.value, &[entry, tag, optional]);
+        let signal = abi::decode_payload(&mut self.body, self.block, payload, true);
+        if let Some(helpers) = self.registry.abort_helpers {
+            Ok(self.op(
+                Operator::Call {
+                    function_index: helpers.root,
+                },
+                &[signal],
+                &[Type::I32],
+            ))
+        } else {
+            Ok(zero)
+        }
     }
 }

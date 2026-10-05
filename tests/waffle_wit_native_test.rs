@@ -1290,7 +1290,11 @@ fn unsupported_timer_values_and_options_receive_source_diagnostics() {
         ),
         (
             "await setTimeout(1, 42, {ref:false});",
-            "Promise timer options are not yet supported",
+            "Timer option 'ref' is unsupported",
+        ),
+        (
+            "await setTimeout(1, 42, {signal:1});",
+            "Timer signal must be AbortSignal or undefined",
         ),
     ] {
         let error = compile(&format!("import {{setTimeout}} from 'node:timers/promises'; export async function run():Promise<void>{{{body}}}"), wit).expect_err("unsupported timer form must fail before emission");
@@ -1299,6 +1303,85 @@ fn unsupported_timer_values_and_options_receive_source_diagnostics() {
             "{body}: {error:#}"
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timer_abort_signals_acknowledge_race_losers_and_match_node() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Owner(Arc<AtomicUsize>);
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let source = include_str!("fixtures/timer_signals.ts");
+    let wit = "package test:timer-signals; world boundary {import wasi:clocks/monotonic-clock@0.3.0; export run:async func()->u32;}";
+    wit_source::check_sdk_source(wit, source)?;
+    let compiled = compile(source, wit)?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let active = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let mut linker = Linker::new(&engine);
+    let observed = active.clone();
+    let registered = started.clone();
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (nanos,): (u64,)| {
+            if nanos == 60_000_000_000 {
+                observed.fetch_add(1, Ordering::SeqCst);
+                registered.fetch_add(1, Ordering::SeqCst);
+                let owner = Owner(observed.clone());
+                Box::pin(async move {
+                    let _owner = owner;
+                    std::future::pending::<()>().await;
+                    Ok(())
+                })
+            } else {
+                assert_eq!(
+                    nanos, 1_000_000,
+                    "pre-aborted timer must not reach the host"
+                );
+                let pending = observed.load(Ordering::SeqCst);
+                assert!(pending == 0 || pending == 2);
+                Box::pin(async {
+                    tokio::task::yield_now().await;
+                    Ok(())
+                })
+            }
+        })?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+    for round in 1..=100 {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, ()))
+                .await??
+                .0,
+            42
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(started.load(Ordering::SeqCst), round * 2);
+        store.assert_concurrent_state_empty();
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/timer_signals.ts");
+    let script = format!(
+        "import {{run}} from {}; console.log(await run());",
+        serde_json::to_string(&path.to_string_lossy())?
+    );
+    let output = std::process::Command::new("node")
+        .args(["--no-warnings", "--input-type=module", "-e", &script])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "42");
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -76,7 +76,7 @@ declare module "perry:clocks" {
 }
 
 declare module "node:timers/promises" {
-  export function setTimeout<T = void>(milliseconds?: number, value?: T): Promise<T>;
+  export function setTimeout<T = void>(milliseconds?: number, value?: T, options?: {signal?: AbortSignal}): Promise<T>;
 }
 
 declare module "perry:http-handler/types" {

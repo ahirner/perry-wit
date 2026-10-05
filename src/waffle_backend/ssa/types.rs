@@ -451,3 +451,16 @@ impl FunctionLowerer<'_> {
         self.infer_expr_type(expr) == HirType::Union(vec![HirType::Number, HirType::Void])
     }
 }
+
+pub(super) fn optional_field_type(ty: &HirType, optional: bool) -> (&HirType, bool) {
+    if let HirType::Union(variants) = ty
+        && variants.len() == 2
+        && variants.contains(&HirType::Void)
+    {
+        return (
+            variants.iter().find(|ty| **ty != HirType::Void).unwrap(),
+            true,
+        );
+    }
+    (ty, optional)
+}

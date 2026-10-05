@@ -27,7 +27,7 @@ impl LowerCapability for ClockOperation {
     fn lower(&self) -> CapabilityPlan {
         if *self == Self::TimeoutValue {
             return CapabilityPlan {
-                params: vec![HirType::Number, HirType::Any],
+                params: vec![HirType::Number, HirType::Any, HirType::Any],
                 result: HirType::Promise(Box::new(HirType::Any)),
                 implementation: CapabilityImplementation::Scalar,
             };

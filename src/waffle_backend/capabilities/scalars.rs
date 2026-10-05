@@ -99,13 +99,18 @@ pub(in crate::waffle_backend) fn declare_imports(
         .collect()
 }
 
+pub(crate) struct NativeWait {
+    pub(crate) wait: Option<Func>,
+    pub(crate) operations: Option<super::super::runtime::operations::Operations>,
+}
+
 pub(in crate::waffle_backend) fn emit(
     module: &mut Module<'static>,
     contract: &ResolvedContract,
     memory: Memory,
     allocator: Option<AllocationFuncs>,
     imports: BTreeMap<String, Func>,
-    await_subtask: Option<Func>,
+    native: NativeWait,
 ) -> Result<BTreeMap<String, Func>> {
     let mut helpers = BTreeMap::new();
     for (name, function) in imports {
@@ -119,6 +124,23 @@ pub(in crate::waffle_backend) fn emit(
         let mut b = Builder::new(module, helper, memory);
         let result = match scalar {
             Scalar::Wait | Scalar::Timeout | Scalar::TimeoutValue => {
+                if let Some(operations) = native.operations {
+                    let signal = if matches!(scalar, Scalar::TimeoutValue) {
+                        b.param(3)
+                    } else {
+                        b.integer(0)
+                    };
+                    b.call(operations.bind_signal, &[signal], &[]);
+                    let aborted = b.call(operations.aborted, &[], &[I32])[0];
+                    let cancelled = b.body.add_block();
+                    let begin = b.body.add_block();
+                    b.branch(aborted, cancelled, begin);
+                    b.block = cancelled;
+                    let thrown = b.integer(1);
+                    let reason = b.number(20.0);
+                    b.ret(&[thrown, reason]);
+                    b.block = begin;
+                }
                 let value = b.param(0);
                 let zero = b.number(0.0);
                 let value = if matches!(scalar, Scalar::Timeout | Scalar::TimeoutValue) {
@@ -138,7 +160,7 @@ pub(in crate::waffle_backend) fn emit(
                 let ns = b.op(Op::F64Mul, &[value, million], F64);
                 let ns = b.op(Op::I64TruncF64U, &[ns], I64);
                 let subtask = b.call(function, &[ns], &[I32])[0];
-                let status = b.call(await_subtask.unwrap(), &[subtask], &[I32])[0];
+                let status = b.call(native.wait.unwrap(), &[subtask], &[I32])[0];
                 let returned = b.integer(2);
                 let success = b.op(Op::I32Eq, &[status, returned], I32);
                 let complete = b.body.add_block();
