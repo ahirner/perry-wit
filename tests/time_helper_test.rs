@@ -316,7 +316,7 @@ impl GuestTime {
             (export "time_plain_format" (func $plain_format))
             (export "json_measure" (func $json)))"#,
         )?;
-        let linked = link::link_helpers(&core)?;
+        let linked = link::link_helpers(core)?;
         let engine = Engine::default();
         let module = Module::new(&engine, &linked)?;
         assert_eq!(module.imports().count(), 0);

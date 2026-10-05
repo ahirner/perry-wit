@@ -5,7 +5,7 @@ use anyhow::{Result, bail, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{MemoryArg, Operator, Type, Value};
 
-pub(super) fn element_type(types: &[HirType], index: &Expr) -> Result<HirType> {
+pub(super) fn element_type<'a>(types: &'a [HirType], index: &Expr) -> Result<&'a HirType> {
     let constant = match index {
         Expr::Number(value) => Some(*value),
         Expr::Integer(value) => Some(*value as f64),
@@ -16,7 +16,7 @@ pub(super) fn element_type(types: &[HirType], index: &Expr) -> Result<HirType> {
             index >= 0.0 && index.fract() == 0.0 && index < types.len() as f64,
             "Tuple index is outside its declared bounds"
         );
-        return Ok(types[index as usize].clone());
+        return Ok(&types[index as usize]);
     }
     let Some(first) = types.first() else {
         bail!("Cannot index an empty tuple");
@@ -25,7 +25,7 @@ pub(super) fn element_type(types: &[HirType], index: &Expr) -> Result<HirType> {
         types.iter().all(|ty| ty == first),
         "A mixed tuple requires a constant index"
     );
-    Ok(first.clone())
+    Ok(first)
 }
 
 impl FunctionLowerer<'_> {
@@ -56,6 +56,6 @@ impl FunctionLowerer<'_> {
             align: 2,
         };
         let boxed = self.op(Operator::I32Load { memory }, &[address], &[Type::I32]);
-        self.extract_value(boxed, &ty)
+        self.extract_value(boxed, ty)
     }
 }

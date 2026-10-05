@@ -38,7 +38,7 @@ fn linked_json_helpers_share_a_measured_layout_with_the_guest_heap() -> Result<(
         (export "json_serialized_size" (func $size))
         (export "json_serialize" (func $serialize)))"#,
     )?;
-    let linked = link::link_helpers(&core)?;
+    let linked = link::link_helpers(core)?;
     let engine = Engine::default();
     let module = Module::new(&engine, &linked)?;
     assert_eq!(module.imports().count(), 0);

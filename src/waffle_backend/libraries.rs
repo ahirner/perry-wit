@@ -476,12 +476,15 @@ impl Library {
         Ok(library)
     }
 
-    pub(crate) fn reachable(&self, entries: &[&str]) -> Result<BTreeSet<u32>> {
+    pub(crate) fn reachable<'a>(
+        &self,
+        entries: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeSet<u32>> {
         let mut pending = entries
-            .iter()
+            .into_iter()
             .map(|entry| {
                 self.exports
-                    .get(*entry)
+                    .get(entry)
                     .copied()
                     .with_context(|| format!("missing internal helper export {entry}"))
             })
@@ -639,7 +642,7 @@ mod tests {
         assert!(lib.exports.contains_key("str_find_substring"));
         assert!(lib.exports.contains_key("str_scalar_to_byte"));
         let reachable = lib
-            .reachable(&["str_find_substring"])
+            .reachable(["str_find_substring"])
             .expect("reachability check");
         assert!(!reachable.is_empty());
     }
@@ -655,7 +658,7 @@ mod tests {
         assert!(lib.exports.contains_key("str_join_total_len"));
         assert!(lib.exports.contains_key("str_join"));
         let reachable = lib
-            .reachable(&["str_code_point_at", "str_from_code_point"])
+            .reachable(["str_code_point_at", "str_from_code_point"])
             .expect("reachability check");
         assert!(!reachable.is_empty());
     }

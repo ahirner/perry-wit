@@ -31,10 +31,10 @@ impl Reencode for CoreRelocations<'_> {
     }
 }
 
-pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     // 1. First pass: check if any helper imports exist
     let mut has_helper_imports = false;
-    for payload in Parser::new(0).parse_all(core_wasm) {
+    for payload in Parser::new(0).parse_all(&core_wasm) {
         if let Payload::ImportSection(imports) = payload? {
             for import in imports.into_imports() {
                 let import = import?;
@@ -47,7 +47,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     }
 
     if !has_helper_imports {
-        return Ok(core_wasm.to_vec());
+        return Ok(core_wasm);
     }
 
     // 2. Parse core module sections
@@ -66,7 +66,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     let mut core_elements = Vec::new();
     let mut core_data = Vec::new();
 
-    for payload in Parser::new(0).parse_all(core_wasm) {
+    for payload in Parser::new(0).parse_all(&core_wasm) {
         match payload? {
             Payload::TypeSection(types) => {
                 for ty in types.into_iter_err_on_gc_types() {
@@ -81,17 +81,9 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
                             let old_func_idx = next_import_func_idx;
                             next_import_func_idx += 1;
                             if import.module == HELPER_MODULE {
-                                helper_imports.push((
-                                    old_func_idx,
-                                    import.name.to_string(),
-                                    type_idx,
-                                ));
+                                helper_imports.push((old_func_idx, import.name, type_idx));
                             } else {
-                                external_imports.push((
-                                    import.module.to_string(),
-                                    import.name.to_string(),
-                                    type_idx,
-                                ));
+                                external_imports.push((import.module, import.name, type_idx));
                             }
                         }
                         _ => {
@@ -150,13 +142,13 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     let helper_func_start_idx = num_new_imported_funcs + num_core_defined_funcs;
 
     // 3. Select and prepare helper libraries
-    let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<String>>::new();
+    let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<&str>>::new();
     for (_, entry_name, _) in &helper_imports {
         let lib_id = LibraryId::for_entry(entry_name)?;
         requested_by_lib
             .entry(lib_id)
             .or_default()
-            .insert(entry_name.clone());
+            .insert(*entry_name);
     }
 
     let mut old_to_new_func_index = BTreeMap::new();
@@ -208,8 +200,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
 
     for (lib_id, entries) in requested_by_lib {
         let lib = Library::parse(lib_id.bytes())?;
-        let entry_refs: Vec<&str> = entries.iter().map(|s| s.as_str()).collect();
-        let reachable = lib.reachable(&entry_refs)?;
+        let reachable = lib.reachable(entries.iter().copied())?;
 
         let type_base = new_types.len();
         for ty in &lib.types {
@@ -239,7 +230,7 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
 
         // Map helper entry symbols to their assigned function index
         for entry in &entries {
-            let orig_idx = lib.exports.get(entry).context("missing helper export")?;
+            let orig_idx = lib.exports.get(*entry).context("missing helper export")?;
             let new_idx = helper_defined_indices
                 .get(orig_idx)
                 .copied()
@@ -411,8 +402,8 @@ pub(crate) fn link_helpers(core_wasm: &[u8]) -> Result<Vec<u8>> {
     let mut new_imports = ImportSection::new();
     for (module_name, field_name, ty_idx) in external_imports {
         new_imports.import(
-            &module_name,
-            &field_name,
+            module_name,
+            field_name,
             wasm_encoder::EntityType::Function(ty_idx),
         );
     }

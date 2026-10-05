@@ -199,7 +199,7 @@ fn compile_resolved_hir(
     let core = waffle_mod
         .to_wasm_bytes()
         .context("Emitting core Wasm bytes from WAFFLE")?;
-    let core = link::link_helpers(&core).context("Linking guest helpers into core Wasm")?;
+    let core = link::link_helpers(core).context("Linking guest helpers into core Wasm")?;
 
     let (component_wat, component) = if options.componentize {
         let (wat, bytes) = native_handler

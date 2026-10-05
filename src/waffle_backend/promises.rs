@@ -27,7 +27,7 @@ impl Combinator {
     }
 }
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, ensure};
 use perry_hir::{
@@ -230,7 +230,7 @@ pub(crate) fn plan_promises(
     }
     let mut calls = 0;
     let mut direct_awaits = 0;
-    let mut referenced = BTreeMap::new();
+    let mut referenced = BTreeSet::new();
     for function in &hir.functions {
         visit_function_expressions(function, &mut |expression| {
             let (expression, awaited) = match expression {
@@ -241,14 +241,14 @@ pub(crate) fn plan_promises(
                 && let Some(target) = TaskTarget::from_callee(callee)
                     .or_else(|| has_body.then(|| TaskTarget::http_body(callee)).flatten())
                     .or_else(|| has_body.then(|| TaskTarget::web_stream(callee)).flatten())
-                && let Some(plan) = candidates.get(&target)
+                && candidates.contains_key(&target)
             {
                 if awaited {
                     direct_awaits += 1;
                 } else {
                     calls += 1;
                 }
-                referenced.insert(target, plan.clone());
+                referenced.insert(target);
             }
         });
     }
@@ -258,8 +258,10 @@ pub(crate) fn plan_promises(
             TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Promise(_))
         )
     });
+    candidates.retain(|target, _| referenced.contains(target));
+    let mut tasks = candidates;
     if has_fetch {
-        referenced.insert(
+        tasks.insert(
             TaskTarget::FetchUpload,
             TaskPlan {
                 symbol: "__perry.fetch.upload".into(),
@@ -268,16 +270,16 @@ pub(crate) fn plan_promises(
             },
         );
     }
-    let uses_body = referenced
+    let uses_body = tasks
         .keys()
         .any(|target| matches!(target, TaskTarget::HttpBody(_) | TaskTarget::WebStream(_)));
-    let uses_filesystem = referenced
+    let uses_filesystem = tasks
         .values()
         .any(|task| matches!(task.arguments, TaskArguments::Filesystem(_)));
     if calls == direct_awaits && !combinators && !has_fetch && !uses_body && !uses_filesystem {
         return Ok(None);
     }
-    for task in referenced.values() {
+    for task in tasks.values() {
         ensure!(
             task.arguments.core_types()?.len() < 16,
             "Stored async calls support at most 15 arguments"
@@ -296,10 +298,7 @@ pub(crate) fn plan_promises(
             "Stored async task results require supported scalar, text, byte, object, or list values"
         );
     }
-    Ok(Some(PromisePlan {
-        tasks: referenced,
-        combinators,
-    }))
+    Ok(Some(PromisePlan { tasks, combinators }))
 }
 
 /// Retained outcomes whose value and ownership fit the completion record.

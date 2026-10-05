@@ -13,12 +13,6 @@ use perry_hir::{
 use std::collections::HashMap;
 use waffle::{Operator, Type, Value};
 
-fn outcome(ty: &HirType) -> HirType {
-    match ty {
-        HirType::Promise(inner) => *inner.clone(),
-        ty => ty.clone(),
-    }
-}
 fn settlement(ty: HirType) -> HirType {
     let record = |status: &str, field: &str, ty| {
         HirType::Object(ObjectType {
@@ -82,8 +76,11 @@ impl FunctionLowerer<'_> {
             operation.name()
         );
         let input = self.combinator_input(&args[0])?;
-        let element = |ty: &HirType| {
-            let ty = outcome(ty);
+        let element = |ty| {
+            let ty = match ty {
+                HirType::Promise(inner) => *inner,
+                ty => ty,
+            };
             if operation == Combinator::AllSettled {
                 settlement(ty)
             } else {
@@ -91,20 +88,19 @@ impl FunctionLowerer<'_> {
             }
         };
         let result = match input {
-            HirType::Array(inner) if operation == Combinator::Race => outcome(&inner),
-            HirType::Array(inner) => HirType::Array(Box::new(element(&inner))),
+            HirType::Array(inner) if operation == Combinator::Race => element(*inner),
+            HirType::Array(inner) => HirType::Array(Box::new(element(*inner))),
             HirType::Tuple(types) if operation == Combinator::Race => {
                 let mut outcomes = Vec::new();
-                for ty in types.iter().map(outcome) {
-                    let variants = if let HirType::Union(types) = ty {
-                        types
-                    } else {
-                        vec![ty]
-                    };
-                    for ty in variants {
-                        if !outcomes.contains(&ty) {
-                            outcomes.push(ty);
+                for ty in types.into_iter().map(element) {
+                    if let HirType::Union(variants) = ty {
+                        for ty in variants {
+                            if !outcomes.contains(&ty) {
+                                outcomes.push(ty);
+                            }
                         }
+                    } else if !outcomes.contains(&ty) {
+                        outcomes.push(ty);
                     }
                 }
                 match outcomes.len() {
@@ -113,7 +109,7 @@ impl FunctionLowerer<'_> {
                     _ => HirType::Union(outcomes),
                 }
             }
-            HirType::Tuple(types) => HirType::Tuple(types.iter().map(element).collect()),
+            HirType::Tuple(types) => HirType::Tuple(types.into_iter().map(element).collect()),
             _ => unreachable!(),
         };
         Ok(HirType::Promise(Box::new(result)))
@@ -129,11 +125,14 @@ impl FunctionLowerer<'_> {
             unreachable!()
         };
         let outcome_tag = |ty: &HirType| -> Result<u32> {
-            let ty = outcome(ty);
-            if crate::waffle_backend::values::is_boxed(&ty) {
+            let ty = match ty {
+                HirType::Promise(inner) => inner.as_ref(),
+                ty => ty,
+            };
+            if crate::waffle_backend::values::is_boxed(ty) {
                 Ok(255)
             } else {
-                Ok(ValueTag::of(&ty)? as u32)
+                Ok(ValueTag::of(ty)? as u32)
             }
         };
         let tags = match &input_ty {

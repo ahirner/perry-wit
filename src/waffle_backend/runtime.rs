@@ -52,14 +52,15 @@ pub(crate) fn emit_functions(
             functions.insert(function, module.funcs.push(FuncDecl::None));
         }
     }
-    for (function, declaration) in runtime.funcs.entries() {
-        let FuncDecl::Body(signature, name, body) = declaration else {
+    for (function, declaration) in runtime.funcs.entries_mut() {
+        let FuncDecl::Body(signature, name, mut body) =
+            std::mem::replace(declaration, FuncDecl::None)
+        else {
             continue;
         };
         let signature = module
             .signatures
-            .push(runtime.signatures[*signature].clone());
-        let mut body = body.clone();
+            .push(runtime.signatures[signature].clone());
         for (_, value) in body.values.entries_mut() {
             if let ValueDef::Operator(operator, _, _) = value {
                 match operator {
@@ -83,7 +84,7 @@ pub(crate) fn emit_functions(
         }
         body.validate()?;
         body.verify_reducible()?;
-        module.funcs[functions[&function]] = FuncDecl::Body(signature, name.clone(), body);
+        module.funcs[functions[&function]] = FuncDecl::Body(signature, name, body);
     }
     runtime
         .exports

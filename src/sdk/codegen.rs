@@ -322,9 +322,9 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         if !ids.insert(id) {
             return;
         }
-        for ty in type_children(&resolve.types[id].kind) {
+        visit_type_children(&resolve.types[id].kind, |ty| {
             collect(resolve, ty, ids);
-        }
+        });
     }
     let mut out = String::new();
     let mut emitted = HashSet::new();
@@ -418,27 +418,27 @@ fn emit_nested_types(
         if td.name.is_some() {
             emit_type_def(resolve, *id, emitted, out);
         } else {
-            for child in type_children(&td.kind) {
+            visit_type_children(&td.kind, |child| {
                 emit_nested_types(resolve, child, emitted, out);
-            }
+            });
         }
     }
 }
 
-fn type_children(kind: &TypeDefKind) -> Vec<&Type> {
+fn visit_type_children(kind: &TypeDefKind, mut visit: impl FnMut(&Type)) {
     match kind {
         TypeDefKind::List(inner) | TypeDefKind::Option(inner) | TypeDefKind::Type(inner) => {
-            vec![inner]
+            visit(inner);
         }
-        TypeDefKind::Result(result) => result.ok.iter().chain(result.err.iter()).collect(),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().collect(),
-        TypeDefKind::Record(record) => record.fields.iter().map(|field| &field.ty).collect(),
+        TypeDefKind::Result(result) => result.ok.iter().chain(result.err.iter()).for_each(visit),
+        TypeDefKind::Tuple(tuple) => tuple.types.iter().for_each(visit),
+        TypeDefKind::Record(record) => record.fields.iter().map(|field| &field.ty).for_each(visit),
         TypeDefKind::Variant(variant) => variant
             .cases
             .iter()
             .filter_map(|case| case.ty.as_ref())
-            .collect(),
-        _ => Vec::new(),
+            .for_each(visit),
+        _ => {}
     }
 }
 
@@ -533,9 +533,9 @@ fn emit_type_def(
         }
         _ => {}
     }
-    for child in type_children(&td.kind) {
+    visit_type_children(&td.kind, |child| {
         emit_nested_types(resolve, child, emitted, out);
-    }
+    });
 }
 
 /// Generates declarations for a WIT directory and target world name.

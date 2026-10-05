@@ -146,7 +146,9 @@ impl FunctionLowerer<'_> {
                 let HirType::Tuple(types) = self.infer_expr_type(object) else {
                     unreachable!()
                 };
-                super::tuples::element_type(&types, index).unwrap_or(HirType::Unknown)
+                super::tuples::element_type(&types, index)
+                    .cloned()
+                    .unwrap_or(HirType::Unknown)
             }
             Expr::PropertyGet {
                 object, property, ..
