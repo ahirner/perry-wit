@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn invalid(b: &mut Builder, t: &Transport<'_>, frame: Value, condition: Value) {
+pub(super) fn invalid(b: &mut Builder, t: &Transport<'_>, frame: Value, condition: Value) {
     let bad = b.body.add_block();
     let next = b.body.add_block();
     b.branch(condition, bad, next);
@@ -129,9 +129,7 @@ pub(super) fn fields(
 pub(super) fn start_upload(
     b: &mut Builder,
     t: &Transport<'_>,
-    bytes: ByteHelpers,
     response: Value,
-    frame: Value,
     writer: Value,
     has_body: Value,
 ) {
@@ -139,20 +137,7 @@ pub(super) fn start_upload(
     let ready = b.body.add_block();
     b.branch(has_body, upload, ready);
     b.block = upload;
-    let two = b.integer(2);
-    let byte_body = b.op(O::I32Eq, &[b.param(4), two], I32);
-    let snapshot = b.body.add_block();
-    let immutable = b.body.add_block();
-    let start = b.body.add_block();
-    let body = b.body.add_blockparam(start, I32);
-    b.branch(byte_body, snapshot, immutable);
-    b.block = snapshot;
-    let copy = b.call(bytes.copy, &[b.param(3)], &[I32])[0];
-    b.store(frame, 36, copy, I32);
-    b.jump(start, &[copy]);
-    b.block = immutable;
-    b.jump(start, &[b.param(3)]);
-    b.block = start;
+    let body = b.param(3);
     let kind = b.integer(3);
     let record = b.call(t.promises.new, &[kind], &[I32])[0];
     b.store(response, 60, record, I32);

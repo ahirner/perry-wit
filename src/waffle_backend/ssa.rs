@@ -139,6 +139,21 @@ pub(crate) fn lower_module(
             string_pool.intern("https");
             string_pool.intern("content-type");
             string_pool.intern("text/plain;charset=UTF-8");
+            for name in [
+                "follow",
+                "manual",
+                "error",
+                "location",
+                "content-encoding",
+                "content-language",
+                "content-location",
+                "authorization",
+                "proxy-authorization",
+                "cookie",
+                "host",
+            ] {
+                string_pool.intern(name);
+            }
         }
         if reqs.objects {
             string_pool.intern("length");

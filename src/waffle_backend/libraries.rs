@@ -30,7 +30,7 @@ pub(crate) enum LibraryId {
 impl LibraryId {
     pub(crate) fn for_entry(entry: &str) -> Result<Self> {
         Ok(match entry {
-            "fetch_url" | "fetch_decode" | "fetch_method" | "fetch_header"
+            "fetch_url" | "fetch_redirect" | "fetch_decode" | "fetch_method" | "fetch_header"
             | "fetch_header_value" | "fetch_header_size" | "fetch_header_get"
             | "fetch_header_name" | "fetch_header_edit" => Self::Fetch,
             "str_find_substring" | "str_scalar_to_byte" => Self::Search,

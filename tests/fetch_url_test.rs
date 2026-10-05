@@ -101,3 +101,42 @@ fn invalid_http_authorities_and_short_outputs_fail_before_io() {
         assert!(url::normalize(source, &mut vec![0; capacity]).is_err());
     }
 }
+
+#[test]
+fn relative_redirect_locations_match_node() {
+    let base = "http://example.com/a/b?old=yes";
+    let locations = [
+        "../c",
+        "./c?x=1#hash",
+        "/x/../z",
+        "//other.example:80/x",
+        "https://other.example",
+        "?new=query",
+        "#fragment",
+        "",
+        "  next  ",
+        "\\path\\next",
+        "é?q='{}",
+    ];
+    let script = "for(const ref of JSON.parse(process.argv[2])) {const u=new URL(ref,process.argv[1]);u.hash='';console.log(u.href)}";
+    let output = std::process::Command::new("node")
+        .args([
+            "-e",
+            script,
+            base,
+            &serde_json::to_string(&locations).unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let expected = String::from_utf8(output.stdout).unwrap();
+    for (location, expected) in locations.iter().zip(expected.lines()) {
+        let mut output = [0; 4096];
+        let metadata = url::resolve(base.as_bytes(), location.as_bytes(), &mut output).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&output[..metadata[4] as usize]).unwrap(),
+            expected,
+            "{location:?}"
+        );
+    }
+}

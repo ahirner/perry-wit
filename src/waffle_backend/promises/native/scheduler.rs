@@ -35,7 +35,7 @@ pub(super) fn append(b: &mut Builder, head: Value, tail: Value) {
     b.block = done;
 }
 
-fn waiter(b: &mut Builder, registry: &ModuleRegistry, thread: Value) -> Value {
+pub(super) fn waiter(b: &mut Builder, registry: &ModuleRegistry, thread: Value) -> Value {
     use Type::I32;
     let node = allocate(b, registry, 8);
     let four = b.integer(4);

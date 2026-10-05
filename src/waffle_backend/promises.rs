@@ -74,7 +74,7 @@ pub(crate) enum TaskArguments {
 impl TaskArguments {
     pub(crate) fn core_types(&self) -> Result<Vec<waffle::Type>> {
         match self {
-            Self::Fetch => Ok(vec![waffle::Type::I32; 6]),
+            Self::Fetch => Ok(vec![waffle::Type::I32; 7]),
             Self::FetchUpload => Ok(vec![waffle::Type::I32; 2]),
             Self::Source(types) => types
                 .iter()

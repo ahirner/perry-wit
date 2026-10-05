@@ -138,6 +138,52 @@ pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32)
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
+pub extern "C" fn fetch_redirect(
+    base: u32,
+    base_len: u32,
+    location: u32,
+    location_len: u32,
+    output: u32,
+    capacity: u32,
+) -> u32 {
+    use guest_memory::GuestRange;
+    let result = (|| {
+        let base = GuestRange::new(base, base_len)?;
+        let location = GuestRange::new(location, location_len)?;
+        let output = GuestRange::new(output, capacity)?;
+        if base.overlaps(output) || location.overlaps(output) {
+            return Err(());
+        }
+        // SAFETY: validated immutable inputs are disjoint from caller-owned output;
+        // the codec neither allocates nor suspends while these ranges are borrowed.
+        let (base, location, output) =
+            unsafe { (base.bytes(), location.bytes(), output.bytes_mut()) };
+        if output.len() < 32 {
+            return Err(());
+        }
+        let metadata = url::resolve(base, location, &mut output[32..])?;
+        let origin_end = base
+            .get(8..)
+            .ok_or(())?
+            .iter()
+            .position(|byte| *byte == b'/')
+            .ok_or(())?
+            + 8;
+        let same_origin = base.get(..origin_end) == output.get(32..32 + metadata[2] as usize);
+        for (index, value) in metadata
+            .into_iter()
+            .chain([u32::from(same_origin)])
+            .enumerate()
+        {
+            output[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        Ok(0)
+    })();
+    result.unwrap_or(u32::MAX)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
 pub extern "C" fn fetch_decode(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
     borrow(input, length, output, capacity, |input, output| {
         decode(input, output).map(|length| length as u32)
@@ -419,6 +465,15 @@ pub extern "C" fn fetch_header_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn redirect_codec_rejects_short_storage_and_non_http_targets() {
+        let base = b"https://example.com/a/b";
+        let mut output = [0; 512];
+        assert!(url::resolve(base, b"file:///secret", &mut output).is_err());
+        assert!(url::resolve(base, b"../c", &mut output[..8]).is_err());
+        let metadata = url::resolve(base, b"../c", &mut output).unwrap();
+        assert_eq!(&output[..metadata[4] as usize], b"https://example.com/c");
+    }
     #[test]
     fn methods_and_header_bytes_follow_fetch_validation() {
         let fields = [

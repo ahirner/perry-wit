@@ -55,6 +55,7 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
     };
     let new = builder::declare(module, "tasks.new", &[I32], &[I32]);
     let await_result = builder::declare(module, "tasks.await", &[I32], &[I32, F64]);
+    let await_native = builder::declare(module, "tasks.join-native", &[I32], &[I32, F64]);
     let yield_thread = builder::declare(module, "tasks.yield", &[], &[]);
     let mut starts = BTreeMap::new();
     for (target, task) in &plan.tasks {
@@ -68,6 +69,7 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
     Ok(PromiseImports {
         new,
         await_result,
+        await_native,
         yield_thread,
         starts,
         native,
@@ -135,6 +137,7 @@ pub(crate) fn emit(
     scheduler::emit(module, registry)?;
     emit_finish(module, registry)?;
     emit_await(module, registry)?;
+    emit_native_await(module, registry)?;
     emit_settle(module, registry)?;
 
     let mut workers = Vec::new();
@@ -368,6 +371,36 @@ fn emit_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result
     b.finish(module, runtime.await_result)
 }
 
+/// Native transport joins do not acquire the source reaction queue's execution token.
+fn emit_native_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
+    use Type::{F64, I32};
+    let runtime = registry.promises.as_ref().unwrap();
+    let native = &runtime.native;
+    let mut b = Builder::new(module, runtime.await_native, registry.memory);
+    let record = b.param(0);
+    let tag = b.load(record, 4, I32);
+    let two = b.integer(2);
+    let pending = b.op(Operator::I32Eq, &[tag, two], I32);
+    let wait = b.body.add_block();
+    let ready = b.body.add_block();
+    b.branch(pending, wait, ready);
+    b.block = wait;
+    let thread = b.call(native.index, &[], &[I32])[0];
+    let waiter = scheduler::waiter(&mut b, registry, thread);
+    let previous = b.load(record, 28, I32);
+    b.store(waiter, 4, previous, I32);
+    b.store(record, 28, waiter, I32);
+    b.call(native.suspend, &[], &[I32]);
+    b.jump(ready, &[]);
+    b.block = ready;
+    let tag = b.load(record, 4, I32);
+    let settled = b.op(Operator::I32LtU, &[tag, two], I32);
+    b.require(settled);
+    let payload = b.load(record, 8, F64);
+    b.ret(&[tag, payload]);
+    b.finish(module, runtime.await_native)
+}
+
 fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
     use Type::{F64, I32};
     let native = &registry.promises.as_ref().unwrap().native;
@@ -390,6 +423,21 @@ fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     b.store(record, 20, zero, I32);
     b.store(record, 24, zero, I32);
     scheduler::append(&mut b, head, tail);
+    let head = b.load(record, 28, I32);
+    b.store(record, 28, zero, I32);
+    let next = b.body.add_block();
+    let waiter = b.body.add_blockparam(next, I32);
+    let wake = b.body.add_block();
+    let done = b.body.add_block();
+    b.jump(next, &[head]);
+    b.block = next;
+    b.branch(waiter, wake, done);
+    b.block = wake;
+    let thread = b.load(waiter, 0, I32);
+    b.call(native.resume, &[thread], &[]);
+    let following = b.load(waiter, 4, I32);
+    b.jump(next, &[following]);
+    b.block = done;
     b.ret(&[]);
     b.finish(module, native.settle)
 }

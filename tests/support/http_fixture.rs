@@ -21,7 +21,7 @@ pub enum Reply {
     Body(u16, String),
     WithHeaders(u16, Vec<(String, String)>, String),
     Bytes(u16, Vec<u8>),
-    GatedBody(Vec<u8>, Arc<AtomicBool>),
+    GatedResponse(u16, Vec<(String, String)>, Vec<u8>, Arc<AtomicBool>),
     #[allow(
         dead_code,
         reason = "Used by the P3 HTTP tests, which share this fixture"
@@ -67,8 +67,10 @@ impl HttpFixture {
                             let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                             let _ = stream.write_all(&body);
                         }
-                        Reply::GatedBody(body, released) => {
-                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                        Reply::GatedResponse(status, headers, body, released) => {
+                            let _ = write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                            for (name, value) in headers { let _ = write!(stream, "{name}: {value}\r\n"); }
+                            let _ = stream.write_all(b"\r\n");
                             let _ = stream.flush();
                             while !released.load(Ordering::Acquire) && !stop.load(Ordering::Relaxed) { thread::sleep(Duration::from_millis(1)); }
                             let _ = stream.write_all(&body);

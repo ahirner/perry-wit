@@ -18,6 +18,7 @@ use waffle::{
     Value,
 };
 
+mod redirects;
 mod request;
 
 pub(crate) const RESPONSE_TYPE: &str = "__perry_fetch_response";
@@ -124,7 +125,10 @@ pub(super) fn emit(
     let bytes = runtime.bytes;
     let native = runtime.imports;
     let promises = runtime.promises.unwrap();
-    let fetch = builder::declare(module, "fetch", &[I32; 6], &[I32, F64]);
+    let fetch = builder::declare(module, "fetch", &[I32; 7], &[I32, F64]);
+    let send = builder::declare(module, "fetch.send", &[I32; 6], &[I32, F64]);
+    let release = builder::declare(module, "fetch.release", &[I32], &[I32]);
+    let discard = builder::declare(module, "fetch.discard", &[I32], &[I32, F64]);
     let body = builder::declare(module, "fetch.consume", &[I32], &[I32, F64]);
     let text = builder::declare(module, "fetch.text", &[I32], &[I32, F64]);
     let finish = builder::declare(module, "fetch.finish", &[], &[]);
@@ -143,16 +147,18 @@ pub(super) fn emit(
     emit_fetch(
         module,
         memory,
-        fetch,
+        send,
         &transport,
         strings,
         native["fetch_url"],
-        bytes,
     )?;
     let upload = request::emit_upload(module, memory, native)?;
     let transfer = streams::emit_read_transfer(module, memory, native["read"])?;
     let buffered = streams::buffered::emit(module, memory, allocator, transfer)?;
-    emit_body(module, memory, body, &transport, bytes, buffered)?;
+    emit_release(module, memory, release, &transport)?;
+    emit_body(module, memory, body, &transport, bytes, buffered, release)?;
+    redirects::emit_discard(module, memory, discard, &transport, release)?;
+    redirects::emit(module, memory, fetch, send, discard, &transport, runtime)?;
     let mut b = Builder::new(module, text, memory);
     let result = b.call(body, &[b.param(0)], &[I32, F64]);
     let failed = b.body.add_block();
@@ -245,7 +251,7 @@ impl Transport<'_> {
         let complete = b.body.add_block();
         b.branch(upload, join, complete);
         b.block = join;
-        b.call(self.promises.await_result, &[upload], &[I32, F64]);
+        b.call(self.promises.await_native, &[upload], &[I32, F64]);
         b.jump(complete, &[]);
         b.block = complete;
         let reader = b.load(response, 36, I32);
@@ -270,7 +276,6 @@ fn emit_fetch(
     t: &Transport<'_>,
     strings: StringHelperFuncs,
     normalize: Func,
-    bytes: ByteHelpers,
 ) -> Result<()> {
     let mut b = Builder::new(module, function, memory);
     let url = b.param(0);
@@ -283,9 +288,9 @@ fn emit_fetch(
     b.store(frame, 28, b.param(1), I32);
     b.store(frame, 32, b.param(2), I32);
     b.store(frame, 36, b.param(3), I32);
-    let response = b.allocate(t.allocator.realloc, 64, 4);
+    let response = b.allocate(t.allocator.realloc, 72, 4);
     b.store(frame, 16, response, I32);
-    let size = b.integer(64);
+    let size = b.integer(72);
     b.effect(O::MemoryFill { mem: memory }, &[response, zero, size]);
     let backlink = b.integer(4);
     let backlink = b.op(O::I32Sub, &[response, backlink], I32);
@@ -409,7 +414,7 @@ fn emit_fetch(
     b.call(t.allocator.frame_drop, &[frame], &[]);
     b.ret(&[one, code]);
     b.block = send;
-    request::start_upload(&mut b, t, bytes, response, frame, body_writer, has_body);
+    request::start_upload(&mut b, t, response, body_writer, has_body);
     let empty = offset(&mut b, scratch, 64);
     let status = b.call(t.native["write-trailers"], &[writer, empty], &[I32])[0];
     b.store(response, 44, status, I32);
@@ -478,6 +483,7 @@ fn emit_body(
     t: &Transport<'_>,
     bytes: ByteHelpers,
     buffered: Func,
+    release: Func,
 ) -> Result<()> {
     let mut b = Builder::new(module, function, memory);
     let response = b.param(0);
@@ -496,12 +502,39 @@ fn emit_body(
     let used = b.load(response, 20, I32);
     reject(&mut b, used, 12);
     b.store(response, 20, one, I32);
-    let scratch = b.load(response, 48, I32);
     let frame = b.load(response, 56, I32);
     let stream = b.load(response, 24, I32);
     let limit = b.integer(u32::MAX);
     let result = b.call(buffered, &[stream, limit], &[I32, I32, I32]);
     b.store(frame, 24, result[1], I32);
+    let error = b.call(release, &[response], &[I32])[0];
+    let failed = b.body.add_block();
+    let ready = b.body.add_block();
+    b.branch(error, failed, ready);
+    b.block = failed;
+    b.call(t.allocator.frame_drop, &[frame], &[]);
+    let payload = b.op(O::F64ConvertI32U, &[error], F64);
+    b.ret(&[one, payload]);
+    b.block = ready;
+    let view = b.call(bytes.lift_canonical, &[result[1], result[2]], &[I32])[0];
+    b.store(response, 12, view, I32);
+    b.call(t.allocator.frame_drop, &[frame], &[]);
+    let payload = b.op(O::F64ConvertI32U, &[view], F64);
+    b.ret(&[zero, payload]);
+    b.finish(module, function)
+}
+
+fn emit_release(
+    module: &mut Module<'static>,
+    memory: Memory,
+    function: Func,
+    t: &Transport<'_>,
+) -> Result<()> {
+    let mut b = Builder::new(module, function, memory);
+    let response = b.param(0);
+    let scratch = b.load(response, 48, I32);
+    let stream = b.load(response, 24, I32);
+    let one = b.integer(1);
     b.call(t.native["drop-reader"], &[stream], &[]);
     let trailers = b.load(response, 28, I32);
     let status = b.call(t.native["read-trailers"], &[trailers, scratch], &[I32])[0];
@@ -543,19 +576,7 @@ fn emit_body(
     let count = b.load(address, 0, I32);
     let count = b.op(O::I32Sub, &[count, one], I32);
     b.store(address, 0, count, I32);
-    let failed = b.body.add_block();
-    let ready = b.body.add_block();
-    b.branch(error, failed, ready);
-    b.block = failed;
-    b.call(t.allocator.frame_drop, &[frame], &[]);
-    let payload = b.op(O::F64ConvertI32U, &[error], F64);
-    b.ret(&[one, payload]);
-    b.block = ready;
-    let view = b.call(bytes.lift_canonical, &[result[1], result[2]], &[I32])[0];
-    b.store(response, 12, view, I32);
-    b.call(t.allocator.frame_drop, &[frame], &[]);
-    let payload = b.op(O::F64ConvertI32U, &[view], F64);
-    b.ret(&[zero, payload]);
+    b.ret(&[error]);
     b.finish(module, function)
 }
 
@@ -571,6 +592,11 @@ pub(crate) fn declare_helpers(module: &mut Module<'static>) -> BTreeMap<String, 
             imports::Function {
                 name: "fetch_url".into(),
                 params: vec!["i32"; 4],
+                results: vec!["i32"],
+            },
+            imports::Function {
+                name: "fetch_redirect".into(),
+                params: vec!["i32"; 6],
                 results: vec!["i32"],
             },
             imports::Function {

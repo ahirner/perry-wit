@@ -115,7 +115,7 @@ impl FunctionLowerer<'_> {
                     "headers" => {
                         HirType::Named(crate::waffle_backend::http::headers::HEADERS_TYPE.into())
                     }
-                    "ok" | "bodyUsed" => HirType::Boolean,
+                    "ok" | "bodyUsed" | "redirected" => HirType::Boolean,
                     _ => HirType::Number,
                 }
             }

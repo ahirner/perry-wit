@@ -317,3 +317,70 @@ fn canonicalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
         out.length as u32,
     ])
 }
+
+/// Resolve an HTTP Location against a canonical absolute URL into disjoint storage.
+pub(super) fn resolve(base: &[u8], location: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
+    let location = location.trim_ascii();
+    let scheme = base.iter().position(|byte| *byte == b':').ok_or(())?;
+    let authority_end = base
+        .get(scheme + 3..)
+        .ok_or(())?
+        .iter()
+        .position(|byte| *byte == b'/')
+        .map(|at| at + scheme + 3)
+        .ok_or(())?;
+    let path_end = base
+        .iter()
+        .position(|byte| *byte == b'?')
+        .unwrap_or(base.len());
+    let mut location = location;
+    let colon = location.iter().position(|byte| *byte == b':');
+    let delimiter = location
+        .iter()
+        .position(|byte| matches!(byte, b'/' | b'\\' | b'?' | b'#'))
+        .unwrap_or(location.len());
+    let absolute = colon.is_some_and(|colon| colon < delimiter);
+    if absolute {
+        return normalize(location, output);
+    }
+    let prefix = if location.starts_with(b"//") || location.starts_with(b"\\\\") {
+        scheme + 1
+    } else if location.starts_with(b"/") || location.starts_with(b"\\") {
+        authority_end
+    } else if location.starts_with(b"?") {
+        path_end
+    } else if location.is_empty() || location.starts_with(b"#") {
+        base.len()
+    } else {
+        base[..path_end]
+            .iter()
+            .rposition(|byte| *byte == b'/')
+            .ok_or(())?
+            + 1
+    };
+    if location.starts_with(b"\\\\") {
+        // The canonical parser needs the scheme separator in its normal form.
+        location = &location[2..];
+    }
+    let network_backslashes = prefix == scheme + 1 && !location.starts_with(b"//");
+    let extra = if network_backslashes { 2 } else { 0 };
+    let size = prefix
+        .checked_add(location.len())
+        .and_then(|size| size.checked_add(extra))
+        .ok_or(())?;
+    let reserve = size
+        .checked_mul(4)
+        .and_then(|size| size.checked_add(64))
+        .ok_or(())?;
+    if reserve > output.len() {
+        return Err(());
+    }
+    let (target, scratch) = output.split_at_mut(reserve);
+    let source = scratch.get_mut(..size).ok_or(())?;
+    source[..prefix].copy_from_slice(&base[..prefix]);
+    if network_backslashes {
+        source[prefix..prefix + 2].copy_from_slice(b"//");
+    }
+    source[prefix + extra..].copy_from_slice(location);
+    normalize(source, target)
+}

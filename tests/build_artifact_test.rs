@@ -8,40 +8,25 @@ fn compute_helpers_are_built_and_sources_are_watched() {
     fs::create_dir_all(scratch.join("src/helpers")).unwrap();
 
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for source in [
-        "search.rs",
-        "text.rs",
-        "fetch.rs",
-        "casing.rs",
-        "case_properties.rs",
-    ] {
-        fs::copy(
-            repo_root.join("src/helpers").join(source),
-            scratch.join("src/helpers").join(source),
-        )
-        .unwrap();
+    let mut directories = vec![
+        PathBuf::from("src/helpers"),
+        PathBuf::from("crates/json-helper"),
+        PathBuf::from("crates/time-helper"),
+    ];
+    while let Some(directory) = directories.pop() {
+        fs::create_dir_all(scratch.join(&directory)).unwrap();
+        for entry in fs::read_dir(repo_root.join(&directory)).unwrap() {
+            let entry = entry.unwrap();
+            let path = directory.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                directories.push(path);
+            } else {
+                fs::copy(entry.path(), scratch.join(path)).unwrap();
+            }
+        }
     }
-    for source in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "crates/json-helper/Cargo.toml",
-        "crates/json-helper/src/lib.rs",
-        "crates/json-helper/src/guest.rs",
-        "crates/time-helper/Cargo.toml",
-        "crates/time-helper/src/lib.rs",
-        "crates/time-helper/src/time.rs",
-        "crates/time-helper/src/parse.rs",
-        "crates/time-helper/src/format.rs",
-        "crates/time-helper/src/guest.rs",
-        "src/helpers/guest_memory.rs",
-        "src/helpers/json.rs",
-        "src/helpers/json/parse.rs",
-        "src/helpers/json/serialize.rs",
-        "src/helpers/json/storage.rs",
-    ] {
-        let destination = scratch.join(source);
-        fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        fs::copy(repo_root.join(source), destination).unwrap();
+    for source in ["Cargo.toml", "Cargo.lock"] {
+        fs::copy(repo_root.join(source), scratch.join(source)).unwrap();
     }
     for source in ["src/lib.rs", "src/main.rs"] {
         let destination = scratch.join(source);

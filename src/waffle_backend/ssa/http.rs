@@ -131,7 +131,7 @@ impl FunctionLowerer<'_> {
         );
         let url = self.string_receiver(&arguments[0])?;
         let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
-        let mut values = [url, zero, zero, zero, zero, zero];
+        let mut values = [url, zero, zero, zero, zero, zero, zero];
         if let Some(options) = arguments.get(1)
             && self.infer_expr_type(options) == HirType::Void
         {
@@ -146,15 +146,15 @@ impl FunctionLowerer<'_> {
             };
             for (key, field) in &shape.properties {
                 ensure!(
-                    matches!(key.as_str(), "method" | "headers" | "body"),
+                    matches!(key.as_str(), "method" | "headers" | "body" | "redirect"),
                     "fetch option '{key}' is not implemented yet"
                 );
 
                 let (ty, _) = fetch_option_type(&field.ty, field.optional);
                 match key.as_str() {
-                    "method" => ensure!(
+                    "method" | "redirect" => ensure!(
                         (crate::waffle_backend::values::is_string_type(ty) || *ty == HirType::Void),
-                        "fetch method must be a string"
+                        "fetch method and redirect mode must be strings"
                     ),
                     "headers" => {
                         header_shape(ty)?;
@@ -170,7 +170,7 @@ impl FunctionLowerer<'_> {
             }
             let object = self.expression(options)?;
             let helpers = self.registry.object_helpers.unwrap();
-            for (name, index) in [("method", 1), ("headers", 2), ("body", 3)] {
+            for (name, index) in [("method", 1), ("headers", 2), ("body", 3), ("redirect", 6)] {
                 if let Some(field) = shape.properties.get(name) {
                     let (ty, optional) = fetch_option_type(&field.ty, field.optional);
                     let key = self.expression(&Expr::String(name.into()))?;
@@ -369,6 +369,7 @@ impl FunctionLowerer<'_> {
             "status" | "ok" => 0,
             "url" => 16,
             "bodyUsed" => 20,
+            "redirected" => 64,
             _ => bail!("Response.{property} lowering is not implemented yet"),
         };
         let response = self.expression(receiver)?;
@@ -384,7 +385,7 @@ impl FunctionLowerer<'_> {
             &[Type::I32],
         );
         Ok(match property {
-            "url" | "bodyUsed" => value,
+            "url" | "bodyUsed" | "redirected" => value,
             "ok" => {
                 let lower = self.op(Operator::I32Const { value: 200 }, &[], &[Type::I32]);
                 let upper = self.op(Operator::I32Const { value: 299 }, &[], &[Type::I32]);

@@ -1471,7 +1471,9 @@ async fn standard_fetch_resolves_at_headers_and_matches_node() -> Result<()> {
     let released = Arc::new(AtomicBool::new(false));
     let gate = released.clone();
     let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
-        "/gated" => fixture::Reply::GatedBody("hello🙂".as_bytes().to_vec(), gate.clone()),
+        "/gated" => {
+            fixture::Reply::GatedResponse(200, vec![], "hello🙂".as_bytes().to_vec(), gate.clone())
+        }
         "/release" => {
             gate.store(true, Ordering::Release);
             fixture::Reply::Body(200, "!".into())
@@ -2252,5 +2254,196 @@ async fn stored_enum_tasks_overlap_and_preserve_repeated_outcomes() -> Result<()
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_redirect_modes_replay_cleanup_and_origin_rules_match_node() -> Result<()> {
+    fn echo(request: &fixture::Request) -> String {
+        let header = |name: &str| {
+            request
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("")
+        };
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            request.method,
+            String::from_utf8_lossy(&request.body),
+            header("content-type"),
+            header("authorization"),
+            header("cookie"),
+            header("x-keep")
+        )
+    }
+    let other = fixture::HttpFixture::new(|request| fixture::Reply::Body(200, echo(request)));
+    let server = fixture::HttpFixture::new(|request| {
+        if let Some(status) = request.target.strip_prefix("/redirect/") {
+            fixture::Reply::WithHeaders(
+                status.parse().unwrap(),
+                vec![("location".into(), "/echo".into())],
+                "redirect".into(),
+            )
+        } else if let Some(target) = request.target.strip_prefix("/cross?target=") {
+            fixture::Reply::WithHeaders(
+                302,
+                vec![("location".into(), format!("{target}/echo"))],
+                String::new(),
+            )
+        } else {
+            match request.target.as_str() {
+                "/loop" => fixture::Reply::WithHeaders(
+                    302,
+                    vec![("location".into(), "/loop".into())],
+                    String::new(),
+                ),
+                "/invalid" => fixture::Reply::WithHeaders(
+                    302,
+                    vec![("location".into(), "file:///secret".into())],
+                    String::new(),
+                ),
+                "/missing" => fixture::Reply::Body(302, "missing".into()),
+                _ => fixture::Reply::Body(200, echo(request)),
+            }
+        }
+    });
+    let compiled = compile(
+        include_str!("fixtures/fetch/redirects.ts"),
+        "package test:redirect; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string,other:string)->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, &str), (String,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    let other_base = format!("http://{}", other.address);
+    let fixture = format!(
+        "{}/tests/fixtures/fetch/redirects.ts",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = std::process::Command::new("node")
+        .args([
+            "--input-type=module",
+            "-e",
+            &format!(
+                "import {{run}} from '{}'; console.log(await run('{}','{}'));",
+                fixture, base, other_base
+            ),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = String::from_utf8(output.stdout)?;
+    assert!(expected.trim().ends_with(";ok"), "{expected}");
+    server.requests.lock().unwrap().clear();
+    for _ in 0..10 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                run.call_async(&mut store, (&base, &other_base))
+            )
+            .await?
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!(
+                "Requests: {:?}",
+                server
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|request| (&request.method, &request.target))
+                    .collect::<Vec<_>>()
+            ))?
+            .0,
+            expected.trim()
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    assert!(
+        !server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.target == "/not-requested")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn standard_fetch_redirects_close_gated_bodies_without_buffering_them() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let gate = Arc::new(AtomicBool::new(false));
+    let server_gate = gate.clone();
+    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+        "/redirect" => fixture::Reply::GatedResponse(
+            302,
+            vec![("location".into(), "/release".into())],
+            vec![42; 4 * 1024 * 1024],
+            server_gate.clone(),
+        ),
+        "/release" => {
+            server_gate.store(true, Ordering::Release);
+            fixture::Reply::Body(200, "ok".into())
+        }
+        _ => fixture::Reply::Disconnect,
+    });
+    let source = include_str!("fixtures/fetch/redirect_lifetime.ts");
+    let compiled = compile(
+        source,
+        "package test:redirect-lifetime; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->string;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    for _ in 0..30 {
+        gate.store(false, Ordering::Release);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), run.call_async(&mut store, (&base,)))
+                .await??
+                .0,
+            "ok"
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    gate.store(false, Ordering::Release);
+    let fixture = format!(
+        "{}/tests/fixtures/fetch/redirect_lifetime.ts",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = std::process::Command::new("node")
+        .args([
+            "--input-type=module",
+            "-e",
+            &format!(
+                "import {{run}} from '{}';console.log(await run('{}'));",
+                fixture, base
+            ),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "ok");
     Ok(())
 }

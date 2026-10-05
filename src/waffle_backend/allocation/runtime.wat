@@ -174,6 +174,7 @@
               (br $strings)))))
           (if (i32.or (i32.eq (local.get $kind) (i32.const 3)) (i32.eq (local.get $kind) (i32.const 4))) (then
             (call $mark (i32.load offset=20 (local.get $pointer)))
+            (call $mark (i32.load offset=28 (local.get $pointer)))
             ;; The completion ABI stores descriptor addresses as numeric f64 values.
             (if (i32.and (i32.eq (local.get $kind) (i32.const 4)) (i32.eqz (i32.load offset=4 (local.get $pointer))))
               (then (call $mark (i32.trunc_f64_u (f64.load offset=8 (local.get $pointer))))))))
