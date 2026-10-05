@@ -1581,6 +1581,7 @@ async fn directly_awaited_timer_values_preserve_their_static_return_type() -> Re
         "const value=await setTimeout(1, [input+' result']); const first=value[0]; if(typeof first!=='string')throw 1; return first;",
         "const value=await setTimeout(1, [40,2]); if(value[0]+value[1]!==42)throw 1; return input+' result';",
         "const value:[number,string]=[42,input+' result']; const retained=await setTimeout(1,value); if(retained!==value)throw 1; return retained[1];",
+        "const value=[input+' result',await setTimeout(1,42)][0]; return value;",
     ] {
         let compiled = compile(
             &format!(

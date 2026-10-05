@@ -6,7 +6,7 @@ Run the default smoke campaign inside the pinned toolchain:
 nix develop -c cargo test --test generative_test -- --nocapture
 ```
 
-The campaign generates eight expression trees, each in four equivalent forms, and runs nine numeric inputs per component instance.
+The campaign runs the saved regression trees plus eight generated expression trees, each in four equivalent forms, and runs twelve numeric inputs per component instance, including NaN and both infinities.
 `tsc --strict` checks every generated source before execution.
 Node and the production resolved-WIT compiler receive the same TypeScript source.
 Wasmtime validates and executes the resulting components with fuel and memory limits.
@@ -27,7 +27,7 @@ nix develop -c env PERRY_GENERATIVE_SEED=100 PERRY_GENERATIVE_COUNT=200 PERRY_GE
 ```
 
 Seeds use a fixed SplitMix64 mapping.
-Count is the number of original trees, before the four variants; depth is bounded at six.
+Count is the number of generated trees, before the four variants; the saved regression trees always run too, and depth is bounded at six.
 The default shrink budget is 100 attempts, configurable with `PERRY_GENERATIVE_SHRINK`.
 Each run prints its retained directory under `target/generative/`, containing sources, WIT, oracle, inputs, tool versions, and progress.
 A semantic failure also saves the original and reduced trees and TypeScript, plus failure details.

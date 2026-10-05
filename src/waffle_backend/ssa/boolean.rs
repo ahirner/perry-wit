@@ -2,7 +2,7 @@
 
 use super::FunctionLowerer;
 use crate::waffle_backend::control_flow::JoinPoint;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use perry_hir::{
     ir::{Expr, LogicalOp},
     types::Type as HirType,
@@ -71,10 +71,11 @@ impl FunctionLowerer<'_> {
         then_expr: &Expr,
         else_expr: &Expr,
     ) -> Result<Value> {
-        let ty = self.infer_expr_type(then_expr);
+        let ty = self.conditional_type(then_expr, else_expr).context(
+            "Conditional expressions require a boolean condition and matching static branch types",
+        )?;
         ensure!(
-            self.infer_expr_type(condition) == HirType::Boolean
-                && crate::waffle_backend::wit::same_type(&ty, &self.infer_expr_type(else_expr)),
+            self.infer_expr_type(condition) == HirType::Boolean,
             "Conditional expressions require a boolean condition and matching static branch types"
         );
         let core = crate::waffle_backend::registry::map_type_to_waffle(&ty)?;
@@ -107,7 +108,7 @@ impl FunctionLowerer<'_> {
             self.locals = incoming_locals.clone();
             self.narrowings = incoming_narrowings.clone();
             self.narrow_type_guard(condition, truth);
-            let value = self.expression(expression)?;
+            let value = self.typed_operand(expression, &ty)?;
             let mut arguments = join.branch_args(&self.locals);
             arguments.push(value);
             self.branch(join.block, arguments);

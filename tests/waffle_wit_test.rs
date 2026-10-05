@@ -5,12 +5,160 @@ use perry_wit::waffle_backend::{
 use wasmtime::component::{Component, Linker, Val};
 use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 
+#[path = "support/heap_measurement.rs"]
+mod heap_measurement;
+
 mod records {
     wasmtime::component::bindgen!({path: "tests/fixtures/record-boundary", world: "boundary"});
 }
 
 fn compile_records(source: &str) -> Result<WaffleCompiled> {
     compile_world(source, include_str!("fixtures/record-boundary/world.wit"))
+}
+
+#[test]
+fn literal_array_projection_avoids_materialization() -> Result<()> {
+    let engine = Engine::default();
+    let mut measurements = Vec::new();
+    for body in [
+        "return [x, x + 1, x + 2][1];",
+        "const values:number[] = [x, x + 1, x + 2]; return values[1];",
+    ] {
+        let compiled = compile_world(
+            &format!("export function run(x:number):number {{{body}}}"),
+            "package test:boundary; world boundary {export run:func(x:f64)->f64;}",
+        )?;
+        let bytes = compiled.component.as_ref().unwrap().len();
+        let core = heap_measurement::instrument(&compiled.core)?;
+        let mut resolve = wit_parser::Resolve::default();
+        let package = resolve.push_str(
+            "probe.wit",
+            "package test:boundary; world boundary {
+            export run:func(x:f64)->f64;
+            export measure-allocations:func()->u64;
+        }",
+        )?;
+        let world = resolve.select_world(&[package], Some("boundary"))?;
+        let component = Component::new(
+            &engine,
+            perry_wit::waffle_backend::encode_component(&core, resolve, world)?,
+        )?;
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+        let allocations =
+            instance.get_typed_func::<(), (u64,)>(&mut store, "measure-allocations")?;
+        let before = allocations.call(&mut store, ())?.0;
+        for input in 0..16 {
+            assert_eq!(
+                run.call(&mut store, (f64::from(input),))?.0,
+                f64::from(input + 1)
+            );
+        }
+        measurements.push((bytes, allocations.call(&mut store, ())?.0 - before));
+    }
+    assert!(
+        measurements[0].0 < measurements[1].0,
+        "component sizes: {measurements:?}"
+    );
+    assert!(
+        measurements[0].1 < measurements[1].1,
+        "allocation counts: {measurements:?}"
+    );
+    println!(
+        "Projection versus materialization (component bytes, allocations for 16 calls): {measurements:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn literal_array_projection_preserves_effects_exceptions_and_aliases() -> Result<()> {
+    let source = r#"
+        function record(trace:number[], value:number):number {trace.push(value);return value;}
+        function fail():number {throw 9;}
+        function churn():number {for(let i=0;i<1000;i++){const garbage:number[]=[i,i+1];}return 0;}
+        export function run():number[] {
+            const trace:number[]=[];
+            const selected=[record(trace,1),record(trace,2),record(trace,3)][1];
+            trace.push(selected);
+            try {const value=[record(trace,4),fail(),record(trace,5)][0]; trace.push(value);}
+            catch(error){trace.push(error);}
+            const held=[trace,churn()][0];
+            held.push(6);
+            return trace;
+        }
+    "#;
+    let compiled = compile_world(
+        source,
+        "package test:boundary; world boundary {export run:func()->list<f64>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(262144).build(),
+    );
+    store.limiter(|limits: &mut StoreLimits| limits);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(), (Vec<f64>,)>(&mut store, "run")?;
+    for _ in 0..20 {
+        assert_eq!(run.call(&mut store, ())?.0, [1., 2., 3., 2., 4., 9., 6.]);
+    }
+    Ok(())
+}
+
+#[test]
+fn conditional_tagged_values_are_checked_only_on_the_selected_branch() -> Result<()> {
+    let engine = Engine::default();
+    for (body, selected) in [
+        ("return {ok:true,value:select ? data.value : 7};", true),
+        ("return {ok:true,value:select ? 7 : data.value};", false),
+        (
+            "let value=7; if(select){value=data.value;} return {ok:true,value:value};",
+            true,
+        ),
+        (
+            "let value=7; for(let i=0;i<2;i++){if(select){value=data.value;}} return {ok:true,value:value};",
+            true,
+        ),
+    ] {
+        let source = format!(
+            r#"
+            export function run(input:string, select:boolean):{{ok:true,value:number}}|{{ok:false,error:number}} {{
+                const data = JSON.parse(input);
+                try {{ {body} }}
+                catch(error) {{ return {{ok:false,error:error}}; }}
+            }}
+        "#
+        );
+        let compiled = compile_world(
+            &source,
+            "package test:boundary; world boundary {export run:func(input:string,select:bool)->result<f64,f64>;}",
+        )?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let run =
+            instance.get_typed_func::<(&str, bool), (Result<f64, f64>,)>(&mut store, "run")?;
+        assert_eq!(
+            run.call(&mut store, (r#"{"value":42}"#, selected))?.0,
+            Ok(42.0)
+        );
+        assert_eq!(
+            run.call(&mut store, (r#"{"value":"wrong"}"#, selected))?.0,
+            Err(12.0)
+        );
+        assert_eq!(
+            run.call(&mut store, (r#"{"value":"wrong"}"#, !selected))?.0,
+            Ok(7.0)
+        );
+    }
+    compile_world(
+        "export function run(select:boolean):number {return select ? 'wrong' : 7;}",
+        "package test:boundary; world boundary {export run:func(select:bool)->f64;}",
+    )
+    .expect_err("incompatible concrete branch types remain rejected");
+    Ok(())
 }
 
 #[test]

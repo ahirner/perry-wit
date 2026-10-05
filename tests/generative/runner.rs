@@ -13,7 +13,7 @@ use serde_json::json;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
-use super::model::{Form, Generator, INPUTS, Number, Program, WIT, node_inputs};
+use super::model::{Form, Generator, INPUTS, Number, Program, WIT};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observation {
@@ -105,9 +105,14 @@ pub fn campaign() -> Result<()> {
         (vec![program], forms)
     } else {
         (
-            (0..count)
-                .map(|index| Program {
-                    expression: Generator::new(seed.wrapping_add(index as u64)).number(depth),
+            serde_json::from_str::<Vec<Number>>(include_str!("regressions.json"))?
+                .into_iter()
+                .chain(
+                    (0..count)
+                        .map(|index| Generator::new(seed.wrapping_add(index as u64)).number(depth)),
+                )
+                .map(|expression| Program {
+                    expression,
                     form: Form::Direct,
                 })
                 .collect::<Vec<_>>(),
@@ -123,7 +128,10 @@ pub fn campaign() -> Result<()> {
     }
     fs::write(directory.join("world.wit"), WIT)?;
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
-    fs::write(directory.join("inputs.json"), node_inputs())?;
+    fs::write(
+        directory.join("inputs.json"),
+        serde_json::to_vec(&INPUTS.map(number))?,
+    )?;
     let mut report = json!({"seed":seed, "count":programs.len() * forms.len(), "depth":depth, "completed":0, "status":"running"});
     fs::write(
         directory.join("report.json"),
@@ -427,7 +435,10 @@ pub fn verify_trace_fault() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let directory = directory.path();
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
-    fs::write(directory.join("inputs.json"), node_inputs())?;
+    fs::write(
+        directory.join("inputs.json"),
+        serde_json::to_vec(&INPUTS.map(number))?,
+    )?;
     let original = Program {
         expression: Number::Call(Box::new(Number::Mark(Box::new(Number::Input)))),
         form: Form::Direct,

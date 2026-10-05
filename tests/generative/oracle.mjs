@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const { run } = await import(pathToFileURL(process.argv[2]));
-const inputs = JSON.parse(readFileSync(process.argv[3], 'utf8'));
+const inputs = JSON.parse(readFileSync(process.argv[3], 'utf8')).map(value =>
+  value === 'NaN' ? NaN : Buffer.from(value, 'hex').readDoubleBE(0));
 const bytes = new DataView(new ArrayBuffer(8));
 function number(value) {
   if (Number.isNaN(value)) return 'NaN';

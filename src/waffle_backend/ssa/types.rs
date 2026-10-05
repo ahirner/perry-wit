@@ -98,6 +98,12 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::IndexGet { object, index }
+                if let Some((items, selected)) =
+                    super::arrays::literal_projection(object, index) =>
+            {
+                self.infer_expr_type(&items[selected])
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if property == "body"
@@ -465,14 +471,9 @@ impl FunctionLowerer<'_> {
                 then_expr,
                 else_expr,
                 ..
-            } => {
-                let left = self.infer_expr_type(then_expr);
-                if crate::waffle_backend::wit::same_type(&left, &self.infer_expr_type(else_expr)) {
-                    left
-                } else {
-                    HirType::Any
-                }
-            }
+            } => self
+                .conditional_type(then_expr, else_expr)
+                .unwrap_or(HirType::Any),
             Expr::Binary { op, left, right } => {
                 if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) {
                     HirType::String
@@ -481,6 +482,22 @@ impl FunctionLowerer<'_> {
                 }
             }
             _ => HirType::Any,
+        }
+    }
+
+    /// A concrete branch supplies the checked type for a tagged value on the other branch.
+    /// Inference and emission must agree before constructing the SSA join parameter.
+    pub(super) fn conditional_type(&self, then_expr: &Expr, else_expr: &Expr) -> Option<HirType> {
+        let left = self.infer_expr_type(then_expr);
+        let right = self.infer_expr_type(else_expr);
+        if crate::waffle_backend::wit::same_type(&left, &right)
+            || crate::waffle_backend::values::is_dynamic(&right)
+        {
+            Some(left)
+        } else if crate::waffle_backend::values::is_dynamic(&left) {
+            Some(right)
+        } else {
+            None
         }
     }
 

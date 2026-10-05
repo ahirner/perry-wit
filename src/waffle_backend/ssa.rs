@@ -1510,6 +1510,11 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::IndexGet { object, index }
+                if let Some((items, selected)) = arrays::literal_projection(object, index) =>
+            {
+                self.project_array_literal(items, selected)
+            }
             Expr::PropertySet { object, .. }
             | Expr::IndexSet { object, .. }
             | Expr::PutValueSet { target: object, .. }
@@ -1863,27 +1868,17 @@ impl<'a> FunctionLowerer<'a> {
             Expr::LocalSet(id, expr) => {
                 let declared = self.local_types.get(id).cloned();
                 if let Some(ty) = &declared
-                    && super::values::is_boxed_union(ty)
+                    && !super::values::is_dynamic(ty)
+                    && !is_text_or_bytes(ty)
+                    && (self.contract.wit.is_some()
+                        || matches!(ty, HirType::Tuple(_))
+                        || super::values::is_boxed_union(ty)
+                        || super::values::is_boxed(&self.infer_expr_type(expr)))
                 {
-                    self.check_typed_value(expr, ty)?;
                     let value = self.typed_operand(expr, ty)?;
                     self.locals.insert(*id, value);
                     self.narrowings.remove(id);
                     return Ok(value);
-                }
-                if let Some(ty) = &declared
-                    && (self.contract.wit.is_some() || matches!(ty, HirType::Tuple(_)))
-                {
-                    self.check_typed_value(expr, ty)?;
-                    if matches!(ty, HirType::Tuple(_) | HirType::Array(_))
-                        || super::objects::is_object(ty)
-                        || (super::values::is_string_type(ty) && *ty != HirType::String)
-                    {
-                        let value = self.typed_operand(expr, ty)?;
-                        self.locals.insert(*id, value);
-                        self.narrowings.remove(id);
-                        return Ok(value);
-                    }
                 }
                 if self
                     .local_types

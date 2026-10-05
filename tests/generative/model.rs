@@ -3,7 +3,7 @@ use std::fmt::{self, Display};
 
 use serde::{Deserialize, Serialize};
 
-pub const INPUTS: [f64; 9] = [
+pub const INPUTS: [f64; 12] = [
     -0.0,
     0.0,
     -1.0,
@@ -13,6 +13,9 @@ pub const INPUTS: [f64; 9] = [
     4294967295.0,
     1e-300,
     1e300,
+    f64::NAN,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
 ];
 pub const WIT: &str = "package test:generated; world generated {
     record observation { value: f64, trace: list<f64> }
@@ -457,8 +460,4 @@ impl Text {
         candidates.retain(|candidate| candidate.to_string().len() < size);
         candidates
     }
-}
-
-pub fn node_inputs() -> String {
-    serde_json::to_string(&INPUTS).unwrap()
 }
