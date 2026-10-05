@@ -364,9 +364,9 @@ fn suspending_exports_require_async_wit_including_transitive_calls() -> Result<(
         core_only: false,
     };
     let source = r#"
-      import {readFileSync} from 'fs';
-      function read(path:string):string {return readFileSync(path,'utf8');}
-      export function run(path:string):string {return read(path);}
+      import {readFile} from 'fs/promises';
+      async function read(path:string):Promise<string> {return (await readFile(path,'utf8'));}
+      export async function run(path:string):Promise<string> {return (await read(path));}
       export function pure(input:string):string {return input+'!';}
     "#;
     for async_export in [false, true] {

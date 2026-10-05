@@ -6,7 +6,7 @@ use waffle::{MemoryArg, Operator, Type, Value};
 
 use super::FunctionLowerer;
 use crate::waffle_backend::{
-    abi, bytes::is_byte_view, capabilities::FilesystemOperation, objects::is_object,
+    bytes::is_byte_view, capabilities::FilesystemOperation, objects::is_object,
     text_or_bytes::is_text_or_bytes,
 };
 
@@ -23,7 +23,7 @@ impl FunctionLowerer<'_> {
             FilesystemOperation::WriteFile => {
                 ensure!(
                     (2..=3).contains(&arguments.len()),
-                    "writeFileSync accepts a path, data, and optional encoding/options"
+                    "writeFile accepts a path, data, and optional encoding/options"
                 );
                 let path = self.string_receiver(&arguments[0])?;
                 let data_type = self.infer_expr_type(&arguments[1]);
@@ -34,7 +34,7 @@ impl FunctionLowerer<'_> {
                     let binary = is_byte_view(&data_type);
                     ensure!(
                         binary || data_type == HirType::String,
-                        "writeFileSync data must be a string or Uint8Array"
+                        "writeFile data must be a string or Uint8Array"
                     );
                     let data = self.expression(&arguments[1])?;
                     let binary = self.op(
@@ -52,7 +52,7 @@ impl FunctionLowerer<'_> {
                     .filter(|options| is_object(&self.infer_expr_type(options)))
                 {
                     let object = self.expression(options)?;
-                    signal = self.filesystem_signal(name, options, object)?;
+                    signal = self.filesystem_signal(options, object)?;
                     self.op(
                         Operator::Call {
                             function_index: helpers.write_object_options,
@@ -71,25 +71,18 @@ impl FunctionLowerer<'_> {
                         &[Type::I32],
                     )
                 };
-                if let Some(record) = self.start_task(
+                self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
                     &[path, data, valid, signal],
                     None,
-                )? {
-                    return Ok(Some(record));
-                }
-                self.call_completion(
-                    self.registry.filesystem_helpers.unwrap().write,
-                    &[path, data, valid],
-                );
-                Ok(None)
+                )
             }
             FilesystemOperation::ReadBytes
             | FilesystemOperation::ReadText
             | FilesystemOperation::ReadValue => {
                 ensure!(
                     (1..=2).contains(&arguments.len()),
-                    "readFileSync accepts a path and optional encoding/options"
+                    "readFile accepts a path and optional encoding/options"
                 );
                 let path = self.string_receiver(&arguments[0])?;
                 let helpers = self.registry.filesystem_helpers.unwrap();
@@ -98,7 +91,7 @@ impl FunctionLowerer<'_> {
                     .filter(|options| is_object(&self.infer_expr_type(options)))
                 {
                     let object = self.expression(options)?;
-                    signal = self.filesystem_signal(name, options, object)?;
+                    signal = self.filesystem_signal(options, object)?;
                     self.op(
                         Operator::Call {
                             function_index: helpers.read_object_options,
@@ -118,75 +111,30 @@ impl FunctionLowerer<'_> {
                         &[Type::I32],
                     )
                 };
-                if let Some(record) = self.start_task(
+                self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
                     &[path, mode, signal],
                     None,
-                )? {
-                    return Ok(Some(record));
-                }
-                let payload = self.call_completion(helpers.read, &[path, mode]);
-                let descriptor = abi::decode_payload(&mut self.body, self.block, payload, true);
-                let value = if operation == FilesystemOperation::ReadValue {
-                    let binary = self.op(Operator::I32Eqz, &[mode], &[Type::I32]);
-                    self.op(Operator::I32Or, &[descriptor, binary], &[Type::I32])
-                } else {
-                    descriptor
-                };
-                Ok(Some(value))
+                )
             }
             operation => {
-                let max_arguments = if operation == FilesystemOperation::Exists {
-                    1
-                } else {
-                    2
-                };
                 ensure!(
-                    (1..=max_arguments).contains(&arguments.len()),
-                    "{} accepts a path{}",
-                    operation.name(),
-                    if max_arguments == 2 {
-                        " and optional options"
-                    } else {
-                        ""
-                    }
+                    (1..=2).contains(&arguments.len()),
+                    "{} accepts a path and optional options",
+                    operation.name()
                 );
                 let path = self.string_receiver(&arguments[0])?;
                 let valid = self.filesystem_metadata_options(operation, arguments.get(1))?;
-                if let Some(record) = self.start_task(
+                self.start_task(
                     &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
                     &[path, valid, zero],
                     None,
-                )? {
-                    return Ok(Some(record));
-                }
-                let helpers = self.registry.filesystem_helpers.unwrap();
-                let payload = if operation == FilesystemOperation::ReadDirectory {
-                    self.call_completion(helpers.read_directory, &[path, valid])
-                } else {
-                    let code = match operation {
-                        FilesystemOperation::Stat => 0,
-                        FilesystemOperation::Exists => 1,
-                        FilesystemOperation::MakeDirectory => 2,
-                        FilesystemOperation::Unlink => 3,
-                        FilesystemOperation::RemoveDirectory => 4,
-                        _ => unreachable!(),
-                    };
-                    let code = self.op(Operator::I32Const { value: code }, &[], &[Type::I32]);
-                    self.call_completion(helpers.metadata, &[path, code, valid])
-                };
-                Ok(matches!(
-                    operation,
-                    FilesystemOperation::Stat
-                        | FilesystemOperation::Exists
-                        | FilesystemOperation::ReadDirectory
                 )
-                .then(|| abi::decode_payload(&mut self.body, self.block, payload, true)))
             }
         }
     }
 
-    fn filesystem_signal(&mut self, name: &str, expression: &Expr, object: Value) -> Result<Value> {
+    fn filesystem_signal(&mut self, expression: &Expr, object: Value) -> Result<Value> {
         let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
         let HirType::Object(shape) = self.infer_expr_type(expression) else {
             return Ok(zero);
@@ -194,15 +142,6 @@ impl FunctionLowerer<'_> {
         let Some(field) = shape.properties.get("signal") else {
             return Ok(zero);
         };
-        ensure!(
-            matches!(
-                self.contract.intrinsics.get(name),
-                Some(crate::waffle_backend::resolve::TypedIntrinsic::Capability(
-                    crate::waffle_backend::capabilities::CapabilityOperation::FilesystemPromise(_)
-                ))
-            ),
-            "AbortSignal is supported by promise readFile/writeFile; synchronous filesystem calls do not accept signals"
-        );
         self.option_signal(object, &field.ty, field.optional, "Filesystem")
     }
 

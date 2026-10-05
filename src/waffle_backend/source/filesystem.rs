@@ -12,18 +12,10 @@ pub(super) fn specialize(
     arguments: &[ast::ExprOrSpread],
     unresolved: SyntaxContext,
 ) -> Result<CapabilityOperation> {
-    let (filesystem, asynchronous) = match operation {
-        CapabilityOperation::Filesystem(filesystem) => (filesystem, false),
-        CapabilityOperation::FilesystemPromise(filesystem) => (filesystem, true),
-        _ => return Ok(operation),
+    let CapabilityOperation::Filesystem(filesystem) = operation else {
+        return Ok(operation);
     };
-    let specialize = |operation| {
-        if asynchronous {
-            CapabilityOperation::FilesystemPromise(operation)
-        } else {
-            CapabilityOperation::Filesystem(operation)
-        }
-    };
+    let specialize = CapabilityOperation::Filesystem;
     let index = if filesystem == FilesystemOperation::WriteFile {
         2
     } else {

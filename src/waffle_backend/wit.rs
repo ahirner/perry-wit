@@ -300,10 +300,7 @@ impl WitWorld {
                                 && (intrinsic.is_async()
                                     || matches!(
                                         intrinsic,
-                                        TypedIntrinsic::Capability(
-                                            CapabilityOperation::Filesystem(_)
-                                                | CapabilityOperation::Stdio(_)
-                                        )
+                                        TypedIntrinsic::Capability(CapabilityOperation::Stdio(_))
                                     ))
                             {
                                 suspending = Some(intrinsic.name().to_owned());

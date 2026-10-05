@@ -324,7 +324,7 @@ impl CapabilityNamespace {
                 "readdir" => FilesystemOperation::ReadDirectory,
                 _ => bail!("Unsupported promise-based filesystem operation '{name}'"),
             };
-            return Ok(CapabilityOperation::FilesystemPromise(operation));
+            return Ok(CapabilityOperation::Filesystem(operation));
         }
         match (self, name) {
             (Self::Http, "get") => Ok(CapabilityOperation::HttpGet),
@@ -341,30 +341,9 @@ impl CapabilityNamespace {
             (Self::Stdio, "writeStderr") => {
                 Ok(CapabilityOperation::Stdio(StdioOperation::WriteStderr))
             }
-            (Self::Filesystem, "writeFileSync") => Ok(CapabilityOperation::Filesystem(
-                FilesystemOperation::WriteFile,
-            )),
-            (Self::Filesystem, "readFileSync") => Ok(CapabilityOperation::Filesystem(
-                FilesystemOperation::ReadBytes,
-            )),
-            (Self::Filesystem, "statSync") => {
-                Ok(CapabilityOperation::Filesystem(FilesystemOperation::Stat))
-            }
-            (Self::Filesystem, "existsSync") => {
-                Ok(CapabilityOperation::Filesystem(FilesystemOperation::Exists))
-            }
-            (Self::Filesystem, "mkdirSync") => Ok(CapabilityOperation::Filesystem(
-                FilesystemOperation::MakeDirectory,
-            )),
-            (Self::Filesystem, "unlinkSync") => {
-                Ok(CapabilityOperation::Filesystem(FilesystemOperation::Unlink))
-            }
-            (Self::Filesystem, "rmdirSync") => Ok(CapabilityOperation::Filesystem(
-                FilesystemOperation::RemoveDirectory,
-            )),
-            (Self::Filesystem, "readdirSync") => Ok(CapabilityOperation::Filesystem(
-                FilesystemOperation::ReadDirectory,
-            )),
+            (Self::Filesystem, _) => bail!(
+                "Unsupported filesystem operation '{name}': synchronous and callback APIs are not supported; use node:fs/promises"
+            ),
             _ => bail!("Unknown capability member '{name}'"),
         }
     }

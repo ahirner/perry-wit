@@ -17,7 +17,7 @@ async fn directory_materialization_grows_beyond_one_page_without_a_fixed_entry_l
     for index in 0..1000 {
         fs::write(directory.path().join(format!("entry-{index}-😀")), b"")?;
     }
-    let source = r#"import {readdirSync} from 'fs'; export function run(): number { return readdirSync('/sandbox').length; }"#;
+    let source = r#"import {readdir} from 'fs/promises'; export async function run(): Promise<number> { return (await readdir('/sandbox')).length; }"#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
         .build();
@@ -38,20 +38,23 @@ async fn directory_materialization_grows_beyond_one_page_without_a_fixed_entry_l
 async fn supported_metadata_and_directory_operations_match_node() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let source = r#"
-    import fs from 'node:fs';
-    export function run(path: string): string {
-        fs.mkdirSync(path + '/child');
-        fs.writeFileSync(path + '/child/é😀', 'é😀');
-        const names = fs.readdirSync(path + '/child', 'utf8');
-        const file = fs.statSync(path + '/child/é😀');
+    import fs from 'node:fs/promises';
+    export async function run(path: string): Promise<string> {
+        (await fs.mkdir(path + '/child'));
+        (await fs.writeFile(path + '/child/é😀', 'é😀'));
+        const names = (await fs.readdir(path + '/child', 'utf8'));
+        const file = (await fs.stat(path + '/child/é😀'));
         if (!file.isFile()) { return 'wrong type'; }
         if (file.size !== 6) { return 'wrong size'; }
         if (names.length !== 1) { return 'wrong count'; }
-        fs.unlinkSync(path + '/child/é😀');
-        fs.rmdirSync(path + '/child');
-        if (fs.existsSync(path + '/child')) { return 'still exists'; }
+        (await fs.unlink(path + '/child/é😀'));
+        (await fs.rmdir(path + '/child'));
+        if ((await exists(path + '/child'))) { return 'still exists'; }
         return names[0].slice(0);
-    }"#;
+    }
+import { stat as existenceStat } from "node:fs/promises";
+async function exists(path: string): Promise<boolean> { try { await existenceStat(path); return true; } catch { return false; } }
+"#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
         .build();
@@ -62,7 +65,7 @@ async fn supported_metadata_and_directory_operations_match_node() -> Result<()> 
     fs::write(
         &entry,
         format!(
-            "{source}\nprocess.stdout.write(run({}));",
+            "{source}\nprocess.stdout.write(await run({}));",
             serde_json::to_string(&directory.path())?
         ),
     )?;
@@ -92,11 +95,11 @@ async fn stat_layout_preserves_signed_timestamps_sizes_and_descriptor_variants()
     type Arguments = (Resource<Descriptor>, PathFlags, String);
     let directory = tempfile::tempdir()?;
     let source = r#"
-    import {statSync, existsSync} from 'fs';
-    export function run(path: string, field: number): number {
-        if (field === 4) { if (existsSync(path)) { return 1; } return 0; }
+    import {stat} from 'fs/promises';
+    export async function run(path: string, field: number): Promise<number> {
+        if (field === 4) { if ((await exists(path))) { return 1; } return 0; }
         try {
-            const stats = statSync(path);
+            const stats = (await stat(path));
             let index = 0;
             while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
             if (field === 0) { return stats.size; }
@@ -105,7 +108,10 @@ async fn stat_layout_preserves_signed_timestamps_sizes_and_descriptor_variants()
             if (stats.isDirectory()) { return 2; }
             return 7;
         } catch (error) { return 0 - error; }
-    }"#;
+    }
+import { stat as existenceStat } from "node:fs/promises";
+async function exists(path: string): Promise<boolean> { try { await existenceStat(path); return true; } catch { return false; } }
+"#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
         .build();
@@ -192,16 +198,19 @@ async fn metadata_confines_paths_denies_mutations_and_protects_preopen_roots() -
     #[cfg(unix)]
     std::os::unix::fs::symlink(outside.path(), inner.path().join("escape"))?;
     let source = r#"
-    import fs from 'fs';
-    export function run(path: string, op: number): Result<number, number> {
-        if (op === 0) { const stats = fs.statSync(path); if (stats.isDirectory()) { return 100; } return stats.size; }
-        if (op === 1) { if (fs.existsSync(path)) { return 1; } return 0; }
-        if (op === 2) { fs.mkdirSync(path, undefined); }
-        if (op === 3) { fs.unlinkSync(path, undefined); }
-        if (op === 4) { fs.rmdirSync(path, undefined); }
-        if (op === 5) { return fs.readdirSync(path).length; }
+    import fs from 'fs/promises';
+    export async function run(path: string, op: number): Promise<Result<number, number>> {
+        if (op === 0) { const stats = (await fs.stat(path)); if (stats.isDirectory()) { return 100; } return stats.size; }
+        if (op === 1) { if ((await exists(path))) { return 1; } return 0; }
+        if (op === 2) { (await fs.mkdir(path, undefined)); }
+        if (op === 3) { (await fs.unlink(path, undefined)); }
+        if (op === 4) { (await fs.rmdir(path, undefined)); }
+        if (op === 5) { return (await fs.readdir(path)).length; }
         return 0;
-    }"#;
+    }
+import { stat as existenceStat } from "node:fs/promises";
+async function exists(path: string): Promise<boolean> { try { await existenceStat(path); return true; } catch { return false; } }
+"#;
     for permissions in [FsPerms::ReadWrite, FsPerms::ReadOnly] {
         let context = WasiCtxBuilder::new()
             .preopened_dir(outer.path(), "/sandbox", permissions)?
@@ -309,23 +318,23 @@ async fn metadata_and_directory_mutations_preserve_live_stats_and_release_resour
 {
     let directory = tempfile::tempdir()?;
     let source = r#"
-    import disk from 'node:fs';
+    import disk from 'node:fs/promises';
     import type {Stats} from 'fs';
     function retain(value: Stats): Stats { return value; }
-    export function run(): number {
+    export async function run(): Promise<number> {
         let index = 0;
         let count = 0;
-        const root = retain(disk.statSync('/sandbox', {bigint:false, throwIfNoEntry:true}));
+        const root = retain((await disk.stat('/sandbox', {bigint:false, throwIfNoEntry:true})));
         const alias = root;
         while (index < 1000) {
-            disk.mkdirSync('/sandbox/child');
-            disk.writeFileSync('/sandbox/child/file', 'é😀');
-            const file = retain(disk.statSync('/sandbox/child/file'));
+            (await disk.mkdir('/sandbox/child'));
+            (await disk.writeFile('/sandbox/child/file', 'é😀'));
+            const file = retain((await disk.stat('/sandbox/child/file')));
             const temporary = new Uint8Array(256);
             if (file.isFile()) { if (!file.isDirectory()) { if (file.mtimeMs > 0) { count = count + file.size; } } }
-            disk.unlinkSync('/sandbox/child/file');
-            disk.rmdirSync('/sandbox/child');
-            if (disk.existsSync('/sandbox/child')) { return -1; }
+            (await disk.unlink('/sandbox/child/file'));
+            (await disk.rmdir('/sandbox/child'));
+            if ((await exists('/sandbox/child'))) { return -1; }
             index = index + 1;
         }
         if (root !== alias) { return -2; }
@@ -333,7 +342,10 @@ async fn metadata_and_directory_mutations_preserve_live_stats_and_release_resour
         if (root.isFile()) { return -4; }
         if (typeof root !== 'object') { return -5; }
         return count;
-    }"#;
+    }
+import { stat as existenceStat } from "node:fs/promises";
+async function exists(path: string): Promise<boolean> { try { await existenceStat(path); return true; } catch { return false; } }
+"#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
         .build();
@@ -357,7 +369,7 @@ async fn directory_names_survive_growth_helper_calls_and_collection() -> Result<
     }
     fs::create_dir(directory.path().join("empty"))?;
     let source = r#"
-    import {readdirSync} from 'fs';
+    import {readdir} from 'fs/promises';
     function retain(names: string[]): string[] { return names; }
     function text(names: string[]): string {
         let result = '';
@@ -369,8 +381,8 @@ async fn directory_names_survive_growth_helper_calls_and_collection() -> Result<
         }
         return result;
     }
-    export function run(path: string): string {
-        const names = retain(readdirSync(path, {encoding:'UTF-8', recursive:false, withFileTypes:false}));
+    export async function run(path: string): Promise<string> {
+        const names = retain((await readdir(path, {encoding:'UTF-8', recursive:false, withFileTypes:false})));
         let index = 0;
         while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
         if (names.length > 0) { if (names[0] === undefined) { return 'lost'; } }
@@ -407,51 +419,57 @@ async fn metadata_options_are_checked_after_effects_and_before_io() -> Result<()
     fs::write(directory.path().join("keep"), b"keep")?;
     for (call, expected) in [
         (
-            "statSync(path(state), {bigint: flag(state, true), bigint: flag(state, false), throwIfNoEntry: flag(state,true)}).size",
+            "(await stat(path(state), {bigint: flag(state, true), bigint: flag(state, false), throwIfNoEntry: flag(state,true)})).size",
             4.0,
         ),
         (
-            "statSync(path(state), {bigint: flag(state, true), throwIfNoEntry: flag(state,true)}).size",
+            "(await stat(path(state), {bigint: flag(state, true), throwIfNoEntry: flag(state,true)})).size",
             -1221.0,
         ),
         (
-            "statSync(path(state), {unknown: flag(state,false), bigint: flag(state,false)}).size",
+            "(await stat(path(state), {unknown: flag(state,false), bigint: flag(state,false)})).size",
             -1221.0,
         ),
-        ("statSync(path(state), {bigint: undefined}).size", -1201.0),
         (
-            "statSync(path(state), {throwIfNoEntry: false}).size",
+            "(await stat(path(state), {bigint: undefined})).size",
             -1201.0,
         ),
-        ("statSync(path(state), null).size", 4.0),
-        ("statSync(path(state), undefined).size", 4.0),
         (
-            "readdirSync(path(state), {recursive: flag(state,true), recursive: flag(state,false), withFileTypes: flag(state,true)}).length",
+            "(await stat(path(state), {throwIfNoEntry: false})).size",
+            -1201.0,
+        ),
+        ("(await stat(path(state), null)).size", 4.0),
+        ("(await stat(path(state), undefined)).size", 4.0),
+        (
+            "(await readdir(path(state), {recursive: flag(state,true), recursive: flag(state,false), withFileTypes: flag(state,true)})).length",
             -1231.0,
         ),
-        ("readdirSync(path(state), 'binary').length", -1201.0),
-        ("readdirSync(path(state), {encoding: 42}).length", -1201.0),
+        ("(await readdir(path(state), 'binary')).length", -1201.0),
         (
-            "mkdirSync(path(state), {recursive: flag(state,false)})",
+            "(await readdir(path(state), {encoding: 42})).length",
+            -1201.0,
+        ),
+        (
+            "(await mkdir(path(state), {recursive: flag(state,false)}))",
             -1211.0,
         ),
         (
-            "unlinkSync(path(state), {unknown: flag(state,true)})",
+            "(await unlink(path(state), {unknown: flag(state,true)}))",
             -1211.0,
         ),
-        ("rmdirSync(path(state), null)", -1201.0),
+        ("(await rmdir(path(state), null))", -1201.0),
     ] {
-        let call = if call.starts_with("statSync") || call.starts_with("readdirSync") {
+        let call = if call.starts_with("(await stat") || call.starts_with("(await readdir") {
             format!("return {call}")
         } else {
             format!("{call}; return 0")
         };
         let source = format!(
             r#"
-        import {{statSync, readdirSync, mkdirSync, unlinkSync, rmdirSync}} from 'fs';
+        import {{stat, readdir, mkdir, unlink, rmdir}} from 'fs/promises';
         function path(state: Uint8Array): string {{ state[0] = state[0] + 1; return '/sandbox/keep'; }}
         function flag(state: Uint8Array, value: boolean): boolean {{ state[0] = state[0] + 10; return value; }}
-        export function run(): number {{
+        export async function run(): Promise<number> {{
             const state = new Uint8Array(1);
             try {{ {call}; }} catch (error) {{ return 0 - error * 100 - state[0]; }}
         }}"#
@@ -472,19 +490,21 @@ async fn metadata_options_are_checked_after_effects_and_before_io() -> Result<()
 #[test]
 fn metadata_types_and_unsupported_source_forms_are_diagnosed() {
     for body in [
-        "return fs.statSync('/file')",
-        "let stats = fs.statSync('/file'); stats = true; return stats.size",
-        "return fs.statSync('/file').unknown",
-        "return fs.statSync('/file').isFile(1)",
-        "return fs.statSync('/file').isSymbolicLink()",
-        "return fs.statSync('/file', {get bigint() {return false}}).size",
-        "return fs.existsSync('/file', {})",
-        "return fs.readdirSync('/dir', {...{recursive:false}}).length",
-        "const options = {get recursive() {return false;}}; return fs.readdirSync('/dir', options).length",
-        "return fs.readdirSync('/dir')",
-        "let names = fs.readdirSync('/dir'); names = true; return names.length",
+        "return (await fs.stat('/file'))",
+        "let stats = (await fs.stat('/file')); stats = true; return stats.size",
+        "return (await fs.stat('/file')).unknown",
+        "return (await fs.stat('/file')).isFile(1)",
+        "return (await fs.stat('/file')).isSymbolicLink()",
+        "return (await fs.stat('/file', {get bigint() {return false}})).size",
+        "return (await exists('/file', {}))",
+        "return (await fs.readdir('/dir', {...{recursive:false}})).length",
+        "const options = {get recursive() {return false;}}; return (await fs.readdir('/dir', options)).length",
+        "return (await fs.readdir('/dir'))",
+        "let names = (await fs.readdir('/dir')); names = true; return names.length",
     ] {
-        let source = format!("import fs from 'fs'; export function run(): number {{ {body}; }}");
+        let source = format!(
+            "import fs from 'fs/promises'; export async function run(): Promise<number> {{ {body}; }}"
+        );
         assert!(
             compile_typescript_waffle(
                 &source,

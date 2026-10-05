@@ -168,6 +168,10 @@ reaction queue schedules source continuations. `all`, `allSettled`, and `race`
 register each operand once; race losers retain ownership and continue executing.
 Returning with unresolved ordinary work traps. Public invocations are serialized.
 
+Filesystem source operations use `node:fs/promises` or `fs/promises`. One typed
+capability path creates retained tasks for reads, writes, and metadata operations;
+synchronous and callback filesystem calls are rejected before lowering.
+
 Native transfer loops handle partial reads/writes and backpressure, and check
 the associated completion channel as well as EOF. Filesystem descriptors and
 HTTP resources close on supported return/error paths. Validation precedes

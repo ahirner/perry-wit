@@ -11,7 +11,6 @@ pub(crate) enum FilesystemOperation {
     ReadText,
     ReadValue,
     Stat,
-    Exists,
     MakeDirectory,
     Unlink,
     RemoveDirectory,
@@ -21,14 +20,13 @@ pub(crate) enum FilesystemOperation {
 impl FilesystemOperation {
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::WriteFile => "writeFileSync",
-            Self::ReadBytes | Self::ReadText | Self::ReadValue => "readFileSync",
-            Self::Stat => "statSync",
-            Self::Exists => "existsSync",
-            Self::MakeDirectory => "mkdirSync",
-            Self::Unlink => "unlinkSync",
-            Self::RemoveDirectory => "rmdirSync",
-            Self::ReadDirectory => "readdirSync",
+            Self::WriteFile => "writeFile",
+            Self::ReadBytes | Self::ReadText | Self::ReadValue => "readFile",
+            Self::Stat => "stat",
+            Self::MakeDirectory => "mkdir",
+            Self::Unlink => "unlink",
+            Self::RemoveDirectory => "rmdir",
+            Self::ReadDirectory => "readdir",
         }
     }
 }
@@ -51,19 +49,13 @@ impl LowerCapability for FilesystemOperation {
                 implementation: CapabilityImplementation::Filesystem,
             },
             Self::Stat
-            | Self::Exists
             | Self::MakeDirectory
             | Self::Unlink
             | Self::RemoveDirectory
             | Self::ReadDirectory => CapabilityPlan {
-                params: if *self == Self::Exists {
-                    vec![HirType::String]
-                } else {
-                    vec![HirType::String, HirType::Any]
-                },
+                params: vec![HirType::String, HirType::Any],
                 result: match self {
                     Self::Stat => HirType::Named("Stats".into()),
-                    Self::Exists => HirType::Boolean,
                     Self::ReadDirectory => HirType::Array(Box::new(HirType::String)),
                     _ => HirType::Void,
                 },

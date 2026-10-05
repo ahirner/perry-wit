@@ -172,7 +172,7 @@ pub(crate) fn plan_promises(
                             super::capabilities::CapabilityOperation::Fetch,
                         ) => TaskArguments::Fetch,
                         TypedIntrinsic::Capability(
-                            super::capabilities::CapabilityOperation::FilesystemPromise(operation),
+                            super::capabilities::CapabilityOperation::Filesystem(operation),
                         ) => TaskArguments::Filesystem(*operation),
                         _ => TaskArguments::Source(params.clone()),
                     },

@@ -839,8 +839,7 @@ impl<'a> FunctionLowerer<'a> {
         }
         if let Expr::ExternFuncRef { name, .. } = callee
             && let Some(super::resolve::TypedIntrinsic::Capability(
-                super::capabilities::CapabilityOperation::Filesystem(operation)
-                | super::capabilities::CapabilityOperation::FilesystemPromise(operation),
+                super::capabilities::CapabilityOperation::Filesystem(operation),
             )) = self.contract.intrinsics.get(name)
         {
             return self.filesystem_operation(name, *operation, args);

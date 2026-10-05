@@ -143,81 +143,14 @@ declare module "perry:stdio" {
 }
 
 declare module "fs" {
-  type Utf8Encoding = `${"u" | "U"}${"t" | "T"}${"f" | "F"}${"" | "-"}8`;
-  type BinaryEncoding = `${"b" | "B"}${"i" | "I"}${"n" | "N"}${"a" | "A"}${"r" | "R"}${"y" | "Y"}`;
-  /** Materialize exact bytes from a preopen-confined path and await producer completion.
-   * Encoding strings may be selected at runtime. */
-  export function readFileSync(
-    path: string,
-    options?: BinaryEncoding | null,
-  ): Uint8Array;
-  /** Strict UTF-8, preserving BOMs. Malformed text throws filesystem error 9.
-   * Reads use memory proportional to the file size; paths/flags follow readFileSync above. */
-  export function readFileSync(
-    path: string,
-    options: Utf8Encoding,
-  ): string;
-  /** Runtime encoding strings and reusable option objects return a tagged string-or-byte value.
-   * Plain objects support aliases, helper calls, and declared-field mutation. Getters,
-   * spreads, computed literal keys, methods, and custom prototypes are diagnosed.
-   * The compiler can specialize inline literals more precisely than this declaration.
-   * Narrow with typeof before using string-only or byte-only operations.
-   * Unsupported labels throw filesystem error 12 before opening a file. */
-  export function readFileSync(
-    path: string,
-    options: string | { encoding?: string | null; flag?: "r" },
-  ): string | Uint8Array;
-  interface WriteOptions {
-    /** Case-insensitive utf8 or utf-8; binary is also accepted for byte data. */
-    encoding?: string | null;
-    flag?: "w";
-  }
-  /** Overwrite a preopen-confined path with exact UTF-8 or visible bytes.
-   * Plain option objects may be reused and mutated. Unsupported options throw before I/O.
-   * May suspend until transfers and the independent P3 completion settle.
-   * Failures throw the one-based WASI 0.3 filesystem error ordinal. */
-  export function writeFileSync(
-    path: string,
-    data: string | Uint8Array,
-    options?: string | WriteOptions | null,
-  ): void;
-  /** Metadata with identity and fields retained through collection and Promises.
-   * Component boundaries use a stats record: size, mtime-ms, and a stats-kind enum. */
   export interface Stats {
     readonly size: number;
     readonly mtimeMs: number;
     isFile(): boolean;
     isDirectory(): boolean;
   }
-  /** Follow confined symlinks and report size, modification milliseconds, and type.
-   * Options are plain data objects. Missing entries throw; bigint is unsupported. */
-  export function statSync(path: string, options?: { bigint?: false; throwIfNoEntry?: true } | null): Stats;
-  /** Return false for filesystem errors, including paths outside available preopens. */
-  export function existsSync(path: string): boolean;
-  /** Create one directory. Recursive creation, permissions, and other options are unsupported. */
-  export function mkdirSync(path: string, options?: undefined): void;
-  export function unlinkSync(path: string, options?: undefined): void;
-  export function rmdirSync(path: string, options?: undefined): void;
-  /** Materialize UTF-8 entry names, excluding dot entries, then await producer completion.
-   * Plain option objects and runtime UTF-8 labels are supported. Ordering is host-defined.
-   * String arrays survive retained Promises and cross component boundaries as list<string>. */
-  export function readdirSync(path: string, options?: string | { encoding?: string | null; recursive?: false; withFileTypes?: false } | null): string[];
-  const fs: {
-    writeFileSync: typeof writeFileSync;
-    readFileSync: typeof readFileSync;
-    statSync: typeof statSync;
-    existsSync: typeof existsSync;
-    mkdirSync: typeof mkdirSync;
-    unlinkSync: typeof unlinkSync;
-    rmdirSync: typeof rmdirSync;
-    readdirSync: typeof readdirSync;
-  };
-  export default fs;
 }
-
-declare module "node:fs" {
-  export { writeFileSync, readFileSync, statSync, existsSync, mkdirSync, unlinkSync, rmdirSync, readdirSync, Stats, default } from "fs";
-}
+declare module "node:fs" { export type { Stats } from "fs"; }
 
 declare module "fs/promises" {
   import type { Stats } from "fs";

@@ -10,9 +10,9 @@ async fn dynamic_reads_keep_their_kind_through_helpers_guards_and_collection() -
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("input"), "é😀\0")?;
     let source = r#"
-    import {readFileSync, writeFileSync} from "fs";
-    function load(path: string, encoding: string): string | Uint8Array {
-        return readFileSync(path, {encoding, flag: "r"});
+    import {readFile, writeFile} from "fs/promises";
+    async function load(path: string, encoding: string): Promise<string | Uint8Array> {
+        return (await readFile(path, {encoding, flag: "r"}));
     }
     function inspect(value: Uint8Array | string): number {
         const alias = value;
@@ -28,10 +28,10 @@ async fn dynamic_reads_keep_their_kind_through_helpers_guards_and_collection() -
             return view[0] + value.length;
         }
     }
-    export function run(encoding: string): number {
-        const value = load("/sandbox/input", encoding);
+    export async function run(encoding: string): Promise<number> {
+        const value = (await load("/sandbox/input", encoding));
         const result = inspect(value);
-        writeFileSync("/sandbox/output", value);
+        (await writeFile("/sandbox/output", value));
         return result;
     }"#;
     let context = WasiCtxBuilder::new()
@@ -184,16 +184,16 @@ async fn dynamic_file_results_cross_component_result_variants() -> Result<()> {
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("input"), "é😀\0")?;
     for declaration in [
-        "export function run(encoding: string): Result<string | Uint8Array, number> { return readFileSync('/sandbox/input', encoding); }",
+        "export async function run(encoding: string): Promise<Result<string | Uint8Array, number>> { return (await readFile('/sandbox/input', encoding)); }",
         r#"
-        async function read(encoding: string): Promise<string | Uint8Array> { return readFileSync('/sandbox/input', encoding); }
+        async function read(encoding: string): Promise<string | Uint8Array> { return (await readFile('/sandbox/input', encoding)); }
         export async function run(encoding: string): Promise<Result<string | Uint8Array, number>> {
             const pending = read(encoding);
             const value = await pending;
             return value;
         }"#,
     ] {
-        let source = format!("import {{readFileSync}} from 'fs'; {declaration}");
+        let source = format!("import {{readFile}} from 'fs/promises'; {declaration}");
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
             .build();
@@ -226,13 +226,13 @@ async fn runtime_options_preserve_effects_and_validate_the_selected_data_kind() 
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("input"), "é😀\0")?;
     let source = r#"
-    import {readFileSync, writeFileSync} from 'node:fs';
+    import {readFile, writeFile} from 'node:fs/promises';
     function step(state: Uint8Array, value: string): string { state[0] = state[0] + 1; return value; }
-    export function run(encoding: string, writeEncoding: string): number {
+    export async function run(encoding: string, writeEncoding: string): Promise<number> {
         const state = new Uint8Array(1);
         try {
-            const value = readFileSync(step(state, '/sandbox/input'), {encoding: step(state, encoding), flag: step(state, 'r')});
-            writeFileSync(step(state, '/sandbox/output'), value, {encoding: step(state, writeEncoding), flag: step(state, 'w')});
+            const value = (await readFile(step(state, '/sandbox/input'), {encoding: step(state, encoding), flag: step(state, 'r')}));
+            (await writeFile(step(state, '/sandbox/output'), value, {encoding: step(state, writeEncoding), flag: step(state, 'w')}));
             return value.length * 100 + state[0];
         } catch (error) { return 0 - error * 100 - state[0]; }
     }"#;

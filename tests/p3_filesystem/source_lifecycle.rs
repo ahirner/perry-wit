@@ -19,9 +19,9 @@ use super::{Host, instantiate_with};
 type WriteArguments = (Resource<Descriptor>, StreamReader<u8>, u64);
 
 const WRITE: &str = r#"
-import {writeFileSync} from "fs";
+import {writeFile} from "fs/promises";
 async function save(path: string, text: string): Promise<number> {
-    try { writeFileSync(path, text); return 0; }
+    try { (await writeFile(path, text)); return 0; }
     catch (error) { return error; }
 }
 export async function run(): Promise<number> {
@@ -68,10 +68,10 @@ async fn filesystem_future_errors_survive_sibling_collection_after_successful_tr
 #[tokio::test(flavor = "current_thread")]
 async fn disposal_closes_pending_filesystem_owners_without_stale_guest_cleanup() -> Result<()> {
     let source = r#"
-    import {writeFileSync} from "fs";
-    export function run(): Result<number, number> {
-        try { writeFileSync("/sandbox/file", "pending"); return 1; }
-        finally { writeFileSync("/sandbox/finally", "unexpected"); }
+    import {writeFile} from "fs/promises";
+    export async function run(): Promise<Result<number, number>> {
+        try { (await writeFile("/sandbox/file", "pending")); return 1; }
+        finally { (await writeFile("/sandbox/finally", "unexpected")); }
     }"#;
     let directory = tempfile::tempdir()?;
     let context = WasiCtxBuilder::new()
@@ -98,9 +98,9 @@ async fn incomplete_transfers_fail_and_host_traps_bypass_language_cleanup() -> R
     use crate::output_capture::MemoryOutput;
 
     let source = r#"
-    import {writeFileSync} from "fs";
-    export function run(): number {
-        try { writeFileSync("/sandbox/file", "must be transferred"); return 0; }
+    import {writeFile} from "fs/promises";
+    export async function run(): Promise<number> {
+        try { (await writeFile("/sandbox/file", "must be transferred")); return 0; }
         catch (error) { return error; }
         finally { console.log("finished"); }
     }"#;

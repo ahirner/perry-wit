@@ -83,7 +83,6 @@ impl TypedIntrinsic {
                             | ClockOperation::TimeoutValue
                     ) | CapabilityOperation::Stdio(_)
                         | CapabilityOperation::Filesystem(_)
-                        | CapabilityOperation::FilesystemPromise(_)
                         | CapabilityOperation::HttpGet
                         | CapabilityOperation::Fetch
                         | CapabilityOperation::Random(RandomOperation::Fill)
@@ -307,9 +306,7 @@ impl ResolvedContract {
         self.intrinsics.values().any(|intrinsic| {
             matches!(
                 intrinsic,
-                TypedIntrinsic::Capability(
-                    CapabilityOperation::Filesystem(_) | CapabilityOperation::FilesystemPromise(_)
-                )
+                TypedIntrinsic::Capability(CapabilityOperation::Filesystem(_))
             )
         })
     }

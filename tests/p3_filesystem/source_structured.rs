@@ -149,14 +149,14 @@ async fn filesystem_structured_results_preserve_values_errors_and_finally_throug
         for arrays in [false, true] {
             let ty = if arrays { "string[]" } else { "Stats" };
             let call = if arrays {
-                "fs.readdirSync(path)"
+                "(await fs.readdir(path))"
             } else {
-                "fs.statSync(path)"
+                "(await fs.stat(path))"
             };
             let source = if stored {
                 format!(
                     r#"
-                import fs from 'fs';
+                import fs from 'fs/promises';
                 async function read(path:string):Promise<{ty}> {{return {call};}}
                 export async function run(path:string,fail:boolean):Promise<Result<{ty},number>> {{
                     const pending=read(path);
@@ -173,8 +173,8 @@ async fn filesystem_structured_results_preserve_values_errors_and_finally_throug
             } else {
                 format!(
                     r#"
-                import fs from 'fs';
-                export function run(path:string,fail:boolean):Result<{ty},number> {{
+                import fs from 'fs/promises';
+                export async function run(path:string,fail:boolean):Promise<Result<{ty},number>> {{
                     try {{const result={call};if(fail) {{throw 123;}}return result;}}
                     finally {{let index=0;while(index<2000) {{const temporary=new Uint8Array(256);index=index+1;}}}}
                 }}"#

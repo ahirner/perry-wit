@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync } from 'fs';
+import { readFile, writeFile } from 'fs/promises';
 
-export function runTask(path: string): string {
-  const data = readFileSync(path, 'utf8');
-  writeFileSync(path + '.copy', data, 'utf8');
+export async function runTask(path: string): Promise<string> {
+  const data = (await readFile(path, 'utf8'));
+  (await writeFile(path + '.copy', data, 'utf8'));
   return data;
 }

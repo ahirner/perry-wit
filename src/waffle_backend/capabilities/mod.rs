@@ -26,7 +26,6 @@ pub(crate) enum CapabilityOperation {
     Random(RandomOperation),
     Stdio(StdioOperation),
     Filesystem(FilesystemOperation),
-    FilesystemPromise(FilesystemOperation),
     HttpGet,
     Fetch,
     Process(ProcessOperation),
@@ -71,7 +70,7 @@ impl CapabilityOperation {
             Self::Context(operation) => operation.name(),
             Self::Random(operation) => operation.name(),
             Self::Stdio(operation) => operation.name(),
-            Self::Filesystem(operation) | Self::FilesystemPromise(operation) => operation.name(),
+            Self::Filesystem(operation) => operation.name(),
             Self::HttpGet => "get",
             Self::Fetch => "fetch",
             Self::Process(operation) => operation.name(),
@@ -92,8 +91,7 @@ impl LowerCapability for CapabilityOperation {
             Self::Context(operation) => operation.lower(),
             Self::Random(operation) => operation.lower(),
             Self::Stdio(operation) => operation.lower(),
-            Self::Filesystem(operation) => operation.lower(),
-            Self::FilesystemPromise(operation) => {
+            Self::Filesystem(operation) => {
                 let mut plan = operation.lower();
                 plan.result = HirType::Promise(Box::new(plan.result));
                 plan

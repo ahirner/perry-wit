@@ -9,7 +9,7 @@ async fn options_retain_aliases_mutations_and_unknown_fields_through_helpers_and
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("file"), "😀é")?;
     let source = r#"
-    import fs from 'fs';
+    import fs from 'fs/promises';
     interface Options {encoding?:string; flag:string;}
     function make(label:string):Options { return {encoding:label,flag:'r'}; }
     function update(options:Options,label:string):Options { options.encoding=label; return options; }
@@ -17,24 +17,24 @@ async fn options_retain_aliases_mutations_and_unknown_fields_through_helpers_and
         if (typeof value === 'string') { return value; }
         return new TextDecoder().decode(value);
     }
-    export function run(label:string):string {
+    export async function run(label:string):Promise<string> {
         const options=make(label);
         const alias=options;
         let index=0;
         while (index<2000) {const garbage={encoding:'utf'+'8', nested:{value:new Uint8Array(128)}}; index=index+1;}
-        const first=text(fs.readFileSync('/sandbox/file',options));
+        const first=text((await fs.readFile('/sandbox/file',options)));
         update(alias,'binary');
         if(options.encoding!=='binary') {return 'lost mutation';}
         if (options!==alias) {return 'lost identity';}
         const invalid={encoding:options.encoding,flag:options.flag,extra:new Uint8Array(128)};
-        try {fs.readFileSync('/outside/file',invalid);return 'accepted unknown';}
+        try {(await fs.readFile('/outside/file',invalid));return 'accepted unknown';}
         catch(error) {if(error!==12) {throw error;}}
-        const bytes=fs.readFileSync('/sandbox/file',options);
+        const bytes=(await fs.readFile('/sandbox/file',options));
         options.flag='w';
-        fs.writeFileSync('/sandbox/copy',bytes,options);
+        (await fs.writeFile('/sandbox/copy',bytes,options));
         options.flag='r';
         options.encoding=undefined;
-        const again=fs.readFileSync('/sandbox/copy',options);
+        const again=(await fs.readFile('/sandbox/copy',options));
         if(typeof again==='string') {return 'wrong default';}
         return first+new TextDecoder().decode(again);
     }"#;
@@ -62,22 +62,22 @@ async fn options_keep_source_order_duplicate_effects_and_rejection_before_io() -
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("file"), "original")?;
     let source = r#"
-    import fs from 'fs';
+    import fs from 'fs/promises';
     type Options={encoding:string;flag:string};
     function effect(state:Uint8Array,text:string):string {state[0]=state[0]+1;return text;}
     function make(state:Uint8Array):Options {
         return {encoding:effect(state,'unsupported'),flag:effect(state,'w'),encoding:effect(state,'utf8'),unknown:effect(state,'effect')};
     }
-    export function run(path:string):number {
+    export async function run(path:string):Promise<number> {
         const state=new Uint8Array(1);
         const invalid=make(state);
-        try {fs.writeFileSync(effect(state,path),effect(state,'changed'),invalid);return 0;}
+        try {(await fs.writeFile(effect(state,path),effect(state,'changed'),invalid));return 0;}
         catch(error) {if(error!==12) {throw error;}}
         if(state[0]!==6) {return -1;}
         const options:Options={encoding:invalid.encoding,flag:invalid.flag};
-        fs.writeFileSync('/sandbox/copy','é😀',options);
+        (await fs.writeFile('/sandbox/copy','é😀',options));
         options.flag='r';
-        const value=fs.readFileSync('/sandbox/copy',options);
+        const value=(await fs.readFile('/sandbox/copy',options));
         if(typeof value==='string') {if(value==='é😀') {return state[0];}}
         return -2;
     }"#;
@@ -140,29 +140,29 @@ async fn stored_metadata_options_validate_current_fields_and_types() -> Result<(
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("é😀"), "data")?;
     let source = r#"
-    import fs from 'fs';
+    import fs from 'fs/promises';
     interface StatOptions {bigint:boolean;throwIfNoEntry:boolean;}
     interface DirectoryOptions {encoding:string;recursive:boolean;withFileTypes:boolean;}
     function statOptions():StatOptions {return {bigint:false,throwIfNoEntry:true};}
     function directoryOptions():DirectoryOptions {return {encoding:'UTF-8',recursive:false,withFileTypes:false};}
-    export function run():number {
+    export async function run():Promise<number> {
         const stat=statOptions();
         const listing=directoryOptions();
         if(stat.bigint) {return -1;}
         if(!stat.throwIfNoEntry) {return -2;}
-        if(fs.statSync('/sandbox/é😀',stat).size!==4) {return -3;}
-        if(fs.readdirSync('/sandbox',listing)[0]!=='é😀') {return -4;}
+        if((await fs.stat('/sandbox/é😀',stat)).size!==4) {return -3;}
+        if((await fs.readdir('/sandbox',listing))[0]!=='é😀') {return -4;}
         const alias=listing;
         const key='rec'+'ursive';
         alias[key]=true;
-        try {fs.readdirSync('/outside',listing);return -5;} catch(error) {if(error!==12) {throw error;}}
+        try {(await fs.readdir('/outside',listing));return -5;} catch(error) {if(error!==12) {throw error;}}
         alias[key]=false;
         stat.bigint=true;
-        try {fs.statSync('/outside',stat);return -6;} catch(error) {if(error!==12) {throw error;}}
+        try {(await fs.stat('/outside',stat));return -6;} catch(error) {if(error!==12) {throw error;}}
         stat.bigint=false;
         const invalid={encoding:listing.encoding,unknown:{encoding:'utf8'}};
-        try {fs.readdirSync('/outside',invalid);return -7;} catch(error) {if(error!==12) {throw error;}}
-        return fs.statSync('/sandbox/é😀',stat).size+fs.readdirSync('/sandbox',listing).length;
+        try {(await fs.readdir('/outside',invalid));return -7;} catch(error) {if(error!==12) {throw error;}}
+        return (await fs.stat('/sandbox/é😀',stat)).size+(await fs.readdir('/sandbox',listing)).length;
     }"#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
@@ -213,7 +213,7 @@ fn unsupported_objects_are_diagnosed_before_losing_property_effects() {
         "class __AnonShape_fake {encoding='utf8';} const options=new __AnonShape_fake();",
     ] {
         let source = format!(
-            "import fs from 'fs'; export function run():number {{{declaration}return fs.readFileSync('/file',options).length;}}"
+            "import fs from 'fs/promises'; export async function run():Promise<number> {{{declaration}return (await fs.readFile('/file',options)).length;}}"
         );
         assert!(
             compile_typescript_waffle(
@@ -231,22 +231,22 @@ fn unsupported_objects_are_diagnosed_before_losing_property_effects() {
 async fn stored_options_match_node_for_supported_encodings_and_metadata() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let source = r#"
-    import fs from 'node:fs';
+    import fs from 'node:fs/promises';
     interface Options {encoding?:string;flag:string;}
-    export function run(path:string):string {
+    export async function run(path:string):Promise<string> {
         const options:Options={encoding:'utf8',flag:'w'};
         const alias=options;
         const file=path+'/file';
-        fs.writeFileSync(file,'é😀',alias);
+        (await fs.writeFile(file,'é😀',alias));
         options.flag='r';
-        const text=fs.readFileSync(file,options);
+        const text=(await fs.readFile(file,options));
         if(typeof text!=='string') {return 'expected text';}
         alias.encoding=undefined;
-        const bytes=fs.readFileSync(file,options.encoding);
+        const bytes=(await fs.readFile(file,options.encoding));
         if(typeof bytes==='string') {return 'expected bytes';}
         const metadata={bigint:false,throwIfNoEntry:true};
-        if(fs.statSync(file,metadata).size!==bytes.length) {return 'wrong size';}
-        fs.unlinkSync(file);
+        if((await fs.stat(file,metadata)).size!==bytes.length) {return 'wrong size';}
+        (await fs.unlink(file));
         return text+new TextDecoder().decode(bytes);
     }"#;
     let context = WasiCtxBuilder::new()
@@ -259,7 +259,7 @@ async fn stored_options_match_node_for_supported_encodings_and_metadata() -> Res
     fs::write(
         &entry,
         format!(
-            "{source}\nprocess.stdout.write(run({}));",
+            "{source}\nprocess.stdout.write(await run({}));",
             serde_json::to_string(&directory.path())?
         ),
     )?;
@@ -282,21 +282,21 @@ async fn stored_options_match_node_for_supported_encodings_and_metadata() -> Res
 #[test]
 fn reusable_options_and_structured_promises_match_sdk_declarations() -> Result<()> {
     let source = r#"
-    import fs from 'fs';
+    import fs from 'fs/promises';
     import type {Stats} from 'fs';
     interface ReadOptions {encoding?:string;flag:'r';}
     async function retain(value:Stats):Promise<Stats> {return value;}
     export async function run(path:string):Promise<string[]> {
         const options:ReadOptions={encoding:'utf8',flag:'r'};
-        const first:string|Uint8Array=fs.readFileSync(path,options);
+        const first:string|Uint8Array=(await fs.readFile(path,options));
         options.encoding=undefined;
-        const second:string|Uint8Array=fs.readFileSync(path,options);
-        const stat:Stats=await retain(fs.statSync(path,{bigint:false,throwIfNoEntry:true}));
+        const second:string|Uint8Array=(await fs.readFile(path,options));
+        const stat:Stats=await retain((await fs.stat(path,{bigint:false,throwIfNoEntry:true})));
         if(stat.size<0) {throw 1;}
-        fs.writeFileSync(path,first);
-        fs.writeFileSync(path,second,{flag:'w'});
+        (await fs.writeFile(path,first));
+        (await fs.writeFile(path,second,{flag:'w'}));
         const listing:{encoding?:string;recursive?:false}={encoding:'utf8',recursive:false};
-        return fs.readdirSync(path,listing);
+        return (await fs.readdir(path,listing));
     }"#;
     crate::waffle_fixture::compile_typescript_waffle(
         source,

@@ -25,11 +25,11 @@ enum Outcome {
 async fn directory_entries_and_completion_keep_owners_through_suspension_collection_and_disposal()
 -> Result<()> {
     let source = r#"
-    import {readdirSync} from 'fs';
+    import {readdir} from 'fs/promises';
     interface Options {encoding:string;recursive:boolean;}
     async function read(options:Options): Promise<string[]> {
         try {
-            const names = readdirSync('/sandbox',options);
+            const names = (await readdir('/sandbox',options));
             let index = 0;
             while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
             if (names.length !== 81) { throw 99; }

@@ -125,7 +125,7 @@
         "Repeated calls are tested under a 1 MiB guest memory cap using independent Wasmtime P3 bindings"
       ],
       "differences": [
-        "Explicit request/response byte caps; status 200\u2013599, with empty bodies for 204/205/304",
+        "Explicit request/response byte caps; status 200–599, with empty bodies for 204/205/304",
         "Overflow returns the corresponding WASI body-size error; invalid response metadata and request producer failures return internal-error",
         "Source exceptions and interrupted calls require store disposal; hosts must drive the P3 event loop through completion",
         "Request trailers are consumed but not exposed; source Web Streams, response trailers, and cooperative cancellation are unsupported"
@@ -152,7 +152,7 @@
       "name": "Native P3 Filesystem Metadata and Directories",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "stat, mkdir, unlink, rmdir, readdir from node:fs/promises; synchronous spellings and existsSync from node:fs",
+      "domain": "stat, mkdir, unlink, rmdir, readdir from node:fs/promises or fs/promises",
       "invariants": [
         "Shared normalized longest-prefix preopens confine paths and symlinks; mutation cannot remove preopen roots",
         "Stats preserve unsigned file sizes, signed modification milliseconds, type predicates, and identity",
@@ -160,14 +160,14 @@
         "Options and argument effects precede validation and I/O; known duplicate fields use the last value",
         "Stats, string arrays, and suspended directory buffers survive helper calls, collection, and retained Promise outcomes",
         "Normal and recoverable-error paths release descriptors, entry streams, and completion futures",
-        "The corresponding node:fs/promises operations use the same wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
+        "Promise operations use wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
       ],
       "differences": [
         "Reusable plain option objects retain aliases, typed mutation, optional undefined fields, and field effects; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
-        "mkdirSync, unlinkSync, and rmdirSync only accept omitted or undefined options",
+        "mkdir, unlink, and rmdir only accept omitted or undefined options",
         "Directory order is host-defined, materialization uses memory proportional to contents, and absent modification timestamps return zero",
         "Component Stats use the exported stats record and stats-kind enum; string arrays use list<string>, also inside numeric-error Result returns",
-        "Errors use one-based WASI 0.3 ordinals; existsSync returns false on filesystem errors, while host traps and cancellation require store disposal"
+        "Errors use one-based WASI 0.3 ordinals. Existence checks use stat success/rejection; no exists API is supplied. Synchronous and callback filesystem APIs are diagnosed. Host traps and interrupted invocations require store disposal"
       ],
       "conformance": [
         "rust:tests/p3_filesystem_test.rs#source::metadata::directory_materialization_grows_beyond_one_page_without_a_fixed_entry_limit",
@@ -191,7 +191,8 @@
         "rust:tests/p3_filesystem_test.rs#source::structured::stats_roundtrip_component_records_and_retained_outcomes_without_filesystem_imports",
         "rust:tests/p3_filesystem_test.rs#source::structured::filesystem_structured_results_preserve_values_errors_and_finally_through_component_abi",
         "rust:tests/waffle_wit_native_test.rs#resolved_world_platform_io_uses_shared_guest_memory",
-        "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup"
+        "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup",
+        "rust:tests/p3_filesystem_test.rs#source::synchronous_and_callback_filesystem_calls_have_direct_diagnostics"
       ],
       "wasi": [
         "wasi:filesystem/preopens@0.3.0",
@@ -203,7 +204,7 @@
       "name": "Native P3 Filesystem Reads",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "readFile from node:fs/promises and readFileSync from node:fs with omitted, literal, or runtime string encoding",
+      "domain": "readFile from node:fs/promises or fs/promises with omitted, literal, or runtime string encoding",
       "invariants": [
         "Binary reads preserve arbitrary bytes and return independent mutable views",
         "Text reads preserve BOMs, NULs, and valid UTF-8 with scalar string semantics",
@@ -212,7 +213,7 @@
         "Pending buffers and returned values survive collection; resources close on success and recoverable errors",
         "Materialization uses storage proportional to file size, with multi-megabyte and repeated bounded-memory fixtures",
         "String-or-byte kinds survive aliases, assignments, control flow, retained Promise outcomes, and component parameters/results",
-        "The corresponding node:fs/promises operations use the same wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
+        "Promise operations use wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
       ],
       "differences": [
         "Runtime string encodings return string-or-byte values; methods, indexing, and type-specific arguments require typeof narrowing",
@@ -255,7 +256,8 @@
         "rust:tests/waffle_decoder_test.rs#split_scalars_boms_and_invalid_sequences_match_fatal_node_decoding",
         "rust:tests/waffle_decoder_test.rs#streaming_errors_keep_the_standard_input_queue_until_consumed_or_reset",
         "rust:tests/waffle_wit_native_test.rs#resolved_world_platform_io_uses_shared_guest_memory",
-        "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup"
+        "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup",
+        "rust:tests/p3_filesystem_test.rs#source::synchronous_and_callback_filesystem_calls_have_direct_diagnostics"
       ],
       "wasi": [
         "wasi:filesystem/preopens@0.3.0",
@@ -267,7 +269,7 @@
       "name": "Native P3 Filesystem Writes",
       "tier": "tier-2-node-core",
       "support": "partial",
-      "domain": "Overwrite-only writeFile from node:fs/promises and writeFileSync from node:fs",
+      "domain": "Overwrite-only writeFile from node:fs/promises or fs/promises",
       "invariants": [
         "Named aliases, namespace imports, and default imports retain binding identity; unused imports add no filesystem capability",
         "String data preserves exact UTF-8 and NUL bytes; Uint8Array data writes only its visible range",
@@ -276,7 +278,7 @@
         "Normalized paths select the longest matching preopen on a component boundary; symlink resolution remains host-confined",
         "Shared native stream writes preserve partial transfers and await an independent filesystem completion",
         "Descriptors, writable ends, and completion futures close on normal and recoverable-error paths; suspended buffers survive sibling collection",
-        "The corresponding node:fs/promises operations use the same wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
+        "Promise operations use wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
       ],
       "differences": [
         "Options accept encoding strings, null, undefined, and reusable plain objects; runtime delete, getters, setters, methods, spreads, computed literal keys, and custom prototypes are diagnosed",
@@ -310,7 +312,8 @@
         "rust:tests/p3_filesystem_test.rs#source::options::stored_options_match_node_for_supported_encodings_and_metadata",
         "rust:tests/p3_filesystem_test.rs#source::options::reusable_options_and_structured_promises_match_sdk_declarations",
         "rust:tests/waffle_wit_native_test.rs#resolved_world_platform_io_uses_shared_guest_memory",
-        "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup"
+        "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup",
+        "rust:tests/p3_filesystem_test.rs#source::synchronous_and_callback_filesystem_calls_have_direct_diagnostics"
       ],
       "wasi": [
         "wasi:filesystem/preopens@0.3.0",

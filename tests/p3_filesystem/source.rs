@@ -29,11 +29,11 @@ mod input;
 async fn source_writes_preserve_binary_subviews_and_exact_utf8_under_repeated_calls() -> Result<()>
 {
     let source = r#"
-    import disk from "node:fs";
-    import {writeFileSync as save} from "fs";
-    export function run(path: string, bytes: Uint8Array, text: string): number {
-        disk.writeFileSync(path, bytes.subarray(1, bytes.length - 1), {encoding: "BiNaRy", flag: "w"});
-        save(path + ".txt", text, "UTF-8");
+    import disk from "node:fs/promises";
+    import {writeFile as save} from "fs/promises";
+    export async function run(path: string, bytes: Uint8Array, text: string): Promise<number> {
+        (await disk.writeFile(path, bytes.subarray(1, bytes.length - 1), {encoding: "BiNaRy", flag: "w"}));
+        (await save(path + ".txt", text, "UTF-8"));
         return bytes.length;
     }"#;
     let directory = tempfile::tempdir()?;
@@ -74,13 +74,13 @@ async fn source_writes_preserve_binary_subviews_and_exact_utf8_under_repeated_ca
 async fn invalid_options_preserve_files_and_argument_effects_before_preopen_resolution()
 -> Result<()> {
     let source = r#"
-    import {writeFileSync} from "node:fs";
+    import {writeFile} from "node:fs/promises";
     function path(state: Uint8Array, value: string): string { state[0] = state[0] * 3 + 1; return value; }
     function data(state: Uint8Array): string { state[0] = state[0] * 3 + 2; return "replace"; }
     function option(state: Uint8Array, value: string): string { state[0] = state[0] * 3 + 3; return value; }
-    export function run(target: string, flag: string): number {
+    export async function run(target: string, flag: string): Promise<number> {
         const state = new Uint8Array(1);
-        try { writeFileSync(path(state, target), data(state), {flag: option(state, flag)}); return 0; }
+        try { (await writeFile(path(state, target), data(state), {flag: option(state, flag)})); return 0; }
         catch (error) { return error * 100 + state[0]; }
     }"#;
     let directory = tempfile::tempdir()?;
@@ -113,8 +113,8 @@ async fn invalid_options_preserve_files_and_argument_effects_before_preopen_reso
 async fn filesystem_paths_select_the_longest_mount_and_reject_escapes_without_leaks() -> Result<()>
 {
     let source = r#"
-    import * as disk from "fs";
-    export function run(path: string): Result<number, number> { disk.writeFileSync(path, "é😀"); return 1; }
+    import * as disk from "fs/promises";
+    export async function run(path: string): Promise<Result<number, number>> { (await disk.writeFile(path, "é😀")); return 1; }
     "#;
     let outer = tempfile::tempdir()?;
     let inner = tempfile::tempdir()?;
@@ -187,12 +187,12 @@ async fn filesystem_paths_select_the_longest_mount_and_reject_escapes_without_le
 #[tokio::test(flavor = "current_thread")]
 async fn write_options_defaults_duplicates_and_coercion_limits_are_explicit() -> Result<()> {
     let source = r#"
-    import {writeFileSync as save} from "node:fs";
+    import {writeFile as save} from "node:fs/promises";
     function effect(state: Uint8Array, value: string): string { state[0] = state[0] + 1; return value; }
-    export function run(path: string, encoding: string, binary: boolean): Result<number, number> {
+    export async function run(path: string, encoding: string, binary: boolean): Promise<Result<number, number>> {
         const state = new Uint8Array(1);
-        if (binary) { save(path, new Uint8Array([0,255,128]), {encoding, flag: "w"}); }
-        else { save(path, "😀\0é", {flag: effect(state, "a"), flag: effect(state, "w"), encoding}); }
+        if (binary) { (await save(path, new Uint8Array([0,255,128]), {encoding, flag: "w"})); }
+        else { (await save(path, "😀\0é", {flag: effect(state, "a"), flag: effect(state, "w"), encoding})); }
         return state[0];
     }"#;
     let directory = tempfile::tempdir()?;
@@ -251,7 +251,7 @@ async fn write_options_defaults_duplicates_and_coercion_limits_are_explicit() ->
         "{flag: undefined}",
     ] {
         let source = format!(
-            "import {{writeFileSync}} from 'fs'; export function run(): Result<number, number> {{ writeFileSync('/sandbox/options', '', {options}); return 1; }}"
+            "import {{writeFile}} from 'fs/promises'; export async function run(): Promise<Result<number, number>> {{ (await writeFile('/sandbox/options', '', {options})); return 1; }}"
         );
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
@@ -282,16 +282,16 @@ async fn write_options_defaults_duplicates_and_coercion_limits_are_explicit() ->
 async fn allocating_write_loops_and_retained_async_tasks_preserve_files_with_bounded_memory()
 -> Result<()> {
     let source = r#"
-    import {writeFileSync} from "fs";
+    import {writeFile} from "fs/promises";
     async function save(path: string, text: string): Promise<string> {
-        writeFileSync(path, text);
+        (await writeFile(path, text));
         return text;
     }
     export async function run(): Promise<string> {
         const pending = save("/sandbox/retained", "😀é");
         let index = 0;
         while (index < 2000) {
-            writeFileSync("/sandbox/loop", new Uint8Array([index, 255, 0]));
+            (await writeFile("/sandbox/loop", new Uint8Array([index, 255, 0])));
             index = index + 1;
         }
         return await pending + await pending;
@@ -321,13 +321,13 @@ async fn allocating_write_loops_and_retained_async_tasks_preserve_files_with_bou
 #[tokio::test(flavor = "current_thread")]
 async fn supported_overwrite_behavior_matches_node() -> Result<()> {
     let source = r#"
-    import * as fs from "node:fs";
-    export function run(path: string): number {
-        fs.writeFileSync(path, "longer original text");
-        fs.writeFileSync(path, "é😀\0", {encoding: "utf8", flag: "w"});
+    import * as fs from "node:fs/promises";
+    export async function run(path: string): Promise<number> {
+        (await fs.writeFile(path, "longer original text"));
+        (await fs.writeFile(path, "é😀\0", {encoding: "utf8", flag: "w"}));
         const bytes = new Uint8Array([71,0,128,255,72]);
-        fs.writeFileSync(path + ".bin", bytes.subarray(1,4));
-        fs.writeFileSync(path + ".empty", new Uint8Array(0), null);
+        (await fs.writeFile(path + ".bin", bytes.subarray(1,4)));
+        (await fs.writeFile(path + ".empty", new Uint8Array(0), null));
         return 1;
     }"#;
     let directory = tempfile::tempdir()?;
@@ -346,7 +346,10 @@ async fn supported_overwrite_behavior_matches_node() -> Result<()> {
     let entry = directory.path().join("compare.mts");
     fs::write(
         &entry,
-        format!("{source}\nrun({});", serde_json::to_string(&node_path)?),
+        format!(
+            "{source}\nawait run({});",
+            serde_json::to_string(&node_path)?
+        ),
     )?;
     let node = Command::new("node")
         .args([
@@ -375,15 +378,15 @@ async fn supported_overwrite_behavior_matches_node() -> Result<()> {
 async fn earlier_write_arguments_survive_collection_during_later_argument_evaluation() -> Result<()>
 {
     let source = r#"
-    import {writeFileSync} from "fs";
+    import {writeFile} from "fs/promises";
     function option(): string {
         let index = 0;
         while (index < 2000) { const scratch = new Uint8Array(1024); index = index + 1; }
         return "utf8";
     }
-    export function run(): number {
-        writeFileSync("/sandbox/" + "text", "é" + "😀", {encoding: option()});
-        writeFileSync("/sandbox/" + "bytes", new Uint8Array([0,128,255]).subarray(1), option());
+    export async function run(): Promise<number> {
+        (await writeFile("/sandbox/" + "text", "é" + "😀", {encoding: option()}));
+        (await writeFile("/sandbox/" + "bytes", new Uint8Array([0,128,255]).subarray(1), option()));
         return 1;
     }"#;
     let directory = tempfile::tempdir()?;
@@ -415,7 +418,7 @@ async fn symlink_resolution_stays_within_the_selected_preopen() -> Result<()> {
     symlink(outside.path().join("file"), directory.path().join("escape"))?;
     symlink(outside.path(), directory.path().join("escaped-dir"))?;
     symlink("cycle", directory.path().join("cycle"))?;
-    let source = "import {writeFileSync} from 'fs'; export function run(path: string): Result<number, number> { writeFileSync(path, 'after'); return 1; }";
+    let source = "import {writeFile} from 'fs/promises'; export async function run(path: string): Promise<Result<number, number>> { (await writeFile(path, 'after')); return 1; }";
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
         .build();
@@ -450,9 +453,9 @@ async fn symlink_resolution_stays_within_the_selected_preopen() -> Result<()> {
 async fn filesystem_bindings_preserve_user_functions_and_prune_unused_imports() -> Result<()> {
     for source in [
         "function writeFileSync(value: number): number { return value + 1; } export function run(): number { return writeFileSync(3); }",
-        "import {writeFileSync} from 'fs'; function local(writeFileSync: number): number { return writeFileSync + 1; } export function run(): number { return local(3); }",
-        "import fs from 'node:fs'; function local(fs: number): number { return fs + 1; } export function run(): number { return local(3); }",
-        "import {writeFileSync as save} from 'node:fs'; export function run(): number { return 4; }",
+        "import {writeFile} from 'fs/promises'; function local(writeFile: number): number { return writeFile + 1; } export async function run(): Promise<number> { return local(3); }",
+        "import fs from 'node:fs/promises'; function local(fs: number): number { return fs + 1; } export async function run(): Promise<number> { return local(3); }",
+        "import {writeFile as save} from 'node:fs/promises'; export async function run(): Promise<number> { return 4; }",
     ] {
         let compiled =
             compile_typescript_waffle(source, "shadow.ts", &WaffleCompileOptions::default())?;
@@ -461,7 +464,7 @@ async fn filesystem_bindings_preserve_user_functions_and_prune_unused_imports() 
         let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
         assert_eq!(run.call_async(&mut store, ()).await?.0, 4.0);
     }
-    let source = "import fs from 'node:fs'; export function run(): Result<number, number> { fs['writeFileSync']('/missing', 'text'); return 1; }";
+    let source = "import fs from 'node:fs/promises'; export async function run(): Promise<Result<number, number>> { await fs['writeFile']('/missing', 'text'); return 1; }";
     let compiled =
         compile_typescript_waffle(source, "imports.ts", &WaffleCompileOptions::default())?;
     let wat = compiled.component_wat.unwrap();
@@ -486,29 +489,74 @@ async fn filesystem_bindings_preserve_user_functions_and_prune_unused_imports() 
 }
 
 #[test]
+fn synchronous_and_callback_filesystem_calls_have_direct_diagnostics() {
+    for module in ["fs", "node:fs"] {
+        for method in [
+            "readFileSync",
+            "writeFileSync",
+            "statSync",
+            "existsSync",
+            "mkdirSync",
+            "unlinkSync",
+            "rmdirSync",
+            "readdirSync",
+            "readFile",
+            "writeFile",
+            "stat",
+        ] {
+            for source in [
+                format!(
+                    "import {{ {method} as operation }} from '{module}'; export function run(): number {{ operation('/file'); return 0; }}"
+                ),
+                format!(
+                    "import * as fs from '{module}'; export function run(): number {{ fs.{method}('/file'); return 0; }}"
+                ),
+                format!(
+                    "import fs from '{module}'; export function run(): number {{ fs['{method}']('/file'); return 0; }}"
+                ),
+            ] {
+                let error = compile_typescript_waffle(
+                    &source,
+                    "unsupported-filesystem.ts",
+                    &WaffleCompileOptions::default(),
+                )
+                .unwrap_err();
+                let diagnostic = format!("{error:#}");
+                assert!(
+                    diagnostic.contains("synchronous and callback APIs are not supported")
+                        && diagnostic.contains("node:fs/promises"),
+                    "{source}: {diagnostic}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn unsupported_filesystem_syntax_is_diagnosed_before_frontend_effects_are_lost() {
     for body in [
-        "fs.writeFileSync('/file')",
-        "fs.writeFileSync('/file', true)",
-        "fs.writeFileSync(42, 'text')",
-        "fs.writeFileSync('/file', 'text', 'utf8', 'extra')",
-        "fs.writeFileSync('/file', 'text', {get flag() { return 'w'; }})",
-        "fs.writeFileSync('/file', 'text', ({get flag() { return 'w'; }}))",
-        "fs.writeFileSync('/file', 'text', ({get flag() { return 'w'; }} as any))",
-        "fs.writeFileSync('/file', 'text', {...{flag: 'w'}})",
-        "fs.writeFileSync('/file', 'text', ({...{flag: 'w'}} as any))",
-        "fs.writeFileSync('/file', 'text', {['flag']: 'w'})",
-        "fs.writeFileSync('/file', 'text', {__proto__: {}})",
-        "fs.writeFileSync('/file', 'text', {flag() { return 'w'; }})",
-        "fs.writeFileSync(...['/file', 'text'])",
-        "const save = fs.writeFileSync; save('/file', 'text')",
-        "const options = {get flag() { return 'w'; }}; fs.writeFileSync('/file', 'text', options)",
-        "fs.readFileSync('/file', {get encoding() { return 'utf8'; }})",
+        "(await fs.writeFile('/file'))",
+        "(await fs.writeFile('/file', true))",
+        "(await fs.writeFile(42, 'text'))",
+        "(await fs.writeFile('/file', 'text', 'utf8', 'extra'))",
+        "(await fs.writeFile('/file', 'text', {get flag() { return 'w'; }}))",
+        "(await fs.writeFile('/file', 'text', ({get flag() { return 'w'; }})))",
+        "(await fs.writeFile('/file', 'text', ({get flag() { return 'w'; }} as any)))",
+        "(await fs.writeFile('/file', 'text', {...{flag: 'w'}}))",
+        "(await fs.writeFile('/file', 'text', ({...{flag: 'w'}} as any)))",
+        "(await fs.writeFile('/file', 'text', {['flag']: 'w'}))",
+        "(await fs.writeFile('/file', 'text', {__proto__: {}}))",
+        "(await fs.writeFile('/file', 'text', {flag() { return 'w'; }}))",
+        "(await fs.writeFile(...['/file', 'text']))",
+        "const save = fs.writeFile; save('/file', 'text')",
+        "const options = {get flag() { return 'w'; }}; (await fs.writeFile('/file', 'text', options))",
+        "(await fs.readFile('/file', {get encoding() { return 'utf8'; }}))",
         "fs.chmodSync('/file', 0)",
         "fs['write' + 'FileSync']('/file', 'text')",
     ] {
-        let source =
-            format!("import fs from 'fs'; export function run(): number {{ {body}; return 1; }}");
+        let source = format!(
+            "import fs from 'fs/promises'; export async function run(): Promise<number> {{ {body}; return 1; }}"
+        );
         assert!(
             compile_typescript_waffle(&source, "invalid.ts", &WaffleCompileOptions::default())
                 .is_err(),

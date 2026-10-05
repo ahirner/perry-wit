@@ -383,7 +383,7 @@ async fn resolved_world_platform_io_uses_shared_guest_memory() -> Result<()> {
     let compiled = compile(
         r#"
       import {waitFor} from 'perry:clocks';
-      import {readFileSync,writeFileSync,statSync,readdirSync} from 'node:fs';
+      import {readFile,writeFile,stat,readdir} from 'node:fs/promises';
       export async function run(path:string):Promise<string> {
         const before=performance.now();
         await waitFor(1);
@@ -396,12 +396,12 @@ async fn resolved_world_platform_io_uses_shared_guest_memory() -> Result<()> {
         const label=process.env.LABEL;
         if(label===undefined) {throw 4;}
         const text=label+process.argv.join(':');
-        writeFileSync(path,text);
+        (await writeFile(path,text));
         console.log(text);
         console.error(text);
-        const retained=readFileSync(path,'utf8');
-        if(statSync(path).size<1) {throw 5;}
-        const entries=readdirSync('/sandbox');
+        const retained=(await readFile(path,'utf8'));
+        if((await stat(path)).size<1) {throw 5;}
+        const entries=(await readdir('/sandbox'));
         if(entries.length!==1) {throw 6;}
         return retained;
       }

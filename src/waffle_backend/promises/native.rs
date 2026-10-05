@@ -338,10 +338,9 @@ fn filesystem_adapter(
         operation => {
             let code = b.integer(match operation {
                 F::Stat => 0,
-                F::Exists => 1,
-                F::MakeDirectory => 2,
-                F::Unlink => 3,
-                F::RemoveDirectory => 4,
+                F::MakeDirectory => 1,
+                F::Unlink => 2,
+                F::RemoveDirectory => 3,
                 _ => unreachable!(),
             });
             b.call(

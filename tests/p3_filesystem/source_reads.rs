@@ -23,10 +23,10 @@ type ReadArguments = (Resource<Descriptor>, u64);
 async fn binary_reads_return_independent_views_and_preserve_all_bytes() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let source = r#"
-    import fs from "node:fs";
-    export function run(path: string): Uint8Array {
-        const bytes = fs.readFileSync(path);
-        const other = fs.readFileSync(path, {encoding: 'BiNaRy', flag: 'r'});
+    import fs from "node:fs/promises";
+    export async function run(path: string): Promise<Uint8Array> {
+        const bytes = (await fs.readFile(path));
+        const other = (await fs.readFile(path, {encoding: 'BiNaRy', flag: 'r'}));
         if (other.length > 0) { other[0] = 71; }
         let index = 0;
         while (index < 2000) { const temporary = new Uint8Array(128); index = index + 1; }
@@ -58,9 +58,9 @@ async fn binary_reads_return_independent_views_and_preserve_all_bytes() -> Resul
 async fn text_reads_preserve_boms_nuls_and_scalar_lengths_and_reject_invalid_utf8() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let source = r#"
-    import {readFileSync as read} from "fs";
-    export function run(path: string): Result<string, number> {
-        const text = read(path, {encoding: 'UTF-8', flag: 'r'});
+    import {readFile as read} from "fs/promises";
+    export async function run(path: string): Promise<Result<string, number>> {
+        const text = (await read(path, {encoding: 'UTF-8', flag: 'r'}));
         let index = 0;
         while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
         return text;
@@ -96,7 +96,7 @@ async fn text_reads_preserve_boms_nuls_and_scalar_lengths_and_reject_invalid_utf
             assert!(store.data().table.is_empty());
         }
     }
-    let source = "import {readFileSync} from 'fs'; export function run(): number { return readFileSync('/sandbox/input', 'utf8').length; }";
+    let source = "import {readFile} from 'fs/promises'; export async function run(): Promise<number> { return (await readFile('/sandbox/input', 'utf8')).length; }";
     fs::write(directory.path().join("input"), "\u{feff}é😀\0")?;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
@@ -110,12 +110,12 @@ async fn text_reads_preserve_boms_nuls_and_scalar_lengths_and_reject_invalid_utf
 #[tokio::test(flavor = "current_thread")]
 async fn read_options_preserve_effects_and_fail_before_preopen_resolution() -> Result<()> {
     let source = r#"
-    import {readFileSync} from "node:fs";
+    import {readFile} from "node:fs/promises";
     function path(state: Uint8Array, value: string): string { state[0] = state[0] * 3 + 1; return value; }
     function flag(state: Uint8Array, value: string): string { state[0] = state[0] * 3 + 2; return value; }
-    export function run(target: string, value: string): number {
+    export async function run(target: string, value: string): Promise<number> {
         const state = new Uint8Array(1);
-        try { readFileSync(path(state, target), {encoding: "utf8", flag: flag(state, value)}); return state[0]; }
+        try { (await readFile(path(state, target), {encoding: "utf8", flag: flag(state, value)})); return state[0]; }
         catch (error) { return error * 100 + state[0]; }
     }"#;
     let directory = tempfile::tempdir()?;
@@ -209,7 +209,7 @@ async fn static_read_options_and_repeated_reads_keep_their_result_contract() -> 
         ("{unknown: true}", -12.0),
     ] {
         let source = format!(
-            "import {{readFileSync}} from 'fs'; export function run(): number {{ try {{ return readFileSync('/sandbox/text', {options}).length; }} catch (error) {{ return 0 - error; }} }}"
+            "import {{readFile}} from 'fs/promises'; export async function run(): Promise<number> {{ try {{ return (await readFile('/sandbox/text', {options})).length; }} catch (error) {{ return 0 - error; }} }}"
         );
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
@@ -225,21 +225,21 @@ async fn static_read_options_and_repeated_reads_keep_their_result_contract() -> 
         assert!(store.data().table.is_empty());
     }
     let source = r#"
-    import {readFileSync, writeFileSync} from 'fs';
-    export function run(): number {
+    import {readFile, writeFile} from 'fs/promises';
+    export async function run(): Promise<number> {
         let index = 0;
         let count = 0;
         let bad = true;
         while (index < 2000) {
             try {
-                if (bad) { readFileSync('/sandbox/bad', 'utf8'); }
-                else { count = count + readFileSync('/sandbox/text', 'utf8').length; }
+                if (bad) { (await readFile('/sandbox/bad', 'utf8')); }
+                else { count = count + (await readFile('/sandbox/text', 'utf8')).length; }
             } catch (error) { count = count + error; }
             bad = bad === false;
             index = index + 1;
         }
-        const data = readFileSync('/sandbox/text');
-        writeFileSync('/sandbox/copy', data.subarray(3));
+        const data = (await readFile('/sandbox/text'));
+        (await writeFile('/sandbox/copy', data.subarray(3)));
         return count;
     }"#;
     let context = WasiCtxBuilder::new()
@@ -262,20 +262,20 @@ fn read_result_types_and_unsupported_options_are_explicit() {
     use perry_wit::waffle_backend::WaffleCompileOptions;
 
     for function in [
-        "export function run(): string { return readFileSync('/file'); }",
-        "export function run(): Uint8Array { return readFileSync('/file', 'utf8'); }",
-        "export function run(): number { return readFileSync('/file', 'utf8'); }",
-        "export function run(encoding: string): string { return readFileSync('/file', encoding); }",
-        "export function run(encoding: string): string { return readFileSync('/file', {encoding}); }",
-        "export function run(): number { const options = {get encoding() {return 'utf8';}}; return readFileSync('/file', options).length; }",
-        "export function run(): number { return readFileSync('/file', ({get encoding() { return 'utf8'; }} as any)).length; }",
-        "export function run(): number { return readFileSync('/file', {...{encoding:'utf8'}}).length; }",
-        "export function run(): number { return readFileSync('/file', {['encoding']:'utf8'}).length; }",
-        "export function run(): number { return readFileSync('/file', {__proto__:{}}).length; }",
-        "export function run(): number { return readFileSync('/file', 'utf8', 'extra').length; }",
-        "export function run(): number { return readFileSync().length; }",
+        "export async function run(): Promise<string> { return (await readFile('/file')); }",
+        "export async function run(): Promise<Uint8Array> { return (await readFile('/file', 'utf8')); }",
+        "export async function run(): Promise<number> { return (await readFile('/file', 'utf8')); }",
+        "export async function run(encoding: string): Promise<string> { return (await readFile('/file', encoding)); }",
+        "export async function run(encoding: string): Promise<string> { return (await readFile('/file', {encoding})); }",
+        "export async function run(): Promise<number> { const options = {get encoding() {return 'utf8';}}; return (await readFile('/file', options)).length; }",
+        "export async function run(): Promise<number> { return (await readFile('/file', ({get encoding() { return 'utf8'; }} as any))).length; }",
+        "export async function run(): Promise<number> { return (await readFile('/file', {...{encoding:'utf8'}})).length; }",
+        "export async function run(): Promise<number> { return (await readFile('/file', {['encoding']:'utf8'})).length; }",
+        "export async function run(): Promise<number> { return (await readFile('/file', {__proto__:{}})).length; }",
+        "export async function run(): Promise<number> { return (await readFile('/file', 'utf8', 'extra')).length; }",
+        "export async function run(): Promise<number> { return (await readFile()).length; }",
     ] {
-        let source = format!("import {{readFileSync}} from 'fs'; {function}");
+        let source = format!("import {{readFile}} from 'fs/promises'; {function}");
         assert!(
             compile_typescript_waffle(&source, "invalid-read.ts", &WaffleCompileOptions::default())
                 .is_err(),
@@ -291,7 +291,7 @@ async fn file_reads_materialize_large_results_without_a_fixed_size_limit() -> Re
         .map(|index| (index * 37) as u8)
         .collect();
     fs::write(directory.path().join("input"), &bytes)?;
-    let source = "import {readFileSync} from 'fs'; export function run(): Uint8Array { return readFileSync('/sandbox/input'); }";
+    let source = "import {readFile} from 'fs/promises'; export async function run(): Promise<Uint8Array> { return (await readFile('/sandbox/input')); }";
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
         .build();
@@ -313,8 +313,8 @@ async fn supported_file_reads_match_node() -> Result<()> {
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("input"), "\u{feff}é😀\0")?;
     let source = r#"
-    import {readFileSync} from "fs";
-    export function run(path: string): string { return readFileSync(path, 'utf8'); }
+    import {readFile} from "fs/promises";
+    export async function run(path: string): Promise<string> { return (await readFile(path, 'utf8')); }
     "#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
@@ -329,7 +329,7 @@ async fn supported_file_reads_match_node() -> Result<()> {
     fs::write(
         &entry,
         format!(
-            "{source}\nprocess.stdout.write(run({}));",
+            "{source}\nprocess.stdout.write(await run({}));",
             serde_json::to_string(&directory.path().join("input"))?
         ),
     )?;
@@ -358,9 +358,9 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
         b"replaced by controlled producer",
     )?;
     let source = r#"
-    import {readFileSync} from "fs";
+    import {readFile} from "fs/promises";
     async function read(): Promise<string> {
-        try { return readFileSync('/sandbox/input', 'utf8'); }
+        try { return (await readFile('/sandbox/input', 'utf8')); }
         catch (error) { if (error === 37) { return 'failed'; } throw error; }
     }
     export async function run(encoding: string): Promise<string> {
@@ -371,9 +371,9 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
         return await pending + await pending;
     }"#;
     let dynamic = r#"
-    import {readFileSync} from "fs";
+    import {readFile} from "fs/promises";
     async function read(encoding: string): Promise<string | Uint8Array> {
-        try { return readFileSync('/sandbox/input', {encoding}); }
+        try { return (await readFile('/sandbox/input', {encoding})); }
         catch (error) { if (error === 37) { return 'failed'; } throw error; }
     }
     function text(value: string | Uint8Array): string {
@@ -489,9 +489,9 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
 async fn pending_read_disposal_and_producer_traps_release_owners_without_guest_finally()
 -> Result<()> {
     let source = r#"
-    import {readFileSync} from 'fs';
-    export function run(): string {
-        try { return readFileSync('/sandbox/input', 'utf8'); }
+    import {readFile} from 'fs/promises';
+    export async function run(): Promise<string> {
+        try { return (await readFile('/sandbox/input', 'utf8')); }
         finally { console.log('unexpected cleanup'); }
     }"#;
     for trap in [false, true] {
