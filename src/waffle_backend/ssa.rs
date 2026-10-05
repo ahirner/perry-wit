@@ -264,16 +264,33 @@ pub(crate) fn lower_module(
             };
             module.funcs[export.func_index] =
                 waffle::FuncDecl::Body(export.sig, format!("{}.export", export.name), wrapper);
-            module.exports.push(Export {
-                name: export.name.clone(),
-                kind: ExportKind::Func(export.func_index),
-            });
-            if let Some(allocator) = registry.allocator {
-                crate::waffle_backend::allocation::emit_post_return(
+            if registry.callbacks.is_some()
+                && contract.wit.as_ref().unwrap().functions[&func.name]
+                    .function
+                    .kind
+                    .is_async()
+            {
+                let wit = contract.wit.as_ref().unwrap();
+                super::runtime::callbacks::emit(
                     &mut module,
-                    allocator,
+                    &registry,
+                    wit,
+                    &wit.functions[&func.name],
                     export,
+                    &string_pool,
                 )?;
+            } else {
+                module.exports.push(Export {
+                    name: export.name.clone(),
+                    kind: ExportKind::Func(export.func_index),
+                });
+                if let Some(allocator) = registry.allocator {
+                    crate::waffle_backend::allocation::emit_post_return(
+                        &mut module,
+                        allocator,
+                        export,
+                    )?;
+                }
             }
         }
         if let Some(plan) = &contract.promises

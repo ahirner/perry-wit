@@ -1,4 +1,6 @@
 //! Native cancellation acknowledgment against the pinned Component Model runtime.
+#[path = "support/cancellation_composition.rs"]
+mod cancellation_composition;
 
 use anyhow::Result;
 use std::sync::{
@@ -136,11 +138,6 @@ async fn native_subtask_cancellation_is_acknowledged_before_owner_release() -> R
 }
 
 fn compose_cancellation_probe() -> Result<Vec<u8>> {
-    use wasm_encoder::{
-        Alias, ComponentAliasSection, ComponentExportKind as Kind, ComponentExportSection,
-        ComponentImportSection, ComponentInstanceSection, ComponentSectionId, ComponentTypeRef,
-        ComponentTypeSection, PrimitiveValType, RawSection,
-    };
     let wit = tempfile::tempdir()?;
     let definition = wit.path().join("world.wit");
     std::fs::write(
@@ -161,48 +158,7 @@ fn compose_cancellation_probe() -> Result<Vec<u8>> {
         wit.path(),
         Some("caller"),
     )?;
-    // Test-only composition of two independently encoded application components.
-    let mut component = wasm_encoder::Component::new();
-    let mut types = ComponentTypeSection::new();
-    types
-        .function()
-        .async_(true)
-        .params([("mode", PrimitiveValType::U32)])
-        .result(Some(PrimitiveValType::U32.into()));
-    component.section(&types);
-    let mut imports = ComponentImportSection::new();
-    imports.import("wait", ComponentTypeRef::Func(0));
-    component.section(&imports);
-    for bytes in [&callee, &caller] {
-        component.section(&RawSection {
-            id: ComponentSectionId::Component.into(),
-            data: bytes,
-        });
-    }
-    let mut instances = ComponentInstanceSection::new();
-    instances.instantiate(0, [("wait", Kind::Func, 0)]);
-    component.section(&instances);
-    let mut aliases = ComponentAliasSection::new();
-    aliases.alias(Alias::InstanceExport {
-        instance: 0,
-        kind: Kind::Func,
-        name: "run",
-    });
-    component.section(&aliases);
-    let mut instances = ComponentInstanceSection::new();
-    instances.instantiate(1, [("wait", Kind::Func, 0), ("operation", Kind::Func, 1)]);
-    component.section(&instances);
-    let mut aliases = ComponentAliasSection::new();
-    aliases.alias(Alias::InstanceExport {
-        instance: 1,
-        kind: Kind::Func,
-        name: "run",
-    });
-    component.section(&aliases);
-    let mut exports = ComponentExportSection::new();
-    exports.export("run", Kind::Func, 2, None);
-    component.section(&exports);
-    Ok(component.finish())
+    cancellation_composition::compose(&callee, &caller)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -259,5 +215,153 @@ async fn component_cancellation_reaches_callback_and_releases_native_owner() -> 
     }
     assert_eq!(operations.started.load(Ordering::SeqCst), 300);
     assert_eq!(operations.completed.load(Ordering::SeqCst), 200);
+    Ok(())
+}
+
+fn compile_cancellable(source: &str) -> Result<Vec<u8>> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("cancel.wit", "package test:cancel; interface host {wait:async func(mode:u32)->u32;} world callee {import host; export run:async func(mode:u32)->u32;}")?;
+    let world = resolve.select_world(&[package], Some("callee"))?;
+    let compiled = perry_wit::waffle_backend::compile_typescript_for_world(
+        source,
+        "cancel.ts",
+        &Default::default(),
+        resolve,
+        world,
+    )?;
+    let wit = tempfile::tempdir()?;
+    std::fs::write(
+        wit.path().join("world.wit"),
+        "package test:cancel; world caller { import wait:async func(mode:u32)->u32; import operation:async func(mode:u32)->u32; export run:async func(mode:u32)->u32; }",
+    )?;
+    let caller = perry_wit::component::embed_and_encode(
+        &wat::parse_str(include_str!("fixtures/cancellation/caller.wat"))?,
+        wit.path(),
+        Some("caller"),
+    )?;
+    cancellation_composition::compose_with_interface(
+        &compiled.component.unwrap(),
+        &caller,
+        Some("test:cancel/host"),
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_exports_acknowledge_host_cancellation_and_run_finally() -> Result<()> {
+    let mut config = Config::new();
+    config
+        .wasm_component_model_async(true)
+        .wasm_component_model_more_async_builtins(true)
+        .wasm_component_model_threading(true)
+        .wasm_component_model_async_stackful(true);
+    let engine = Engine::new(&config)?;
+    for body in [
+        "return await wait(mode);",
+        "const first = wait(mode); const second = wait(1); const values = await Promise.all([first, second]); return values[0];",
+        "const first = wait(mode); const second = wait(1); const result = await Promise.race([first, second]); await first; return result;",
+    ] {
+        let source = format!(
+            "import {{wait}} from 'test:cancel/host'; let running = 0; export async function run(mode:number):Promise<number> {{ if (running !== 0) throw 99; running = 1; try {{ {body} }} finally {{ running = 0; await wait(4); }} }}"
+        );
+        let component = Component::new(&engine, compile_cancellable(&source)?)?;
+        let operations = Arc::new(Operations::default());
+        let cleanup = Arc::new(AtomicUsize::new(0));
+        let mut linker = Linker::new(&engine);
+        let observed = operations.clone();
+        let cleanups = cleanup.clone();
+        linker
+            .root()
+            .func_wrap_concurrent("wait", move |_, (mode,): (u32,)| {
+                let operations = observed.clone();
+                let cleanups = cleanups.clone();
+                Box::pin(async move {
+                    if mode == 4 {
+                        cleanups.fetch_add(1, Ordering::SeqCst);
+                        return Ok((0u32,));
+                    }
+                    if mode == 3 {
+                        operations.release.notify_one();
+                        operations.completion.notified().await;
+                        return Ok((0u32,));
+                    }
+                    operations.active.fetch_add(1, Ordering::SeqCst);
+                    operations.started.fetch_add(1, Ordering::SeqCst);
+                    let _owner = Owner(operations.clone());
+                    if mode == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    if mode == 2 {
+                        operations.release.notified().await;
+                    }
+                    operations.completed.fetch_add(1, Ordering::SeqCst);
+                    if mode == 2 {
+                        operations.completion.notify_one();
+                    }
+                    Ok((42u32,))
+                })
+            })?;
+        let mut store = Store::new(
+            &engine,
+            wasmtime::StoreLimitsBuilder::new()
+                .memory_size(65536)
+                .build(),
+        );
+        store.limiter(|limits| limits);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+        for round in 0..30 {
+            for mode in [0, 1, 2] {
+                let status = timeout(Duration::from_secs(5), run.call_async(&mut store, (mode,)))
+                    .await?
+                    .map_err(|error| {
+                        anyhow::anyhow!("mode={mode}, round={round}, source={source}: {error:#}")
+                    })?
+                    .0;
+                assert_eq!(
+                    status,
+                    if mode == 1 { 2 } else { 4 },
+                    "mode={mode}, round={round}, source={source}"
+                );
+                assert_eq!(operations.active.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    cleanup.load(Ordering::SeqCst),
+                    round * 3 + mode as usize + 1
+                );
+                store.assert_concurrent_state_empty();
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_empty_race_can_be_cancelled_without_native_work() -> Result<()> {
+    let source = "export async function run(mode:number):Promise<number> { if (mode === 1) return 42; const empty:Promise<number>[] = []; return await Promise.race(empty); }";
+    let mut config = Config::new();
+    config
+        .wasm_component_model_async(true)
+        .wasm_component_model_more_async_builtins(true)
+        .wasm_component_model_threading(true)
+        .wasm_component_model_async_stackful(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, compile_cancellable(source)?)?;
+    let mut linker = Linker::new(&engine);
+    linker
+        .root()
+        .func_wrap_concurrent("wait", |_, (_mode,): (u32,)| {
+            Box::pin(async { Ok((0u32,)) })
+        })?;
+    let mut store = Store::new(&engine, ());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+    for _ in 0..100 {
+        for mode in [0, 1] {
+            let status = timeout(Duration::from_secs(5), run.call_async(&mut store, (mode,)))
+                .await??
+                .0;
+            assert_eq!(status, if mode == 1 { 2 } else { 4 });
+            store.assert_concurrent_state_empty();
+        }
+    }
     Ok(())
 }

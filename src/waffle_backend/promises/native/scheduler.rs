@@ -8,7 +8,7 @@ use waffle::Value;
 
 pub(super) const READY_HEAD: u32 = 80;
 const READY_TAIL: u32 = 84;
-pub(super) const ACTIVE: u32 = 88;
+pub(crate) const ACTIVE: u32 = 88;
 
 pub(super) fn append(b: &mut Builder, head: Value, tail: Value) {
     use Type::I32;

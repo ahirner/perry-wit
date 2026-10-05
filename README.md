@@ -185,14 +185,15 @@ Stored async tasks retain their outcomes for repeated observation.
 `Promise.all`, `allSettled`, and `race` register each operand once; execution is
 eager to the first suspension. Race losers continue running and must finish
 before the owning call returns. Unresolved ordinary work at that boundary traps.
-Standard `fetch(url, options)` accepts typed methods, header records/pairs/`Headers`, and string or
-byte bodies, resolves at headers, and supports `status`, `ok`, `url`,
-`headers.get()`, `headers.has()`, `bodyUsed`, `text()`, `json()`, `bytes()`, and `arrayBuffer()`. Body consumption grows incrementally and waits
-for P3 transfer completion. Uploads retain snapshots through partial writes.
-`Headers` supports construction, snapshots, `append`, `set`, and `delete`;
-fetched response headers are immutable. Request construction, redirects, cooperative cancellation,
-and Web Streams remain implementation work; see the catalog for supported shapes. Traps and interrupted calls require store disposal, which releases
-native resources without running guest `finally` blocks.
+Standard `fetch` accepts URLs or `Request` values, typed options, header
+records/pairs/`Headers`, and string or byte bodies. It resolves at response headers,
+supports redirect modes, and exposes response metadata and single-consumption
+`text()`, `json()`, `bytes()`, and `arrayBuffer()` methods. Bodies grow incrementally
+and wait for P3 transfer completion; uploads retain snapshots through partial writes.
+`Request`, `Response`, and `Headers` support construction and buffered body values.
+Headers support `get`, `has`, `append`, `set`, and `delete`; fetched response headers
+are immutable. HTTP cancellation and Web Streams remain implementation work;
+the capability catalog records supported shapes and executable evidence.
 
 ## Contributing
 

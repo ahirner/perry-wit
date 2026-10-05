@@ -77,6 +77,8 @@ impl FunctionInfo {
 
 /// Immutable registry of all module declarations, memory, and intrinsics.
 pub(crate) struct ModuleRegistry {
+    pub(crate) operations: Option<super::runtime::operations::Operations>,
+    pub(crate) callbacks: Option<super::runtime::callbacks::Imports>,
     pub(crate) finish_command: Option<Func>,
     pub(crate) await_subtask: Option<Func>,
     pub(crate) module_state: Option<super::initialization::ModuleState>,
@@ -191,11 +193,18 @@ impl ModuleRegistry {
             intrinsics.insert(name.clone(), func);
         }
 
+        let callbacks = super::runtime::callbacks::enabled(contract)
+            .then(|| super::runtime::callbacks::declare(module, contract));
+        let operation_imports = callbacks
+            .as_ref()
+            .map(|_| super::runtime::operations::declare(module));
         let subtask_imports = contract
             .intrinsics
             .values()
             .any(TypedIntrinsic::owns_subtask)
-            .then(|| super::runtime::subtasks::declare(module));
+            .then_some(())
+            .filter(|_| callbacks.is_none())
+            .map(|_| super::runtime::subtasks::declare(module));
 
         let stream_imports = contract
             .has_stream_input()
@@ -291,11 +300,27 @@ impl ModuleRegistry {
         } else {
             None
         };
-        let await_subtask = subtask_imports
+        let operations = operation_imports
             .map(|imports| {
-                super::runtime::subtasks::emit_wait(module, memory, allocator.unwrap(), imports)
+                super::runtime::operations::emit(module, memory, allocator.unwrap(), imports)
             })
             .transpose()?;
+        let await_subtask = if let Some(operations) = operations {
+            use super::runtime::builder::{self, Builder};
+            let function = builder::declare(module, "operations.await", &[Type::I32], &[Type::I32]);
+            let mut b = Builder::new(module, function, memory);
+            let owner = b.call(operations.register, &[b.param(0)], &[Type::I32])[0];
+            let status = b.call(operations.wait, &[owner], &[Type::I32])[0];
+            b.ret(&[status]);
+            b.finish(module, function)?;
+            Some(function)
+        } else {
+            subtask_imports
+                .map(|imports| {
+                    super::runtime::subtasks::emit_wait(module, memory, allocator.unwrap(), imports)
+                })
+                .transpose()?
+        };
         intrinsics.extend(super::capabilities::scalars::emit(
             module,
             contract,
@@ -769,6 +794,8 @@ impl ModuleRegistry {
             .map(|plan| super::initialization::ModuleState::declare(module, plan))
             .transpose()?;
         let mut registry = Self {
+            operations,
+            callbacks,
             finish_command,
             await_subtask,
             module_state,

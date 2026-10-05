@@ -141,12 +141,21 @@ pub(in crate::waffle_backend) fn emit(
                 let status = b.call(await_subtask.unwrap(), &[subtask], &[I32])[0];
                 let returned = b.integer(2);
                 let success = b.op(Op::I32Eq, &[status, returned], I32);
-                b.require(success);
-                if matches!(scalar, Scalar::TimeoutValue) {
-                    vec![b.param(1)]
+                let complete = b.body.add_block();
+                let cancelled = b.body.add_block();
+                b.branch(success, complete, cancelled);
+                b.block = cancelled;
+                let thrown = b.integer(1);
+                let reason = b.number(20.0);
+                b.ret(&[thrown, reason]);
+                b.block = complete;
+                let tag = b.integer(0);
+                let value = if matches!(scalar, Scalar::TimeoutValue) {
+                    b.param(1)
                 } else {
-                    vec![]
-                }
+                    b.number(0.0)
+                };
+                vec![tag, value]
             }
             Scalar::Monotonic => {
                 let nanos = b.call(function, &[], &[I64])[0];

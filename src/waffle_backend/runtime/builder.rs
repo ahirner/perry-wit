@@ -87,6 +87,8 @@ impl Builder {
         let op = match ty {
             Type::I32 => Operator::I32Load { memory },
             Type::F64 => Operator::F64Load { memory },
+            Type::I64 => Operator::I64Load { memory },
+            Type::F32 => Operator::F32Load { memory },
             _ => unreachable!(),
         };
         self.op(op, &[address], ty)
@@ -96,6 +98,8 @@ impl Builder {
         let op = match ty {
             Type::I32 => Operator::I32Store { memory },
             Type::F64 => Operator::F64Store { memory },
+            Type::I64 => Operator::I64Store { memory },
+            Type::F32 => Operator::F32Store { memory },
             _ => unreachable!(),
         };
         self.effect(op, &[address, value]);

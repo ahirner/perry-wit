@@ -174,12 +174,13 @@ HTTP resources close on supported return/error paths. Validation precedes
 external effects; already transferred bytes cannot be rolled back. The current
 bounded HTTP handler retains its storage through response consumer completion.
 
-Production suspension uses native stackful workers. Test-owned callback adapters
-also verify acknowledged native subtask cancellation and worker cleanup before
-publishing terminal results. Connecting that cancellation owner to source APIs,
-and exposing Web Streams with returned-stream ownership, remain requirements in
-[TODOs.md](TODOs.md). Traps and interrupted calls require store disposal; disposal
-releases native operations without executing guest `finally` blocks.
+Production suspension uses native stackful workers. Async WIT and timer components
+use callback exports with shared operation owners. Host cancellation wakes guest
+observers, runs cleanup, and retains native storage until cancellation or completion
+is acknowledged. Canonical backpressure serializes public calls. HTTP, filesystem,
+and stream transfers still require the same cancellation ownership integration;
+AbortSignal and Web Streams with returned-stream ownership remain requirements in
+[TODOs.md](TODOs.md). Traps and host disposal do not run guest `finally` blocks.
 
 ## Runtime WAT inventory
 

@@ -9,6 +9,7 @@ use crate::waffle_backend::{
     runtime::builder::{self, Builder},
 };
 use anyhow::Result;
+pub(crate) use scheduler::ACTIVE as ACTIVE_SOURCE;
 use std::collections::BTreeMap;
 use waffle::{Export, ExportKind, Func, Module, Operator, TableData, Type};
 
@@ -16,6 +17,7 @@ pub(crate) struct NativeRuntime {
     pub enter: Func,
     pub combine: Option<Func>,
     pub finish: Func,
+    pub cancel_all: Func,
     settle: Func,
     new_thread: Func,
     resume_now: Func,
@@ -28,7 +30,7 @@ pub(crate) struct NativeRuntime {
     observe: Func,
     dispatch: Func,
     pause: Func,
-    complete: Func,
+    pub complete: Func,
 }
 
 pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Result<PromiseImports> {
@@ -51,6 +53,7 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
             .then(|| builder::declare(module, "tasks.combine", &[I32; 6], &[I32])),
         enter: builder::declare(module, "tasks.enter", &[], &[]),
         finish: builder::declare(module, "tasks.finish", &[], &[]),
+        cancel_all: builder::declare(module, "tasks.cancel-all", &[], &[]),
         settle: builder::declare(module, "tasks.settle", &[I32, I32, F64], &[]),
     };
     let new = builder::declare(module, "tasks.new", &[I32], &[I32]);
@@ -112,6 +115,18 @@ pub(crate) fn emit(
     let head = b.load(four, 0, I32);
     b.store(record, 16, head, I32);
     b.store(four, 0, record, I32);
+    if let Some(operations) = registry.operations {
+        let cancelled = b.call(operations.cancelled, &[], &[I32])[0];
+        let cancel = b.body.add_block();
+        let done = b.body.add_block();
+        b.branch(cancelled, cancel, done);
+        b.block = cancel;
+        let thrown = b.integer(1);
+        let reason = b.number(20.0);
+        b.call(native.settle, &[record, thrown, reason], &[]);
+        b.jump(done, &[]);
+        b.block = done;
+    }
     b.ret(&[record]);
     b.finish(module, runtime.new)?;
 
@@ -139,6 +154,7 @@ pub(crate) fn emit(
     emit_await(module, registry)?;
     emit_native_await(module, registry)?;
     emit_settle(module, registry)?;
+    emit_cancel_all(module, registry)?;
 
     let mut workers = Vec::new();
     for (target, task) in &contract.promises.as_ref().unwrap().tasks {
@@ -157,6 +173,9 @@ pub(crate) fn emit(
             b.store(context, 8 * (index as u32 + 1), b.param(index + 1), *ty);
         }
         let index = b.integer(workers.len() as u32);
+        if registry.operations.is_some() {
+            crate::waffle_backend::runtime::callbacks::worker_count(&mut b, true);
+        }
         let thread = b.call(native.new_thread, &[index, context], &[I32])[0];
         b.call(native.resume_now, &[thread], &[I32]);
         let zero = b.integer(0);
@@ -225,6 +244,9 @@ pub(crate) fn emit(
             b.call(native.complete, &[], &[]);
         } else {
             b.call(native.dispatch, &[], &[I32]);
+        }
+        if registry.operations.is_some() {
+            crate::waffle_backend::runtime::callbacks::worker_count(&mut b, false);
         }
         b.ret(&[]);
         b.finish(module, worker)?;
@@ -408,7 +430,18 @@ fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     let two = b.integer(2);
     let old_tag = b.load(record, 4, I32);
     let pending = b.op(Operator::I32Eq, &[old_tag, two], I32);
-    b.require(pending);
+    if let Some(operations) = registry.operations {
+        let settle = b.body.add_block();
+        let duplicate = b.body.add_block();
+        b.branch(pending, settle, duplicate);
+        b.block = duplicate;
+        let cancelled = b.call(operations.cancelled, &[], &[I32])[0];
+        b.require(cancelled);
+        b.ret(&[]);
+        b.block = settle;
+    } else {
+        b.require(pending);
+    }
     let valid = b.op(Operator::I32LtU, &[tag, two], I32);
     b.require(valid);
     b.store(record, 8, payload, F64);
@@ -437,4 +470,42 @@ fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     b.block = done;
     b.ret(&[]);
     b.finish(module, native.settle)
+}
+
+fn emit_cancel_all(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
+    use Type::I32;
+    let native = &registry.promises.as_ref().unwrap().native;
+    let mut b = Builder::new(module, native.cancel_all, registry.memory);
+    if let Some(operations) = registry.operations {
+        let cancelled = b.call(operations.cancelled, &[], &[I32])[0];
+        b.require(cancelled);
+        let address = b.integer(4);
+        let head = b.load(address, 0, I32);
+        let next = b.body.add_block();
+        let record = b.body.add_blockparam(next, I32);
+        let visit = b.body.add_block();
+        let done = b.body.add_block();
+        b.jump(next, &[head]);
+        b.block = next;
+        b.branch(record, visit, done);
+        b.block = visit;
+        let state = b.load(record, 4, I32);
+        let two = b.integer(2);
+        let pending = b.op(Operator::I32Eq, &[state, two], I32);
+        let cancel = b.body.add_block();
+        let following = b.body.add_block();
+        b.branch(pending, cancel, following);
+        b.block = cancel;
+        let thrown = b.integer(1);
+        let reason = b.number(20.0);
+        b.call(native.settle, &[record, thrown, reason], &[]);
+        b.jump(following, &[]);
+        b.block = following;
+        let successor = b.load(record, 16, I32);
+        b.jump(next, &[successor]);
+        b.block = done;
+        b.call(native.dispatch, &[], &[I32]);
+    }
+    b.ret(&[]);
+    b.finish(module, native.cancel_all)
 }

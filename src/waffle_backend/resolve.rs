@@ -76,7 +76,11 @@ impl TypedIntrinsic {
             self,
             Self::WitImport { .. }
                 | Self::Capability(
-                    CapabilityOperation::Stdio(_)
+                    CapabilityOperation::Clock(
+                        ClockOperation::WaitFor
+                            | ClockOperation::Timeout
+                            | ClockOperation::TimeoutValue
+                    ) | CapabilityOperation::Stdio(_)
                         | CapabilityOperation::Filesystem(_)
                         | CapabilityOperation::FilesystemPromise(_)
                         | CapabilityOperation::HttpGet
@@ -128,7 +132,7 @@ impl TypedIntrinsic {
         let (params, returns) = match self {
             Self::Capability(CapabilityOperation::Clock(ClockOperation::TimeoutValue)) => (
                 vec![WaffleType::F64, WaffleType::F64, WaffleType::I32],
-                vec![WaffleType::F64],
+                vec![WaffleType::I32, WaffleType::F64],
             ),
             Self::WitImport { params, .. } => {
                 (params.clone(), vec![WaffleType::I32, WaffleType::F64])

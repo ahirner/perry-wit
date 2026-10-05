@@ -78,13 +78,7 @@ impl FunctionLowerer<'_> {
         {
             return Ok(record);
         }
-        let payload = self.op(
-            Operator::Call {
-                function_index: self.registry.intrinsics[name],
-            },
-            &args,
-            &[Type::F64],
-        );
+        let payload = self.call_completion(self.registry.intrinsics[name], &args);
         Ok(abi::decode_payload(
             &mut self.body,
             self.block,

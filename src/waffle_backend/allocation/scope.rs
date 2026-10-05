@@ -76,7 +76,7 @@ impl ScratchScope {
         );
     }
 
-    pub(crate) fn release(self, body: &mut FunctionBody, block: Block) -> Block {
+    pub(crate) fn release(&self, body: &mut FunctionBody, block: Block) -> Block {
         let memory = MemoryArg {
             memory: self.memory,
             offset: 12,

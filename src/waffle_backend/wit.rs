@@ -18,7 +18,7 @@ use wit_parser::{Function, FunctionKind, Resolve, Type, TypeDefKind, WorldId, Wo
 use super::strings::StringPool;
 use crate::{abi::export_names, sdk::codegen::to_camel_case};
 
-pub(super) use adapter::{build_export_wrapper, build_import_wrapper};
+pub(super) use adapter::{build_export_wrapper, build_import_wrapper, build_task_return};
 
 pub(super) fn validate_source(module: &ast::Module) -> Result<()> {
     for item in &module.body {

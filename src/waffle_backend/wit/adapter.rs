@@ -37,7 +37,14 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
     let block = body.entry;
     let command_failure =
         (declaration.core_name == "wasi:cli/run@0.3.0#run").then(|| body.add_block());
+    let cancellation_failure =
+        if declaration.function.kind.is_async() && registry.callbacks.is_some() {
+            Some(body.add_block())
+        } else {
+            None
+        };
     let mut adapter = Adapter {
+        cancellation_failure,
         body,
         block,
         registry,
@@ -184,6 +191,25 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
             },
         );
     }
+    if let Some(failure) = cancellation_failure {
+        adapter.block = failure;
+        let cancelled = adapter.call(registry.operations.unwrap().cancelled, &[]);
+        adapter.require(cancelled);
+        let mut values = Vec::new();
+        for ty in &module.signatures[export.sig].returns {
+            let op = match ty {
+                CoreType::I32 => Operator::I32Const { value: 0 },
+                CoreType::I64 => Operator::I64Const { value: 0 },
+                CoreType::F32 => Operator::F32Const { value: 0 },
+                CoreType::F64 => Operator::F64Const { value: 0 },
+                _ => unreachable!(),
+            };
+            values.push(adapter.op(op, &[], *ty));
+        }
+        adapter
+            .body
+            .set_terminator(adapter.block, Terminator::Return { values });
+    }
     adapter.body.validate()?;
     adapter.body.verify_reducible()?;
     Ok(adapter.body)
@@ -203,10 +229,31 @@ struct Adapter<'a> {
     scratch: Option<crate::waffle_backend::allocation::scope::ScratchScope>,
     strings: &'a StringPool,
     command_failure: Option<Block>,
+    cancellation_failure: Option<Block>,
 }
 
 impl Adapter<'_> {
     fn finish_invocation(&mut self) {
+        let after = self.cancellation_failure.map(|_| self.body.add_block());
+        if let Some(after) = after {
+            let cancelled = self.call(self.registry.operations.unwrap().cancelled, &[]);
+            let finish = self.body.add_block();
+            self.body.set_terminator(
+                self.block,
+                Terminator::CondBr {
+                    cond: cancelled,
+                    if_true: BlockTarget {
+                        block: after,
+                        args: vec![],
+                    },
+                    if_false: BlockTarget {
+                        block: finish,
+                        args: vec![],
+                    },
+                },
+            );
+            self.block = finish;
+        }
         if let Some(native) = self
             .registry
             .promises
@@ -235,6 +282,18 @@ impl Adapter<'_> {
                 &[],
                 &[],
             );
+        }
+        if let Some(after) = after {
+            self.body.set_terminator(
+                self.block,
+                Terminator::Br {
+                    target: BlockTarget {
+                        block: after,
+                        args: vec![],
+                    },
+                },
+            );
+            self.block = after;
         }
     }
 
@@ -267,19 +326,38 @@ impl Adapter<'_> {
     }
     fn call_checked(&mut self, function: Func, args: &[Value]) -> Value {
         let outcome = abi::emit_fallible_call(&mut self.body, self.block, function, args);
-        self.body.set_terminator(
-            outcome.err_block,
-            if let Some(block) = self.command_failure {
-                Terminator::Br {
-                    target: BlockTarget {
-                        block,
-                        args: vec![],
-                    },
-                }
-            } else {
-                Terminator::Unreachable
-            },
-        );
+        let failure = if let Some(block) = self.cancellation_failure {
+            let ordinary = self.command_failure.unwrap_or_else(|| {
+                let trap = self.body.add_block();
+                self.body.set_terminator(trap, Terminator::Unreachable);
+                trap
+            });
+            let saved = self.block;
+            self.block = outcome.err_block;
+            let cancelled = self.call(self.registry.operations.unwrap().cancelled, &[]);
+            self.block = saved;
+            Terminator::CondBr {
+                cond: cancelled,
+                if_true: BlockTarget {
+                    block,
+                    args: vec![],
+                },
+                if_false: BlockTarget {
+                    block: ordinary,
+                    args: vec![],
+                },
+            }
+        } else if let Some(block) = self.command_failure {
+            Terminator::Br {
+                target: BlockTarget {
+                    block,
+                    args: vec![],
+                },
+            }
+        } else {
+            Terminator::Unreachable
+        };
+        self.body.set_terminator(outcome.err_block, failure);
         self.block = outcome.ok_block;
         outcome.payload
     }
@@ -800,6 +878,7 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         sizes,
         scratch: Some(scratch),
         command_failure: None,
+        cancellation_failure: None,
         strings,
     };
     let guest_params: Vec<_> = adapter.body.blocks[block]
@@ -858,7 +937,36 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         let status = adapter.call(registry.await_subtask.unwrap(), &[returned]);
         let two = adapter.integer(2);
         let completed = adapter.op(Operator::I32Eq, &[status, two], CoreType::I32);
-        adapter.require(completed);
+        let success = adapter.body.add_block();
+        let cancelled = adapter.body.add_block();
+        adapter.body.set_terminator(
+            adapter.block,
+            Terminator::CondBr {
+                cond: completed,
+                if_true: BlockTarget {
+                    block: success,
+                    args: vec![],
+                },
+                if_false: BlockTarget {
+                    block: cancelled,
+                    args: vec![],
+                },
+            },
+        );
+        let cancelled = adapter
+            .scratch
+            .as_ref()
+            .unwrap()
+            .release(&mut adapter.body, cancelled);
+        adapter.block = cancelled;
+        let reason = adapter.number(20.0);
+        abi::emit_completion(
+            &mut adapter.body,
+            cancelled,
+            abi::CompletionStatus::Threw,
+            reason,
+        );
+        adapter.block = success;
     }
     let value = if let Some(ty) = import.function.result {
         let direct = [returned];
@@ -893,4 +1001,80 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         format!("{}.import", import.function.name),
         adapter.body,
     )))
+}
+
+/// Adapts a canonical synchronous result layout to the official task.return signature.
+pub(in crate::waffle_backend) fn build_task_return(
+    module: &mut Module<'static>,
+    registry: &ModuleRegistry,
+    wit: &WitWorld,
+    declaration: &WitExport,
+    export: &FunctionExport,
+    task_return: Func,
+    strings: &StringPool,
+) -> Result<Func> {
+    use crate::waffle_backend::runtime::builder;
+    let params = module.signatures[export.sig].returns.clone();
+    let function = builder::declare(
+        module,
+        &format!("{}.task-return", export.name),
+        &params,
+        &[],
+    );
+    let mut sizes = SizeAlign::default();
+    sizes.fill(&wit.resolve)?;
+    let body = FunctionBody::new(module, module.funcs[function].sig());
+    let block = body.entry;
+    let mut adapter = Adapter {
+        body,
+        block,
+        registry,
+        wit,
+        sizes,
+        scratch: None,
+        strings,
+        command_failure: None,
+        cancellation_failure: None,
+    };
+    let params = adapter.body.blocks[block]
+        .params
+        .iter()
+        .map(|param| param.1)
+        .collect::<Vec<_>>();
+    let signature = wit.resolve.wasm_signature(
+        wit_parser::abi::AbiVariant::GuestExport,
+        &declaration.function,
+    );
+    let (_, _, returned) =
+        declaration
+            .function
+            .task_return_import(&wit.resolve, None, wit_parser::Mangling::Legacy);
+    let mut args = Vec::new();
+    if signature.retptr && !returned.indirect_params {
+        adapter.flatten_memory(
+            declaration.function.result.unwrap(),
+            params[0],
+            0,
+            &mut args,
+        )?;
+    } else {
+        args = params;
+    }
+    adapter.body.add_op(
+        adapter.block,
+        Operator::Call {
+            function_index: task_return,
+        },
+        &args,
+        &[],
+    );
+    adapter
+        .body
+        .set_terminator(adapter.block, Terminator::Return { values: vec![] });
+    adapter.body.validate()?;
+    adapter.body.verify_reducible()?;
+    let sig = module.funcs[function].sig();
+    module.funcs[function] =
+        waffle::FuncDecl::Body(sig, format!("{}.task-return", export.name), adapter.body);
+    Ok(function)
 }
