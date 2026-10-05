@@ -98,6 +98,11 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::Uint8ArrayGet { array, index }
+            | Expr::IndexGet {
+                object: array,
+                index,
+            } if super::bytes::literal_projection(array, index).is_some() => HirType::Number,
             Expr::IndexGet { object, index }
                 if let Some((items, selected)) =
                     super::arrays::literal_projection(object, index) =>

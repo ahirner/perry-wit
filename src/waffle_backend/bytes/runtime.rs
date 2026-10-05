@@ -30,6 +30,7 @@ pub(super) fn emit(
         new: builder::declare(module, "bytes.new", &[F64], &[I32, F64]),
         copy: builder::declare(module, "bytes.copy", &[I32], &[I32]),
         get: builder::declare(module, "bytes.get", &[I32, F64], &[F64]),
+        to_byte: builder::declare(module, "bytes.to-byte", &[F64], &[I32]),
         set: builder::declare(module, "bytes.set", &[I32, F64, F64], &[]),
         subarray: builder::declare(module, "bytes.subarray", &[I32, F64, F64], &[I32]),
     };
@@ -131,6 +132,23 @@ pub(super) fn emit(
     b.ret(&[valid]);
     b.finish(module, valid_index)?;
 
+    let mut b = Builder::new(module, helpers.to_byte, memory);
+    let value = b.param(0);
+    let magnitude = b.op(Op::F64Abs, &[value], F64);
+    let infinity = b.number(f64::INFINITY);
+    let finite = b.op(Op::F64Lt, &[magnitude, infinity], I32);
+    let zero = b.number(0.0);
+    let value = b.op(Op::Select, &[value, zero, finite], F64);
+    let integer = b.op(Op::F64Trunc, &[value], F64);
+    let modulus = b.number(256.0);
+    let quotient = b.op(Op::F64Div, &[integer, modulus], F64);
+    let quotient = b.op(Op::F64Floor, &[quotient], F64);
+    let multiple = b.op(Op::F64Mul, &[quotient, modulus], F64);
+    let remainder = b.op(Op::F64Sub, &[integer, multiple], F64);
+    let byte = b.op(Op::I32TruncF64U, &[remainder], I32);
+    b.ret(&[byte]);
+    b.finish(module, helpers.to_byte)?;
+
     for (function, write) in [(helpers.get, false), (helpers.set, true)] {
         let mut b = Builder::new(module, function, memory);
         let descriptor = b.param(0);
@@ -152,18 +170,7 @@ pub(super) fn emit(
         let address = b.op(Op::I32Add, &[data, index], I32);
         if write {
             let value = b.param(2);
-            let magnitude = b.op(Op::F64Abs, &[value], F64);
-            let infinity = b.number(f64::INFINITY);
-            let finite = b.op(Op::F64Lt, &[magnitude, infinity], I32);
-            let zero = b.number(0.0);
-            let value = b.op(Op::Select, &[value, zero, finite], F64);
-            let integer = b.op(Op::F64Trunc, &[value], F64);
-            let modulus = b.number(256.0);
-            let quotient = b.op(Op::F64Div, &[integer, modulus], F64);
-            let quotient = b.op(Op::F64Floor, &[quotient], F64);
-            let multiple = b.op(Op::F64Mul, &[quotient, modulus], F64);
-            let remainder = b.op(Op::F64Sub, &[integer, multiple], F64);
-            let byte = b.op(Op::I32TruncF64U, &[remainder], I32);
+            let byte = b.call(helpers.to_byte, &[value], &[I32])[0];
             b.effect(
                 Op::I32Store8 {
                     memory: b.memory(0),

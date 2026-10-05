@@ -7,6 +7,14 @@ use waffle::{MemoryArg, Operator, Type, Value};
 use super::FunctionLowerer;
 use crate::waffle_backend::{abi, bytes::is_byte_view};
 
+/// The constructor cannot escape an immediate, known in-bounds indexed read.
+pub(super) fn literal_projection<'a>(array: &'a Expr, index: &Expr) -> Option<(&'a [Expr], usize)> {
+    let Expr::Uint8ArrayNew(Some(argument)) = array else {
+        return None;
+    };
+    super::arrays::literal_projection(argument, index)
+}
+
 impl FunctionLowerer<'_> {
     pub(super) fn encode_bytes(&mut self, input: &Expr) -> Result<Value> {
         ensure!(
@@ -134,6 +142,23 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn byte_index(&mut self, array: &Expr, index: &Expr) -> Result<Value> {
+        if let Some((items, selected)) = literal_projection(array, index) {
+            let mut result = None;
+            for (index, item) in items.iter().enumerate() {
+                let value = self.byte_number(Some(item), f64::NAN)?;
+                if index == selected {
+                    result = Some(value);
+                }
+            }
+            let byte = self.op(
+                Operator::Call {
+                    function_index: self.registry.byte_helpers.unwrap().to_byte,
+                },
+                &[result.expect("literal projection validated the index")],
+                &[Type::I32],
+            );
+            return Ok(self.op(Operator::F64ConvertI32U, &[byte], &[Type::F64]));
+        }
         let view = self.byte_receiver(array)?;
         let index = self.byte_number(Some(index), f64::NAN)?;
         let get = self.registry.byte_helpers.unwrap().get;

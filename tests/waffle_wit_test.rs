@@ -17,56 +17,103 @@ fn compile_records(source: &str) -> Result<WaffleCompiled> {
 }
 
 #[test]
-fn literal_array_projection_avoids_materialization() -> Result<()> {
+fn literal_projections_avoid_materialization() -> Result<()> {
     let engine = Engine::default();
-    let mut measurements = Vec::new();
-    for body in [
-        "return [x, x + 1, x + 2][1];",
-        "const values:number[] = [x, x + 1, x + 2]; return values[1];",
+    for (kind, bodies) in [
+        (
+            "dense array",
+            [
+                "return [x, x + 1, x + 2][1];",
+                "const values:number[] = [x, x + 1, x + 2]; return values[1];",
+            ],
+        ),
+        (
+            "byte array",
+            [
+                "return new Uint8Array([x, x + 1, x + 2])[1] + 0;",
+                "const values = new Uint8Array([x, x + 1, x + 2]); return values[1] + 0;",
+            ],
+        ),
     ] {
-        let compiled = compile_world(
-            &format!("export function run(x:number):number {{{body}}}"),
-            "package test:boundary; world boundary {export run:func(x:f64)->f64;}",
-        )?;
-        let bytes = compiled.component.as_ref().unwrap().len();
-        let core = heap_measurement::instrument(&compiled.core)?;
-        let mut resolve = wit_parser::Resolve::default();
-        let package = resolve.push_str(
-            "probe.wit",
-            "package test:boundary; world boundary {
+        let mut measurements = Vec::new();
+        for body in bodies {
+            let compiled = compile_world(
+                &format!("export function run(x:number):number {{{body}}}"),
+                "package test:boundary; world boundary {export run:func(x:f64)->f64;}",
+            )?;
+            let bytes = compiled.component.as_ref().unwrap().len();
+            let core = heap_measurement::instrument(&compiled.core)?;
+            let mut resolve = wit_parser::Resolve::default();
+            let package = resolve.push_str(
+                "probe.wit",
+                "package test:boundary; world boundary {
             export run:func(x:f64)->f64;
             export measure-allocations:func()->u64;
         }",
-        )?;
-        let world = resolve.select_world(&[package], Some("boundary"))?;
-        let component = Component::new(
-            &engine,
-            perry_wit::waffle_backend::encode_component(&core, resolve, world)?,
-        )?;
-        let mut store = Store::new(&engine, ());
-        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-        let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
-        let allocations =
-            instance.get_typed_func::<(), (u64,)>(&mut store, "measure-allocations")?;
-        let before = allocations.call(&mut store, ())?.0;
-        for input in 0..16 {
-            assert_eq!(
-                run.call(&mut store, (f64::from(input),))?.0,
-                f64::from(input + 1)
-            );
+            )?;
+            let world = resolve.select_world(&[package], Some("boundary"))?;
+            let component = Component::new(
+                &engine,
+                perry_wit::waffle_backend::encode_component(&core, resolve, world)?,
+            )?;
+            let mut store = Store::new(&engine, ());
+            let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+            let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+            let allocations =
+                instance.get_typed_func::<(), (u64,)>(&mut store, "measure-allocations")?;
+            let before = allocations.call(&mut store, ())?.0;
+            for input in 0..16 {
+                assert_eq!(
+                    run.call(&mut store, (f64::from(input),))?.0,
+                    f64::from(input + 1)
+                );
+            }
+            measurements.push((bytes, allocations.call(&mut store, ())?.0 - before));
         }
-        measurements.push((bytes, allocations.call(&mut store, ())?.0 - before));
+        assert!(
+            measurements[0].0 < measurements[1].0,
+            "component sizes: {measurements:?}"
+        );
+        assert!(
+            measurements[0].1 < measurements[1].1,
+            "allocation counts: {measurements:?}"
+        );
+        println!(
+            "{kind} projection versus materialization (component bytes, allocations for 16 calls): {measurements:?}"
+        );
     }
-    assert!(
-        measurements[0].0 < measurements[1].0,
-        "component sizes: {measurements:?}"
-    );
-    assert!(
-        measurements[0].1 < measurements[1].1,
-        "allocation counts: {measurements:?}"
-    );
-    println!(
-        "Projection versus materialization (component bytes, allocations for 16 calls): {measurements:?}"
+    Ok(())
+}
+
+#[test]
+fn literal_byte_projection_preserves_conversion_effects_and_exception_order() -> Result<()> {
+    let source = r#"
+        function record(trace:number[], value:number):number {trace.push(value);return value;}
+        function fail():number {throw 9;}
+        export function run():number[] {
+            const trace:number[]=[];
+            const selected=new Uint8Array([record(trace,-257.9),record(trace,2),record(trace,3)])[0];
+            trace.push(selected);
+            try {const value=new Uint8Array([record(trace,4),fail(),record(trace,5)])[0]; trace.push(value);}
+            catch(error){trace.push(error);}
+            const truth = new Uint8Array([true,false,undefined])[0];
+            const missing = new Uint8Array([true,false,undefined])[2];
+            trace.push(truth); trace.push(missing);
+            return trace;
+        }
+    "#;
+    let compiled = compile_world(
+        source,
+        "package test:boundary; world boundary {export run:func()->list<f64>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(), (Vec<f64>,)>(&mut store, "run")?;
+    assert_eq!(
+        run.call(&mut store, ())?.0,
+        [-257.9, 2.0, 3.0, 255.0, 4.0, 9.0, 1.0, 0.0]
     );
     Ok(())
 }

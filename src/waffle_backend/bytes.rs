@@ -15,6 +15,7 @@ pub(crate) struct ByteHelpers {
     pub(crate) copy: Func,
     pub(crate) get: Func,
     pub(crate) set: Func,
+    pub(crate) to_byte: Func,
     pub(crate) subarray: Func,
 }
 
