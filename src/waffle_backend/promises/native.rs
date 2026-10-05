@@ -9,7 +9,7 @@ use crate::waffle_backend::{
     runtime::builder::{self, Builder},
 };
 use anyhow::Result;
-pub(crate) use scheduler::ACTIVE as ACTIVE_SOURCE;
+pub(crate) use scheduler::RUNNABLE as RUNNABLE_SOURCE;
 use std::collections::BTreeMap;
 use waffle::{Export, ExportKind, Func, Module, Operator, TableData, Type};
 
@@ -17,6 +17,7 @@ pub(crate) struct NativeRuntime {
     pub enter: Func,
     pub combine: Option<Func>,
     pub finish: Func,
+    pub validate: Func,
     pub cancel_all: Func,
     settle: Func,
     new_thread: Func,
@@ -29,9 +30,8 @@ pub(crate) struct NativeRuntime {
     resume: Func,
     context_get: Func,
     context_set: Func,
-    enqueue: Func,
+    schedule: Func,
     observe: Func,
-    dispatch: Func,
     pause: Func,
     pub complete: Func,
 }
@@ -54,9 +54,8 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
         resume: builder::native(module, "[thread-resume-later]", &[I32], &[]),
         context_get: builder::native(module, "[context-get-0]", &[], &[I32]),
         context_set: builder::native(module, "[context-set-0]", &[I32], &[]),
-        enqueue: builder::declare(module, "tasks.enqueue", &[I32], &[]),
+        schedule: builder::declare(module, "tasks.wake", &[I32], &[]),
         observe: builder::declare(module, "tasks.observe-promise", &[I32, I32], &[]),
-        dispatch: builder::declare(module, "tasks.dispatch", &[], &[I32]),
         pause: builder::declare(module, "tasks.pause", &[], &[]),
         complete: builder::declare(module, "tasks.complete", &[], &[]),
         combine: plan
@@ -64,6 +63,7 @@ pub(crate) fn declare(module: &mut Module<'static>, plan: &PromisePlan) -> Resul
             .then(|| builder::declare(module, "tasks.combine", &[I32; 6], &[I32])),
         enter: builder::declare(module, "tasks.enter", &[], &[]),
         finish: builder::declare(module, "tasks.finish", &[], &[]),
+        validate: builder::declare(module, "tasks.validate", &[], &[]),
         cancel_all: builder::declare(module, "tasks.cancel-all", &[], &[]),
         settle: builder::declare(module, "tasks.settle", &[I32, I32, F64], &[]),
     };
@@ -141,13 +141,6 @@ pub(crate) fn emit(
     b.ret(&[record]);
     b.finish(module, runtime.new)?;
 
-    let mut b = Builder::new(module, runtime.yield_thread, memory);
-    let thread = b.call(native.index, &[], &[I32])[0];
-    b.call(native.enqueue, &[thread], &[]);
-    b.call(native.pause, &[], &[]);
-    b.ret(&[]);
-    b.finish(module, runtime.yield_thread)?;
-
     let mut b = Builder::new(module, native.enter, memory);
     let address = b.integer(32);
     let active = b.load(address, 0, I32);
@@ -155,7 +148,7 @@ pub(crate) fn emit(
     b.require(inactive);
     let one = b.integer(1);
     b.store(address, 0, one, I32);
-    let active = b.integer(scheduler::ACTIVE);
+    let active = b.integer(scheduler::RUNNABLE);
     b.store(active, 0, one, I32);
     let workers = b.integer(crate::waffle_backend::runtime::callbacks::LIVE_WORKERS);
     let zero = b.integer(0);
@@ -183,6 +176,7 @@ pub(crate) fn emit(
         b.store(context, 0, b.param(0), I32);
         let guest = matches!(target, TaskTarget::Guest(_));
         if guest {
+            scheduler::update_runnable(&mut b, true);
             let parent = b.call(native.index, &[], &[I32])[0];
             let eager = b.op(Operator::I32Add, &[parent, one], I32);
             b.store(context, 4, eager, I32);
@@ -267,8 +261,6 @@ pub(crate) fn emit(
         b.call(registry.allocator.unwrap().frame_drop, &[frame], &[]);
         if guest {
             b.call(native.complete, &[], &[]);
-        } else {
-            b.call(native.dispatch, &[], &[I32]);
         }
         crate::waffle_backend::runtime::callbacks::worker_count(
             &mut b,
@@ -385,20 +377,24 @@ fn emit_finish(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     use Type::I32;
     let runtime = registry.promises.as_ref().unwrap();
     let native = &runtime.native;
-    let function = native.finish;
+    let function = native.validate;
     let mut b = Builder::new(module, function, registry.memory);
-    let check_queue = b.body.add_block();
-    let drain_queue = b.body.add_block();
-    let validate = b.body.add_block();
-    b.jump(check_queue, &[]);
-    b.block = check_queue;
-    let ready = b.integer(scheduler::READY_HEAD);
-    let head = b.load(ready, 0, I32);
-    b.branch(head, drain_queue, validate);
-    b.block = drain_queue;
-    b.call(runtime.yield_thread, &[], &[]);
-    b.jump(check_queue, &[]);
-    b.block = validate;
+    {
+        let check = b.body.add_block();
+        let drain = b.body.add_block();
+        let validate = b.body.add_block();
+        b.jump(check, &[]);
+        b.block = check;
+        let address = b.integer(scheduler::RUNNABLE);
+        let count = b.load(address, 0, I32);
+        let one = b.integer(1);
+        let other = b.op(Operator::I32GtU, &[count, one], I32);
+        b.branch(other, drain, validate);
+        b.block = drain;
+        b.call(runtime.yield_thread, &[], &[]);
+        b.jump(check, &[]);
+        b.block = validate;
+    }
     let address = b.integer(4);
     let head = b.load(address, 0, I32);
     let next = b.body.add_block();
@@ -416,7 +412,12 @@ fn emit_finish(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     let record = b.load(record, 16, I32);
     b.jump(next, &[record]);
     b.block = done;
-    if registry.operations.is_none() {
+    b.ret(&[]);
+    b.finish(module, function)?;
+    let function = native.finish;
+    let mut b = Builder::new(module, function, registry.memory);
+    b.call(native.validate, &[], &[]);
+    if registry.callbacks.is_none() {
         let check = b.body.add_block();
         let drain = b.body.add_block();
         let finished = b.body.add_block();
@@ -431,10 +432,11 @@ fn emit_finish(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
         b.block = finished;
     }
     let zero = b.integer(0);
+    let address = b.integer(4);
     b.store(address, 0, zero, I32);
     let active = b.integer(32);
     b.store(active, 0, zero, I32);
-    let active = b.integer(scheduler::ACTIVE);
+    let active = b.integer(scheduler::RUNNABLE);
     b.store(active, 0, zero, I32);
     b.ret(&[]);
     b.finish(module, function)
@@ -446,10 +448,22 @@ fn emit_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result
     let native = &runtime.native;
     let mut b = Builder::new(module, runtime.await_result, registry.memory);
     let record = b.param(0);
+    let two = b.integer(2);
+    let tag = b.load(record, 4, I32);
+    let pending = b.op(Operator::I32Eq, &[tag, two], I32);
+    let wait = b.body.add_block();
+    let yield_ready = b.body.add_block();
+    let ready = b.body.add_block();
+    b.branch(pending, wait, yield_ready);
+    b.block = wait;
     let thread = b.call(native.index, &[], &[I32])[0];
     b.call(native.observe, &[record, thread], &[]);
     b.call(native.pause, &[], &[]);
-    let two = b.integer(2);
+    b.jump(ready, &[]);
+    b.block = yield_ready;
+    b.call(runtime.yield_thread, &[], &[]);
+    b.jump(ready, &[]);
+    b.block = ready;
     let tag = b.load(record, 4, I32);
     let settled = b.op(Operator::I32LtU, &[tag, two], I32);
     b.require(settled);
@@ -458,7 +472,7 @@ fn emit_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result
     b.finish(module, runtime.await_result)
 }
 
-/// Native transport joins do not acquire the source reaction queue's execution token.
+/// Native transport joins retain their observers independently of source continuations.
 fn emit_native_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
     use Type::{F64, I32};
     let runtime = registry.promises.as_ref().unwrap();
@@ -515,27 +529,33 @@ fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     b.store(record, 8, payload, F64);
     b.store(record, 4, tag, I32);
     b.store(record, 0, two, I32);
-    let head = b.load(record, 20, I32);
-    let tail = b.load(record, 24, I32);
     let zero = b.integer(0);
-    b.store(record, 20, zero, I32);
-    b.store(record, 24, zero, I32);
-    scheduler::append(&mut b, head, tail);
-    let head = b.load(record, 28, I32);
-    b.store(record, 28, zero, I32);
-    let next = b.body.add_block();
-    let waiter = b.body.add_blockparam(next, I32);
-    let wake = b.body.add_block();
-    let done = b.body.add_block();
-    b.jump(next, &[head]);
-    b.block = next;
-    b.branch(waiter, wake, done);
-    b.block = wake;
-    let thread = b.load(waiter, 0, I32);
-    b.call(native.resume, &[thread], &[]);
-    let following = b.load(waiter, 4, I32);
-    b.jump(next, &[following]);
-    b.block = done;
+    for (offset, resume) in [(20, native.schedule), (28, native.resume)] {
+        let head = b.load(record, offset, I32);
+        b.store(record, offset, zero, I32);
+        if offset == 20 {
+            b.store(record, 24, zero, I32);
+        }
+        let next = b.body.add_block();
+        let waiter = b.body.add_blockparam(next, I32);
+        let wake = b.body.add_block();
+        let done = b.body.add_block();
+        b.jump(next, &[head]);
+        b.block = next;
+        b.branch(waiter, wake, done);
+        b.block = wake;
+        let thread = b.load(waiter, 0, I32);
+        let following = b.load(waiter, 4, I32);
+        b.call(resume, &[thread], &[]);
+        let eight = b.integer(8);
+        b.call(
+            registry.allocator.unwrap().realloc,
+            &[waiter, eight, eight, zero],
+            &[I32],
+        );
+        b.jump(next, &[following]);
+        b.block = done;
+    }
     b.ret(&[]);
     b.finish(module, native.settle)
 }
@@ -572,7 +592,6 @@ fn emit_cancel_all(module: &mut Module<'static>, registry: &ModuleRegistry) -> R
         let successor = b.load(record, 16, I32);
         b.jump(next, &[successor]);
         b.block = done;
-        b.call(native.dispatch, &[], &[I32]);
     }
     b.ret(&[]);
     b.finish(module, native.cancel_all)

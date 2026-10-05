@@ -263,7 +263,11 @@ impl Adapter<'_> {
             self.body.add_op(
                 self.block,
                 Operator::Call {
-                    function_index: native.finish,
+                    function_index: if self.cancellation_failure.is_some() {
+                        native.validate
+                    } else {
+                        native.finish
+                    },
                 },
                 &[],
                 &[],

@@ -7,6 +7,9 @@ use std::{fs, time::Instant};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, ResourceLimiter, Store};
 
+#[path = "support/heap_measurement.rs"]
+mod heap_measurement;
+
 #[derive(Default)]
 struct MemoryUsage(usize);
 impl ResourceLimiter for MemoryUsage {
@@ -39,6 +42,9 @@ struct Measurement {
     memory_after_samples: usize,
     calls_per_sample: u32,
     microseconds_per_call: Vec<f64>,
+    allocations_per_call: u64,
+    requested_bytes_per_call: u64,
+    peak_allocated_block_bytes: u64,
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -70,6 +76,14 @@ async fn measure_owned_fanout() -> Result<()> {
             core_only: false,
         },
     )?;
+    let instrumented = heap_measurement::instrument(&compiled.core)?;
+    fs::write(
+        root.path().join("world.wit"),
+        "package test:scheduling; world task {export run:async func(count:u32)->f64; export measure-allocations:func()->u64; export measure-bytes:func()->u64; export measure-peak:func()->u64;}",
+    )?;
+    let (resolve, package) = perry_wit::component::wit::resolve_wit(root.path())?;
+    let world = resolve.select_world(&[package], Some("task"))?;
+    let instrumented = perry_wit::waffle_backend::encode_component(&instrumented, resolve, world)?;
     let bytes = compiled.stripped.unwrap();
     let component_bytes = bytes.len();
     let mut config = Config::new();
@@ -80,6 +94,7 @@ async fn measure_owned_fanout() -> Result<()> {
         .wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, bytes)?;
+    let allocation_probe = Component::new(&engine, instrumented)?;
     let mut measurements = Vec::new();
     for operands in [1u32, 16, 64, 256] {
         let mut store = Store::new(&engine, MemoryUsage::default());
@@ -108,6 +123,28 @@ async fn measure_owned_fanout() -> Result<()> {
             memory_after_warmup == store.data().0,
             "serial calls keep growing memory"
         );
+        let mut probe_store = Store::new(&engine, ());
+        let probe = Linker::new(&engine)
+            .instantiate_async(&mut probe_store, &allocation_probe)
+            .await?;
+        let probe_run = probe.get_typed_func::<(u32,), (f64,)>(&mut probe_store, "run")?;
+        assert_eq!(
+            probe_run.call_async(&mut probe_store, (operands,)).await?.0,
+            expected
+        );
+        let allocations = probe
+            .get_typed_func::<(), (u64,)>(&mut probe_store, "measure-allocations")?
+            .call(&mut probe_store, ())?
+            .0;
+        let allocated_bytes = probe
+            .get_typed_func::<(), (u64,)>(&mut probe_store, "measure-bytes")?
+            .call(&mut probe_store, ())?
+            .0;
+        let peak = probe
+            .get_typed_func::<(), (u64,)>(&mut probe_store, "measure-peak")?
+            .call(&mut probe_store, ())?
+            .0;
+        probe_store.assert_concurrent_state_empty();
         let sample = Measurement {
             operands,
             component_bytes,
@@ -115,6 +152,9 @@ async fn measure_owned_fanout() -> Result<()> {
             memory_after_samples: store.data().0,
             calls_per_sample,
             microseconds_per_call,
+            allocations_per_call: allocations,
+            requested_bytes_per_call: allocated_bytes,
+            peak_allocated_block_bytes: peak,
         };
         eprintln!("{}", serde_json::to_string(&sample)?);
         measurements.push(sample);

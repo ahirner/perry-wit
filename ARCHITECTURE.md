@@ -16,8 +16,9 @@ component tests use the same resolved-WIT component encoder.
    share the same lowering and validation machinery. Typed capability plans
    connect source validation to implementation signatures and canonical imports.
 4. **Native Component Model async.** Host-managed suspension and native transfer
-   handles carry pending operations. Guest task records and a reaction queue
-   supply source Promise identity, observation, and combinator ordering.
+   handles carry pending operations. Guest task records and pending observers
+   supply source Promise identity, repeated observation, and combinator results;
+   native P3 wakeups schedule continuations.
 5. **Authoritative WIT.** Pinned official interfaces define built-in platform
    capabilities. Application WIT defines application contracts. SDK and compiler
    share export naming; internal helper names do not create host protocols.
@@ -163,10 +164,22 @@ separate from the independently tested pure codecs and introduces no allocator.
 ## Async execution and ownership
 
 Source async functions execute eagerly to their first suspension. Stored tasks
-keep one settlement and shared outcome storage for repeated awaits. A FIFO
-reaction queue schedules source continuations. `all`, `allSettled`, and `race`
-register each operand once; race losers retain ownership and continue executing.
+keep one settlement and shared outcome storage for repeated awaits. Native P3
+wakeups schedule continuations; exact Node microtask ordering is not guaranteed.
+Already-settled awaits yield through P3 without allocating an observer. Pending
+observers register once and receive the same outcome; their wakeup order and
+nested continuation order have no Node FIFO guarantee. `all` preserves input
+order and rejection, and `allSettled` records each input's outcome. Empty `all`
+and `allSettled` resolve to empty arrays; an empty `race` remains pending.
+`race` uses the first observed settlement, with no input-order tie-break for
+simultaneously ready operands. Losers retain ownership and continue executing.
 Returning with unresolved ordinary work traps. Public invocations are serialized.
+
+The runtime counts runnable source continuations to distinguish pending work
+from cleanup that can finish before boundary validation. Shared settlement
+records, pending-observer lists, and combinator result storage use the guest heap.
+Observer nodes are released after notification. P3 owns the ready-thread queue;
+Perry does not maintain another reaction queue.
 
 Filesystem source operations use `node:fs/promises` or `fs/promises`. One typed
 capability path creates retained tasks for reads, writes, and metadata operations;
@@ -223,7 +236,7 @@ tested ABI bridges are intended to remain after consolidation.
 | `src/waffle_backend/initialization.rs` | Command adaptation and instance module state |
 | `src/waffle_backend/ssa/` | Shared values, control flow, exceptions, and source calls |
 | `src/waffle_backend/capabilities/` | Pure capability plans and scalar implementations |
-| `src/waffle_backend/promises/native/` | Task records, observers, reaction queue, combinators |
+| `src/waffle_backend/promises/native/` | Task records, observers, native wakeups, combinators |
 | `src/waffle_backend/allocation/`, `allocation.rs` | Guest heap, roots, and canonical scratch scopes |
 | `src/waffle_backend/wit/`, `wit.rs` | Canonical layouts, adapters, native capability wiring |
 | `src/component/` | Official/application WIT resolution and component encoding |

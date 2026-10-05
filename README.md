@@ -183,8 +183,9 @@ coercion, and other compatibility work are recorded in
 
 Stored async tasks retain their outcomes for repeated observation.
 `Promise.all`, `allSettled`, and `race` register each operand once; execution is
-eager to the first suspension. Race losers continue running and must finish
-before the owning call returns. Unresolved ordinary work at that boundary traps.
+eager to the first suspension. Continuations follow P3 scheduling; exact Node
+microtask ordering is not guaranteed. Race losers continue running and must finish
+or be explicitly cancelled before the owning call returns. Unresolved ordinary work at that boundary traps.
 Standard `fetch` accepts URLs or `Request` values, typed options, header
 records/pairs/`Headers`, and string or byte bodies. It resolves at response headers,
 supports redirect modes, and exposes response metadata and single-consumption

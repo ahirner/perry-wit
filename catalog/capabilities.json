@@ -442,12 +442,13 @@
         "A source task starts eagerly and its caller continues while native P3 work is pending",
         "Aliases preserve Promise identity and repeated awaits retain statically typed success values and numeric rejection",
         "Native P3 threads settle one shared outcome and notify registered observers once",
-        "A FIFO reaction queue preserves registration order, eager execution to first suspension, and return-promise adoption after finally",
+        "Native P3 wakeups schedule continuations; eager execution to first suspension and return-promise adoption after finally are preserved",
         "Promise records and reference-bearing outcomes share the guest heap, survive collection, and are reclaimed after result copying",
         "Guest rejection enters catch and finally at await; host traps remain outside the language error channel"
       ],
       "differences": [
         "Stored Promises require the host's component async stackful and threading features",
+        "Async continuations follow P3 scheduling, not exact Node microtask order. Already-settled awaits yield through P3; multiple observers and nested continuations have no Node FIFO guarantee. Simultaneously ready race operands have no input-order tie-break: the first observed settlement wins",
         "Promise parameters are guest-internal; constructors and callback reactions remain unsupported",
         "Detached call statements are diagnosed; unresolved work at return traps. Public calls execute serially; entries that bypass host serialization trap on the invocation guard",
         "Host cancellation runs guest cleanup and drains acknowledged native owners in async WIT/timer/HTTP components. Filesystem descriptor and file/console transfer owners also use the shared registry; file AbortSignal cancellation is verified through independent producer completion. Public streams and incoming handlers still need ownership integration; traps and host disposal require a fresh store"
@@ -462,8 +463,8 @@
         "rust:tests/p3_promise_test.rs#completed_task_transport_releases_native_state",
         "rust:tests/p3_promise_test.rs#settled_promise_identity_adoption_and_void_are_preserved",
         "rust:tests/p3_promise_test.rs#unsupported_promise_uses_have_source_diagnostics",
-        "rust:tests/p3_promise_test.rs#concurrent_observers_resume_once_in_registration_order",
-        "rust:tests/p3_promise_test.rs#sibling_reactions_precede_an_observers_dependent_reaction",
+        "rust:tests/p3_promise_test.rs#concurrent_observers_receive_one_shared_outcome",
+        "rust:tests/p3_promise_test.rs#sibling_and_dependent_observers_each_run_once",
         "rust:tests/p3_promise_test.rs#stored_text_results_survive_repeated_observation_and_export_cleanup",
         "rust:tests/p3_promise_test.rs#repeated_awaits_do_not_allocate_additional_records",
         "rust:tests/p3_promise_test.rs#source_stored_promise_retains_identity_success_and_rejection",
@@ -479,7 +480,7 @@
         "rust:tests/waffle_wit_native_test.rs#asynchronous_wit_traps_and_disposal_release_pending_host_calls",
         "rust:tests/waffle_wit_native_test.rs#independent_record_flow_preserves_transformations_and_orders_host_effects",
         "rust:tests/waffle_wit_native_test.rs#promise_combinators_preserve_results_and_release_native_threads",
-        "rust:tests/waffle_wit_native_test.rs#resolved_task_reaction_order_matches_node",
+        "rust:tests/waffle_wit_native_test.rs#native_continuations_preserve_eager_prefixes_and_dependencies",
         "rust:tests/waffle_wit_native_test.rs#empty_race_stays_pending_and_cannot_escape_its_call",
         "rust:tests/waffle_wit_native_test.rs#directly_awaited_imports_serialize_public_calls",
         "rust:tests/waffle_wit_native_test.rs#timer_delays_map_to_p3_nanoseconds_without_waiting_for_the_clock",
@@ -748,7 +749,7 @@
       ],
       "conformance": [
         "rust:tests/waffle_wit_native_test.rs#promise_combinators_preserve_results_and_release_native_threads",
-        "rust:tests/waffle_wit_native_test.rs#resolved_task_reaction_order_matches_node",
+        "rust:tests/waffle_wit_native_test.rs#native_continuations_preserve_eager_prefixes_and_dependencies",
         "rust:tests/waffle_wit_native_test.rs#empty_race_stays_pending_and_cannot_escape_its_call",
         "node:tests/conformance/cases/03_promise_all.ts",
         "rust:tests/p3_cancellation_test.rs#compiled_exports_acknowledge_host_cancellation_and_run_finally",

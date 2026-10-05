@@ -1,5 +1,46 @@
 # Performance measurements
 
+## Native P3 scheduling and promise-only files
+
+Measured on 2026-10-05 with Wasmtime 49.0.2, Cargo's test profile, and default
+Cranelift on arm64 macOS 27.0. The FIFO baseline is `35f4bfe`; the native candidate
+is the commit containing this report. The same fan-out fixture receives five
+warmup calls followed by five batches of 50 calls. Every result is checked,
+native task state is empty after calls, and linear memory remains constant
+through sampling. [Raw samples](measurements/native-scheduling-2026-10-05.json)
+include the baseline revisions, allocation probe, and filesystem comparison.
+
+| Tasks | Median FIFO → native | Nonzero allocations/call, FIFO → native | Peak allocated payload, FIFO → native | Linear memory, both |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 153.66 → 154.88 µs | 23 → 22 | 396 → 388 B | 64 KiB |
+| 16 | 1.504 → 0.961 ms | 174 → 158 | 2,648 → 2,520 B | 64 KiB |
+| 64 | 6.562 → 4.232 ms | 656 → 592 | 9,944 → 9,432 B | 64 KiB |
+| 256 | 44.945 → 35.343 ms | 2,578 → 2,322 | 39,128 → 37,080 B | 128 KiB |
+
+The stripped component decreases from 19,979 to 19,824 bytes (155 bytes, 0.8%).
+This fixture saves one eight-byte allocation per task. The three production
+Promise runtime files decrease from 1,197 to 1,180 lines: the ready-queue head,
+tail, append/pop dispatcher, and queue GC root disappear, while pending observers,
+combinator bookkeeping, eager-start handoff, and runnable-work accounting remain.
+The size and source reduction are modest. These samples show 21–36% lower whole-call
+cost at 16–256 tasks and no improvement at one task; they do not isolate scheduler
+instructions or establish performance for network I/O or other workloads.
+
+[The test-only allocation probe](tests/support/heap_measurement.rs) instruments
+the shared allocator in a separately instantiated component. Counts include
+nonzero allocations and reallocations. Peak payload includes allocated garbage
+not yet collected and excludes heap headers, alignment, host stacks, JIT code,
+and RSS; it is not a reachability measurement. Size and timing use uninstrumented
+code. Stable linear memory and empty native state establish bounded storage
+across these repeated calls, not a universal bound for every application.
+
+The promise-only filesystem comparison uses the same promise-based 64 KiB
+read/write fixture before (`978817b`) and after (`35f4bfe`) removing synchronous
+support. Its stripped component decreases from 33,960 to 33,802 bytes (158 bytes,
+0.5%). Linear memory remains 256 KiB in both, and median call time is 1.554 versus
+1.550 ms. No meaningful speedup is claimed. Descriptor ownership, transfer
+buffering, completion channels, and cancellation remain necessary.
+
 ## Production snapshot at `8f916eb`
 
 Measured on 2026-10-04 using the pinned Wasmtime 49.0.2 on arm64 macOS 27.0,

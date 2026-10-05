@@ -147,7 +147,6 @@
         (else (call $mark (local.get $pointer)) (local.set $previous (local.get $pointer))))
       (local.set $pointer (local.get $next))
       (br $promises)))
-    (call $mark (i32.load (i32.const 80))) ;; Promise reaction queue.
     (call $mark-frames (i32.const 44))
     (call $mark-frames (i32.const 72))
     (loop $trace

@@ -317,11 +317,11 @@ pub(crate) fn emit(
         let yielded = b.op(O::I32Eq, &[action, one], I32);
         let idle_turn = b.op(O::I32Eqz, &[b.param(0)], I32);
         let idle_turn = b.op(O::I32And, &[yielded, idle_turn], I32);
-        let active_address = b.integer(crate::waffle_backend::promises::native::ACTIVE_SOURCE);
-        let active_source = b.load(active_address, 0, I32);
+        let active_address = b.integer(crate::waffle_backend::promises::native::RUNNABLE_SOURCE);
+        let runnable_source = b.load(active_address, 0, I32);
         let workers_address = b.integer(NATIVE_WORKERS);
         let workers = b.load(workers_address, 0, I32);
-        let active_work = b.op(O::I32Or, &[active_source, workers], I32);
+        let active_work = b.op(O::I32Or, &[runnable_source, workers], I32);
         let source_idle = b.op(O::I32Eqz, &[active_work], I32);
         let idle_turn = b.op(O::I32And, &[idle_turn, source_idle], I32);
         let done_address = b.integer(DONE);

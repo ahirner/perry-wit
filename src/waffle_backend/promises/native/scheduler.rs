@@ -1,38 +1,29 @@
-//! FIFO source reactions share one execution token; native I/O remains concurrent.
-//! Thread startup queues the caller until the child's first native suspension or await.
-//! The shared context retains the immediate parent during that eager prefix;
-//! the first await resumes that parent explicitly before entering queued reactions.
+//! P3 schedules runnable continuations; records retain only pending observers.
+//! The immediate caller resumes at a child's first suspension, preserving eager starts.
 
 use super::*;
 use waffle::Value;
 
-pub(super) const READY_HEAD: u32 = 80;
-const READY_TAIL: u32 = 84;
-pub(crate) const ACTIVE: u32 = 88;
+pub(crate) const RUNNABLE: u32 = 88;
 
-pub(super) fn append(b: &mut Builder, head: Value, tail: Value) {
+pub(super) fn update_runnable(b: &mut Builder, started: bool) {
     use Type::I32;
-    let nonempty = b.body.add_block();
-    let done = b.body.add_block();
-    b.branch(head, nonempty, done);
-    b.block = nonempty;
-    let head_address = b.integer(READY_HEAD);
-    let tail_address = b.integer(READY_TAIL);
-    let previous = b.load(tail_address, 0, I32);
-    let append = b.body.add_block();
-    let first = b.body.add_block();
-    let linked = b.body.add_block();
-    b.branch(previous, append, first);
-    b.block = append;
-    b.store(previous, 4, head, I32);
-    b.jump(linked, &[]);
-    b.block = first;
-    b.store(head_address, 0, head, I32);
-    b.jump(linked, &[]);
-    b.block = linked;
-    b.store(tail_address, 0, tail, I32);
-    b.jump(done, &[]);
-    b.block = done;
+    let address = b.integer(RUNNABLE);
+    let count = b.load(address, 0, I32);
+    let one = b.integer(1);
+    if !started {
+        b.require(count);
+    }
+    let count = b.op(
+        if started {
+            Operator::I32Add
+        } else {
+            Operator::I32Sub
+        },
+        &[count, one],
+        I32,
+    );
+    b.store(address, 0, count, I32);
 }
 
 pub(super) fn waiter(b: &mut Builder, registry: &ModuleRegistry, thread: Value) -> Value {
@@ -51,19 +42,18 @@ pub(super) fn waiter(b: &mut Builder, registry: &ModuleRegistry, thread: Value) 
 
 pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result<()> {
     use Type::I32;
-    let native = &registry.promises.as_ref().unwrap().native;
+    let runtime = registry.promises.as_ref().unwrap();
+    let native = &runtime.native;
     let memory = registry.memory;
-    let mut b = Builder::new(module, native.enqueue, memory);
-    let thread = b.param(0);
-    let node = waiter(&mut b, registry, thread);
-    append(&mut b, node, node);
+    let mut b = Builder::new(module, native.schedule, memory);
+    update_runnable(&mut b, true);
+    b.call(native.resume, &[b.param(0)], &[]);
     b.ret(&[]);
-    b.finish(module, native.enqueue)?;
+    b.finish(module, native.schedule)?;
 
     let mut b = Builder::new(module, native.observe, memory);
     let record = b.param(0);
     let thread = b.param(1);
-    let node = waiter(&mut b, registry, thread);
     let status = b.load(record, 4, I32);
     let two = b.integer(2);
     let pending = b.op(Operator::I32Eq, &[status, two], I32);
@@ -71,9 +61,10 @@ pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> R
     let ready = b.body.add_block();
     b.branch(pending, wait, ready);
     b.block = ready;
-    append(&mut b, node, node);
+    b.call(native.schedule, &[thread], &[]);
     b.ret(&[]);
     b.block = wait;
+    let node = waiter(&mut b, registry, thread);
     let tail = b.load(record, 24, I32);
     let append = b.body.add_block();
     let first = b.body.add_block();
@@ -90,49 +81,20 @@ pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> R
     b.ret(&[]);
     b.finish(module, native.observe)?;
 
-    let mut b = Builder::new(module, native.dispatch, memory);
-    let active_address = b.integer(ACTIVE);
-    let active = b.load(active_address, 0, I32);
-    let idle = b.body.add_block();
-    let done = b.body.add_block();
-    b.branch(active, done, idle);
-    b.block = idle;
-    let head_address = b.integer(READY_HEAD);
-    let tail_address = b.integer(READY_TAIL);
-    let head = b.load(head_address, 0, I32);
-    let pop = b.body.add_block();
-    b.branch(head, pop, done);
-    b.block = pop;
-    let next = b.load(head, 4, I32);
-    b.store(head_address, 0, next, I32);
-    let last = b.body.add_block();
-    let resume = b.body.add_block();
-    b.branch(next, resume, last);
-    b.block = last;
-    let zero = b.integer(0);
-    b.store(tail_address, 0, zero, I32);
-    b.jump(resume, &[]);
-    b.block = resume;
-    let one = b.integer(1);
-    b.store(active_address, 0, one, I32);
-    let thread = b.load(head, 0, I32);
-    let current = b.call(native.index, &[], &[I32])[0];
-    let same = b.op(Operator::I32Eq, &[thread, current], I32);
-    let continue_current = b.body.add_block();
-    let resume_other = b.body.add_block();
-    b.branch(same, continue_current, resume_other);
-    b.block = continue_current;
-    b.ret(&[one]);
-    b.block = resume_other;
-    b.call(native.resume, &[thread], &[]);
-    b.jump(done, &[]);
-    b.block = done;
-    let zero = b.integer(0);
-    b.ret(&[zero]);
-    b.finish(module, native.dispatch)?;
-
-    for (function, suspend) in [(native.pause, true), (native.complete, false)] {
+    enum Continuation {
+        Suspend,
+        Complete,
+        Yield,
+    }
+    for (function, continuation) in [
+        (native.pause, Continuation::Suspend),
+        (native.complete, Continuation::Complete),
+        (runtime.yield_thread, Continuation::Yield),
+    ] {
         let mut b = Builder::new(module, function, memory);
+        if !matches!(continuation, Continuation::Yield) {
+            update_runnable(&mut b, false);
+        }
         let context = b.call(native.context_get, &[], &[I32])[0];
         let inspect = b.body.add_block();
         let handoff = b.body.add_block();
@@ -146,25 +108,27 @@ pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> R
         b.store(context, 4, zero, I32);
         let one = b.integer(1);
         let parent = b.op(Operator::I32Sub, &[eager, one], I32);
-        if suspend {
-            b.call(native.suspend_then_promote, &[parent], &[I32]);
-        } else {
-            b.call(native.yield_then_promote, &[parent], &[I32]);
-        }
+        b.call(
+            if matches!(continuation, Continuation::Suspend) {
+                native.suspend_then_promote
+            } else {
+                native.yield_then_promote
+            },
+            &[parent],
+            &[I32],
+        );
         b.ret(&[]);
         b.block = release;
-        let active = b.integer(ACTIVE);
-        let zero = b.integer(0);
-        b.store(active, 0, zero, I32);
-        let same = b.call(native.dispatch, &[], &[I32])[0];
-        if suspend {
-            let wait = b.body.add_block();
-            let resumed = b.body.add_block();
-            b.branch(same, resumed, wait);
-            b.block = wait;
-            b.call(native.suspend, &[], &[I32]);
-            b.jump(resumed, &[]);
-            b.block = resumed;
+        if !matches!(continuation, Continuation::Complete) {
+            b.call(
+                if matches!(continuation, Continuation::Suspend) {
+                    native.suspend
+                } else {
+                    native.yield_now
+                },
+                &[],
+                &[I32],
+            );
         }
         b.ret(&[]);
         b.finish(module, function)?;

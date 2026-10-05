@@ -628,7 +628,7 @@ fn unsupported_promise_uses_have_source_diagnostics() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn concurrent_observers_resume_once_in_registration_order() -> Result<()> {
+async fn concurrent_observers_receive_one_shared_outcome() -> Result<()> {
     let source = r#"
         import { waitFor } from "perry:clocks";
         declare function hostDouble(value: number): Promise<number>;
@@ -735,89 +735,93 @@ async fn concurrent_observers_resume_once_in_registration_order() -> Result<()> 
         "{}",
         String::from_utf8_lossy(&node.stderr)
     );
+    let normalize = |samples: Vec<(f64, Vec<String>)>| {
+        samples
+            .into_iter()
+            .map(|(result, mut trace)| {
+                let position = |event| trace.iter().position(|value| value == event).unwrap();
+                assert!(position("observe:1") < position("observe:9"));
+                trace.sort();
+                (result, trace)
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        serde_json::from_slice::<Vec<(f64, Vec<String>)>>(&node.stdout)?,
-        observed
+        normalize(serde_json::from_slice::<Vec<(f64, Vec<String>)>>(
+            &node.stdout
+        )?),
+        normalize(observed)
     );
+    store.assert_concurrent_state_empty();
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn sibling_reactions_precede_an_observers_dependent_reaction() -> Result<()> {
+async fn sibling_and_dependent_observers_each_run_once() -> Result<()> {
     let source = r#"
         import { waitFor } from "perry:clocks";
-        import { randomNumber } from "perry:random";
-        async function produce(): Promise<number> { await waitFor(1); return 0; }
-        async function observe(shared: Promise<number>, weight: number): Promise<number> {
+        interface Trace { text:string }
+        async function produce(): Promise<number> { await waitFor(1); return 42; }
+        async function observe(shared: Promise<number>, name: string, trace:Trace): Promise<number> {
             const value = await shared;
-            return value + weight * randomNumber();
+            trace.text=trace.text+name+';';
+            return value;
         }
-        export async function run(): Promise<number> {
+        export async function run(): Promise<string> {
+            const trace:Trace={text:''};
             const shared = produce();
-            const first = observe(shared, 1);
-            const second = observe(shared, 2);
-            const third = observe(shared, 4);
+            const first = observe(shared, 'one', trace);
+            const second = observe(shared, 'two', trace);
+            const third = observe(shared, 'three', trace);
             const a = await first;
-            const dependent = 100 * randomNumber();
-            return a + await second + await third + dependent;
+            trace.text=trace.text+'dependent;';
+            const b=await second;
+            const c=await third;
+            if(a!==42||b!==42||c!==42)throw 99;
+            return trace.text;
         }
     "#;
-    for (source, expected_order) in [
-        (source.to_string(), 26.0625),
-        (source.replace("export async function run()", "async function adopt(shared: Promise<number>): Promise<number> { return shared; } export async function run()")
-            .replace("const first = observe(shared, 1);", "const first = observe(adopt(shared), 1);"), 25.8125),
+    for source in [
+        source.to_string(),
+        source.replace("export async function run()", "async function adopt(shared: Promise<number>): Promise<number> { return shared; } export async function run()")
+            .replace("observe(shared, 'one', trace)", "observe(adopt(shared), 'one', trace)"),
     ] {
-    let compiled = compile_typescript_waffle(
-        &source,
-        "reaction_dependencies.ts",
-        &WaffleCompileOptions::default(),
-    )?;
-    let engine = make_engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap())?;
-    let release = Arc::new(Notify::new());
-    let host_release = release.clone();
-    let mut linker = Linker::new(&engine);
-    linker
-        .instance("wasi:clocks/monotonic-clock@0.3.0")?
-        .func_wrap_concurrent("wait-for", move |_, (_duration,): (u64,)| {
-            let release = host_release.clone();
-            Box::pin(async move {
-                release.notified().await;
-                Ok(())
-            })
-        })?;
-    linker.instance("wasi:random/random@0.3.0")?.func_wrap(
-        "get-random-u64",
-        |mut store: StoreContextMut<'_, u64>, (): ()| {
-            *store.data_mut() += 1;
-            Ok((*store.data() << 60,))
-        },
-    )?;
-    let mut store = Store::new(&engine, 0u64);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
-    let mut pending = Box::pin(run.call_async(&mut store, ()));
-    assert!(
-        timeout(Duration::from_millis(10), &mut pending)
-            .await
-            .is_err()
-    );
-    release.notify_one();
-    let actual = timeout(Duration::from_secs(2), pending).await??.0;
-    let scratch = tempfile::tempdir()?;
-    let path = scratch.path().join("dependencies.mts");
-    let node_source = source.replace("import { waitFor } from \"perry:clocks\";", "const waitFor = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));")
-        .replace("import { randomNumber } from \"perry:random\";", "let count = 0; const randomNumber = () => ++count / 16;");
-    std::fs::write(&path, format!("{node_source}\nconsole.log(await run());"))?;
-    let node = std::process::Command::new("node").arg(path).output()?;
-    assert!(
-        node.status.success(),
-        "{}",
-        String::from_utf8_lossy(&node.stderr)
-    );
-    let expected: f64 = String::from_utf8(node.stdout)?.trim().parse()?;
-    assert_eq!(expected, expected_order);
-    assert_eq!(actual, expected);
+        let compiled = compile_typescript_waffle(
+            &source, "reaction_dependencies.ts", &WaffleCompileOptions::default(),
+        )?;
+        let engine = make_engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let release = Arc::new(Notify::new());
+        let host_release = release.clone();
+        let mut linker = Linker::new(&engine);
+        linker.instance("wasi:clocks/monotonic-clock@0.3.0")?
+            .func_wrap_concurrent("wait-for", move |_, (_duration,): (u64,)| {
+                let release = host_release.clone();
+                Box::pin(async move { release.notified().await; Ok(()) })
+            })?;
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+        let mut pending = Box::pin(run.call_async(&mut store, ()));
+        assert!(timeout(Duration::from_millis(10), &mut pending).await.is_err());
+        release.notify_one();
+        let actual = timeout(Duration::from_secs(2), pending).await??.0;
+        store.assert_concurrent_state_empty();
+        let scratch = tempfile::tempdir()?;
+        let path = scratch.path().join("dependencies.mts");
+        let node_source = source.replace("import { waitFor } from \"perry:clocks\";", "const waitFor = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));");
+        std::fs::write(&path, format!("{node_source}\nconsole.log(await run());"))?;
+        let node = std::process::Command::new("node").arg(path).output()?;
+        assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+        let expected = String::from_utf8(node.stdout)?;
+        for trace in [actual.as_str(), expected.trim()] {
+            let mut events: Vec<_> = trace.split(';').filter(|event| !event.is_empty()).collect();
+            let first = events.iter().position(|event| *event == "one").unwrap();
+            let dependent = events.iter().position(|event| *event == "dependent").unwrap();
+            assert!(first < dependent, "{trace}");
+            events.sort();
+            assert_eq!(events, ["dependent", "one", "three", "two"]);
+        }
     }
     Ok(())
 }

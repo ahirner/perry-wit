@@ -1172,6 +1172,14 @@ async fn promise_combinators_preserve_results_and_release_native_threads() -> Re
             0.0,
         ),
         (
+            "const tasks:Promise<number>[]=[task(1,0),task(2,0)]; await Promise.all(tasks); const race=Promise.race(tasks); const winner=await race; if(winner!==1&&winner!==2)throw 99; if(await race!==winner)throw 98; const outcomes=await Promise.all(tasks); return outcomes[0]+outcomes[1];",
+            3.0,
+        ),
+        (
+            "const race=Promise.race([1,2]); const winner=await race; if(winner!==1&&winner!==2)throw 99; if(await race!==winner)throw 98; return 3;",
+            3.0,
+        ),
+        (
             "const values=await Promise.all([1,2,3]); return values[0]+values[2];",
             4.0,
         ),
@@ -1264,14 +1272,20 @@ async fn promise_combinators_preserve_results_and_release_native_threads() -> Re
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resolved_task_reaction_order_matches_node() -> Result<()> {
-    for body in [
+async fn native_continuations_preserve_eager_prefixes_and_dependencies() -> Result<()> {
+    for (body, dependencies) in [
         "const pending=middle(state);state.text=state.text+'root;';await pending;return state.text;",
         "const a=child(state,'a'); const b=child(state,'b'); const first=observe(a,state,'one'); const second=observe(a,state,'two'); const both=Promise.all([a,b]); state.text=state.text+'parent;'; await both; state.text=state.text+'all;'; await first; await second; return state.text;",
         "const a=child(state,'a'); const adopted=adopt(a,state); const observer=observe(a,state,'observed'); state.text=state.text+'parent;'; await adopted; state.text=state.text+'adopted;'; await observer; return state.text;",
         "const adopted=adopt(rejected(),state); state.text=state.text+'parent;'; try {await adopted;} catch(e) {state.text=state.text+'rejected;';} return state.text;",
         "const race=Promise.race(['a','b']); const observed=observe(race,state,'race'); const empty=Promise.allSettled([]); state.text=state.text+'parent;'; await empty; state.text=state.text+'empty;'; await observed; return state.text;",
-    ] {
+    ].into_iter().zip([
+        vec![("immediate", "middle"), ("middle", "root")],
+        vec![("a-start", "b-start"), ("b-start", "parent"), ("a-start", "a-end"), ("b-start", "b-end"), ("a-end", "one"), ("a-end", "two"), ("a-end", "all"), ("b-end", "all")],
+        vec![("a-start", "a-end"), ("a-end", "observed"), ("a-end", "adopted"), ("finally", "adopted")],
+        vec![("finally", "rejected")],
+        vec![("parent", "empty")],
+    ]) {
         let source = format!(
             r#"
         interface Trace {{ text:string }}
@@ -1320,11 +1334,20 @@ async fn resolved_task_reaction_order_matches_node() -> Result<()> {
             .await?;
         let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
         for _ in 0..40 {
-            assert_eq!(
-                run.call_async(&mut store, ()).await?.0,
-                expected.trim(),
-                "{body}"
-            );
+            let actual = run.call_async(&mut store, ()).await?.0;
+            for trace in [actual.as_str(), expected.trim()] {
+                let events: Vec<_> = trace.split(';').filter(|event| !event.is_empty()).collect();
+                for (before, after) in &dependencies {
+                    let position = |event: &str| events.iter().position(|value| *value == event).unwrap();
+                    assert!(position(before) < position(after), "{before} must precede {after}: {trace}");
+                }
+            }
+            let events = |trace: &str| {
+                let mut events = trace.split(';').map(str::to_owned).collect::<Vec<_>>();
+                events.sort();
+                events
+            };
+            assert_eq!(events(&actual), events(expected.trim()), "{body}");
             store.assert_concurrent_state_empty();
         }
     }
