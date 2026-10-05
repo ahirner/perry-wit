@@ -30,6 +30,7 @@
         "Request values snapshot headers and byte bodies, normalize methods, transfer inherited bodies exactly once, permit explicit body overrides, and retain metadata through stored tasks and collection; null bodies remain reusable",
         "Request and constructed Response values share single-consumption body codecs without host imports; body methods receive async-effect checks before component encoding",
         "Request/Response.body exposes nullable ReadableStream<Uint8Array> with locked, getReader(), reader.read(), reader.releaseLock(), reader.cancel(), and stream.cancel(); reads serialize native demand and check independent completion before reporting EOF",
+        "for await over native byte bodies preserves chunk order and locking, releases on EOF/read failure, and cancels on break/return/body exceptions through acknowledged native completion; body exceptions survive cancellation failure",
         "Releasing a reader rejects its pending public reads once while private transfer owners and buffers survive until completion or cancellation; buffered consumption and inherited Request-body transfer preserve locking",
         "Response construction snapshots string/byte bodies and header records/pairs/Headers, validates status and statusText, keeps null bodies reusable, and exposes mutable headers independently of the input",
         "fetch resolves at response headers and retains native body, trailers, upload task, and request completion ownership until acknowledged completion",
@@ -51,7 +52,7 @@
         "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
       ],
       "differences": [
-        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect/signal fields. Writable endpoints, piping, async iteration, reader.closed, returned-stream ownership, stream uploads, and finite Error objects remain unfinished R7/R8.3 work",
+        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect/signal fields. Writable endpoints, piping, reader.closed, returned-stream ownership, stream uploads, and finite Error objects remain unfinished R7/R8.3 work",
         "One URL codec normalizes ASCII and percent-encoded hosts, numeric IPv4, bracketed IPv6, ports, dot segments, HTTP backslashes, path/query escaping, whitespace, and fragments. Internationalized domains and noncanonical scheme separators remain unsupported",
         "Constructed Response values preserve statusText; fetched responses expose an empty statusText because the standard WASI HTTP response carries no reason phrase",
         "Every non-null acquired fetch body must be consumed or explicitly aborted before the owning call returns; otherwise the invocation traps instead of abandoning its native owner",
@@ -80,6 +81,7 @@
         "rust:tests/waffle_wit_native_test.rs#resolved_world_http_disposal_releases_suspended_headers_and_body",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_consumes_body_once_and_preserves_http_status",
         "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_preserve_body_identity_and_consumption",
+        "rust:tests/waffle_wit_native_test.rs#byte_stream_iteration_preserves_exits_errors_and_bounded_ownership",
         "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_release_pending_requests_and_cancel_owned_transfers",
         "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_stream_beyond_guest_memory_and_reject_completion_failure",
         "rust:tests/waffle_wit_native_test.rs#native_byte_streams_reject_invalid_shapes_and_synchronous_effects",
@@ -773,7 +775,7 @@
         "Standard fetch lowers directly to wasi:http/client@0.3.0; compiler.p3_http_get records the supported request and response shapes"
       ],
       "differences": [
-        "AbortSignal cancellation and HTTP byte readers are supported; writable endpoints, piping, async iteration, reader.closed, returned streams, and stream uploads remain unfinished. See compiler.p3_http_get for exact shapes and evidence"
+        "AbortSignal cancellation and HTTP byte readers are supported; writable endpoints, piping, reader.closed, returned streams, and stream uploads remain unfinished. See compiler.p3_http_get for exact shapes and evidence"
       ],
       "conformance": [
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_json_and_array_buffers_preserve_types_identity_and_failures",

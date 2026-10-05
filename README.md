@@ -199,7 +199,7 @@ Promise timers accept typed result values and optional signals. Filesystem calls
 use `node:fs/promises` or `fs/promises`; synchronous and callback APIs receive
 compiler diagnostics. `readFile` and `writeFile` also accept signals and retain transfer storage until the
 filesystem completion arrives. Request and Response bodies expose byte-stream
-readers with locking and explicit cancellation. Writers, piping, async iteration,
+readers with locking, cancellation, and `for await` iteration. Writers, piping,
 returned streams, and standard incoming handlers remain implementation work;
 the capability catalog records supported shapes and executable evidence.
 

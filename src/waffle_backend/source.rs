@@ -9,6 +9,7 @@ pub(crate) mod modules;
 mod objects;
 mod options;
 mod readonly;
+mod streams;
 mod time;
 pub(crate) use decoder::validate_lowering;
 
@@ -77,6 +78,8 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::http::headers::HEADERS_TYPE)
                 && !names.0.contains(super::http::request::REQUEST_TYPE)
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
+                && !names.0.contains(super::streams::web::Kind::Readable.name())
+                && !names.0.contains(super::streams::web::Kind::Reader.name())
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
                 && !names
                     .0
@@ -536,6 +539,20 @@ impl SourceCalls {
 }
 
 impl VisitMut for SourceCalls {
+    fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
+        statement.visit_mut_children_with(self);
+        if let ast::Stmt::ForOf(loop_) = statement
+            && loop_.is_await
+        {
+            match self.rewrite_stream_iteration(loop_) {
+                Ok(lowered) => *statement = lowered,
+                Err(error) => {
+                    self.error.get_or_insert(error);
+                }
+            }
+        }
+    }
+
     /// SWC already decoded the literal; Perry's raw-text encoding repair corrupts valid Latin-1 text.
     fn visit_mut_str(&mut self, literal: &mut ast::Str) {
         literal.raw = None;

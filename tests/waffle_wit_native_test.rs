@@ -3755,6 +3755,16 @@ fn native_byte_streams_reject_invalid_shapes_and_synchronous_effects() {
             true,
             "takes no arguments",
         ),
+        (
+            "export function run():void {const response=new Response('x');const body=response.body;if(body===null)throw 1;for await(const chunk of body){}}",
+            false,
+            "async func",
+        ),
+        (
+            "type __perry_byte_reader = number;export function run():void{}",
+            false,
+            "Reserved compiler type name",
+        ),
     ] {
         let kind = if asynchronous { "async " } else { "" };
         let wit =
@@ -3762,4 +3772,54 @@ fn native_byte_streams_reject_invalid_shapes_and_synchronous_effects() {
         let error = compile(source, &wit).expect_err("unsupported stream shape must be diagnosed");
         assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn byte_stream_iteration_preserves_exits_errors_and_bounded_ownership() -> Result<()> {
+    let compiled = compile(
+        include_str!("fixtures/fetch/iteration.ts"),
+        "package test:stream-iteration; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->f64;}",
+    )?;
+    let size = 8 * 1024 * 1024;
+    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+        "/complete" => fixture::Reply::Bytes(200, vec![b'x'; size]),
+        _ => fixture::Reply::TruncatedBody(vec![b'x'; 65536], size),
+    });
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+    let base = format!("http://{}", server.address);
+    for _ in 0..5 {
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                run.call_async(&mut store, (&base,))
+            )
+            .await??
+            .0,
+            size as f64
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let module =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/iteration.ts");
+    let script = format!(
+        "import {{run}} from {};console.log(await run(process.argv[1]));",
+        serde_json::to_string(&module.to_string_lossy())?
+    );
+    let node = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script, &base])
+        .output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert_eq!(String::from_utf8(node.stdout)?.trim(), size.to_string());
+    Ok(())
 }
