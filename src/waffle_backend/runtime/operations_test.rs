@@ -35,7 +35,7 @@ fn callee() -> Result<Vec<u8>> {
         ],
     );
     let allocator = crate::waffle_backend::allocation::emit_allocator(&mut module, memory, 1024)?;
-    let operations = emit(&mut module, memory, allocator, imports)?;
+    let operations = emit(&mut module, memory, allocator, imports, &[])?;
     let worker = builder::declare(&mut module, "worker", &[I32], &[]);
     let table = module.tables.push(TableData {
         ty: waffle::Type::FuncRef,

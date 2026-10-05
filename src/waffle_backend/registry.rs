@@ -302,7 +302,7 @@ impl ModuleRegistry {
         };
         let operations = operation_imports
             .map(|imports| {
-                super::runtime::operations::emit(module, memory, allocator.unwrap(), imports)
+                super::runtime::operations::emit(module, memory, allocator.unwrap(), imports, &[])
             })
             .transpose()?;
         let await_subtask = if let Some(operations) = operations {

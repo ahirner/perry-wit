@@ -36,6 +36,10 @@ mod values;
 mod visit;
 mod wit;
 
+#[cfg(test)]
+#[path = "../../tests/support/p3_input.rs"]
+mod test_input;
+
 use anyhow::{Context, Result};
 use perry_hir::ir::Module as HirModule;
 use perry_hir::lower_module;

@@ -11,9 +11,7 @@ use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::waffle_backend::{allocation, runtime};
 
-#[path = "../../../tests/support/p3_input.rs"]
-mod input;
-use input::{ControlledProducer, Observations};
+use crate::waffle_backend::test_input::{ControlledProducer, Observations};
 
 async fn instantiate(cap: usize) -> Result<(Store<StoreLimits>, Instance)> {
     let mut module = Module::empty();

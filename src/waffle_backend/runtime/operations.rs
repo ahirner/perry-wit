@@ -1,7 +1,7 @@
 //! Registered canonical operations retain storage until terminal acknowledgement.
 use super::builder::{self, Builder};
 use crate::waffle_backend::allocation::AllocationFuncs;
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use waffle::{Func, Memory, Module, Operator as O, Type::I32, Value};
 
 const SCOPE: u32 = 112;
@@ -14,9 +14,17 @@ const STATE: u32 = 16;
 const STATUS: u32 = 20;
 const FRAME: u32 = 24;
 const OWNER_SCOPE: u32 = 28;
+const CONTROL: u32 = 32;
+const EVENT: u32 = 36;
+const SIZE: u32 = 40;
 const PENDING: u32 = 0;
 const CANCELLING: u32 = 1;
 const TERMINAL: u32 = 2;
+
+pub(crate) struct Transfer {
+    pub(crate) event: u32,
+    pub(crate) cancel: Func,
+}
 
 pub(crate) struct Imports {
     block_calls: Func,
@@ -50,6 +58,7 @@ pub(crate) struct Operations {
     pub(crate) pending: Func,
     pub(crate) enter: Func,
     pub(crate) register: Func,
+    pub(crate) register_transfer: Option<Func>,
     pub(crate) wait: Func,
     pub(crate) notify: Func,
     pub(crate) cancel: Func,
@@ -67,12 +76,21 @@ pub(crate) fn emit(
     memory: Memory,
     a: AllocationFuncs,
     i: Imports,
+    transfers: &[Transfer],
 ) -> Result<Operations> {
+    ensure!(
+        transfers
+            .iter()
+            .all(|transfer| (2..=5).contains(&transfer.event)),
+        "Transfer controllers require stream/future read/write events"
+    );
     let r = Operations {
         cancelled: builder::declare(module, "operations.cancelled", &[], &[I32]),
         pending: builder::declare(module, "operations.pending", &[], &[I32]),
         enter: builder::declare(module, "operations.enter", &[], &[]),
         register: builder::declare(module, "operations.register", &[I32], &[I32]),
+        register_transfer: (!transfers.is_empty())
+            .then(|| builder::declare(module, "operations.register-transfer", &[I32; 3], &[I32])),
         wait: builder::declare(module, "operations.wait", &[I32], &[I32]),
         notify: builder::declare(module, "operations.notify", &[I32; 3], &[]),
         cancel: builder::declare(module, "operations.cancel", &[I32], &[]),
@@ -117,27 +135,71 @@ pub(crate) fn emit(
     b.ret(&[]);
     b.finish(module, r.enter)?;
 
+    let register = builder::declare(module, "operations.retain", &[I32; 5], &[I32]);
     let mut b = Builder::new(module, r.register, memory);
-    let scope = current_scope(&mut b);
-    b.require(scope);
     let packed = b.param(0);
     let mask = b.integer(15);
     let status = b.op(O::I32And, &[packed, mask], I32);
-    let terminal = b.integer(TERMINAL);
-    let valid = b.op(O::I32LeU, &[status, terminal], I32);
+    let two = b.integer(2);
+    let valid = b.op(O::I32LeU, &[status, two], I32);
     b.require(valid);
+    let pending = b.op(O::I32LtU, &[status, two], I32);
+    let four = b.integer(4);
+    let handle = b.op(O::I32ShrU, &[packed, four], I32);
+    let zero = b.integer(0);
+    let event = b.integer(1);
+    let owner = b.call(register, &[handle, status, zero, event, pending], &[I32])[0];
+    b.ret(&[owner]);
+    b.finish(module, r.register)?;
+
+    if let Some(function) = r.register_transfer {
+        let mut b = Builder::new(module, function, memory);
+        let handle = b.param(0);
+        let status = b.param(1);
+        let control = b.param(2);
+        let known = b.body.add_block();
+        let event = b.body.add_blockparam(known, I32);
+        for (index, transfer) in transfers.iter().enumerate() {
+            let code = b.integer(index as u32 + 1);
+            let same = b.op(O::I32Eq, &[control, code], I32);
+            let selected = b.body.add_block();
+            let following = b.body.add_block();
+            b.branch(same, selected, following);
+            b.block = selected;
+            let event = b.integer(transfer.event);
+            b.jump(known, &[event]);
+            b.block = following;
+        }
+        b.body
+            .set_terminator(b.block, waffle::Terminator::Unreachable);
+        b.block = known;
+        let blocked = b.integer(u32::MAX);
+        let pending = b.op(O::I32Eq, &[status, blocked], I32);
+        let owner = b.call(register, &[handle, status, control, event, pending], &[I32])[0];
+        b.ret(&[owner]);
+        b.finish(module, function)?;
+    }
+
+    let mut b = Builder::new(module, register, memory);
+    let scope = current_scope(&mut b);
+    b.require(scope);
+    let handle = b.param(0);
+    let status = b.param(1);
+    let terminal = b.integer(TERMINAL);
     let one = b.integer(1);
     let frame = b.call(a.frame_new, &[one], &[I32])[0];
-    let node = b.allocate(a.realloc, 32, 4);
+    let node = b.allocate(a.realloc, SIZE, 4);
     b.store(frame, 12, node, I32);
     let zero = b.integer(0);
-    let size = b.integer(32);
+    let size = b.integer(SIZE);
     b.effect(O::MemoryFill { mem: memory }, &[node, zero, size]);
     b.store(node, FRAME, frame, I32);
     b.store(node, OWNER_SCOPE, scope, I32);
     let none = b.integer(u32::MAX);
     b.store(node, THREAD, none, I32);
-    let returned = b.op(O::I32Eq, &[status, terminal], I32);
+    b.store(node, CONTROL, b.param(2), I32);
+    b.store(node, EVENT, b.param(3), I32);
+    let returned = b.op(O::I32Eqz, &[b.param(4)], I32);
     let immediate = b.body.add_block();
     let pending = b.body.add_block();
     b.branch(returned, immediate, pending);
@@ -146,8 +208,6 @@ pub(crate) fn emit(
     b.store(node, STATUS, status, I32);
     b.ret(&[node]);
     b.block = pending;
-    let four = b.integer(4);
-    let handle = b.op(O::I32ShrU, &[packed, four], I32);
     b.store(node, HANDLE, handle, I32);
     let head = b.load(scope, 0, I32);
     b.store(node, NEXT, head, I32);
@@ -173,7 +233,7 @@ pub(crate) fn emit(
     b.jump(done, &[]);
     b.block = done;
     b.ret(&[node]);
-    b.finish(module, r.register)?;
+    b.finish(module, register)?;
 
     let mut b = Builder::new(module, r.wait, memory);
     let node = b.param(0);
@@ -195,6 +255,10 @@ pub(crate) fn emit(
     let status = b.load(node, STATUS, I32);
     let frame = b.load(node, FRAME, I32);
     b.call(a.frame_drop, &[frame], &[]);
+    let zero = b.integer(0);
+    let size = b.integer(SIZE);
+    let four = b.integer(4);
+    b.call(a.realloc, &[node, size, four, zero], &[I32]);
     b.ret(&[status]);
     b.finish(module, r.wait)?;
 
@@ -205,16 +269,33 @@ pub(crate) fn emit(
     let state = b.load(node, STATE, I32);
     let pending = b.op(O::I32LtU, &[state, terminal], I32);
     b.require(pending);
+    let handle = b.load(node, HANDLE, I32);
+    let zero = b.integer(0);
+    b.call(i.join, &[handle, zero], &[]);
+    let event = b.load(node, EVENT, I32);
+    let one = b.integer(1);
+    let subtask = b.op(O::I32Eq, &[event, one], I32);
+    let task = b.body.add_block();
+    let transfer = b.body.add_block();
+    let release = b.body.add_block();
+    b.branch(subtask, task, transfer);
+    b.block = task;
     let min = b.integer(2);
     let max = b.integer(4);
     let valid = b.op(O::I32GeU, &[status, min], I32);
     b.require(valid);
     let valid = b.op(O::I32LeU, &[status, max], I32);
     b.require(valid);
-    let handle = b.load(node, HANDLE, I32);
-    let zero = b.integer(0);
-    b.call(i.join, &[handle, zero], &[]);
     b.call(i.drop, &[handle], &[]);
+    b.jump(release, &[]);
+    b.block = transfer;
+    let mask = b.integer(15);
+    let flag = b.op(O::I32And, &[status, mask], I32);
+    let two = b.integer(2);
+    let valid = b.op(O::I32LeU, &[flag, two], I32);
+    b.require(valid);
+    b.jump(release, &[]);
+    b.block = release;
     b.store(node, STATE, terminal, I32);
     b.store(node, STATUS, status, I32);
     let scope = b.load(node, OWNER_SCOPE, I32);
@@ -249,10 +330,11 @@ pub(crate) fn emit(
 
     let mut b = Builder::new(module, r.notify, memory);
     let one = b.integer(1);
-    let valid = b.op(O::I32Eq, &[b.param(0), one], I32);
-    b.require(valid);
+    let subtask = b.op(O::I32Eq, &[b.param(0), one], I32);
     let two = b.integer(2);
-    let terminal = b.op(O::I32GeU, &[b.param(2), two], I32);
+    let started = b.op(O::I32LtU, &[b.param(2), two], I32);
+    let started = b.op(O::I32And, &[subtask, started], I32);
+    let terminal = b.op(O::I32Eqz, &[started], I32);
     let find = b.body.add_block();
     let done = b.body.add_block();
     b.branch(terminal, find, done);
@@ -273,6 +355,9 @@ pub(crate) fn emit(
     let next = b.load(node, NEXT, I32);
     b.jump(search, &[next]);
     b.block = found;
+    let event = b.load(node, EVENT, I32);
+    let valid = b.op(O::I32Eq, &[event, b.param(0)], I32);
+    b.require(valid);
     b.call(settle, &[node, b.param(2)], &[]);
     b.jump(done, &[]);
     b.block = done;
@@ -293,7 +378,26 @@ pub(crate) fn emit(
     let zero = b.integer(0);
     let handle = b.load(node, HANDLE, I32);
     b.call(i.join, &[handle, zero], &[]);
-    let status = b.call(i.cancel, &[handle], &[I32])[0];
+    let control = b.load(node, CONTROL, I32);
+    let acknowledged = b.body.add_block();
+    let status = b.body.add_blockparam(acknowledged, I32);
+    for (index, cancel) in std::iter::once(i.cancel)
+        .chain(transfers.iter().map(|transfer| transfer.cancel))
+        .enumerate()
+    {
+        let code = b.integer(index as u32);
+        let same = b.op(O::I32Eq, &[control, code], I32);
+        let selected = b.body.add_block();
+        let following = b.body.add_block();
+        b.branch(same, selected, following);
+        b.block = selected;
+        let status = b.call(cancel, &[handle], &[I32])[0];
+        b.jump(acknowledged, &[status]);
+        b.block = following;
+    }
+    b.body
+        .set_terminator(b.block, waffle::Terminator::Unreachable);
+    b.block = acknowledged;
     let blocked = b.integer(u32::MAX);
     let pending = b.op(O::I32Eq, &[status, blocked], I32);
     let wait = b.body.add_block();
@@ -383,3 +487,7 @@ pub(crate) fn emit(
 #[cfg(test)]
 #[path = "operations_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "transfers_test.rs"]
+mod transfers_test;
