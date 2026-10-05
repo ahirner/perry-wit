@@ -32,7 +32,7 @@ The default shrink budget is 100 attempts, configurable with `PERRY_GENERATIVE_S
 Each run prints its retained directory under `target/generative/`, containing sources, WIT, oracle, inputs, tool versions, and progress.
 A semantic failure also saves the original and reduced trees and TypeScript, plus failure details.
 Reduction preserves the failure category and checks the final reduced program again.
-Replay a saved tree with the same test binary path used by the campaign:
+Replay a saved tree against the current compiler:
 
 ```sh
 nix develop -c env PERRY_GENERATIVE_REPLAY=target/generative/run-EXAMPLE/minimal.json cargo test --test generative_test generated_programs_match_node -- --nocapture

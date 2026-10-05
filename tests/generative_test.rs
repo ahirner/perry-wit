@@ -76,12 +76,14 @@ fn observations_preserve_ieee_values_and_process_failures() -> Result<()> {
         directory.path(),
         Duration::from_secs(5),
     )?;
-    assert!(!output.success && !output.timed_out);
+    assert!(
+        matches!(output.status, runner::ProcessStatus::Exited(status) if status.code() == Some(7))
+    );
     let output = runner::command(
         Command::new("node").args(["-e", "for (;;) {}"]),
         directory.path(),
         Duration::from_millis(100),
     )?;
-    assert!(!output.success && output.timed_out);
+    assert!(matches!(output.status, runner::ProcessStatus::TimedOut));
     Ok(())
 }

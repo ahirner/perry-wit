@@ -2,7 +2,7 @@
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,11 +48,22 @@ struct Failure {
 }
 
 #[derive(Debug)]
+pub enum ProcessStatus {
+    Exited(ExitStatus),
+    TimedOut,
+}
+
+#[derive(Debug)]
 pub struct ProcessOutput {
-    pub success: bool,
-    pub timed_out: bool,
+    pub status: ProcessStatus,
     pub stdout: String,
     pub stderr: String,
+}
+
+impl ProcessOutput {
+    pub fn success(&self) -> bool {
+        matches!(self.status, ProcessStatus::Exited(status) if status.success())
+    }
 }
 
 /// Files avoid pipe-buffer deadlocks; every child is reaped, including on timeout.
@@ -66,20 +77,20 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
         .spawn()
         .with_context(|| format!("starting {command:?}; use nix develop for the test toolchain"))?;
     let start = Instant::now();
-    let (status, timed_out) = loop {
+    let status = loop {
         if let Some(status) = child.try_wait()? {
-            break (status, false);
+            break ProcessStatus::Exited(status);
         }
         if start.elapsed() >= limit {
             // The process may have exited between try_wait and kill.
             let _ = child.kill();
-            break (child.wait()?, true);
+            child.wait()?;
+            break ProcessStatus::TimedOut;
         }
         thread::sleep(Duration::from_millis(10));
     };
     Ok(ProcessOutput {
-        success: status.success(),
-        timed_out,
+        status,
         stdout: fs::read_to_string(stdout)?,
         stderr: fs::read_to_string(stderr)?,
     })
@@ -145,7 +156,7 @@ pub fn campaign() -> Result<()> {
     tsc.arg("-p").arg(directory.join("tsconfig.json"));
     let checked = command(&mut tsc, &directory, Duration::from_secs(60))?;
     ensure!(
-        checked.success && !checked.timed_out,
+        checked.success(),
         "generated source failed tsc: {checked:?}; artifacts: {}",
         directory.display()
     );
@@ -258,7 +269,7 @@ fn oracle(path: &Path, directory: &Path) -> Result<Vec<Observation>> {
     .arg(directory.join("inputs.json"));
     let output = command(&mut node, directory, Duration::from_secs(10))?;
     ensure!(
-        output.success && !output.timed_out,
+        output.success(),
         "Node oracle failed for {}: {output:?}",
         path.display()
     );
@@ -276,15 +287,15 @@ fn compare(path: &Path, directory: &Path, expected: &[Observation]) -> Result<Op
         .env("PERRY_GENERATIVE_SOURCE", path)
         .env("PERRY_GENERATIVE_OUTCOME", &outcome);
     let output = command(&mut worker, directory, Duration::from_secs(30))?;
-    let failure = if output.timed_out {
+    let failure = if matches!(output.status, ProcessStatus::TimedOut) {
         Failure {
             kind: FailureKind::Timeout,
             detail: output.stderr,
         }
-    } else if !output.success {
+    } else if !output.success() {
         Failure {
             kind: FailureKind::Crash,
-            detail: format!("{}\n{}", output.stdout, output.stderr),
+            detail: format!("{:?}\n{}\n{}", output.status, output.stdout, output.stderr),
         }
     } else {
         match serde_json::from_slice::<Outcome>(
