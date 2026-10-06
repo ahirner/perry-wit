@@ -285,47 +285,47 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     let regressions = [
         (
             "branch-true",
-            include_str!("../cases/regression-1.json"),
+            include_str!("../cases/branch-true-array.json"),
             "ecma.array.dense",
         ),
         (
             "branch-false",
-            include_str!("../cases/regression-2.json"),
+            include_str!("../cases/branch-false-array.json"),
             "ecma.array.dense",
         ),
         (
             "first-index",
-            include_str!("../cases/regression-3.json"),
+            include_str!("../cases/first-array-index.json"),
             "ecma.array.dense",
         ),
         (
             "array-effects",
-            include_str!("../cases/regression-4.json"),
+            include_str!("../cases/array-effects.json"),
             "ecma.array.dense",
         ),
         (
             "byte-input",
-            include_str!("../cases/regression-5.json"),
+            include_str!("../cases/byte-input.json"),
             "ecma.uint8array.conversion",
         ),
         (
             "byte-effects",
-            include_str!("../cases/regression-6.json"),
+            include_str!("../cases/byte-effects.json"),
             "ecma.uint8array.conversion",
         ),
         (
             "nested-codecs",
-            include_str!("../cases/regression-7.json"),
+            include_str!("../cases/nested-codecs.json"),
             "ecma.date.epoch",
         ),
         (
             "stored-unicode",
-            include_str!("../cases/regression-8.json"),
+            include_str!("../cases/stored-json-unicode.json"),
             "ecma.json.roundtrip",
         ),
         (
             "direct-unicode",
-            include_str!("../cases/regression-9.json"),
+            include_str!("../cases/direct-json-unicode.json"),
             "ecma.json.roundtrip",
         ),
     ];

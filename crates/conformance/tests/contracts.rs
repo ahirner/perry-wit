@@ -20,16 +20,16 @@ fn registry_owns_regressions_and_partition_witnesses() -> Result<()> {
         .iter()
         .flat_map(|c| &c.witnesses)
         .collect::<Vec<_>>();
-    for index in 1..=9 {
+    for name in ["branch-true-array", "branch-false-array", "first-array-index", "array-effects", "byte-input", "byte-effects", "nested-codecs", "stored-json-unicode", "direct-json-unicode"] {
         let program: Program = serde_json::from_slice(&fs::read(format!(
-            "{}/cases/regression-{index}.json",
+            "{}/cases/{name}.json",
             env!("CARGO_MANIFEST_DIR")
         ))?)?;
         ensure!(
             cases
                 .iter()
                 .any(|w| w.case == Case::Program(program.clone())),
-            "unregistered regression {index}"
+            "unregistered regression {name}"
         );
     }
     for contract in contracts {

@@ -9,7 +9,7 @@ Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as 
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
 - **Hermetic toolchain**: Fully reproducible builds, type generation, and component testing via Nix flakes.
 
-For runtime boundaries, memory layouts, and compilation pipeline details, see [ARCHITECTURE.md](ARCHITECTURE.md). For verified capability contracts, see the [capability catalog](catalog/capabilities.json).
+For runtime boundaries, memory layouts, and compilation pipeline details, see [ARCHITECTURE.md](ARCHITECTURE.md). For verified capability contracts, see the [executable contract registry](crates/conformance/src/registry.rs).
 
 ## Environment
 
@@ -103,20 +103,17 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
 
 ### Test
 
-Perry-WIT includes unit tests, differential conformance testing against Node.js, generative semantic checks, and end-to-end integration tests:
+Perry-WIT includes ordinary Rust tests, one executable conformance registry for directed and generated checks against Node.js, and end-to-end integration tests:
 
 ```sh
 # Run unit and integration tests
 cargo test --workspace
 
-# Run differential conformance tests against the Node.js oracle
-cargo test --test conformance_test
+# Execute every contract, directed witness, and randomized smoke campaign
+cargo run -p perry-conformance -- check
 
-# Run generative semantic and metamorphic checks
-cargo test --test generative_test
-
-# Validate formal capability evidence and generate target/conformance/report.json
-node scripts/check_conformance.mjs
+# Generate the catalog from executable contracts
+cargo run -p perry-conformance -- list
 
 # Linter and formatting checks
 cargo clippy --workspace --all-targets -- -D warnings
@@ -127,7 +124,9 @@ cargo fmt --all -- --check
 nix flake check
 ```
 
-The conformance check executes fresh Rust and Node tests, validates each capability against the catalog's exact test identifiers, and outputs the audited report to `target/conformance/report.json`. For details on the seeded differential and metamorphic testing pipeline, see the [generative suite](tests/generative/README.md).
+The development-only `perry-conformance` crate owns strategies, examples, observation checks, and reports. Each declared boundary partition has a mandatory witness. Node and Perry execute identical source; failures include concrete minimized inputs, source, configuration, toolchain versions, and source identity under `target/conformance`. An incomplete, skipped, exhausted, or stale execution cannot establish a passing claim. Registered domains describe bounded coverage, not total ECMAScript or Node conformance.
+
+The default smoke campaign generates eight programs per contract at depth three and runs the preserved IEEE-754 boundary corpus. Select contracts or capability groups with `--select node.fs`, extend budgets with `--cases 200 --depth 4 --seed 100`, and replay a concrete saved case with `cargo run -p perry-conformance -- replay target/conformance/run-EXAMPLE/CONTRACT/minimal.json`. `--shrink-limit`, `--fuel`, `--memory` (bytes), and `--timeout` (seconds) bound reduction and execution. Proptest state machines generate complete valid sequential lifecycle traces before compilation; they do not exhaustively explore asynchronous schedules. Ordinary Rust tests remain a separate CI gate.
 
 ## Authoring Components
 
@@ -227,8 +226,8 @@ Before submitting changes, ensure all formatting, lints, tests, and flake checks
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-node scripts/check_conformance.mjs
+cargo run -p perry-conformance -- check
 nix flake check
 ```
 
-Keep capability claims synchronized with executable evidence in [catalog/capabilities.json](catalog/capabilities.json).
+Register each claimed behavior, input domain, and directed boundary witness in [the contract registry](crates/conformance/src/registry.rs).

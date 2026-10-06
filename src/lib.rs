@@ -7,7 +7,6 @@ extern crate self as perry_wit;
 pub mod abi;
 pub mod compiler;
 pub mod component;
-pub mod conformance;
 pub mod sdk;
 pub mod strip;
 pub mod waffle_backend;
