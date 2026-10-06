@@ -25,6 +25,8 @@ The grammar covers arithmetic, comparisons, short-circuit booleans, conditionals
 - `4`: also pending `node:fs/promises.readFile` and `writeFile`/read-back forms, for eight forms per tree.
 - `5`: also retained `stat` results, `readdir`, and binary `readFile` with UTF-8 decoding, for ten forms per tree. JSON expressions include serialization stored in a temporary array before parsing, which keeps the generic parser path covered alongside direct string-field projections.
 
+- `6`: also binary `writeFile` from a byte subview, detached read-back bytes, truncation through an empty subview, and repeated awaits of a rejected file read followed by successful recovery, for twelve forms per tree.
+
 Every added expression participates in typed structural reduction.
 Timer variants run against the real Node timer API and the production WASI P3 clock host; only values and ordered source effects are compared, not wall-clock timing.
 Filesystem variants use separate fresh temporary directories for Node and the guest, initialized with the same UTF-8/NUL fixture, so one implementation cannot supply the other's output.
@@ -42,7 +44,7 @@ nix develop -c env PERRY_GENERATIVE_API_LEVEL=5 PERRY_GENERATIVE_FUEL=10000000 P
 ```
 
 Seeds use a fixed SplitMix64 mapping.
-Count is the number of generated trees, before the four, six, eight, or ten variants selected by the API level; the saved regression trees always run too, and depth is bounded at six.
+Count is the number of generated trees, before the four, six, eight, ten, or twelve variants selected by the API level; the saved regression trees always run too, and depth is bounded at six.
 The default shrink budget is 100 attempts, configurable with `PERRY_GENERATIVE_SHRINK`.
 Each run prints its retained directory under `target/generative/`, containing sources, WIT, oracle, inputs, tool versions, grammar version/API level, Git revision and source patch, start time, elapsed time, and progress.
 A semantic failure also saves the original and reduced trees and TypeScript, plus failure details.

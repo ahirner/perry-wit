@@ -109,7 +109,7 @@ pub fn campaign() -> Result<()> {
     let seed = setting("PERRY_GENERATIVE_SEED", 0_u64)?;
     let count = setting("PERRY_GENERATIVE_COUNT", 8_usize)?;
     let api_level = setting("PERRY_GENERATIVE_API_LEVEL", 2_u8)?;
-    ensure!(api_level <= 5, "API level must be at most 5");
+    ensure!(api_level <= 6, "API level must be at most 6");
     let depth = setting("PERRY_GENERATIVE_DEPTH", 3_u8)?;
     ensure!((1..=10000).contains(&count), "count must be in 1..=10000");
     ensure!(depth <= 6, "depth must be at most 6");
@@ -137,6 +137,9 @@ pub fn campaign() -> Result<()> {
         if api_level >= 5 {
             forms.extend([Form::FileMetadata, Form::FileBytes]);
         }
+        if api_level >= 6 {
+            forms.extend([Form::FileByteRoundTrip, Form::FileRejectedRead]);
+        }
         (
             serde_json::from_str::<Vec<Number>>(include_str!("regressions.json"))?
                 .into_iter()
@@ -162,7 +165,7 @@ pub fn campaign() -> Result<()> {
     fs::write(directory.join("async-world.wit"), async_wit())?;
     fs::write(
         directory.join("timers.d.ts"),
-        "declare module 'node:timers/promises' { export function setTimeout<T>(delay: number, value: T): Promise<T>; }\ndeclare module 'node:fs/promises' { export function readFile(path: string, encoding: 'utf8'): Promise<string>; export function readFile(path: string): Promise<Uint8Array>; export function stat(path: string): Promise<{size:number;isFile():boolean;isDirectory():boolean}>; export function readdir(path: string): Promise<string[]>; export function writeFile(path: string, data: string): Promise<void>; }",
+        "declare module 'node:timers/promises' { export function setTimeout<T>(delay: number, value: T): Promise<T>; }\ndeclare module 'node:fs/promises' { export function readFile(path: string, encoding: 'utf8'): Promise<string>; export function readFile(path: string): Promise<Uint8Array>; export function stat(path: string): Promise<{size:number;isFile():boolean;isDirectory():boolean}>; export function readdir(path: string): Promise<string[]>; export function writeFile(path: string, data: string | Uint8Array): Promise<void>; }",
     )?;
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
     fs::write(
@@ -172,7 +175,7 @@ pub fn campaign() -> Result<()> {
     let mut report = json!({
         "seed":seed, "count":programs.len() * forms.len(), "depth":depth,
         "completed":0, "status":"running", "startedUnix":started,
-        "grammarVersion":7, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
+        "grammarVersion":8, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
         "fuelPerCall":fuel,
         "replay":env::var_os("PERRY_GENERATIVE_REPLAY").is_some(),
     });

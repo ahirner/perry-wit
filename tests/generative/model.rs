@@ -119,6 +119,8 @@ pub enum Form {
     FileRoundTrip,
     FileMetadata,
     FileBytes,
+    FileByteRoundTrip,
+    FileRejectedRead,
 }
 
 impl Form {
@@ -133,6 +135,8 @@ impl Form {
                 | Self::FileRoundTrip
                 | Self::FileMetadata
                 | Self::FileBytes
+                | Self::FileByteRoundTrip
+                | Self::FileRejectedRead
         )
     }
 }
@@ -148,6 +152,12 @@ impl Program {
         let expression = &self.expression;
         let fixture = serde_json::to_string(FIXTURE).unwrap();
         let body = match self.form {
+            Form::FileByteRoundTrip => format!(
+                "const bytes = new Uint8Array([19,0,255,128,42,20]); const view = bytes.subarray(1,5); const pending = writeFile('view.bin',view); const value = {expression}; await pending; view[0] = 99; const restored = await readFile('view.bin'); if(restored.byteLength !== 4 || restored[0] !== 0 || restored[1] !== 255 || restored[2] !== 128 || restored[3] !== 42 || bytes[1] !== 99) {{throw 95;}} await writeFile('view.bin',view.subarray(2,2)); const empty = await readFile('view.bin'); if(empty.byteLength !== 0) {{throw 96;}}"
+            ),
+            Form::FileRejectedRead => format!(
+                "const pending = readFile('missing.txt','utf8'); let failures = 0; try {{await pending;}} catch {{failures++;}} const value = {expression}; try {{await pending;}} catch {{failures++;}} if(failures !== 2) {{throw 97;}} const restored = await readFile('fixture.txt','utf8'); if(restored !== {fixture}) {{throw 98;}}"
+            ),
             Form::FileMetadata => format!(
                 "const pending = stat('fixture.txt'); const value = {expression}; const info = await pending; const names = await readdir('.'); if(!info.isFile() || info.isDirectory() || info.size !== 6 || names.length !== 1 || names[0] !== 'fixture.txt') {{throw 93;}}"
             ),
@@ -175,7 +185,12 @@ impl Program {
         };
         let import = match self.form {
             Form::Timer | Form::StoredTimer => "import {setTimeout} from 'node:timers/promises';\n",
-            Form::FileRead | Form::FileRoundTrip | Form::FileMetadata | Form::FileBytes => {
+            Form::FileRead
+            | Form::FileRoundTrip
+            | Form::FileMetadata
+            | Form::FileBytes
+            | Form::FileByteRoundTrip
+            | Form::FileRejectedRead => {
                 "import {readFile,writeFile,stat,readdir} from 'node:fs/promises';\n"
             }
             _ => "",
