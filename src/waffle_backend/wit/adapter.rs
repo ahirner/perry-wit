@@ -199,6 +199,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         .set_terminator(adapter.block, Terminator::Return { values: returned });
     if let Some(failure) = command_failure {
         adapter.block = failure;
+        adapter.finish_resources()?;
         adapter.finish_invocation();
         let failed = adapter.integer(1);
         adapter.body.set_terminator(
@@ -212,6 +213,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         adapter.block = failure;
         let cancelled = adapter.call(registry.operations.unwrap().cancelled, &[]);
         adapter.require(cancelled);
+        adapter.finish_resources()?;
         let mut values = Vec::new();
         for ty in &module.signatures[export.sig].returns {
             let op = match ty {
@@ -1035,16 +1037,17 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
                 },
             },
         );
-        let cancelled = adapter
+        adapter.block = cancelled;
+        adapter.finish_resources()?;
+        adapter.block = adapter
             .scratch
             .as_ref()
             .unwrap()
-            .release(&mut adapter.body, cancelled);
-        adapter.block = cancelled;
+            .release(&mut adapter.body, adapter.block);
         let reason = adapter.number(20.0);
         abi::emit_completion(
             &mut adapter.body,
-            cancelled,
+            adapter.block,
             abi::CompletionStatus::Threw,
             reason,
         );

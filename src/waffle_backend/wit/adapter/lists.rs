@@ -66,6 +66,10 @@ impl Adapter<'_> {
                 self.registry.structured_helpers.unwrap().lower_strings,
                 &[array],
             );
+            self.scratch
+                .as_ref()
+                .unwrap()
+                .retain(&mut self.body, self.block, list);
             let data = self.load_i32(list, 0);
             let count = self.load_i32(list, 4);
             self.store_i32(pointer, offset, data);

@@ -1,5 +1,8 @@
 //! Test-only assertion that a suspended canonical return area remains allocated.
 
+#[path = "core_probe.rs"]
+mod core_probe;
+
 use anyhow::{Context, Result, ensure};
 use waffle::{
     BlockTarget, FuncDecl, FunctionBody, GlobalData, ImportKind, MemoryArg, Module, Operator,
@@ -159,25 +162,7 @@ pub fn guard_return_area(
 pub fn collect_at_result_handoffs(
     compiled: &perry_wit::waffle_backend::WaffleCompiled,
 ) -> Result<Vec<u8>> {
-    let mut module = Module::from_wasm_bytes(&compiled.core, &Default::default())?;
-    module.expand_all_funcs()?;
-    // Linking preserves the order of core definitions, then appends helper bodies.
-    let names = compiled
-        .waffle_ir
-        .lines()
-        .filter(|line| line.starts_with("  func") && line.contains(" = #"))
-        .map(|line| line.split('"').nth(1).context("missing function name"))
-        .collect::<Result<Vec<_>>>()?;
-    let definitions = module
-        .funcs
-        .entries_mut()
-        .filter_map(|(_, function)| match function {
-            FuncDecl::Body(_, name, _) => Some(name),
-            _ => None,
-        });
-    for (name, original) in definitions.zip(names) {
-        *name = original.into();
-    }
+    let mut module = core_probe::named_core(compiled)?;
     let collect = module
         .funcs
         .entries()
@@ -246,18 +231,27 @@ pub fn collect_at_result_handoffs(
         })
         .collect();
     let mut sites = 0;
+    let realloc = module
+        .exports
+        .iter()
+        .find_map(|export| match export.kind {
+            waffle::ExportKind::Func(function) if export.name == "cabi_realloc" => Some(function),
+            _ => None,
+        })
+        .context("missing canonical allocator")?;
     for (_, function) in module.funcs.entries_mut() {
         let FuncDecl::Body(_, name, body) = function else {
             continue;
         };
         let worker = name.ends_with(".worker");
+        let adapter = name.ends_with(".export") || name.ends_with(".import");
         let blocks: Vec<_> = body.blocks.iter().collect();
         for block in blocks {
             let instructions = std::mem::take(&mut body.blocks[block].insts);
             for instruction in instructions {
                 let target = match &body.values[instruction] {
                     ValueDef::Operator(Operator::Call { function_index }, _, _) => {
-                        targets.contains(function_index)
+                        targets.contains(function_index) || (adapter && *function_index == realloc)
                     }
                     _ => false,
                 };
