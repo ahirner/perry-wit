@@ -10,6 +10,7 @@ The campaign runs the saved regression trees plus eight generated expression tre
 `tsc --strict` checks every generated source before execution.
 Node and the production resolved-WIT compiler receive the same TypeScript source.
 Wasmtime validates and executes the resulting components with fuel and memory limits.
+The default budget is 1,000,000 fuel per input, configurable with `PERRY_GENERATIVE_FUEL` (1–100,000,000) for bounded profiling. Fuel exhaustion is its own failure category, so reduction cannot silently substitute another execution trap. Successful worker outcomes include the component byte count and maximum fuel consumed by one input; campaign reports retain the configured budget.
 A separate process contains compiler panics, aborts, and timeouts. Each campaign snapshots its worker executable so a concurrent rebuild cannot change the compiler halfway through a run.
 The development profile optimizes the upstream `perry-hir` dependency: its unoptimized frontend overflowed the normal Rust test-thread stack on a saved nested Date/byte/JSON case. The regression runs at the normal stack limit.
 Missing tools, oracle errors, and rejected generated programs fail the test.
@@ -22,6 +23,7 @@ The grammar covers arithmetic, comparisons, short-circuit booleans, conditionals
 - `2` (default): also `Date.getTime`, `Uint8Array` conversion/indexing, `TextEncoder` plus byte subviews, and JSON serialization/parse/field reads.
 - `3`: all level-two expressions plus direct and stored/repeated awaits of `node:timers/promises.setTimeout`, for six forms per tree.
 - `4`: also pending `node:fs/promises.readFile` and `writeFile`/read-back forms, for eight forms per tree.
+- `5`: also retained `stat` results, `readdir`, and binary `readFile` with UTF-8 decoding, for ten forms per tree.
 
 Every added expression participates in typed structural reduction.
 Timer variants run against the real Node timer API and the production WASI P3 clock host; only values and ordered source effects are compared, not wall-clock timing.
@@ -36,11 +38,11 @@ Unsupported operators and methods are outside this grammar; generated tests do n
 For a larger reproducible campaign:
 
 ```sh
-nix develop -c env PERRY_GENERATIVE_SEED=100 PERRY_GENERATIVE_COUNT=200 PERRY_GENERATIVE_DEPTH=4 cargo test --test generative_test generated_programs_match_node -- --nocapture
+nix develop -c env PERRY_GENERATIVE_API_LEVEL=5 PERRY_GENERATIVE_FUEL=10000000 PERRY_GENERATIVE_SEED=100 PERRY_GENERATIVE_COUNT=200 PERRY_GENERATIVE_DEPTH=4 cargo test --test generative_test generated_programs_match_node -- --nocapture
 ```
 
 Seeds use a fixed SplitMix64 mapping.
-Count is the number of generated trees, before the four, six, or eight variants selected by the API level; the saved regression trees always run too, and depth is bounded at six.
+Count is the number of generated trees, before the four, six, eight, or ten variants selected by the API level; the saved regression trees always run too, and depth is bounded at six.
 The default shrink budget is 100 attempts, configurable with `PERRY_GENERATIVE_SHRINK`.
 Each run prints its retained directory under `target/generative/`, containing sources, WIT, oracle, inputs, tool versions, grammar version/API level, Git revision and source patch, start time, elapsed time, and progress.
 A semantic failure also saves the original and reduced trees and TypeScript, plus failure details.
@@ -54,3 +56,16 @@ nix develop -c env PERRY_GENERATIVE_REPLAY=target/generative/run-EXAMPLE/minimal
 This is deterministic generative differential testing, not coverage-guided fuzzing.
 The design follows `../nix-wit/tests/equivalence`: typed generation, metamorphic observations, bounded structural reduction, and saved replay artifacts.
 [Fuzzilli](https://github.com/googleprojectzero/fuzzilli) provides a related model of separating valid-program generation, execution, and minimization.
+
+To aggregate a sustained run, place a JSON manifest beside the `run-*` directories
+with a `startedUnix` timestamp. Optional `legacyCampaignsThisGoal` names include
+older reports without timestamps. Then run:
+
+```sh
+nix develop -c node scripts/tally_generative.mjs target/generative/goal-manifest.json
+```
+
+The tally includes only completed matching programs, excludes diagnostic replays,
+and reports exact-source SHA-256 deduplication separately from total executions.
+A running or failed campaign contributes only its verified prefix. Missing or
+unreadable reports are listed rather than silently counted as successes.

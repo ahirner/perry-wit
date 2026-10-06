@@ -116,6 +116,8 @@ pub enum Form {
     StoredTimer,
     FileRead,
     FileRoundTrip,
+    FileMetadata,
+    FileBytes,
 }
 
 impl Form {
@@ -124,7 +126,12 @@ impl Form {
     pub fn is_async(self) -> bool {
         matches!(
             self,
-            Self::Timer | Self::StoredTimer | Self::FileRead | Self::FileRoundTrip
+            Self::Timer
+                | Self::StoredTimer
+                | Self::FileRead
+                | Self::FileRoundTrip
+                | Self::FileMetadata
+                | Self::FileBytes
         )
     }
 }
@@ -140,6 +147,12 @@ impl Program {
         let expression = &self.expression;
         let fixture = serde_json::to_string(FIXTURE).unwrap();
         let body = match self.form {
+            Form::FileMetadata => format!(
+                "const pending = stat('fixture.txt'); const value = {expression}; const info = await pending; const names = await readdir('.'); if(!info.isFile() || info.isDirectory() || info.size !== 6 || names.length !== 1 || names[0] !== 'fixture.txt') {{throw 93;}}"
+            ),
+            Form::FileBytes => format!(
+                "const pending = readFile('fixture.txt'); const value = {expression}; const bytes = await pending; if(bytes.byteLength !== 6 || new TextDecoder().decode(bytes) !== {fixture}) {{throw 94;}}"
+            ),
             Form::FileRead => format!(
                 "const pending = readFile('fixture.txt','utf8'); const value = {expression}; const text = await pending; if(text !== {fixture}) {{throw 91;}}"
             ),
@@ -161,8 +174,8 @@ impl Program {
         };
         let import = match self.form {
             Form::Timer | Form::StoredTimer => "import {setTimeout} from 'node:timers/promises';\n",
-            Form::FileRead | Form::FileRoundTrip => {
-                "import {readFile,writeFile} from 'node:fs/promises';\n"
+            Form::FileRead | Form::FileRoundTrip | Form::FileMetadata | Form::FileBytes => {
+                "import {readFile,writeFile,stat,readdir} from 'node:fs/promises';\n"
             }
             _ => "",
         };

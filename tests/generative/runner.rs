@@ -25,10 +25,15 @@ pub struct Observation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "stage", content = "detail")]
 enum Outcome {
-    Values(Vec<Observation>),
+    Values {
+        observations: Vec<Observation>,
+        max_fuel_used: u64,
+        component_bytes: usize,
+    },
     Compile(String),
     Validate(String),
     Execute(String),
+    Fuel(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -36,6 +41,7 @@ enum FailureKind {
     Compile,
     Validate,
     Execute,
+    Fuel,
     Crash,
     Timeout,
     Value,
@@ -99,10 +105,11 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
 
 pub fn campaign() -> Result<()> {
     let compiler = CompilerWorker::new()?;
+    let fuel = execution_fuel()?;
     let seed = setting("PERRY_GENERATIVE_SEED", 0_u64)?;
     let count = setting("PERRY_GENERATIVE_COUNT", 8_usize)?;
     let api_level = setting("PERRY_GENERATIVE_API_LEVEL", 2_u8)?;
-    ensure!(api_level <= 4, "API level must be at most 4");
+    ensure!(api_level <= 5, "API level must be at most 5");
     let depth = setting("PERRY_GENERATIVE_DEPTH", 3_u8)?;
     ensure!((1..=10000).contains(&count), "count must be in 1..=10000");
     ensure!(depth <= 6, "depth must be at most 6");
@@ -120,6 +127,16 @@ pub fn campaign() -> Result<()> {
         let forms = vec![program.form];
         (vec![program], forms)
     } else {
+        let mut forms = Form::ALL.to_vec();
+        if api_level >= 3 {
+            forms.extend([Form::Timer, Form::StoredTimer]);
+        }
+        if api_level >= 4 {
+            forms.extend([Form::FileRead, Form::FileRoundTrip]);
+        }
+        if api_level >= 5 {
+            forms.extend([Form::FileMetadata, Form::FileBytes]);
+        }
         (
             serde_json::from_str::<Vec<Number>>(include_str!("regressions.json"))?
                 .into_iter()
@@ -131,24 +148,7 @@ pub fn campaign() -> Result<()> {
                     form: Form::Direct,
                 })
                 .collect::<Vec<_>>(),
-            if api_level == 4 {
-                Form::ALL
-                    .into_iter()
-                    .chain([
-                        Form::Timer,
-                        Form::StoredTimer,
-                        Form::FileRead,
-                        Form::FileRoundTrip,
-                    ])
-                    .collect()
-            } else if api_level == 3 {
-                Form::ALL
-                    .into_iter()
-                    .chain([Form::Timer, Form::StoredTimer])
-                    .collect()
-            } else {
-                Form::ALL.to_vec()
-            },
+            forms,
         )
     };
     for (case, program) in programs.iter_mut().enumerate() {
@@ -162,7 +162,7 @@ pub fn campaign() -> Result<()> {
     fs::write(directory.join("async-world.wit"), async_wit())?;
     fs::write(
         directory.join("timers.d.ts"),
-        "declare module 'node:timers/promises' { export function setTimeout<T>(delay: number, value: T): Promise<T>; }\ndeclare module 'node:fs/promises' { export function readFile(path: string, encoding: 'utf8'): Promise<string>; export function writeFile(path: string, data: string): Promise<void>; }",
+        "declare module 'node:timers/promises' { export function setTimeout<T>(delay: number, value: T): Promise<T>; }\ndeclare module 'node:fs/promises' { export function readFile(path: string, encoding: 'utf8'): Promise<string>; export function readFile(path: string): Promise<Uint8Array>; export function stat(path: string): Promise<{size:number;isFile():boolean;isDirectory():boolean}>; export function readdir(path: string): Promise<string[]>; export function writeFile(path: string, data: string): Promise<void>; }",
     )?;
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
     fs::write(
@@ -172,7 +172,8 @@ pub fn campaign() -> Result<()> {
     let mut report = json!({
         "seed":seed, "count":programs.len() * forms.len(), "depth":depth,
         "completed":0, "status":"running", "startedUnix":started,
-        "grammarVersion":5, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
+        "grammarVersion":6, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
+        "fuelPerCall":fuel,
         "replay":env::var_os("PERRY_GENERATIVE_REPLAY").is_some(),
     });
     let revision = Command::new("git").args(["rev-parse", "HEAD"]).output()?;
@@ -406,7 +407,14 @@ impl CompilerWorker {
                     kind: FailureKind::Execute,
                     detail,
                 },
-                Outcome::Values(actual) => {
+                Outcome::Fuel(detail) => Failure {
+                    kind: FailureKind::Fuel,
+                    detail,
+                },
+                Outcome::Values {
+                    observations: actual,
+                    ..
+                } => {
                     if actual == expected {
                         return Ok(None);
                     }
@@ -522,7 +530,9 @@ fn execute(source: &str, path: &Path, asynchronous: bool) -> Outcome {
         .wasm_component_model_threading(true)
         .wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config).unwrap();
-    let component = match Component::new(&engine, compiled.component.unwrap()) {
+    let bytes = compiled.component.unwrap();
+    let component_bytes = bytes.len();
+    let component = match Component::new(&engine, bytes) {
         Ok(component) => component,
         Err(error) => return Outcome::Validate(format!("{error:#}")),
     };
@@ -531,7 +541,16 @@ fn execute(source: &str, path: &Path, asynchronous: bool) -> Outcome {
         .build()
         .unwrap();
     match runtime.block_on(observations(&engine, &component)) {
-        Ok(values) => Outcome::Values(values),
+        Ok((observations, max_fuel_used)) => Outcome::Values {
+            observations,
+            max_fuel_used,
+            component_bytes,
+        },
+        Err(error)
+            if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) =>
+        {
+            Outcome::Fuel(format!("{error:#}"))
+        }
         Err(error) => Outcome::Execute(format!("{error:#}")),
     }
 }
@@ -558,7 +577,17 @@ impl WasiView for Host {
     }
 }
 
-async fn observations(engine: &Engine, component: &Component) -> Result<Vec<Observation>> {
+fn execution_fuel() -> Result<u64> {
+    let fuel = setting("PERRY_GENERATIVE_FUEL", 1_000_000_u64)?;
+    ensure!(
+        (1..=100_000_000).contains(&fuel),
+        "fuel must be between 1 and 100000000"
+    );
+    Ok(fuel)
+}
+
+async fn observations(engine: &Engine, component: &Component) -> Result<(Vec<Observation>, u64)> {
+    let fuel = execution_fuel()?;
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("fixture.txt"), FIXTURE)?;
     let context = WasiCtxBuilder::new()
@@ -575,19 +604,22 @@ async fn observations(engine: &Engine, component: &Component) -> Result<Vec<Obse
         },
     );
     store.limiter(|host| &mut host.limits);
-    store.set_fuel(1_000_000)?;
+    store.set_fuel(fuel)?;
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let instance = linker.instantiate_async(&mut store, component).await?;
     let run = instance.get_typed_func::<(f64,), (GuestObservation,)>(&mut store, "run")?;
     let mut values = Vec::new();
+    let mut max_fuel_used = 0;
     // Reuse the instance to catch retained state and allocation lifetime errors.
     for input in INPUTS {
-        store.set_fuel(1_000_000)?;
+        store.set_fuel(fuel)?;
         let (value,) = run
             .call_async(&mut store, (input,))
             .await
-            .map_err(|error| anyhow::anyhow!("input {input:?}: {error:#}"))?;
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("input {input:?}"))?;
+        max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
         store.assert_concurrent_state_empty();
         ensure!(
             store.data().table.is_empty(),
@@ -598,7 +630,7 @@ async fn observations(engine: &Engine, component: &Component) -> Result<Vec<Obse
             trace: value.trace.into_iter().map(number).collect(),
         });
     }
-    Ok(values)
+    Ok((values, max_fuel_used))
 }
 
 pub fn number(value: f64) -> String {
