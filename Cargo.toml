@@ -11,6 +11,9 @@ members = [
     "crates/time-helper",
 ]
 
+[profile.dev.package.perry-hir]
+opt-level = 1
+
 [profile.release]
 opt-level = "z"
 lto = "fat"

@@ -2,5 +2,8 @@
   {"Choose":[{"Literal":true},{"Array":["Input","Input","Input",1]},"Input"]},
   {"Choose":[{"Literal":false},"Input",{"Array":["Input","Input","Input",1]}]},
   {"Array":["Input","Input","Input",0]},
-  {"Array":[{"Mark":"Input"},{"Mark":{"Integer":1}},{"Mark":{"Integer":2}},0]}
+  {"Array":[{"Mark":"Input"},{"Mark":{"Integer":1}},{"Mark":{"Integer":2}},0]},
+  {"ByteGet":["Input","Input","Input",0]},
+  {"ByteGet":[{"Mark":"Input"},{"Mark":{"Integer":1}},{"Mark":{"Integer":2}},0]},
+  {"DateTime":{"ByteGet":["Input","Input",{"EncodedLength":[{"Literal":""},"Input",{"JsonLength":{"Literal":""}}]},2]}}
 ]

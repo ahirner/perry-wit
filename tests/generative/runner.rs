@@ -4,16 +4,17 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
 use perry_wit::waffle_backend::{WaffleCompileOptions, compile_typescript_for_world};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use super::model::{Form, Generator, INPUTS, Number, Program, WIT};
+use super::model::{FIXTURE, Form, Generator, INPUTS, Number, Program, WIT};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observation {
@@ -97,8 +98,11 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
 }
 
 pub fn campaign() -> Result<()> {
+    let compiler = CompilerWorker::new()?;
     let seed = setting("PERRY_GENERATIVE_SEED", 0_u64)?;
     let count = setting("PERRY_GENERATIVE_COUNT", 8_usize)?;
+    let api_level = setting("PERRY_GENERATIVE_API_LEVEL", 2_u8)?;
+    ensure!(api_level <= 4, "API level must be at most 4");
     let depth = setting("PERRY_GENERATIVE_DEPTH", 3_u8)?;
     ensure!((1..=10000).contains(&count), "count must be in 1..=10000");
     ensure!(depth <= 6, "depth must be at most 6");
@@ -110,6 +114,7 @@ pub fn campaign() -> Result<()> {
         .tempdir_in(root)?
         .keep();
     eprintln!("Generative artifacts: {}", directory.display());
+    let started = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let (mut programs, forms) = if let Some(path) = env::var_os("PERRY_GENERATIVE_REPLAY") {
         let program = serde_json::from_slice::<Program>(&fs::read(path)?)?;
         let forms = vec![program.form];
@@ -118,16 +123,32 @@ pub fn campaign() -> Result<()> {
         (
             serde_json::from_str::<Vec<Number>>(include_str!("regressions.json"))?
                 .into_iter()
-                .chain(
-                    (0..count)
-                        .map(|index| Generator::new(seed.wrapping_add(index as u64)).number(depth)),
-                )
+                .chain((0..count).map(|index| {
+                    Generator::with_apis(seed.wrapping_add(index as u64), api_level).number(depth)
+                }))
                 .map(|expression| Program {
                     expression,
                     form: Form::Direct,
                 })
                 .collect::<Vec<_>>(),
-            Form::ALL.to_vec(),
+            if api_level == 4 {
+                Form::ALL
+                    .into_iter()
+                    .chain([
+                        Form::Timer,
+                        Form::StoredTimer,
+                        Form::FileRead,
+                        Form::FileRoundTrip,
+                    ])
+                    .collect()
+            } else if api_level == 3 {
+                Form::ALL
+                    .into_iter()
+                    .chain([Form::Timer, Form::StoredTimer])
+                    .collect()
+            } else {
+                Form::ALL.to_vec()
+            },
         )
     };
     for (case, program) in programs.iter_mut().enumerate() {
@@ -138,12 +159,47 @@ pub fn campaign() -> Result<()> {
         }
     }
     fs::write(directory.join("world.wit"), WIT)?;
+    fs::write(directory.join("async-world.wit"), async_wit())?;
+    fs::write(
+        directory.join("timers.d.ts"),
+        "declare module 'node:timers/promises' { export function setTimeout<T>(delay: number, value: T): Promise<T>; }\ndeclare module 'node:fs/promises' { export function readFile(path: string, encoding: 'utf8'): Promise<string>; export function writeFile(path: string, data: string): Promise<void>; }",
+    )?;
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
     fs::write(
         directory.join("inputs.json"),
         serde_json::to_vec(&INPUTS.map(number))?,
     )?;
-    let mut report = json!({"seed":seed, "count":programs.len() * forms.len(), "depth":depth, "completed":0, "status":"running"});
+    let mut report = json!({
+        "seed":seed, "count":programs.len() * forms.len(), "depth":depth,
+        "completed":0, "status":"running", "startedUnix":started,
+        "grammarVersion":5, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
+        "replay":env::var_os("PERRY_GENERATIVE_REPLAY").is_some(),
+    });
+    let revision = Command::new("git").args(["rev-parse", "HEAD"]).output()?;
+    ensure!(
+        revision.status.success(),
+        "cannot identify compiler revision"
+    );
+    report["revision"] = json!(String::from_utf8(revision.stdout)?.trim());
+    let changes = Command::new("git")
+        .args([
+            "diff",
+            "HEAD",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            "flake.nix",
+            "src",
+            "tests/generative",
+            "tests/generative_test.rs",
+        ])
+        .output()?;
+    ensure!(
+        changes.status.success(),
+        "cannot record compiler and generator changes"
+    );
+    report["dirty"] = json!(!changes.stdout.is_empty());
+    fs::write(directory.join("source.patch"), changes.stdout)?;
     fs::write(
         directory.join("report.json"),
         serde_json::to_vec_pretty(&report)?,
@@ -151,7 +207,7 @@ pub fn campaign() -> Result<()> {
     let mut tsc = Command::new("tsc");
     fs::write(
         directory.join("tsconfig.json"),
-        r#"{"compilerOptions":{"noEmit":true,"strict":true,"target":"es2022","module":"esnext","skipLibCheck":true},"include":["case-*.ts"]}"#,
+        r#"{"compilerOptions":{"noEmit":true,"strict":true,"target":"es2022","module":"esnext","skipLibCheck":true},"include":["case-*.ts","timers.d.ts"]}"#,
     )?;
     tsc.arg("-p").arg(directory.join("tsconfig.json"));
     let checked = command(&mut tsc, &directory, Duration::from_secs(60))?;
@@ -184,7 +240,9 @@ pub fn campaign() -> Result<()> {
                     "metamorphic transformation changed Node observations: {path:?}"
                 );
             }
-            if let Some(failure) = compare(&path, &directory, &expected)? {
+            if let Some(failure) =
+                compiler.compare(&path, &directory, &expected, program.form.is_async())?
+            {
                 fs::write(directory.join("original.ts"), program.source())?;
                 fs::write(
                     directory.join("original.json"),
@@ -198,7 +256,8 @@ pub fn campaign() -> Result<()> {
                     let path = directory.join("candidate.ts");
                     fs::write(&path, candidate.source())?;
                     let expected = oracle(&path, &directory)?;
-                    Ok(compare(&path, &directory, &expected)?
+                    Ok(compiler
+                        .compare(&path, &directory, &expected, candidate.form.is_async())?
                         .is_some_and(|next| next.kind == failure.kind))
                 })?;
                 let minimal_path = directory.join("minimal.ts");
@@ -208,7 +267,13 @@ pub fn campaign() -> Result<()> {
                     serde_json::to_vec_pretty(&minimal)?,
                 )?;
                 let expected = oracle(&minimal_path, &directory)?;
-                let reproduced = compare(&minimal_path, &directory, &expected)?
+                let reproduced = compiler
+                    .compare(
+                        &minimal_path,
+                        &directory,
+                        &expected,
+                        minimal.form.is_async(),
+                    )?
                     .context("reduction stopped reproducing")?;
                 ensure!(
                     reproduced.kind == failure.kind,
@@ -233,6 +298,8 @@ pub fn campaign() -> Result<()> {
             }
         }
     }
+    report["elapsedSeconds"] =
+        json!(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() - started);
     report["status"] = json!("passed");
     report["active"] = json!(null);
     fs::write(
@@ -266,7 +333,8 @@ fn oracle(path: &Path, directory: &Path) -> Result<Vec<Observation>> {
     ])
     .arg(directory.join("oracle.mjs"))
     .arg(path)
-    .arg(directory.join("inputs.json"));
+    .arg(directory.join("inputs.json"))
+    .arg(serde_json::to_string(FIXTURE)?);
     let output = command(&mut node, directory, Duration::from_secs(10))?;
     ensure!(
         output.success(),
@@ -276,62 +344,88 @@ fn oracle(path: &Path, directory: &Path) -> Result<Vec<Observation>> {
     serde_json::from_str(&output.stdout).context("Node observations")
 }
 
-fn compare(path: &Path, directory: &Path, expected: &[Observation]) -> Result<Option<Failure>> {
-    let outcome = directory.join("outcome.json");
-    if outcome.exists() {
-        fs::remove_file(&outcome)?;
+/// Keep every child on the same executable even if another campaign rebuilds the tests.
+struct CompilerWorker(tempfile::TempPath);
+
+impl CompilerWorker {
+    fn new() -> Result<Self> {
+        let executable = tempfile::Builder::new()
+            .prefix("perry-worker-")
+            .suffix(std::env::consts::EXE_SUFFIX)
+            .tempfile()?
+            .into_temp_path();
+        fs::copy(env::current_exe()?, &executable)?;
+        Ok(Self(executable))
     }
-    let mut worker = Command::new(env::current_exe()?);
-    worker
-        .args(["--exact", "generative_worker", "--ignored", "--nocapture"])
-        .env("PERRY_GENERATIVE_SOURCE", path)
-        .env("PERRY_GENERATIVE_OUTCOME", &outcome);
-    let output = command(&mut worker, directory, Duration::from_secs(30))?;
-    let failure = if matches!(output.status, ProcessStatus::TimedOut) {
-        Failure {
-            kind: FailureKind::Timeout,
-            detail: output.stderr,
+
+    fn compare(
+        &self,
+        path: &Path,
+        directory: &Path,
+        expected: &[Observation],
+        asynchronous: bool,
+    ) -> Result<Option<Failure>> {
+        let outcome = directory.join("outcome.json");
+        if outcome.exists() {
+            fs::remove_file(&outcome)?;
         }
-    } else if !output.success() {
-        Failure {
-            kind: FailureKind::Crash,
-            detail: format!("{:?}\n{}\n{}", output.status, output.stdout, output.stderr),
+        let mut worker = Command::new(&self.0);
+        worker
+            .args(["--exact", "generative_worker", "--ignored", "--nocapture"])
+            .env("PERRY_GENERATIVE_SOURCE", path)
+            .env("PERRY_GENERATIVE_OUTCOME", &outcome);
+        if asynchronous {
+            worker.env("PERRY_GENERATIVE_ASYNC", "1");
+        } else {
+            worker.env_remove("PERRY_GENERATIVE_ASYNC");
         }
-    } else {
-        match serde_json::from_slice::<Outcome>(
-            &fs::read(&outcome).context("worker produced no outcome")?,
-        )? {
-            Outcome::Compile(detail) => Failure {
-                kind: FailureKind::Compile,
-                detail,
-            },
-            Outcome::Validate(detail) => Failure {
-                kind: FailureKind::Validate,
-                detail,
-            },
-            Outcome::Execute(detail) => Failure {
-                kind: FailureKind::Execute,
-                detail,
-            },
-            Outcome::Values(actual) => {
-                if actual == expected {
-                    return Ok(None);
-                }
-                let kind = if actual.len() == expected.len()
-                    && actual.iter().zip(expected).all(|(a, b)| a.value == b.value)
-                {
-                    FailureKind::Trace
-                } else {
-                    FailureKind::Value
-                };
-                Failure {
-                    kind,
-                    detail: format!("expected {expected:?}; actual {actual:?}"),
+        let output = command(&mut worker, directory, Duration::from_secs(30))?;
+        let failure = if matches!(output.status, ProcessStatus::TimedOut) {
+            Failure {
+                kind: FailureKind::Timeout,
+                detail: output.stderr,
+            }
+        } else if !output.success() {
+            Failure {
+                kind: FailureKind::Crash,
+                detail: format!("{:?}\n{}\n{}", output.status, output.stdout, output.stderr),
+            }
+        } else {
+            match serde_json::from_slice::<Outcome>(
+                &fs::read(&outcome).context("worker produced no outcome")?,
+            )? {
+                Outcome::Compile(detail) => Failure {
+                    kind: FailureKind::Compile,
+                    detail,
+                },
+                Outcome::Validate(detail) => Failure {
+                    kind: FailureKind::Validate,
+                    detail,
+                },
+                Outcome::Execute(detail) => Failure {
+                    kind: FailureKind::Execute,
+                    detail,
+                },
+                Outcome::Values(actual) => {
+                    if actual == expected {
+                        return Ok(None);
+                    }
+                    let kind = if actual.len() == expected.len()
+                        && actual.iter().zip(expected).all(|(a, b)| a.value == b.value)
+                    {
+                        FailureKind::Trace
+                    } else {
+                        FailureKind::Value
+                    };
+                    Failure {
+                        kind,
+                        detail: format!("expected {expected:?}; actual {actual:?}"),
+                    }
                 }
             }
-        }
-    };
-    Ok(Some(failure))
+        };
+        Ok(Some(failure))
+    }
 }
 
 /// Candidates must be strictly smaller; only the caller's original failure predicate is retained.
@@ -368,15 +462,48 @@ pub fn worker() -> Result<()> {
     let destination =
         PathBuf::from(env::var_os("PERRY_GENERATIVE_OUTCOME").context("worker output")?);
     let source = fs::read_to_string(&path)?;
-    let outcome = execute(&source, &path);
+    let outcome = execute(
+        &source,
+        &path,
+        env::var_os("PERRY_GENERATIVE_ASYNC").is_some(),
+    );
     fs::write(destination, serde_json::to_vec(&outcome)?)?;
     Ok(())
 }
 
-fn execute(source: &str, path: &Path) -> Outcome {
+fn async_wit() -> String {
+    WIT.replace(
+        "export run: func",
+        "include wasi:cli/imports@0.3.0; export run: async func",
+    )
+}
+
+fn resolve_world(asynchronous: bool) -> Result<(wit_parser::Resolve, wit_parser::WorldId)> {
     let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("generated.wit", WIT).unwrap();
-    let world = resolve.select_world(&[package], Some("generated")).unwrap();
+    let package = if asynchronous {
+        let main = wit_parser::UnresolvedPackageGroup::parse("generated.wit", &async_wit())
+            .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+        let mut paths = fs::read_dir(env::var("WASI_P3_WIT_PATH")?)?
+            .map(|entry| Ok(entry?.path()))
+            .collect::<Result<Vec<_>>>()?;
+        paths.sort();
+        let dependencies = paths
+            .into_iter()
+            .map(wit_parser::UnresolvedPackageGroup::parse_dir)
+            .collect::<Result<Vec<_>>>()?;
+        resolve.push_groups(main, dependencies)?
+    } else {
+        resolve.push_str("generated.wit", WIT)?
+    };
+    let world = resolve.select_world(&[package], Some("generated"))?;
+    Ok((resolve, world))
+}
+
+fn execute(source: &str, path: &Path, asynchronous: bool) -> Outcome {
+    let (resolve, world) = match resolve_world(asynchronous) {
+        Ok(world) => world,
+        Err(error) => return Outcome::Compile(format!("{error:#}")),
+    };
     let compiled = match compile_typescript_for_world(
         source,
         &path.to_string_lossy(),
@@ -388,13 +515,22 @@ fn execute(source: &str, path: &Path) -> Outcome {
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
     let mut config = Config::new();
-    config.consume_fuel(true);
+    config
+        .consume_fuel(true)
+        .wasm_component_model_async(true)
+        .wasm_component_model_more_async_builtins(true)
+        .wasm_component_model_threading(true)
+        .wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config).unwrap();
     let component = match Component::new(&engine, compiled.component.unwrap()) {
         Ok(component) => component,
         Err(error) => return Outcome::Validate(format!("{error:#}")),
     };
-    match observations(&engine, &component) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    match runtime.block_on(observations(&engine, &component)) {
         Ok(values) => Outcome::Values(values),
         Err(error) => Outcome::Execute(format!("{error:#}")),
     }
@@ -407,24 +543,56 @@ struct GuestObservation {
     trace: Vec<f64>,
 }
 
-fn observations(engine: &Engine, component: &Component) -> Result<Vec<Observation>> {
+struct Host {
+    context: WasiCtx,
+    table: ResourceTable,
+    limits: StoreLimits,
+}
+
+impl WasiView for Host {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.context,
+            table: &mut self.table,
+        }
+    }
+}
+
+async fn observations(engine: &Engine, component: &Component) -> Result<Vec<Observation>> {
+    let directory = tempfile::tempdir()?;
+    fs::write(directory.path().join("fixture.txt"), FIXTURE)?;
+    let context = WasiCtxBuilder::new()
+        .preopened_dir(directory.path(), "/", FsPerms::ReadWrite)?
+        .build();
     let mut store = Store::new(
         engine,
-        StoreLimitsBuilder::new()
-            .memory_size(8 * 1024 * 1024)
-            .build(),
+        Host {
+            context,
+            table: ResourceTable::new(),
+            limits: StoreLimitsBuilder::new()
+                .memory_size(8 * 1024 * 1024)
+                .build(),
+        },
     );
-    store.limiter(|limits: &mut StoreLimits| limits);
+    store.limiter(|host| &mut host.limits);
     store.set_fuel(1_000_000)?;
-    let instance = Linker::new(engine).instantiate(&mut store, component)?;
+    let mut linker = Linker::new(engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let instance = linker.instantiate_async(&mut store, component).await?;
     let run = instance.get_typed_func::<(f64,), (GuestObservation,)>(&mut store, "run")?;
     let mut values = Vec::new();
     // Reuse the instance to catch retained state and allocation lifetime errors.
     for input in INPUTS {
         store.set_fuel(1_000_000)?;
         let (value,) = run
-            .call(&mut store, (input,))
+            .call_async(&mut store, (input,))
+            .await
             .map_err(|error| anyhow::anyhow!("input {input:?}: {error:#}"))?;
+        store.assert_concurrent_state_empty();
+        ensure!(
+            store.data().table.is_empty(),
+            "host resources leaked after run"
+        );
         values.push(Observation {
             value: number(value.value),
             trace: value.trace.into_iter().map(number).collect(),
@@ -443,6 +611,7 @@ pub fn number(value: f64) -> String {
 
 /// Remove a real side effect from the compiled source to verify detection and reduction.
 pub fn verify_trace_fault() -> Result<()> {
+    let compiler = CompilerWorker::new()?;
     let directory = tempfile::tempdir()?;
     let directory = directory.path();
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
@@ -460,12 +629,15 @@ pub fn verify_trace_fault() -> Result<()> {
         fs::write(&path, &source)?;
         let expected = oracle(&path, directory)?;
         ensure!(
-            compare(&path, directory, &expected)?.is_none(),
+            compiler
+                .compare(&path, directory, &expected, candidate.form.is_async())?
+                .is_none(),
             "unmodified source must pass"
         );
         let path = directory.join("fault.ts");
         fs::write(&path, source.replace("mark(trace, ", "identity("))?;
-        Ok(compare(&path, directory, &expected)?
+        Ok(compiler
+            .compare(&path, directory, &expected, candidate.form.is_async())?
             .is_some_and(|failure| failure.kind == FailureKind::Trace))
     };
     ensure!(detects(&original)?, "missing side effect was not detected");
