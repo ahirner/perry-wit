@@ -75,31 +75,6 @@ wasmtime run -C cache=n -S p3=y \
 
 Use `process.exitCode = 1` to set the exit status when execution finishes, or call `process.exit(1)` to terminate immediately.
 
-### Text and resource boundaries
-
-Outbound WIT `list<u8>` values accept `string | Uint8Array`. This applies recursively to import arguments and exported results, including records, options, variants, and lists. Incoming byte lists remain mutable `Uint8Array` values. The generated SDK provides `WitInput<T>` and named `TInput` aliases for outbound values:
-
-```ts
-import { submit, type DocumentInput } from "example:documents/store";
-
-const document: DocumentInput = { bytes: JSON.stringify({ message: "Grüße" }) };
-submit(document);
-```
-
-Strings lower using their existing UTF-8 pointer and byte length, with their storage retained for the call. No intermediate encoding buffer is created. Component-to-component transfer may still copy into the receiving memory. Explicit `TextEncoder.encode` returns an independent, mutable copy.
-
-Opaque interface resources have nominal SDK types. An imported resource `secret` exposes `dropSecret`; an exported resource additionally exposes `newSecret(representation)` and `secretRep(secret)`. Transferring or disposing ownership invalidates all aliases. Borrowed handles expire when the exporting call returns and cannot be disposed or transferred as owned handles. Dispose owned imports explicitly, normally in `finally`:
-
-```ts
-const result = await get("api-key");
-if (!result.ok) throw new Error("secret unavailable");
-const secret = result.value;
-try { return await reveal(secret); }
-finally { dropSecret(secret); }
-```
-
-Resource constructors and methods declared in WIT still require freestanding wrapper functions. Numeric `BigInt(value)` construction supports finite safe integers for WIT `u64`/`s64` fields; arbitrary-precision arithmetic and bigint literals are not implemented.
-
 ### Library Exports
 
 When implementing WIT interface exports, WIT is authoritative for names, parameter/result types, and async effects. An export such as `run-task: func(input: string) -> string` is implemented as:
@@ -121,7 +96,6 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
   --invoke 'run-task("hello")' dist/task.wasm
 ```
 
-- **Data Types**: Both `s64` and `u64` map to TypeScript `bigint` (including nested records, lists, options, and tuples). Literal record field names remain unchanged even when matching builtins (`fetch`, `process`, `console`).
 - **Initialization**: Static dependencies and top-level statements execute once before the first exported call. Module state persists across subsequent invocations.
 - **Async Exports**: An export must be declared as `async func` in WIT if it can suspend, including during module initialization or through filesystem, timer, and HTTP calls.
 - **Core Wasm Output**: Pass `--core-only` (or use a `.core.wasm` extension) to emit unlinked core Wasm for custom embedding.
@@ -177,15 +151,50 @@ nix flake init -t git+file:///path/to/perry-wit
    perry-wit src/index.ts --wit wit --world task -o dist/task.wasm
    ```
 
+## Compilation Pipeline
+
+Perry-WIT compiles TypeScript ahead-of-time directly into native WebAssembly instructions without an embedded JavaScript engine:
+
+```text
+ TypeScript AST + static ESM             WIT World Definitions
+          │                                        │
+          │◄─── 1. Bind imports, inject command ───┤
+          │        adapter before syntax erasure   │
+          ▼                                        │
+  2. Perry HIR Lowering                            │
+          │                                        │
+          │◄─── 3. Validate signatures, plan ──────┤
+          │        Canonical ABI layouts           │
+          ▼                                        │
+  4. WAFFLE SSA Lowering                           │
+          │                                        │
+  5. Code Generation ─────────────────► 6. ComponentEncoder
+                                       (Embed resolved WIT)
+                                                   │
+                                                   ▼
+                                      Validated WASI 0.3 Component
+```
+
+1. **Source Analysis**: Resolves local ESM dependencies, validates AST constructs, binds WIT interface imports before syntax erasure, and synthesizes command adapters when targeting `wasi:cli/run`.
+2. **HIR Lowering**: Lowers the normalized AST into Perry HIR, establishing lexical scopes and guarded top-level module initialization.
+3. **Contract Resolution**: Validates HIR function signatures against WIT exports, verifies that suspending functions are declared `async func`, and derives canonical ABI memory layouts and capability plans.
+4. **SSA Lowering**: Lowers HIR into typed SSA basic blocks. Heap references are tracked in root frames across async suspension points, and algorithmic tasks (such as JSON codecs and date arithmetic) are statically linked from embedded, allocator-free Rust helpers.
+5. **Code Generation**: WAFFLE optimizes SSA control flow graphs, enforces reducibility, and reconstructs structured core WebAssembly instructions.
+6. **Component Encoding**: Synthesizes canonical ABI import and export adapters, embeds resolved WIT interface metadata via `wit_component::ComponentEncoder`, and emits the validated WASI 0.3 component.
+
+For memory layouts, coroutine scheduling, and helper linking details, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Semantics
 
 Perry-WIT supports a predictable, strictly typed subset of TypeScript designed for high-performance ahead-of-time compilation.
 
 ### Types
-- **Supported Shapes**: Declared interfaces/records, typed dictionaries, dense homogeneous arrays, finite unions, and validated JSON trees.
-- **64-bit Integers**: Both `s64` and `u64` use TypeScript `bigint`.
+- **Shapes**: Declared interfaces/records, typed dictionaries, dense homogeneous arrays, finite unions, and validated JSON trees. Literal record field names are preserved even when matching builtins (`fetch`, `process`, `console`).
+- **Integers**: Both `s64` and `u64` map to TypeScript `bigint` (including nested records, lists, options, and tuples). `BigInt(value)` construction supports finite safe integers; arbitrary-precision arithmetic and bigint literals are not implemented.
+- **Strings**: Lower directly using their UTF-8 pointer and byte length without intermediate re-encoding.
+- **Bytes**: Outbound WIT `list<u8>` accepts `string | Uint8Array` recursively across import arguments and exported results (records, options, variants, lists). The generated SDK provides `WitInput<T>` and named `TInput` aliases for outbound values. Incoming byte lists remain mutable `Uint8Array` values.
 - **Dates**: `Date` supports immutable UTC operations, while supported `Temporal` APIs provide explicit ISO timestamp and calendar calculations.
-- **Unsupported Dynamic Features**: Arbitrary runtime coercion, dynamic property deletion (`delete obj.prop`), and untyped prototype manipulation are rejected at compile time.
+- **Coercion**: Arbitrary runtime coercion, dynamic property deletion (`delete obj.prop`), and untyped prototype manipulation are rejected at compile time.
 
 ### Concurrency
 - **Scheduling**: Execution runs eagerly until the first suspension point. Continuations are scheduled directly via native WASI 0.3 wakeups.
@@ -200,7 +209,11 @@ Perry-WIT supports a predictable, strictly typed subset of TypeScript designed f
 - **Timers**: Promise-based timers via `setTimeout` from `node:timers/promises`.
 
 ### Resource Management
-Host resources—such as open files, HTTP connections, and stream buffers—are managed directly by the host runtime. Perry-WIT preserves these resources across asynchronous suspensions and frees them automatically when an operation finishes or when an `AbortSignal` triggers cancellation. If an unhandled trap or abnormal exit occurs, the host reclaims all active resources cleanly during store disposal.
+Host resources—such as open files, HTTP connections, and stream buffers—are managed directly by the host runtime. Perry-WIT preserves these resources across asynchronous suspensions and frees them automatically when an operation finishes or when an `AbortSignal` triggers cancellation.
+
+Opaque interface resources have nominal SDK types. An imported resource exposes `drop*`; an exported resource additionally exposes `new*` and `*Rep`. Transferring or disposing ownership invalidates all aliases. Borrowed handles expire when the exporting call returns and cannot be disposed or transferred as owned handles. Dispose owned imports explicitly, typically in `finally`.
+
+If an unhandled trap or abnormal exit occurs, the host reclaims all active resources cleanly during store disposal.
 
 ## Contributing
 

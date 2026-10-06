@@ -2,10 +2,10 @@
 
 The generative test suite synthesizes well-typed TypeScript programs, compiles them to WASI 0.3 WebAssembly components, and checks differential semantic equivalence against Node.js across numerical boundary inputs.
 
-- **Differential & Metamorphic**: Compares WASI 0.3 component execution in Wasmtime directly against Node.js across semantic-preserving program variants.
-- **Automated Reduction**: Reduces failing programs to minimal reproducing TypeScript cases.
-- **Resource-Bounded**: Enforces configurable fuel and memory limits in isolated worker processes.
-- **Deterministic & Replayable**: Seeded generation with saved artifacts for replay against the current compiler.
+- **Differential**: Compares WASI 0.3 component execution in Wasmtime directly against Node.js across semantic-preserving program variants.
+- **Reduction**: Reduces failing programs to minimal reproducing TypeScript cases.
+- **Budgets**: Enforces configurable fuel and memory limits in isolated worker processes.
+- **Replay**: Deterministic seeded generation and regression reproduction from saved artifacts.
 
 ## Quick Start
 
@@ -53,11 +53,21 @@ nix develop -c env \
 | `PERRY_GENERATIVE_SHRINK` | `100` | Maximum reduction attempts on failure. |
 | `PERRY_GENERATIVE_REPLAY` | _unset_ | Saved TypeScript file (`.ts` or `.json`) to replay. |
 
-## Failure Reduction & Replay
+## Replay
 
-The runner prints the retained directory under `target/generative/run-<id>/` and saves failure diagnostics and any reduced reproducer.
+Replay reproduces program execution deterministically against the current compiler. It accepts saved candidate programs, regression trees, or reduced artifacts from prior campaign runs.
 
-Replay a saved case against the current compiler:
+This mechanism encompasses failures whenever a synthesized program deviates from expected behavior, specifically across scenarios such as:
+- **Semantic Mismatch**: Divergence between WASI 0.3 execution results in Wasmtime and Node.js oracle output.
+- **Compilation Diagnostics**: Unexpected rejection of valid TypeScript syntax or internal compiler lowering failures.
+- **Component Validation**: Canonical ABI layout mismatches or rejected WebAssembly component structures.
+- **Execution Traps**: Guest panics, unhandled runtime exceptions, or exceeded memory limits.
+- **Fuel Exhaustion**: Exceeding the allocated Wasmtime instruction fuel budget before reaching completion.
+- **Process Timeouts**: Hanging asynchronous suspensions or unobserved dangling promises at instance boundaries.
+
+When any of these failures occur during a campaign, the runner isolates the fault in a worker process, logs the failure diagnostics to `target/generative/run-<id>/`, and shrinks the program into a minimal reproducing case (`minimal.ts` and `minimal.json`).
+
+Replay the reduced failure directly against the compiler:
 
 ```sh
 nix develop -c env \
