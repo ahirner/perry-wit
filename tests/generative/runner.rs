@@ -52,6 +52,21 @@ enum FailureKind {
 struct Failure {
     kind: FailureKind,
     detail: String,
+    input: Option<usize>,
+}
+
+impl Failure {
+    fn preserves(&self, original: &Self) -> bool {
+        self.kind == original.kind
+            && match self.kind {
+                FailureKind::Value | FailureKind::Trace => self.input == original.input,
+                FailureKind::Compile
+                | FailureKind::Validate
+                | FailureKind::Execute
+                | FailureKind::Fuel => self.detail == original.detail,
+                FailureKind::Crash | FailureKind::Timeout => false,
+            }
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +90,11 @@ impl ProcessOutput {
 
 /// Files avoid pipe-buffer deadlocks; every child is reaped, including on timeout.
 pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Result<ProcessOutput> {
+    let directory = tempfile::Builder::new()
+        .prefix("process-")
+        .tempdir_in(directory)?
+        .keep();
+    fs::write(directory.join("command.txt"), format!("{command:?}"))?;
     let stdout = directory.join("stdout.log");
     let stderr = directory.join("stderr.log");
     let mut child = command
@@ -82,7 +102,10 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
         .stderr(Stdio::from(File::create(&stderr)?))
         .stdin(Stdio::null())
         .spawn()
-        .with_context(|| format!("starting {command:?}; use nix develop for the test toolchain"))?;
+        .with_context(|| format!("starting {command:?}; use nix develop for the test toolchain"))
+        .inspect_err(|error| {
+            let _ = fs::write(directory.join("status.txt"), format!("{error:#}"));
+        })?;
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -96,6 +119,7 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
         }
         thread::sleep(Duration::from_millis(10));
     };
+    fs::write(directory.join("status.txt"), format!("{status:?}"))?;
     Ok(ProcessOutput {
         status,
         stdout: fs::read_to_string(stdout)?,
@@ -104,7 +128,88 @@ pub fn command(command: &mut Command, directory: &Path, limit: Duration) -> Resu
 }
 
 pub fn campaign() -> Result<()> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/generative");
+    fs::create_dir_all(&root)?;
+    let directory = tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(root)?
+        .keep();
+    eprintln!("Generative artifacts: {}", directory.display());
+    let started = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let mut report = json!({"completed":0, "status":"running", "startedUnix":started});
+    save_report(&directory, &report)?;
+    let start = Instant::now();
+    let result = run_campaign(&directory, &mut report);
+    report["elapsedSeconds"] = json!(start.elapsed().as_secs());
+    match &result {
+        Ok(()) => {
+            report["status"] = json!("passed");
+            report["active"] = json!(null);
+            eprintln!(
+                "Passed {} programs × {} inputs; {}",
+                report["completed"],
+                report["inputsPerProgram"],
+                directory.display()
+            );
+        }
+        Err(error) => {
+            report["status"] = json!("failed");
+            report["error"] = json!(format!("{error:#}"));
+        }
+    }
+    if let Err(error) = save_report(&directory, &report) {
+        if result.is_ok() {
+            return Err(error);
+        }
+        eprintln!("Could not save campaign report: {error:#}");
+    }
+    result
+}
+
+fn save_report(directory: &Path, report: &serde_json::Value) -> Result<()> {
+    let temporary = directory.join("report.json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(report)?)?;
+    fs::rename(temporary, directory.join("report.json"))?;
+    Ok(())
+}
+
+fn run_campaign(directory: &Path, report: &mut serde_json::Value) -> Result<()> {
     let compiler = CompilerWorker::new()?;
+    let revision = Command::new("git").args(["rev-parse", "HEAD"]).output()?;
+    ensure!(
+        revision.status.success(),
+        "cannot identify compiler revision"
+    );
+    report["revision"] = json!(String::from_utf8(revision.stdout)?.trim());
+    let changes = Command::new("git")
+        .args([
+            "diff",
+            "HEAD",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            "flake.nix",
+            "src",
+            "tests/generative",
+            "tests/generative_test.rs",
+        ])
+        .output()?;
+    ensure!(
+        changes.status.success(),
+        "cannot record compiler and generator changes"
+    );
+    report["dirty"] = json!(!changes.stdout.is_empty());
+    fs::write(directory.join("source.patch"), changes.stdout)?;
+    save_report(directory, report)?;
+    let versions = json!({
+        "node": Command::new("node").arg("--version").output().map(|v| String::from_utf8_lossy(&v.stdout).into_owned())?,
+        "typescript": Command::new("tsc").arg("--version").output().map(|v| String::from_utf8_lossy(&v.stdout).into_owned())?,
+        "compiler": env!("CARGO_PKG_VERSION"),
+    });
+    report["versions"] = versions;
+    if let Some(path) = env::var_os("PERRY_GENERATIVE_REPLAY") {
+        return replay_saved(&PathBuf::from(path), directory, report, &compiler);
+    }
     let fuel = execution_fuel()?;
     let seed = setting("PERRY_GENERATIVE_SEED", 0_u64)?;
     let count = setting("PERRY_GENERATIVE_COUNT", 8_usize)?;
@@ -114,19 +219,7 @@ pub fn campaign() -> Result<()> {
     ensure!((1..=10000).contains(&count), "count must be in 1..=10000");
     ensure!(depth <= 6, "depth must be at most 6");
     let shrink_limit = setting("PERRY_GENERATIVE_SHRINK", 100_usize)?;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/generative");
-    fs::create_dir_all(&root)?;
-    let directory = tempfile::Builder::new()
-        .prefix("run-")
-        .tempdir_in(root)?
-        .keep();
-    eprintln!("Generative artifacts: {}", directory.display());
-    let started = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let (mut programs, forms) = if let Some(path) = env::var_os("PERRY_GENERATIVE_REPLAY") {
-        let program = serde_json::from_slice::<Program>(&fs::read(path)?)?;
-        let forms = vec![program.form];
-        (vec![program], forms)
-    } else {
+    let (mut programs, forms) = {
         let mut forms = Form::ALL.to_vec();
         if api_level >= 3 {
             forms.extend([Form::Timer, Form::StoredTimer]);
@@ -159,8 +252,103 @@ pub fn campaign() -> Result<()> {
             program.form = form;
             let index = case * forms.len() + variant;
             fs::write(directory.join(format!("case-{index}.ts")), program.source())?;
+            fs::write(
+                directory.join(format!("case-{index}.json")),
+                serde_json::to_vec(program)?,
+            )?;
         }
     }
+    save_environment(directory)?;
+    report["seed"] = json!(seed);
+    report["count"] = json!(programs.len() * forms.len());
+    report["depth"] = json!(depth);
+    report["grammarVersion"] = json!(8);
+    report["apiLevel"] = json!(api_level);
+    report["inputsPerProgram"] = json!(INPUTS.len());
+    report["fuelPerCall"] = json!(fuel);
+    report["replay"] = json!(false);
+    save_report(directory, report)?;
+    check_sources(directory)?;
+    for (case, mut program) in programs.into_iter().enumerate() {
+        let mut baseline = None;
+        for (variant, &form) in forms.iter().enumerate() {
+            program.form = form;
+            let index = case * forms.len() + variant;
+            let path = directory.join(format!("case-{index}.ts"));
+            report["active"] = json!({"index":index,"form":program.form});
+            save_report(directory, report)?;
+            let expected = oracle(&path, directory)?;
+            if let Some(baseline) = &baseline {
+                ensure!(
+                    *baseline == expected,
+                    "metamorphic transformation changed Node observations: {path:?}"
+                );
+            }
+            if let Some(failure) =
+                compiler.compare(&path, directory, &expected, program.form.is_async())?
+            {
+                fs::copy(&path, directory.join("original.ts"))?;
+                fs::write(
+                    directory.join("original.json"),
+                    serde_json::to_vec_pretty(&program)?,
+                )?;
+                fs::write(
+                    directory.join("failure.json"),
+                    serde_json::to_vec_pretty(&failure)?,
+                )?;
+                report["failure"] = serde_json::to_value(&failure)?;
+                save_report(directory, report)?;
+                let limit = if matches!(failure.kind, FailureKind::Crash | FailureKind::Timeout) {
+                    0
+                } else {
+                    shrink_limit
+                };
+                let (minimal, attempts) = reduce(program, limit, |candidate| {
+                    let path = directory.join("candidate.ts");
+                    fs::write(&path, candidate.source())?;
+                    let expected = oracle(&path, directory)?;
+                    Ok(compiler
+                        .compare(&path, directory, &expected, candidate.form.is_async())?
+                        .is_some_and(|next| next.preserves(&failure)))
+                })?;
+                let minimal_path = directory.join("minimal.ts");
+                fs::write(&minimal_path, minimal.source())?;
+                fs::write(
+                    directory.join("minimal.json"),
+                    serde_json::to_vec_pretty(&minimal)?,
+                )?;
+                let expected = oracle(&minimal_path, directory)?;
+                let reproduced = compiler
+                    .compare(&minimal_path, directory, &expected, minimal.form.is_async())?
+                    .context("reduction stopped reproducing")?;
+                ensure!(
+                    reproduced.preserves(&failure)
+                        || (limit == 0
+                            && matches!(failure.kind, FailureKind::Crash | FailureKind::Timeout)
+                            && reproduced.kind == failure.kind),
+                    "reduction changed failure signature"
+                );
+                report["reducedFailure"] = serde_json::to_value(&reproduced)?;
+                report["shrinkAttempts"] = json!(attempts);
+                save_report(directory, report)?;
+                bail!(
+                    "{reproduced:?}\nArtifacts: {}\nReplay: PERRY_GENERATIVE_REPLAY={} cargo test --test generative_test generated_programs_match_node -- --nocapture",
+                    directory.display(),
+                    directory.join("minimal.json").display()
+                );
+            }
+            report["completed"] = json!(index + 1);
+            save_report(directory, report)?;
+            if baseline.is_none() {
+                baseline = Some(expected);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn save_environment(directory: &Path) -> Result<()> {
+    fs::write(directory.join("fixture.txt"), FIXTURE)?;
     fs::write(directory.join("world.wit"), WIT)?;
     fs::write(directory.join("async-world.wit"), async_wit())?;
     fs::write(
@@ -172,150 +360,78 @@ pub fn campaign() -> Result<()> {
         directory.join("inputs.json"),
         serde_json::to_vec(&INPUTS.map(number))?,
     )?;
-    let mut report = json!({
-        "seed":seed, "count":programs.len() * forms.len(), "depth":depth,
-        "completed":0, "status":"running", "startedUnix":started,
-        "grammarVersion":8, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
-        "fuelPerCall":fuel,
-        "replay":env::var_os("PERRY_GENERATIVE_REPLAY").is_some(),
-    });
-    let revision = Command::new("git").args(["rev-parse", "HEAD"]).output()?;
-    ensure!(
-        revision.status.success(),
-        "cannot identify compiler revision"
-    );
-    report["revision"] = json!(String::from_utf8(revision.stdout)?.trim());
-    let changes = Command::new("git")
-        .args([
-            "diff",
-            "HEAD",
-            "--",
-            "Cargo.toml",
-            "Cargo.lock",
-            "flake.nix",
-            "src",
-            "tests/generative",
-            "tests/generative_test.rs",
-        ])
-        .output()?;
-    ensure!(
-        changes.status.success(),
-        "cannot record compiler and generator changes"
-    );
-    report["dirty"] = json!(!changes.stdout.is_empty());
-    fs::write(directory.join("source.patch"), changes.stdout)?;
-    fs::write(
-        directory.join("report.json"),
-        serde_json::to_vec_pretty(&report)?,
-    )?;
+    Ok(())
+}
+
+fn check_sources(directory: &Path) -> Result<()> {
     let mut tsc = Command::new("tsc");
     fs::write(
         directory.join("tsconfig.json"),
         r#"{"compilerOptions":{"noEmit":true,"strict":true,"target":"es2022","module":"esnext","skipLibCheck":true},"include":["case-*.ts","timers.d.ts"]}"#,
     )?;
     tsc.arg("-p").arg(directory.join("tsconfig.json"));
-    let checked = command(&mut tsc, &directory, Duration::from_secs(60))?;
+    let checked = command(&mut tsc, directory, Duration::from_secs(60))?;
     ensure!(
         checked.success(),
         "generated source failed tsc: {checked:?}; artifacts: {}",
         directory.display()
     );
-    let versions = json!({
-        "node": Command::new("node").arg("--version").output().map(|v| String::from_utf8_lossy(&v.stdout).into_owned())?,
-        "typescript": Command::new("tsc").arg("--version").output().map(|v| String::from_utf8_lossy(&v.stdout).into_owned())?,
-        "compiler": env!("CARGO_PKG_VERSION"),
-    });
-    report["versions"] = versions;
-    for (case, mut program) in programs.into_iter().enumerate() {
-        let mut baseline = None;
-        for (variant, &form) in forms.iter().enumerate() {
-            program.form = form;
-            let index = case * forms.len() + variant;
-            let path = directory.join(format!("case-{index}.ts"));
-            report["active"] = json!({"index":index,"form":program.form});
-            fs::write(
-                directory.join("report.json"),
-                serde_json::to_vec_pretty(&report)?,
-            )?;
-            let expected = oracle(&path, &directory)?;
-            if let Some(baseline) = &baseline {
-                ensure!(
-                    *baseline == expected,
-                    "metamorphic transformation changed Node observations: {path:?}"
-                );
-            }
-            if let Some(failure) =
-                compiler.compare(&path, &directory, &expected, program.form.is_async())?
-            {
-                fs::write(directory.join("original.ts"), program.source())?;
-                fs::write(
-                    directory.join("original.json"),
-                    serde_json::to_vec_pretty(&program)?,
-                )?;
-                fs::write(
-                    directory.join("failure.json"),
-                    serde_json::to_vec_pretty(&failure)?,
-                )?;
-                let (minimal, attempts) = reduce(program, shrink_limit, |candidate| {
-                    let path = directory.join("candidate.ts");
-                    fs::write(&path, candidate.source())?;
-                    let expected = oracle(&path, &directory)?;
-                    Ok(compiler
-                        .compare(&path, &directory, &expected, candidate.form.is_async())?
-                        .is_some_and(|next| next.kind == failure.kind))
-                })?;
-                let minimal_path = directory.join("minimal.ts");
-                fs::write(&minimal_path, minimal.source())?;
-                fs::write(
-                    directory.join("minimal.json"),
-                    serde_json::to_vec_pretty(&minimal)?,
-                )?;
-                let expected = oracle(&minimal_path, &directory)?;
-                let reproduced = compiler
-                    .compare(
-                        &minimal_path,
-                        &directory,
-                        &expected,
-                        minimal.form.is_async(),
-                    )?
-                    .context("reduction stopped reproducing")?;
-                ensure!(
-                    reproduced.kind == failure.kind,
-                    "reduction changed failure category"
-                );
-                report["status"] = json!("failed");
-                report["failure"] = serde_json::to_value(&reproduced)?;
-                report["shrinkAttempts"] = json!(attempts);
-                fs::write(
-                    directory.join("report.json"),
-                    serde_json::to_vec_pretty(&report)?,
-                )?;
-                bail!(
-                    "{reproduced:?}\nArtifacts: {}\nReplay: PERRY_GENERATIVE_REPLAY={} cargo test --test generative_test generated_programs_match_node -- --nocapture",
-                    directory.display(),
-                    directory.join("minimal.json").display()
-                );
-            }
-            report["completed"] = json!(index + 1);
-            if baseline.is_none() {
-                baseline = Some(expected);
-            }
-        }
+    Ok(())
+}
+
+fn replay_saved(
+    path: &Path,
+    directory: &Path,
+    report: &mut serde_json::Value,
+    compiler: &CompilerWorker,
+) -> Result<()> {
+    let source = path.with_extension("ts");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(path.with_extension("json"))?)?;
+    let form: Form = serde_json::from_value(metadata["form"].clone())?;
+    let saved = path.parent().context("replay directory")?;
+    let previous: serde_json::Value =
+        serde_json::from_slice(&fs::read(saved.join("report.json"))?)?;
+    for name in [
+        "inputs.json",
+        "fixture.txt",
+        "oracle.mjs",
+        "world.wit",
+        "async-world.wit",
+        "timers.d.ts",
+    ] {
+        fs::copy(saved.join(name), directory.join(name))
+            .with_context(|| format!("replay requires saved {name}"))?;
     }
-    report["elapsedSeconds"] =
-        json!(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() - started);
-    report["status"] = json!("passed");
-    report["active"] = json!(null);
-    fs::write(
-        directory.join("report.json"),
-        serde_json::to_vec_pretty(&report)?,
-    )?;
-    eprintln!(
-        "Passed {} programs × {} inputs; {}",
-        report["completed"],
-        INPUTS.len(),
-        directory.display()
+    let path = directory.join("case-0.ts");
+    fs::copy(&source, &path)?;
+    fs::copy(source.with_extension("json"), path.with_extension("json"))?;
+    let inputs: Vec<String> = serde_json::from_slice(&fs::read(directory.join("inputs.json"))?)?;
+    report["count"] = json!(1);
+    report["replay"] = json!(true);
+    report["replayedSource"] = json!(source);
+    let fuel = previous["fuelPerCall"]
+        .as_u64()
+        .context("saved fuelPerCall must be an integer")?;
+    ensure!(
+        (1..=100_000_000).contains(&fuel),
+        "saved fuel must be between 1 and 100000000"
     );
+    report["fuelPerCall"] = json!(fuel);
+    report["inputsPerProgram"] = json!(inputs.len());
+    report["active"] = json!({"index":0,"form":form});
+    save_report(directory, report)?;
+    check_sources(directory)?;
+    let expected = oracle(&path, directory)?;
+    if let Some(failure) = compiler.compare(&path, directory, &expected, form.is_async())? {
+        fs::write(
+            directory.join("failure.json"),
+            serde_json::to_vec_pretty(&failure)?,
+        )?;
+        report["failure"] = serde_json::to_value(&failure)?;
+        bail!("{failure:?}; artifacts: {}", directory.display());
+    }
+    report["completed"] = json!(1);
     Ok(())
 }
 
@@ -338,7 +454,9 @@ fn oracle(path: &Path, directory: &Path) -> Result<Vec<Observation>> {
     .arg(directory.join("oracle.mjs"))
     .arg(path)
     .arg(directory.join("inputs.json"))
-    .arg(serde_json::to_string(FIXTURE)?);
+    .arg(serde_json::to_string(&fs::read_to_string(
+        directory.join("fixture.txt"),
+    )?)?);
     let output = command(&mut node, directory, Duration::from_secs(10))?;
     ensure!(
         output.success(),
@@ -383,15 +501,25 @@ impl CompilerWorker {
         } else {
             worker.env_remove("PERRY_GENERATIVE_ASYNC");
         }
+        if directory.join("report.json").exists() {
+            let report: serde_json::Value =
+                serde_json::from_slice(&fs::read(directory.join("report.json"))?)?;
+            let fuel = report["fuelPerCall"]
+                .as_u64()
+                .context("saved fuelPerCall must be an integer")?;
+            worker.env("PERRY_GENERATIVE_FUEL", fuel.to_string());
+        }
         let output = command(&mut worker, directory, Duration::from_secs(30))?;
         let failure = if matches!(output.status, ProcessStatus::TimedOut) {
             Failure {
                 kind: FailureKind::Timeout,
+                input: None,
                 detail: output.stderr,
             }
         } else if !output.success() {
             Failure {
                 kind: FailureKind::Crash,
+                input: None,
                 detail: format!("{:?}\n{}\n{}", output.status, output.stdout, output.stderr),
             }
         } else {
@@ -400,19 +528,23 @@ impl CompilerWorker {
             )? {
                 Outcome::Compile(detail) => Failure {
                     kind: FailureKind::Compile,
-                    detail,
+                    input: None,
+                    detail: detail.replace(path.to_string_lossy().as_ref(), "<source>"),
                 },
                 Outcome::Validate(detail) => Failure {
                     kind: FailureKind::Validate,
-                    detail,
+                    input: None,
+                    detail: detail.replace(path.to_string_lossy().as_ref(), "<source>"),
                 },
                 Outcome::Execute(detail) => Failure {
                     kind: FailureKind::Execute,
-                    detail,
+                    input: None,
+                    detail: detail.replace(path.to_string_lossy().as_ref(), "<source>"),
                 },
                 Outcome::Fuel(detail) => Failure {
                     kind: FailureKind::Fuel,
-                    detail,
+                    input: None,
+                    detail: detail.replace(path.to_string_lossy().as_ref(), "<source>"),
                 },
                 Outcome::Values {
                     observations: actual,
@@ -430,6 +562,16 @@ impl CompilerWorker {
                     };
                     Failure {
                         kind,
+                        input: Some(
+                            actual
+                                .iter()
+                                .zip(expected)
+                                .position(|(a, b)| match kind {
+                                    FailureKind::Value => a.value != b.value,
+                                    _ => a.trace != b.trace,
+                                })
+                                .unwrap_or(actual.len().min(expected.len())),
+                        ),
                         detail: format!("expected {expected:?}; actual {actual:?}"),
                     }
                 }
@@ -490,10 +632,19 @@ fn async_wit() -> String {
     )
 }
 
-fn resolve_world(asynchronous: bool) -> Result<(wit_parser::Resolve, wit_parser::WorldId)> {
+fn resolve_world(
+    directory: &Path,
+    asynchronous: bool,
+) -> Result<(wit_parser::Resolve, wit_parser::WorldId)> {
     let mut resolve = wit_parser::Resolve::default();
+    let path = directory.join(if asynchronous {
+        "async-world.wit"
+    } else {
+        "world.wit"
+    });
+    let wit = fs::read_to_string(path)?;
     let package = if asynchronous {
-        let main = wit_parser::UnresolvedPackageGroup::parse("generated.wit", &async_wit())
+        let main = wit_parser::UnresolvedPackageGroup::parse("generated.wit", &wit)
             .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
         let mut paths = fs::read_dir(env::var("WASI_P3_WIT_PATH")?)?
             .map(|entry| Ok(entry?.path()))
@@ -505,14 +656,15 @@ fn resolve_world(asynchronous: bool) -> Result<(wit_parser::Resolve, wit_parser:
             .collect::<Result<Vec<_>>>()?;
         resolve.push_groups(main, dependencies)?
     } else {
-        resolve.push_str("generated.wit", WIT)?
+        resolve.push_str("generated.wit", &wit)?
     };
     let world = resolve.select_world(&[package], Some("generated"))?;
     Ok((resolve, world))
 }
 
 fn execute(source: &str, path: &Path, asynchronous: bool) -> Outcome {
-    let (resolve, world) = match resolve_world(asynchronous) {
+    let directory = path.parent().unwrap();
+    let (resolve, world) = match resolve_world(directory, asynchronous) {
         Ok(world) => world,
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
@@ -544,7 +696,7 @@ fn execute(source: &str, path: &Path, asynchronous: bool) -> Outcome {
         .enable_all()
         .build()
         .unwrap();
-    match runtime.block_on(observations(&engine, &component)) {
+    match runtime.block_on(observations(&engine, &component, directory)) {
         Ok((observations, max_fuel_used)) => Outcome::Values {
             observations,
             max_fuel_used,
@@ -590,10 +742,17 @@ fn execution_fuel() -> Result<u64> {
     Ok(fuel)
 }
 
-async fn observations(engine: &Engine, component: &Component) -> Result<(Vec<Observation>, u64)> {
+async fn observations(
+    engine: &Engine,
+    component: &Component,
+    artifacts: &Path,
+) -> Result<(Vec<Observation>, u64)> {
     let fuel = execution_fuel()?;
     let directory = tempfile::tempdir()?;
-    fs::write(directory.path().join("fixture.txt"), FIXTURE)?;
+    fs::write(
+        directory.path().join("fixture.txt"),
+        fs::read(artifacts.join("fixture.txt"))?,
+    )?;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/", FsPerms::ReadWrite)?
         .build();
@@ -616,7 +775,13 @@ async fn observations(engine: &Engine, component: &Component) -> Result<(Vec<Obs
     let mut values = Vec::new();
     let mut max_fuel_used = 0;
     // Reuse the instance to catch retained state and allocation lifetime errors.
-    for input in INPUTS {
+    let inputs: Vec<String> = serde_json::from_slice(&fs::read(artifacts.join("inputs.json"))?)?;
+    for encoded in inputs {
+        let input = if encoded == "NaN" {
+            f64::NAN
+        } else {
+            f64::from_bits(u64::from_str_radix(&encoded, 16)?)
+        };
         store.set_fuel(fuel)?;
         let (value,) = run
             .call_async(&mut store, (input,))
@@ -650,11 +815,7 @@ pub fn verify_trace_fault() -> Result<()> {
     let compiler = CompilerWorker::new()?;
     let directory = tempfile::tempdir()?;
     let directory = directory.path();
-    fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
-    fs::write(
-        directory.join("inputs.json"),
-        serde_json::to_vec(&INPUTS.map(number))?,
-    )?;
+    save_environment(directory)?;
     let original = Program {
         expression: Number::Call(Box::new(Number::Mark(Box::new(Number::Input)))),
         form: Form::Direct,
