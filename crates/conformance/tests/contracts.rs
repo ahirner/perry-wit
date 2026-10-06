@@ -3,7 +3,7 @@ use perry_conformance::{
     execution::{Executor, Fault, Limits, check_fault, command, number},
     program::{Form, Number, Program},
     registry::{self, Case},
-    runner::{self, SavedCase, Settings},
+    runner::{self, ConcreteCase, SavedCase, Settings},
     transitions::{self, TimerModel},
 };
 use proptest::{
@@ -68,6 +68,7 @@ fn state_machine_shrinking_preserves_valid_serializable_traces() {
         .run(
             &TimerModel::sequential_strategy(1..=20),
             |(_, actions, _)| {
+                let actions = transitions::complete_trace(actions);
                 let decoded: Vec<transitions::Action> =
                     serde_json::from_slice(&serde_json::to_vec(&actions).unwrap()).unwrap();
                 prop_assert_eq!(&decoded, &actions);
@@ -121,8 +122,12 @@ fn injected_faults_shrink_and_replay_through_the_execution_adapter() -> Result<(
             &replay,
             serde_json::to_vec(&SavedCase {
                 contract: id.into(),
-                source: case.source(),
+                source: format!(
+                    "// Saved concrete source survives emitter changes\n{}",
+                    case.source()
+                ),
                 case,
+                metamorphic: vec![],
                 settings: Settings::default(),
                 source_sha256: "test".into(),
                 revision: "test".into(),
@@ -153,5 +158,45 @@ fn observations_and_process_isolation_preserve_failures() -> Result<()> {
         Duration::from_millis(100),
     )?;
     assert!(stalled.timed_out && !stalled.success());
+    Ok(())
+}
+
+#[test]
+fn concrete_replay_retains_the_metamorphic_failure_after_emitter_changes() -> Result<()> {
+    let case = Case::Program(Program {
+        expression: Number::Integer(0),
+        form: Form::Direct,
+    });
+    let variant = Case::Program(Program {
+        expression: Number::Integer(0),
+        form: Form::Loop,
+    });
+    let saved = SavedCase {
+        contract: "ecma.number.arithmetic".into(),
+        source: case.source(),
+        case,
+        metamorphic: vec![ConcreteCase {
+            source: variant.source().replace("value:value", "value:1"),
+            case: variant,
+        }],
+        settings: Settings::default(),
+        source_sha256: "archived".into(),
+        revision: "archived".into(),
+        versions: serde_json::json!({}),
+    };
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("metamorphic.json");
+    fs::write(&path, serde_json::to_vec(&saved)?)?;
+    let error = runner::replay(
+        &path,
+        PathBuf::from(env!("CARGO_BIN_EXE_perry-conformance")),
+    )
+    .unwrap_err();
+    ensure!(
+        error
+            .to_string()
+            .contains("metamorphic form changed Node observations"),
+        "wrong replay failure: {error:#}"
+    );
     Ok(())
 }

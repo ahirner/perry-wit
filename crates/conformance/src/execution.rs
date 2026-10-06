@@ -1,6 +1,6 @@
 //! Isolated effectful adapters. Models and observation checks do not perform I/O.
 use crate::{
-    program::{FIXTURE, Form, INPUTS, WIT},
+    program::{FIXTURE, INPUTS, WIT},
     registry::Case,
 };
 use anyhow::{Context, Result, ensure};
@@ -30,7 +30,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            fuel: 1_000_000,
+            fuel: 100_000_000,
             memory_bytes: 8 * 1024 * 1024,
             timeout_seconds: 30,
         }
@@ -41,11 +41,13 @@ pub struct Observation {
     pub value: String,
     pub trace: Vec<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "stage", content = "detail", rename_all = "snake_case")]
 pub enum Outcome {
     Values {
         observations: Vec<Observation>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
         max_fuel_used: u64,
         component_bytes: usize,
     },
@@ -56,6 +58,49 @@ pub enum Outcome {
     Fuel(String),
     Crash(String),
     Timeout,
+}
+impl std::fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Values {
+                observations,
+                stdout,
+                stderr,
+                max_fuel_used,
+                component_bytes,
+            } => f
+                .debug_struct("Values")
+                .field("observations", &observations.len())
+                .field(
+                    "sample",
+                    &observations.first().map(|o| {
+                        (
+                            &o.value,
+                            o.trace.len(),
+                            o.trace.iter().take(8).collect::<Vec<_>>(),
+                        )
+                    }),
+                )
+                .field("stdout_bytes", &stdout.len())
+                .field("stderr_bytes", &stderr.len())
+                .field("max_fuel_used", max_fuel_used)
+                .field("component_bytes", component_bytes)
+                .finish(),
+            Self::Command(value) => f
+                .debug_struct("Command")
+                .field("exit", &value.exit)
+                .field("stdout_bytes", &value.stdout.len())
+                .field("stderr_bytes", &value.stderr.len())
+                .field("timed_out", &value.timed_out)
+                .finish(),
+            Self::Compile(s) => f.debug_tuple("Compile").field(s).finish(),
+            Self::Validate(s) => f.debug_tuple("Validate").field(s).finish(),
+            Self::Execute(s) => f.debug_tuple("Execute").field(s).finish(),
+            Self::Fuel(s) => f.debug_tuple("Fuel").field(s).finish(),
+            Self::Crash(s) => f.debug_tuple("Crash").field(s).finish(),
+            Self::Timeout => f.write_str("Timeout"),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
@@ -145,6 +190,36 @@ pub struct Request {
     pub limits: Limits,
 }
 
+pub fn check_metamorphic(evidence: &[Evidence]) -> Result<()> {
+    if let Some(Evidence {
+        oracle:
+            Outcome::Values {
+                observations: baseline,
+                stdout,
+                stderr,
+                ..
+            },
+        ..
+    }) = evidence.first()
+    {
+        for result in &evidence[1..] {
+            if let Outcome::Values {
+                observations,
+                stdout: output,
+                stderr: errors,
+                ..
+            } = &result.oracle
+            {
+                ensure!(
+                    observations == baseline && output == stdout && errors == stderr,
+                    "metamorphic form changed Node observations"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
     match (case, &evidence.oracle, &evidence.component) {
         (Case::Reject { diagnostic, .. }, _, Outcome::Compile(message)) => ensure!(
@@ -162,12 +237,38 @@ pub fn check_equivalence(case: &Case, evidence: &Evidence) -> Result<()> {
             },
         ) => {
             ensure!(a == b, "value or side-effect trace mismatch: {evidence:?}");
-            ensure!(a.len() == INPUTS.len(), "missing boundary observations");
-        }
-        (_, Outcome::Command(a), Outcome::Command(b)) => {
             ensure!(
-                a.success() && b.success(),
-                "positive command failed: {evidence:?}"
+                a.len()
+                    == if matches!(case, Case::Stream(_) | Case::Fetch(_) | Case::Handler(_)) {
+                        3
+                    } else {
+                        INPUTS.len()
+                    },
+                "missing boundary observations"
+            );
+            if let (
+                Outcome::Values {
+                    stdout: a,
+                    stderr: ae,
+                    ..
+                },
+                Outcome::Values {
+                    stdout: b,
+                    stderr: be,
+                    ..
+                },
+            ) = (&evidence.oracle, &evidence.component)
+            {
+                ensure!(a == b && ae == be, "function output bytes differ");
+            }
+        }
+        (Case::Command { exit, .. }, Outcome::Command(a), Outcome::Command(b)) => {
+            ensure!(
+                !a.timed_out
+                    && !b.timed_out
+                    && a.exit == Some(exit.code())
+                    && b.exit == Some(exit.code()),
+                "command did not produce its declared exit status: {evidence:?}"
             );
             ensure!(
                 a.stdout == b.stdout && a.stderr == b.stderr,
@@ -223,45 +324,24 @@ impl Executor {
         Self { executable, limits }
     }
     pub fn check(&self, case: &Case, directory: &Path) -> Result<Vec<Evidence>> {
-        let forms = match case {
-            Case::Program(p) if p.form == Form::Direct => Form::ALL.to_vec(),
-            _ => vec![Form::Direct],
-        };
-        let mut evidence = Vec::new();
-        for (index, form) in forms.into_iter().enumerate() {
-            let mut variant = case.clone();
-            if let Case::Program(p) = &mut variant
-                && p.form == Form::Direct
-            {
-                p.form = form;
-            }
-            let directory = directory.join(index.to_string());
-            fs::create_dir_all(&directory)?;
-            let result = self.execute(&variant, &directory)?;
-            if let Some(Evidence {
-                oracle:
-                    Outcome::Values {
-                        observations: baseline,
-                        ..
-                    },
-                ..
-            }) = evidence.first()
-                && let Outcome::Values { observations, .. } = &result.oracle
-            {
-                ensure!(
-                    observations == baseline,
-                    "metamorphic form changed Node observations"
-                );
-            }
-            evidence.push(result);
-        }
+        let evidence = case
+            .variants()
+            .into_iter()
+            .enumerate()
+            .map(|(index, variant)| self.execute(&variant, &directory.join(index.to_string())))
+            .collect::<Result<Vec<_>>>()?;
+        check_metamorphic(&evidence)?;
         Ok(evidence)
     }
     pub fn execute(&self, case: &Case, directory: &Path) -> Result<Evidence> {
+        self.execute_source(case, &case.source(), directory)
+    }
+    pub fn execute_source(&self, case: &Case, source: &str, directory: &Path) -> Result<Evidence> {
         fs::create_dir_all(directory)?;
         let path = directory.join("case.ts");
-        fs::write(&path, case.source())?;
+        fs::write(&path, source)?;
         environment(directory)?;
+        fs::write(directory.join("input-case.json"), serde_json::to_vec(case)?)?;
         if !matches!(case, Case::Reject { .. }) {
             let checked = command(
                 Command::new("tsc")
@@ -302,12 +382,15 @@ impl Executor {
                 Command::new("node")
                     .args([
                         "--disable-warning=ExperimentalWarning",
+                        "--harmony-temporal",
                         "--experimental-strip-types",
                     ])
                     .arg(directory.join("oracle.mjs"))
                     .arg(&path)
                     .arg(directory.join("inputs.json"))
-                    .arg(serde_json::to_string(FIXTURE)?),
+                    .arg(serde_json::to_string(FIXTURE)?)
+                    .arg(directory.join("input-case.json"))
+                    .arg(directory.join("node-observations.json")),
                 directory,
                 Duration::from_secs(self.limits.timeout_seconds),
             )?;
@@ -317,8 +400,12 @@ impl Executor {
                 Outcome::Execute(String::from_utf8_lossy(&captured.stderr).into_owned())
             } else {
                 Outcome::Values {
-                    observations: serde_json::from_slice(&captured.stdout)
-                        .context("Node observations")?,
+                    observations: serde_json::from_slice(&fs::read(
+                        directory.join("node-observations.json"),
+                    )?)
+                    .context("Node observations")?,
+                    stdout: captured.stdout,
+                    stderr: captured.stderr,
                     max_fuel_used: 0,
                     component_bytes: 0,
                 }
@@ -350,8 +437,12 @@ impl Executor {
         };
         let control = if let Case::Fault { program, .. } = case {
             Some(
-                self.execute(&Case::Program(program.clone()), &directory.join("control"))?
-                    .component,
+                self.execute_source(
+                    &Case::Program(program.clone()),
+                    source,
+                    &directory.join("control"),
+                )?
+                .component,
             )
         } else {
             None
@@ -373,9 +464,10 @@ pub fn worker(request: &Path, destination: &Path) -> Result<()> {
     let Request { case, limits } = serde_json::from_slice(&fs::read(request)?)?;
     let directory = request.parent().context("worker directory")?;
     let path = directory.join("case.ts");
+    let source = fs::read_to_string(&path)?;
     let outcome = match &case {
-        Case::Command { source } | Case::Reject { source, .. } => match compile_typescript(
-            source,
+        Case::Command { .. } | Case::Reject { .. } => match compile_typescript(
+            &source,
             &path.to_string_lossy(),
             &CompileOptions {
                 world: Some("command".into()),
@@ -429,11 +521,11 @@ pub fn worker(request: &Path, destination: &Path) -> Result<()> {
             } else {
                 None
             };
-            let source = fault.map_or_else(|| case.source(), |fault| fault.source(&case.source()));
+            let source = fault.map_or(source.clone(), |fault| fault.source(&source));
             if fault.is_some() {
                 fs::write(directory.join("injected.ts"), &source)?;
             }
-            execute_function(&source, &path, case.asynchronous(), &limits, fault)
+            execute_function(&source, &path, &case, &limits, fault)
         }
     };
     fs::write(destination, serde_json::to_vec_pretty(&outcome)?)?;
@@ -446,7 +538,10 @@ fn environment(directory: &Path) -> Result<()> {
     fs::write(directory.join("async-world.wit"), async_wit())?;
     fs::write(
         directory.join("capabilities.d.ts"),
-        include_str!("../../../types/p3.d.ts"),
+        format!(
+            "{}\ndeclare module \"test:generated/control\" {{ export function release():void; }}",
+            include_str!("../../../types/p3.d.ts")
+        ),
     )?;
     fs::write(
         directory.join("http-handler.d.ts"),
@@ -500,22 +595,59 @@ fn resolve_world(
 fn execute_function(
     source: &str,
     path: &Path,
-    asynchronous: bool,
+    case: &Case,
     limits: &Limits,
     fault: Option<Fault>,
 ) -> Outcome {
     let directory = path.parent().unwrap();
-    let (resolve, world) = match resolve_world(directory, asynchronous) {
+    if matches!(case, Case::Stream(_)) {
+        let wit = async_wit().replace("x: f64", "input: stream<u8>");
+        if let Err(error) = fs::write(directory.join("async-world.wit"), wit) {
+            return Outcome::Compile(error.to_string());
+        }
+    }
+    if matches!(case, Case::Fetch(_)) {
+        let wit = async_wit().replace("x: f64", "url: string").replace(
+            "include wasi:cli/imports@0.3.0;",
+            "include wasi:cli/imports@0.3.0; import wasi:http/client@0.3.0;",
+        );
+        if let Err(error) = fs::write(directory.join("async-world.wit"), wit) {
+            return Outcome::Compile(error.to_string());
+        }
+    }
+    if matches!(case, Case::Lifecycle(_)) {
+        let wit = async_wit().replace(
+            "world generated {",
+            "interface control { release: func(); } world generated { import control;",
+        );
+        if let Err(error) = fs::write(directory.join("async-world.wit"), wit) {
+            return Outcome::Compile(error.to_string());
+        }
+    }
+    let (resolve, world) = match resolve_world(directory, case.asynchronous()) {
         Ok(world) => world,
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
-    let compiled = match compile_typescript_for_world(
-        source,
-        &path.to_string_lossy(),
-        &WaffleCompileOptions::default(),
-        resolve,
-        world,
-    ) {
+    let compilation = if matches!(case, Case::Handler(_)) {
+        perry_wit::waffle_backend::compile_http_handler(
+            source,
+            &path.to_string_lossy(),
+            &WaffleCompileOptions::default(),
+            perry_wit::waffle_backend::HttpHandlerOptions {
+                max_request_bytes: 65536,
+                max_response_bytes: 65536,
+            },
+        )
+    } else {
+        compile_typescript_for_world(
+            source,
+            &path.to_string_lossy(),
+            &WaffleCompileOptions::default(),
+            resolve,
+            world,
+        )
+    };
+    let compiled = match compilation {
         Ok(compiled) => compiled,
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
@@ -537,9 +669,13 @@ fn execute_function(
         .enable_all()
         .build()
         .unwrap();
-    match runtime.block_on(observations(&engine, &component, directory, limits, fault)) {
-        Ok((observations, max_fuel_used)) => Outcome::Values {
+    match runtime.block_on(observations(
+        &engine, &component, directory, limits, fault, case,
+    )) {
+        Ok((observations, max_fuel_used, stdout, stderr)) => Outcome::Values {
             observations,
+            stdout,
+            stderr,
             max_fuel_used,
             component_bytes,
         },
@@ -561,6 +697,7 @@ struct GuestObservation {
 
 struct Host {
     context: WasiCtx,
+    http: wasmtime_wasi_http::WasiHttpCtx,
     table: ResourceTable,
     limits: StoreLimits,
 }
@@ -574,29 +711,49 @@ impl WasiView for Host {
     }
 }
 
+impl wasmtime_wasi_http::WasiHttpView for Host {
+    fn http(&mut self) -> wasmtime_wasi_http::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: Default::default(),
+        }
+    }
+}
+
 async fn observations(
     engine: &Engine,
     component: &Component,
     artifacts: &Path,
     limits: &Limits,
     fault: Option<Fault>,
-) -> Result<(Vec<Observation>, u64)> {
+    case: &Case,
+) -> Result<(Vec<Observation>, u64, Vec<u8>, Vec<u8>)> {
     let fuel = limits.fuel;
     let directory = tempfile::tempdir()?;
     fs::write(
         directory.path().join("fixture.txt"),
         fs::read(artifacts.join("fixture.txt"))?,
     )?;
+    let stdout = output_capture::MemoryOutput::new(32 * 1024 * 1024);
+    let stderr = output_capture::MemoryOutput::new(32 * 1024 * 1024);
     let context = WasiCtxBuilder::new()
+        .stdout(stdout.clone())
+        .stderr(stderr.clone())
         .preopened_dir(directory.path(), "/", FsPerms::ReadWrite)?
         .build();
     let mut store = Store::new(
         engine,
         Host {
             context,
+            http: wasmtime_wasi_http::WasiHttpCtx::new(),
             table: ResourceTable::new(),
             limits: StoreLimitsBuilder::new()
-                .memory_size(limits.memory_bytes)
+                .memory_size(if matches!(case, Case::Stream(_)) {
+                    limits.memory_bytes.min(65536)
+                } else {
+                    limits.memory_bytes
+                })
                 .build(),
         },
     );
@@ -604,7 +761,171 @@ async fn observations(
     store.set_fuel(fuel)?;
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    if matches!(case, Case::Fetch(_) | Case::Handler(_)) {
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    }
+    if matches!(case, Case::Lifecycle(_)) {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        linker.allow_shadowing(true);
+        let wait_gate = gate.clone();
+        linker
+            .instance("wasi:clocks/monotonic-clock@0.3.0")?
+            .func_wrap_concurrent("wait-for", move |_, (_duration,): (u64,)| {
+                let gate = wait_gate.clone();
+                Box::pin(async move {
+                    gate.notified().await;
+                    Ok(())
+                })
+            })?;
+        linker.instance("test:generated/control")?.func_wrap(
+            "release",
+            move |_: wasmtime::StoreContextMut<'_, Host>, (): ()| {
+                gate.notify_one();
+                Ok(())
+            },
+        )?;
+    }
+    if let Case::Handler(case) = case {
+        use http_body_util::{BodyExt, Full};
+        use wasmtime::AsContextMut;
+        let service = wasmtime_wasi_http::p3::bindings::Service::instantiate_async(
+            &mut store, component, &linker,
+        )
+        .await?;
+        let mut observations = Vec::new();
+        let mut max_fuel_used = 0;
+        for _ in 0..3 {
+            store.set_fuel(fuel)?;
+            let request = http::Request::builder()
+                .method("PUT")
+                .uri("https://example.test/contract?q=1")
+                .header("x-value", "first")
+                .header("x-value", "second")
+                .body(Full::new(bytes::Bytes::from(case.bytes.clone())))?;
+            let (request, completed) = wasmtime_wasi_http::p3::Request::from_http(
+                wasmtime_wasi_http::default_hooks(),
+                request,
+            );
+            let observation = store
+                .run_concurrent(async |accessor| -> Result<Observation> {
+                    let response = service
+                        .handle(accessor, request)
+                        .await?
+                        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+                    let response = accessor
+                        .with(|mut store| response.into_http(&mut store, async { Ok(()) }))?;
+                    ensure!(
+                        response
+                            .headers()
+                            .get_all("x-value")
+                            .iter()
+                            .map(|v| v.as_bytes())
+                            .collect::<Vec<_>>()
+                            == [b"first".as_slice(), b"second".as_slice()],
+                        "native handler lost duplicate headers"
+                    );
+                    let status = response.status().as_u16();
+                    let bytes = response.into_body().collect().await?.to_bytes();
+                    completed.await?;
+                    while accessor
+                        .with(|mut store| store.as_context_mut().concurrent_state_table_size())
+                        != 0
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(Observation {
+                        value: number(f64::from(status)),
+                        trace: bytes.iter().map(|b| number(f64::from(*b))).collect(),
+                    })
+                })
+                .await??;
+            observations.push(observation);
+            max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
+            store.assert_concurrent_state_empty();
+            ensure!(
+                store.data().table.is_empty(),
+                "host resources leaked after handler"
+            );
+        }
+        return Ok((
+            observations,
+            max_fuel_used,
+            stdout.contents().to_vec(),
+            stderr.contents().to_vec(),
+        ));
+    }
     let instance = linker.instantiate_async(&mut store, component).await?;
+    let mut values = Vec::new();
+    let mut max_fuel_used = 0;
+    if let Case::Stream(case) = case {
+        let run = instance
+            .get_typed_func::<(wasmtime::component::StreamReader<u8>,), (GuestObservation,)>(
+                &mut store, "run",
+            )?;
+        for _ in 0..3 {
+            store.set_fuel(fuel)?;
+            let input = wasmtime::component::StreamReader::new(&mut store, case.bytes.clone())?;
+            let (value,) = run.call_async(&mut store, (input,)).await?;
+            max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
+            store.assert_concurrent_state_empty();
+            ensure!(
+                store.data().table.is_empty(),
+                "host resources leaked after stream"
+            );
+            values.push(Observation {
+                value: number(value.value),
+                trace: value.trace.into_iter().map(number).collect(),
+            });
+        }
+        return Ok((
+            values,
+            max_fuel_used,
+            stdout.contents().to_vec(),
+            stderr.contents().to_vec(),
+        ));
+    }
+    if let Case::Fetch(case) = case {
+        let reply = case.clone();
+        let server = http_fixture::HttpFixture::new(move |_| {
+            if reply.truncated {
+                http_fixture::Reply::TruncatedBody(reply.bytes.clone(), reply.bytes.len() + 1)
+            } else {
+                http_fixture::Reply::Bytes(reply.status, reply.bytes.clone())
+            }
+        });
+        let url = format!("http://{}/contract", server.address);
+        let run = instance.get_typed_func::<(&str,), (GuestObservation,)>(&mut store, "run")?;
+        for _ in 0..3 {
+            store.set_fuel(fuel)?;
+            let (value,) = run.call_async(&mut store, (&url,)).await?;
+            max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
+            store.assert_concurrent_state_empty();
+            ensure!(
+                store.data().table.is_empty(),
+                "host resources leaked after Fetch"
+            );
+            values.push(Observation {
+                value: number(value.value),
+                trace: value.trace.into_iter().map(number).collect(),
+            });
+        }
+        let requests = server.requests.lock().unwrap();
+        ensure!(
+            requests.len() == 3
+                && requests.iter().all(|r| r.method == "GET"
+                    && r.target == "/contract"
+                    && r.headers
+                        .iter()
+                        .any(|(n, v)| n == "x-contract" && v == "bounded")),
+            "Fetch side effects differ from the model"
+        );
+        return Ok((
+            values,
+            max_fuel_used,
+            stdout.contents().to_vec(),
+            stderr.contents().to_vec(),
+        ));
+    }
     let run = instance.get_typed_func::<(f64,), (GuestObservation,)>(&mut store, "run")?;
     let mut values = Vec::new();
     let mut max_fuel_used = 0;
@@ -636,7 +957,12 @@ async fn observations(
             trace: value.trace.into_iter().map(number).collect(),
         });
     }
-    Ok((values, max_fuel_used))
+    Ok((
+        values,
+        max_fuel_used,
+        stdout.contents().to_vec(),
+        stderr.contents().to_vec(),
+    ))
 }
 
 pub fn number(value: f64) -> String {
@@ -646,3 +972,10 @@ pub fn number(value: f64) -> String {
         format!("{:016x}", value.to_bits())
     }
 }
+
+#[path = "../../../tests/support/output_capture.rs"]
+mod output_capture;
+
+#[allow(dead_code)]
+#[path = "../../../tests/support/http_fixture.rs"]
+mod http_fixture;

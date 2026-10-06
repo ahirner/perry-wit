@@ -10,10 +10,27 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitStatus {
+    Success,
+    Failure,
+}
+impl ExitStatus {
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Success => 0,
+            Self::Failure => 1,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "input", rename_all = "snake_case")]
 pub enum Case {
     Program(Program),
+    Stream(crate::streams::StreamCase),
+    Fetch(crate::fetch::FetchCase),
+    Handler(crate::handler::HandlerCase),
     Fault {
         program: Program,
         fault: crate::execution::Fault,
@@ -24,6 +41,7 @@ pub enum Case {
     },
     Command {
         source: String,
+        exit: ExitStatus,
     },
     Reject {
         source: String,
@@ -31,13 +49,47 @@ pub enum Case {
     },
     Lifecycle(Vec<Action>),
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedOutcome {
+    EquivalentExecution,
+    CompilerRejection,
+    InjectedFaultDetection,
+}
 impl Case {
+    pub fn expected_outcome(&self) -> ExpectedOutcome {
+        match self {
+            Self::Reject { .. } => ExpectedOutcome::CompilerRejection,
+            Self::Fault { .. } => ExpectedOutcome::InjectedFaultDetection,
+            _ => ExpectedOutcome::EquivalentExecution,
+        }
+    }
+    pub fn variants(&self) -> Vec<Self> {
+        if let Self::Program(program) = self
+            && program.form == Form::Direct
+        {
+            Form::ALL
+                .into_iter()
+                .map(|form| {
+                    Self::Program(Program {
+                        expression: program.expression.clone(),
+                        form,
+                    })
+                })
+                .collect()
+        } else {
+            vec![self.clone()]
+        }
+    }
     pub fn source(&self) -> String {
         match self {
+            Self::Stream(case) => case.source(),
+            Self::Fetch(case) => case.source(),
+            Self::Handler(case) => case.source(),
             Self::Program(program) | Self::Fault { program, .. } => program.source(),
             Self::Lifecycle(actions) => crate::transitions::source(actions),
             Self::Function { source, .. }
-            | Self::Command { source }
+            | Self::Command { source, .. }
             | Self::Reject { source, .. } => source.clone(),
         }
     }
@@ -45,7 +97,7 @@ impl Case {
         match self {
             Self::Program(program) | Self::Fault { program, .. } => program.form.is_async(),
             Self::Function { asynchronous, .. } => *asynchronous,
-            Self::Lifecycle(_) => true,
+            Self::Lifecycle(_) | Self::Stream(_) | Self::Fetch(_) | Self::Handler(_) => true,
             _ => false,
         }
     }
@@ -71,15 +123,24 @@ pub struct CatalogEntry {
     pub specification: &'static str,
     pub domain: &'static str,
     pub partitions: Vec<&'static str>,
+    pub expected_outcomes: Vec<ExpectedOutcome>,
 }
 impl Contract {
     pub fn catalog(&self) -> CatalogEntry {
+        let mut expected_outcomes = Vec::new();
+        for witness in &self.witnesses {
+            let expected = witness.case.expected_outcome();
+            if !expected_outcomes.contains(&expected) {
+                expected_outcomes.push(expected);
+            }
+        }
         CatalogEntry {
             id: self.id,
             description: self.description,
             specification: self.specification,
             domain: self.domain,
             partitions: self.witnesses.iter().map(|w| w.partition).collect(),
+            expected_outcomes,
         }
     }
 }
@@ -94,7 +155,7 @@ fn expression_contract(
         id,
         description,
         specification: "https://tc39.es/ecma262/",
-        domain: "Typed terminating numeric programs over the IEEE-754 boundary corpus; direct/local/branch/loop forms",
+        domain: "Typed terminating programs over the IEEE-754 boundary corpus; generated strings restricted to BMP scalars; direct/local/branch/loop metamorphic forms",
         witnesses: examples
             .into_iter()
             .map(|(partition, expression)| Witness {
@@ -357,6 +418,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     ] {
         let case = Case::Command {
             source: source.into(),
+            exit: ExitStatus::Success,
         };
         contracts.push(Contract {
             id,
@@ -373,34 +435,37 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     }
     contracts.push(Contract {
         id: "node.timers.promises.lifecycle",
-        description: "Start, settle, cancel, observe and reuse retained timer tasks",
+        description: "Start, host release, completion, cancellation, observation and reuse",
         specification: "https://nodejs.org/api/timers.html",
-        domain: "Explicit sequential lifecycle traces, including overlapping native work",
+        domain: "Complete sequential lifecycle traces with controlled Node/WASI clocks; no claim of exhaustive async scheduling",
         witnesses: vec![
             Witness {
                 partition: "settlement-and-reobserve",
-                case: Case::Lifecycle(vec![
+                case: Case::Lifecycle(crate::transitions::complete_trace(vec![
                     Action::Start,
-                    Action::Release,
+                    Action::HostRelease,
+                    Action::Complete,
                     Action::Observe,
                     Action::Observe,
-                ]),
+                ])),
             },
             Witness {
                 partition: "cancel-and-reuse",
-                case: Case::Lifecycle(vec![
+                case: Case::Lifecycle(crate::transitions::complete_trace(vec![
                     Action::Start,
                     Action::Cancel,
+                    Action::Complete,
                     Action::Observe,
                     Action::Reuse,
                     Action::Start,
-                    Action::Release,
+                    Action::HostRelease,
+                    Action::Complete,
                     Action::Observe,
-                ]),
+                ])),
             },
         ],
         strategy: TimerModel::sequential_strategy(1..=12)
-            .prop_map(|(_, actions, _)| Case::Lifecycle(actions))
+            .prop_map(|(_, actions, _)| Case::Lifecycle(crate::transitions::complete_trace(actions)))
             .boxed(),
         check: crate::transitions::check,
     });
@@ -428,6 +493,10 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         contracts.push(Contract{id,description:"Injected faults must be distinguished from the unchanged program",specification:"https://component-model.bytecodealliance.org/",domain:"Value corruption, omitted effects, and retained host resources; only the component adapter is faulted",
             witnesses:vec![Witness{partition:"injected-fault",case:case(Number::Input)}],strategy:n.clone().prop_map(case).boxed(),check:crate::execution::check_fault});
     }
+    contracts.push(crate::streams::contract());
+    contracts.push(crate::fetch::contract());
+    contracts.extend(crate::capabilities::contracts());
+    contracts.push(crate::handler::contract());
     let mut ids = std::collections::HashSet::new();
     for contract in &contracts {
         ensure!(

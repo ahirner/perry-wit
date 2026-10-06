@@ -1,7 +1,7 @@
 //! Campaign orchestration and structured evidence; no parsing of test-runner output.
 use crate::{
-    execution::{Executor, Limits},
-    registry::{self, Case, Contract},
+    execution::{Executor, Limits, check_metamorphic},
+    registry::{self, Case, Contract, ExpectedOutcome},
 };
 use anyhow::{Context, Result, ensure};
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestError, TestRunner};
@@ -69,8 +69,12 @@ pub struct PartitionResult {
 #[derive(Serialize)]
 pub struct ContractResult {
     pub id: &'static str,
+    pub description: &'static str,
+    pub specification: &'static str,
+    pub domain: &'static str,
     pub status: Status,
     pub partitions: Vec<PartitionResult>,
+    pub expected_outcomes: Vec<ExpectedOutcome>,
     pub generated_cases: u32,
     pub executions: u32,
     pub error: Option<String>,
@@ -86,10 +90,16 @@ pub struct Report {
     pub source_unchanged: bool,
 }
 #[derive(Serialize, Deserialize)]
+pub struct ConcreteCase {
+    pub case: Case,
+    pub source: String,
+}
+#[derive(Serialize, Deserialize)]
 pub struct SavedCase {
     pub contract: String,
     pub case: Case,
     pub source: String,
+    pub metamorphic: Vec<ConcreteCase>,
     pub settings: Settings,
     pub source_sha256: String,
     pub revision: String,
@@ -152,12 +162,19 @@ fn versions() -> Result<serde_json::Value> {
     )
 }
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
-    fs::rename(temporary, path)?;
+    let temporary = tempfile::NamedTempFile::new_in(path.parent().context("report directory")?)?;
+    serde_json::to_writer_pretty(temporary.as_file(), value)?;
+    temporary.persist(path)?;
     Ok(())
 }
 fn evaluate(contract: &Contract, case: &Case, executor: &Executor, directory: &Path) -> Result<()> {
+    ensure!(
+        contract
+            .catalog()
+            .expected_outcomes
+            .contains(&case.expected_outcome()),
+        "generated input changes the contract's declared expected outcome"
+    );
     for evidence in executor.check(case, directory)? {
         (contract.check)(case, &evidence)?;
     }
@@ -165,12 +182,28 @@ fn evaluate(contract: &Contract, case: &Case, executor: &Executor, directory: &P
 }
 fn save_case(path: &Path, contract: &str, case: Case, settings: &Settings) -> Result<()> {
     fs::write(path.with_extension("ts"), case.source())?;
+    let metamorphic = case
+        .variants()
+        .into_iter()
+        .skip(1)
+        .map(|case| ConcreteCase {
+            source: case.source(),
+            case,
+        })
+        .collect::<Vec<_>>();
+    for (index, variant) in metamorphic.iter().enumerate() {
+        fs::write(
+            path.with_extension(format!("form-{index}.ts")),
+            &variant.source,
+        )?;
+    }
     let (source_sha256, revision) = identity()?;
     write_json(
         path,
         &SavedCase {
             contract: contract.into(),
             source: case.source(),
+            metamorphic,
             case,
             settings: settings.clone(),
             source_sha256,
@@ -211,6 +244,10 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
             .iter()
             .map(|c| ContractResult {
                 id: c.id,
+                description: c.description,
+                specification: c.specification,
+                domain: c.domain,
+                expected_outcomes: c.catalog().expected_outcomes,
                 status: Status::NotRun,
                 partitions: c
                     .witnesses
@@ -323,10 +360,6 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
 pub fn replay(path: &Path, executable: PathBuf) -> Result<()> {
     let saved: SavedCase = serde_json::from_slice(&fs::read(path)?)?;
     saved.settings.validate()?;
-    ensure!(
-        saved.source == saved.case.source(),
-        "saved source does not match its concrete case"
-    );
     let contracts = registry::contracts(saved.settings.depth)?;
     let contract = contracts
         .iter()
@@ -338,12 +371,18 @@ pub fn replay(path: &Path, executable: PathBuf) -> Result<()> {
         .prefix("replay-")
         .tempdir_in(output)?
         .keep();
-    let outcome = evaluate(
-        contract,
-        &saved.case,
-        &Executor::new(executable, saved.settings.limits.clone()),
-        &directory,
-    );
+    let executor = Executor::new(executable, saved.settings.limits.clone());
+    let outcome = std::iter::once((&saved.case, &saved.source))
+        .chain(saved.metamorphic.iter().map(|v| (&v.case, &v.source)))
+        .enumerate()
+        .map(|(index, (case, source))| {
+            let evidence =
+                executor.execute_source(case, source, &directory.join(index.to_string()))?;
+            (contract.check)(case, &evidence)?;
+            Ok(evidence)
+        })
+        .collect::<Result<Vec<_>>>()
+        .and_then(|evidence| check_metamorphic(&evidence));
     write_json(
         &directory.join("replay.json"),
         &serde_json::json!({"input":saved,"source_identity":identity()?,"versions":versions()?,"passed":outcome.is_ok(),"error":outcome.as_ref().err().map(|e|format!("{e:#}"))}),

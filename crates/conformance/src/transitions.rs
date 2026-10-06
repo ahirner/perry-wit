@@ -14,6 +14,9 @@ pub enum TimerModel {
     #[default]
     Idle,
     Pending,
+    Completing {
+        cancelled: bool,
+    },
     Settled {
         cancelled: bool,
         observed: bool,
@@ -22,7 +25,8 @@ pub enum TimerModel {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     Start,
-    Release,
+    HostRelease,
+    Complete,
     Cancel,
     Observe,
     Reuse,
@@ -37,7 +41,8 @@ impl ReferenceStateMachine for TimerModel {
     fn transitions(state: &Self) -> BoxedStrategy<Action> {
         let actions = [
             Action::Start,
-            Action::Release,
+            Action::HostRelease,
+            Action::Complete,
             Action::Cancel,
             Action::Observe,
             Action::Reuse,
@@ -51,7 +56,8 @@ impl ReferenceStateMachine for TimerModel {
         matches!(
             (state, action),
             (Self::Idle, Action::Start)
-                | (Self::Pending, Action::Release | Action::Cancel)
+                | (Self::Pending, Action::HostRelease | Action::Cancel)
+                | (Self::Completing { .. }, Action::Complete)
                 | (Self::Settled { .. }, Action::Observe)
                 | (Self::Settled { observed: true, .. }, Action::Reuse)
         )
@@ -60,13 +66,14 @@ impl ReferenceStateMachine for TimerModel {
         assert!(Self::preconditions(&state, action));
         match action {
             Action::Start => Self::Pending,
-            Action::Release => Self::Settled {
-                cancelled: false,
-                observed: false,
-            },
-            Action::Cancel => Self::Settled {
-                cancelled: true,
-                observed: false,
+            Action::HostRelease => Self::Completing { cancelled: false },
+            Action::Cancel => Self::Completing { cancelled: true },
+            Action::Complete => match state {
+                Self::Completing { cancelled } => Self::Settled {
+                    cancelled,
+                    observed: false,
+                },
+                _ => unreachable!(),
             },
             Action::Observe => match state {
                 Self::Settled { cancelled, .. } => Self::Settled {
@@ -87,7 +94,8 @@ pub fn expected_trace(actions: &[Action]) -> Vec<String> {
         .map(|action| {
             let value = match action {
                 Action::Start => 1.0,
-                Action::Release => 2.0,
+                Action::HostRelease => 2.0,
+                Action::Complete => 6.0,
                 Action::Cancel => 3.0,
                 Action::Reuse => 5.0,
                 Action::Observe => {
@@ -132,7 +140,7 @@ pub fn check(case: &Case, evidence: &Evidence) -> Result<()> {
 
 pub fn source(actions: &[Action]) -> String {
     let mut source = String::from(
-        "import {setTimeout} from 'node:timers/promises';\nexport async function run(x:number):Promise<{value:number,trace:number[]}>{const trace:number[]=[];\n",
+        "import {setTimeout} from 'node:timers/promises';\nimport {release} from 'test:generated/control';\nexport async function run(x:number):Promise<{value:number,trace:number[]}>{const trace:number[]=[];\n",
     );
     let mut generation = 0;
     let mut state = TimerModel::Idle;
@@ -140,7 +148,11 @@ pub fn source(actions: &[Action]) -> String {
     for action in actions {
         match action {
             Action::Start => source.push_str(&format!("const controller{generation}=new AbortController();const task{generation}=setTimeout(0,7,{{signal:controller{generation}.signal}});trace.push(1);\n")),
-            Action::Release => source.push_str(&format!("await task{generation};trace.push(2);\n")),
+            Action::HostRelease => source.push_str("release();trace.push(2);\n"),
+            Action::Complete => {
+                let cancelled = matches!(state,TimerModel::Completing {cancelled:true});
+                source.push_str(&format!("let completed{generation}=false;try{{await task{generation};}}catch{{completed{generation}=true;}}if(completed{generation}!=={cancelled})throw 91;trace.push(6);\n"));
+            },
             Action::Cancel => source.push_str(&format!("controller{generation}.abort();trace.push(3);\n")),
             Action::Observe => if matches!(state,TimerModel::Settled{cancelled:true,..}) {
                 source.push_str(&format!("let rejected{observation}=false;try{{await task{generation};}}catch{{rejected{observation}=true;}}if(!rejected{observation})throw 90;trace.push(4);\n"));
@@ -150,9 +162,29 @@ pub fn source(actions: &[Action]) -> String {
         }
         state = TimerModel::apply(state, action);
     }
-    if !matches!(state, TimerModel::Idle) {
-        source.push_str(&format!("try{{await task{generation};}}catch{{}}\n"));
-    }
+    assert!(
+        matches!(state, TimerModel::Idle),
+        "complete the trace before source emission"
+    );
     source.push_str("return {value:x,trace:trace};}");
     source
+}
+
+/// Complete the generated prefix before compilation, including cancellation acknowledgement.
+pub fn complete_trace(mut actions: Vec<Action>) -> Vec<Action> {
+    let mut state = actions.iter().fold(TimerModel::Idle, TimerModel::apply);
+    while !matches!(state, TimerModel::Idle) {
+        let action = match state {
+            TimerModel::Pending => Action::HostRelease,
+            TimerModel::Completing { .. } => Action::Complete,
+            TimerModel::Settled {
+                observed: false, ..
+            } => Action::Observe,
+            TimerModel::Settled { observed: true, .. } => Action::Reuse,
+            TimerModel::Idle => unreachable!(),
+        };
+        state = TimerModel::apply(state, &action);
+        actions.push(action);
+    }
+    actions
 }

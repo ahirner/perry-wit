@@ -41,6 +41,7 @@ declare namespace NodeJS {
     readonly argv: readonly string[];
     /** Cached initial host directory, or / if absent. A supplied empty string is retained. */
     cwd(): string;
+    exitCode: number | undefined;
     exit(code?: number): never;
   }
 }

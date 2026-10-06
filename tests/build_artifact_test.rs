@@ -8,11 +8,7 @@ fn compute_helpers_are_built_and_sources_are_watched() {
     fs::create_dir_all(scratch.join("src/helpers")).unwrap();
 
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut directories = vec![
-        PathBuf::from("src/helpers"),
-        PathBuf::from("crates/json-helper"),
-        PathBuf::from("crates/time-helper"),
-    ];
+    let mut directories = vec![PathBuf::from("src/helpers"), PathBuf::from("crates")];
     while let Some(directory) = directories.pop() {
         fs::create_dir_all(scratch.join(&directory)).unwrap();
         for entry in fs::read_dir(repo_root.join(&directory)).unwrap() {
