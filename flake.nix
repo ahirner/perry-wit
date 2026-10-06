@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -15,9 +14,16 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, wasi-p3 }:
+  outputs = { self, nixpkgs, rust-overlay, crane, wasi-p3 }:
     let
-      systemOutputs = flake-utils.lib.eachDefaultSystem (system:
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+      forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+      perSystem = forAllSystems (system:
         let
           pkgs = import nixpkgs {
             inherit system;
@@ -93,7 +99,27 @@
           strictDeps = true;
           doCheck = false;
           nativeBuildInputs = with pkgs; [ pkg-config ];
+          postInstall = ''
+            mkdir -p "$out/lib/perry-wit-helpers" "$out/include"
+            for f in search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
+              wasm_file=$(find target -name "$f" -print -quit)
+              if [ -n "$wasm_file" ]; then
+                cp "$wasm_file" "$out/lib/perry-wit-helpers/"
+              else
+                echo "Error: could not find $f in target" >&2
+                exit 1
+              fi
+            done
+            cp types/p3.d.ts "$out/include/"
+          '';
         };
+
+        # Core WASM helper libraries and Preview 3 TypeScript declarations
+        coreHelpers = pkgs.runCommand "perry-wit-core-helpers-0.1.0" {} ''
+          mkdir -p "$out/lib" "$out/include"
+          cp ${perryWitBin}/lib/perry-wit-helpers/*.wasm "$out/lib/"
+          cp ${perryWitBin}/include/p3.d.ts "$out/include/"
+        '';
 
         # Example WASIp3 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
         exampleMergeDocs = pkgs.stdenv.mkDerivation {
@@ -223,6 +249,8 @@
         packages = {
           default = perryWitBin;
           perry-wit = perryWitBin;
+          core-helpers = coreHelpers;
+          helpers = coreHelpers;
           example-merge-docs = exampleMergeDocs;
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
@@ -239,7 +267,7 @@
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
-          inherit exampleMergeDocs exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
+          inherit coreHelpers exampleMergeDocs exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
         };
 
         devShells.default = pkgs.mkShell {
@@ -272,7 +300,11 @@
 
       }
     );
-  in systemOutputs // {
+  in {
+    packages = forAllSystems (system: perSystem.${system}.packages);
+    checks = forAllSystems (system: perSystem.${system}.checks);
+    devShells = forAllSystems (system: perSystem.${system}.devShells);
+    lib = forAllSystems (system: perSystem.${system}.lib);
     templates.default = {
       path = ./template;
       description = "A WASI 0.3 TypeScript component built with Perry-WIT";

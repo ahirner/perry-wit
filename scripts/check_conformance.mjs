@@ -1,7 +1,7 @@
 // Build current tests, execute them, and require all catalog evidence to pass.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,9 @@ function run(program, args, env = environment) {
 function sourceDigest() {
   const hash = createHash('sha256');
   const paths = run('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean).sort();
+  const relOutput = relative(root, output);
   for (const path of paths) {
+    if (path === relOutput) continue;
     hash.update(path + '\0');
     try { hash.update(readFileSync(join(root, path))); }
     catch (error) { if (error.code !== 'ENOENT') throw error; hash.update('missing'); }
@@ -62,30 +64,85 @@ for (const id of required) {
 const scratch = mkdtempSync(join(tmpdir(), 'perry-evidence-'));
 try {
   const evidence = [];
+  let hasNonNodeFailures = false;
   for (const [target, executable] of executables) {
     if (target === nodeTarget) continue;
     console.log(`Running ${target}`);
-    const result = run(executable, ['--format=pretty', '--color=never']);
-    for (const line of result.split('\n')) {
+    const result = spawnSync(executable, ['--format=pretty', '--color=never'], {
+      cwd: root,
+      env: environment,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      hasNonNodeFailures = true;
+      if (result.status !== 101) {
+        process.stderr.write(result.stdout ?? '');
+        process.stderr.write(result.stderr ?? '');
+        throw new Error(`${executable} exited with unexpected status ${result.status ?? result.signal}`);
+      }
+    }
+    const stdout = result.stdout ?? '';
+    for (const line of stdout.split('\n')) {
       const match = /^test (\S+) \.\.\. (ok|FAILED|ignored)(?:,.*)?$/.exec(line);
       if (!match) continue;
-      evidence.push({ id: `rust:${target}#${match[1]}`, outcome: { ok: 'passed', FAILED: 'failed', ignored: 'skipped' }[match[2]], details: [] });
+      evidence.push({
+        id: `rust:${target}#${match[1]}`,
+        outcome: { ok: 'passed', FAILED: 'failed', ignored: 'skipped' }[match[2]],
+        details: [],
+      });
     }
   }
   const path = join(scratch, 'rust.json');
   writeFileSync(path, JSON.stringify(evidence));
   mkdirSync(dirname(output), { recursive: true });
   console.log('Comparing ordinary TypeScript with Node and checking aggregate evidence');
-  run(executables.get(nodeTarget), [], { ...environment, PERRY_RUST_EVIDENCE: path, PERRY_CONFORMANCE_REPORT: output });
-  const report = JSON.parse(readFileSync(output, 'utf8'));
-  if (report.missing_capabilities || report.failing_capabilities) throw new Error('Conformance report is incomplete');
-  if (sourceDigest() !== sources) {
-    rmSync(output, { force: true });
-    throw new Error('Source files changed during verification; rerun against a stable checkout');
+  const nodeResult = spawnSync(executables.get(nodeTarget), [], {
+    cwd: root,
+    env: { ...environment, PERRY_RUST_EVIDENCE: path, PERRY_CONFORMANCE_REPORT: output },
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  const reportWritten = existsSync(output);
+  let report = null;
+
+  if (reportWritten) {
+    report = JSON.parse(readFileSync(output, 'utf8'));
+    if (sourceDigest() !== sources) {
+      rmSync(output, { force: true });
+      throw new Error('Source files changed during verification; rerun against a stable checkout');
+    }
+    report.source_sha256 = sources;
+    report.compiler_revision = run('git', ['rev-parse', 'HEAD']).trim();
+    writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
   }
-  report.source_sha256 = sources;
-  report.compiler_revision = run('git', ['rev-parse', 'HEAD']).trim();
-  writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
+
+  const failed =
+    !reportWritten ||
+    Boolean(report?.missing_capabilities) ||
+    Boolean(report?.failing_capabilities) ||
+    nodeResult.status !== 0 ||
+    hasNonNodeFailures;
+
+  if (failed) {
+    if (nodeResult.stdout) process.stdout.write(nodeResult.stdout);
+    if (nodeResult.stderr) process.stderr.write(nodeResult.stderr);
+
+    const reasons = [];
+    if (!reportWritten) reasons.push('conformance test did not generate a report');
+    if (report?.failing_capabilities) reasons.push(`${report.failing_capabilities} failing capability contract(s)`);
+    if (report?.missing_capabilities) reasons.push(`${report.missing_capabilities} missing capability contract(s)`);
+    if (hasNonNodeFailures) reasons.push('Rust unit/integration test failure(s)');
+    if (nodeResult.status !== 0 && !report?.failing_capabilities && !report?.missing_capabilities && !hasNonNodeFailures) {
+      reasons.push(`conformance test exited with ${nodeResult.status ?? nodeResult.signal}`);
+    }
+    console.error(`\nConformance verification failed: ${reasons.join(', ')}`);
+    if (reportWritten) console.error(`See report at: ${output}`);
+    process.exit(1);
+  }
+
   console.log(`${report.passing_capabilities}/${report.supported_capabilities} advertised capability contracts verified; ${output}`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });

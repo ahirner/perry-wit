@@ -41,6 +41,7 @@ fn test_differential_conformance_suite() {
         "No conformance test cases were executed"
     );
 
+    let mut failed_cases = Vec::new();
     for res in &results {
         println!("=== CASE: {} ===", res.case_path);
         println!("Matched: {}", res.matched);
@@ -51,19 +52,12 @@ fn test_differential_conformance_suite() {
         if !res.discrepancies.is_empty() {
             println!("Discrepancies: {:?}", res.discrepancies);
         }
-        assert!(
-            res.matched,
-            "Case {} failed differential equivalence:\nDiscrepancies: {:?}\nNode stdout: {:?}\nWasm stdout: {:?}\nNode stderr: {:?}\nWasm stderr: {:?}",
-            res.case_path,
-            res.discrepancies,
-            res.oracle.stdout,
-            res.wasm.stdout,
-            res.oracle.stderr,
-            res.wasm.stderr
-        );
+        if !res.matched {
+            failed_cases.push(res);
+        }
     }
 
-    if let Some(path) = std::env::var_os("PERRY_RUST_EVIDENCE") {
+    let report_status = if let Some(path) = std::env::var_os("PERRY_RUST_EVIDENCE") {
         let mut evidence: Vec<TestEvidence> =
             serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         evidence.extend(results.iter().map(TestEvidence::from));
@@ -78,11 +72,38 @@ fn test_differential_conformance_suite() {
         )
         .unwrap();
         println!("{}", report.render_markdown_table());
-        if let Some(path) = std::env::var_os("PERRY_CONFORMANCE_REPORT") {
-            fs::write(path, report.render_json().unwrap()).unwrap();
+        if let Some(report_path) = std::env::var_os("PERRY_CONFORMANCE_REPORT") {
+            fs::write(report_path, report.render_json().unwrap()).unwrap();
         }
-        report
-            .require_complete()
-            .expect("All advertised capabilities need executed evidence");
+        Some(report.require_complete())
+    } else {
+        None
+    };
+
+    if let Some(status) = report_status {
+        status.expect("All advertised capabilities need executed evidence");
+    }
+
+    if !failed_cases.is_empty() {
+        let summary = failed_cases
+            .iter()
+            .map(|res| {
+                format!(
+                    "Case {} failed differential equivalence:\nDiscrepancies: {:?}\nNode stdout: {:?}\nWasm stdout: {:?}\nNode stderr: {:?}\nWasm stderr: {:?}",
+                    res.case_path,
+                    res.discrepancies,
+                    res.oracle.stdout,
+                    res.wasm.stdout,
+                    res.oracle.stderr,
+                    res.wasm.stderr
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        panic!(
+            "{} conformance case(s) failed differential equivalence:\n\n{}",
+            failed_cases.len(),
+            summary
+        );
     }
 }

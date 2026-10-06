@@ -32,11 +32,8 @@ pub struct Capability {
     pub name: String,
     pub tier: String,
     pub support: SupportLevel,
-    pub domain: String,
-    pub invariants: Vec<String>,
-    pub differences: Vec<String>,
     #[serde(default)]
-    pub wasi: Vec<String>,
+    pub description: String,
     pub conformance: Vec<String>,
 }
 
@@ -99,7 +96,6 @@ impl CapabilityCatalog {
     /// - Unique tier IDs
     /// - Unique capability IDs
     /// - All capabilities reference an existing tier
-    /// - Supported capabilities (`full` or `partial`) must have at least one invariant
     /// - Supported capabilities must have at least one conformance test reference
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -135,11 +131,6 @@ impl CapabilityCatalog {
             }
 
             if cap.support != SupportLevel::Unsupported {
-                ensure!(
-                    !cap.invariants.is_empty(),
-                    "supported capability '{}' must declare at least one invariant",
-                    cap.id
-                );
                 ensure!(
                     !cap.conformance.is_empty(),
                     "supported capability '{}' must declare at least one conformance reference",

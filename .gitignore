@@ -1,7 +1,7 @@
 /target
 /dist
 /artifacts
-result
+result*
 
 # Resolved WIT dependencies sourced from the pinned flake
 wit/deps

@@ -42,6 +42,7 @@ fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
             "-Clink-arg=--shared",
             "-Clink-arg=--no-entry",
             "-Clink-arg=--import-memory",
+            "-Clink-arg=--strip-debug",
         ])
         .arg(&source)
         .arg("-o")
@@ -80,6 +81,7 @@ fn compile_cargo_helper(manifest: &Path, output: &Path, helper: &str) {
             "-Clink-arg=--shared",
             "-Clink-arg=--no-entry",
             "-Clink-arg=--import-memory",
+            "-Clink-arg=--strip-debug",
         ])
         .status()
         .expect("build embedded Cargo helper");

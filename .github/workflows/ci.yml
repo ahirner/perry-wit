@@ -1,0 +1,125 @@
+name: "CI"
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  flake-checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: endersonmenezes/free-disk-space@v4
+      if: matrix.os == 'ubuntu-latest'
+      with:
+        rm_cmd: "rmz"
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+    - uses: actions/checkout@v7
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - uses: cachix/cachix-action@v17
+      with:
+        name: 'cybertreiber'
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - run: nix --version
+    - run: nix flake check -L --keep-going
+    - run: nix flake show
+    - run: nix develop -L -c echo built
+
+  conformance-and-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: endersonmenezes/free-disk-space@v4
+      with:
+        rm_cmd: "rmz"
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+    - uses: actions/checkout@v7
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - uses: cachix/cachix-action@v17
+      with:
+        name: 'cybertreiber'
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - run: nix develop -c node scripts/check_conformance.mjs
+    - run: nix develop -c cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  build-artifacts:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: endersonmenezes/free-disk-space@v4
+      if: matrix.os == 'ubuntu-latest'
+      with:
+        rm_cmd: "rmz"
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+    - uses: actions/checkout@v7
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - uses: cachix/cachix-action@v17
+      with:
+        name: 'cybertreiber'
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - run: nix build -L .#perry-wit
+    - run: |
+        mkdir -p dist
+        tar -czf "dist/perry-wit-${{ matrix.target }}.tar.gz" -C result/bin perry-wit
+    - uses: actions/upload-artifact@v7
+      with:
+        name: perry-wit-${{ matrix.target }}
+        path: dist/perry-wit-${{ matrix.target }}.tar.gz
+        if-no-files-found: error
+    - run: nix build -L .#core-helpers --out-link result-helpers
+    - run: |
+        mkdir -p dist
+        tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib include
+    - uses: actions/upload-artifact@v7
+      if: matrix.os == 'ubuntu-latest'
+      with:
+        name: perry-wit-core-helpers
+        path: dist/perry-wit-core-helpers.tar.gz
+        if-no-files-found: error
+
+  release:
+    needs: [flake-checks, conformance-and-tests, build-artifacts]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        merge-multiple: true
+        path: dist
+    - uses: softprops/action-gh-release@v3
+      with:
+        files: dist/*
+        generate_release_notes: true
