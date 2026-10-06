@@ -2,11 +2,12 @@
 
 use super::FunctionLowerer;
 use crate::waffle_backend::control_flow::JoinPoint;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use perry_hir::{
     ir::{Expr, LogicalOp},
     types::Type as HirType,
 };
+use std::mem;
 use waffle::{BlockTarget, Terminator, Type, Value};
 
 impl FunctionLowerer<'_> {
@@ -71,16 +72,16 @@ impl FunctionLowerer<'_> {
         then_expr: &Expr,
         else_expr: &Expr,
     ) -> Result<Value> {
-        let ty = self.infer_expr_type(then_expr);
+        let ty = self.conditional_type(then_expr, else_expr).context(
+            "Conditional expressions require a boolean condition and matching static branch types",
+        )?;
         ensure!(
-            self.infer_expr_type(condition) == HirType::Boolean
-                && crate::waffle_backend::wit::same_type(&ty, &self.infer_expr_type(else_expr)),
+            self.infer_expr_type(condition) == HirType::Boolean,
             "Conditional expressions require a boolean condition and matching static branch types"
         );
         let core = crate::waffle_backend::registry::map_type_to_waffle(&ty)?;
         let value = self.expression(condition)?;
-        let incoming_locals = self.locals.clone();
-        let incoming_narrowings = self.narrowings.clone();
+        let incoming_narrowings = mem::take(&mut self.narrowings);
         let then_block = self.body.add_block();
         let else_block = self.body.add_block();
         let join = JoinPoint::new(&mut self.body, "conditional join", &self.locals);
@@ -99,15 +100,19 @@ impl FunctionLowerer<'_> {
                 },
             },
         );
-        for (block, expression, truth) in [
+        let branch_locals = [self.locals.clone(), mem::take(&mut self.locals)];
+        for ((block, expression, truth), locals) in [
             (then_block, then_expr, true),
             (else_block, else_expr, false),
-        ] {
+        ]
+        .into_iter()
+        .zip(branch_locals)
+        {
             self.block = block;
-            self.locals = incoming_locals.clone();
+            self.locals = locals;
             self.narrowings = incoming_narrowings.clone();
             self.narrow_type_guard(condition, truth);
-            let value = self.expression(expression)?;
+            let value = self.typed_operand(expression, &ty)?;
             let mut arguments = join.branch_args(&self.locals);
             arguments.push(value);
             self.branch(join.block, arguments);

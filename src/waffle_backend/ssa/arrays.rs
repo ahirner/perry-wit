@@ -7,7 +7,40 @@ use waffle::{BlockTarget, MemoryArg, Operator, Terminator, Type, Value};
 use super::FunctionLowerer;
 use crate::waffle_backend::strings::valid_index;
 
+/// An immediate in-bounds literal index cannot observe the temporary array's identity.
+/// Keep the full item list so emission still evaluates unselected elements in order.
+pub(super) fn literal_projection<'a>(
+    object: &'a Expr,
+    index: &Expr,
+) -> Option<(&'a [Expr], usize)> {
+    let Expr::Array(items) = object else {
+        return None;
+    };
+    let index = match index {
+        Expr::Number(value) => *value,
+        Expr::Integer(value) => *value as f64,
+        _ => return None,
+    };
+    (index >= 0.0 && index.fract() == 0.0 && index < items.len() as f64)
+        .then_some((items, index as usize))
+}
+
 impl FunctionLowerer<'_> {
+    pub(super) fn project_values<'e>(
+        &mut self,
+        items: impl Iterator<Item = &'e Expr>,
+        selected: usize,
+    ) -> Result<Value> {
+        let mut result = None;
+        for (index, item) in items.enumerate() {
+            let value = self.expression(item)?;
+            if index == selected {
+                result = Some(value);
+            }
+        }
+        Ok(result.expect("literal projection validated the index"))
+    }
+
     pub(super) fn is_dense_array(&self, expression: &Expr) -> bool {
         matches!(self.infer_expr_type(expression),HirType::Array(inner) if *inner!=HirType::String)
     }

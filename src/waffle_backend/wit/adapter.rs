@@ -184,22 +184,16 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
             adapter.flatten_memory(ty, address, 0, &mut returned)?;
         }
     }
-    let retained = adapter.scratch.take().unwrap();
-    if cancellation_failure.is_some() {
-        crate::waffle_backend::runtime::pending_result::PendingExportResult::new(retained).handoff(
-            &mut adapter.body,
-            adapter.block,
-            registry.memory,
-        );
-    } else {
-        adapter.block = retained.release(&mut adapter.body, adapter.block);
-    }
-    adapter
-        .body
-        .set_terminator(adapter.block, Terminator::Return { values: returned });
+    let success = adapter.block;
     if let Some(failure) = command_failure {
         adapter.block = failure;
+        adapter.finish_resources()?;
         adapter.finish_invocation();
+        adapter.block = adapter
+            .scratch
+            .as_ref()
+            .unwrap()
+            .release(&mut adapter.body, adapter.block);
         let failed = adapter.integer(1);
         adapter.body.set_terminator(
             adapter.block,
@@ -212,6 +206,12 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         adapter.block = failure;
         let cancelled = adapter.call(registry.operations.unwrap().cancelled, &[]);
         adapter.require(cancelled);
+        adapter.finish_resources()?;
+        adapter.block = adapter
+            .scratch
+            .as_ref()
+            .unwrap()
+            .release(&mut adapter.body, adapter.block);
         let mut values = Vec::new();
         for ty in &module.signatures[export.sig].returns {
             let op = match ty {
@@ -227,6 +227,20 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
             .body
             .set_terminator(adapter.block, Terminator::Return { values });
     }
+    adapter.block = success;
+    let retained = adapter.scratch.take().unwrap();
+    if cancellation_failure.is_some() {
+        crate::waffle_backend::runtime::pending_result::PendingExportResult::new(retained).handoff(
+            &mut adapter.body,
+            adapter.block,
+            registry.memory,
+        );
+    } else {
+        adapter.block = retained.release(&mut adapter.body, adapter.block);
+    }
+    adapter
+        .body
+        .set_terminator(adapter.block, Terminator::Return { values: returned });
     adapter.body.validate()?;
     adapter.body.verify_reducible()?;
     Ok(adapter.body)
@@ -1035,16 +1049,17 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
                 },
             },
         );
-        let cancelled = adapter
+        adapter.block = cancelled;
+        adapter.finish_resources()?;
+        adapter.block = adapter
             .scratch
             .as_ref()
             .unwrap()
-            .release(&mut adapter.body, cancelled);
-        adapter.block = cancelled;
+            .release(&mut adapter.body, adapter.block);
         let reason = adapter.number(20.0);
         abi::emit_completion(
             &mut adapter.body,
-            cancelled,
+            adapter.block,
             abi::CompletionStatus::Threw,
             reason,
         );

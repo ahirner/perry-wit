@@ -914,7 +914,8 @@ impl<'a> FunctionLowerer<'a> {
             object, property, ..
         } = callee
         {
-            if let Some(kind) = super::abort::Kind::of(&self.infer_expr_type(object)) {
+            let receiver_type = self.infer_expr_type(object);
+            if let Some(kind) = super::abort::Kind::of(&receiver_type) {
                 ensure!(
                     kind == super::abort::Kind::Controller
                         && property == "abort"
@@ -935,49 +936,51 @@ impl<'a> FunctionLowerer<'a> {
                     &[Type::F64],
                 )));
             }
-            if let Some(kind) = super::streams::web::Kind::of(&self.infer_expr_type(object)) {
+            if let Some(kind) = super::streams::web::Kind::of(&receiver_type) {
                 return self
                     .web_stream_method(kind, object, property, args)
                     .map(Some);
             }
-            if let Some(kind) = super::time::TimeKind::of(&self.infer_expr_type(object)) {
+            if let Some(kind) = super::time::TimeKind::of(&receiver_type) {
                 return self.time_method(kind, object, property, args).map(Some);
             }
-            if super::http::fetch::is_response(&self.infer_expr_type(object))
-                || super::http::request::is_request(&self.infer_expr_type(object))
+            if super::http::fetch::is_response(&receiver_type)
+                || super::http::request::is_request(&receiver_type)
             {
                 return self.http_body(object, property, args).map(Some);
             }
-            if super::http::is_response(&self.infer_expr_type(object)) {
+            if super::http::is_response(&receiver_type) {
                 return self.http_header(object, property, args).map(Some);
             }
-            if super::date::is_date(&self.infer_expr_type(object)) {
+            if super::date::is_date(&receiver_type) {
                 return self.date_method(object, property, args).map(Some);
             }
-            if super::filesystem::is_stats(&self.infer_expr_type(object)) {
+            if super::filesystem::is_stats(&receiver_type) {
                 return self.stats_method(object, property, args).map(Some);
             }
-            if super::decoder::is_decoder(&self.infer_expr_type(object)) {
+            if super::decoder::is_decoder(&receiver_type) {
                 ensure!(
                     property == "decode",
                     "Unsupported TextDecoder method '{property}'"
                 );
                 return self.decode_bytes(object, args).map(Some);
             }
-            if super::http::headers::is_headers(&self.infer_expr_type(object)) {
+            if super::http::headers::is_headers(&receiver_type) {
                 return self.fetch_header(object, property, args).map(Some);
             }
-            if super::bytes::is_byte_view(&self.infer_expr_type(object)) {
+            if super::bytes::is_byte_view(&receiver_type) {
                 return self.byte_method(object, property, args).map(Some);
             }
             ensure!(
-                !matches!(self.infer_expr_type(object), HirType::Promise(_)),
+                !matches!(receiver_type, HirType::Promise(_)),
                 "Promise methods are unsupported; await the retained outcome"
             );
             if property == "join" {
                 return self.array_join(object, args).map(Some);
             }
-            if property == "push" && self.is_dense_array(object) {
+            if property == "push"
+                && matches!(&receiver_type, HirType::Array(inner) if **inner != HirType::String)
+            {
                 ensure!(args.len() == 1, "Typed array push requires one element");
                 return self.dense_push(object, &args[0]).map(Some);
             }
@@ -1510,6 +1513,31 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::PropertyGet {
+                object, property, ..
+            } if property == "length"
+                && let Expr::Array(items) = object.as_ref() =>
+            {
+                for item in items {
+                    self.expression(item)?;
+                }
+                self.expression(&Expr::Number(items.len() as f64))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if let Some((selected, _)) = self.literal_field_projection(object, property) => {
+                self.project_fields(object, selected)
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if let Some((literal, selected)) = self.json_string_projection(object, property) => {
+                self.project_fields(literal, selected)
+            }
+            Expr::IndexGet { object, index }
+                if let Some((items, selected)) = arrays::literal_projection(object, index) =>
+            {
+                self.project_values(items.iter(), selected)
+            }
             Expr::PropertySet { object, .. }
             | Expr::IndexSet { object, .. }
             | Expr::PutValueSet { target: object, .. }
@@ -1863,27 +1891,17 @@ impl<'a> FunctionLowerer<'a> {
             Expr::LocalSet(id, expr) => {
                 let declared = self.local_types.get(id).cloned();
                 if let Some(ty) = &declared
-                    && super::values::is_boxed_union(ty)
+                    && !super::values::is_dynamic(ty)
+                    && !is_text_or_bytes(ty)
+                    && (self.contract.wit.is_some()
+                        || matches!(ty, HirType::Tuple(_))
+                        || super::values::is_boxed_union(ty)
+                        || super::values::is_boxed(&self.infer_expr_type(expr)))
                 {
-                    self.check_typed_value(expr, ty)?;
                     let value = self.typed_operand(expr, ty)?;
                     self.locals.insert(*id, value);
                     self.narrowings.remove(id);
                     return Ok(value);
-                }
-                if let Some(ty) = &declared
-                    && (self.contract.wit.is_some() || matches!(ty, HirType::Tuple(_)))
-                {
-                    self.check_typed_value(expr, ty)?;
-                    if matches!(ty, HirType::Tuple(_) | HirType::Array(_))
-                        || super::objects::is_object(ty)
-                        || (super::values::is_string_type(ty) && *ty != HirType::String)
-                    {
-                        let value = self.typed_operand(expr, ty)?;
-                        self.locals.insert(*id, value);
-                        self.narrowings.remove(id);
-                        return Ok(value);
-                    }
                 }
                 if self
                     .local_types

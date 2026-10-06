@@ -128,7 +128,7 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
 
 ### Test
 
-Perry-WIT includes unit tests, differential oracle testing against Node.js, and end-to-end integration tests:
+Perry-WIT includes unit tests, differential conformance testing against Node.js, generative semantic checks, and end-to-end integration tests:
 
 ```sh
 # Run unit and integration tests
@@ -136,6 +136,9 @@ cargo test --workspace
 
 # Run differential conformance tests against the Node.js oracle
 cargo test --test conformance_test
+
+# Run generative semantic and metamorphic checks
+cargo test --test generative_test
 
 # Validate formal capability evidence and generate target/conformance/report.json
 node scripts/check_conformance.mjs
@@ -149,7 +152,7 @@ cargo fmt --all -- --check
 nix flake check
 ```
 
-The conformance check executes fresh Rust and Node tests, validates each capability against the catalog's exact test identifiers, and outputs the audited report to `target/conformance/report.json`.
+The conformance check executes fresh Rust and Node tests, validates each capability against the catalog's exact test identifiers, and outputs the audited report to `target/conformance/report.json`. For details on the seeded differential and metamorphic testing pipeline, see the [generative suite](tests/generative/README.md).
 
 ## Authoring Components
 

@@ -1,13 +1,28 @@
 //! Date construction and UTC operations over clipped epoch milliseconds.
 
 use super::FunctionLowerer;
-use crate::waffle_backend::{abi, date::is_date};
+use crate::waffle_backend::{abi, date::is_date, resolve::TypedIntrinsic};
 use anyhow::{Result, bail, ensure};
 use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{MemoryArg, Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
     pub(super) fn new_date(&mut self, arguments: &[Expr]) -> Result<Value> {
+        let time = self.date_argument(arguments)?;
+        let helpers = self
+            .registry
+            .date_helpers
+            .expect("Date helpers are registered");
+        Ok(self.op(
+            Operator::Call {
+                function_index: helpers.new,
+            },
+            &[time],
+            &[Type::I32],
+        ))
+    }
+
+    fn date_argument(&mut self, arguments: &[Expr]) -> Result<Value> {
         ensure!(
             arguments.len() == 1,
             "Date construction requires one argument"
@@ -54,13 +69,7 @@ impl FunctionLowerer<'_> {
         } else {
             bail!("Date construction requires a statically known number or string; found {ty:?}")
         };
-        Ok(self.op(
-            Operator::Call {
-                function_index: helpers.new,
-            },
-            &[time],
-            &[Type::I32],
-        ))
+        Ok(time)
     }
 
     pub(super) fn date_method(
@@ -73,11 +82,29 @@ impl FunctionLowerer<'_> {
             is_date(&self.infer_expr_type(receiver)),
             "Expected a Date receiver"
         );
-        let date = self.expression(receiver)?;
         let helpers = self
             .registry
             .date_helpers
             .expect("Date helpers are registered");
+        if method == "getTime"
+            && let Expr::Call { callee, args, .. } = receiver
+            && let Expr::ExternFuncRef { name, .. } = callee.as_ref()
+            && matches!(
+                self.contract.intrinsics.get(name),
+                Some(TypedIntrinsic::DateNew)
+            )
+        {
+            ensure!(arguments.is_empty(), "Date.getTime accepts no arguments");
+            let time = self.date_argument(args)?;
+            return Ok(self.op(
+                Operator::Call {
+                    function_index: helpers.clip,
+                },
+                &[time],
+                &[Type::F64],
+            ));
+        }
+        let date = self.expression(receiver)?;
 
         if method == "getTime" {
             ensure!(arguments.is_empty(), "Date.getTime accepts no arguments");

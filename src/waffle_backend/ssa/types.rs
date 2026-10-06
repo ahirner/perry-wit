@@ -100,6 +100,30 @@ impl FunctionLowerer<'_> {
         match expr {
             Expr::PropertyGet {
                 object, property, ..
+            } if property == "length" && matches!(object.as_ref(), Expr::Array(_)) => {
+                HirType::Number
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if let Some((_, value)) = self.literal_field_projection(object, property) => {
+                self.infer_expr_type(value)
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if self.json_string_projection(object, property).is_some() => HirType::String,
+            Expr::Uint8ArrayGet { array, index }
+            | Expr::IndexGet {
+                object: array,
+                index,
+            } if super::bytes::literal_projection(array, index).is_some() => HirType::Number,
+            Expr::IndexGet { object, index }
+                if let Some((items, selected)) =
+                    super::arrays::literal_projection(object, index) =>
+            {
+                self.infer_expr_type(&items[selected])
+            }
+            Expr::PropertyGet {
+                object, property, ..
             } if property == "body"
                 && (crate::waffle_backend::http::fetch::is_response(
                     &self.infer_expr_type(object),
@@ -232,12 +256,18 @@ impl FunctionLowerer<'_> {
             Expr::PropertyGet {
                 object, property, ..
             } if crate::waffle_backend::objects::is_object(&self.infer_expr_type(object)) => {
-                self.object_property_type(object, &Expr::String(property.clone()))
+                self.object_property_type(object, Some(property))
             }
             Expr::IndexGet { object, index, .. }
                 if crate::waffle_backend::objects::is_object(&self.infer_expr_type(object)) =>
             {
-                self.object_property_type(object, index)
+                self.object_property_type(
+                    object,
+                    match index.as_ref() {
+                        Expr::String(key) => Some(key),
+                        _ => None,
+                    },
+                )
             }
             Expr::PropertySet { value, .. } | Expr::IndexSet { value, .. } => {
                 self.infer_expr_type(value)
@@ -465,14 +495,9 @@ impl FunctionLowerer<'_> {
                 then_expr,
                 else_expr,
                 ..
-            } => {
-                let left = self.infer_expr_type(then_expr);
-                if crate::waffle_backend::wit::same_type(&left, &self.infer_expr_type(else_expr)) {
-                    left
-                } else {
-                    HirType::Any
-                }
-            }
+            } => self
+                .conditional_type(then_expr, else_expr)
+                .unwrap_or(HirType::Any),
             Expr::Binary { op, left, right } => {
                 if *op == BinaryOp::Add && (self.is_string(left) || self.is_string(right)) {
                     HirType::String
@@ -481,6 +506,22 @@ impl FunctionLowerer<'_> {
                 }
             }
             _ => HirType::Any,
+        }
+    }
+
+    /// A concrete branch supplies the checked type for a tagged value on the other branch.
+    /// Inference and emission must agree before constructing the SSA join parameter.
+    pub(super) fn conditional_type(&self, then_expr: &Expr, else_expr: &Expr) -> Option<HirType> {
+        let left = self.infer_expr_type(then_expr);
+        let right = self.infer_expr_type(else_expr);
+        if crate::waffle_backend::wit::same_type(&left, &right)
+            || crate::waffle_backend::values::is_dynamic(&right)
+        {
+            Some(left)
+        } else if crate::waffle_backend::values::is_dynamic(&left) {
+            Some(right)
+        } else {
+            None
         }
     }
 

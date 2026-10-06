@@ -16,6 +16,66 @@ use perry_hir::{
 use waffle::{Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
+    /// Plain own fields retain their last value without exposing the literal's identity.
+    pub(super) fn literal_field_projection<'e>(
+        &'e self,
+        object: &'e Expr,
+        property: &str,
+    ) -> Option<(usize, &'e Expr)> {
+        let mut selected = None;
+        for (index, (name, value)) in literal_properties(self.contract, object).ok()??.enumerate() {
+            if name == "__proto__" {
+                return None;
+            }
+            if name == property {
+                selected = Some((index, value));
+            }
+        }
+        selected
+    }
+
+    /// String-only plain fields survive a JSON round trip without conversion or hooks.
+    pub(super) fn json_string_projection<'e>(
+        &self,
+        receiver: &'e Expr,
+        property: &str,
+    ) -> Option<(&'e Expr, usize)> {
+        let serialized = match receiver {
+            Expr::JsonParse(input) | Expr::JsonParseTyped { text: input, .. } => input,
+            _ => return None,
+        };
+        let literal = match serialized.as_ref() {
+            Expr::JsonStringify(input) => input.as_ref(),
+            Expr::JsonStringifyFull(input, replacer, space)
+                if matches!(replacer.as_ref(), Expr::Null | Expr::Undefined)
+                    && matches!(space.as_ref(), Expr::Null | Expr::Undefined) =>
+            {
+                input.as_ref()
+            }
+            _ => return None,
+        };
+        let mut selected = None;
+        for (index, (name, value)) in literal_properties(self.contract, literal)
+            .ok()??
+            .enumerate()
+        {
+            if matches!(name, "__proto__" | "toJSON")
+                || !crate::waffle_backend::values::is_string_type(&self.infer_expr_type(value))
+            {
+                return None;
+            }
+            if name == property {
+                selected = Some(index);
+            }
+        }
+        selected.map(|index| (literal, index))
+    }
+
+    pub(super) fn project_fields(&mut self, literal: &Expr, selected: usize) -> Result<Value> {
+        let fields = literal_properties(self.contract, literal)?.expect("proven literal fields");
+        self.project_values(fields.map(|(_, expression)| expression), selected)
+    }
+
     pub(super) fn object_assign(&mut self, target: &Expr, sources: &[Expr]) -> Result<Value> {
         ensure!(
             is_object(&self.infer_expr_type(target)),
@@ -117,13 +177,13 @@ impl FunctionLowerer<'_> {
         })
     }
 
-    pub(super) fn object_property_type(&self, receiver: &Expr, key: &Expr) -> HirType {
-        if crate::waffle_backend::context::is_environment(&self.infer_expr_type(receiver)) {
+    pub(super) fn object_property_type(&self, receiver: &Expr, key: Option<&str>) -> HirType {
+        let receiver_type = self.infer_expr_type(receiver);
+        if crate::waffle_backend::context::is_environment(&receiver_type) {
             return HirType::Union(vec![HirType::String, HirType::Void]);
         }
-        let receiver_type = self.infer_expr_type(receiver);
         if let HirType::Union(variants) = &receiver_type {
-            let Expr::String(key) = key else {
+            let Some(key) = key else {
                 return HirType::Any;
             };
             let mut types = Vec::new();
@@ -156,7 +216,7 @@ impl FunctionLowerer<'_> {
         let HirType::Object(object) = receiver_type else {
             return HirType::Any;
         };
-        if let Expr::String(key) = key
+        if let Some(key) = key
             && let Some(property) = object.properties.get(key)
         {
             return crate::waffle_backend::objects::property_type(property);
@@ -222,7 +282,13 @@ impl FunctionLowerer<'_> {
         key: &Expr,
         expression: &Expr,
     ) -> Result<Value> {
-        let expected = self.object_property_type(receiver, key);
+        let expected = self.object_property_type(
+            receiver,
+            match key {
+                Expr::String(key) => Some(key),
+                _ => None,
+            },
+        );
         if self.contract.wit.is_some() {
             ensure!(
                 expected != HirType::Any,
@@ -245,7 +311,13 @@ impl FunctionLowerer<'_> {
     }
 
     pub(super) fn object_get(&mut self, receiver: &Expr, key: &Expr) -> Result<Value> {
-        let ty = self.object_property_type(receiver, key);
+        let ty = self.object_property_type(
+            receiver,
+            match key {
+                Expr::String(key) => Some(key),
+                _ => None,
+            },
+        );
         ensure!(
             ty != HirType::Any,
             "Object property reads need a declared property or index type"
