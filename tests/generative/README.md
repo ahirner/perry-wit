@@ -1,73 +1,123 @@
-# Generated semantic checks
+# Generative Semantic Checks
 
-Run the default smoke campaign inside the pinned toolchain:
+**Generative Semantic Checks** provides deterministic differential fuzzing and metamorphic testing to verify compiler correctness and runtime soundness in **Perry-WIT** against Node.js.
+
+Rather than relying solely on hand-written unit tests, the generative suite synthesizes well-typed TypeScript programs across expanding language features and host APIs, verifies them with `tsc --strict`, compiles them to WASI 0.3 WebAssembly components, and validates bit-exact execution results and ordered side-effect traces against Node.js across numerical boundary inputs.
+
+- **Differential & Metamorphic**: Compares native WASI 0.3 component execution in Wasmtime directly against Node.js across identical expressions and semantic-preserving program variants (such as introducing fresh locals, conditional assignments, or single-iteration loops).
+- **Automated Reduction**: Shrinks failing test cases via bounded structural reduction (delta debugging) to produce minimal reproducing TypeScript programs while preserving the exact failure category.
+- **Isolated & Resource-Bounded**: Executes guest components inside Wasmtime with configurable fuel and memory limits in isolated worker processes, safely containing compiler panics, aborts, timeouts, or runaway loops.
+- **Deterministic & Replayable**: Employs SplitMix64 pseudo-random generation with comprehensive artifact logging in `target/generative/run-*`, allowing any generated test program or reduced failure case to be replayed instantly.
+
+For compiler architecture, memory layouts, and runtime lowering details, see [ARCHITECTURE.md](../../ARCHITECTURE.md). For formal capability verification, see the root [README.md](../../README.md) and the [capability catalog](../../catalog/capabilities.json).
+
+## Quick Start
+
+Run the default smoke campaign inside the pinned Nix environment:
 
 ```sh
 nix develop -c cargo test --test generative_test -- --nocapture
 ```
 
-The campaign runs the saved regression trees plus eight generated expression trees, each in four equivalent forms, and runs 24 numeric inputs per component instance, including signed zero, NaN, infinities, subnormals, maximum finite values, rounding ties, and the Date clipping boundary.
-`tsc --strict` checks every generated source before execution.
-Node and the production resolved-WIT compiler receive the same TypeScript source.
-Wasmtime validates and executes the resulting components with fuel and memory limits.
-The default budget is 1,000,000 fuel per input, configurable with `PERRY_GENERATIVE_FUEL` (1–100,000,000) for bounded profiling. Fuel exhaustion is its own failure category, so reduction cannot silently substitute another execution trap. Successful worker outcomes include the component byte count and maximum fuel consumed by one input; campaign reports retain the configured budget.
-A separate process contains compiler panics, aborts, and timeouts. Each campaign snapshots its worker executable so a concurrent rebuild cannot change the compiler halfway through a run.
-The development profile optimizes the upstream `perry-hir` dependency: its unoptimized frontend overflowed the normal Rust test-thread stack on a saved nested Date/byte/JSON case. The regression runs at the normal stack limit.
-Missing tools, oracle errors, and rejected generated programs fail the test.
+The smoke campaign:
+- Replays saved regression trees from `tests/generative/regressions.json`.
+- Synthesizes 8 random expression trees, each transformed into 4 equivalent metamorphic forms.
+- Evaluates 24 boundary numeric inputs per component instance (including signed zero `-0.0`, `NaN`, infinities, subnormals, maximum finite values, rounding ties, and `Date` clipping boundaries).
+- Validates every generated source with `tsc --strict` prior to compilation and execution.
 
-The grammar covers arithmetic, comparisons, short-circuit booleans, conditionals, function calls, dense arrays, record fields, string concatenation/casing/slicing, and ordered side effects.
-`PERRY_GENERATIVE_API_LEVEL` selects progressively broader deterministic APIs:
+## How It Works
 
-- `0`: the original language and text operations.
-- `1`: also `Math.floor/ceil/trunc/abs/round`, string `indexOf`, `charAt`, and uppercase conversion.
-- `2` (default): also `Date.getTime`, `Uint8Array` conversion/indexing, `TextEncoder` plus byte subviews, and JSON serialization/parse/field reads.
-- `3`: all level-two expressions plus direct and stored/repeated awaits of `node:timers/promises.setTimeout`, for six forms per tree.
-- `4`: also pending `node:fs/promises.readFile` and `writeFile`/read-back forms, for eight forms per tree.
-- `5`: also retained `stat` results, `readdir`, and binary `readFile` with UTF-8 decoding, for ten forms per tree. JSON expressions include serialization stored in a temporary array before parsing, which keeps the generic parser path covered alongside direct string-field projections.
+The generative test pipeline ensures semantic equivalence between TypeScript running on Node.js and ahead-of-time compiled WASI 0.3 components:
 
-- `6`: also binary `writeFile` from a byte subview, detached read-back bytes, truncation through an empty subview, and repeated awaits of a rejected file read followed by successful recovery, for twelve forms per tree.
+1. **Generation**: The typed grammar ([`model.rs`](model.rs)) deterministically generates abstract syntax trees using a fixed SplitMix64 PRNG seed.
+2. **Type Checking**: Generated TypeScript source files are strictly checked using `tsc --strict`. Any rejection by TypeScript fails the test.
+3. **Differential Execution**:
+   - **Node.js Oracle**: Executes the TypeScript source using an isolated runner script ([`oracle.mjs`](oracle.mjs)), recording returned values and ordered side-effect traces.
+   - **WASI 0.3 Component**: Perry-WIT compiles the exact same source to a WebAssembly component, which is instantiated and run inside Wasmtime.
+4. **Observation Matching**:
+   - **Bit-Exact Floats**: Observations preserve every IEEE-754 bit except specific NaN payload bits (preserving signed zero `-0.0` vs. `+0.0` and `±Infinity`).
+   - **Ordered Trace**: Side-effects (such as method calls, mutations, or logged trace marks) must execute in the exact same sequence.
+   - **Resource Disposal**: Completed guest calls must leave zero outstanding concurrent tasks or uncollected host resources.
 
-Every added expression participates in typed structural reduction.
-Timer variants run against the real Node timer API and the production WASI P3 clock host; only values and ordered source effects are compared, not wall-clock timing.
-Filesystem variants use separate fresh temporary directories for Node and the guest, initialized with the same UTF-8/NUL fixture, so one implementation cannot supply the other's output.
-Each completed guest call must leave no outstanding concurrent tasks or host resources.
-Metamorphic variants introduce a fresh local, conditional assignment, or a one-iteration loop.
-Each variant must preserve Node's original observations and match the component's result and side-effect trace.
-Numeric observations preserve every IEEE-754 bit except NaN payloads, including signed zero and infinities.
-Text literals stay within the BMP because Perry-WIT deliberately counts Unicode scalars while Node counts UTF-16 code units.
-Unsupported operators and methods are outside this grammar; generated tests do not add capability claims to the conformance catalog.
+## API Levels
 
-For a larger reproducible campaign:
+`PERRY_GENERATIVE_API_LEVEL` selects progressively broader deterministic APIs and async effects:
 
-```sh
-nix develop -c env PERRY_GENERATIVE_API_LEVEL=5 PERRY_GENERATIVE_FUEL=10000000 PERRY_GENERATIVE_SEED=100 PERRY_GENERATIVE_COUNT=200 PERRY_GENERATIVE_DEPTH=4 cargo test --test generative_test generated_programs_match_node -- --nocapture
-```
+- **Level 0 (Core Syntax & Text)**: Arithmetic, comparisons, short-circuit booleans, ternary conditionals, function calls, dense array indexing, record field projections, and string concatenation/casing/slicing.
+- **Level 1 (Math & String Operations)**: Adds `Math.floor`, `ceil`, `trunc`, `abs`, and `round`, along with string `indexOf`, `charAt`, and uppercase conversion.
+- **Level 2 (Default — Dates, Bytes & JSON)**: Adds `Date.getTime`, `Uint8Array` construction and indexing, `TextEncoder` with byte subviews, and JSON `stringify`, `parse`, and field reads.
+- **Level 3 (Timers & Asynchronous Control)**: Adds direct, stored, and repeated `await` forms of `node:timers/promises.setTimeout` (generates 6 metamorphic forms per tree).
+- **Level 4 (Filesystem I/O)**: Adds asynchronous `node:fs/promises.readFile` and `writeFile` with read-back verification in isolated temporary directories (generates 8 forms per tree).
+- **Level 5 (Retained Stats & File Queries)**: Adds `stat`, `readdir`, and binary `readFile` with UTF-8 decoding. Tests generic JSON parsing via temporary array storage (generates 10 forms per tree).
+- **Level 6 (Byte Subviews & Error Recovery)**: Adds binary `writeFile` from byte subviews, detached read-backs, truncation via empty subviews, and repeated awaits on rejected reads followed by recovery (generates 12 forms per tree).
 
-Seeds use a fixed SplitMix64 mapping.
-Count is the number of generated trees, before the four, six, eight, ten, or twelve variants selected by the API level; the saved regression trees always run too, and depth is bounded at six.
-The default shrink budget is 100 attempts, configurable with `PERRY_GENERATIVE_SHRINK`.
-Each run prints its retained directory under `target/generative/`, containing sources, WIT, oracle, inputs, tool versions, grammar version/API level, Git revision and source patch, start time, elapsed time, and progress.
-A semantic failure also saves the original and reduced trees and TypeScript, plus failure details.
-Reduction preserves the failure category and checks the final reduced program again.
-Replay a saved tree against the current compiler:
+## Running Campaigns
+
+### Custom Campaigns
+
+Configure campaign parameters using environment variables:
 
 ```sh
-nix develop -c env PERRY_GENERATIVE_REPLAY=target/generative/run-EXAMPLE/minimal.json cargo test --test generative_test generated_programs_match_node -- --nocapture
+# Run an extended campaign across advanced filesystem APIs
+nix develop -c env \
+  PERRY_GENERATIVE_API_LEVEL=5 \
+  PERRY_GENERATIVE_FUEL=10000000 \
+  PERRY_GENERATIVE_SEED=100 \
+  PERRY_GENERATIVE_COUNT=200 \
+  PERRY_GENERATIVE_DEPTH=4 \
+  cargo test --test generative_test generated_programs_match_node -- --nocapture
 ```
 
-This is deterministic generative differential testing, not coverage-guided fuzzing.
-The design follows `../nix-wit/tests/equivalence`: typed generation, metamorphic observations, bounded structural reduction, and saved replay artifacts.
-[Fuzzilli](https://github.com/googleprojectzero/fuzzilli) provides a related model of separating valid-program generation, execution, and minimization.
+### Configuration Reference
 
-To aggregate a sustained run, place a JSON manifest beside the `run-*` directories
-with a `startedUnix` timestamp. Optional `legacyCampaignsThisGoal` names include
-older reports without timestamps. Then run:
+| Environment Variable | Default | Description |
+|:---|:---:|:---|
+| `PERRY_GENERATIVE_API_LEVEL` | `2` | API feature level (0–6). Higher levels enable timers and filesystem operations. |
+| `PERRY_GENERATIVE_COUNT` | `8` | Number of root expression trees to generate before variant expansion. |
+| `PERRY_GENERATIVE_DEPTH` | `3` | Maximum AST recursion depth (bounded at 6). |
+| `PERRY_GENERATIVE_SEED` | `0` | SplitMix64 PRNG seed for deterministic generation. |
+| `PERRY_GENERATIVE_FUEL` | `1000000` | Wasmtime fuel budget per input (1–100,000,000). Fuel exhaustion is tracked distinctly. |
+| `PERRY_GENERATIVE_SHRINK` | `100` | Maximum structural reduction attempts on failure. |
+| `PERRY_GENERATIVE_REPLAY` | _unset_ | File path to a saved `minimal.json` failure artifact to replay. |
+
+## Failure Reduction & Replay
+
+When a failure occurs (compilation error, fuel exhaustion, runtime trap, or output mismatch):
+
+1. **Process Containment**: A dedicated worker process isolates compiler panics, aborts, and timeouts. The compiler executable is snapshotted before the campaign begins to prevent concurrent rebuild interference.
+2. **Structural Reduction**: The runner applies typed AST transformations to shrink the failing program, validating that each reduced candidate still reproduces the exact same failure category.
+3. **Artifact Logging**: Each campaign creates a directory in `target/generative/run-<id>/` containing:
+   - Generated TypeScript sources (`case-*.ts`) and WIT definitions
+   - Inputs, oracle logs, tool versions, and Git revisions
+   - For failing runs: original tree, reduced tree (`minimal.json`), and failure diagnostics
+4. **Deterministic Replay**: Replay any saved failure tree against the current compiler:
+
+```sh
+# Replay a minimal failing case
+nix develop -c env \
+  PERRY_GENERATIVE_REPLAY=target/generative/run-EXAMPLE/minimal.json \
+  cargo test --test generative_test generated_programs_match_node -- --nocapture
+```
+
+## Sustained Campaigns & Metrics
+
+To tally results across sustained fuzzing runs, create a goal manifest JSON file beside the `target/generative/run-*` directories:
+
+```json
+{
+  "startedUnix": 1775433600000,
+  "continueUntilLocal": "2026-10-06T20:00:00"
+}
+```
+
+Then run the tally script:
 
 ```sh
 nix develop -c node scripts/tally_generative.mjs target/generative/goal-manifest.json
 ```
 
-The tally includes only completed matching programs, excludes diagnostic replays,
-and reports exact-source SHA-256 deduplication separately from total executions.
-A running or failed campaign contributes only its verified prefix. Missing or
-unreadable reports are listed rather than silently counted as successes.
+The tally report:
+- Includes only completed matching programs and total input executions.
+- Deduplicates distinct TypeScript source programs using SHA-256 hashes.
+- Excludes diagnostic replay runs.
+- Accurately tracks in-progress runs by counting only verified prefixes.

@@ -73,8 +73,6 @@ Module initialization supports both scripts and export libraries:
 
 Perry HIR lowers into typed WAFFLE SSA basic blocks:
 - Branch joins and loop headers pass mutable local state through SSA block parameters.
-- Constant-index reads of array literals retain the selected SSA value directly, evaluating every element in order without allocating the temporary array or boxing its elements.
-- Conditional joins and assignments use checked typed operands when a tagged dynamic value enters a statically typed location.
 - Exception unwinding uses shared catch and finally dispatch paths to guarantee consistent cleanup order.
 - Function invocations, native capability calls, and Promise observations adhere to uniform ownership rules.
 - References to heap objects are tracked in root frames that remain linked across asynchronous suspension points.
