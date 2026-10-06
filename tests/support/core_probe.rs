@@ -10,17 +10,20 @@ pub fn named_core(compiled: &WaffleCompiled) -> Result<Module<'static>> {
         .waffle_ir
         .lines()
         .filter(|line| line.starts_with("  func") && line.contains(" = #"))
-        .map(|line| line.split('"').nth(1).context("missing function name"))
-        .collect::<Result<Vec<_>>>()?;
-    let definitions = module
+        .map(|line| line.split('"').nth(1).context("missing function name"));
+    let mut definitions = module
         .funcs
         .entries_mut()
         .filter_map(|(_, function)| match function {
             FuncDecl::Body(_, name, _) => Some(name),
             _ => None,
         });
-    for (name, original) in definitions.zip(names) {
-        *name = original.into();
+    for original in names {
+        let original = original?;
+        if let Some(name) = definitions.next() {
+            *name = original.into();
+        }
     }
+    drop(definitions);
     Ok(module.without_orig_bytes())
 }

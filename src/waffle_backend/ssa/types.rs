@@ -105,7 +105,9 @@ impl FunctionLowerer<'_> {
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if let Some((_, ty)) = self.literal_field_projection(object, property) => ty,
+            } if let Some((_, value)) = self.literal_field_projection(object, property) => {
+                self.infer_expr_type(value)
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if self.json_string_projection(object, property).is_some() => HirType::String,
@@ -254,12 +256,18 @@ impl FunctionLowerer<'_> {
             Expr::PropertyGet {
                 object, property, ..
             } if crate::waffle_backend::objects::is_object(&self.infer_expr_type(object)) => {
-                self.object_property_type(object, &Expr::String(property.clone()))
+                self.object_property_type(object, Some(property))
             }
             Expr::IndexGet { object, index, .. }
                 if crate::waffle_backend::objects::is_object(&self.infer_expr_type(object)) =>
             {
-                self.object_property_type(object, index)
+                self.object_property_type(
+                    object,
+                    match index.as_ref() {
+                        Expr::String(key) => Some(key),
+                        _ => None,
+                    },
+                )
             }
             Expr::PropertySet { value, .. } | Expr::IndexSet { value, .. } => {
                 self.infer_expr_type(value)

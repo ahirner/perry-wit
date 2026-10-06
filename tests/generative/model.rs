@@ -1,5 +1,5 @@
 //! Typed, terminating programs shared by generation, replay, and structural reduction.
-use std::fmt::{self, Display};
+use std::fmt::{self, Display, Write};
 
 use serde::{Deserialize, Serialize};
 
@@ -206,15 +206,12 @@ impl Program {
         )
     }
 
-    pub fn reductions(&self) -> Vec<Self> {
+    pub fn reductions(&self) -> impl Iterator<Item = Self> + use<> {
+        let form = self.form;
         self.expression
             .reductions()
             .into_iter()
-            .map(|expression| Self {
-                expression,
-                form: self.form,
-            })
-            .collect()
+            .map(move |expression| Self { expression, form })
     }
 }
 
@@ -438,7 +435,7 @@ impl Number {
         let mut candidates = vec![Self::Integer(0), Self::Input];
         match self {
             Self::Binary(op, a, b) => {
-                candidates.extend([*a.clone(), *b.clone()]);
+                candidates.extend([a.as_ref().clone(), b.as_ref().clone()]);
                 candidates.extend(
                     a.reductions()
                         .into_iter()
@@ -451,7 +448,7 @@ impl Number {
                 );
             }
             Self::Choose(c, a, b) => {
-                candidates.extend([*a.clone(), *b.clone()]);
+                candidates.extend([a.as_ref().clone(), b.as_ref().clone()]);
                 candidates.extend(
                     c.reductions()
                         .into_iter()
@@ -469,7 +466,7 @@ impl Number {
                 );
             }
             Self::Mark(value) | Self::Call(value) | Self::DateTime(value) => {
-                candidates.push(*value.clone());
+                candidates.push(value.as_ref().clone());
                 candidates.extend(value.reductions().into_iter().map(|v| {
                     if matches!(self, Self::Mark(_)) {
                         Self::Mark(Box::new(v))
@@ -486,7 +483,7 @@ impl Number {
                 } else {
                     Self::ByteGet
                 };
-                candidates.extend([*a.clone(), *b.clone(), *c.clone()]);
+                candidates.extend([a.as_ref().clone(), b.as_ref().clone(), c.as_ref().clone()]);
                 candidates.extend(
                     a.reductions()
                         .into_iter()
@@ -504,7 +501,7 @@ impl Number {
                 );
             }
             Self::Field(a, b) => {
-                candidates.extend([*a.clone(), *b.clone()]);
+                candidates.extend([a.as_ref().clone(), b.as_ref().clone()]);
                 candidates.extend(
                     a.reductions()
                         .into_iter()
@@ -517,7 +514,7 @@ impl Number {
                 );
             }
             Self::Math(op, value) => {
-                candidates.push(*value.clone());
+                candidates.push(value.as_ref().clone());
                 candidates.extend(
                     value
                         .reductions()
@@ -526,7 +523,7 @@ impl Number {
                 );
             }
             Self::IndexOf(text, needle, start) => {
-                candidates.push(*start.clone());
+                candidates.push(start.as_ref().clone());
                 candidates.extend(
                     text.reductions()
                         .into_iter()
@@ -546,7 +543,7 @@ impl Number {
                 );
             }
             Self::EncodedLength(text, start, end) => {
-                candidates.extend([*start.clone(), *end.clone()]);
+                candidates.extend([start.as_ref().clone(), end.as_ref().clone()]);
                 candidates.extend(
                     text.reductions()
                         .into_iter()
@@ -584,8 +581,7 @@ impl Number {
             ),
             _ => {}
         }
-        let size = self.to_string().len();
-        candidates.retain(|candidate| candidate.to_string().len() < size);
+        retain_smaller(&mut candidates, self);
         candidates
     }
 }
@@ -609,7 +605,7 @@ impl Condition {
                 }
             }
             Self::And(a, b) | Self::Or(a, b) => {
-                candidates.extend([*a.clone(), *b.clone()]);
+                candidates.extend([a.as_ref().clone(), b.as_ref().clone()]);
                 for (a, b) in a
                     .reductions()
                     .into_iter()
@@ -624,7 +620,7 @@ impl Condition {
                 }
             }
             Self::Not(value) => {
-                candidates.push(*value.clone());
+                candidates.push(value.as_ref().clone());
                 candidates.extend(
                     value
                         .reductions()
@@ -634,8 +630,7 @@ impl Condition {
             }
             Self::Literal(_) => {}
         }
-        let size = self.to_string().len();
-        candidates.retain(|candidate| candidate.to_string().len() < size);
+        retain_smaller(&mut candidates, self);
         candidates
     }
 }
@@ -645,7 +640,7 @@ impl Text {
         let mut candidates = vec![Self::Literal(String::new())];
         match self {
             Self::Concat(a, b) => {
-                candidates.extend([*a.clone(), *b.clone()]);
+                candidates.extend([a.as_ref().clone(), b.as_ref().clone()]);
                 candidates.extend(
                     a.reductions()
                         .into_iter()
@@ -658,7 +653,7 @@ impl Text {
                 );
             }
             Self::Choose(c, a, b) => {
-                candidates.extend([*a.clone(), *b.clone()]);
+                candidates.extend([a.as_ref().clone(), b.as_ref().clone()]);
                 candidates.extend(
                     c.reductions()
                         .into_iter()
@@ -676,7 +671,7 @@ impl Text {
                 );
             }
             Self::Lower(value) | Self::Upper(value) | Self::Slice(value, ..) => {
-                candidates.push(*value.clone());
+                candidates.push(value.as_ref().clone());
                 candidates.extend(value.reductions().into_iter().map(|v| match self {
                     Self::Lower(_) => Self::Lower(Box::new(v)),
                     Self::Upper(_) => Self::Upper(Box::new(v)),
@@ -685,7 +680,7 @@ impl Text {
                 }));
             }
             Self::CharAt(value, index) => {
-                candidates.push(*value.clone());
+                candidates.push(value.as_ref().clone());
                 candidates.extend(
                     value
                         .reductions()
@@ -701,8 +696,17 @@ impl Text {
             }
             Self::Literal(_) => {}
         }
-        let size = self.to_string().len();
-        candidates.retain(|candidate| candidate.to_string().len() < size);
+        retain_smaller(&mut candidates, self);
         candidates
     }
+}
+
+fn retain_smaller<T: Display>(candidates: &mut Vec<T>, original: &T) {
+    let mut rendered = original.to_string();
+    let size = rendered.len();
+    candidates.retain(|candidate| {
+        rendered.clear();
+        write!(&mut rendered, "{candidate}").expect("formatting generated expression");
+        rendered.len() < size
+    });
 }

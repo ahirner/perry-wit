@@ -41,7 +41,16 @@ fn cancelled_exports_invalidate_saved_borrows_and_drop_handles() -> Result<()> {
     let instance = linker.instantiate(&mut store, &core)?;
     let run = instance.get_typed_func::<u32, u32>(&mut store, "probe-run.export")?;
     let stale = instance.get_typed_func::<(), (i32, f64)>(&mut store, "probe-stale")?;
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .context("missing memory")?;
+    let active_roots: [u8; 4] = memory.data(&store)[44..48].try_into()?;
     assert_eq!(run.call(&mut store, 42)?, 0);
+    assert_eq!(
+        &memory.data(&store)[44..48],
+        &active_roots,
+        "cancelled export retained scratch frames"
+    );
     assert!(stale.call(&mut store, ()).is_err());
     assert_eq!(*store.data(), 1);
     Ok(())
@@ -129,14 +138,10 @@ fn compile(source: &str, wit: &str) -> Result<Module<'static>> {
     // WIT elaboration imports the exported resource interface as a dependency.
     // This core-only fixture removes that alias to exercise temporary handles
     // independently of the compiler's duplicate-resource restriction.
-    let exports = resolve.worlds[world]
-        .exports
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    resolve.worlds[world]
+    let definition = &mut resolve.worlds[world];
+    definition
         .imports
-        .retain(|key, _| !exports.contains(key));
+        .retain(|key, _| !definition.exports.contains_key(key));
     let compiled = compile_typescript_for_world(
         source,
         "cleanup.ts",

@@ -103,9 +103,11 @@ nix develop -c env \
 
 To tally results across sustained fuzzing runs, create a goal manifest JSON file beside the `target/generative/run-*` directories:
 
+`startedUnix` uses Unix seconds, matching campaign reports. This example starts at 2026-10-06 00:00 UTC.
+
 ```json
 {
-  "startedUnix": 1775433600000,
+  "startedUnix": 1791244800,
   "continueUntilLocal": "2026-10-06T20:00:00"
 }
 ```

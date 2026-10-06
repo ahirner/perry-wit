@@ -189,15 +189,15 @@ pub fn collect_at_result_handoffs(
     )?;
     let mut poison = Module::from_wasm_bytes(&poison, &Default::default())?;
     poison.expand_all_funcs()?;
-    let body = poison
+    let mut body = poison
         .funcs
-        .entries()
-        .find_map(|(_, function)| match function {
-            FuncDecl::Body(_, _, body) => Some(body.clone()),
+        .into_vec()
+        .into_iter()
+        .find_map(|function| match function {
+            FuncDecl::Body(_, _, body) => Some(body),
             _ => None,
         })
         .context("missing poison body")?;
-    let mut body = body;
     let memory = module.memories.iter().next().context("missing memory")?;
     for (_, value) in body.values.entries_mut() {
         if let ValueDef::Operator(operator, _, _) = value {

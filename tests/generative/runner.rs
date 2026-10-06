@@ -446,7 +446,7 @@ pub fn reduce(
     mut reproduces: impl FnMut(&Program) -> Result<bool>,
 ) -> Result<(Program, usize)> {
     let mut attempts = 0;
-    loop {
+    while attempts < limit {
         let mut replacement = None;
         for candidate in program.reductions() {
             if attempts == limit {
@@ -463,6 +463,7 @@ pub fn reduce(
             None => return Ok((program, attempts)),
         }
     }
+    Ok((program, attempts))
 }
 
 pub fn worker() -> Result<()> {
