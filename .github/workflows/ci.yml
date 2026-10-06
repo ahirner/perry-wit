@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - 'feature/**'
     tags:
       - 'v*'
 
@@ -42,14 +41,9 @@ jobs:
     - run: nix develop -L -c echo built
 
   conformance-and-tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
     - uses: endersonmenezes/free-disk-space@v4
-      if: matrix.os == 'ubuntu-latest'
       with:
         rm_cmd: "rmz"
         remove_android: true
@@ -96,17 +90,22 @@ jobs:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - run: nix build -L .#perry-wit
-    - run: nix build -L .#core-helpers --out-link result-helpers
     - run: |
         mkdir -p dist
         tar -czf "dist/perry-wit-${{ matrix.target }}.tar.gz" -C result/bin perry-wit
-        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib include
-        fi
     - uses: actions/upload-artifact@v7
       with:
-        name: release-artifacts-${{ matrix.target }}
-        path: dist/*
+        name: perry-wit-${{ matrix.target }}
+        path: dist/perry-wit-${{ matrix.target }}.tar.gz
+        if-no-files-found: error
+    - run: nix build -L .#core-helpers --out-link result-helpers
+    - run: |
+        mkdir -p dist
+        tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib include
+    - uses: actions/upload-artifact@v7
+      with:
+        name: perry-wit-core-helpers-${{ matrix.target }}
+        path: dist/perry-wit-core-helpers.tar.gz
         if-no-files-found: error
 
   release:
@@ -118,7 +117,6 @@ jobs:
     steps:
     - uses: actions/download-artifact@v8
       with:
-        pattern: release-artifacts-*
         merge-multiple: true
         path: dist
     - uses: softprops/action-gh-release@v3
