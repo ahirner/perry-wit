@@ -33,6 +33,8 @@ async fn native_file_forwarding_preserves_bytes_and_checks_both_completions() ->
     let mut config = Config::new();
     config.wasm_component_model_async(true);
     config.wasm_component_model_more_async_builtins(true);
+    config.wasm_component_model_threading(true);
+    config.wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(
         &engine,
@@ -88,20 +90,14 @@ async fn native_file_forwarding_preserves_bytes_and_checks_both_completions() ->
 #[tokio::test(flavor = "current_thread")]
 async fn compiled_source_scans_a_real_p3_file_across_component_boundaries() -> Result<()> {
     let source = r#"
-    declare function readChunk(input: ByteStream): Promise<number>;
-    declare function byteAt(index: number): number;
-    export async function run(input: ByteStream): Promise<number> {
-        let total = 0;
-        let count = await readChunk(input);
-        while (count > 0) {
-            let index = 0;
-            while (index < count) {
-                total = total + byteAt(index);
-                index = index + 1;
-            }
-            count = await readChunk(input);
+    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+        const reader=input.getReader();let total=0;let chunk=await reader.read();
+        while(!chunk.done) {
+            const bytes=chunk.value;if(bytes===undefined)throw 1;
+            for(let index=0;index<bytes.length;index++) {total+=bytes[index];}
+            chunk=await reader.read();
         }
-        return total;
+        reader.releaseLock();return total;
     }"#;
     check_source_scan(source).await
 }
@@ -109,24 +105,19 @@ async fn compiled_source_scans_a_real_p3_file_across_component_boundaries() -> R
 #[tokio::test(flavor = "current_thread")]
 async fn compiled_source_reads_a_real_p3_file_into_managed_views() -> Result<()> {
     let source = r#"
-    declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-    export async function run(input: ByteStream): Promise<number> {
-        const bytes = new Uint8Array(4099);
-        bytes[0] = 91;
-        bytes[4098] = 17;
-        const view = bytes.subarray(2, 4098);
-        let total = 0;
-        let count = await readInto(input, view);
-        while (count > 0) {
-            let index = 0;
-            while (index < count) {
-                total = total + view[index];
-                index = index + 1;
+    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+        const bytes=new Uint8Array(4099);bytes[0]=91;bytes[4098]=17;
+        const view=bytes.subarray(2,4098);const reader=input.getReader();let total=0;
+        let result=await reader.read();
+        while(!result.done) {
+            const chunk=result.value;if(chunk===undefined)throw 1;
+            for(let offset=0;offset<chunk.length;offset+=view.length) {
+                const remaining=chunk.length-offset;const count=remaining<view.length?remaining:view.length;
+                for(let index=0;index<count;index++) {view[index]=chunk[offset+index];total+=view[index];}
             }
-            count = await readInto(input, view);
+            result=await reader.read();
         }
-        if (bytes[0] !== 91) { return -1; }
-        if (bytes[4098] !== 17) { return -1; }
+        reader.releaseLock();if(bytes[0]!==91 || bytes[4098]!==17)return -1;
         return total;
     }"#;
     check_source_scan(source).await
@@ -151,6 +142,8 @@ async fn check_source_scan(source: &str) -> Result<()> {
     let mut config = Config::new();
     config.wasm_component_model_async(true);
     config.wasm_component_model_more_async_builtins(true);
+    config.wasm_component_model_threading(true);
+    config.wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, wat::parse_str(wat)?)?;
     let mut linker = Linker::new(&engine);

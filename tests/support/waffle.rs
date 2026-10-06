@@ -42,7 +42,7 @@ fn value_type(ty: &Type) -> Result<String> {
         Type::String => "string".into(),
         Type::Promise(inner) => value_type(inner)?,
         Type::Array(inner) if **inner == Type::String => "list<string>".into(),
-        Type::Named(name) if name == "ByteStream" => "stream<u8>".into(),
+        Type::Named(name) if name == "__perry_readable_bytes" => "stream<u8>".into(),
         Type::Named(name) if name == "Uint8Array" => "list<u8>".into(),
         Type::Named(name) if name.contains("Stats") => "stats".into(),
         Type::Named(name) if name.contains("value") => "f64".into(),

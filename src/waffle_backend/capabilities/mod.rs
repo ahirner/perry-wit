@@ -25,6 +25,7 @@ pub(crate) enum CapabilityOperation {
     Context(ContextOperation),
     Random(RandomOperation),
     Stdio(StdioOperation),
+    Writable(StdioOperation),
     Filesystem(FilesystemOperation),
     HttpGet,
     Fetch,
@@ -42,6 +43,7 @@ pub(crate) enum CapabilityImplementation {
     Promise,
     Scalar,
     Stdio(StdioOperation),
+    Writable,
     Filesystem,
     Http,
     RandomBytes,
@@ -55,14 +57,6 @@ pub(crate) trait LowerCapability {
 }
 
 impl CapabilityOperation {
-    pub(crate) fn from_declaration(name: &str) -> Option<Self> {
-        match name {
-            "waitFor" => Some(Self::Clock(ClockOperation::WaitFor)),
-            "randomNumber" => Some(Self::Random(RandomOperation::Number)),
-            _ => None,
-        }
-    }
-
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Promise(operation) => operation.name(),
@@ -70,6 +64,7 @@ impl CapabilityOperation {
             Self::Context(operation) => operation.name(),
             Self::Random(operation) => operation.name(),
             Self::Stdio(operation) => operation.name(),
+            Self::Writable(_) => "Writable.toWeb",
             Self::Filesystem(operation) => operation.name(),
             Self::HttpGet => "get",
             Self::Fetch => "fetch",
@@ -91,6 +86,11 @@ impl LowerCapability for CapabilityOperation {
             Self::Context(operation) => operation.lower(),
             Self::Random(operation) => operation.lower(),
             Self::Stdio(operation) => operation.lower(),
+            Self::Writable(_) => CapabilityPlan {
+                params: vec![HirType::Number],
+                result: super::streams::web::Kind::Writable.ty(),
+                implementation: CapabilityImplementation::Writable,
+            },
             Self::Filesystem(operation) => {
                 let mut plan = operation.lower();
                 plan.result = HirType::Promise(Box::new(plan.result));

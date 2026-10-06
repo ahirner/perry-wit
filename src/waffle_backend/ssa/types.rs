@@ -34,7 +34,6 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::filesystem::is_stats(ty) => Some("Stats"),
         HirType::Array(inner) if **inner == HirType::String => Some("string[]"),
         HirType::Array(_) => Some("array"),
-        HirType::Named(name) if name == "ByteStream" => Some("ByteStream"),
         _ => None,
     }
 }
@@ -413,6 +412,7 @@ impl FunctionLowerer<'_> {
                     {
                         return match property.as_str() {
                             "getReader" => crate::waffle_backend::streams::web::Kind::Reader.ty(),
+                            "getWriter" => crate::waffle_backend::streams::web::Kind::Writer.ty(),
                             "releaseLock" => HirType::Void,
                             name => crate::waffle_backend::streams::web::Method::named(name)
                                 .map(|m| HirType::Promise(Box::new(m.result())))

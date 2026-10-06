@@ -116,23 +116,21 @@ fn make_wasi_linker(engine: &Engine) -> Result<Linker<WasiHostState>> {
 async fn test_waffle_capability_aliases_builtins_and_shadowing() -> Result<()> {
     let engine = make_async_engine()?;
     for source in [
-        "import { randomNumber as sample } from 'perry:random'; export function run(): number { return sample(); }",
-        "import * as numbers from 'perry:random'; export function run(): number { return numbers.randomNumber(); }",
-        "import * as numbers from 'perry:random'; export function run(): number { return numbers['randomNumber'](); }",
+        "import {setTimeout as sample} from 'node:timers/promises'; export async function run():Promise<number> {await sample(0);return Math.random();}",
+        "import * as timers from 'node:timers/promises'; export async function run():Promise<number> {await timers.setTimeout(0);return Math.random();}",
+        "import * as timers from 'node:timers/promises'; export async function run():Promise<number> {await timers['setTimeout'](0);return Math.random();}",
         "export function run(): number { return Math.random(); }",
         "export function run(): number { return Math['random'](); }",
-        "declare function randomNumber(): number; export function run(): number { return (randomNumber() + Math.random()) / 2; }",
+        " export function run(): number { return (Math.random() + Math.random()) / 2; }",
     ] {
         let compiled =
             compile_typescript_waffle(source, "aliases.ts", &WaffleCompileOptions::default())?;
         let component = Component::new(&engine, compiled.component.unwrap())?;
-        assert_eq!(
+        assert!(
             component
                 .component_type()
                 .imports(&engine)
-                .map(|(name, _)| name)
-                .collect::<Vec<_>>(),
-            ["wasi:random/random@0.3.0"]
+                .any(|(name, _)| name == "wasi:random/random@0.3.0")
         );
         let mut linker = Linker::new(&engine);
         linker
@@ -140,6 +138,13 @@ async fn test_waffle_capability_aliases_builtins_and_shadowing() -> Result<()> {
             .func_wrap("get-random-u64", |_: StoreContextMut<'_, ()>, (): ()| {
                 Ok((1u64 << 63,))
             })?;
+        if source.contains("node:timers/promises") {
+            linker
+                .instance("wasi:clocks/monotonic-clock@0.3.0")?
+                .func_wrap_concurrent("wait-for", |_, (_duration,): (u64,)| {
+                    Box::pin(async { Ok(()) })
+                })?;
+        }
         let mut store = Store::new(&engine, ());
         let instance = linker.instantiate_async(&mut store, &component).await?;
         let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
@@ -147,11 +152,11 @@ async fn test_waffle_capability_aliases_builtins_and_shadowing() -> Result<()> {
     }
 
     for source in [
-        "import { randomNumber as sample } from 'perry:random'; export function run(sample: number): number { return sample + 1; }",
-        "import * as Math from 'perry:random'; export function run(Math: number): number { return Math + 1; }",
+        "import {setTimeout as sample} from 'node:timers/promises'; export function run(sample: number): number { return sample + 1; }",
+        "import * as Math from 'node:timers/promises'; export function run(Math: number): number { return Math + 1; }",
         "export function run(Math: number): number { return Math + 1; }",
         "function randomNumber(value: number): number { return value + 1; } export function run(value: number): number { return randomNumber(value); }",
-        "declare function waitFor(milliseconds: number): Promise<void>; declare function randomNumber(): number; declare function readChunk(stream: ByteStream): Promise<number>; export function run(value: number): number { return value + 1; }",
+        "import {setTimeout as waitFor} from 'node:timers/promises';   export function run(value: number): number { return value + 1; }",
     ] {
         let compiled =
             compile_typescript_waffle(source, "shadowing.ts", &WaffleCompileOptions::default())?;
@@ -170,8 +175,8 @@ async fn test_waffle_capability_aliases_builtins_and_shadowing() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result<()> {
     let source = r#"
-        import { waitFor as pause } from 'perry:clocks';
-        import { randomNumber as sample, randomNumber as again } from 'perry:random';
+        import { setTimeout as pause } from 'node:timers/promises';
+        function sample():number {return Math.random();} function again():number {return Math.random();}
         function helper(sample: number): number { return sample + 1; }
         export async function run(): Promise<number> {
             let before = helper(2);
@@ -214,7 +219,7 @@ async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result
     assert_eq!(result, 3.375);
     assert_eq!(
         *trace.lock().unwrap(),
-        ["random", "random", "wait:375000", "resume", "random"]
+        ["random", "random", "wait:1000000", "resume", "random"]
     );
     let scratch = tempfile::tempdir()?;
     let source_path = scratch.path().join("effects.ts");
@@ -232,19 +237,14 @@ async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result
         "{}",
         String::from_utf8(checked.stdout)?
     );
-    let node_source = source.replace(
-        "import { waitFor as pause } from 'perry:clocks';",
-        "const pause = async (ms: number) => { trace.push(`wait:${ms * 1000000}`); await new Promise(resolve => setTimeout(resolve, 1)); trace.push('resume'); };"
-    ).replace(
-        "import { randomNumber as sample, randomNumber as again } from 'perry:random';",
-        "let calls = 0; const sample = () => { trace.push('random'); return ++calls / 8; }; const again = sample; Math.random = sample;"
+    let node_source = format!(
+        "{}\n{source}",
+        include_str!("support/node-clock-observer.mjs")
     );
     let node_path = scratch.path().join("effects.mts");
     fs::write(
         &node_path,
-        format!(
-            "const trace: string[] = [];\n{node_source}\nconsole.log(JSON.stringify([await run(), trace]));"
-        ),
+        format!("{node_source}\nconsole.log(JSON.stringify([await run(), trace]));"),
     )?;
     let node = Command::new("node").arg(&node_path).output()?;
     assert!(node.status.success(), "{}", String::from_utf8(node.stderr)?);
@@ -259,31 +259,31 @@ async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result
 fn test_waffle_capability_dynamic_forms_and_initialization_are_diagnosed() {
     for (source, expected) in [
         (
-            "import * as numbers from 'perry:random'; export function run(key: string): number { return numbers[key](); }",
+            "import * as numbers from 'node:timers/promises'; export function run(key: string): number { return numbers[key](); }",
             "Dynamic capability member lookup is unsupported",
         ),
         (
-            "import { randomNumber as sample } from 'perry:random'; export function run(): number { const alias = sample; return alias(); }",
+            "import {setTimeout as sample} from 'node:timers/promises'; export function run(): number { const alias = sample; return alias(); }",
             "Capability functions are only supported as direct calls",
         ),
         (
-            "import * as numbers from 'perry:random'; export function run(): number { const alias = numbers; return 1; }",
+            "import * as numbers from 'node:timers/promises'; export function run(): number { const alias = numbers; return 1; }",
             "Capability namespaces cannot be used as values",
         ),
         (
-            "import { randomNumber as sample } from 'perry:random'; export function run(): number { return sample(...[]); }",
+            "import {setTimeout as sample} from 'node:timers/promises'; export function run(): number { return sample(...[]); }",
             "Spread capability arguments are unsupported",
         ),
         (
-            "import { missing } from 'perry:random'; export function run(): number { return 1; }",
+            "import { missing } from 'node:timers/promises'; export function run(): number { return 1; }",
             "Unknown capability member 'missing'",
         ),
         (
-            "import 'perry:clocks'; export function run(): number { return 1; }",
+            "import 'node:timers/promises'; export function run(): number { return 1; }",
             "Capability imports cannot run module initialization",
         ),
         (
-            "declare function randomNumber(): number; export function run(value: number = randomNumber()): number { return value; }",
+            " export function run(value: number = Math.random()): number { return value; }",
             "Unsupported default or rest parameters in func 'run'",
         ),
         (
@@ -303,8 +303,8 @@ fn test_waffle_capability_dynamic_forms_and_initialization_are_diagnosed() {
             "Unsupported string method: random",
         ),
         (
-            "import { randomNumber as sample } from 'perry:random'; export function run(): number { return sample(1); }",
-            "Intrinsic 'randomNumber' expects 0 arguments, got 1",
+            "export function run(): number { return Math.random(1); }",
+            "Intrinsic 'Math.random' expects 0 arguments, got 1",
         ),
     ] {
         let error =
@@ -317,7 +317,7 @@ fn test_waffle_capability_dynamic_forms_and_initialization_are_diagnosed() {
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_typed_random_capability() -> Result<()> {
     let compiled = compile_typescript_waffle(
-        "declare function randomNumber(): number; export function run(): number { return randomNumber(); }",
+        " export function run(): number { return Math.random(); }",
         "random.ts",
         &WaffleCompileOptions::default(),
     )?;
@@ -369,7 +369,7 @@ async fn test_waffle_typed_random_capability() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_capability_host_failure_is_not_a_language_result() -> Result<()> {
     let compiled = compile_typescript_waffle(
-        "declare function randomNumber(): number; export function run(): number { try { return randomNumber(); } catch { return -1; } }",
+        " export function run(): number { try { return Math.random(); } catch { return -1; } }",
         "random_failure.ts",
         &WaffleCompileOptions::default(),
     )?;
@@ -394,16 +394,12 @@ async fn test_waffle_capability_host_failure_is_not_a_language_result() -> Resul
 fn test_waffle_capability_signatures_are_checked_before_emission() {
     for (source, expected) in [
         (
-            "declare function randomNumber(): boolean; export function run(): boolean { return randomNumber(); }",
-            "Invalid capability declaration 'randomNumber': expected [] -> Number",
+            " export function run(): number { return Math.random(1); }",
+            "Intrinsic 'Math.random' expects 0 arguments, got 1",
         ),
         (
-            "declare function randomNumber(): number; export function run(): number { return randomNumber(1); }",
-            "Intrinsic 'randomNumber' expects 0 arguments, got 1",
-        ),
-        (
-            "declare function waitFor(milliseconds: number): Promise<void>; export async function run(): Promise<void> { await waitFor(true); }",
-            "Intrinsic 'waitFor' argument 1 must have core type F64",
+            "import {setTimeout as waitFor} from 'node:timers/promises'; export async function run(): Promise<void> { await waitFor(true); }",
+            "Intrinsic 'setTimeout' argument 1 must have core type F64",
         ),
     ] {
         let error =
@@ -418,17 +414,17 @@ async fn test_waffle_mixed_capabilities_share_text_unwinding_and_invocation_life
 {
     let compiled = compile_typescript_waffle(
         r#"
-        declare function waitFor(milliseconds: number): Promise<void>;
-        declare function randomNumber(): number;
+        import {setTimeout as waitFor} from 'node:timers/promises';
+
         export async function run(input: string, delay: number): Promise<Result<string, number>> {
             let text = input.toUpperCase();
-            let sample = randomNumber();
+            let sample = Math.random();
             try {
                 await waitFor(delay);
                 if (sample < 0.5) { throw 17; }
                 return text + "!";
             } finally {
-                randomNumber();
+                Math.random();
             }
         }
         "#,
@@ -711,9 +707,9 @@ async fn test_waffle_evaluation_order_and_multi_arg_calls() -> Result<()> {
 async fn test_waffle_shadowing_and_binding_resolution() -> Result<()> {
     // 1. Parameter shadowing declared intrinsic is rejected
     let bad_shadow = r#"
-        declare function waitFor(milliseconds: number): Promise<void>;
-        export function run(waitFor: number): number {
-            return waitFor + 1;
+        declare function hostDouble(value: number): Promise<number>;
+        export function run(hostDouble: number): number {
+            return hostDouble + 1;
         }
     "#;
     let err1 =
@@ -724,10 +720,10 @@ async fn test_waffle_shadowing_and_binding_resolution() -> Result<()> {
 
     // 2. Local variable shadowing declared intrinsic is rejected
     let bad_local = r#"
-        declare function waitFor(milliseconds: number): Promise<void>;
+        declare function hostDouble(value: number): Promise<number>;
         export function run(input: number): number {
-            let waitFor = input * 2;
-            return waitFor;
+            let hostDouble = input * 2;
+            return hostDouble;
         }
     "#;
     let err2 =
@@ -820,7 +816,7 @@ fn test_waffle_boolean_returns_and_terminated_paths() -> Result<()> {
 async fn test_waffle_async_p3_wait_and_suspension() -> Result<()> {
     let source = r#"
         declare function hostDouble(value: number): Promise<number>;
-        declare function waitFor(milliseconds: number): Promise<void>;
+        import {setTimeout as waitFor} from 'node:timers/promises';
 
         export async function run(input: number): Promise<number> {
             let total = input;
@@ -955,7 +951,7 @@ fn test_waffle_boolean_comparisons() -> Result<()> {
 
 #[test]
 fn test_waffle_stream_core_and_component_validate() -> Result<()> {
-    let source = "export function run(input: ByteStream): number { return 42; }";
+    let source = "export function run(input: ReadableStream<Uint8Array>): number { return 42; }";
     let compiled =
         compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())?;
     Component::new(&make_async_engine()?, compiled.component.unwrap())?;
@@ -1037,7 +1033,7 @@ async fn test_waffle_component_entry_signatures() -> Result<()> {
         &WaffleCompileOptions::default(),
     )
     .unwrap_err();
-    assert!(error.to_string().contains("Only one ByteStream input"));
+    assert!(error.to_string().contains("ByteStream"));
     Ok(())
 }
 
@@ -1393,7 +1389,7 @@ async fn test_waffle_await_rejection_enters_guest_exception_path() -> Result<()>
 async fn test_waffle_async_multiple_awaits_in_loop_and_branch() -> Result<()> {
     let source = r#"
         declare function hostDouble(value: number): Promise<number>;
-        declare function waitFor(milliseconds: number): Promise<void>;
+        import {setTimeout as waitFor} from 'node:timers/promises';
 
         export async function run(input: number): Promise<number> {
             let acc = input;
@@ -1450,7 +1446,7 @@ async fn test_waffle_async_multiple_awaits_in_loop_and_branch() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_async_cancellation_and_repeated_calls() -> Result<()> {
     let source = r#"
-        declare function waitFor(milliseconds: number): Promise<void>;
+        import {setTimeout as waitFor} from 'node:timers/promises';
 
         export async function run(input: number): Promise<number> {
             let val = input;

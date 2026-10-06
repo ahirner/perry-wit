@@ -119,3 +119,61 @@ impl VisitMut for IterationParts<'_> {
         statement.visit_mut_children_with(self);
     }
 }
+
+impl SourceCalls {
+    pub(super) fn rewrite_writable(&mut self, expression: &mut ast::Expr) -> Result<()> {
+        let ast::Expr::Call(call) = expression else {
+            return Ok(());
+        };
+        let ast::Callee::Expr(callee) = &call.callee else {
+            return Ok(());
+        };
+        let ast::Expr::Member(member) = super::underlying_expression(callee) else {
+            return Ok(());
+        };
+        if !matches!(&member.prop,ast::MemberProp::Ident(name) if name.sym=="toWeb") {
+            return Ok(());
+        }
+        if !matches!(
+            self.operation(&member.obj)?,
+            Some(super::CapabilityOperation::Writable(_))
+        ) {
+            return Ok(());
+        }
+        ensure!(
+            call.args.len() == 1 && call.args[0].spread.is_none(),
+            "Writable.toWeb requires one process output stream"
+        );
+        let ast::Expr::Member(output) = super::underlying_expression(&call.args[0].expr) else {
+            bail!("Writable.toWeb requires process.stdout or process.stderr")
+        };
+        ensure!(
+            matches!(super::underlying_expression(&output.obj),ast::Expr::Ident(name) if name.sym=="process" && name.ctxt==self.unresolved),
+            "Writable.toWeb requires the standard process output stream"
+        );
+        let channel = match &output.prop {
+            ast::MemberProp::Ident(name) if name.sym == "stdout" => 0.0,
+            ast::MemberProp::Ident(name) if name.sym == "stderr" => 1.0,
+            _ => bail!("Writable.toWeb requires process.stdout or process.stderr"),
+        };
+        let name = self.capability_name(super::CapabilityOperation::Writable(if channel == 0.0 {
+            super::StdioOperation::WriteStdout
+        } else {
+            super::StdioOperation::WriteStderr
+        }));
+        call.callee = ast::Callee::Expr(Box::new(ast::Expr::Ident(ast::Ident::new(
+            name.into(),
+            call.span,
+            SyntaxContext::empty(),
+        ))));
+        call.args = vec![ast::ExprOrSpread {
+            spread: None,
+            expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
+                span: call.span,
+                value: channel,
+                raw: None,
+            }))),
+        }];
+        Ok(())
+    }
+}

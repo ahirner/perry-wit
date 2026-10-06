@@ -26,8 +26,7 @@ pub(crate) fn enabled(contract: &ResolvedContract) -> bool {
         wit.functions
             .values()
             .any(|export| export.function.kind.is_async())
-    }) && !contract.has_stream_input()
-        && contract.http_handler.is_none()
+    }) && contract.http_handler.is_none()
 }
 
 pub(crate) struct Imports {

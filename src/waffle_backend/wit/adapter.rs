@@ -53,6 +53,7 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         registry.allocator.unwrap(),
     );
     let mut adapter = Adapter {
+        streams: Vec::new(),
         borrowed: None,
         exporting: true,
         cancellation_failure,
@@ -252,6 +253,7 @@ enum Input<'a> {
 }
 
 struct Adapter<'a> {
+    streams: Vec<Value>,
     borrowed: Option<Value>,
     exporting: bool,
     body: FunctionBody,
@@ -490,7 +492,12 @@ impl Adapter<'_> {
             Type::U16 => (Operator::I32Load16U { memory }, CoreType::I32),
             Type::S16 => (Operator::I32Load16S { memory }, CoreType::I32),
             Type::U32 | Type::S32 => (Operator::I32Load { memory }, CoreType::I32),
-            Type::Id(id) if matches!(self.wit.resolve.types[id].kind, TypeDefKind::Handle(_)) => {
+            Type::Id(id)
+                if matches!(
+                    self.wit.resolve.types[id].kind,
+                    TypeDefKind::Handle(_) | TypeDefKind::Stream(_)
+                ) =>
+            {
                 (Operator::I32Load { memory }, CoreType::I32)
             }
             Type::F32 => (Operator::F32Load { memory }, CoreType::F32),
@@ -527,6 +534,16 @@ impl Adapter<'_> {
         }
         if let Type::Id(id) = ty {
             return match self.wit.resolve.types[id].kind.clone() {
+                TypeDefKind::Stream(Some(Type::U8)) => {
+                    ensure!(
+                        self.exporting,
+                        "WIT streams are supported only as incoming export parameters"
+                    );
+                    let raw = self.read_scalar(ty, source)?;
+                    let stream = self.call(self.registry.web_streams.unwrap().input, &[raw]);
+                    self.streams.push(stream);
+                    Ok(stream)
+                }
                 TypeDefKind::Handle(handle) => self.lift_resource(ty, handle, source),
                 TypeDefKind::Flags(flags) => self.lift_flags(&flags, source),
                 TypeDefKind::Record(record) => {
@@ -939,6 +956,7 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         registry.allocator.unwrap(),
     );
     let mut adapter = Adapter {
+        streams: Vec::new(),
         borrowed: None,
         exporting: false,
         body,
@@ -1124,6 +1142,7 @@ pub(in crate::waffle_backend) fn build_task_return(
     let body = FunctionBody::new(module, module.funcs[function].sig());
     let block = body.entry;
     let mut adapter = Adapter {
+        streams: Vec::new(),
         borrowed: None,
         exporting: false,
         body,

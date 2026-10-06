@@ -107,18 +107,19 @@ async fn parsed_graphs_preserve_aliases_mutations_and_held_values() -> Result<()
             if (array[1].text !== 'é') throw 91;
             if (root !== alias) throw 92;
             if (array !== root.items) throw 93;
-            if (held.text.length !== 2) throw 94;
+            const text = held.text;
+            if(typeof text!=="string")throw 94;
+            if (new TextEncoder().encode(text).length !== 5) throw 94;
             return JSON.stringify({root: root, held: held, keys: Object.keys(root)});
         }
     "#;
     let input = r#"{"items":[{"text":"😀x"},{"text":"é"}]}"#;
     let directory = tempfile::tempdir()?;
     let script = directory.path().join("json.mts");
-    let node_source = source.replace("held.text.length", "Array.from(held.text).length");
     fs::write(
         &script,
         format!(
-            "{node_source}\nprocess.stdout.write(JSON.stringify(run({}, 1000)));",
+            "{source}\nprocess.stdout.write(JSON.stringify(run({}, 1000)));",
             serde_json::to_string(input)?
         ),
     )?;
@@ -245,7 +246,7 @@ async fn json_and_text_helpers_share_memory_and_keep_wit_error_channels() -> Res
 async fn parsed_values_survive_pending_tasks_and_repeated_awaits() -> Result<()> {
     run_json_cases(
         r#"
-        declare function waitFor(duration: number): Promise<void>;
+        import {setTimeout as waitFor} from "node:timers/promises";
         async function parse(input: string): Promise<any> {
             const value = JSON.parse(input);
             await waitFor(10);
@@ -295,7 +296,7 @@ async fn large_json_materializes_without_a_fixed_buffer_and_reclaims_between_cal
 async fn pending_json_graphs_are_disposable_with_their_store() -> Result<()> {
     let (mut store, instance) = instantiate_json(
         r#"
-        declare function waitFor(duration: number): Promise<void>;
+        import {setTimeout as waitFor} from "node:timers/promises";
         export async function run(input: string): Promise<string> {
             const value = JSON.parse(input);
             await waitFor(10000);

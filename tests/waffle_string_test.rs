@@ -313,7 +313,7 @@ async fn test_regex_search_matches_node_with_scalar_positions() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn test_regex_tables_coexist_with_text_helpers_and_suspension() -> Result<()> {
     run_cases(
-        r#"import { waitFor } from "perry:clocks";
+        r#"import { setTimeout as waitFor } from "node:timers/promises";
         export async function run(input: string): Promise<string> {
             const upper = input.toUpperCase();
             await waitFor(1);
@@ -569,7 +569,7 @@ async fn test_scalar_iteration_and_loop_cleanup_match_node() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn test_scalar_iteration_retains_state_across_p3_waits() -> Result<()> {
     run_cases(
-        r#"import { waitFor } from "perry:clocks";
+        r#"import { setTimeout as waitFor } from "node:timers/promises";
         export async function run(input: string): Promise<string> {
             let result = "";
             for (const scalar of input) {

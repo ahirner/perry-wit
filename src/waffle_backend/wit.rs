@@ -116,7 +116,19 @@ pub(crate) struct WitExport {
 impl WitWorld {
     pub(super) fn new(resolve: Resolve, world: WorldId) -> Result<Self> {
         let resolved = Self::for_encoding(resolve, world)?;
+        let mut stream_exports = 0;
         for export in resolved.functions.values() {
+            let streams = export
+                .function
+                .find_futures_and_streams(&resolved.resolve)
+                .into_iter()
+                .filter(|id| matches!(resolved.resolve.types[*id].kind, TypeDefKind::Stream(_)))
+                .count();
+            if streams != 0 {
+                stream_exports += 1;
+                ensure!(streams == 1 && export.function.params.iter().filter(|param| matches!(param.ty, Type::Id(id) if matches!(resolved.resolve.types[id].kind, TypeDefKind::Stream(Some(Type::U8))))).count() == 1,
+                    "WIT streams require one direct stream<u8> input parameter; nested streams and stream results are unsupported");
+            }
             ensure!(
                 matches!(
                     export.function.kind,
@@ -131,6 +143,10 @@ impl WitWorld {
                 hir_type(&resolved.resolve, ty)?;
             }
         }
+        ensure!(
+            stream_exports <= 1,
+            "Multiple WIT exports with stream parameters are unsupported"
+        );
         Ok(resolved)
     }
 
@@ -491,6 +507,7 @@ fn hir_type(resolve: &Resolve, ty: Type) -> Result<HirType> {
             TypeDefKind::Handle(handle) => {
                 resources::hir_type(resources::handle_id(resolve, *handle))
             }
+            TypeDefKind::Stream(Some(Type::U8)) => super::streams::web::Kind::Readable.ty(),
             TypeDefKind::List(Type::U8) => HirType::Named("Uint8Array".into()),
             TypeDefKind::List(inner) => HirType::Array(Box::new(hir_type(resolve, *inner)?)),
             TypeDefKind::Type(ty) => return hir_type(resolve, *ty),

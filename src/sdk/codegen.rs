@@ -118,6 +118,7 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
         TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
             type_name(resolve, *id)
         }
+        TypeDefKind::Stream(Some(Type::U8)) => "ReadableStream<Uint8Array>".into(),
         TypeDefKind::List(elem) => {
             if matches!(elem, Type::U8) {
                 "Uint8Array".to_string()

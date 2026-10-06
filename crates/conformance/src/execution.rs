@@ -230,10 +230,10 @@ impl Executor {
         let mut evidence = Vec::new();
         for (index, form) in forms.into_iter().enumerate() {
             let mut variant = case.clone();
-            if let Case::Program(p) = &mut variant {
-                if p.form == Form::Direct {
-                    p.form = form;
-                }
+            if let Case::Program(p) = &mut variant
+                && p.form == Form::Direct
+            {
+                p.form = form;
             }
             let directory = directory.join(index.to_string());
             fs::create_dir_all(&directory)?;
@@ -246,13 +246,12 @@ impl Executor {
                     },
                 ..
             }) = evidence.first()
+                && let Outcome::Values { observations, .. } = &result.oracle
             {
-                if let Outcome::Values { observations, .. } = &result.oracle {
-                    ensure!(
-                        observations == baseline,
-                        "metamorphic form changed Node observations"
-                    );
-                }
+                ensure!(
+                    observations == baseline,
+                    "metamorphic form changed Node observations"
+                );
             }
             evidence.push(result);
         }

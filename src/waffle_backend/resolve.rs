@@ -24,7 +24,6 @@ pub enum ResolvedInputKind {
     Number,
     Boolean,
     String,
-    ByteStream,
     Bytes,
     TextOrBytes,
     Stats,
@@ -41,9 +40,6 @@ pub(crate) enum TypedIntrinsic {
         is_async: bool,
     },
     Capability(CapabilityOperation),
-    ReadChunk,
-    ReadInto,
-    ByteAt,
     DecoderNew,
     DateNew,
     AbortNew,
@@ -65,9 +61,7 @@ impl TypedIntrinsic {
             self,
             Self::WitImport { is_async: true, .. }
                 | Self::Capability(CapabilityOperation::Clock(
-                    ClockOperation::WaitFor
-                        | ClockOperation::Timeout
-                        | ClockOperation::TimeoutValue
+                    ClockOperation::Timeout | ClockOperation::TimeoutValue
                 ))
         )
     }
@@ -78,9 +72,7 @@ impl TypedIntrinsic {
             Self::WitImport { .. }
                 | Self::Capability(
                     CapabilityOperation::Clock(
-                        ClockOperation::WaitFor
-                            | ClockOperation::Timeout
-                            | ClockOperation::TimeoutValue
+                        ClockOperation::Timeout | ClockOperation::TimeoutValue
                     ) | CapabilityOperation::Stdio(_)
                         | CapabilityOperation::Filesystem(_)
                         | CapabilityOperation::HttpGet
@@ -98,9 +90,6 @@ impl TypedIntrinsic {
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Capability(operation) => operation.name(),
-            Self::ReadChunk => "readChunk",
-            Self::ReadInto => "readInto",
-            Self::ByteAt => "byteAt",
             Self::DecoderNew => "TextDecoder",
             Self::DateNew => "Date",
             Self::AbortNew => "AbortController",
@@ -116,10 +105,8 @@ impl TypedIntrinsic {
         match self {
             Self::Capability(CapabilityOperation::Promise(_)) => true,
             Self::Capability(operation) => matches!(operation.lower().result, HirType::Promise(_)),
-            Self::ReadChunk | Self::ReadInto => true,
             Self::WitImport { is_async, .. } => *is_async,
-            Self::ByteAt
-            | Self::DecoderNew
+            Self::DecoderNew
             | Self::DateNew
             | Self::AbortNew
             | Self::HeadersNew
@@ -165,9 +152,6 @@ impl TypedIntrinsic {
                     returns,
                 )
             }
-            Self::ByteAt => (vec![WaffleType::F64], vec![WaffleType::F64]),
-            Self::ReadChunk => (vec![WaffleType::I32], vec![WaffleType::F64]),
-            Self::ReadInto => (vec![WaffleType::I32; 2], vec![WaffleType::F64]),
             Self::DateNew => (vec![WaffleType::F64], vec![WaffleType::I32]),
             Self::AbortNew => (vec![], vec![WaffleType::I32]),
             Self::RequestNew => (
@@ -311,6 +295,14 @@ impl ResolvedContract {
         })
     }
 
+    pub(crate) fn has_writable(&self) -> bool {
+        self.intrinsics.values().any(|i| {
+            matches!(
+                i,
+                TypedIntrinsic::Capability(CapabilityOperation::Writable(_))
+            )
+        })
+    }
     pub(crate) fn output_operations(&self) -> BTreeSet<StdioOperation> {
         self.intrinsics
             .values()
@@ -324,13 +316,18 @@ impl ResolvedContract {
                     None
                 }
             })
+            .chain(self.intrinsics.values().filter_map(|i| {
+                if let TypedIntrinsic::Capability(CapabilityOperation::Writable(op)) = i {
+                    Some(*op)
+                } else {
+                    None
+                }
+            }))
             .collect()
     }
 
-    pub(crate) fn has_stream_input(&self) -> bool {
-        self.entry_params
-            .iter()
-            .any(|ty| matches!(ty, HirType::Named(name) if name == "ByteStream"))
+    pub(crate) fn has_web_input(&self) -> bool {
+        self.entry_params.iter().any(|ty|super::streams::web::Kind::of(ty)==Some(super::streams::web::Kind::Readable)) || self.wit.as_ref().is_some_and(|wit|wit.functions.values().any(|export|export.function.params.iter().any(|param|matches!(param.ty,wit_parser::Type::Id(id) if matches!(wit.resolve.types[id].kind,wit_parser::TypeDefKind::Stream(Some(wit_parser::Type::U8)))))))
     }
 }
 
@@ -418,12 +415,7 @@ pub(crate) fn resolve_contract(
             intrinsics.insert(name.clone(), TypedIntrinsic::DecoderNew);
             continue;
         }
-        if let Some(operation) = bindings
-            .capabilities
-            .get(name)
-            .copied()
-            .or_else(|| CapabilityOperation::from_declaration(name))
-        {
+        if let Some(operation) = bindings.capabilities.get(name).copied() {
             let plan = operation.lower();
             ensure!(
                 *params == plan.params && *ret == plan.result,
@@ -434,69 +426,31 @@ pub(crate) fn resolve_contract(
             intrinsics.insert(name.clone(), TypedIntrinsic::Capability(operation));
             continue;
         }
-        match name.as_str() {
-            "readChunk" => {
-                ensure!(
-                    params.len() == 1
-                        && matches!(&params[0], HirType::Named(n) if n == "ByteStream"),
-                    "readChunk signature must be (stream: ByteStream) => Promise<number>"
-                );
-                ensure!(
-                    matches!(ret, HirType::Promise(inner) if matches!(**inner, HirType::Number)),
-                    "readChunk must return Promise<number>"
-                );
-                intrinsics.insert(name.clone(), TypedIntrinsic::ReadChunk);
-            }
-            "readInto" => {
-                ensure!(
-                    params.len() == 2
-                        && matches!(&params[0], HirType::Named(n) if n == "ByteStream")
-                        && super::bytes::is_byte_view(&params[1]),
-                    "readInto signature must be (stream: ByteStream, destination: Uint8Array) => Promise<number>"
-                );
-                ensure!(
-                    matches!(ret, HirType::Promise(inner) if matches!(**inner, HirType::Number)),
-                    "readInto must return Promise<number>"
-                );
-                intrinsics.insert(name.clone(), TypedIntrinsic::ReadInto);
-            }
-            "byteAt" => {
-                ensure!(
-                    params.len() == 1 && matches!(params[0], HirType::Number),
-                    "byteAt signature must be (index: number) => number"
-                );
-                ensure!(matches!(ret, HirType::Number), "byteAt must return number");
-                intrinsics.insert(name.clone(), TypedIntrinsic::ByteAt);
-            }
-            other => {
-                // Generic custom typed intrinsic
-                let waffle_params = params
-                    .iter()
-                    .map(map_hir_type_to_waffle)
-                    .collect::<Result<Vec<_>>>()?;
-                let (waffle_returns, is_async) = match ret {
-                    HirType::Void => (vec![], false),
-                    HirType::Promise(inner) => {
-                        let ret_ty = if matches!(**inner, HirType::Void) {
-                            vec![]
-                        } else {
-                            vec![map_hir_type_to_waffle(inner)?]
-                        };
-                        (ret_ty, true)
-                    }
-                    other_ty => (vec![map_hir_type_to_waffle(other_ty)?], false),
+        let waffle_params = params
+            .iter()
+            .map(map_hir_type_to_waffle)
+            .collect::<Result<Vec<_>>>()?;
+        let (waffle_returns, is_async) = match ret {
+            HirType::Void => (vec![], false),
+            HirType::Promise(inner) => {
+                let ret_ty = if matches!(**inner, HirType::Void) {
+                    vec![]
+                } else {
+                    vec![map_hir_type_to_waffle(inner)?]
                 };
-                intrinsics.insert(
-                    other.to_string(),
-                    TypedIntrinsic::Custom {
-                        name: other.to_string(),
-                        params: waffle_params,
-                        returns: waffle_returns,
-                        is_async,
-                    },
-                );
+                (ret_ty, true)
             }
-        }
+            other_ty => (vec![map_hir_type_to_waffle(other_ty)?], false),
+        };
+        intrinsics.insert(
+            name.clone(),
+            TypedIntrinsic::Custom {
+                name: name.clone(),
+                params: waffle_params,
+                returns: waffle_returns,
+                is_async,
+            },
+        );
     }
 
     // Determine primary exported entry point (defaults to first function if not explicitly marked)
@@ -510,7 +464,7 @@ pub(crate) fn resolve_contract(
         ResolvedInputKind::Wit
     } else if let Some(first_param) = entry_func.params.first() {
         match &first_param.ty {
-            HirType::Named(name) if name == "ByteStream" => ResolvedInputKind::ByteStream,
+            ty if super::streams::web::Kind::of(ty).is_some() => ResolvedInputKind::Wit,
             ty if super::values::is_dynamic(ty) => ResolvedInputKind::Number,
             HirType::Number | HirType::Any => ResolvedInputKind::Number,
             HirType::Boolean => ResolvedInputKind::Boolean,
@@ -547,27 +501,6 @@ pub(crate) fn resolve_contract(
     });
 
     let promises = super::promises::plan_promises(hir, &intrinsics)?;
-    let stream_inputs = entry_func
-        .params
-        .iter()
-        .filter(|param| matches!(&param.ty, HirType::Named(name) if name == "ByteStream"))
-        .count();
-    ensure!(
-        stream_inputs <= 1,
-        "Only one ByteStream input is supported per entry invocation"
-    );
-    ensure!(
-        stream_inputs == 0 || promises.is_none(),
-        "ByteStream inputs cannot be combined with stored async tasks until each transfer has its own buffer owner"
-    );
-    ensure!(
-        stream_inputs == 1
-            || !intrinsics.values().any(|intrinsic| matches!(
-                intrinsic,
-                TypedIntrinsic::ReadChunk | TypedIntrinsic::ReadInto | TypedIntrinsic::ByteAt
-            )),
-        "Stream operations require a ByteStream entry input"
-    );
     Ok(ResolvedContract {
         initialization: super::initialization::ModulePlan::from_hir(hir),
         http_handler: None,
@@ -684,7 +617,6 @@ fn map_hir_type_to_waffle(ty: &HirType) -> Result<WaffleType> {
         HirType::Union(types) if types == &[HirType::Number, HirType::Void] => Ok(WaffleType::F64),
         HirType::Number => Ok(WaffleType::F64),
         HirType::Boolean => Ok(WaffleType::I32),
-        HirType::Named(name) if name == "ByteStream" => Ok(WaffleType::I32),
         _ => bail!("Type {ty:?} cannot be directly mapped to a primitive WAFFLE type"),
     }
 }

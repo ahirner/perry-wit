@@ -288,7 +288,7 @@ async fn invalid_responses_and_response_limit_return_domain_errors() -> Result<(
 async fn async_handler_retains_text_bytes_and_metadata_through_delays() -> Result<()> {
     let source = r#"
         import type {Request, Response} from "perry:http-handler/types";
-        import {waitFor} from 'perry:clocks';
+        import {setTimeout as waitFor} from 'node:timers/promises';
         export async function handle(request:Request):Promise<Response> {
             const text=new TextDecoder('utf-8',{fatal:true}).decode(request.body);
             const first=waitFor(1);

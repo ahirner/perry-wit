@@ -82,13 +82,19 @@ pub(crate) fn lower_module(
                 super::http::body::BodyMethod::Json,
             ))
     });
-    reqs.objects |= contract.has_http() || contract.has_headers() || contract.wit.is_some();
+    reqs.objects |= contract.has_http()
+        || contract.has_headers()
+        || contract.wit.is_some()
+        || contract.has_web_input()
+        || contract.has_writable();
     reqs.objects |= contract
         .context_operations()
         .contains(&super::capabilities::ContextOperation::Environment);
     reqs.needs_strings |= contract
         .clock_operations()
         .contains(&super::capabilities::ClockOperation::DateNow)
+        || contract.has_web_input()
+        || contract.has_writable()
         || contract.wit.is_some()
         || super::values::required(hir)
         || super::date::required(hir)
@@ -115,7 +121,8 @@ pub(crate) fn lower_module(
         || contract.promises.is_some()
         || super::bytes::required(hir)
         || super::structured::required(hir)
-        || contract.has_stream_input()
+        || contract.has_web_input()
+        || contract.has_writable()
         || !contract.output_operations().is_empty()
         || contract.has_filesystem()
         || contract.has_abort()
@@ -137,7 +144,11 @@ pub(crate) fn lower_module(
                     }),
             );
         }
-        if contract.has_http() || contract.has_body() {
+        if contract.has_http()
+            || contract.has_body()
+            || contract.has_web_input()
+            || contract.has_writable()
+        {
             string_pool.intern("done");
             string_pool.intern("value");
             for method in ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"] {
@@ -335,7 +346,6 @@ struct FunctionLowerer<'a> {
     locals: BTreeMap<LocalId, Value>,
     local_types: BTreeMap<LocalId, HirType>,
     narrowings: BTreeMap<LocalId, HirType>,
-    stream_parameter: Option<Value>,
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
     loops: Vec<loops::LoopScope>,
@@ -356,7 +366,6 @@ fn lower_function_body(
     let entry = body.entry;
     let mut locals = BTreeMap::new();
     let mut local_types = BTreeMap::new();
-    let mut stream_parameter = None;
     let mut reference_values = BTreeSet::new();
 
     // Map entry block parameters to function parameters
@@ -366,11 +375,6 @@ fn lower_function_body(
         local_types.insert(param.id, param.ty.clone());
         if types::is_reference(&param.ty) {
             reference_values.insert(val);
-        }
-        if func.id == contract.entry_func_id
-            && matches!(&param.ty, HirType::Named(n) if n == "ByteStream")
-        {
-            stream_parameter = Some(val);
         }
     }
 
@@ -387,23 +391,12 @@ fn lower_function_body(
         locals,
         local_types,
         narrowings: BTreeMap::new(),
-        stream_parameter,
         awaited_calls: 0,
         unwind_ctx: UnwindContext::new(),
         loops: Vec::new(),
         reference_values,
         collection_blocks: BTreeSet::new(),
     };
-
-    if let (Some(stream_val), Some(helpers)) = (stream_parameter, registry.stream_helpers) {
-        lowerer.op(
-            Operator::Call {
-                function_index: helpers.start,
-            },
-            &[stream_val],
-            &[],
-        );
-    }
 
     let lowered = lowerer.statements(&func.body);
     if contract.wit.is_some() {
@@ -1080,12 +1073,7 @@ impl<'a> FunctionLowerer<'a> {
                     "Decoder parameters require TextDecoder arguments"
                 );
             }
-            if matches!(expected, Some(HirType::Named(name)) if name == "ByteStream") {
-                ensure!(
-                    matches!(&argument_type, HirType::Named(name) if name == "ByteStream"),
-                    "Stream parameters require ByteStream arguments"
-                );
-            }
+
             if expected.is_some_and(super::bytes::is_byte_view) {
                 ensure!(
                     super::bytes::is_byte_view(&argument_type),
@@ -2016,9 +2004,13 @@ impl<'a> FunctionLowerer<'a> {
                 object, property, ..
             } if super::streams::web::Kind::of(&self.infer_expr_type(object)).is_some() => {
                 ensure!(
-                    super::streams::web::Kind::of(&self.infer_expr_type(object))
-                        == Some(super::streams::web::Kind::Readable)
-                        && property == "locked",
+                    super::streams::web::Kind::of(&self.infer_expr_type(object)).is_some_and(
+                        |kind| matches!(
+                            kind,
+                            super::streams::web::Kind::Readable
+                                | super::streams::web::Kind::Writable
+                        )
+                    ) && property == "locked",
                     "Unsupported Web Stream property '{property}'"
                 );
                 let stream = self.expression(object)?;
@@ -2294,22 +2286,7 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
 
-    fn cleanup_resources(&mut self) {
-        if let (Some(stream_val), Some(helpers)) =
-            (self.stream_parameter, self.registry.stream_helpers)
-        {
-            self.op(
-                Operator::Call {
-                    function_index: helpers.drop,
-                },
-                &[stream_val],
-                &[],
-            );
-        }
-    }
-
     fn emit_terminal_return(&mut self, ret_val: Option<Value>) {
-        self.cleanup_resources();
         let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
         abi::emit_completion(
             &mut self.body,
@@ -2320,7 +2297,6 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn emit_terminal_throw(&mut self, err_val_f64: Value) {
-        self.cleanup_resources();
         abi::emit_completion(
             &mut self.body,
             self.block,

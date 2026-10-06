@@ -20,7 +20,17 @@ fn registry_owns_regressions_and_partition_witnesses() -> Result<()> {
         .iter()
         .flat_map(|c| &c.witnesses)
         .collect::<Vec<_>>();
-    for name in ["branch-true-array", "branch-false-array", "first-array-index", "array-effects", "byte-input", "byte-effects", "nested-codecs", "stored-json-unicode", "direct-json-unicode"] {
+    for name in [
+        "branch-true-array",
+        "branch-false-array",
+        "first-array-index",
+        "array-effects",
+        "byte-input",
+        "byte-effects",
+        "nested-codecs",
+        "stored-json-unicode",
+        "direct-json-unicode",
+    ] {
         let program: Program = serde_json::from_slice(&fs::read(format!(
             "{}/cases/{name}.json",
             env!("CARGO_MANIFEST_DIR")

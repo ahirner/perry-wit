@@ -80,6 +80,8 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
                 && !names.0.contains(super::streams::web::Kind::Readable.name())
                 && !names.0.contains(super::streams::web::Kind::Reader.name())
+                && !names.0.contains(super::streams::web::Kind::Writable.name())
+                && !names.0.contains(super::streams::web::Kind::Writer.name())
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
                 && !names
                     .0
@@ -115,10 +117,8 @@ pub(crate) fn resolve_bindings(
                 continue;
             }
             let namespace = match import.src.value.as_str() {
-                Some("perry:clocks") => CapabilityNamespace::Clocks,
                 Some("node:timers/promises") => CapabilityNamespace::TimerPromises,
-                Some("perry:random") => CapabilityNamespace::Random,
-                Some("perry:stdio") => CapabilityNamespace::Stdio,
+                Some("node:stream") => CapabilityNamespace::Stream,
                 Some("perry:http") => CapabilityNamespace::Http,
                 Some("fs" | "node:fs") => CapabilityNamespace::Filesystem,
                 Some("fs/promises" | "node:fs/promises") => CapabilityNamespace::FilesystemPromises,
@@ -289,6 +289,9 @@ fn source_type(ty: &HirType) -> Result<String> {
         ty if *ty == ProcessOperation::GetExitCode.lower().result => {
             Ok("number | undefined".into())
         }
+        ty if super::streams::web::Kind::of(ty).is_some() => {
+            Ok(super::streams::web::Kind::of(ty).unwrap().name().into())
+        }
         HirType::Number => Ok("number".into()),
         HirType::Boolean => Ok("boolean".into()),
         HirType::String => Ok("string".into()),
@@ -306,9 +309,7 @@ fn source_type(ty: &HirType) -> Result<String> {
 #[derive(Clone, Copy)]
 enum CapabilityNamespace {
     TimerPromises,
-    Clocks,
-    Random,
-    Stdio,
+    Stream,
     Filesystem,
     FilesystemPromises,
     Http,
@@ -331,18 +332,11 @@ impl CapabilityNamespace {
         }
         match (self, name) {
             (Self::Http, "get") => Ok(CapabilityOperation::HttpGet),
-            (Self::Clocks, "waitFor") => Ok(CapabilityOperation::Clock(ClockOperation::WaitFor)),
             (Self::TimerPromises, "setTimeout") => {
                 Ok(CapabilityOperation::Clock(ClockOperation::Timeout))
             }
-            (Self::Random, "randomNumber") => {
-                Ok(CapabilityOperation::Random(RandomOperation::Number))
-            }
-            (Self::Stdio, "writeStdout") => {
-                Ok(CapabilityOperation::Stdio(StdioOperation::WriteStdout))
-            }
-            (Self::Stdio, "writeStderr") => {
-                Ok(CapabilityOperation::Stdio(StdioOperation::WriteStderr))
+            (Self::Stream, "Writable") => {
+                Ok(CapabilityOperation::Writable(StdioOperation::WriteStdout))
             }
             (Self::Filesystem, _) => bail!(
                 "Unsupported filesystem operation '{name}': synchronous and callback APIs are not supported; use node:fs/promises"
@@ -659,6 +653,12 @@ impl VisitMut for SourceCalls {
             }
             match self.operation(callee) {
                 Ok(Some(mut operation)) => {
+                    if matches!(operation, CapabilityOperation::Writable(_)) {
+                        self.error.get_or_insert_with(|| {
+                            anyhow::anyhow!("Writable supports only toWeb(process.stdout/stderr)")
+                        });
+                        return;
+                    }
                     if operation == CapabilityOperation::Process(ProcessOperation::Exit)
                         && call.args.is_empty()
                     {
@@ -749,6 +749,10 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
+        if let Err(error) = self.rewrite_writable(expression) {
+            self.error.get_or_insert(error);
+            return;
+        }
         self.rewrite_process_assignment(expression);
         self.rewrite_process_value(expression);
         if matches!(expression, ast::Expr::Object(_))
@@ -830,7 +834,10 @@ impl VisitMut for SourceCalls {
             && name.ctxt == self.unresolved
             && matches!(
                 name.sym.as_ref(),
-                "ReadableStream" | "ReadableStreamDefaultReader"
+                "ReadableStream"
+                    | "ReadableStreamDefaultReader"
+                    | "WritableStream"
+                    | "WritableStreamDefaultWriter"
             )
         {
             let bytes = reference.type_params.as_ref().is_some_and(|params| {
@@ -845,10 +852,11 @@ impl VisitMut for SourceCalls {
                 });
                 return;
             }
-            let kind = if name.sym == "ReadableStream" {
-                super::streams::web::Kind::Readable
-            } else {
-                super::streams::web::Kind::Reader
+            let kind = match name.sym.as_ref() {
+                "ReadableStream" => super::streams::web::Kind::Readable,
+                "ReadableStreamDefaultReader" => super::streams::web::Kind::Reader,
+                "WritableStream" => super::streams::web::Kind::Writable,
+                _ => super::streams::web::Kind::Writer,
             };
             name.sym = kind.name().into();
             reference.type_params = None;

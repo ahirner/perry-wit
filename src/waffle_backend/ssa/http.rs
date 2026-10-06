@@ -459,6 +459,59 @@ impl FunctionLowerer<'_> {
         arguments: &[Expr],
     ) -> Result<Value> {
         use crate::waffle_backend::streams::web::{Kind, Method};
+        if matches!(kind, Kind::Writable | Kind::Writer) {
+            let helpers = self.registry.web_streams.context("Web output helpers")?;
+            let value = self.expression(receiver)?;
+            match (kind, method) {
+                (Kind::Writable, "getWriter") | (Kind::Writer, "releaseLock") => {
+                    ensure!(arguments.is_empty(), "Web writer method takes no arguments");
+                    let payload = self.call_completion(
+                        if method == "getWriter" {
+                            helpers.reader
+                        } else {
+                            helpers.release
+                        },
+                        &[value],
+                    );
+                    return Ok(abi::decode_payload(
+                        &mut self.body,
+                        self.block,
+                        payload,
+                        method == "getWriter",
+                    ));
+                }
+                (Kind::Writer, "write" | "close") => {
+                    let write = method == "write";
+                    ensure!(
+                        arguments.len() == usize::from(write),
+                        "Web writer method has unsupported arguments"
+                    );
+                    let data = if write {
+                        ensure!(
+                            crate::waffle_backend::bytes::is_byte_view(
+                                &self.infer_expr_type(&arguments[0])
+                            ),
+                            "Web writer.write requires Uint8Array"
+                        );
+                        self.expression(&arguments[0])?
+                    } else {
+                        self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])
+                    };
+                    return self
+                        .start_task(
+                            &crate::waffle_backend::promises::TaskTarget::WebStream(if write {
+                                Method::Write
+                            } else {
+                                Method::Close
+                            }),
+                            &[value, data],
+                            None,
+                        )?
+                        .context("Web writer requires retained tasks");
+                }
+                _ => bail!("Unsupported Web writer method '{method}'"),
+            }
+        }
         ensure!(
             arguments.is_empty(),
             "Web Stream {method} takes no arguments in the supported byte-stream surface"

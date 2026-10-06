@@ -102,6 +102,8 @@ pub(crate) enum ValueTag {
     AbortSignal = 21,
     ReadableStream = 22,
     StreamReader = 23,
+    WritableStream = 25,
+    StreamWriter = 26,
     PlainDate = 24,
 }
 
@@ -120,6 +122,14 @@ impl ValueTag {
             }
             ty if super::streams::web::Kind::of(ty) == Some(super::streams::web::Kind::Reader) => {
                 Self::StreamReader
+            }
+            ty if super::streams::web::Kind::of(ty)
+                == Some(super::streams::web::Kind::Writable) =>
+            {
+                Self::WritableStream
+            }
+            ty if super::streams::web::Kind::of(ty) == Some(super::streams::web::Kind::Writer) => {
+                Self::StreamWriter
             }
             ty if is_string_type(ty) => Self::String,
             HirType::Tuple(_) => Self::Array,

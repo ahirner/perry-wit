@@ -28,7 +28,10 @@ declare namespace NodeJS {
   interface ProcessEnv {
     readonly [key: string]: string | undefined;
   }
+  interface WritableStream { write(chunk: Uint8Array | string): boolean; }
   interface Process {
+    readonly stdout: WritableStream;
+    readonly stderr: WritableStream;
     /** Cached read-only environment. Missing keys return undefined.
      * Enumeration and JSON return independent snapshots. All mutation, including
      * through aliases or casts, is rejected by the WAFFLE/P3 compiler. */
@@ -83,11 +86,7 @@ declare namespace Temporal {
   }
 }
 
-declare module "perry:clocks" {
-  /** Wait in milliseconds. May be stored and awaited repeatedly within one invocation.
-   * Invalid or overflowing durations trap before host I/O. */
-  export function waitFor(milliseconds: number): Promise<void>;
-}
+
 
 declare module "node:timers/promises" {
   export function setTimeout<T = void>(milliseconds?: number, value?: T, options?: {signal?: AbortSignal}): Promise<T>;
@@ -142,18 +141,12 @@ declare module "perry:http" {
   ): Promise<HttpResponse>;
 }
 
-declare module "perry:random" {
-  /** A number in [0, 1) from the high 53 bits of a WASI random word. */
-  export function randomNumber(): number;
-}
 
-declare module "perry:stdio" {
-  /** Write the visible bytes, then await the independent P3 output completion.
-   * Tasks remain owned by the invocation. Numeric rejection codes: 1 I/O, 2 invalid
-   * byte sequence, 3 broken pipe. Already written bytes are not rolled back. */
-  export function writeStdout(bytes: Uint8Array): Promise<void>;
-  /** Same transfer and completion contract as writeStdout, directed to stderr. */
-  export function writeStderr(bytes: Uint8Array): Promise<void>;
+
+declare module "node:stream" {
+  export class Writable {
+    static toWeb(stream: NodeJS.WritableStream): WritableStream<Uint8Array>;
+  }
 }
 
 declare module "fs" {
@@ -185,21 +178,3 @@ declare module "fs/promises" {
 declare module "node:fs/promises" {
   export { readFile, writeFile, stat, mkdir, unlink, rmdir, readdir, default } from "fs/promises";
 }
-
-/** Opaque readable end of a native byte stream, owned by the entry invocation. */
-interface ByteStream {
-  readonly __perryByteStream: unique symbol;
-}
-
-/** Read up to 8192 bytes. Zero means EOF, which does not imply producer success.
- * Must be immediately awaited. The next read replaces the current chunk. */
-declare function readChunk(input: ByteStream): Promise<number>;
-
-/** Fill a byte view and return the number of bytes written, leaving the rest unchanged.
- * A nonempty view returning zero means EOF, which does not imply producer success.
- * An empty view returns zero without consuming input. Invalidates the current chunk.
- * Must be immediately awaited; the destination and backing storage remain live. */
-declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-
-/** Read a byte from the current chunk. Noninteger or out-of-range indices trap. */
-declare function byteAt(index: number): number;

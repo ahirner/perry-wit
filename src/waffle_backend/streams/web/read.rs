@@ -21,6 +21,24 @@ pub(super) fn emit_finish(
     let error = b.load(stream, ERROR, I32);
     b.ret(&[error]);
     b.block = close;
+    let kind = b.load(stream, BODY_KIND, I32);
+    let input_kind = b.integer(super::super::incoming::KIND);
+    let input = b.op(O::I32Eq, &[kind, input_kind], I32);
+    let release_input = b.body.add_block();
+    let other = b.body.add_block();
+    b.branch(input, release_input, other);
+    b.block = release_input;
+    if let Some(input) = r.input {
+        let handle = b.load(stream, super::super::incoming::HANDLE, I32);
+        b.call(input.imports.drop, &[handle], &[]);
+        b.store(stream, STATE, one, I32);
+        let zero = b.integer(0);
+        b.ret(&[zero]);
+    } else {
+        b.body
+            .set_terminator(b.block, waffle::Terminator::Unreachable);
+    }
+    b.block = other;
     let native = is_native(&mut b, stream);
     let release = b.body.add_block();
     let buffered = b.body.add_block();
@@ -54,6 +72,7 @@ pub(super) fn emit_pull(
     r: &Runtime<'_>,
     f: Func,
     finish: Func,
+    input_pull: Func,
 ) -> Result<()> {
     let mut b = Builder::new(module, f, memory);
     let stream = b.param(0);
@@ -99,6 +118,16 @@ pub(super) fn emit_pull(
     let reason = b.call(finish, &[stream], &[I32])[0];
     b.ret(&[reason, zero, one]);
     b.block = source;
+    let kind = b.load(stream, BODY_KIND, I32);
+    let input_kind = b.integer(super::super::incoming::KIND);
+    let input = b.op(O::I32Eq, &[kind, input_kind], I32);
+    let read_input = b.body.add_block();
+    let other = b.body.add_block();
+    b.branch(input, read_input, other);
+    b.block = read_input;
+    let values = b.call(input_pull, &[stream], &[I32; 3]);
+    b.ret(&values);
+    b.block = other;
     let native = is_native(&mut b, stream);
     let read = b.body.add_block();
     let buffered = b.body.add_block();
@@ -372,13 +401,17 @@ pub(super) fn emit_cancel(
     b.block = cancel;
     let cancelling = b.integer(CANCELLING);
     b.store(stream, STATE, cancelling, I32);
-    if let Some(native) = r.native {
+    if let Some(operations) = r
+        .native
+        .map(|n| n.operations)
+        .or_else(|| r.input.and_then(|i| i.operations))
+    {
         let owner = b.load(stream, TRANSFER, I32);
         let pending = b.body.add_block();
         let done = b.body.add_block();
         b.branch(owner, pending, done);
         b.block = pending;
-        b.call(native.operations.cancel, &[owner], &[]);
+        b.call(operations.cancel, &[owner], &[]);
         b.jump(done, &[]);
         b.block = done;
     }

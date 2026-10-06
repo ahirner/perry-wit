@@ -24,19 +24,23 @@ mod read;
 pub(crate) enum Kind {
     Readable,
     Reader,
+    Writable,
+    Writer,
 }
 impl Kind {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Readable => "__perry_readable_bytes",
             Self::Reader => "__perry_byte_reader",
+            Self::Writable => "__perry_writable_bytes",
+            Self::Writer => "__perry_byte_writer",
         }
     }
     pub(crate) fn ty(self) -> HirType {
         HirType::Named(self.name().into())
     }
     pub(crate) fn of(ty: &HirType) -> Option<Self> {
-        [Self::Readable, Self::Reader]
+        [Self::Readable, Self::Reader, Self::Writable, Self::Writer]
             .into_iter()
             .find(|kind| kind.ty() == *ty)
     }
@@ -73,19 +77,23 @@ pub(crate) fn read_type() -> HirType {
 pub(crate) enum Method {
     Read,
     Cancel,
+    Write,
+    Close,
 }
 impl Method {
     pub(crate) fn named(name: &str) -> Option<Self> {
         match name {
             "read" => Some(Self::Read),
             "cancel" => Some(Self::Cancel),
+            "write" => Some(Self::Write),
+            "close" => Some(Self::Close),
             _ => None,
         }
     }
     pub(crate) fn result(self) -> HirType {
         match self {
             Self::Read => read_type(),
-            Self::Cancel => HirType::Void,
+            Self::Cancel | Self::Write | Self::Close => HirType::Void,
         }
     }
 }
@@ -102,11 +110,16 @@ pub(crate) const PENDING_CHUNK: u32 = 32;
 const SIZE: u32 = 36;
 const CLOSED: u32 = 1;
 const ERRORED: u32 = 2;
-const CANCELLING: u32 = 3;
+pub(super) const CANCELLING: u32 = 3;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Helpers {
     pub(crate) body: Func,
+    pub(crate) input: Func,
+    pub(crate) writable: Func,
+    pub(crate) write: Func,
+    pub(crate) close: Func,
+    pub(crate) dispose: Func,
     pub(crate) reader: Func,
     pub(crate) release: Func,
     pub(crate) read: Func,
@@ -118,6 +131,8 @@ impl Helpers {
         match method {
             Method::Read => self.read,
             Method::Cancel => self.cancel,
+            Method::Write => self.write,
+            Method::Close => self.close,
         }
     }
 }
@@ -134,12 +149,14 @@ pub(crate) struct Runtime<'a> {
     pub(crate) promises: Option<&'a PromiseImports>,
     pub(crate) pool: &'a StringPool,
     pub(crate) native: Option<NativeBody>,
+    pub(crate) input: Option<super::incoming::Runtime>,
+    pub(crate) output: Option<[Option<Func>; 2]>,
 }
 fn pointer(b: &mut Builder, base: Value, offset: u32) -> Value {
     let offset = b.integer(offset);
     b.op(O::I32Add, &[base, offset], I32)
 }
-fn reject(b: &mut Builder, condition: Value, code: u32) {
+pub(super) fn reject(b: &mut Builder, condition: Value, code: u32) {
     let bad = b.body.add_block();
     let next = b.body.add_block();
     b.branch(condition, bad, next);
@@ -149,7 +166,12 @@ fn reject(b: &mut Builder, condition: Value, code: u32) {
     b.ret(&[one, error]);
     b.block = next;
 }
-fn tagged_allocation(b: &mut Builder, a: AllocationFuncs, size: u32, kind: u32) -> Value {
+pub(super) fn tagged_allocation(
+    b: &mut Builder,
+    a: AllocationFuncs,
+    size: u32,
+    kind: u32,
+) -> Value {
     let value = b.allocate(a.realloc, size, 4);
     let zero = b.integer(0);
     let size = b.integer(size);
@@ -172,7 +194,11 @@ fn used_address(b: &mut Builder, stream: Value) -> Value {
     let request = b.integer(crate::waffle_backend::http::request::BODY_USED);
     let response = b.integer(20);
     let offset = b.op(O::Select, &[response, request, kind], I32);
-    b.op(O::I32Add, &[body, offset], I32)
+    let address = b.op(O::I32Add, &[body, offset], I32);
+    let input_kind = b.integer(super::incoming::KIND);
+    let input = b.op(O::I32Eq, &[kind, input_kind], I32);
+    let used = pointer(b, stream, super::incoming::USED);
+    b.op(O::Select, &[used, address, input], I32)
 }
 fn is_native(b: &mut Builder, stream: Value) -> Value {
     let kind = b.load(stream, BODY_KIND, I32);
@@ -197,6 +223,11 @@ pub(crate) fn emit(
     r: &Runtime<'_>,
 ) -> Result<Helpers> {
     let h = Helpers {
+        writable: builder::declare(module, "web.writable", &[F64], &[I32]),
+        write: builder::declare(module, "web.write", &[I32; 3], &[I32, F64]),
+        close: builder::declare(module, "web.close", &[I32; 3], &[I32, F64]),
+        input: builder::declare(module, "web.input", &[I32], &[I32]),
+        dispose: builder::declare(module, "web.dispose-input", &[I32], &[]),
         body: builder::declare(module, "web.body", &[I32; 2], &[I32]),
         reader: builder::declare(module, "web.get-reader", &[I32], &[I32, F64]),
         release: builder::declare(module, "web.release-reader", &[I32], &[I32, F64]),
@@ -209,10 +240,12 @@ pub(crate) fn emit(
     emit_body(module, memory, r, h.body)?;
     emit_reader(module, memory, r, h)?;
     read::emit_finish(module, memory, r, finish)?;
-    read::emit_pull(module, memory, r, h.pull, finish)?;
+    let input_pull = super::incoming::emit(module, memory, r, h, finish)?;
+    read::emit_pull(module, memory, r, h.pull, finish, input_pull)?;
     read::emit_result(module, memory, r, result)?;
     read::emit_read(module, memory, r, h.read, h.pull, result)?;
     read::emit_cancel(module, memory, r, h.cancel, finish)?;
+    super::writable::emit(module, memory, r, h)?;
     Ok(h)
 }
 fn emit_body(module: &mut Module<'static>, memory: Memory, r: &Runtime<'_>, f: Func) -> Result<()> {

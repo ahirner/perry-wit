@@ -165,6 +165,16 @@ impl Adapter<'_> {
             .retain(&mut self.body, self.block, object);
     }
     pub(super) fn finish_resources(&mut self) -> Result<()> {
+        for stream in &self.streams {
+            self.body.add_op(
+                self.block,
+                Operator::Call {
+                    function_index: self.registry.web_streams.unwrap().dispose,
+                },
+                &[*stream],
+                &[],
+            );
+        }
         let Some(head) = self.borrowed else {
             return Ok(());
         };

@@ -203,10 +203,24 @@ pub(crate) fn plan_promises(
                 TypedIntrinsic::RequestNew | TypedIntrinsic::ResponseNew
             )
         });
-    if has_body {
+    let has_stream = has_body
+        || intrinsics.values().any(|i| {
+            matches!(
+                i,
+                TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Writable(_))
+            )
+        })
+        || hir.functions.iter().any(|f| {
+            f.params
+                .iter()
+                .any(|p| super::streams::web::Kind::of(&p.ty).is_some())
+        });
+    if has_stream {
         for method in [
             super::streams::web::Method::Read,
             super::streams::web::Method::Cancel,
+            super::streams::web::Method::Write,
+            super::streams::web::Method::Close,
         ] {
             candidates.insert(
                 TaskTarget::WebStream(method),
@@ -240,7 +254,7 @@ pub(crate) fn plan_promises(
             if let Expr::Call { callee, .. } = expression
                 && let Some(target) = TaskTarget::from_callee(callee)
                     .or_else(|| has_body.then(|| TaskTarget::http_body(callee)).flatten())
-                    .or_else(|| has_body.then(|| TaskTarget::web_stream(callee)).flatten())
+                    .or_else(|| has_stream.then(|| TaskTarget::web_stream(callee)).flatten())
                 && candidates.contains_key(&target)
             {
                 if awaited {

@@ -235,7 +235,7 @@ fn date_helpers_are_retained_for_emitted_functions_without_constructors() -> Res
 #[tokio::test(flavor = "current_thread")]
 async fn pending_time_values_survive_sibling_collection_and_release_on_disposal() -> Result<()> {
     let source = r#"
-    import {waitFor} from 'perry:clocks';
+    import {setTimeout as waitFor} from 'node:timers/promises';
     async function make():Promise<Date> {
         const date=new Date(-1);
         await waitFor(2);

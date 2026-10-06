@@ -48,9 +48,25 @@ pub(crate) fn build_export_wrapper(
             &[],
         );
     }
+    let mut streams = Vec::new();
     let mut args = Vec::new();
     let mut param_cursor = 0;
     for param_ty in &callee.param_types {
+        if super::streams::web::Kind::of(param_ty) == Some(super::streams::web::Kind::Readable) {
+            let raw = body.blocks[entry].params[param_cursor].1;
+            param_cursor += 1;
+            let stream = body.add_op(
+                entry,
+                Operator::Call {
+                    function_index: registry.web_streams.unwrap().input,
+                },
+                &[raw],
+                &[Type::I32],
+            );
+            args.push(stream);
+            streams.push(stream);
+            continue;
+        }
         if super::values::is_dynamic(param_ty) {
             let value = body.blocks[entry].params[param_cursor].1;
             param_cursor += 1;
@@ -202,6 +218,16 @@ pub(crate) fn build_export_wrapper(
                     &[value],
                 )
             });
+            for stream in &streams {
+                body.add_op(
+                    block,
+                    Operator::Call {
+                        function_index: registry.web_streams.unwrap().dispose,
+                    },
+                    &[*stream],
+                    &[],
+                );
+            }
             body.add_op(
                 block,
                 Operator::Call {
@@ -212,6 +238,20 @@ pub(crate) fn build_export_wrapper(
             );
             if let Some(root) = root {
                 root.release(&mut body, block);
+            }
+        }
+    }
+    if registry.promises.is_none() {
+        for block in [outcome.ok_block, outcome.err_block] {
+            for stream in &streams {
+                body.add_op(
+                    block,
+                    Operator::Call {
+                        function_index: registry.web_streams.unwrap().dispose,
+                    },
+                    &[*stream],
+                    &[],
+                );
             }
         }
     }

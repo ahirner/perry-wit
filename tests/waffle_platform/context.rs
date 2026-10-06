@@ -301,7 +301,7 @@ async fn arguments_and_cwd_are_cached_across_returns_and_collection() -> Result<
         if(args[2]!=='') {throw 95;}
         if(args[3]!=='zero\0byte') {throw 94;}
         if(process.cwd()!=='/é/😀') {throw 93;}
-        if(process.cwd().length!==4) {throw 92;}
+        if(new TextEncoder().encode(process.cwd()).length!==8) {throw 92;}
         let index=0;
         while(index<4000) {new Date(index).toISOString();index=index+1;}
         if(await pending!==args) {throw 91;}
@@ -352,11 +352,10 @@ async fn arguments_and_cwd_are_cached_across_returns_and_collection() -> Result<
     assert_eq!(cwd.load(Ordering::SeqCst), 1);
     let directory = tempfile::tempdir()?;
     let script = directory.path().join("context.mts");
-    let node_source = source.replace("process.cwd().length", "Array.from(process.cwd()).length");
     std::fs::write(
         &script,
         format!(
-            "process.argv={};process.cwd=()=>'/é/😀';{node_source}\nprocess.stdout.write(JSON.stringify(await run(false)));",
+            "process.argv={};process.cwd=()=>'/é/😀';{source}\nprocess.stdout.write(JSON.stringify(await run(false)));",
             serde_json::to_string(&expected)?
         ),
     )?;
@@ -379,7 +378,7 @@ async fn arguments_and_cwd_are_cached_across_returns_and_collection() -> Result<
 #[tokio::test(flavor = "current_thread")]
 async fn cached_context_survives_sibling_collection_and_pending_store_disposal() -> Result<()> {
     let arguments = r#"
-    import {waitFor} from 'perry:clocks';
+    import {setTimeout as waitFor} from 'node:timers/promises';
     async function keep():Promise<string[]> {const args=process.argv;await waitFor(2);return args;}
     export async function run():Promise<string[]> {
         const pending=keep();
@@ -390,7 +389,7 @@ async fn cached_context_survives_sibling_collection_and_pending_store_disposal()
         return args;
     }"#;
     let environment = r#"
-    import {waitFor} from 'perry:clocks';
+    import {setTimeout as waitFor} from 'node:timers/promises';
     async function keep():Promise<{[key:string]:string|undefined}> {
         const env=process.env;const before=env.OLD;const keys=Object.keys(env);
         await waitFor(2);

@@ -24,7 +24,7 @@ async fn instantiate(cap: usize) -> Result<(Store<StoreLimits>, Instance)> {
         name: "memory".into(),
         kind: ExportKind::Memory(memory),
     });
-    let imports = super::declare_imports(&mut module);
+    let imports = super::incoming::Imports::declare(&mut module, false);
     let allocator = allocation::emit_allocator(&mut module, memory, 1024)?;
     let transfer = super::emit_read_transfer(&mut module, memory, imports.read)?;
     let buffered = super::buffered::emit(&mut module, memory, allocator, transfer)?;

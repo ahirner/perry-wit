@@ -5,7 +5,6 @@ use perry_hir::types::Type as HirType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ClockOperation {
-    WaitFor,
     Timeout,
     TimeoutValue,
     MonotonicNow,
@@ -15,7 +14,6 @@ pub(crate) enum ClockOperation {
 impl ClockOperation {
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::WaitFor => "waitFor",
             Self::Timeout | Self::TimeoutValue => "setTimeout",
             Self::MonotonicNow => "performance.now",
             Self::DateNow => "Date.now",
@@ -33,12 +31,12 @@ impl LowerCapability for ClockOperation {
             };
         }
         CapabilityPlan {
-            params: if matches!(self, Self::WaitFor | Self::Timeout) {
+            params: if matches!(self, Self::Timeout) {
                 vec![HirType::Number]
             } else {
                 vec![]
             },
-            result: if matches!(self, Self::WaitFor | Self::Timeout) {
+            result: if matches!(self, Self::Timeout) {
                 HirType::Promise(Box::new(HirType::Void))
             } else {
                 HirType::Number

@@ -382,7 +382,7 @@ async fn resolved_world_http_get_uses_native_component_bindings() -> Result<()> 
 async fn resolved_world_platform_io_uses_shared_guest_memory() -> Result<()> {
     let compiled = compile(
         r#"
-      import {waitFor} from 'perry:clocks';
+      import {setTimeout as waitFor} from 'node:timers/promises';
       import {readFile,writeFile,stat,readdir} from 'node:fs/promises';
       export async function run(path:string):Promise<string> {
         const before=performance.now();
@@ -4129,6 +4129,57 @@ async fn pending_export_ownership_releases_after_cancellation_acknowledgement() 
             );
             store.assert_concurrent_state_empty();
         }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn incoming_wit_streams_use_standard_readers_and_release_owned_handles() -> Result<()> {
+    use wasmtime::component::StreamReader;
+    let compiled = compile(
+        r#"
+      export async function scan(input:ReadableStream<Uint8Array>,stop:boolean):Promise<number> {
+        const reader=input.getReader();
+        if(!input.locked)throw 90;
+        let sum=0;
+        let result=await reader.read();
+        while(!result.done) {
+          const bytes=result.value;if(bytes===undefined)throw 91;
+          for(let i=0;i<bytes.length;i++){sum+=bytes[i];}
+          if(stop){await reader.cancel();break;}
+          result=await reader.read();
+        }
+        reader.releaseLock();
+        if(input.locked)throw 92;
+        return sum;
+      }
+    "#,
+        "package test:incoming;world boundary {export scan:async func(input:stream<u8>,stop:bool)->f64;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = store(&engine);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let scan = instance.get_typed_func::<(StreamReader<u8>, bool), (f64,)>(&mut store, "scan")?;
+    for (length, stop) in [
+        (0, false),
+        (1, false),
+        (8193, false),
+        (4 * 1024 * 1024, false),
+        (9000, true),
+        (17, false),
+    ] {
+        let bytes = vec![3u8; length];
+        let input = StreamReader::new(&mut store, bytes)?;
+        let expected = if stop { length.min(8192) } else { length };
+        assert_eq!(
+            scan.call_async(&mut store, (input, stop)).await?.0,
+            (expected * 3) as f64
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
     }
     Ok(())
 }
