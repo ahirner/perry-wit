@@ -17,11 +17,6 @@ fn test_embedded_catalog_loads_and_validates() {
             "supported capability must be full or partial"
         );
         assert!(
-            !cap.invariants.is_empty(),
-            "capability '{}' must have invariants",
-            cap.id
-        );
-        assert!(
             !cap.conformance.is_empty(),
             "capability '{}' must have conformance references",
             cap.id
@@ -52,9 +47,7 @@ fn test_catalog_rejects_duplicates() {
                 "name": "One",
                 "tier": "t1",
                 "support": "full",
-                "domain": "test",
-                "invariants": ["inv"],
-                "differences": [],
+                "description": "test",
                 "conformance": ["node:test.ts"]
             },
             {
@@ -62,9 +55,7 @@ fn test_catalog_rejects_duplicates() {
                 "name": "One Duplicate",
                 "tier": "t1",
                 "support": "full",
-                "domain": "test",
-                "invariants": ["inv"],
-                "differences": [],
+                "description": "test",
                 "conformance": ["node:test.ts"]
             }
         ]

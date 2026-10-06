@@ -20,126 +20,11 @@
   ],
   "capabilities": [
     {
-      "id": "compiler.p3_http_get",
-      "name": "P3 HTTP client",
-      "tier": "tier-1-web-primaries",
-      "support": "partial",
-      "domain": "fetch with string URLs or Request values, standard Request/Response/Headers, and the perry:http buffered GET facade",
-      "invariants": [
-        "Request construction validates synchronously without host imports; fetch uses the same preparation inside its retained Promise. URL fragments remain in Request.url and are omitted from transport coordinates and Response.url",
-        "Request values snapshot headers and byte bodies, normalize methods, transfer inherited bodies exactly once, permit explicit body overrides, and retain metadata through stored tasks and collection; null bodies remain reusable",
-        "Request and constructed Response values share single-consumption body codecs without host imports; body methods receive async-effect checks before component encoding",
-        "Request/Response.body exposes nullable ReadableStream<Uint8Array> with locked, getReader(), reader.read(), reader.releaseLock(), reader.cancel(), and stream.cancel(); reads serialize native demand and check independent completion before reporting EOF",
-        "for await over native byte bodies preserves chunk order and locking, releases on EOF/read failure, and cancels on break/return/body exceptions through acknowledged native completion; body exceptions survive cancellation failure",
-        "text/json/bytes/arrayBuffer materialize through the same native pull and completion path as byte readers; growth uses received bytes, preserves existing chunks across collection, and fails on guest-memory exhaustion",
-        "Releasing a reader rejects its pending public reads once while private transfer owners and buffers survive until completion or cancellation; buffered consumption and inherited Request-body transfer preserve locking",
-        "Response construction snapshots string/byte bodies and header records/pairs/Headers, validates status and statusText, keeps null bodies reusable, and exposes mutable headers independently of the input",
-        "fetch resolves at response headers and retains native body, trailers, upload task, and request completion ownership until acknowledged completion",
-        "GET/HEAD/POST/PUT/DELETE/OPTIONS/PATCH and permitted extension methods accept typed required or optional method/header/body fields; string and Uint8Array bodies upload concurrently with response headers, and byte bodies snapshot the selected view before suspension",
-        "follow/manual/error redirect modes preserve Node HTTP status behavior, final URL, redirect count limits, POST/303 method and body-header rewrites, buffered body replay, and cross-origin credential removal; intermediate bodies close through P3 completion channels without buffering",
-        "Header records, [string, string][] pairs, and Headers snapshots validate names and ByteString values, trim HTTP whitespace, and add the string-body Content-Type only when absent; invalid methods, headers, and GET/HEAD bodies reject before network I/O",
-        "Omitted or undefined options and fields preserve defaults; null bodies are absent. Invalid metadata rejects the returned Promise, permits repeated observation, and performs no network I/O",
-        "Response.status, ok, url, redirected, bodyUsed, text(), json(), bytes(), and arrayBuffer() use one response identity; non-null body methods reject repeated consumption and preserve stored Promise observation; HEAD and null-body statuses release ownership and remain repeatedly consumable",
-        "Response.headers preserves identity and supports case-insensitive get()/has(), duplicate joining, null for missing fields, and ByteString decoding; retained metadata survives body consumption, async observation, and collection",
-        "Headers construction from records, dense typed pairs, Headers, or omitted/undefined input requires no host imports; append/set/delete preserve snapshot independence while fetched response headers reject mutation",
-        "JSON uses the validated value-tree codec and explicit typeof narrowing; ArrayBuffer outcomes preserve identity and share backing storage with distinct Uint8Array views through suspension and collection",
-        "Fetch body buffering grows incrementally without a fixed cap or upfront Content-Length allocation; text strips a UTF-8 BOM and replaces malformed UTF-8",
-        "Controlled headers-before-body execution matches Node from the same independently authored TypeScript; repeated calls and failures run under a 512 KiB guest limit",
-        "Explicit scheme, authority, path/query, string-valued headers, and integer response byte limit are checked before network I/O",
-        "Responses preserve status, duplicate headers, exact header bytes, and body bytes; non-2xx status remains a response",
-        "Body EOF is followed by separate producer/request completion; native resources close before return",
-        "Response metadata, body views, and header views survive helper returns and collection",
-        "The independent http_json fixture checks status, one supported Content-Type, a 64 KiB cap, strict UTF-8, and JSON syntax",
-        "Resolved WIT worlds importing wasi:http/client@0.3.0 use standard canonical bindings with typed results and recoverable errors"
-      ],
-      "differences": [
-        "fetch accepts absolute HTTP(S) string URLs or Request values and typed records with required or optional method/header/body/redirect/signal fields. Writable endpoints, piping, reader.closed, returned-stream ownership, stream uploads, and finite Error objects remain unfinished R7/R8.3 work",
-        "One URL codec normalizes ASCII and percent-encoded hosts, numeric IPv4, bracketed IPv6, ports, dot segments, HTTP backslashes, path/query escaping, whitespace, and fragments. Internationalized domains and noncanonical scheme separators remain unsupported",
-        "Constructed Response values preserve statusText; fetched responses expose an empty statusText because the standard WASI HTTP response carries no reason phrase",
-        "Every non-null acquired fetch body must be consumed or explicitly aborted before the owning call returns; otherwise the invocation traps instead of abandoning its native owner",
-        "Tasks may overlap in resolved WIT components and must finish before the owning invocation returns",
-        "HttpResponse is guest-internal; component wrappers export status, text, or bytes",
-        "Numeric failures: 8 overflow, 12 invalid metadata/limit/index, 100 plus WASI HTTP error discriminant, 200 plus header error discriminant",
-        "AbortController.abort() cancels fetch owners sharing its signal, including pending headers/body reads and unused responses; unrelated requests continue. Request signals have distinct identity and follow their parent; signal:null creates an independent signal. Custom abort reasons and signal callbacks are not implemented",
-        "Host cancellation acknowledges HTTP send, body transfers, and completion channels before instance reuse; traps and host disposal require a fresh store"
-      ],
-      "conformance": [
-        "rust:src/lib.rs#waffle_backend::http::tests::buffered_get_uses_real_p3_http_resources_and_preserves_headers_status_and_bytes",
-        "rust:src/lib.rs#waffle_backend::http::tests::bounded_responses_handle_exact_limits_overflow_and_repeated_four_mib_bodies",
-        "rust:src/lib.rs#waffle_backend::http::tests::metadata_and_transport_errors_release_resources_and_allow_reuse",
-        "rust:src/lib.rs#waffle_backend::http::tests::disposal_abandons_pending_headers_and_body_transfers",
-        "rust:src/lib.rs#waffle_backend::http::tests::typed_source_preserves_response_fields_headers_and_binary_body",
-        "rust:src/lib.rs#waffle_backend::http::tests::source_response_and_detached_views_survive_collection_and_repeated_calls",
-        "rust:src/lib.rs#waffle_backend::http::tests::source_validation_preserves_argument_order_and_errors_before_io",
-        "rust:src/lib.rs#waffle_backend::http::tests::json_fetch_checks_status_media_type_and_payload",
-        "rust:src/lib.rs#waffle_backend::http::tests::source_http_contract_rejects_unsupported_types",
-        "rust:src/lib.rs#waffle_backend::http::tests::source_binary_boundaries_keep_limits_and_completion_errors_separate_from_decoding",
-        "rust:src/lib.rs#waffle_backend::http::tests::http_sdk_checks_the_document_fixture_and_static_contract",
-        "rust:src/lib.rs#waffle_backend::http::tests::stored_http_operations_can_be_observed_repeatedly_but_not_abandoned",
-        "rust:tests/waffle_wit_native_test.rs#stored_http_requests_overlap_and_complete_both_channels",
-        "rust:tests/waffle_wit_native_test.rs#resolved_world_http_get_uses_native_component_bindings",
-        "rust:tests/waffle_wit_native_test.rs#resolved_world_http_domain_failures_release_resources_before_reuse",
-        "rust:tests/waffle_wit_native_test.rs#resolved_world_http_disposal_releases_suspended_headers_and_body",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_consumes_body_once_and_preserves_http_status",
-        "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_preserve_body_identity_and_consumption",
-        "rust:tests/waffle_wit_native_test.rs#byte_stream_iteration_preserves_exits_errors_and_bounded_ownership",
-        "rust:tests/waffle_wit_native_test.rs#fetch_buffering_grows_with_received_data_and_available_guest_memory",
-        "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_release_pending_requests_and_cancel_owned_transfers",
-        "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_stream_beyond_guest_memory_and_reject_completion_failure",
-        "rust:tests/waffle_wit_native_test.rs#native_byte_streams_reject_invalid_shapes_and_synchronous_effects",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_owners",
-        "rust:tests/waffle_wit_native_test.rs#abort_signals_preserve_identity_follow_requests_and_survive_collection",
-        "rust:tests/waffle_wit_native_test.rs#fetch_abort_signals_cancel_selected_native_owners_and_match_node",
-        "rust:tests/waffle_wit_native_test.rs#abort_signals_reject_invalid_types_and_mutation",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_resolves_at_headers_and_matches_node",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_releases_failures_and_grows_bodies_incrementally",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_rejects_unconsumed_body_at_call_boundary",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_runs_as_a_top_level_node_and_p3_command",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_uploads_snapshot_bodies_and_options_and_match_node",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_validates_methods_and_finishes_null_bodies",
-        "rust:src/lib.rs#waffle_backend::http::fetch::algorithms::tests::methods_and_header_bytes_follow_fetch_validation",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_json_and_array_buffers_preserve_types_identity_and_failures",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_headers_match_node_and_retain_metadata_after_consumption",
-        "rust:tests/waffle_wit_native_test.rs#decoded_string_literals_preserve_latin1_without_encoding_repair",
-        "rust:tests/waffle_wit_native_test.rs#standard_headers_construct_mutate_and_snapshot_without_host_imports",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_accepts_header_objects_and_pairs_with_immutable_responses",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_optional_fields_and_validation_rejections_match_node",
-        "rust:tests/fetch_url_test.rs#http_url_normalization_matches_node_for_host_path_and_query_shapes",
-        "rust:tests/fetch_url_test.rs#invalid_http_authorities_and_short_outputs_fail_before_io",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_normalizes_runtime_urls_before_native_io_and_matches_node",
-        "rust:tests/fetch_url_test.rs#relative_redirect_locations_match_node",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_redirect_modes_replay_cleanup_and_origin_rules_match_node",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_redirects_close_gated_bodies_without_buffering_them",
-        "rust:tests/waffle_wit_native_test.rs#standard_response_values_and_bodies_match_node_without_host_imports",
-        "rust:tests/waffle_wit_native_test.rs#standard_request_values_validate_and_snapshot_without_host_imports",
-        "rust:tests/waffle_wit_native_test.rs#standard_fetch_request_snapshots_transfers_and_reuse_match_node",
-        "rust:tests/waffle_wit_native_test.rs#standard_request_body_methods_share_decoding_and_consumption_without_host_imports",
-        "rust:tests/waffle_wit_native_test.rs#standard_request_body_consumption_requires_async_wit_effects",
-        "rust:tests/fetch_url_test.rs#request_urls_retain_fragments_while_transport_coordinates_exclude_them"
-      ],
-      "wasi": [
-        "wasi:http/client@0.3.0",
-        "wasi:http/types@0.3.0"
-      ]
-    },
-    {
       "id": "compiler.p3_http_handler",
       "name": "Bounded P3 HTTP Handler",
       "tier": "tier-1-web-primaries",
+      "description": "Rust compile_http_handler API exporting wasi:http/handler@0.3.0",
       "support": "partial",
-      "domain": "Rust compile_http_handler API exporting wasi:http/handler@0.3.0",
-      "invariants": [
-        "Typed request/response records preserve method, optional coordinates, duplicate header bytes, and bounded body bytes",
-        "Typed guest tasks and combinators can use P3 capabilities; invocations are serialized through body transfer and separate consumer completion",
-        "Responses are published before transmission; abandonment and consumer errors release streams, futures, resources, and invocation storage",
-        "Repeated calls are tested under a 1 MiB guest memory cap using independent Wasmtime P3 bindings"
-      ],
-      "differences": [
-        "Explicit request/response byte caps; status 200–599, with empty bodies for 204/205/304",
-        "Overflow returns the corresponding WASI body-size error; invalid response metadata and request producer failures return internal-error",
-        "Source exceptions and interrupted calls require store disposal; hosts must drive the P3 event loop through completion",
-        "Request trailers are consumed but not exposed; source Web Streams, response trailers, and cooperative cancellation are unsupported"
-      ],
       "conformance": [
         "rust:tests/waffle_http_handler_test.rs#bounded_handler_roundtrips_binary_and_duplicate_headers",
         "rust:tests/waffle_http_handler_test.rs#request_overflow_and_producer_failure_release_resources",
@@ -151,34 +36,14 @@
         "rust:tests/waffle_http_handler_test.rs#malformed_source_data_traps_and_requires_store_disposal",
         "rust:tests/waffle_http_handler_test.rs#handler_imports_only_required_capabilities_and_checks_source_types",
         "rust:tests/waffle_http_handler_test.rs#custom_method_scheme_and_absent_coordinates_preserve_variants"
-      ],
-      "wasi": [
-        "wasi:http/handler@0.3.0",
-        "wasi:http/types@0.3.0"
       ]
     },
     {
       "id": "compiler.p3_filesystem_metadata",
       "name": "Native P3 Filesystem Metadata and Directories",
       "tier": "tier-2-node-core",
+      "description": "Filesystem metadata and directory operations (stat, mkdir, unlink, rmdir, readdir)",
       "support": "partial",
-      "domain": "stat, mkdir, unlink, rmdir, readdir from node:fs/promises or fs/promises",
-      "invariants": [
-        "Shared normalized longest-prefix preopens confine paths and symlinks; mutation cannot remove preopen roots",
-        "Stats preserve unsigned file sizes, signed modification milliseconds, type predicates, and identity",
-        "Directory listings materialize UTF-8 names, omit dot entries, and await the separate producer completion after EOF",
-        "Options and argument effects precede validation and I/O; known duplicate fields use the last value",
-        "Stats, string arrays, and suspended directory buffers survive helper calls, collection, and retained Promise outcomes",
-        "Normal and recoverable-error paths release descriptors, entry streams, and completion futures",
-        "Promise operations use wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
-      ],
-      "differences": [
-        "Reusable plain option objects retain aliases, typed mutation, optional undefined fields, and field effects; stat supports bigint false and throwIfNoEntry true, and readdir supports UTF-8 encoding, recursive false, and withFileTypes false",
-        "mkdir, unlink, and rmdir only accept omitted or undefined options",
-        "Directory order is host-defined, materialization uses memory proportional to contents, and absent modification timestamps return zero",
-        "Component Stats use the exported stats record and stats-kind enum; string arrays use list<string>, also inside numeric-error Result returns",
-        "Errors use one-based WASI 0.3 ordinals. Existence checks use stat success/rejection; no exists API is supplied. Synchronous and callback filesystem APIs are diagnosed. Host traps and interrupted invocations require store disposal"
-      ],
       "conformance": [
         "rust:tests/p3_filesystem_test.rs#source::metadata::directory_materialization_grows_beyond_one_page_without_a_fixed_entry_limit",
         "rust:tests/p3_filesystem_test.rs#source::metadata::supported_metadata_and_directory_operations_match_node",
@@ -203,36 +68,14 @@
         "rust:tests/waffle_wit_native_test.rs#resolved_world_platform_io_uses_shared_guest_memory",
         "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup",
         "rust:tests/p3_filesystem_test.rs#source::synchronous_and_callback_filesystem_calls_have_direct_diagnostics"
-      ],
-      "wasi": [
-        "wasi:filesystem/preopens@0.3.0",
-        "wasi:filesystem/types@0.3.0"
       ]
     },
     {
       "id": "compiler.p3_filesystem_read",
       "name": "Native P3 Filesystem Reads",
       "tier": "tier-2-node-core",
+      "description": "Filesystem read operations (readFile, open, FileHandle)",
       "support": "partial",
-      "domain": "readFile from node:fs/promises or fs/promises with omitted, literal, or runtime string encoding",
-      "invariants": [
-        "Binary reads preserve arbitrary bytes and return independent mutable views",
-        "Text reads preserve BOMs, NULs, and valid UTF-8 with scalar string semantics",
-        "The shared transfer loop handles partial input and closure; successful EOF still awaits producer completion",
-        "Invalid options fail before I/O; read-only preopens work without requesting write permissions",
-        "Pending buffers and returned values survive collection; resources close on success and recoverable errors",
-        "Materialization uses storage proportional to file size, with multi-megabyte and repeated bounded-memory fixtures",
-        "String-or-byte kinds survive aliases, assignments, control flow, retained Promise outcomes, and component parameters/results",
-        "Promise operations use wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
-      ],
-      "differences": [
-        "Runtime string encodings return string-or-byte values; methods, indexing, and type-specific arguments require typeof narrowing",
-        "Component unions use the exported text-or-bytes variant with text(string) and bytes(list<u8>) cases",
-        "Plain option objects support encoding and the default or r flag, preserve current fields through helpers and mutation, and return a string-or-byte union when reused",
-        "Malformed text throws filesystem error 9 instead of Node replacement decoding",
-        "The binary encoding label returns Uint8Array, preserving the existing compiler contract; Node returns Latin-1 text for that label",
-        "Promise readFile options accept AbortSignal; cancellation retains storage through descriptor/transfer acknowledgement and producer completion. Host traps and disposal require a fresh store"
-      ],
       "conformance": [
         "rust:tests/p3_filesystem_test.rs#source::reads::binary_reads_return_independent_views_and_preserve_all_bytes",
         "rust:tests/p3_filesystem_test.rs#source::reads::text_reads_preserve_boms_nuls_and_scalar_lengths_and_reject_invalid_utf8",
@@ -268,34 +111,14 @@
         "rust:tests/waffle_wit_native_test.rs#resolved_world_platform_io_uses_shared_guest_memory",
         "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup",
         "rust:tests/p3_filesystem_test.rs#source::synchronous_and_callback_filesystem_calls_have_direct_diagnostics"
-      ],
-      "wasi": [
-        "wasi:filesystem/preopens@0.3.0",
-        "wasi:filesystem/types@0.3.0"
       ]
     },
     {
       "id": "compiler.p3_filesystem_write",
       "name": "Native P3 Filesystem Writes",
       "tier": "tier-2-node-core",
+      "description": "Filesystem write operations (writeFile, appendFile, truncate)",
       "support": "partial",
-      "domain": "Overwrite-only writeFile from node:fs/promises or fs/promises",
-      "invariants": [
-        "Named aliases, namespace imports, and default imports retain binding identity; unused imports add no filesystem capability",
-        "String data preserves exact UTF-8 and NUL bytes; Uint8Array data writes only its visible range",
-        "Arguments and plain object fields execute in source order; aliases, typed mutation, optional undefined fields, and duplicate-field effects survive validation and collection",
-        "Invalid encodings, flags, and unknown option properties fail before opening or truncating a file",
-        "Normalized paths select the longest matching preopen on a component boundary; symlink resolution remains host-confined",
-        "Shared native stream writes preserve partial transfers and await an independent filesystem completion",
-        "Descriptors, writable ends, and completion futures close on normal and recoverable-error paths; suspended buffers survive sibling collection",
-        "Promise operations use wasi:filesystem/types@0.3.0 and wasi:filesystem/preopens@0.3.0 bindings with retained task outcomes"
-      ],
-      "differences": [
-        "Options accept encoding strings, null, undefined, and reusable plain objects; runtime delete, getters, setters, methods, spreads, computed literal keys, and custom prototypes are diagnosed",
-        "Only the default or w flag is supported; UTF8 labels accept ASCII case, and binary encoding is restricted to byte data",
-        "Errors throw the one-based WASI 0.3 filesystem error ordinal; already written bytes are not rolled back",
-        "Promise writeFile options accept AbortSignal; cancellation acknowledges partial writes and independent completion without rolling back prior effects. Host traps and disposal require a fresh store"
-      ],
       "conformance": [
         "rust:tests/p3_filesystem_test.rs#native_file_forwarding_preserves_bytes_and_checks_both_completions",
         "rust:tests/p3_filesystem_test.rs#compiled_source_scans_a_real_p3_file_across_component_boundaries",
@@ -324,32 +147,14 @@
         "rust:tests/waffle_wit_native_test.rs#resolved_world_platform_io_uses_shared_guest_memory",
         "rust:tests/waffle_wit_native_test.rs#node_filesystem_promises_preserve_retained_outcomes_and_cleanup",
         "rust:tests/p3_filesystem_test.rs#source::synchronous_and_callback_filesystem_calls_have_direct_diagnostics"
-      ],
-      "wasi": [
-        "wasi:filesystem/preopens@0.3.0",
-        "wasi:filesystem/types@0.3.0"
       ]
     },
     {
       "id": "compiler.p3_stdio",
       "name": "Native P3 Output",
       "tier": "tier-1-web-primaries",
+      "description": "Console logging (console.log, console.error) and stdio byte stream writes",
       "support": "partial",
-      "domain": "Production compiler: perry:stdio byte writes and single-string console logging",
-      "invariants": [
-        "writeStdout and writeStderr preserve arbitrary bytes and visible Uint8Array ranges",
-        "Shared native writes retry partial transfers and respect host backpressure",
-        "Successful transfer still awaits the separate capability completion future",
-        "console.log routes to stdout; console.error and console.warn route to stderr, preserving UTF-8 and embedded NULs and appending a newline",
-        "Output buffers remain traced while suspended, including collection by sibling tasks",
-        "Normal and recoverable error paths close writable ends and consume and drop completion futures"
-      ],
-      "differences": [
-        "Byte writes are owned tasks; console calls return void but may suspend for host output",
-        "Console supports exactly one string; formatting and other argument forms are diagnosed",
-        "Output errors throw numeric codes: 1 I/O, 2 invalid byte sequence, 3 broken pipe; already written bytes remain visible",
-        "Host traps and cancellation require store disposal; returned streams and callbacks need further ownership support"
-      ],
       "conformance": [
         "rust:tests/waffle_output_test.rs#native_output_preserves_arbitrary_bytes_and_subview_ranges_beyond_guest_memory",
         "rust:tests/waffle_output_test.rs#string_logging_preserves_utf8_nuls_order_and_stored_task_lifetimes",
@@ -358,32 +163,14 @@
         "rust:tests/waffle_output_test.rs#output_contracts_and_binding_identity_are_checked_before_io",
         "rust:tests/waffle_output_test.rs#stored_output_operations_settle_once_and_preserve_bytes",
         "node:tests/conformance/cases/02_console_streams.ts"
-      ],
-      "wasi": [
-        "wasi:cli/stdout@0.3.0",
-        "wasi:cli/stderr@0.3.0"
       ]
     },
     {
       "id": "compiler.p3_text",
       "name": "Scalar UTF-8 Text",
       "tier": "tier-1-web-primaries",
+      "description": "UTF-8 text operations, encoding, and component string boundaries",
       "support": "partial",
-      "domain": "Production compiler: UTF-8 text operations and component string boundaries",
-      "invariants": [
-        "Length, indexing, slicing, search positions, and string iteration count Unicode scalars",
-        "String for-of evaluates its input once and retains that snapshot across mutation and P3 waits",
-        "Nested loops preserve update effects and route break/continue through crossed finally clauses",
-        "Unicode case conversions, code-point construction, split, and join preserve valid UTF-8",
-        "Literal regex search uses immutable compiled tables, returns reusable scalar positions, and allocates no guest storage",
-        "Canonical boundaries retain byte lengths; completed serial calls reclaim their invocation storage"
-      ],
-      "differences": [
-        "Unpaired surrogate escapes and UTF-16 code-unit APIs are diagnosed",
-        "Custom iterator protocols and labeled loop exits are unsupported; JSON is described separately in compiler.p3_json",
-        "Regex support is literal string.search with u/s flags; constructors, stored regex values, other flags, lookaround, backreferences, and property escapes are diagnosed",
-        "Implicit string coercions are restricted; traced loop collection reclaims dead temporaries, while returned-stream and callback owners remain incomplete"
-      ],
       "conformance": [
         "rust:tests/waffle_string_test.rs#test_long_invocations_reclaim_dead_text_temporaries",
         "rust:tests/waffle_string_test.rs#test_collection_retains_interior_views_operands_and_return_payloads",
@@ -439,30 +226,14 @@
         "rust:tests/text_contract_test.rs#test_hir_validator_diagnoses_char_code_at",
         "rust:tests/text_contract_test.rs#test_scalar_operations_semantics",
         "rust:tests/text_contract_test.rs#test_template_interpolation_boundaries"
-      ],
-      "wasi": []
+      ]
     },
     {
       "id": "compiler.p3_promises",
       "name": "Stored P3 Promise Outcomes",
       "tier": "tier-1-web-primaries",
+      "description": "Async/await execution and Promise lifecycle handling",
       "support": "partial",
-      "domain": "Production compiler: typed guest tasks, async WIT imports, native operations, and repeated await",
-      "invariants": [
-        "A source task starts eagerly and its caller continues while native P3 work is pending",
-        "Aliases preserve Promise identity and repeated awaits retain statically typed success values and numeric rejection",
-        "Native P3 threads settle one shared outcome and notify registered observers once",
-        "Native P3 wakeups schedule continuations; eager execution to first suspension and return-promise adoption after finally are preserved",
-        "Promise records and reference-bearing outcomes share the guest heap, survive collection, and are reclaimed after result copying",
-        "Guest rejection enters catch and finally at await; host traps remain outside the language error channel"
-      ],
-      "differences": [
-        "Stored Promises require the host's component async stackful and threading features",
-        "Async continuations follow P3 scheduling, not exact Node microtask order. Already-settled awaits yield through P3; multiple observers and nested continuations have no Node FIFO guarantee. Simultaneously ready race operands have no input-order tie-break: the first observed settlement wins",
-        "Promise parameters are guest-internal; constructors and callback reactions remain unsupported",
-        "Detached call statements are diagnosed; unresolved work at return traps. Public calls execute serially; entries that bypass host serialization trap on the invocation guard",
-        "Host cancellation runs guest cleanup and drains acknowledged native owners in async WIT/timer/HTTP components. Filesystem descriptor and file/console transfer owners also use the shared registry; file AbortSignal cancellation is verified through independent producer completion. HTTP byte readers support per-stream and host cancellation; returned streams, writable endpoints, and incoming handlers still need ownership integration; traps and host disposal require a fresh store"
-      ],
       "conformance": [
         "rust:tests/p3_promise_test.rs#long_invocations_reclaim_dead_promises_and_retain_shared_outcomes",
         "rust:tests/p3_promise_test.rs#collection_retains_suspended_tasks_observers_and_finally_returns",
@@ -500,37 +271,14 @@
         "rust:tests/waffle_wit_native_test.rs#export_results_survive_collection_while_ready_work_finishes",
         "rust:tests/p3_cancellation_test.rs#compiled_exports_acknowledge_host_cancellation_and_run_finally",
         "rust:tests/p3_cancellation_test.rs#compiled_empty_race_can_be_cancelled_without_native_work"
-      ],
-      "wasi": []
+      ]
     },
     {
       "id": "compiler.p3_primitives",
       "name": "Typed P3 Clock and Random Calls",
       "tier": "tier-1-web-primaries",
+      "description": "Clocks, performance.now, Math.random, crypto randomness, and timer promises",
       "support": "partial",
-      "domain": "performance.now, Date.now, Math.random, crypto.getRandomValues, crypto.randomUUID, and promise-based node:timers/promises.setTimeout",
-      "invariants": [
-        "Clocks and randomness use typed shared lowering plans and WASI 0.3 canonical adapters",
-        "Named and namespace timer imports preserve binding identity; the perry:clocks and perry:random source facades remain available",
-        "Arguments execute once in source order, with clock durations converted from milliseconds to nanoseconds",
-        "Monotonic reads return fractional milliseconds and system-clock reads return signed whole epoch milliseconds",
-        "Random filling preserves byte-view identity and its visible range, validates type and the 65536-byte quota before host calls, skips empty views, and loops over P3 short reads",
-        "UUIDs use fresh random bytes with v4 version and variant bits; UUID text and filled views survive collection, retained Promises, suspension, and disposal",
-        "Clock and random imports contain only selected functions and share adapters when multiple operations use the same interface",
-        "Unused declarations add no component imports; all emitted function bodies retain their referenced dependencies",
-        "UTF-8 values, exceptions, and async invocation ownership remain shared across capabilities",
-        "Host failures trap independently of guest exception handlers",
-        "Timer promises map to wasi:clocks/monotonic-clock@0.3.0 wait-for; delays below 1, above 2147483647, or NaN become 1 ms, and fractional delays are truncated"
-      ],
-      "differences": [
-        "Only direct calls and literal namespace member names are supported; dynamic lookup, capability function values, and spread arguments are diagnosed",
-        "Timer results preserve supported static scalar, string, byte, record, array, tuple, and opaque-value types and identity, including undefined and null; native waits retain result storage through suspension and collection",
-        "Timer options accept a typed optional AbortSignal. Aborting a signal cancels its native waits through acknowledgement; pre-aborted timers never reach the host. The lower-level waitFor facade traps on invalid or overflowing durations",
-        "Random destinations support Uint8Array only; invalid supported value kinds throw numeric 1 and oversized views throw 2, while other typed-array classes are diagnosed",
-        "Native random calls returning zero progress or too many bytes trap; prior writes are not rolled back",
-        "Date objects and process context are scoped separately in compiler.p3_dates and compiler.p3_context; context mutation and callback timers are deferred under D1/D5",
-        "Public calls execute serially. Timer signals and host cancellation drain native owners in callback-enabled components; public stream compositions still require ownership integration"
-      ],
       "conformance": [
         "rust:tests/waffle_pipeline_test.rs#test_waffle_capability_aliases_builtins_and_shadowing",
         "rust:tests/waffle_pipeline_test.rs#test_waffle_capability_argument_effects_and_adapter_sharing",
@@ -559,35 +307,14 @@
         "rust:tests/waffle_wit_native_test.rs#timer_signal_scope_does_not_cancel_later_native_calls",
         "rust:tests/waffle_wit_native_test.rs#directly_awaited_timer_values_preserve_their_static_return_type",
         "rust:tests/waffle_wit_native_test.rs#unsupported_timer_values_and_options_receive_source_diagnostics"
-      ],
-      "wasi": [
-        "wasi:clocks/monotonic-clock@0.3.0",
-        "wasi:clocks/system-clock@0.3.0",
-        "wasi:random/random@0.3.0"
       ]
     },
     {
       "id": "compiler.p3_dates",
       "name": "P3 Immutable Date and Temporal Values",
       "tier": "tier-1-web-primaries",
+      "description": "Immutable UTC Date and typed Temporal values",
       "support": "partial",
-      "domain": "Production compiler: immutable UTC Date and typed Temporal.Instant / Temporal.PlainDateTime",
-      "invariants": [
-        "Date.now() reads whole signed UTC epoch milliseconds from the P3 system clock",
-        "Construction requires a statically known number and preserves time clipping and invalid dates",
-        "Constructed dates have distinct object identity and aliases retain identity",
-        "getTime() returns the timestamp or NaN for invalid dates",
-        "ISO formatting covers the entire clipped range, including negative timestamps, year zero, and signed six-digit years",
-        "Invalid ISO serialization throws numeric 1 through shared catch/finally completion handling",
-        "Dates and ISO strings survive helpers, object properties, retained Promises, suspension, and repeated allocating loops under a 64 KiB guest cap",
-        "Pure epoch/ISO computations require no WASI imports"
-      ],
-      "differences": [
-        "Date values are guest-internal; component boundaries carry UTC ISO strings",
-        "Omitted, copy, nonnumeric, and multi-argument constructors, calendar getters, valueOf, setters, string parsing, dynamic methods, and method arguments are diagnosed",
-        "Invalid ISO errors are numeric rather than Error objects",
-        "Temporal supports ISO string factories, Instant.fromEpochMilliseconds/epochMilliseconds, PlainDateTime fields/add({days}), and toString(); bracket annotations, options, additional calendars/zones, and implicit JSON serialization are unsupported"
-      ],
       "conformance": [
         "rust:tests/waffle_platform_test.rs#date::dates_match_node_for_clipping_calendar_boundaries_and_iso",
         "rust:tests/waffle_platform_test.rs#date::invalid_dates_unwind_and_retained_dates_survive_collection",
@@ -605,31 +332,14 @@
         "rust:tests/waffle_platform_test.rs#time::unsupported_temporal_forms_have_compile_time_diagnostics",
         "rust:tests/waffle_platform_test.rs#time::temporal_numeric_range_errors_and_returns_survive_allocating_finally",
         "node:tests/conformance/cases/08_date.ts"
-      ],
-      "wasi": [
-        "wasi:clocks/system-clock@0.3.0"
       ]
     },
     {
       "id": "compiler.p3_json",
       "name": "P3 JSON and Shared Guest Graphs",
       "tier": "tier-1-web-primaries",
+      "description": "Strict UTF-8 JSON serialization and parsing (JSON.stringify, JSON.parse)",
       "support": "partial",
-      "domain": "Production compiler: strict UTF-8 JSON parsing and compact serialization through the component boundary",
-      "invariants": [
-        "Parsed objects and mixed arrays preserve primitive tags, identity, nested mutation, and retained values across helpers, collection, and native suspension",
-        "Serialization preserves ECMAScript number formatting, duplicate-key replacement and property ordering; undefined fields are omitted and undefined array elements or holes become null",
-        "Undefined root serialization returns undefined; Dates produce ISO strings or null when invalid",
-        "Numeric error codes 1, 2, and 3 report syntax, unpaired surrogate escapes, and depth/cycles through catch/finally and declared WIT errors",
-        "Checked Rust codec adapters borrow disjoint guest storage outside measured helper data/stack; allocating loops and repeated large inputs reclaim temporary graphs",
-        "Pure JSON source tasks require no WASI imports; selected text helpers and P3 capabilities share the same guest memory"
-      ],
-      "differences": [
-        "Strings count Unicode scalars and reject unpaired surrogate escapes",
-        "Object keys must be strings; runtime delete, sparse arrays, and heterogeneous mutation are diagnosed. JSON value-tree reads preserve primitive tags.",
-        "Revivers, replacers, indentation, custom prototypes, sparse array literals, general array methods and extra array properties are unsupported",
-        "Unsupported byte-view, Stats, decoder, and Promise serialization throws numeric 12; errors are numbers rather than Error objects"
-      ],
       "conformance": [
         "rust:tests/json_helper_test.rs#linked_json_helpers_share_a_measured_layout_with_the_guest_heap",
         "rust:tests/json_helper_test.rs#guest_adapter_round_trips_json_in_disjoint_memory_without_growing",
@@ -665,33 +375,14 @@
         "rust:tests/waffle_platform_test.rs#context::large_argument_snapshots_reuse_storage_across_component_exports",
         "rust:tests/waffle_platform_test.rs#context::process_shadows_stay_pure_and_unsupported_context_forms_are_diagnosed",
         "node:tests/conformance/cases/01_json.ts"
-      ],
-      "wasi": []
+      ]
     },
     {
       "id": "compiler.p3_context",
       "name": "P3 Process Context",
       "tier": "tier-2-node-core",
+      "description": "Process execution context (process.env, process.argv, process.cwd)",
       "support": "partial",
-      "domain": "Production compiler: read-only process.env, process.argv, and process.cwd()",
-      "invariants": [
-        "Only selected wasi:cli/environment@0.3.0 functions are imported and read lazily once per instance",
-        "Cached argument-array identity and valid UTF-8 values survive component returns, helper calls, retained Promises, collection, and native suspension",
-        "Retained heap roots preserve instance-local snapshots while invocation temporaries remain reclaimable",
-        "Environment and arguments are read-only; assignment, deletion, mutating methods, and bulk writes are diagnosed through aliases, casts, containers, and helper calls",
-        "Environment-only tasks do not link JSON formatting or coercion helpers",
-        "Object.keys and string-valued Object.values produce independent snapshots in insertion order; duplicate native environment keys replace values without moving their keys",
-        "JSON snapshots preserve cached environment values and parsed copies are independent",
-        "Host failures trap without running guest finally; store disposal releases pending native work"
-      ],
-      "differences": [
-        "Arguments use the host-provided list without synthetic Node executable/script prefixes",
-        "The initial directory defaults to / only when absent; an explicitly empty directory remains empty",
-        "Text operations count Unicode scalars",
-        "Missing environment keys return undefined; Object.values throws 12 for nonstring fields in ordinary objects",
-        "Numeric-looking dictionary keys keep insertion order; JavaScript integer-key sorting is deferred under D2",
-        "Object.assign accepts plain object targets/sources and ignores nullish sources; other primitive sources, prototypes, and spread arguments remain unsupported"
-      ],
       "conformance": [
         "rust:tests/waffle_platform_test.rs#context::context_mutation_is_rejected_through_aliases_calls_and_containers",
         "rust:tests/waffle_platform_test.rs#context::context_reads_allow_helpers_and_independent_mutable_copies",
@@ -707,56 +398,30 @@
         "rust:tests/waffle_platform_test.rs#context::large_argument_snapshots_reuse_storage_across_component_exports",
         "rust:tests/waffle_platform_test.rs#context::process_shadows_stay_pure_and_unsupported_context_forms_are_diagnosed",
         "node:tests/conformance/cases/10_env.ts"
-      ],
-      "wasi": [
-        "wasi:cli/environment@0.3.0"
       ]
     },
     {
       "id": "web.guest_callbacks",
       "name": "Guest Function Values",
       "tier": "tier-1-web-primaries",
+      "description": "Calling synchronous guest function values with retained lexical captures",
       "support": "unsupported",
-      "domain": "Calling synchronous guest function values with retained lexical captures",
-      "invariants": [],
-      "differences": [
-        "Escaped callbacks and captures are deferred under D5."
-      ],
-      "conformance": [],
-      "wasi": []
+      "conformance": []
     },
     {
       "id": "web.timers",
       "name": "Timers",
       "tier": "tier-1-web-primaries",
+      "description": "Direct setTimeout/setInterval and clearTimeout/clearInterval with guest callbacks",
       "support": "unsupported",
-      "domain": "Direct setTimeout/setInterval and clearTimeout/clearInterval calls with synchronous guest callbacks and retained arguments",
-      "invariants": [],
-      "differences": [
-        "Callback timers are deferred under D5; direct waits use native P3 clocks."
-      ],
-      "conformance": [],
-      "wasi": []
+      "conformance": []
     },
     {
       "id": "web.promise_all",
       "name": "Typed Promise Combinators",
       "tier": "tier-1-web-primaries",
+      "description": "Typed Promise combinators (Promise.all, Promise.allSettled, Promise.race)",
       "support": "partial",
-      "domain": "Promise.all, Promise.allSettled, and Promise.race over dense typed arrays and tuples",
-      "invariants": [
-        "Operands are registered once; aggregate results preserve input order and retained identity",
-        "all rejects on the first observed rejection; allSettled retains status/value/reason records",
-        "race settles once and leaves losing operations owned until they complete",
-        "Finite heterogeneous tuple outcomes retain explicit static types",
-        "Empty all and allSettled settle to empty arrays; empty race remains pending and cannot escape its owning call",
-        "Shared observers register each operand once; joining does not sequentially await operands or rebuild pending lists on wake"
-      ],
-      "differences": [
-        "Requires a resolved WIT world and the pinned host threading features",
-        "Arbitrary iterables and thenables are unsupported; rejection payloads are numeric",
-        "Host cancellation drains the owning call, including empty races. Timer, fetch, HTTP reader, and supported filesystem AbortSignal operations retain native owners through acknowledgement; returned-stream ownership remains unfinished"
-      ],
       "conformance": [
         "rust:tests/waffle_wit_native_test.rs#promise_combinators_preserve_results_and_release_native_threads",
         "rust:tests/waffle_wit_native_test.rs#native_continuations_preserve_eager_prefixes_and_dependencies",
@@ -764,78 +429,89 @@
         "node:tests/conformance/cases/03_promise_all.ts",
         "rust:tests/p3_cancellation_test.rs#compiled_exports_acknowledge_host_cancellation_and_run_finally",
         "rust:tests/p3_cancellation_test.rs#compiled_empty_race_can_be_cancelled_without_native_work"
-      ],
-      "wasi": []
+      ]
     },
     {
       "id": "web.fetch",
       "name": "global.fetch",
       "tier": "tier-1-web-primaries",
+      "description": "Standard fetch client with Request/Response/Headers lowering to wasi:http/client@0.3.0",
       "support": "partial",
-      "domain": "fetch with string URLs or Request values, standard Request/Response/Headers, and the perry:http buffered GET facade",
-      "invariants": [
-        "Standard fetch lowers directly to wasi:http/client@0.3.0; compiler.p3_http_get records the supported request and response shapes"
-      ],
-      "differences": [
-        "AbortSignal cancellation and HTTP byte readers are supported; writable endpoints, piping, reader.closed, returned streams, and stream uploads remain unfinished. See compiler.p3_http_get for exact shapes and evidence"
-      ],
       "conformance": [
+        "rust:src/lib.rs#waffle_backend::http::tests::buffered_get_uses_real_p3_http_resources_and_preserves_headers_status_and_bytes",
+        "rust:src/lib.rs#waffle_backend::http::tests::bounded_responses_handle_exact_limits_overflow_and_repeated_four_mib_bodies",
+        "rust:src/lib.rs#waffle_backend::http::tests::metadata_and_transport_errors_release_resources_and_allow_reuse",
+        "rust:src/lib.rs#waffle_backend::http::tests::disposal_abandons_pending_headers_and_body_transfers",
+        "rust:src/lib.rs#waffle_backend::http::tests::typed_source_preserves_response_fields_headers_and_binary_body",
+        "rust:src/lib.rs#waffle_backend::http::tests::source_response_and_detached_views_survive_collection_and_repeated_calls",
+        "rust:src/lib.rs#waffle_backend::http::tests::source_validation_preserves_argument_order_and_errors_before_io",
+        "rust:src/lib.rs#waffle_backend::http::tests::json_fetch_checks_status_media_type_and_payload",
+        "rust:src/lib.rs#waffle_backend::http::tests::source_http_contract_rejects_unsupported_types",
+        "rust:src/lib.rs#waffle_backend::http::tests::source_binary_boundaries_keep_limits_and_completion_errors_separate_from_decoding",
+        "rust:src/lib.rs#waffle_backend::http::tests::http_sdk_checks_the_document_fixture_and_static_contract",
+        "rust:src/lib.rs#waffle_backend::http::tests::stored_http_operations_can_be_observed_repeatedly_but_not_abandoned",
+        "rust:tests/waffle_wit_native_test.rs#stored_http_requests_overlap_and_complete_both_channels",
+        "rust:tests/waffle_wit_native_test.rs#resolved_world_http_get_uses_native_component_bindings",
+        "rust:tests/waffle_wit_native_test.rs#resolved_world_http_domain_failures_release_resources_before_reuse",
+        "rust:tests/waffle_wit_native_test.rs#resolved_world_http_disposal_releases_suspended_headers_and_body",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_consumes_body_once_and_preserves_http_status",
+        "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_preserve_body_identity_and_consumption",
+        "rust:tests/waffle_wit_native_test.rs#byte_stream_iteration_preserves_exits_errors_and_bounded_ownership",
+        "rust:tests/waffle_wit_native_test.rs#fetch_buffering_grows_with_received_data_and_available_guest_memory",
+        "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_release_pending_requests_and_cancel_owned_transfers",
+        "rust:tests/waffle_wit_native_test.rs#standard_byte_readers_stream_beyond_guest_memory_and_reject_completion_failure",
+        "rust:tests/waffle_wit_native_test.rs#native_byte_streams_reject_invalid_shapes_and_synchronous_effects",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_owners",
+        "rust:tests/waffle_wit_native_test.rs#abort_signals_preserve_identity_follow_requests_and_survive_collection",
+        "rust:tests/waffle_wit_native_test.rs#fetch_abort_signals_cancel_selected_native_owners_and_match_node",
+        "rust:tests/waffle_wit_native_test.rs#abort_signals_reject_invalid_types_and_mutation",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_resolves_at_headers_and_matches_node",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_releases_failures_and_grows_bodies_incrementally",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_rejects_unconsumed_body_at_call_boundary",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_runs_as_a_top_level_node_and_p3_command",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_uploads_snapshot_bodies_and_options_and_match_node",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_validates_methods_and_finishes_null_bodies",
+        "rust:src/lib.rs#waffle_backend::http::fetch::algorithms::tests::methods_and_header_bytes_follow_fetch_validation",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_json_and_array_buffers_preserve_types_identity_and_failures",
         "rust:tests/waffle_wit_native_test.rs#standard_fetch_headers_match_node_and_retain_metadata_after_consumption",
-        "rust:tests/waffle_wit_native_test.rs#decoded_string_literals_preserve_latin1_without_encoding_repair"
-      ],
-      "wasi": [
-        "wasi:http/client@0.3.0",
-        "wasi:http/types@0.3.0"
+        "rust:tests/waffle_wit_native_test.rs#decoded_string_literals_preserve_latin1_without_encoding_repair",
+        "rust:tests/waffle_wit_native_test.rs#standard_headers_construct_mutate_and_snapshot_without_host_imports",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_accepts_header_objects_and_pairs_with_immutable_responses",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_optional_fields_and_validation_rejections_match_node",
+        "rust:tests/fetch_url_test.rs#http_url_normalization_matches_node_for_host_path_and_query_shapes",
+        "rust:tests/fetch_url_test.rs#invalid_http_authorities_and_short_outputs_fail_before_io",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_normalizes_runtime_urls_before_native_io_and_matches_node",
+        "rust:tests/fetch_url_test.rs#relative_redirect_locations_match_node",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_redirect_modes_replay_cleanup_and_origin_rules_match_node",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_redirects_close_gated_bodies_without_buffering_them",
+        "rust:tests/waffle_wit_native_test.rs#standard_response_values_and_bodies_match_node_without_host_imports",
+        "rust:tests/waffle_wit_native_test.rs#standard_request_values_validate_and_snapshot_without_host_imports",
+        "rust:tests/waffle_wit_native_test.rs#standard_fetch_request_snapshots_transfers_and_reuse_match_node",
+        "rust:tests/waffle_wit_native_test.rs#standard_request_body_methods_share_decoding_and_consumption_without_host_imports",
+        "rust:tests/waffle_wit_native_test.rs#standard_request_body_consumption_requires_async_wit_effects",
+        "rust:tests/fetch_url_test.rs#request_urls_retain_fragments_while_transport_coordinates_exclude_them"
       ]
     },
     {
       "id": "node.process_exit",
       "name": "CLI exit status",
       "tier": "tier-2-node-core",
+      "description": "Process termination and exit status (process.exit, process.exitCode)",
       "support": "partial",
-      "domain": "Global process.exit with omitted, literal undefined, or numeric safe-integer codes; direct process.exitCode reads, numeric assignments, and clearing with literal undefined",
-      "invariants": [
-        "Maps directly to wasi:cli/exit@0.3.0#exit-with-code with an eight-bit status",
-        "Immediately terminates CLI scripts and named component exports without running subsequent statements or finally blocks",
-        "Validates numeric codes before invoking the host; a returning exit host traps",
-        "process.exitCode starts undefined, retains its assigned integer across named calls, and publishes command status only after source execution and owned work finish",
-        "Omitted process.exit() uses the stored exitCode; an explicit undefined argument selects zero, matching the pinned Node runtime",
-        "Uncaught CLI source failures return the standard failed wasi:cli/run result after source finally cleanup; failed module initialization remains failed on later calls"
-      ],
-      "differences": [
-        "Finite guest RangeError objects for invalid numeric codes remain required restoration work",
-        "Nonnumeric values, extra exit arguments, compound exitCode assignments, and optional-valued assignment expressions are diagnosed; invalid runtime numeric values currently trap"
-      ],
       "conformance": [
         "rust:tests/production_test.rs#process_exit_uses_standard_wasi_and_matches_node_status",
         "rust:tests/production_test.rs#named_exports_use_standard_wasi_exit_and_validate_its_arguments",
         "rust:tests/production_test.rs#process_exit_code_preserves_execution_and_matches_node_command_status",
         "rust:tests/production_test.rs#named_exports_retain_exit_code_without_terminating_the_host",
         "rust:tests/production_test.rs#uncaught_cli_failures_return_failed_wit_results_and_preserve_finally"
-      ],
-      "wasi": [
-        "wasi:cli/exit@0.3.0",
-        "wasi:cli/run@0.3.0"
       ]
     },
     {
       "id": "web.uint8array",
       "name": "Uint8Array Byte Views",
       "tier": "tier-1-web-primaries",
+      "description": "Uint8Array byte construction, indexed access, and shared subviews",
       "support": "partial",
-      "domain": "Byte construction, indexed access, and shared subviews used by randomness and filesystem APIs",
-      "invariants": [
-        "Numeric lengths create zero-filled views; array/view inputs copy the visible bytes",
-        "Construction and indexed writes apply wrapping byte conversion; invalid indices do not alias valid elements",
-        "Subarrays share storage and resolve negative bounds relative to the current view",
-        "Byte views survive object properties, helper calls, retained Promise outcomes, and collection",
-        "Canonical list<u8> parameters and results preserve arbitrary bytes and copy visible subview ranges before reclamation"
-      ],
-      "differences": [
-        "Other typed-array classes, ArrayBuffer interoperability, Node Buffer compatibility, and broader Uint8Array methods are outside the tested subset",
-        "JSON serialization of byte views throws numeric 12; callers must choose an explicit text or numeric-array representation"
-      ],
       "conformance": [
         "rust:tests/waffle_bytes_test.rs#byte_views_preserve_aliases_copies_and_lengths",
         "rust:tests/waffle_bytes_test.rs#byte_conversions_and_out_of_bounds_access_are_explicit",
@@ -846,34 +522,23 @@
         "rust:tests/waffle_bytes_test.rs#canonical_bytes_round_trip_arbitrary_data_and_reclaim_all_outcomes",
         "rust:tests/waffle_bytes_test.rs#direct_byte_results_and_mixed_text_parameters_use_distinct_descriptors",
         "rust:tests/waffle_bytes_test.rs#byte_entry_outcomes_survive_stored_primitive_tasks"
-      ],
-      "wasi": []
+      ]
     },
     {
       "id": "lang.eval",
       "name": "Dynamic Code Evaluation (eval / new Function)",
       "tier": "non-goals",
+      "description": "Runtime evaluation of dynamic JavaScript strings (eval, new Function)",
       "support": "unsupported",
-      "domain": "Runtime evaluation of dynamic JavaScript strings",
-      "invariants": [],
-      "differences": [
-        "Runtime code generation is outside the static TypeScript contract."
-      ],
-      "conformance": [],
-      "wasi": []
+      "conformance": []
     },
     {
       "id": "node.child_process",
       "name": "Child Process Spawning",
       "tier": "non-goals",
+      "description": "Spawning arbitrary OS processes via fork / exec",
       "support": "unsupported",
-      "domain": "Spawning arbitrary OS processes via fork / exec",
-      "invariants": [],
-      "differences": [
-        "Arbitrary host process spawning is outside the supported capability contract."
-      ],
-      "conformance": [],
-      "wasi": []
+      "conformance": []
     }
   ]
 }
