@@ -2,7 +2,8 @@
 
 **Perry-WIT** compiles static TypeScript ahead-of-time directly into lightweight, high-performance WebAssembly components targeting **WASI 0.3 (Preview 3)**.
 
-Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through Perry HIR and WAFFLE SSA straight to native WebAssembly. This produces self-contained components ranging from **~10 KB** for pure compute to **tens of KB** when using filesystem operations and HTTP streaming—with instant startup times, low linear memory usage, and zero runtime bloat.
+Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
+[Perry](https://www.perryts.com) HIR and [WAFFLE](https://crates.io/crates/waffle) SSA straight to native WebAssembly. This produces self-contained components ranging from **~10 KB** for pure compute to **tens of KB** when using filesystem operations and HTTP streaming—with instant startup times, low linear memory usage, and zero runtime bloat.
 
 - **Dual-mode authoring**: Write standalone CLI commands using top-level `await`, export typed functions matching a WIT interface, or combine both in a single source file.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
@@ -121,7 +122,7 @@ node scripts/check_conformance.mjs
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 
-# End-to-end HTTP integration and hermetic Nix flake checks
+# End-to-end HTTP integration
 ./scripts/test_e2e.sh
 nix flake check
 ```
@@ -217,8 +218,9 @@ If an unhandled trap or abnormal exit occurs, the host reclaims all active resou
 
 ## Contributing
 
-Develop inside `nix develop` to ensure matching toolchain versions across dependencies.
+Human + AIs are welcome: “Act always so as to increase the number of choices” — [Heinz von Foerster](https://de.wikipedia.org/wiki/Heinz_von_Foerster).
 
+Develop inside `nix develop` to ensure matching toolchain versions across dependencies.
 Before submitting changes, ensure all formatting, lints, tests, and flake checks pass:
 
 ```sh
