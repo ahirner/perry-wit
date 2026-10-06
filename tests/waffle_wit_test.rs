@@ -21,6 +21,22 @@ fn literal_projections_avoid_materialization() -> Result<()> {
     let engine = Engine::default();
     for (kind, bodies, helpers) in [
         (
+            "object field",
+            [
+                "return {first:x, length:x+1, last:x+2}.length;",
+                "const values = {first:x, length:x+1, last:x+2}; return values.length;",
+            ],
+            "",
+        ),
+        (
+            "array length",
+            [
+                "return [x, x+1, x+2].length + [].length + x - 2;",
+                "const values = [x, x+1, x+2]; return values.length + [].length + x - 2;",
+            ],
+            "",
+        ),
+        (
             "dense array",
             [
                 "return [x, x + 1, x + 2][1];",
@@ -104,7 +120,7 @@ fn literal_projections_avoid_materialization() -> Result<()> {
 }
 
 #[test]
-fn immediate_json_string_projection_preserves_effects_duplicates_and_live_values() -> Result<()> {
+fn immediate_literal_projections_preserve_effects_duplicates_and_live_values() -> Result<()> {
     let source = r#"
         function text(trace:number[], value:number):string {
             trace.push(value); return 'p' + (value === 7 ? 'last' : 'a');
@@ -124,6 +140,16 @@ fn immediate_json_string_projection_preserves_effects_duplicates_and_live_values
             trace.push(duplicate.length);
             const kept=JSON.parse(JSON.stringify({text:text(trace,8),unused:churn()})).text;
             trace.push(kept.length);
+            const plain=({first:text(trace,10),selected:text(trace,11),last:churn()}).selected;
+            trace.push(plain.length);
+            trace.push([text(trace,12),text(trace,13)].length);
+            try {trace.push([text(trace,14),fail(),text(trace,15)].length);}
+            catch(error){trace.push(error as number);}
+            const record={count:1};
+            const alias=({keep:record,unused:text(trace,16)}).keep;
+            alias.count=2; trace.push(record.count);
+            trace.push(({n:1,n:2}).n);
+            trace.push(1/({n:-0}).n);
             return trace;
         }
     "#;
@@ -145,7 +171,31 @@ fn immediate_json_string_projection_preserves_effects_duplicates_and_live_values
     for _ in 0..16 {
         assert_eq!(
             run.call(&mut store, ())?.0,
-            [1., 2., 3., 2., 4., 9., 6., 7., 5., 8., 2.]
+            [
+                1.,
+                2.,
+                3.,
+                2.,
+                4.,
+                9.,
+                6.,
+                7.,
+                5.,
+                8.,
+                2.,
+                10.,
+                11.,
+                2.,
+                12.,
+                13.,
+                2.,
+                14.,
+                9.,
+                16.,
+                2.,
+                2.,
+                f64::NEG_INFINITY
+            ]
         );
     }
     Ok(())

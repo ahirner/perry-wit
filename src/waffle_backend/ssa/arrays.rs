@@ -26,13 +26,13 @@ pub(super) fn literal_projection<'a>(
 }
 
 impl FunctionLowerer<'_> {
-    pub(super) fn project_array_literal(
+    pub(super) fn project_values<'e>(
         &mut self,
-        items: &[Expr],
+        items: impl Iterator<Item = &'e Expr>,
         selected: usize,
     ) -> Result<Value> {
         let mut result = None;
-        for (index, item) in items.iter().enumerate() {
+        for (index, item) in items.enumerate() {
             let value = self.expression(item)?;
             if index == selected {
                 result = Some(value);

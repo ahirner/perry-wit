@@ -100,6 +100,14 @@ impl FunctionLowerer<'_> {
         match expr {
             Expr::PropertyGet {
                 object, property, ..
+            } if property == "length" && matches!(object.as_ref(), Expr::Array(_)) => {
+                HirType::Number
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if let Some((_, ty)) = self.literal_field_projection(object, property) => ty,
+            Expr::PropertyGet {
+                object, property, ..
             } if self.json_string_projection(object, property).is_some() => HirType::String,
             Expr::Uint8ArrayGet { array, index }
             | Expr::IndexGet {

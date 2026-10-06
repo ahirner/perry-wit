@@ -1515,13 +1515,28 @@ impl<'a> FunctionLowerer<'a> {
         match expr {
             Expr::PropertyGet {
                 object, property, ..
+            } if property == "length"
+                && let Expr::Array(items) = object.as_ref() =>
+            {
+                for item in items {
+                    self.expression(item)?;
+                }
+                self.expression(&Expr::Number(items.len() as f64))
+            }
+            Expr::PropertyGet {
+                object, property, ..
+            } if let Some((selected, _)) = self.literal_field_projection(object, property) => {
+                self.project_fields(object, selected)
+            }
+            Expr::PropertyGet {
+                object, property, ..
             } if let Some((literal, selected)) = self.json_string_projection(object, property) => {
-                self.project_json_string(literal, selected)
+                self.project_fields(literal, selected)
             }
             Expr::IndexGet { object, index }
                 if let Some((items, selected)) = arrays::literal_projection(object, index) =>
             {
-                self.project_array_literal(items, selected)
+                self.project_values(items.iter(), selected)
             }
             Expr::PropertySet { object, .. }
             | Expr::IndexSet { object, .. }
