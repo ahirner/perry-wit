@@ -98,28 +98,3 @@ nix develop -c env \
   PERRY_GENERATIVE_REPLAY=target/generative/run-EXAMPLE/minimal.json \
   cargo test --test generative_test generated_programs_match_node -- --nocapture
 ```
-
-## Sustained Campaigns & Metrics
-
-To tally results across sustained fuzzing runs, create a goal manifest JSON file beside the `target/generative/run-*` directories:
-
-`startedUnix` uses Unix seconds, matching campaign reports. This example starts at 2026-10-06 00:00 UTC.
-
-```json
-{
-  "startedUnix": 1791244800,
-  "continueUntilLocal": "2026-10-06T20:00:00"
-}
-```
-
-Then run the tally script:
-
-```sh
-nix develop -c node scripts/tally_generative.mjs target/generative/goal-manifest.json
-```
-
-The tally report:
-- Includes only completed matching programs and total input executions.
-- Deduplicates distinct TypeScript source programs using SHA-256 hashes.
-- Excludes diagnostic replay runs.
-- Accurately tracks in-progress runs by counting only verified prefixes.
