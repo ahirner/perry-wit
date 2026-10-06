@@ -19,13 +19,14 @@ fn compile_records(source: &str) -> Result<WaffleCompiled> {
 #[test]
 fn literal_projections_avoid_materialization() -> Result<()> {
     let engine = Engine::default();
-    for (kind, bodies) in [
+    for (kind, bodies, helpers) in [
         (
             "dense array",
             [
                 "return [x, x + 1, x + 2][1];",
                 "const values:number[] = [x, x + 1, x + 2]; return values[1];",
             ],
+            "",
         ),
         (
             "Date timestamp",
@@ -33,6 +34,7 @@ fn literal_projections_avoid_materialization() -> Result<()> {
                 "return new Date(x + 1).getTime();",
                 "const value = new Date(x + 1); return value.getTime();",
             ],
+            "",
         ),
         (
             "byte array",
@@ -40,12 +42,21 @@ fn literal_projections_avoid_materialization() -> Result<()> {
                 "return new Uint8Array([x, x + 1, x + 2])[1] + 0;",
                 "const values = new Uint8Array([x, x + 1, x + 2]); return values[1] + 0;",
             ],
+            "",
+        ),
+        (
+            "JSON string field",
+            [
+                "return identity(JSON.parse(JSON.stringify({text:'abc'})).text.length) + x - 2;",
+                "const text=JSON.stringify({text:'abc'}); return identity(JSON.parse(text).text.length) + x - 2;",
+            ],
+            "function identity(value:number):number {return value;}\n",
         ),
     ] {
         let mut measurements = Vec::new();
         for body in bodies {
             let compiled = compile_world(
-                &format!("export function run(x:number):number {{{body}}}"),
+                &format!("{helpers}export function run(x:number):number {{{body}}}"),
                 "package test:boundary; world boundary {export run:func(x:f64)->f64;}",
             )?;
             let bytes = compiled.component.as_ref().unwrap().len();
@@ -88,6 +99,71 @@ fn literal_projections_avoid_materialization() -> Result<()> {
         println!(
             "{kind} projection versus materialization (component bytes, allocations for 16 calls): {measurements:?}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn immediate_json_string_projection_preserves_effects_duplicates_and_live_values() -> Result<()> {
+    let source = r#"
+        function text(trace:number[], value:number):string {
+            trace.push(value); return 'p' + (value === 7 ? 'last' : 'a');
+        }
+        function fail():string {throw 9;}
+        function churn():string {
+            for(let i=0;i<1000;i++){const garbage:string[]=['a','b'];}
+            return '';
+        }
+        export function run():number[] {
+            const trace:number[]=[];
+            const selected=JSON.parse(JSON.stringify({first:text(trace,1),selected:text(trace,2),last:text(trace,3)})).selected;
+            trace.push(selected.length);
+            try {const value=JSON.parse(JSON.stringify({keep:text(trace,4),other:fail(),last:text(trace,5)})).keep;trace.push(value.length);}
+            catch(error){trace.push(error as number);}
+            const duplicate=JSON.parse(JSON.stringify({text:text(trace,6),text:text(trace,7)})).text;
+            trace.push(duplicate.length);
+            const kept=JSON.parse(JSON.stringify({text:text(trace,8),unused:churn()})).text;
+            trace.push(kept.length);
+            return trace;
+        }
+    "#;
+    let compiled = compile_world(
+        source,
+        "package test:boundary; world boundary {export run:func()->list<f64>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new()
+            .memory_size(8 * 1024 * 1024)
+            .build(),
+    );
+    store.limiter(|limits: &mut StoreLimits| limits);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(), (Vec<f64>,)>(&mut store, "run")?;
+    for _ in 0..16 {
+        assert_eq!(
+            run.call(&mut store, ())?.0,
+            [1., 2., 3., 2., 4., 9., 6., 7., 5., 8., 2.]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn immediate_json_string_projection_preserves_string_boundaries() -> Result<()> {
+    let compiled = compile_world(
+        "export function run(value:string):string {return JSON.parse(JSON.stringify({text:value})).text;}",
+        "package test:boundary; world boundary {export run:func(value:string)->string;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(String,), (String,)>(&mut store, "run")?;
+    for input in ["", "a\0b", "é漢", "e\u{301}", "😀", "\"\\\n"] {
+        assert_eq!(run.call(&mut store, (input.into(),))?.0, input);
     }
     Ok(())
 }

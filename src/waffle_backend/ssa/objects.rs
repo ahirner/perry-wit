@@ -16,6 +16,55 @@ use perry_hir::{
 use waffle::{Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
+    /// String-only plain fields survive a JSON round trip without conversion or hooks.
+    pub(super) fn json_string_projection<'e>(
+        &self,
+        receiver: &'e Expr,
+        property: &str,
+    ) -> Option<(&'e Expr, usize)> {
+        let serialized = match receiver {
+            Expr::JsonParse(input) | Expr::JsonParseTyped { text: input, .. } => input,
+            _ => return None,
+        };
+        let literal = match serialized.as_ref() {
+            Expr::JsonStringify(input) => input.as_ref(),
+            Expr::JsonStringifyFull(input, replacer, space)
+                if matches!(replacer.as_ref(), Expr::Null | Expr::Undefined)
+                    && matches!(space.as_ref(), Expr::Null | Expr::Undefined) =>
+            {
+                input.as_ref()
+            }
+            _ => return None,
+        };
+        let mut selected = None;
+        for (index, (name, value)) in literal_properties(self.contract, literal)
+            .ok()??
+            .enumerate()
+        {
+            if matches!(name, "__proto__" | "toJSON")
+                || !crate::waffle_backend::values::is_string_type(&self.infer_expr_type(value))
+            {
+                return None;
+            }
+            if name == property {
+                selected = Some(index);
+            }
+        }
+        selected.map(|index| (literal, index))
+    }
+
+    pub(super) fn project_json_string(&mut self, literal: &Expr, selected: usize) -> Result<Value> {
+        let fields = literal_properties(self.contract, literal)?.expect("proven literal fields");
+        let mut result = None;
+        for (index, (_, expression)) in fields.enumerate() {
+            let value = self.expression(expression)?;
+            if index == selected {
+                result = Some(value);
+            }
+        }
+        Ok(result.expect("proven selected field"))
+    }
+
     pub(super) fn object_assign(&mut self, target: &Expr, sources: &[Expr]) -> Result<Value> {
         ensure!(
             is_object(&self.infer_expr_type(target)),

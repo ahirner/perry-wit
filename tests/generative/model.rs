@@ -53,6 +53,7 @@ pub enum Number {
     ByteGet(Box<Self>, Box<Self>, Box<Self>, u8),
     EncodedLength(Box<Text>, Box<Self>, Box<Self>),
     JsonLength(Box<Text>),
+    JsonStoredLength(Box<Text>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +225,10 @@ impl Display for Number {
                 f,
                 "(new TextEncoder().encode({value}).subarray({start}, {end}).byteLength)"
             ),
+            Self::JsonStoredLength(value) => write!(
+                f,
+                "identity(JSON.parse([JSON.stringify({{text:{value}}})][0]).text.length)"
+            ),
             Self::JsonLength(value) => write!(
                 f,
                 "identity(JSON.parse(JSON.stringify({{text:{value}}})).text.length)"
@@ -279,10 +284,6 @@ pub struct Generator {
 }
 
 impl Generator {
-    pub fn new(seed: u64) -> Self {
-        Self::with_apis(seed, 2)
-    }
-
     pub fn with_apis(seed: u64, api_level: u8) -> Self {
         Self {
             state: seed,
@@ -310,7 +311,8 @@ impl Generator {
             match self.pick(match self.api_level {
                 0 => 10,
                 1 => 12,
-                _ => 16,
+                2..=4 => 16,
+                _ => 17,
             }) {
                 0 => self.number(0),
                 1..=3 => {
@@ -363,7 +365,8 @@ impl Generator {
                     Box::new(self.number(child)),
                     Box::new(self.number(child)),
                 ),
-                _ => Number::JsonLength(Box::new(self.text(child))),
+                15 => Number::JsonLength(Box::new(self.text(child))),
+                _ => Number::JsonStoredLength(Box::new(self.text(child))),
             }
         }
     }
@@ -546,6 +549,12 @@ impl Number {
                         .map(|v| Self::EncodedLength(text.clone(), start.clone(), Box::new(v))),
                 );
             }
+            Self::JsonStoredLength(value) => candidates.extend(
+                value
+                    .reductions()
+                    .into_iter()
+                    .map(|v| Self::JsonStoredLength(Box::new(v))),
+            ),
             Self::JsonLength(value) => candidates.extend(
                 value
                     .reductions()

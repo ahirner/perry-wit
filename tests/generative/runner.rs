@@ -172,7 +172,7 @@ pub fn campaign() -> Result<()> {
     let mut report = json!({
         "seed":seed, "count":programs.len() * forms.len(), "depth":depth,
         "completed":0, "status":"running", "startedUnix":started,
-        "grammarVersion":6, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
+        "grammarVersion":7, "apiLevel":api_level, "inputsPerProgram":INPUTS.len(),
         "fuelPerCall":fuel,
         "replay":env::var_os("PERRY_GENERATIVE_REPLAY").is_some(),
     });

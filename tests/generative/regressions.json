@@ -5,5 +5,7 @@
   {"Array":[{"Mark":"Input"},{"Mark":{"Integer":1}},{"Mark":{"Integer":2}},0]},
   {"ByteGet":["Input","Input","Input",0]},
   {"ByteGet":[{"Mark":"Input"},{"Mark":{"Integer":1}},{"Mark":{"Integer":2}},0]},
-  {"DateTime":{"ByteGet":["Input","Input",{"EncodedLength":[{"Literal":""},"Input",{"JsonLength":{"Literal":""}}]},2]}}
+  {"DateTime":{"ByteGet":["Input","Input",{"EncodedLength":[{"Literal":""},"Input",{"JsonLength":{"Literal":""}}]},2]}},
+  {"JsonStoredLength":{"Concat":[{"Literal":"é\u0000"},{"Literal":"漢"}]}},
+  {"JsonLength":{"Concat":[{"Literal":"é\u0000"},{"Literal":"漢"}]}}
 ]

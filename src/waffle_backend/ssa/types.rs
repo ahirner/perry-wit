@@ -98,6 +98,9 @@ impl StringKind {
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
         match expr {
+            Expr::PropertyGet {
+                object, property, ..
+            } if self.json_string_projection(object, property).is_some() => HirType::String,
             Expr::Uint8ArrayGet { array, index }
             | Expr::IndexGet {
                 object: array,

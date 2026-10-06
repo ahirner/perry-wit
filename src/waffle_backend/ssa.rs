@@ -1513,6 +1513,11 @@ impl<'a> FunctionLowerer<'a> {
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::PropertyGet {
+                object, property, ..
+            } if let Some((literal, selected)) = self.json_string_projection(object, property) => {
+                self.project_json_string(literal, selected)
+            }
             Expr::IndexGet { object, index }
                 if let Some((items, selected)) = arrays::literal_projection(object, index) =>
             {

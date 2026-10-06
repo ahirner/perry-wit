@@ -23,7 +23,7 @@ The grammar covers arithmetic, comparisons, short-circuit booleans, conditionals
 - `2` (default): also `Date.getTime`, `Uint8Array` conversion/indexing, `TextEncoder` plus byte subviews, and JSON serialization/parse/field reads.
 - `3`: all level-two expressions plus direct and stored/repeated awaits of `node:timers/promises.setTimeout`, for six forms per tree.
 - `4`: also pending `node:fs/promises.readFile` and `writeFile`/read-back forms, for eight forms per tree.
-- `5`: also retained `stat` results, `readdir`, and binary `readFile` with UTF-8 decoding, for ten forms per tree.
+- `5`: also retained `stat` results, `readdir`, and binary `readFile` with UTF-8 decoding, for ten forms per tree. JSON expressions include serialization stored in a temporary array before parsing, which keeps the generic parser path covered alongside direct string-field projections.
 
 Every added expression participates in typed structural reduction.
 Timer variants run against the real Node timer API and the production WASI P3 clock host; only values and ordered source effects are compared, not wall-clock timing.

@@ -29,8 +29,8 @@ fn generative_worker() -> Result<()> {
 #[test]
 fn generation_and_reduction_preserve_replay() -> Result<()> {
     for seed in 0..64 {
-        let expression = Generator::new(seed).number(3);
-        assert_eq!(expression, Generator::new(seed).number(3));
+        let expression = Generator::with_apis(seed, 5).number(3);
+        assert_eq!(expression, Generator::with_apis(seed, 5).number(3));
         let program = Program {
             expression,
             form: Form::Direct,
