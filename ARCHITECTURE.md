@@ -2,10 +2,6 @@
 
 Perry-WIT compiles static TypeScript directly to WebAssembly components targeting WASI 0.3 (Preview 3) through Perry HIR and WAFFLE SSA.
 
-### Unified Pipeline
-
-All compiler targets—the CLI, public Rust library API, Nix derivations, and integration test suites—converge on the exact same lowering pipeline and resolved-WIT component encoder. Tests exercise the identical encoding and validation path used in production.
-
 ## Principles
 
 1. **Ahead-of-Time Execution**
@@ -29,7 +25,7 @@ All compiler targets—the CLI, public Rust library API, Nix derivations, and in
 7. **Reproducible Evidence**
    Nix flakes pin all toolchain versions, compilers, and interface definitions. Differential testing against Node.js establishes source-level equivalence. Controlled WASI 0.3 hosts verify canonical ABI compliance, stackful suspension, resource lifetimes, and cleanup.
 
-## Lowering Pipeline
+## Lowering
 
 The compiler layers cooperate to transform high-level TypeScript into validated WASI 0.3 WebAssembly components:
 
