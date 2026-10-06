@@ -29,6 +29,7 @@ pub(super) fn emit(
         lift_canonical: builder::declare(module, "bytes.lift", &[I32, I32], &[I32]),
         new: builder::declare(module, "bytes.new", &[F64], &[I32, F64]),
         copy: builder::declare(module, "bytes.copy", &[I32], &[I32]),
+        copy_into: builder::declare(module, "bytes.copy-into", &[I32, I32, F64], &[I32, F64]),
         get: builder::declare(module, "bytes.get", &[I32, F64], &[F64]),
         to_byte: builder::declare(module, "bytes.to-byte", &[F64], &[I32]),
         set: builder::declare(module, "bytes.set", &[I32, F64, F64], &[]),
@@ -116,6 +117,45 @@ pub(super) fn emit(
     );
     b.ret(&[result]);
     b.finish(module, helpers.copy)?;
+
+    let mut b = Builder::new(module, helpers.copy_into, memory);
+    let target = b.param(0);
+    let source = b.param(1);
+    let offset = b.param(2);
+    let zero = b.number(0.0);
+    let ordered = b.op(Op::F64Eq, &[offset, offset], I32);
+    let offset = b.op(Op::Select, &[offset, zero, ordered], F64);
+    let offset = b.op(Op::F64Trunc, &[offset], F64);
+    let target_length = b.load(target, LENGTH, I32);
+    let target_length = b.op(Op::F64ConvertI32U, &[target_length], F64);
+    let length = b.load(source, LENGTH, I32);
+    let source_length = b.op(Op::F64ConvertI32U, &[length], F64);
+    let end = b.op(Op::F64Add, &[offset, source_length], F64);
+    let positive = b.op(Op::F64Ge, &[offset, zero], I32);
+    let within = b.op(Op::F64Le, &[end, target_length], I32);
+    let valid = b.op(Op::I32And, &[positive, within], I32);
+    let copy = b.body.add_block();
+    let reject = b.body.add_block();
+    b.branch(valid, copy, reject);
+    b.block = reject;
+    let error = b.integer(1);
+    let code = b.number(1.0);
+    b.ret(&[error, code]);
+    b.block = copy;
+    let offset = b.op(Op::I32TruncF64U, &[offset], I32);
+    let destination = b.load(target, DATA, I32);
+    let destination = b.op(Op::I32Add, &[destination, offset], I32);
+    let source = b.load(source, DATA, I32);
+    b.effect(
+        Op::MemoryCopy {
+            src_mem: memory,
+            dst_mem: memory,
+        },
+        &[destination, source, length],
+    );
+    let success = b.integer(0);
+    b.ret(&[success, zero]);
+    b.finish(module, helpers.copy_into)?;
 
     let mut b = Builder::new(module, valid_index, memory);
     let descriptor = b.param(0);

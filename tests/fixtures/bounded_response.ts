@@ -24,24 +24,3 @@ async function readBounded(response: Response, limit: number): Promise<Uint8Arra
     reader.releaseLock();
   }
 }
-
-type Outcome = { ok: true } | { ok: false };
-
-async function read(path: string): Promise<string> {
-  const response = await fetch('http://127.0.0.1:8080' + path, { headers: { accept: 'application/json' } });
-  if (response.status !== 200) {
-    const body = response.body;
-    if (body !== null) await body.cancel();
-    throw 12;
-  }
-  return new TextDecoder('utf-8', { fatal: true }).decode(await readBounded(response, 65536));
-}
-
-export async function runRun(): Promise<Outcome> {
-  const first = JSON.parse(await read('/doc1.json'));
-  const second = JSON.parse(await read('/doc2.json'));
-  const output = JSON.stringify({ first, second });
-  if (typeof output !== "string") return { ok: false };
-  console.log(output);
-  return { ok: true };
-}

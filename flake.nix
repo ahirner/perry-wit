@@ -110,7 +110,7 @@
                 exit 1
               fi
             done
-            cp types/p3.d.ts "$out/include/"
+            cp types/*.d.ts "$out/include/"
           '';
         };
 
@@ -118,7 +118,7 @@
         coreHelpers = pkgs.runCommand "perry-wit-core-helpers-0.1.0" {} ''
           mkdir -p "$out/lib" "$out/include"
           cp ${perryWitBin}/lib/perry-wit-helpers/*.wasm "$out/lib/"
-          cp ${perryWitBin}/include/p3.d.ts "$out/include/"
+          cp ${perryWitBin}/include/*.d.ts "$out/include/"
         '';
 
         # Example WASIp3 component hermetically compiled using perry-wit CLI and dynamic WASI WIT

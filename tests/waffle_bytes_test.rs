@@ -347,3 +347,46 @@ async fn run(source: &str, inputs: &[f64]) -> Result<Vec<f64>> {
     assert_eq!(results, serde_json::from_slice::<Vec<f64>>(&node.stdout)?);
     Ok(results)
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn typed_array_set_preserves_overlap_ranges_offsets_and_failure_atomicity() -> Result<()> {
+    let source = r#"
+    export function run(offset:number):number {
+      const bytes=new Uint8Array([1,2,3,4,5]);
+      bytes.set(bytes.subarray(0,4),1);
+      if(bytes[0]!==1||bytes[1]!==1||bytes[2]!==2||bytes[3]!==3||bytes[4]!==4)throw 1;
+      bytes.set(bytes.subarray(1),0);
+      if(bytes[0]!==1||bytes[1]!==2||bytes[2]!==3||bytes[3]!==4||bytes[4]!==4)throw 2;
+      const target=bytes.subarray(1,4);
+      try {target.set(new Uint8Array([7,8]),offset);}
+      catch {return bytes[0]*10000+bytes[1]*1000+bytes[2]*100+bytes[3]*10+bytes[4];}
+      return bytes[0]*10000+bytes[1]*1000+bytes[2]*100+bytes[3]*10+bytes[4];
+    }"#;
+    let inputs = [
+        f64::NAN,
+        -0.9,
+        1.9,
+        2.,
+        -1.,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        1e20,
+    ];
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("set.mts");
+    fs::write(
+        &script,
+        format!(
+            "{source}\nconsole.log(JSON.stringify([NaN,-0.9,1.9,2,-1,Infinity,-Infinity,1e20].map(run)));"
+        ),
+    )?;
+    let node = Command::new("node").arg(script).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: Vec<f64> = serde_json::from_slice(&node.stdout)?;
+    assert_eq!(run(source, &inputs).await?, expected);
+    Ok(())
+}

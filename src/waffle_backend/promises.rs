@@ -338,7 +338,7 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || super::values::is_boxed_union(ty)
         || super::structured::is_string_array(ty)
         || matches!(ty, HirType::Array(_) | HirType::Tuple(_))
-        || super::http::is_response(ty)
+        || super::http::fetch::is_response(ty)
         || super::http::headers::is_headers(ty)
         || super::http::request::is_request(ty)
         || super::streams::web::Kind::of(ty).is_some()

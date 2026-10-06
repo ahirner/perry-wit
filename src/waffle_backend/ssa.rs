@@ -466,7 +466,7 @@ impl<'a> FunctionLowerer<'a> {
                             "Temporal initializers must match their declared type"
                         );
                     }
-                    if super::http::is_response(ty) {
+                    if super::http::fetch::is_response(ty) {
                         ensure!(
                             ty == &inferred,
                             "HTTP response initializers must match their declared type"
@@ -676,7 +676,7 @@ impl<'a> FunctionLowerer<'a> {
             || super::filesystem::is_stats(self.return_type)
             || super::date::is_date(self.return_type)
             || super::time::is_time(self.return_type)
-            || super::http::is_response(self.return_type)
+            || super::http::fetch::is_response(self.return_type)
             || super::http::headers::is_headers(self.return_type)
             || super::http::request::is_request(self.return_type)
             || matches!(self.return_type, HirType::Array(_))
@@ -707,7 +707,7 @@ impl<'a> FunctionLowerer<'a> {
             ensure!(
                 !super::date::is_date(&self.infer_expr_type(expr))
                     && !super::time::is_time(&self.infer_expr_type(expr))
-                    && !super::http::is_response(&self.infer_expr_type(expr)),
+                    && !super::http::fetch::is_response(&self.infer_expr_type(expr)),
                 "Cannot return a Date, Temporal, or HTTP response value as {:?}",
                 self.return_type
             );
@@ -831,16 +831,6 @@ impl<'a> FunctionLowerer<'a> {
             return self.random_fill(name, args).map(Some);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
-            && matches!(
-                self.contract.intrinsics.get(name),
-                Some(super::resolve::TypedIntrinsic::Capability(
-                    super::capabilities::CapabilityOperation::HttpGet
-                ))
-            )
-        {
-            return self.http_get(name, args).map(Some);
-        }
-        if let Expr::ExternFuncRef { name, .. } = callee
             && let Some(super::resolve::TypedIntrinsic::Capability(
                 super::capabilities::CapabilityOperation::Filesystem(operation),
             )) = self.contract.intrinsics.get(name)
@@ -942,9 +932,6 @@ impl<'a> FunctionLowerer<'a> {
             {
                 return self.http_body(object, property, args).map(Some);
             }
-            if super::http::is_response(&receiver_type) {
-                return self.http_header(object, property, args).map(Some);
-            }
             if super::date::is_date(&receiver_type) {
                 return self.date_method(object, property, args).map(Some);
             }
@@ -1043,8 +1030,8 @@ impl<'a> FunctionLowerer<'a> {
                     "Object arguments must match their declared parameter types"
                 );
             }
-            if expected.is_some_and(super::http::is_response)
-                || super::http::is_response(&argument_type)
+            if expected.is_some_and(super::http::fetch::is_response)
+                || super::http::fetch::is_response(&argument_type)
                 || expected.is_some_and(super::http::request::is_request)
                 || super::http::request::is_request(&argument_type)
                 || expected.is_some_and(super::http::headers::is_headers)
@@ -1549,7 +1536,7 @@ impl<'a> FunctionLowerer<'a> {
             Expr::PropertySet { object, .. }
             | Expr::IndexSet { object, .. }
             | Expr::PutValueSet { target: object, .. }
-                if super::http::is_response(&self.infer_expr_type(object)) =>
+                if super::http::fetch::is_response(&self.infer_expr_type(object)) =>
             {
                 bail!("HTTP response metadata is read-only")
             }
@@ -2057,7 +2044,7 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if super::http::is_response(&self.infer_expr_type(object))
+            } if super::http::fetch::is_response(&self.infer_expr_type(object))
                 || super::http::request::is_request(&self.infer_expr_type(object)) =>
             {
                 self.http_property(object, property)

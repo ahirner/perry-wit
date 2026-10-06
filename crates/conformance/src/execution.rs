@@ -448,6 +448,10 @@ fn environment(directory: &Path) -> Result<()> {
         directory.join("capabilities.d.ts"),
         include_str!("../../../types/p3.d.ts"),
     )?;
+    fs::write(
+        directory.join("http-handler.d.ts"),
+        perry_wit::sdk::generate_http_handler_declarations()?,
+    )?;
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
     fs::write(
         directory.join("inputs.json"),

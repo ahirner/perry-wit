@@ -1,19 +1,13 @@
-import { get } from "perry:http";
-
-export async function run(authority: string, path: string): Promise<Result<string, number>> {
-  const response = await get("http", authority, path, { accept: "application/json" }, 65536);
-  if (response.status !== 200) { throw 400; }
-  let found = false;
-  const decoder = new TextDecoder();
-  for (let index = 0; index < response.headerCount; index++) {
-    if (response.headerName(index) === "content-type") {
-      if (found) { throw 401; }
-      found = true;
-      if (decoder.decode(response.headerValue(index)) !== "application/json") { throw 402; }
-    }
-  }
-  if (!found) { throw 401; }
-  const text = decoder.decode(response.body);
+export async function run(authority: string, path: string): Promise<{ok:true,value:string}|{ok:false,error:number}> {
+  try {
+  const response = await fetch("http://" + authority + path, { headers: { accept: "application/json" } });
+  const bytes = await readBounded(response, 65536);
+  if (response.status !== 200) throw 400;
+  const mediaType = response.headers.get("content-type");
+  if (mediaType === null || mediaType.includes(",")) throw 401;
+  if (mediaType !== "application/json") throw 402;
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   JSON.parse(text);
-  return text;
+  return {ok:true,value:text};
+  } catch(error) { if(typeof error==='number') return {ok:false,error};throw error; }
 }

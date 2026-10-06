@@ -73,7 +73,6 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::values::VALUE_TYPE)
                 && !names.0.contains(super::context::ENVIRONMENT_TYPE)
                 && !names.0.contains(super::date::DATE_TYPE)
-                && !names.0.contains(super::http::RESPONSE_TYPE)
                 && !names.0.contains(super::http::fetch::RESPONSE_TYPE)
                 && !names.0.contains(super::http::headers::HEADERS_TYPE)
                 && !names.0.contains(super::http::request::REQUEST_TYPE)
@@ -91,35 +90,16 @@ pub(crate) fn resolve_bindings(
             "Reserved compiler type name in source"
         );
         let mut bindings = HashMap::new();
-        let mut http_types = HashSet::new();
         for item in &module.body {
             let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item else {
                 continue;
             };
-            if import.src.value.as_str() == Some("perry:http") {
-                for specifier in &import.specifiers {
-                    if let ast::ImportSpecifier::Named(named) = specifier {
-                        let name = named.imported.as_ref().map_or_else(
-                            || named.local.sym.to_string(),
-                            |name| name.atom().to_string(),
-                        );
-                        if name == "HttpResponse" {
-                            ensure!(
-                                import.type_only || named.is_type_only,
-                                "Import HttpResponse with import type"
-                            );
-                            http_types.insert(named.local.to_id());
-                        }
-                    }
-                }
-            }
             if import.type_only {
                 continue;
             }
             let namespace = match import.src.value.as_str() {
                 Some("node:timers/promises") => CapabilityNamespace::TimerPromises,
                 Some("node:stream") => CapabilityNamespace::Stream,
-                Some("perry:http") => CapabilityNamespace::Http,
                 Some("fs" | "node:fs") => CapabilityNamespace::Filesystem,
                 Some("fs/promises" | "node:fs/promises") => CapabilityNamespace::FilesystemPromises,
                 _ => bail!("Unsupported capability import: {:?}", import.src.value),
@@ -163,7 +143,6 @@ pub(crate) fn resolve_bindings(
         });
         let mut calls = SourceCalls {
             bindings,
-            http_types,
             unresolved: SyntaxContext::empty().apply_mark(unresolved),
             names: names.0,
             shadow_names: HashMap::new(),
@@ -283,8 +262,7 @@ pub(crate) fn resolve_bindings(
 
 fn source_type(ty: &HirType) -> Result<String> {
     match ty {
-        HirType::Named(name) if super::http::is_response(ty) => Ok(name.clone()),
-        ty if *ty == super::http::headers_type() => Ok("{[key: string]: string}".into()),
+        HirType::Named(name) if super::http::fetch::is_response(ty) => Ok(name.clone()),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("string | Uint8Array".into()),
         ty if *ty == ProcessOperation::GetExitCode.lower().result => {
             Ok("number | undefined".into())
@@ -312,7 +290,6 @@ enum CapabilityNamespace {
     Stream,
     Filesystem,
     FilesystemPromises,
-    Http,
 }
 
 impl CapabilityNamespace {
@@ -331,7 +308,6 @@ impl CapabilityNamespace {
             return Ok(CapabilityOperation::Filesystem(operation));
         }
         match (self, name) {
-            (Self::Http, "get") => Ok(CapabilityOperation::HttpGet),
             (Self::TimerPromises, "setTimeout") => {
                 Ok(CapabilityOperation::Clock(ClockOperation::Timeout))
             }
@@ -352,7 +328,6 @@ enum CapabilityBinding {
 }
 
 struct SourceCalls {
-    http_types: HashSet<ast::Id>,
     bindings: HashMap<ast::Id, CapabilityBinding>,
     unresolved: SyntaxContext,
     names: HashSet<String>,
@@ -889,11 +864,6 @@ impl VisitMut for SourceCalls {
             && name.ctxt == self.unresolved
         {
             name.sym = super::http::fetch::RESPONSE_TYPE.into();
-        }
-        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
-            && self.http_types.contains(&name.to_id())
-        {
-            name.sym = super::http::RESPONSE_TYPE.into();
         }
         if let Err(error) = self.rewrite_time_type(reference) {
             self.error.get_or_insert(error);

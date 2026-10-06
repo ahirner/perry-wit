@@ -223,6 +223,19 @@ impl FunctionLowerer<'_> {
         method: &str,
         arguments: &[Expr],
     ) -> Result<Value> {
+        if method == "set" {
+            ensure!(
+                !arguments.is_empty() && arguments.len() <= 2,
+                "Uint8Array.set requires a Uint8Array and optional numeric offset"
+            );
+            let view = self.byte_receiver(array)?;
+            let source = self.byte_receiver(&arguments[0])?;
+            let offset = self.byte_number(arguments.get(1), 0.0)?;
+            return Ok(self.call_completion(
+                self.registry.byte_helpers.unwrap().copy_into,
+                &[view, source, offset],
+            ));
+        }
         ensure!(
             matches!(method, "subarray" | "slice"),
             "Unsupported Uint8Array method '{method}'"

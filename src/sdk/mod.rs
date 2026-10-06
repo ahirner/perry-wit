@@ -40,6 +40,21 @@ pub struct SdkResult {
     pub tsconfig_path: Option<PathBuf>,
 }
 
+/// Generate the native HTTP handler's source types directly from its WIT contract.
+pub fn generate_http_handler_declarations() -> Result<String> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "handler.wit",
+        include_str!("../waffle_backend/http/handler/world.wit"),
+    )?;
+    let world = resolve.select_world(&[package], Some("handler"))?;
+    let support = codegen::SUPPORT_TYPES.replace("declare const", "const");
+    let types = codegen::world_type_declarations(&resolve, &resolve.worlds[world]);
+    Ok(format!(
+        "// Generated from src/waffle_backend/http/handler/world.wit by the SDK.\ndeclare module \"perry:http-handler/types\" {{\n{support}{types}\n}}\n"
+    ))
+}
+
 /// Generates world/import declarations, an implementation check, and a missing tsconfig.
 pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
@@ -52,6 +67,10 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         )
     })?;
 
+    fs::write(
+        options.out_dir.join("http-handler.d.ts"),
+        generate_http_handler_declarations()?,
+    )?;
     let imports_path = options.out_dir.join("imports.d.ts");
     fs::write(
         &imports_path,

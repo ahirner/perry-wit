@@ -47,7 +47,7 @@ pub(super) fn emit(
     send: Func,
     discard: Func,
     t: &Transport<'_>,
-    r: &super::super::SourceRuntime<'_>,
+    r: &super::super::FetchRuntime<'_>,
 ) -> Result<()> {
     use super::super::request as request_value;
     let mut b = Builder::new(module, function, memory);

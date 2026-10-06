@@ -239,7 +239,7 @@ pub(crate) fn emit(
                 (registry.web_streams.unwrap().method(*method), true)
             }
             TaskTarget::Guest(id) => (registry.functions[id].func_index, true),
-            TaskTarget::FetchUpload => (registry.http_helpers.unwrap().fetch.unwrap().upload, true),
+            TaskTarget::FetchUpload => (registry.fetch_helpers.unwrap().upload, true),
             TaskTarget::HttpBody(method) => (registry.body_helpers.unwrap().method(*method), true),
             TaskTarget::Intrinsic(name) => (
                 filesystem.unwrap_or_else(|| registry.intrinsics[name]),

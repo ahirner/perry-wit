@@ -100,7 +100,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) response_constructor: Option<Func>,
     pub(crate) time_helpers: BTreeMap<&'static str, Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
-    pub(crate) http_helpers: Option<super::http::HttpHelpers>,
+    pub(crate) fetch_helpers: Option<super::http::fetch::Helpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
     pub(crate) object_helpers: Option<super::objects::ObjectHelpers>,
     pub(crate) structured_helpers: Option<super::structured::StructuredHelpers>,
@@ -619,19 +619,18 @@ impl ModuleRegistry {
                 )
             })
             .transpose()?;
-        let http_helpers = if let Some(mut imports) = http_imports {
+        let fetch_helpers = if let Some(mut imports) = http_imports {
             if let Some(operations) = operations {
                 super::http::operations::emit(module, memory, &mut imports, operations)?;
             }
-            Some(super::http::emit_source_runtime(
+            Some(super::http::fetch::emit(
                 module,
                 memory,
-                super::http::SourceRuntime {
+                &super::http::FetchRuntime {
                     abort: abort_helpers,
                     allocator: allocator.unwrap(),
                     imports: &imports,
                     strings: string_helpers.unwrap(),
-                    bytes: byte_helpers.unwrap(),
                     headers: headers_helpers,
                     request: request_helpers,
                     pool: string_pool,
@@ -654,7 +653,7 @@ impl ModuleRegistry {
                             objects: object_helpers.unwrap(),
                             promises: promises.as_ref(),
                             pool: string_pool,
-                            native: http_helpers.and_then(|h| h.fetch).and_then(|h| h.stream),
+                            native: fetch_helpers.and_then(|h| h.stream),
                             output: writable_output,
                             input: input_imports.map(|imports| super::streams::incoming::Runtime {
                                 imports,
@@ -724,24 +723,13 @@ impl ModuleRegistry {
             None
         };
 
-        if let Some(helpers) = http_helpers {
-            for (name, intrinsic) in &contract.intrinsics {
-                if matches!(
-                    intrinsic,
-                    TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::HttpGet)
-                ) {
-                    intrinsics.insert(name.clone(), helpers.get);
-                }
-            }
-        }
-
-        if let Some(helpers) = http_helpers {
+        if let Some(helpers) = fetch_helpers {
             for (name, intrinsic) in &contract.intrinsics {
                 if matches!(
                     intrinsic,
                     TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Fetch)
                 ) {
-                    intrinsics.insert(name.clone(), helpers.fetch.unwrap().fetch);
+                    intrinsics.insert(name.clone(), helpers.fetch);
                 }
             }
         }
@@ -929,7 +917,7 @@ impl ModuleRegistry {
             response_constructor,
             body_helpers,
             web_streams,
-            http_helpers,
+            fetch_helpers,
             filesystem_helpers,
             object_helpers,
             structured_helpers,
@@ -971,7 +959,7 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)
-            || super::http::is_response(ty)
+            || super::http::fetch::is_response(ty)
             || super::http::headers::is_headers(ty)
             || super::http::request::is_request(ty) =>
         {
@@ -1002,7 +990,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)
-            || super::http::is_response(ty)
+            || super::http::fetch::is_response(ty)
             || super::http::headers::is_headers(ty)
             || super::http::request::is_request(ty) =>
         {

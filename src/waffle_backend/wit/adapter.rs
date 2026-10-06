@@ -312,7 +312,7 @@ impl Adapter<'_> {
             let zero = self.integer(0);
             self.store_i32(address, 0, zero);
         }
-        if let Some(fetch) = self.registry.http_helpers.and_then(|http| http.fetch) {
+        if let Some(fetch) = self.registry.fetch_helpers {
             self.body.add_op(
                 self.block,
                 Operator::Call {

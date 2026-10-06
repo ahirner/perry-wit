@@ -53,6 +53,39 @@ async fn drain(accessor: &Accessor<Host>) {
 }
 
 async fn instantiate(source: &str, limit: u32) -> Result<(Store<Host>, Service)> {
+    let directory = tempfile::tempdir()?;
+    perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
+        wit_dir: std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/waffle_backend/http/handler"
+        )),
+        world: Some("handler".into()),
+        out_dir: directory.path().to_owned(),
+        project_root: Some(directory.path().to_owned()),
+        entry: "handler.ts".into(),
+        initialize_tsconfig: false,
+    })?;
+    std::fs::write(directory.path().join("handler.ts"), source)?;
+    let checked = std::process::Command::new("tsc")
+        .current_dir(directory.path())
+        .args([
+            "--ignoreConfig",
+            "--noEmit",
+            "--strict",
+            "--target",
+            "ES2022",
+            "--module",
+            "esnext",
+            "handler.ts",
+            "p3.d.ts",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        checked.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
     let compiled = compile_http_handler(
         source,
         "handler.ts",

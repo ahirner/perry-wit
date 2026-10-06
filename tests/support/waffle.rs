@@ -46,6 +46,30 @@ fn value_type(ty: &Type) -> Result<String> {
         Type::Named(name) if name == "Uint8Array" => "list<u8>".into(),
         Type::Named(name) if name.contains("Stats") => "stats".into(),
         Type::Named(name) if name.contains("value") => "f64".into(),
+        Type::Union(types)
+            if types.len() == 2
+                && types.iter().all(
+                    |ty| matches!(ty,Type::Object(shape) if shape.properties.contains_key("ok")),
+                ) =>
+        {
+            let payload = |name| {
+                types.iter().find_map(|ty| match ty {
+                    Type::Object(shape) => shape.properties.get(name).map(|p| &p.ty),
+                    _ => None,
+                })
+            };
+            format!(
+                "result<{},{}>",
+                value_type(
+                    payload("value")
+                        .ok_or_else(|| anyhow::anyhow!("Fixture result requires value"))?
+                )?,
+                value_type(
+                    payload("error")
+                        .ok_or_else(|| anyhow::anyhow!("Fixture result requires error"))?
+                )?
+            )
+        }
         Type::Union(types) if types.len() == 2 && types.contains(&Type::String) => {
             "text-or-bytes".into()
         }
@@ -58,10 +82,24 @@ fn value_type(ty: &Type) -> Result<String> {
     })
 }
 
-fn component(mut compiled: WaffleCompiled, enabled: bool) -> Result<WaffleCompiled> {
-    if !enabled {
-        return Ok(compiled);
-    }
+pub(crate) fn compile_typescript_for_fixture_world(
+    source: &str,
+    file: &str,
+    options: &WaffleCompileOptions,
+) -> Result<WaffleCompiled> {
+    let compiled = compile_typescript_waffle(
+        source,
+        file,
+        &WaffleCompileOptions {
+            componentize: false,
+            ..options.clone()
+        },
+    )?;
+    let (resolve, world) = fixture_world(&compiled)?;
+    waffle_backend::compile_typescript_for_world(source, file, options, resolve, world)
+}
+
+fn fixture_world(compiled: &WaffleCompiled) -> Result<(wit_parser::Resolve, wit_parser::WorldId)> {
     let module = waffle::Module::from_wasm_bytes(&compiled.core, &Default::default())?;
     let mut wit = String::from("package test:compiler-fixture; world fixture {");
     if module.imports.iter().any(|import| {
@@ -112,6 +150,14 @@ fn component(mut compiled: WaffleCompiled, enabled: bool) -> Result<WaffleCompil
     std::fs::write(directory.path().join("world.wit"), wit)?;
     let (resolve, package) = perry_wit::component::wit::resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("fixture"))?;
+    Ok((resolve, world))
+}
+
+fn component(mut compiled: WaffleCompiled, enabled: bool) -> Result<WaffleCompiled> {
+    if !enabled {
+        return Ok(compiled);
+    }
+    let (resolve, world) = fixture_world(&compiled)?;
     let component = waffle_backend::encode_component(&compiled.core, resolve, world)?;
     compiled.component_wat = Some(wasmprinter::print_bytes(&component)?);
     compiled.component = Some(component);

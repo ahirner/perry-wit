@@ -27,7 +27,6 @@ pub(crate) enum CapabilityOperation {
     Stdio(StdioOperation),
     Writable(StdioOperation),
     Filesystem(FilesystemOperation),
-    HttpGet,
     Fetch,
     Process(ProcessOperation),
 }
@@ -66,7 +65,6 @@ impl CapabilityOperation {
             Self::Stdio(operation) => operation.name(),
             Self::Writable(_) => "Writable.toWeb",
             Self::Filesystem(operation) => operation.name(),
-            Self::HttpGet => "get",
             Self::Fetch => "fetch",
             Self::Process(operation) => operation.name(),
         }
@@ -100,19 +98,6 @@ impl LowerCapability for CapabilityOperation {
                 params: vec![HirType::String],
                 result: HirType::Promise(Box::new(HirType::Named(
                     super::http::fetch::RESPONSE_TYPE.into(),
-                ))),
-                implementation: CapabilityImplementation::Http,
-            },
-            Self::HttpGet => CapabilityPlan {
-                params: vec![
-                    HirType::String,
-                    HirType::String,
-                    HirType::String,
-                    crate::waffle_backend::http::headers_type(),
-                    HirType::Number,
-                ],
-                result: HirType::Promise(Box::new(HirType::Named(
-                    crate::waffle_backend::http::RESPONSE_TYPE.into(),
                 ))),
                 implementation: CapabilityImplementation::Http,
             },

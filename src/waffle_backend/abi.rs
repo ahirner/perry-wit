@@ -255,7 +255,7 @@ pub(crate) fn build_export_wrapper(
             }
         }
     }
-    if let Some(fetch) = registry.http_helpers.and_then(|http| http.fetch) {
+    if let Some(fetch) = registry.fetch_helpers {
         for block in [outcome.ok_block, outcome.err_block] {
             body.add_op(
                 block,

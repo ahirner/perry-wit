@@ -1,3 +1,4 @@
+/// <reference path="./http-handler.d.ts" />
 /** Capability imports accepted by the production WASI 0.3 compiler.
  * Standard TypeScript library declarations also describe Math.random(),
  * performance.now(), Date.now(), crypto.randomUUID(), and crypto.getRandomValues().
@@ -91,57 +92,6 @@ declare namespace Temporal {
 declare module "node:timers/promises" {
   export function setTimeout<T = void>(milliseconds?: number, value?: T, options?: {signal?: AbortSignal}): Promise<T>;
 }
-
-declare module "perry:http-handler/types" {
-  export type Method =
-    | { tag: "get" | "head" | "post" | "put" | "delete" | "connect" | "options" | "trace" | "patch" }
-    | { tag: "other"; val: string };
-  export type Scheme = { tag: "http" | "https" } | { tag: "other"; val: string };
-  export interface Request {
-    method: Method;
-    scheme: Scheme | null | undefined;
-    authority: string | null | undefined;
-    pathWithQuery: string | null | undefined;
-    headers: [string, Uint8Array][];
-    body: Uint8Array;
-  }
-  /** Buffered response for compile_http_handler. Body caps are compiler options.
-   * Status is 200–599; 204/205/304 require an empty body. Headers preserve duplicates
-   * and bytes. Typed owned tasks and combinators may remain pending within handle. */
-  export interface Response {
-    status: number;
-    headers: [string, Uint8Array][];
-    body: Uint8Array;
-  }
-}
-
-declare module "perry:http" {
-  /** Buffered response with no remaining native HTTP resources. Headers preserve
-   * duplicates and exact bytes. Indices must be integers in [0, headerCount).
-   * Response metadata is immutable; body and header views remain mutable bytes. */
-  export interface HttpResponse {
-    readonly status: number;
-    readonly body: Uint8Array;
-    readonly headerCount: number;
-    headerName(index: number): string;
-    headerValue(index: number): Uint8Array;
-  }
-  /** Bounded GET, supporting stored tasks in resolved WIT components. Scheme is exactly http or https; path
-   * includes any query. Request headers are string-valued. The response limit
-   * must be an integer in [0, 4294967295]. Numeric failures: 8 body overflow,
-   * 12 invalid metadata/limit/index, 100 + WASI HTTP error discriminant, or
-   * 200 + WASI header error discriminant. Non-2xx status remains a response.
-   * Native producer completion is checked independently of body EOF. */
-  export function get(
-    scheme: "http" | "https",
-    authority: string,
-    path: string,
-    headers: { [name: string]: string },
-    maxResponseBytes: number,
-  ): Promise<HttpResponse>;
-}
-
-
 
 declare module "node:stream" {
   export class Writable {

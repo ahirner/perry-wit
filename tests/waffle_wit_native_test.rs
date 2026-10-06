@@ -60,8 +60,13 @@ fn compile(source: &str, wit: &str) -> Result<WaffleCompiled> {
         .collect::<Result<Vec<_>>>()?;
     let package = resolve.push_groups(main, dependencies)?;
     let world = resolve.select_world(&[package], Some("boundary"))?;
+    let source = if source.contains("readBounded(") {
+        format!("{}\n{source}", include_str!("fixtures/bounded_response.ts"))
+    } else {
+        source.to_owned()
+    };
     compile_typescript_for_world(
-        source,
+        &source,
         "native.ts",
         &WaffleCompileOptions::default(),
         resolve,
@@ -282,15 +287,15 @@ async fn stored_http_requests_overlap_and_complete_both_channels() -> Result<()>
     };
     let compiled = compile(
         r#"
-      import {get} from 'perry:http';
+
       export async function run(authority:string,path:string):Promise<string> {
-        const first=get('http',authority,path+'1',{},4096);
-        const second=get('http',authority,path+'2',{},4096);
+        const first=fetch('http://'+authority+path+'1');
+        const second=fetch('http://'+authority+path+'2');
         const responses=await Promise.all([first,second]);
         const retained=await first;
         if(retained!==responses[0])throw 1;
         const decoder=new TextDecoder('utf-8',{fatal:true});
-        return decoder.decode(responses[0].body)+decoder.decode(responses[1].body);
+        return decoder.decode(await readBounded(responses[0],4096))+decoder.decode(await readBounded(responses[1],4096));
       }
     "#,
         HTTP_WORLD,
@@ -333,14 +338,14 @@ async fn stored_http_requests_overlap_and_complete_both_channels() -> Result<()>
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resolved_world_http_get_uses_native_component_bindings() -> Result<()> {
+async fn resolved_world_fetch_uses_native_component_bindings() -> Result<()> {
     let compiled = compile(
         r#"
-      import {get} from 'perry:http';
+
       export async function run(authority:string,path:string):Promise<string> {
-        const response=await get('http',authority,path,{accept:'application/json'},65536);
+        const response=await fetch('http://'+authority+path,{headers:{accept:'application/json'}});
         if(response.status!==200) {throw 1;}
-        const text=new TextDecoder('utf-8',{fatal:true}).decode(response.body);
+        const text=new TextDecoder('utf-8',{fatal:true}).decode(await readBounded(response,65536));
         JSON.parse(text);
         for(let index=0;index<400;index++) {JSON.parse(text);}
         return text;
@@ -913,11 +918,11 @@ fn resolved_world_rejects_detached_tasks_and_missing_capabilities() {
 async fn resolved_world_http_domain_failures_release_resources_before_reuse() -> Result<()> {
     let compiled = compile(
         r#"
-        import {get} from 'perry:http';
+
         export async function run(authority:string,path:string):Promise<{ok:true,value:Uint8Array}|{ok:false,error:number}> {
           try {
-            const response=await get('http',authority,path,{},8);
-            return {ok:true,value:response.body};
+            const response=await fetch('http://'+authority+path);
+            return {ok:true,value:await readBounded(response,8)};
           } catch(error) {
             if(typeof error==='number') {return {ok:false,error};}
             throw error;
@@ -972,10 +977,10 @@ async fn resolved_world_http_domain_failures_release_resources_before_reuse() ->
 async fn resolved_world_http_disposal_releases_suspended_headers_and_body() -> Result<()> {
     let compiled = compile(
         r#"
-      import {get} from 'perry:http';
+
       export async function run(authority:string,path:string):Promise<string> {
-        const response=await get('http',authority,path,{},128);
-        return new TextDecoder().decode(response.body);
+        const response=await fetch('http://'+authority+path);
+        return new TextDecoder().decode(await readBounded(response,65536));
       }
     "#,
         HTTP_WORLD,

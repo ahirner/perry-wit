@@ -21,7 +21,6 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::http::fetch::is_response(ty) => Some("Response"),
         ty if crate::waffle_backend::http::headers::is_headers(ty) => Some("Headers"),
         ty if crate::waffle_backend::http::request::is_request(ty) => Some("Request"),
-        ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
         ty if crate::waffle_backend::abort::Kind::of(ty).is_some() => Some("abort object"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::time::is_time(ty) => {
@@ -48,7 +47,7 @@ pub(crate) fn is_reference(ty: &HirType) -> bool {
             || crate::waffle_backend::abort::Kind::of(ty).is_some()
             || crate::waffle_backend::date::is_date(ty)
             || crate::waffle_backend::time::is_time(ty)
-            || crate::waffle_backend::http::is_response(ty)
+            || crate::waffle_backend::http::fetch::is_response(ty)
             || crate::waffle_backend::http::headers::is_headers(ty)
             || crate::waffle_backend::http::request::is_request(ty) =>
         {
@@ -202,15 +201,6 @@ impl FunctionLowerer<'_> {
                     }
                     "ok" | "bodyUsed" | "redirected" => HirType::Boolean,
                     _ => HirType::Number,
-                }
-            }
-            Expr::PropertyGet {
-                object, property, ..
-            } if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) => {
-                if property == "body" {
-                    HirType::Named("Uint8Array".into())
-                } else {
-                    HirType::Number
                 }
             }
             Expr::Logical { left, right, .. }
@@ -428,13 +418,6 @@ impl FunctionLowerer<'_> {
                     {
                         return HirType::Promise(Box::new(method.result()));
                     }
-                    if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) {
-                        return if property == "headerName" {
-                            HirType::String
-                        } else {
-                            HirType::Named("Uint8Array".into())
-                        };
-                    }
                     if crate::waffle_backend::time::is_time(&self.infer_expr_type(object)) {
                         return if property == "toString" {
                             HirType::String
@@ -458,6 +441,11 @@ impl FunctionLowerer<'_> {
                         && property == "decode"
                     {
                         return HirType::String;
+                    }
+                    if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
+                        && property == "set"
+                    {
+                        return HirType::Void;
                     }
                     if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
                         && matches!(property.as_str(), "subarray" | "slice")

@@ -13,6 +13,7 @@ pub(crate) struct ByteHelpers {
     pub(crate) lift_canonical: Func,
     pub(crate) new: Func,
     pub(crate) copy: Func,
+    pub(crate) copy_into: Func,
     pub(crate) get: Func,
     pub(crate) set: Func,
     pub(crate) to_byte: Func,

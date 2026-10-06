@@ -76,10 +76,10 @@ fn error_code(b: &mut Builder, scratch: Value) -> Value {
     b.op(O::Select, &[code, zero, failed], I32)
 }
 
-pub(super) fn emit(
+pub(crate) fn emit(
     module: &mut Module<'static>,
     memory: Memory,
-    runtime: &super::SourceRuntime<'_>,
+    runtime: &super::FetchRuntime<'_>,
 ) -> Result<Helpers> {
     let allocator = runtime.allocator;
     let strings = runtime.strings;

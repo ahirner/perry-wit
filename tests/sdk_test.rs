@@ -245,3 +245,11 @@ fn test_typecheck_examples_against_generated_declarations() {
         );
     }
 }
+
+#[test]
+fn handler_declarations_match_the_wit_contract() {
+    assert_eq!(
+        perry_wit::sdk::generate_http_handler_declarations().unwrap(),
+        include_str!("../types/http-handler.d.ts")
+    );
+}

@@ -146,11 +146,7 @@ pub(crate) fn emit(
     for (index, (value, ty)) in returned.iter().zip(&signature.returns).enumerate() {
         b.store(context, result_offset + 8 * index as u32, *value, *ty);
     }
-    if let Some(cancel) = registry
-        .http_helpers
-        .and_then(|http| http.fetch)
-        .and_then(|fetch| fetch.cancel_unused)
-    {
+    if let Some(cancel) = registry.fetch_helpers.and_then(|fetch| fetch.cancel_unused) {
         b.call(cancel, &[], &[]);
     }
     if let Some(promises) = &registry.promises {
@@ -200,7 +196,7 @@ pub(crate) fn emit(
     let action = b.call(operations.action, &[], &[I32])[0];
     b.ret(&[action]);
     b.block = finish;
-    if let Some(fetch) = registry.http_helpers.and_then(|http| http.fetch) {
+    if let Some(fetch) = registry.fetch_helpers {
         b.call(fetch.finish, &[], &[]);
     }
     if let Some(promises) = &registry.promises {
