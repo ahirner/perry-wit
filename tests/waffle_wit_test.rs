@@ -28,6 +28,13 @@ fn literal_projections_avoid_materialization() -> Result<()> {
             ],
         ),
         (
+            "Date timestamp",
+            [
+                "return new Date(x + 1).getTime();",
+                "const value = new Date(x + 1); return value.getTime();",
+            ],
+        ),
+        (
             "byte array",
             [
                 "return new Uint8Array([x, x + 1, x + 2])[1] + 0;",
@@ -81,6 +88,60 @@ fn literal_projections_avoid_materialization() -> Result<()> {
         println!(
             "{kind} projection versus materialization (component bytes, allocations for 16 calls): {measurements:?}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn immediate_date_timestamp_preserves_clipping_effects_and_exceptions() -> Result<()> {
+    let source = r#"
+        function record(trace:number[], value:number):number {trace.push(value);return value;}
+        function fail():number {throw 9;}
+        function text(trace:number[]):string {trace.push(7);return '1970-01-01T00:00:00.000Z';}
+        export function run(x:number):number[] {
+            const trace:number[]=[];
+            trace.push(new Date(record(trace,x)).getTime());
+            const stored=new Date(x);
+            trace.push(stored.getTime());
+            try {const value=new Date(fail()).getTime();trace.push(value);}
+            catch(error){trace.push(error as number);}
+            trace.push(new Date(text(trace)).getTime());
+            trace.push(new Date('invalid').getTime());
+            return trace;
+        }
+    "#;
+    let compiled = compile_world(
+        source,
+        "package test:boundary; world boundary {export run:func(x:f64)->list<f64>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(f64,), (Vec<f64>,)>(&mut store, "run")?;
+    for (input, expected) in [
+        (-0.0, 0.0),
+        (-0.5, 0.0),
+        (0.5, 0.0),
+        (-1.9, -1.0),
+        (8_640_000_000_000_000.0, 8_640_000_000_000_000.0),
+        (-8_640_000_000_000_000.0, -8_640_000_000_000_000.0),
+        (8_640_000_000_000_001.0, f64::NAN),
+        (-8_640_000_000_000_001.0, f64::NAN),
+        (f64::NAN, f64::NAN),
+        (f64::INFINITY, f64::NAN),
+        (f64::NEG_INFINITY, f64::NAN),
+    ] {
+        let actual = run.call(&mut store, (input,))?.0;
+        let expected = [input, expected, expected, 9.0, 7.0, 0.0, f64::NAN];
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual.to_bits(), expected.to_bits(), "input {input:?}");
+            }
+        }
     }
     Ok(())
 }
