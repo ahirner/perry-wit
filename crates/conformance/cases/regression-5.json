@@ -1,0 +1,11 @@
+{
+  "expression": {
+    "ByteGet": [
+      "Input",
+      "Input",
+      "Input",
+      0
+    ]
+  },
+  "form": "Direct"
+}
