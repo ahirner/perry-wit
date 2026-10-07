@@ -22,6 +22,7 @@ mod number;
 mod objects;
 pub(crate) mod promises;
 mod random;
+mod reachability;
 mod regex;
 pub(crate) mod registry;
 pub(crate) mod resolve;
@@ -194,6 +195,14 @@ fn compile_resolved_hir(
     let mut waffle_mod = ssa::lower_module(&hir, &contract)?;
     if let Some(exports) = native_handler.as_ref().or(contract.wit.as_ref()) {
         exports.bind_native_imports(&mut waffle_mod)?;
+    }
+    reachability::retain_reachable(&mut waffle_mod)?;
+    for (_, function) in waffle_mod.funcs.entries_mut() {
+        function.optimize(&Default::default());
+        if let waffle::FuncDecl::Body(_, _, body) = function {
+            body.validate()?;
+            body.verify_reducible()?;
+        }
     }
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
