@@ -113,6 +113,7 @@ struct SizeMeasurement {
 }
 #[derive(Serialize)]
 struct Report {
+    placement: String,
     timings: Vec<Measurement>,
     sizes: Vec<SizeMeasurement>,
 }
@@ -133,6 +134,16 @@ struct Measurement {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "set PERRY_MEASUREMENT_OUTPUT to record size, memory, and throughput"]
 async fn measure_components() -> Result<()> {
+    let placement =
+        std::env::var("PERRY_MEASUREMENT_PLACEMENT").unwrap_or_else(|_| "root-future".to_owned());
+    match placement.as_str() {
+        "root-future" => measure_campaign(placement).await,
+        "spawned-task" => tokio::spawn(measure_campaign(placement)).await?,
+        _ => anyhow::bail!("unknown measurement placement: {placement}"),
+    }
+}
+
+async fn measure_campaign(placement: String) -> Result<()> {
     let output = std::env::var_os("PERRY_MEASUREMENT_OUTPUT")
         .context("set PERRY_MEASUREMENT_OUTPUT to a JSON output path")?;
     let output = std::path::PathBuf::from(output);
@@ -243,10 +254,13 @@ async fn measure_components() -> Result<()> {
     }
     let legacy = fs::read_to_string("types/p3.d.ts")?.contains("declare module \"perry:http\"");
     measurements.push(measure_stream(&engine, artifacts, legacy, false).await?);
-    measurements.extend(measure_http(&engine, artifacts, legacy, false).await?);
-    if !legacy {
+    if legacy {
+        measurements.extend(measure_http(&engine, artifacts, HttpRead::Legacy).await?);
+    } else {
         measurements.push(measure_stream(&engine, artifacts, false, true).await?);
-        measurements.extend(measure_http(&engine, artifacts, false, true).await?);
+        for reader in [HttpRead::Default, HttpRead::Byob, HttpRead::ArrayBuffer] {
+            measurements.extend(measure_http(&engine, artifacts, reader).await?);
+        }
     }
 
     let mut sizes = Vec::new();
@@ -284,6 +298,7 @@ async fn measure_components() -> Result<()> {
     fs::write(
         output,
         serde_json::to_string_pretty(&Report {
+            placement,
             timings: measurements,
             sizes,
         })?,
@@ -425,23 +440,34 @@ async fn measure_stream(
     })
 }
 
+enum HttpRead {
+    Legacy,
+    Default,
+    Byob,
+    ArrayBuffer,
+}
+
 async fn measure_http(
     engine: &Engine,
     artifacts: &Path,
-    legacy: bool,
-    byob: bool,
+    reader: HttpRead,
 ) -> Result<Vec<Measurement>> {
-    let read = if legacy {
-        "const response=await get('http',authority,'/',{},limit);const body=response.body;"
-    } else {
-        "const response=await fetch('http://'+authority+'/');const body=await readBounded(response,limit);"
+    let read = match reader {
+        HttpRead::Legacy => {
+            "const response=await get('http',authority,'/',{},limit);const body=response.body;"
+        }
+        HttpRead::Default | HttpRead::Byob => {
+            "const response=await fetch('http://'+authority+'/');const body=await readBounded(response,limit);"
+        }
+        HttpRead::ArrayBuffer => {
+            "const response=await fetch('http://'+authority+'/');const body=new Uint8Array(await response.arrayBuffer());"
+        }
     };
-    let prefix = if legacy {
-        "import {get} from 'perry:http';"
-    } else if byob {
-        include_str!("fixtures/bounded_byob_response.ts")
-    } else {
-        include_str!("fixtures/bounded_response.ts")
+    let prefix = match reader {
+        HttpRead::Legacy => "import {get} from 'perry:http';",
+        HttpRead::Default => include_str!("fixtures/bounded_response.ts"),
+        HttpRead::Byob => include_str!("fixtures/bounded_byob_response.ts"),
+        HttpRead::ArrayBuffer => "",
     };
     let source = format!(
         r#"{prefix}
@@ -454,10 +480,10 @@ export async function run(authority:string,limit:number):Promise<number> {{
 }}
 "#
     );
-    let name = if byob {
-        "bounded-http-byob"
-    } else {
-        "bounded-http"
+    let name = match reader {
+        HttpRead::Legacy | HttpRead::Default => "bounded-http",
+        HttpRead::Byob => "bounded-http-byob",
+        HttpRead::ArrayBuffer => "unbounded-http-array-buffer",
     };
     fs::write(artifacts.join(format!("{name}.ts")), &source)?;
     let wit = tempfile::tempdir()?;
@@ -467,7 +493,7 @@ export async function run(authority:string,limit:number):Promise<number> {{
     )?;
     let bytes = perry_wit::compile_typescript(
         &source,
-        "bounded-http.ts",
+        &format!("{name}.ts"),
         &CompileOptions {
             wit_dir: wit.path().into(),
             world: Some("task".into()),
@@ -502,26 +528,22 @@ export async function run(authority:string,limit:number):Promise<number> {{
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(&str, f64), (f64,)>(&mut store, "run")?;
     let mut measurements = Vec::new();
-    for (workload, limit, expected) in [
-        (
-            if byob {
-                "bounded-http-exact-byob"
-            } else {
-                "bounded-http-exact"
-            },
-            PAYLOAD_BYTES,
-            PAYLOAD_BYTES as f64,
-        ),
-        (
-            if byob {
-                "bounded-http-overflow-byob"
-            } else {
-                "bounded-http-overflow"
-            },
-            PAYLOAD_BYTES - 1,
-            -8.0,
-        ),
-    ] {
+    let outcomes: &[(&str, usize, f64)] = match reader {
+        HttpRead::Legacy | HttpRead::Default => &[
+            ("bounded-http-exact", PAYLOAD_BYTES, PAYLOAD_BYTES as f64),
+            ("bounded-http-overflow", PAYLOAD_BYTES - 1, -8.0),
+        ],
+        HttpRead::Byob => &[
+            (
+                "bounded-http-exact-byob",
+                PAYLOAD_BYTES,
+                PAYLOAD_BYTES as f64,
+            ),
+            ("bounded-http-overflow-byob", PAYLOAD_BYTES - 1, -8.0),
+        ],
+        HttpRead::ArrayBuffer => &[("unbounded-http-array-buffer", 0, PAYLOAD_BYTES as f64)],
+    };
+    for &(workload, limit, expected) in outcomes {
         for _ in 0..WARMUP_CALLS {
             ensure!(
                 run.call_async(&mut store, ("measurement.invalid", limit as f64))
@@ -565,7 +587,8 @@ export async function run(authority:string,limit:number):Promise<number> {{
         });
     }
     ensure!(
-        store.data().response.requests == 2 * (WARMUP_CALLS + SAMPLE_COUNT * CALLS_PER_SAMPLE),
+        store.data().response.requests
+            == outcomes.len() * (WARMUP_CALLS + SAMPLE_COUNT * CALLS_PER_SAMPLE),
         "missing HTTP requests"
     );
     Ok(measurements)

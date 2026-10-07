@@ -67,7 +67,7 @@ const metadata = {
   rustflags: process.env.RUSTFLAGS ?? "",
   harness_sha256: hash(readFileSync(join(root, "tests/component_measurement.rs"))),
   flake_lock_sha256: hash(readFileSync(join(root, "flake.lock"))),
-  method: "Median of five sample means on a reused instance after five warmup calls. Execution is directly awaited by the root future of a current-thread Tokio runtime, not a spawned task. Stream/HTTP: five calls per sample. Builds, compilation, instantiation, input preparation and outcome assertions are outside the stream/HTTP timers. HTTP uses an in-memory host response; no network is timed.",
+  method: "Median of five sample means on a reused instance after five warmup calls. Both revisions run in both placements on a current-thread Tokio runtime: directly awaited by its root future, and in an ordinary spawned task. Stream/HTTP: five calls per sample. Builds, compilation, instantiation, input preparation and outcome assertions are outside the stream/HTTP timers. HTTP uses an in-memory host response; no network is timed.",
 };
 writeFileSync(join(output, "current.patch"), command("git", ["diff", "HEAD", "--binary"]));
 copyFileSync(fileURLToPath(import.meta.url), join(output, "compare_components.mjs"));
@@ -99,14 +99,23 @@ for (const revision of revisions) {
 }
 
 // Finish both builds before timing either revision to avoid compiler CPU contention.
-for (const revision of revisions) {
-  console.log(`Measuring ${revision.name}…`);
-  const report = join(revision.output, "measurements.json");
-  command(revision.executable, ["--ignored", "--exact", "measure_components", "--nocapture"], revision.source, {
-    env: { ...process.env, PERRY_MEASUREMENT_OUTPUT: report },
-    stdio: "inherit", timeout: 10 * 60 * 1000,
-  });
-  revision.report = JSON.parse(readFileSync(report, "utf8"));
+const placements = ["root-future", "spawned-task"];
+for (const placement of placements) {
+  for (const revision of revisions) {
+    console.log(`Measuring ${revision.name} (${placement})…`);
+    const report = join(revision.output, placement, "measurements.json");
+    command(revision.executable, ["--ignored", "--exact", "measure_components", "--nocapture"], revision.source, {
+      env: {
+        ...process.env, PERRY_MEASUREMENT_OUTPUT: report, PERRY_MEASUREMENT_PLACEMENT: placement,
+      },
+      stdio: "inherit", timeout: 10 * 60 * 1000,
+    });
+    revision.reports ??= {};
+    revision.reports[placement] = JSON.parse(readFileSync(report, "utf8"));
+    if (revision.reports[placement].placement !== placement) {
+      throw new Error(`Wrong executor placement in ${report}`);
+    }
+  }
 }
 if (sourceIdentity().source_sha256 !== currentIdentity.source_sha256) {
   throw new Error(`Source changed during measurement; discard this comparison: ${output}`);
@@ -120,31 +129,56 @@ function delta(before, after) {
   const percent = 100 * (after / before - 1);
   return `${percent >= 0 ? "+" : ""}${percent.toFixed(1)}%`;
 }
-const rows = ["incoming-stream", "bounded-http-exact", "bounded-http-overflow",
-  "incoming-stream-byob", "bounded-http-exact-byob", "bounded-http-overflow-byob",
-  "merge_docs.ts", "merge_task.ts", "template-task"];
-const table = [
-  "| Workload | Baseline ms/call | Current ms/call | Time change | Baseline bytes | Current bytes | Size change |",
+const rows = ["incoming-stream", "incoming-stream-byob", "bounded-http-exact",
+  "bounded-http-overflow", "bounded-http-exact-byob", "bounded-http-overflow-byob",
+  "unbounded-http-array-buffer"];
+function comparison(workload, placement) {
+  return revisions.map(({ reports }, index) => {
+    const name = index !== 0 ? workload
+      : workload === "unbounded-http-array-buffer" ? "bounded-http-exact"
+        : workload.replace(/-byob$/, "");
+    const report = reports[placement];
+    const result = [...report.timings, ...report.sizes].find((item) => item.workload === name);
+    if (!result) throw new Error(`Missing workload: ${name} (${placement})`);
+    return result;
+  });
+}
+const timingTable = [
+  "| Workload | Baseline root ms | Current root ms | Change | Baseline spawned ms | Current spawned ms | Change |",
   "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
 ];
 for (const workload of rows) {
-  const [before, after] = revisions.map(({ report }, index) => {
-    const name = index === 0 ? workload.replace(/-byob$/, "") : workload;
-    return [...report.timings, ...report.sizes].find((item) => item.workload === name);
+  const values = placements.flatMap((placement) => {
+    const times = comparison(workload, placement).map((item) => median(item.milliseconds_per_call));
+    return [...times.map((time) => time.toFixed(3)), delta(...times)];
   });
-  if (!before || !after) throw new Error(`Missing workload: ${workload}`);
-  const timed = before.milliseconds_per_call !== undefined;
-  const times = timed
-    ? [median(before.milliseconds_per_call), median(after.milliseconds_per_call)] : [];
-  table.push(`| ${workload} | ${timed ? times[0].toFixed(3) : "—"} | ${timed ? times[1].toFixed(3) : "—"} | ${timed ? delta(...times) : "—"} | ${before.component_bytes} | ${after.component_bytes} | ${delta(before.component_bytes, after.component_bytes)} |`);
+  timingTable.push(`| ${workload} | ${values.join(" | ")} |`);
+}
+const sizeTable = [
+  "| Workload | Baseline component bytes | Current component bytes | Change | Baseline guest memory bytes | Current guest memory bytes |",
+  "| --- | ---: | ---: | ---: | ---: | ---: |",
+];
+for (const workload of [...rows, "merge_docs.ts", "merge_task.ts", "template-task"]) {
+  const [before, after] = comparison(workload, "root-future");
+  const spawned = comparison(workload, "spawned-task");
+  for (const [index, item] of [before, after].entries()) {
+    for (const metric of ["component_bytes", "memory_after_samples"]) {
+      if (item[metric] !== spawned[index][metric]) {
+        throw new Error(`${workload} ${metric} differs between executor placements`);
+      }
+    }
+  }
+  sizeTable.push(`| ${workload} | ${before.component_bytes} | ${after.component_bytes} | ${delta(before.component_bytes, after.component_bytes)} | ${before.memory_after_samples ?? "—"} | ${after.memory_after_samples ?? "—"} |`);
 }
 const report = [
   `Baseline: \`${baselineRef}\` at \`${baselineCommit}\`.`,
   `Current: \`${currentIdentity.commit}\`${currentIdentity.status ? " (working tree changes; see metadata.json and current.patch)" : ""}.`,
   metadata.method,
-  table.join("\n"),
-  "All sizes are stripped component bytes. Both HTTP rows use the same component and a 4 MiB response; limits are 4 MiB and 4 MiB − 1 byte. Incoming stream sums 4 MiB under a 64 KiB guest memory limit. HTTP has a 16 MiB guest limit. Neither grows after warmup; every call checks its result and resource cleanup.",
+  timingTable.join("\n"),
+  sizeTable.join("\n"),
+  "All sizes are stripped component bytes. Guest memory is committed Wasm linear memory after warmup, not process RSS. Exact and overflow HTTP rows share a component and a 4 MiB response; limits are 4 MiB and 4 MiB − 1 byte. Incoming stream sums 4 MiB under a 64 KiB guest memory limit. HTTP has a 16 MiB guest limit. Neither grows after warmup; every call checks its result and resource cleanup.",
   "BYOB rows compare caller-provided buffers with the same workload using the original API on the baseline. Original default-reader rows remain separate. Both HTTP implementations enforce the same cap and probe for overflow.",
+  "The unbounded row uses new Uint8Array(await response.arrayBuffer()), with no guest body-size cap and no caller-provided buffer. It is one guest-level await, not necessarily one internal read. Its baseline reference is the original perry:http exact-limit read of the same 4 MiB body: the baseline retains its cap, so these rows have different overflow guarantees. The harness memory limit still applies.",
   "Examples use each revision’s own source. Timings are local measurements, not a significance test; inspect raw samples and repeat when differences are small. The existing text/filesystem measurements are retained in the JSON reports.",
 ].join("\n\n") + "\n";
 writeFileSync(join(output, "comparison.md"), report);
