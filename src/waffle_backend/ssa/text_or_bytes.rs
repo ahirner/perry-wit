@@ -82,8 +82,15 @@ impl FunctionLowerer<'_> {
         if crate::waffle_backend::values::is_boxed(&ty) {
             return self.value_typeof(value);
         }
-        if super::types::StringKind::of(&ty) == Some(super::types::StringKind::Optional) {
-            let text = self.expression(&Expr::String("string".into()))?;
+        if let Some(inner) = crate::waffle_backend::values::sentinel_inner(&ty)
+            && inner != &HirType::Number
+        {
+            let label = if crate::waffle_backend::values::is_string_type(inner) {
+                "string"
+            } else {
+                "object"
+            };
+            let text = self.expression(&Expr::String(label.into()))?;
             let undefined = self.expression(&Expr::String("undefined".into()))?;
             return Ok(self.op(Operator::Select, &[text, undefined, value], &[Type::I32]));
         }
@@ -220,6 +227,26 @@ impl FunctionLowerer<'_> {
         if let Some((id, label, equal)) = type_guard(expression, truth)
             && let Some(ty) = self.local_types.get(&id)
         {
+            if let Some(inner) = crate::waffle_backend::values::sentinel_inner(ty)
+                && inner != &HirType::Number
+            {
+                let present = if crate::waffle_backend::values::is_string_type(inner) {
+                    "string"
+                } else {
+                    "object"
+                };
+                if label == present || label == "undefined" {
+                    self.narrowings.insert(
+                        id,
+                        if (label == present) == equal {
+                            inner.clone()
+                        } else {
+                            HirType::Void
+                        },
+                    );
+                }
+                return;
+            }
             if crate::waffle_backend::values::is_dynamic(ty) && equal {
                 let narrowed = match label {
                     "string" => Some(HirType::String),
@@ -260,8 +287,6 @@ impl FunctionLowerer<'_> {
             }
             let other = if is_text_or_bytes(ty) {
                 Some(("object", HirType::Named("Uint8Array".into())))
-            } else if super::types::StringKind::of(ty) == Some(super::types::StringKind::Optional) {
-                Some(("undefined", HirType::Void))
             } else {
                 None
             };

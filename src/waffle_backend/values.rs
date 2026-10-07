@@ -30,15 +30,18 @@ pub(crate) fn is_dynamic(ty: &HirType) -> bool {
     matches!(ty, HirType::Named(name) if name == VALUE_TYPE)
 }
 
-/// Optional strings and numbers encode undefined in their primitive storage.
+/// References reserve pointer zero for undefined; optional numbers retain their NaN sentinel.
 pub(crate) fn sentinel_inner(ty: &HirType) -> Option<&HirType> {
     let HirType::Union(types) = ty else {
         return None;
     };
     if types.len() == 2 && types.contains(&HirType::Void) {
-        types
-            .iter()
-            .find(|ty| matches!(ty, HirType::String | HirType::Number))
+        types.iter().find(|ty| {
+            matches!(ty, HirType::Number | HirType::String)
+                || ValueTag::of(ty).is_ok_and(|tag| {
+                    tag as u32 >= ValueTag::Bytes as u32 && tag as u32 != ValueTag::WitU64 as u32
+                })
+        })
     } else {
         None
     }

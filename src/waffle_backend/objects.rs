@@ -14,6 +14,7 @@ pub(crate) const INFERRED_RECORD_TYPE: &str = "__perry_inferred_record";
 #[derive(Clone, Copy)]
 pub(crate) struct ObjectHelpers {
     pub(crate) new: Func,
+    pub(crate) record: Func,
     pub(crate) set: Func,
     pub(crate) get: Func,
     pub(crate) value: Func,
@@ -147,6 +148,7 @@ pub(crate) fn emit_runtime(
     let functions = runtime::emit_functions(module, memory, &wat, &imports)?;
     Ok(ObjectHelpers {
         new: functions["object.new"],
+        record: functions["object.record"],
         set: functions["object.set"],
         get: functions["object.get"],
         value: functions["object.value"],

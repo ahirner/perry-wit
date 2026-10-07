@@ -3,6 +3,71 @@ use anyhow::Result;
 use wasmtime::StoreContextMut;
 
 #[tokio::test(flavor = "current_thread")]
+async fn optional_references_preserve_absence_identity_and_live_values() -> Result<()> {
+    let source = r#"
+    function identity(value:any):any {return value;}
+    function optional(value:any):Uint8Array|undefined {return value;}
+    async function retain(value:Uint8Array|undefined):Promise<Uint8Array|undefined> {return value;}
+    async function widen(value:Uint8Array|undefined):Promise<any> {return retain(value);}
+    function first(value:Uint8Array|undefined):number {
+        if(typeof value==='undefined')return -1;
+        return value[0];
+    }
+    function time(value:Date):number {return value.getTime();}
+    function churn():undefined {
+        for(let i=0;i<200;i++){identity(new Uint8Array([i]));}
+        return undefined;
+    }
+    export async function run():Promise<number> {
+        const bytes=new Uint8Array([42]);
+        let value:Uint8Array|undefined=undefined;
+        if(value!==undefined||first(value)!==-1)throw 1;
+        value=bytes;
+        if(value!==bytes||first(value)!==42)throw 2;
+        const state:{value?:Uint8Array}={value:bytes};
+        const saved=state.value;
+        state.value=undefined;
+        if(state.value!==undefined||saved!==bytes)throw 3;
+        if(optional(identity(bytes))!==bytes||optional(identity(undefined))!==undefined)throw 4;
+        try {optional(identity(null));throw 99;}catch(error){if(error!==12)throw error;}
+        if(await retain(bytes)!==bytes||await retain(undefined)!==undefined)throw 5;
+        if(await widen(bytes)!==bytes||await widen(undefined)!==undefined)throw 6;
+        const results=await Promise.all([retain(bytes),retain(undefined)]);
+        if(results[0]!==bytes||results[1]!==undefined)throw 7;
+        if(await Promise.race([retain(undefined)])!==undefined)throw 8;
+        if(await Promise.race([retain(bytes)])!==bytes)throw 9;
+        if(saved===churn()||first(saved)!==42)throw 10;
+        value=undefined;
+        if(value)throw 11;
+        if(typeof value!=='undefined')throw 11;
+        value=new Uint8Array(0);
+        if(!value||typeof value!=='object')throw 12;
+        const dates:{value?:Date}={value:new Date(-1)};
+        const date=dates.value;
+        if(date===undefined||date.getTime()!==-1)throw 13;
+        dates.value=undefined;
+        if(dates.value!==undefined||identity(date)!==date)throw 14;
+        const record:{[key:string]:any}={first:bytes,second:date};
+        const snapshot=record.first;
+        record.first=undefined;
+        record.extra=new Uint8Array([7]);
+        Object.assign(record,{more:bytes});
+        churn();
+        if(snapshot!==bytes||first(record.extra)!==7||time(record.second)!==-1)throw 15;
+        const keys=Object.keys(record);
+        if(keys.length!==4||keys[0]!=='first'||keys[3]!=='more')throw 16;
+        return first(saved);
+    }"#;
+    let (mut store, instance) = instantiate(source, 65536, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..10 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 42.0);
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn dynamic_values_preserve_types_equality_and_checked_boundaries() -> Result<()> {
     let source = r#"
     function identity(value:any):any {return value;}

@@ -448,6 +448,12 @@ impl<'a> FunctionLowerer<'a> {
                         ty.clone()
                     };
                     let ty = &declared;
+                    let initialized_type = super::values::sentinel_inner(ty)
+                        .filter(|inner| {
+                            **inner != HirType::Number
+                                && (**inner == inferred || inferred == HirType::Void)
+                        })
+                        .map(|_| inferred.clone());
                     if self.contract.wit.is_some()
                         && *ty != HirType::Any
                         && !(ty == &HirType::Number
@@ -474,7 +480,9 @@ impl<'a> FunctionLowerer<'a> {
                             && matches!(expr, Expr::Array(_)))
                     {
                         (ty.clone(), self.typed_operand(expr, ty)?)
-                    } else if super::values::is_boxed_union(ty) {
+                    } else if super::values::is_boxed_union(ty)
+                        || super::values::sentinel_inner(ty).is_some()
+                    {
                         self.check_typed_value(expr, ty)?;
                         (ty.clone(), self.typed_operand(expr, ty)?)
                     } else if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
@@ -498,6 +506,9 @@ impl<'a> FunctionLowerer<'a> {
                     };
                     self.local_types.insert(*id, ty);
                     self.narrowings.remove(id);
+                    if let Some(ty) = initialized_type {
+                        self.narrowings.insert(*id, ty);
+                    }
                     ensure!(
                         self.locals.insert(*id, val).is_none(),
                         "Duplicate local binding id: {:?}",
@@ -1352,7 +1363,12 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::Compare { op, left, right }
                 if super::values::is_boxed(&self.infer_expr_type(left))
-                    || super::values::is_boxed(&self.infer_expr_type(right)) =>
+                    || super::values::is_boxed(&self.infer_expr_type(right))
+                    || [left, right].iter().any(|value| {
+                        super::values::sentinel_inner(&self.infer_expr_type(value)).is_some_and(
+                            |inner| !matches!(inner, HirType::Number | HirType::String),
+                        )
+                    }) =>
             {
                 self.value_comparison(*op, left, right)
             }
@@ -1864,6 +1880,7 @@ impl<'a> FunctionLowerer<'a> {
                     && (self.contract.wit.is_some()
                         || matches!(ty, HirType::Tuple(_))
                         || super::values::is_boxed_union(ty)
+                        || super::values::sentinel_inner(ty).is_some()
                         || super::values::is_boxed(&self.infer_expr_type(expr)))
                 {
                     let value = self.typed_operand(expr, ty)?;

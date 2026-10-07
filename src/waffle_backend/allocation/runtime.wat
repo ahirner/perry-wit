@@ -179,7 +179,7 @@
 
   (func $collect (export "collect")
     (local $block i32) (local $next i32) (local $previous i32) (local $pointer i32)
-    (local $kind i32) (local $changed i32) (local $index i32) (local $count i32)
+    (local $kind i32) (local $changed i32) (local $index i32) (local $count i32) (local $entry i32)
     (i32.store (i32.const 144) (i32.const 0))
     (call $index)
     ;; Completed native transports no longer need the invocation's pending root.
@@ -229,7 +229,16 @@
           (if (i32.eq (local.get $kind) (i32.const 20)) (then (call $mark (i32.load (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 8)) (then
             (if (i32.load offset=16 (local.get $pointer)) (then (call $mark (i32.load offset=12 (local.get $pointer)))))))
-          (if (i32.eq (local.get $kind) (i32.const 9)) (then (call $mark (i32.load (local.get $pointer)))))
+          (if (i32.eq (local.get $kind) (i32.const 9)) (then
+            (local.set $entry (i32.load (local.get $pointer)))
+            (block $properties_done (loop $properties
+              (br_if $properties_done (i32.eqz (local.get $entry)))
+              (call $mark (local.get $entry))
+              (call $mark (i32.load offset=4 (local.get $entry)))
+              (if (i32.ge_u (i32.load offset=8 (local.get $entry)) (i32.const 4))
+                (then (call $mark (i32.trunc_f64_u (f64.load offset=16 (local.get $entry))))))
+              (local.set $entry (i32.load (local.get $entry)))
+              (br $properties)))))
           (if (i32.eq (local.get $kind) (i32.const 10)) (then
             (call $mark (i32.load (local.get $pointer)))
             (call $mark (i32.load offset=4 (local.get $pointer)))

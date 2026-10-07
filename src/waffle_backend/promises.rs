@@ -2,6 +2,9 @@
 
 pub(crate) mod native;
 
+/// The remaining bits carry the present value's tag; payload zero means undefined.
+pub(crate) const OPTIONAL_REFERENCE_TAG: u32 = 1 << 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Combinator {
     All,
@@ -356,6 +359,7 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || super::time::is_time(ty)
         || super::values::is_dynamic(ty)
         || super::values::is_boxed_union(ty)
+        || super::values::sentinel_inner(ty).is_some()
         || super::structured::is_string_array(ty)
         || matches!(ty, HirType::Array(_) | HirType::Tuple(_))
         || super::http::fetch::is_response(ty)

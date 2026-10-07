@@ -232,11 +232,18 @@ impl FunctionLowerer<'_> {
         let fields = literal_properties(self.contract, expression)?
             .ok_or_else(|| anyhow::anyhow!("Expected a plain object literal"))?;
         let helpers = self.registry.object_helpers.unwrap();
-        let object = self.op(
-            Operator::Call {
-                function_index: helpers.new,
+        let count = self.op(
+            Operator::I32Const {
+                value: fields.clone().count().try_into()?,
             },
             &[],
+            &[Type::I32],
+        );
+        let object = self.op(
+            Operator::Call {
+                function_index: helpers.record,
+            },
+            &[count],
             &[Type::I32],
         );
         self.reference_values.insert(object);

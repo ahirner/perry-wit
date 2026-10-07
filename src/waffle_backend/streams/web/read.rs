@@ -268,10 +268,7 @@ pub(super) fn emit_result(
     let bytes = b.param(0);
     let done = b.param(1);
     let count = b.integer(2);
-    let frame = b.call(r.allocator.frame_new, &[count], &[I32])[0];
-    b.store(frame, 12, bytes, I32);
-    let result = b.call(r.objects.new, &[], &[I32])[0];
-    b.store(frame, 16, result, I32);
+    let result = b.call(r.objects.record, &[count], &[I32])[0];
     let key = b.integer(r.pool.get("done").unwrap());
     let tag = b.integer(2);
     let payload = b.op(O::F64ConvertI32U, &[done], F64);
@@ -282,7 +279,6 @@ pub(super) fn emit_result(
     let tag = b.op(O::Select, &[tag, zero, bytes], I32);
     let payload = b.op(O::F64ConvertI32U, &[bytes], F64);
     b.call(r.objects.set, &[result, key, tag, payload], &[I32, F64]);
-    b.call(r.allocator.frame_drop, &[frame], &[]);
     b.ret(&[result]);
     b.finish(module, f)
 }
