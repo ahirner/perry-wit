@@ -16,6 +16,8 @@ use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 mod input;
 use input::{ControlledProducer, Observations};
 
+#[path = "waffle_stream/byob.rs"]
+mod byob;
 #[path = "waffle_stream/decoding.rs"]
 mod decoding;
 #[path = "waffle_stream/transfers.rs"]
@@ -192,8 +194,11 @@ fn unsupported_stream_ownership_is_diagnosed() {
         "declare function readChunk(input: ByteStream): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readChunk(input); }",
         "declare function readInto(input: ByteStream, bytes: Uint8Array): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readInto(input,new Uint8Array(1)); }",
         "export async function run(input: ReadableStream<string>): Promise<number> {return 1;}",
-        "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {input.getReader({mode:'byob'});return 1;}",
+        "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {input.getReader({mode:'invalid'});return 1;}",
         "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {input.tee();return 1;}",
+        "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {await input.getReader({mode:'byob'}).read();return 1;}",
+        "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {await input.getReader().read(new Uint8Array(1));return 1;}",
+        "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {await input.getReader({mode:'byob'}).read(new Uint8Array(1),{min:'1'});return 1;}",
     ] {
         assert!(
             compile_typescript_waffle(
@@ -349,6 +354,12 @@ async fn binary_views_remain_live_across_native_reads() -> Result<()> {
 async fn instantiate(source: &str) -> Result<(Store<StoreLimits>, wasmtime::component::Instance)> {
     let compiled =
         compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())?;
+    instantiate_compiled(compiled).await
+}
+
+async fn instantiate_compiled(
+    compiled: perry_wit::waffle_backend::WaffleCompiled,
+) -> Result<(Store<StoreLimits>, wasmtime::component::Instance)> {
     let mut config = Config::new();
     config.wasm_component_model_async(true);
     config.wasm_component_model_more_async_builtins(true);

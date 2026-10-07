@@ -494,7 +494,9 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             witnesses:vec![Witness{partition:"injected-fault",case:case(Number::Input)}],strategy:n.clone().prop_map(case).boxed(),check:crate::execution::check_fault});
     }
     contracts.push(crate::streams::contract());
+    contracts.push(crate::streams::byob_contract());
     contracts.push(crate::fetch::contract());
+    contracts.push(crate::fetch::byob_contract());
     contracts.extend(crate::capabilities::contracts());
     contracts.push(crate::handler::contract());
     let mut ids = std::collections::HashSet::new();

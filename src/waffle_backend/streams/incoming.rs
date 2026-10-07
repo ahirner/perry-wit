@@ -98,7 +98,7 @@ pub(super) fn emit(
     b.ret(&[]);
     b.finish(module, h.dispose)?;
 
-    let pull = builder::declare(module, "web.pull-input", &[I32], &[I32; 3]);
+    let pull = builder::declare(module, "web.pull-input", &[I32; 2], &[I32; 3]);
     let mut b = Builder::new(module, pull, memory);
     let stream = b.param(0);
     let Some(native) = r.input else {
@@ -112,10 +112,10 @@ pub(super) fn emit(
     let two = b.integer(2);
     let frame = b.call(r.allocator.frame_new, &[two], &[I32])[0];
     b.store(frame, 12, stream, I32);
-    let data = b.allocate(r.allocator.realloc, 8192, 1);
-    b.store(frame, 16, data, I32);
+    let destination = b.param(1);
+    let (view, data, capacity) = super::web::byob::destination(&mut b, r, destination, 8192);
+    b.store(frame, 16, view, I32);
     let handle = b.load(stream, HANDLE, I32);
-    let capacity = b.integer(8192);
     let transfer = b.body.add_block();
     b.jump(transfer, &[]);
     b.block = transfer;
@@ -168,7 +168,7 @@ pub(super) fn emit(
     b.call(r.allocator.frame_drop, &[frame], &[]);
     b.ret(&[reason, zero, one]);
     b.block = bytes;
-    let view = b.call(r.bytes.lift_canonical, &[data, length], &[I32])[0];
+    b.store(view, 4, length, I32);
     b.call(r.allocator.frame_drop, &[frame], &[]);
     b.ret(&[zero, view, zero]);
     b.finish(module, pull)?;

@@ -242,8 +242,13 @@ async fn measure_components() -> Result<()> {
         measurements.push(result);
     }
     let legacy = fs::read_to_string("types/p3.d.ts")?.contains("declare module \"perry:http\"");
-    measurements.push(measure_stream(&engine, artifacts, legacy).await?);
-    measurements.extend(measure_http(&engine, artifacts, legacy).await?);
+    measurements.push(measure_stream(&engine, artifacts, legacy, false).await?);
+    measurements.extend(measure_http(&engine, artifacts, legacy, false).await?);
+    if !legacy {
+        measurements.push(measure_stream(&engine, artifacts, false, true).await?);
+        measurements.extend(measure_http(&engine, artifacts, false, true).await?);
+    }
+
     let mut sizes = Vec::new();
     for (workload, source, wit, world) in [
         ("merge_docs.ts", "examples/merge_docs.ts", "wit", "command"),
@@ -320,10 +325,41 @@ export async function run(input: ReadableStream<Uint8Array>): Promise<number> {
 }
 "#;
 
-async fn measure_stream(engine: &Engine, artifacts: &Path, legacy: bool) -> Result<Measurement> {
+const BYOB_STREAM: &str = r#"
+export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+    const reader=input.getReader({mode:"byob"});
+    let buffer=new Uint8Array(8192);let total=0;
+    while(true) {
+        const result=await reader.read(buffer);
+        const bytes=result.value;if(bytes===undefined)throw 90;
+        for(let index=0;index<bytes.length;index++)total+=bytes[index];
+        if(result.done)break;
+        buffer=new Uint8Array(bytes.buffer);
+    }
+    reader.releaseLock();return total;
+}
+"#;
+
+async fn measure_stream(
+    engine: &Engine,
+    artifacts: &Path,
+    legacy: bool,
+    byob: bool,
+) -> Result<Measurement> {
     use wasmtime::component::StreamReader;
-    let source = if legacy { LEGACY_STREAM } else { STREAM };
-    fs::write(artifacts.join("incoming-stream.ts"), source)?;
+    let source = if legacy {
+        LEGACY_STREAM
+    } else if byob {
+        BYOB_STREAM
+    } else {
+        STREAM
+    };
+    let workload = if byob {
+        "incoming-stream-byob"
+    } else {
+        "incoming-stream"
+    };
+    fs::write(artifacts.join(format!("{workload}.ts")), source)?;
     let compiled = waffle_fixture::compile_typescript_waffle(
         source,
         "incoming-stream.ts",
@@ -331,7 +367,7 @@ async fn measure_stream(engine: &Engine, artifacts: &Path, legacy: bool) -> Resu
     )?;
     let stream_bytes =
         perry_wit::strip::component(&compiled.component.context("stream component")?)?;
-    fs::write(artifacts.join("incoming-stream.wasm"), &stream_bytes)?;
+    fs::write(artifacts.join(format!("{workload}.wasm")), &stream_bytes)?;
     let stream_size = stream_bytes.len();
     let stream = Component::new(engine, stream_bytes)?;
     let mut store = Store::new(
@@ -377,7 +413,7 @@ async fn measure_stream(engine: &Engine, artifacts: &Path, legacy: bool) -> Resu
     );
     Ok(Measurement {
         pipeline: "production",
-        workload: "incoming-stream",
+        workload,
         component_bytes: stream_size,
         memory_limit_bytes: store.data().limit,
         memory_after_warmup,
@@ -389,7 +425,12 @@ async fn measure_stream(engine: &Engine, artifacts: &Path, legacy: bool) -> Resu
     })
 }
 
-async fn measure_http(engine: &Engine, artifacts: &Path, legacy: bool) -> Result<Vec<Measurement>> {
+async fn measure_http(
+    engine: &Engine,
+    artifacts: &Path,
+    legacy: bool,
+    byob: bool,
+) -> Result<Vec<Measurement>> {
     let read = if legacy {
         "const response=await get('http',authority,'/',{},limit);const body=response.body;"
     } else {
@@ -397,6 +438,8 @@ async fn measure_http(engine: &Engine, artifacts: &Path, legacy: bool) -> Result
     };
     let prefix = if legacy {
         "import {get} from 'perry:http';"
+    } else if byob {
+        include_str!("fixtures/bounded_byob_response.ts")
     } else {
         include_str!("fixtures/bounded_response.ts")
     };
@@ -411,7 +454,12 @@ export async function run(authority:string,limit:number):Promise<number> {{
 }}
 "#
     );
-    fs::write(artifacts.join("bounded-http.ts"), &source)?;
+    let name = if byob {
+        "bounded-http-byob"
+    } else {
+        "bounded-http"
+    };
+    fs::write(artifacts.join(format!("{name}.ts")), &source)?;
     let wit = tempfile::tempdir()?;
     fs::write(
         wit.path().join("world.wit"),
@@ -428,7 +476,7 @@ export async function run(authority:string,limit:number):Promise<number> {{
     )?
     .stripped
     .context("stripped HTTP component")?;
-    fs::write(artifacts.join("bounded-http.wasm"), &bytes)?;
+    fs::write(artifacts.join(format!("{name}.wasm")), &bytes)?;
     let component_bytes = bytes.len();
     let component = Component::new(engine, bytes)?;
     let mut linker = Linker::new(engine);
@@ -455,8 +503,24 @@ export async function run(authority:string,limit:number):Promise<number> {{
     let run = instance.get_typed_func::<(&str, f64), (f64,)>(&mut store, "run")?;
     let mut measurements = Vec::new();
     for (workload, limit, expected) in [
-        ("bounded-http-exact", PAYLOAD_BYTES, PAYLOAD_BYTES as f64),
-        ("bounded-http-overflow", PAYLOAD_BYTES - 1, -8.0),
+        (
+            if byob {
+                "bounded-http-exact-byob"
+            } else {
+                "bounded-http-exact"
+            },
+            PAYLOAD_BYTES,
+            PAYLOAD_BYTES as f64,
+        ),
+        (
+            if byob {
+                "bounded-http-overflow-byob"
+            } else {
+                "bounded-http-overflow"
+            },
+            PAYLOAD_BYTES - 1,
+            -8.0,
+        ),
     ] {
         for _ in 0..WARMUP_CALLS {
             ensure!(

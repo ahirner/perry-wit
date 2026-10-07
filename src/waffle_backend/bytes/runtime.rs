@@ -1,6 +1,6 @@
 //! Byte-view identity, shared backing storage, and checked numeric indexing.
 
-use super::ByteHelpers;
+use super::{ByteHelpers, buffer};
 use crate::waffle_backend::{
     allocation::AllocationFuncs,
     runtime::builder::{self, Builder},
@@ -22,11 +22,15 @@ pub(super) fn emit(
     allocator: AllocationFuncs,
 ) -> Result<ByteHelpers> {
     let view = builder::declare(module, "bytes.view", &[I32, I32, I32], &[I32]);
+    let buffers = buffer::emit(module, memory, allocator, view)?;
     let allocate = builder::declare(module, "bytes.allocate", &[I32], &[I32]);
     let valid_index = builder::declare(module, "bytes.valid-index", &[I32, F64], &[I32]);
     let bound = builder::declare(module, "bytes.bound", &[F64, I32], &[I32]);
     let helpers = ByteHelpers {
         lift_canonical: builder::declare(module, "bytes.lift", &[I32, I32], &[I32]),
+        from_buffer: buffers.from_buffer,
+        validate: buffers.validate,
+        transfer: buffers.transfer,
         new: builder::declare(module, "bytes.new", &[F64], &[I32, F64]),
         copy: builder::declare(module, "bytes.copy", &[I32], &[I32]),
         copy_into: builder::declare(module, "bytes.copy-into", &[I32, I32, F64], &[I32, F64]),
@@ -40,13 +44,14 @@ pub(super) fn emit(
     let owner = b.param(0);
     let offset = b.param(1);
     let length = b.param(2);
-    let descriptor = b.allocate(allocator.realloc, 16, 4);
+    let descriptor = b.allocate(allocator.realloc, 24, 4);
     let four = b.integer(4);
     let header = b.op(Op::I32Sub, &[descriptor, four], I32);
     let header = b.load(header, 0, I32);
     let kind = b.integer(7);
     b.store(header, 16, kind, I32);
-    let data = b.op(Op::I32Add, &[owner, offset], I32);
+    let data = b.load(owner, DATA, I32);
+    let data = b.op(Op::I32Add, &[data, offset], I32);
     for (offset, value) in [
         (DATA, data),
         (LENGTH, length),
@@ -55,6 +60,18 @@ pub(super) fn emit(
     ] {
         b.store(descriptor, offset, value, I32);
     }
+    let head = b.load(owner, buffer::VIEWS, I32);
+    let zero = b.integer(0);
+    b.store(descriptor, buffer::NEXT, head, I32);
+    b.store(descriptor, buffer::PREVIOUS, zero, I32);
+    let link = b.body.add_block();
+    let linked = b.body.add_block();
+    b.branch(head, link, linked);
+    b.block = link;
+    b.store(head, buffer::PREVIOUS, descriptor, I32);
+    b.jump(linked, &[]);
+    b.block = linked;
+    b.store(owner, buffer::VIEWS, descriptor, I32);
     b.ret(&[descriptor]);
     b.finish(module, view)?;
 
@@ -65,6 +82,7 @@ pub(super) fn emit(
     let size = b.op(Op::Select, &[length, one, length], I32);
     let owner = b.call(allocator.realloc, &[zero, zero, one, size], &[I32])[0];
     b.effect(Op::MemoryFill { mem: memory }, &[owner, zero, length]);
+    let owner = b.call(buffers.new, &[owner, length], &[I32])[0];
     let result = b.call(view, &[owner, zero, length], &[I32])[0];
     b.ret(&[result]);
     b.finish(module, allocate)?;
@@ -73,7 +91,8 @@ pub(super) fn emit(
     let data = b.param(0);
     let length = b.param(1);
     let zero = b.integer(0);
-    let result = b.call(view, &[data, zero, length], &[I32])[0];
+    let buffer = b.call(buffers.new, &[data, length], &[I32])[0];
+    let result = b.call(view, &[buffer, zero, length], &[I32])[0];
     b.ret(&[result]);
     b.finish(module, helpers.lift_canonical)?;
 

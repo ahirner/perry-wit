@@ -15,6 +15,12 @@
  * and multi-argument constructors, other calendar methods, and valueOf() are
  * diagnosed. Component boundaries carry UTC ISO strings.
  * Temporal supports the typed immutable subset declared below.
+ * WIT stream<u8> and HTTP bodies expose ReadableStream<Uint8Array>. Readers
+ * support getReader(), getReader({mode:"byob"}), read(), cancel(), and releaseLock().
+ * BYOB read accepts Uint8Array with an optional literal {min:number}; it transfers
+ * the entire backing ArrayBuffer and detaches every old view. Reuse the returned
+ * value.buffer. Short EOF returns a view; cancellation of a pending read returns
+ * undefined. Other BYOB view types and dynamic reader options are diagnosed.
  * Unconstrained any coercion, callbacks, and detached work
  * are deferred. Standard library declarations do not imply compiler support.
  * JSON.parse accepts strict UTF-8 strings and rejects unpaired surrogate escapes.

@@ -307,9 +307,9 @@ impl WitWorld {
                             suspending = Some("module initialization".to_owned());
                         }
                         Expr::FuncRef(callee) => pending.push(*callee),
-                        Expr::Call { callee, .. } => {
+                        Expr::Call { callee, args, .. } => {
                             if let Some(target) = super::promises::TaskTarget::http_body(callee)
-                                .or_else(|| super::promises::TaskTarget::web_stream(callee))
+                                .or_else(|| super::promises::TaskTarget::web_stream(callee, args))
                                 && contract
                                     .promises
                                     .as_ref()

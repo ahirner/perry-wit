@@ -3630,55 +3630,65 @@ async fn standard_byte_readers_release_pending_requests_and_cancel_owned_transfe
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let compiled = compile(
-        include_str!("fixtures/fetch/readers.ts"),
-        "package test:reader-ownership; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->f64;}",
-    )?;
-    let released = Arc::new(AtomicBool::new(false));
-    let gate = released.clone();
-    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
-        "/gated" => fixture::Reply::GatedResponse(200, vec![], b"hello".to_vec(), gate.clone()),
-        "/release" => {
-            gate.store(true, Ordering::Release);
-            fixture::Reply::Body(200, "ok".into())
+    for (fixture_source, fixture_name) in [
+        (include_str!("fixtures/fetch/readers.ts"), "readers.ts"),
+        (
+            include_str!("fixtures/fetch/byob_readers.ts"),
+            "byob_readers.ts",
+        ),
+    ] {
+        let compiled = compile(
+            fixture_source,
+            "package test:reader-ownership; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->f64;}",
+        )?;
+        let released = Arc::new(AtomicBool::new(false));
+        let gate = released.clone();
+        let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+            "/gated" => fixture::Reply::GatedResponse(200, vec![], b"hello".to_vec(), gate.clone()),
+            "/release" => {
+                gate.store(true, Ordering::Release);
+                fixture::Reply::Body(200, "ok".into())
+            }
+            "/stall" => fixture::Reply::StallBody,
+            _ => fixture::Reply::Disconnect,
+        });
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+        let mut store = store(&engine);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+        let base = format!("http://{}", server.address);
+        for _ in 0..20 {
+            released.store(false, Ordering::Release);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
+                    .await??
+                    .0,
+                5.0
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
         }
-        "/stall" => fixture::Reply::StallBody,
-        _ => fixture::Reply::Disconnect,
-    });
-    let engine = engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap())?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = store(&engine);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
-    let base = format!("http://{}", server.address);
-    for _ in 0..20 {
         released.store(false, Ordering::Release);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
-                .await??
-                .0,
-            5.0
+        let module = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fetch")
+            .join(fixture_name);
+        let script = format!(
+            "import {{run}} from {};console.log(await run(process.argv[1]));",
+            serde_json::to_string(&module.to_string_lossy())?
         );
-        store.assert_concurrent_state_empty();
-        assert!(store.data().table.is_empty());
+        let node = std::process::Command::new("node")
+            .args(["--input-type=module", "-e", &script, &base])
+            .output()?;
+        assert!(
+            node.status.success(),
+            "{}",
+            String::from_utf8_lossy(&node.stderr)
+        );
+        assert_eq!(String::from_utf8(node.stdout)?.trim(), "5");
     }
-    released.store(false, Ordering::Release);
-    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/readers.ts");
-    let script = format!(
-        "import {{run}} from {};console.log(await run(process.argv[1]));",
-        serde_json::to_string(&module.to_string_lossy())?
-    );
-    let node = std::process::Command::new("node")
-        .args(["--input-type=module", "-e", &script, &base])
-        .output()?;
-    assert!(
-        node.status.success(),
-        "{}",
-        String::from_utf8_lossy(&node.stderr)
-    );
-    assert_eq!(String::from_utf8(node.stdout)?.trim(), "5");
     Ok(())
 }
 
@@ -3757,9 +3767,9 @@ fn native_byte_streams_reject_invalid_shapes_and_synchronous_effects() {
             "Uint8Array chunks",
         ),
         (
-            "export async function run():Promise<void> {const response=new Response('x');const body=response.body;if(body===null)throw 1;body.getReader({mode:'byob'});}",
+            "export async function run():Promise<void> {const response=new Response('x');const body=response.body;if(body===null)throw 1;body.getReader({mode:'invalid'});}",
             true,
-            "takes no arguments",
+            "getReader supports only",
         ),
         (
             "export function run():void {const response=new Response('x');const body=response.body;if(body===null)throw 1;for await(const chunk of body){}}",
@@ -3768,6 +3778,11 @@ fn native_byte_streams_reject_invalid_shapes_and_synchronous_effects() {
         ),
         (
             "type __perry_byte_reader = number;export function run():void{}",
+            false,
+            "Reserved compiler type name",
+        ),
+        (
+            "type __perry_byob_reader = number;export function run():void{}",
             false,
             "Reserved compiler type name",
         ),

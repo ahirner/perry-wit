@@ -41,13 +41,15 @@ impl BodyMethod {
 #[derive(Clone, Copy)]
 pub(crate) struct Helpers {
     bytes: Func,
+    array_buffer: Func,
     text: Func,
     json: Option<Func>,
 }
 impl Helpers {
     pub(crate) fn method(self, method: BodyMethod) -> Func {
         match method {
-            BodyMethod::Bytes | BodyMethod::ArrayBuffer => self.bytes,
+            BodyMethod::Bytes => self.bytes,
+            BodyMethod::ArrayBuffer => self.array_buffer,
             BodyMethod::Text => self.text,
             BodyMethod::Json => self.json.unwrap(),
         }
@@ -67,6 +69,21 @@ pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) ->
     let body = builder::declare(module, "body.bytes", &[I32; 2], &[I32, F64]);
     let text = builder::declare(module, "body.text", &[I32; 2], &[I32, F64]);
     emit_bytes(module, memory, body, r)?;
+    let array_buffer = builder::declare(module, "body.array-buffer", &[I32; 2], &[I32, F64]);
+    let mut b = Builder::new(module, array_buffer, memory);
+    let result = b.call(body, &[b.param(0), b.param(1)], &[I32, F64]);
+    let failed = b.body.add_block();
+    let ready = b.body.add_block();
+    b.branch(result[0], failed, ready);
+    b.block = failed;
+    b.ret(&result);
+    b.block = ready;
+    let view = b.op(O::I32TruncF64U, &[result[1]], I32);
+    let buffer = b.load(view, 8, I32);
+    let payload = b.op(O::F64ConvertI32U, &[buffer], F64);
+    let zero = b.integer(0);
+    b.ret(&[zero, payload]);
+    b.finish(module, array_buffer)?;
     let mut b = Builder::new(module, text, memory);
     let result = b.call(body, &[b.param(0), b.param(1)], &[I32, F64]);
     let failed = b.body.add_block();
@@ -125,6 +142,7 @@ pub(crate) fn emit(module: &mut Module<'static>, memory: Memory, r: &Runtime) ->
 
     Ok(Helpers {
         bytes: body,
+        array_buffer,
         text,
         json,
     })
@@ -173,7 +191,7 @@ fn emit_bytes(module: &mut Module<'static>, memory: Memory, f: Func, r: &Runtime
     b.block = next;
     b.store(frame, 16, data, I32);
     b.store(frame, 20, zero, I32);
-    let read = b.call(r.streams.pull, &[stream], &[I32; 3]);
+    let read = b.call(r.streams.pull, &[stream, zero], &[I32; 3]);
     let failed = b.body.add_block();
     let received = b.body.add_block();
     b.branch(read[0], failed, received);

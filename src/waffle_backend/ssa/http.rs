@@ -397,18 +397,67 @@ impl FunctionLowerer<'_> {
                 _ => bail!("Unsupported Web writer method '{method}'"),
             }
         }
-        ensure!(
-            arguments.is_empty(),
-            "Web Stream {method} takes no arguments in the supported byte-stream surface"
-        );
         let helpers = self
             .registry
             .web_streams
             .context("Web Stream methods require a native body")?;
         let value = self.expression(receiver)?;
+        if kind == Kind::Readable && method == "getReader" && !arguments.is_empty() {
+            ensure!(
+                arguments.len() == 1,
+                "getReader supports only {{mode: 'byob'}}"
+            );
+            let fields = super::options::literal_properties(self.contract, &arguments[0])?
+                .context("getReader options must be a literal {mode: 'byob'}")?;
+            let fields: Vec<_> = fields.collect();
+            ensure!(
+                fields.len() == 1
+                    && fields[0].0 == "mode"
+                    && matches!(fields[0].1, Expr::String(s) if s == "byob"),
+                "getReader supports only {{mode: 'byob'}}"
+            );
+        } else if kind == Kind::ByobReader && method == "read" {
+            ensure!(
+                (1..=2).contains(&arguments.len()),
+                "BYOB read requires Uint8Array and optional {{min}}"
+            );
+            ensure!(
+                crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(&arguments[0])),
+                "BYOB read requires Uint8Array"
+            );
+            let view = self.expression(&arguments[0])?;
+            let minimum = if arguments.len() == 2 {
+                let fields = super::options::literal_properties(self.contract, &arguments[1])?
+                    .context("BYOB read options must be a literal {min}")?;
+                let fields: Vec<_> = fields.collect();
+                ensure!(
+                    fields.len() == 1 && fields[0].0 == "min",
+                    "BYOB read supports only {{min}}"
+                );
+                ensure!(
+                    self.infer_expr_type(fields[0].1) == perry_hir::types::Type::Number,
+                    "BYOB min must be a number"
+                );
+                self.expression(fields[0].1)?
+            } else {
+                self.expression(&Expr::Number(1.0))?
+            };
+            return self
+                .start_task(
+                    &crate::waffle_backend::promises::TaskTarget::WebStream(Method::ReadInto),
+                    &[value, view, minimum],
+                    None,
+                )?
+                .context("BYOB read requires retained tasks");
+        } else {
+            ensure!(
+                arguments.is_empty(),
+                "Web Stream {method} has unsupported arguments"
+            );
+        }
         let sync = match (kind, method) {
             (Kind::Readable, "getReader") => Some((helpers.reader, true)),
-            (Kind::Reader, "releaseLock") => Some((helpers.release, false)),
+            (Kind::Reader | Kind::ByobReader, "releaseLock") => Some((helpers.release, false)),
             _ => None,
         };
         if let Some((function, reference)) = sync {
@@ -427,7 +476,7 @@ impl FunctionLowerer<'_> {
         };
         let reader = self.op(
             Operator::I32Const {
-                value: u32::from(kind == Kind::Reader),
+                value: u32::from(matches!(kind, Kind::Reader | Kind::ByobReader)),
             },
             &[],
             &[Type::I32],

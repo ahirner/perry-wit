@@ -263,7 +263,10 @@ pub(crate) fn emit(
         };
         if matches!(
             target,
-            TaskTarget::WebStream(super::super::streams::web::Method::Read)
+            TaskTarget::WebStream(
+                super::super::streams::web::Method::Read
+                    | super::super::streams::web::Method::ReadInto
+            )
         ) {
             let state = b.load(record, 4, I32);
             let two = b.integer(2);

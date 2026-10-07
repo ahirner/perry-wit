@@ -68,6 +68,7 @@ pub(crate) fn emit_runtime(
     memory: Memory,
     allocator: AllocationFuncs,
     imports: BTreeMap<String, Func>,
+    bytes_lift: Func,
     compare: Func,
     keys: &super::strings::StringPool,
 ) -> Result<FilesystemHelpers> {
@@ -81,6 +82,7 @@ pub(crate) fn emit_runtime(
       (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
       (import "host" "frame-new" (func $frame-new (param i32) (result i32)))
       (import "host" "frame-drop" (func $frame-drop (param i32)))
+      (import "host" "bytes-lift" (func $bytes-lift (param i32 i32) (result i32)))
       (import "host" "compare" (func $compare (param i32 i32) (result i32)))
       (import "host" "read-buffered" (func $read-buffered (param i32 i32) (result i32 i32 i32)))
       (import "host" "read-directory-transfer" (func $read-directory-transfer (param i32 i32 i32) (result i32 i32)))
@@ -104,6 +106,7 @@ pub(crate) fn emit_runtime(
         ("frame-new", allocator.frame_new),
         ("frame-drop", allocator.frame_drop),
         ("compare", compare),
+        ("bytes-lift", bytes_lift),
         ("read-buffered", read_buffered),
         ("write-buffer", write_buffer),
         ("read-directory-transfer", read_directory_transfer),

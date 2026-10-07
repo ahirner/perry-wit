@@ -13,6 +13,8 @@ pub struct FetchCase {
     pub status: u16,
     pub limit: usize,
     pub truncated: bool,
+    #[serde(default)]
+    pub byob: bool,
 }
 impl FetchCase {
     pub fn source(&self) -> String {
@@ -33,7 +35,11 @@ export async function run(url:string):Promise<{{value:number,trace:number[]}}> {
   }}catch{{return {{value:-1,trace}};}}
 }}
 "#,
-            reader = include_str!("../../../tests/fixtures/bounded_response.ts"),
+            reader = if self.byob {
+                include_str!("../../../tests/fixtures/bounded_byob_response.ts")
+            } else {
+                include_str!("../../../tests/fixtures/bounded_response.ts")
+            },
             limit = self.limit
         )
     }
@@ -67,6 +73,7 @@ pub fn contract() -> Contract {
             status,
             limit,
             truncated,
+            byob: false,
         })
     };
     Contract {
@@ -113,4 +120,25 @@ pub fn contract() -> Contract {
             .boxed(),
         check,
     }
+}
+
+pub fn byob_contract() -> Contract {
+    let mut contract = contract();
+    contract.id = "web.fetch.bounded_byob_body";
+    contract.description = "BYOB bounded Fetch consumes directly into its final buffer";
+    for witness in &mut contract.witnesses {
+        if let Case::Fetch(case) = &mut witness.case {
+            case.byob = true;
+        }
+    }
+    contract.strategy = contract
+        .strategy
+        .prop_map(|mut case| {
+            if let Case::Fetch(fetch) = &mut case {
+                fetch.byob = true;
+            }
+            case
+        })
+        .boxed();
+    contract
 }

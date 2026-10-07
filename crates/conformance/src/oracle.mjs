@@ -87,9 +87,11 @@ try {
       const bytes = new Uint8Array(testCase.input.bytes);
       let position = 0;
       input = new ReadableStream({
+        type: "bytes",
         pull(controller) {
           if (position === bytes.length) {
             controller.close();
+            controller.byobRequest?.respond(0);
             return;
           }
           const end = Math.min(bytes.length, position + 8192);

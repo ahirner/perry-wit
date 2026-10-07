@@ -11,9 +11,14 @@ use serde::{Deserialize, Serialize};
 pub struct StreamCase {
     pub bytes: Vec<u8>,
     pub cancel: bool,
+    #[serde(default)]
+    pub byob: bool,
 }
 impl StreamCase {
     pub fn source(&self) -> String {
+        if self.byob {
+            return self.byob_source();
+        }
         format!(
             r#"
 import {{Writable}} from 'node:stream';
@@ -43,6 +48,41 @@ export async function run(input:ReadableStream<Uint8Array>):Promise<{{value:numb
     finished.releaseLock();trace.push(3);
     return {{value:count,trace}};
   }} finally {{if(input.locked){{await reader.cancel();reader.releaseLock();}}}}
+}}
+"#,
+            cancel = self.cancel
+        )
+    }
+    fn byob_source(&self) -> String {
+        format!(
+            r#"
+import {{Writable}} from 'node:stream';
+export async function run(input:ReadableStream<Uint8Array>):Promise<{{value:number,trace:number[]}}> {{
+  const trace:number[]=[];const reader=input.getReader({{mode:"byob"}});
+  if(!input.locked)throw 1;
+  let locked=false;try{{input.getReader();}}catch{{locked=true;}}
+  if(!locked)throw 2;trace.push(1);
+  const writer=Writable.toWeb(process.stdout).getWriter();
+  let buffer=new Uint8Array(8196);buffer[0]=19;buffer[8195]=23;let count=0;
+  try {{
+    while(true){{
+      const original=buffer.buffer;const alias=buffer.subarray(1,2);
+      const pending=reader.read(buffer.subarray(2,8194),{{min:8192}});
+      if(buffer.length!==0 || alias.length!==0 || original.byteLength!==0)throw 3;
+      const result=await pending;const bytes=result.value;if(bytes===undefined)throw 4;
+      if(bytes.byteOffset!==2 || bytes.buffer.byteLength!==8196)throw 5;
+      buffer=new Uint8Array(bytes.buffer);
+      if(buffer[0]!==19 || buffer[8195]!==23)throw 6;
+      if(bytes.length>0){{
+        const write=writer.write(bytes);await write;await write;count+=bytes.length;
+        if({cancel}){{await reader.cancel();trace.push(2);break;}}
+      }}
+      if(result.done)break;
+    }}
+    writer.releaseLock();reader.releaseLock();if(input.locked)throw 7;
+    const finished=input.getReader();if(!(await finished.read()).done)throw 8;
+    finished.releaseLock();trace.push(3);return {{value:count,trace}};
+  }}finally{{if(input.locked){{await reader.cancel();reader.releaseLock();}}}}
 }}
 "#,
             cancel = self.cancel
@@ -93,6 +133,7 @@ pub fn contract() -> Contract {
         Case::Stream(StreamCase {
             bytes: (0..length).map(|i| (i * 37 + i / 251) as u8).collect(),
             cancel,
+            byob: false,
         })
     };
     Contract {
@@ -123,8 +164,36 @@ pub fn contract() -> Contract {
             },
         ],
         strategy: (prop::collection::vec(any::<u8>(), 0..=16385), any::<bool>())
-            .prop_map(|(bytes, cancel)| Case::Stream(StreamCase { bytes, cancel }))
+            .prop_map(|(bytes, cancel)| {
+                Case::Stream(StreamCase {
+                    bytes,
+                    cancel,
+                    byob: false,
+                })
+            })
             .boxed(),
         check,
     }
+}
+
+pub fn byob_contract() -> Contract {
+    let mut contract = contract();
+    contract.id = "web.streams.byob_reader";
+    contract.description = "BYOB readers transfer shared buffers and fill visible views directly";
+    contract.domain = "Uint8Array destinations with offsets, alias detachment, buffer reuse, min:8192, short EOF, locking and cancellation; three calls per instance; exact output bytes within 64 KiB guest memory";
+    for witness in &mut contract.witnesses {
+        if let Case::Stream(case) = &mut witness.case {
+            case.byob = true;
+        }
+    }
+    contract.strategy = (prop::collection::vec(any::<u8>(), 0..=16385), any::<bool>())
+        .prop_map(|(bytes, cancel)| {
+            Case::Stream(StreamCase {
+                bytes,
+                cancel,
+                byob: true,
+            })
+        })
+        .boxed();
+    contract
 }

@@ -102,6 +102,7 @@ pub(crate) enum ValueTag {
     AbortSignal = 21,
     ReadableStream = 22,
     StreamReader = 23,
+    ByobReader = 27,
     WritableStream = 25,
     StreamWriter = 26,
     PlainDate = 24,
@@ -122,6 +123,11 @@ impl ValueTag {
             }
             ty if super::streams::web::Kind::of(ty) == Some(super::streams::web::Kind::Reader) => {
                 Self::StreamReader
+            }
+            ty if super::streams::web::Kind::of(ty)
+                == Some(super::streams::web::Kind::ByobReader) =>
+            {
+                Self::ByobReader
             }
             ty if super::streams::web::Kind::of(ty)
                 == Some(super::streams::web::Kind::Writable) =>

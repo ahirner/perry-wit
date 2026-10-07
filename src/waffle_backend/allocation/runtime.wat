@@ -226,6 +226,7 @@
               (then (call $mark (i32.trunc_f64_u (f64.load offset=8 (local.get $pointer))))))))
           (if (i32.eq (local.get $kind) (i32.const 5)) (then (call $mark (i32.load offset=4 (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 7)) (then (call $mark (i32.load offset=8 (local.get $pointer)))))
+          (if (i32.eq (local.get $kind) (i32.const 20)) (then (call $mark (i32.load (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 8)) (then
             (if (i32.load offset=16 (local.get $pointer)) (then (call $mark (i32.load offset=12 (local.get $pointer)))))))
           (if (i32.eq (local.get $kind) (i32.const 9)) (then (call $mark (i32.load (local.get $pointer)))))
@@ -311,8 +312,17 @@
     (local.set $block (i32.load (i32.const 36)))
     (block $swept (loop $sweep
       (br_if $swept (i32.eqz (local.get $block)))
-      (if (i32.eqz (i32.load offset=20 (local.get $block)))
-        (then (i32.store offset=16 (local.get $block) (i32.const -1))))
+      (if (i32.eqz (i32.load offset=20 (local.get $block))) (then
+        ;; Buffer view links are weak. Unlink a dead view before reusing its storage.
+        (if (i32.eq (i32.load offset=16 (local.get $block)) (i32.const 7)) (then
+          (local.set $pointer (i32.add (local.get $block) (i32.load offset=8 (local.get $block))))
+          (local.set $next (i32.load offset=16 (local.get $pointer)))
+          (local.set $previous (i32.load offset=20 (local.get $pointer)))
+          (if (local.get $previous)
+            (then (i32.store offset=16 (local.get $previous) (local.get $next)))
+            (else (i32.store offset=12 (i32.load offset=8 (local.get $pointer)) (local.get $next))))
+          (if (local.get $next) (then (i32.store offset=20 (local.get $next) (local.get $previous))))))
+        (i32.store offset=16 (local.get $block) (i32.const -1))))
       (i32.store offset=20 (local.get $block) (i32.const 0))
       (local.set $block (i32.load (local.get $block)))
       (br $sweep)))

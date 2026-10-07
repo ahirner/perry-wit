@@ -36,6 +36,25 @@ async fn byte_views_preserve_aliases_copies_and_lengths() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn backing_buffers_preserve_identity_and_reclaim_dead_aliases() -> Result<()> {
+    let source = r#"export function run(): number {
+        const bytes = new Uint8Array([3, 7, 11]);
+        const buffer = bytes.buffer;
+        const alias = new Uint8Array(buffer);
+        if (alias.buffer !== buffer || buffer.byteLength !== 3) return -1;
+        for (let index = 0; index < 10000; index++) {
+            const view = alias.subarray(1, 2);
+            if (view.buffer !== buffer || view.byteOffset !== 1 || view.byteLength !== 1) return -2;
+            view[0] = index;
+        }
+        if (new Uint8Array(bytes).buffer === buffer) return -3;
+        return bytes[1];
+    }"#;
+    assert_eq!(run(source, &[]).await?, vec![15.0; 3]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn byte_conversions_and_out_of_bounds_access_are_explicit() -> Result<()> {
     let source = r#"
     export function run(value: number): number {

@@ -1,5 +1,6 @@
 //! Mutable byte views with distinct identity and shared backing allocation ownership.
 
+mod buffer;
 mod runtime;
 
 use anyhow::Result;
@@ -11,6 +12,9 @@ use super::{allocation::AllocationFuncs, visit};
 #[derive(Clone, Copy)]
 pub(crate) struct ByteHelpers {
     pub(crate) lift_canonical: Func,
+    pub(crate) from_buffer: Func,
+    pub(crate) validate: Func,
+    pub(crate) transfer: Func,
     pub(crate) new: Func,
     pub(crate) copy: Func,
     pub(crate) copy_into: Func,

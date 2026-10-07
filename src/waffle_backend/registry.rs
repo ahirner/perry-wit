@@ -389,7 +389,8 @@ impl ModuleRegistry {
             },
         )?);
 
-        let byte_helpers = if super::bytes::required(hir)
+        let byte_helpers = if filesystem_imports.is_some()
+            || super::bytes::required(hir)
             || contract.has_http()
             || contract.has_body()
             || contract.has_web_input()
@@ -648,6 +649,12 @@ impl ModuleRegistry {
                         module,
                         memory,
                         &super::streams::web::Runtime {
+                            byob: contract.promises.as_ref().is_some_and(|plan| {
+                                plan.tasks
+                                    .contains_key(&super::promises::TaskTarget::WebStream(
+                                        super::streams::web::Method::ReadInto,
+                                    ))
+                            }),
                             allocator: allocator.unwrap(),
                             bytes: byte_helpers.unwrap(),
                             objects: object_helpers.unwrap(),
@@ -714,6 +721,7 @@ impl ModuleRegistry {
                 memory,
                 allocator.expect("filesystem storage requires an allocator"),
                 imports,
+                byte_helpers.unwrap().lift_canonical,
                 string_helpers
                     .expect("filesystem paths require strings")
                     .str_compare,

@@ -51,7 +51,7 @@ command("git", ["archive", "--format=tar", `--output=${join(output, "baseline.ta
 command("tar", ["-xf", join(output, "baseline.tar"), "-C", baselineSource]);
 
 // Both revisions use exactly the same harness. Each keeps its own compiler and examples.
-for (const path of ["tests/component_measurement.rs", "tests/fixtures/bounded_response.ts"]) {
+for (const path of ["tests/component_measurement.rs", "tests/fixtures/bounded_response.ts", "tests/fixtures/bounded_byob_response.ts"]) {
   mkdirSync(dirname(join(baselineSource, path)), { recursive: true });
   copyFileSync(join(root, path), join(baselineSource, path));
 }
@@ -121,14 +121,17 @@ function delta(before, after) {
   return `${percent >= 0 ? "+" : ""}${percent.toFixed(1)}%`;
 }
 const rows = ["incoming-stream", "bounded-http-exact", "bounded-http-overflow",
+  "incoming-stream-byob", "bounded-http-exact-byob", "bounded-http-overflow-byob",
   "merge_docs.ts", "merge_task.ts", "template-task"];
 const table = [
   "| Workload | Baseline ms/call | Current ms/call | Time change | Baseline bytes | Current bytes | Size change |",
   "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
 ];
 for (const workload of rows) {
-  const [before, after] = revisions.map(({ report }) =>
-    [...report.timings, ...report.sizes].find((item) => item.workload === workload));
+  const [before, after] = revisions.map(({ report }, index) => {
+    const name = index === 0 ? workload.replace(/-byob$/, "") : workload;
+    return [...report.timings, ...report.sizes].find((item) => item.workload === name);
+  });
   if (!before || !after) throw new Error(`Missing workload: ${workload}`);
   const timed = before.milliseconds_per_call !== undefined;
   const times = timed
@@ -141,6 +144,7 @@ const report = [
   metadata.method,
   table.join("\n"),
   "All sizes are stripped component bytes. Both HTTP rows use the same component and a 4 MiB response; limits are 4 MiB and 4 MiB − 1 byte. Incoming stream sums 4 MiB under a 64 KiB guest memory limit. HTTP has a 16 MiB guest limit. Neither grows after warmup; every call checks its result and resource cleanup.",
+  "BYOB rows compare caller-provided buffers with the same workload using the original API on the baseline. Original default-reader rows remain separate. Both HTTP implementations enforce the same cap and probe for overflow.",
   "Examples use each revision’s own source. Timings are local measurements, not a significance test; inspect raw samples and repeat when differences are small. The existing text/filesystem measurements are retained in the JSON reports.",
 ].join("\n\n") + "\n";
 writeFileSync(join(output, "comparison.md"), report);

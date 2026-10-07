@@ -288,6 +288,13 @@ impl FunctionLowerer<'_> {
             Expr::Uint8ArrayLength(_) => HirType::Number,
             Expr::PropertyGet {
                 object, property, ..
+            } if property == "buffer"
+                && crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object)) =>
+            {
+                HirType::Named("ArrayBuffer".into())
+            }
+            Expr::PropertyGet {
+                object, property, ..
             } if property == "length"
                 && (self.is_string(object)
                     || crate::waffle_backend::text_or_bytes::is_text_or_bytes(
@@ -401,7 +408,13 @@ impl FunctionLowerer<'_> {
                         .is_some()
                     {
                         return match property.as_str() {
-                            "getReader" => crate::waffle_backend::streams::web::Kind::Reader.ty(),
+                            "getReader" => {
+                                if args.is_empty() {
+                                    crate::waffle_backend::streams::web::Kind::Reader.ty()
+                                } else {
+                                    crate::waffle_backend::streams::web::Kind::ByobReader.ty()
+                                }
+                            }
                             "getWriter" => crate::waffle_backend::streams::web::Kind::Writer.ty(),
                             "releaseLock" => HirType::Void,
                             name => crate::waffle_backend::streams::web::Method::named(name)

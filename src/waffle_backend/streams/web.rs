@@ -18,12 +18,14 @@ use waffle::{
     Value,
 };
 
+pub(super) mod byob;
 mod read;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Readable,
     Reader,
+    ByobReader,
     Writable,
     Writer,
 }
@@ -32,6 +34,7 @@ impl Kind {
         match self {
             Self::Readable => "__perry_readable_bytes",
             Self::Reader => "__perry_byte_reader",
+            Self::ByobReader => "__perry_byob_reader",
             Self::Writable => "__perry_writable_bytes",
             Self::Writer => "__perry_byte_writer",
         }
@@ -40,9 +43,15 @@ impl Kind {
         HirType::Named(self.name().into())
     }
     pub(crate) fn of(ty: &HirType) -> Option<Self> {
-        [Self::Readable, Self::Reader, Self::Writable, Self::Writer]
-            .into_iter()
-            .find(|kind| kind.ty() == *ty)
+        [
+            Self::Readable,
+            Self::Reader,
+            Self::ByobReader,
+            Self::Writable,
+            Self::Writer,
+        ]
+        .into_iter()
+        .find(|kind| kind.ty() == *ty)
     }
 }
 pub(crate) fn body_type() -> HirType {
@@ -76,6 +85,7 @@ pub(crate) fn read_type() -> HirType {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Method {
     Read,
+    ReadInto,
     Cancel,
     Write,
     Close,
@@ -92,7 +102,7 @@ impl Method {
     }
     pub(crate) fn result(self) -> HirType {
         match self {
-            Self::Read => read_type(),
+            Self::Read | Self::ReadInto => read_type(),
             Self::Cancel | Self::Write | Self::Close => HirType::Void,
         }
     }
@@ -123,6 +133,7 @@ pub(crate) struct Helpers {
     pub(crate) reader: Func,
     pub(crate) release: Func,
     pub(crate) read: Func,
+    pub(crate) read_into: Func,
     pub(crate) cancel: Func,
     pub(crate) pull: Func,
 }
@@ -130,6 +141,7 @@ impl Helpers {
     pub(crate) fn method(self, method: Method) -> Func {
         match method {
             Method::Read => self.read,
+            Method::ReadInto => self.read_into,
             Method::Cancel => self.cancel,
             Method::Write => self.write,
             Method::Close => self.close,
@@ -143,6 +155,7 @@ pub(crate) struct NativeBody {
     pub(crate) operations: Operations,
 }
 pub(crate) struct Runtime<'a> {
+    pub(crate) byob: bool,
     pub(crate) allocator: AllocationFuncs,
     pub(crate) bytes: ByteHelpers,
     pub(crate) objects: ObjectHelpers,
@@ -232,8 +245,9 @@ pub(crate) fn emit(
         reader: builder::declare(module, "web.get-reader", &[I32], &[I32, F64]),
         release: builder::declare(module, "web.release-reader", &[I32], &[I32, F64]),
         read: builder::declare(module, "web.read", &[I32; 3], &[I32, F64]),
+        read_into: builder::declare(module, "web.read-into", &[I32, I32, F64, I32], &[I32, F64]),
         cancel: builder::declare(module, "web.cancel", &[I32; 3], &[I32, F64]),
-        pull: builder::declare(module, "web.pull", &[I32], &[I32; 3]),
+        pull: builder::declare(module, "web.pull", &[I32; 2], &[I32; 3]),
     };
     let finish = builder::declare(module, "web.finish", &[I32], &[I32]);
     let result = builder::declare(module, "web.read-result", &[I32; 2], &[I32]);
@@ -243,7 +257,9 @@ pub(crate) fn emit(
     let input_pull = super::incoming::emit(module, memory, r, h, finish)?;
     read::emit_pull(module, memory, r, h.pull, finish, input_pull)?;
     read::emit_result(module, memory, r, result)?;
-    read::emit_read(module, memory, r, h.read, h.pull, result)?;
+    let byob_pull = byob::emit(module, memory, h.pull, finish)?;
+    read::emit_read(module, memory, r, h.read, h.pull, result, false)?;
+    read::emit_read(module, memory, r, h.read_into, byob_pull, result, true)?;
     read::emit_cancel(module, memory, r, h.cancel, finish)?;
     super::writable::emit(module, memory, r, h)?;
     Ok(h)

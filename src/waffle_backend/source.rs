@@ -79,6 +79,9 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
                 && !names.0.contains(super::streams::web::Kind::Readable.name())
                 && !names.0.contains(super::streams::web::Kind::Reader.name())
+                && !names
+                    .0
+                    .contains(super::streams::web::Kind::ByobReader.name())
                 && !names.0.contains(super::streams::web::Kind::Writable.name())
                 && !names.0.contains(super::streams::web::Kind::Writer.name())
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
@@ -811,16 +814,18 @@ impl VisitMut for SourceCalls {
                 name.sym.as_ref(),
                 "ReadableStream"
                     | "ReadableStreamDefaultReader"
+                    | "ReadableStreamBYOBReader"
                     | "WritableStream"
                     | "WritableStreamDefaultWriter"
             )
         {
-            let bytes = reference.type_params.as_ref().is_some_and(|params| {
-                params.params.len() == 1
-                    && matches!(params.params[0].as_ref(),
+            let bytes = (name.sym == "ReadableStreamBYOBReader" && reference.type_params.is_none())
+                || reference.type_params.as_ref().is_some_and(|params| {
+                    params.params.len() == 1
+                        && matches!(params.params[0].as_ref(),
                     ast::TsType::TsTypeRef(ty) if matches!(&ty.type_name,
                         ast::TsEntityName::Ident(name) if name.sym == "Uint8Array"))
-            });
+                });
             if !bytes {
                 self.error.get_or_insert_with(|| {
                     anyhow::anyhow!("Native Web Streams require Uint8Array chunks")
@@ -830,6 +835,7 @@ impl VisitMut for SourceCalls {
             let kind = match name.sym.as_ref() {
                 "ReadableStream" => super::streams::web::Kind::Readable,
                 "ReadableStreamDefaultReader" => super::streams::web::Kind::Reader,
+                "ReadableStreamBYOBReader" => super::streams::web::Kind::ByobReader,
                 "WritableStream" => super::streams::web::Kind::Writable,
                 _ => super::streams::web::Kind::Writer,
             };
