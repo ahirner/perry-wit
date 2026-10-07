@@ -1,5 +1,6 @@
 //! Controlled composed host cancellation exercises the shared operation registry.
 use super::*;
+use crate::waffle_backend::runtime::scheduler::{self, HostTurn};
 use std::collections::BTreeMap;
 use waffle::{Export, ExportKind, MemoryData, TableData};
 
@@ -69,7 +70,7 @@ fn callee() -> Result<Vec<u8>> {
     let pending = b.body.add_block();
     b.branch(done, finish, pending);
     b.block = pending;
-    let action = b.call(operations.action, &[], &[I32])[0];
+    let action = scheduler::host_action(&mut b, operations, HostTurn::Dispatch);
     b.ret(&[action]);
     b.block = finish;
     let cancelled = b.call(operations.finish, &[], &[I32])[0];
@@ -99,7 +100,7 @@ fn callee() -> Result<Vec<u8>> {
     b.store(address, 0, zero, I32);
     let worker = b.call(new_thread, &[zero, b.param(0)], &[I32])[0];
     b.call(resume, &[worker], &[I32]);
-    let action = b.call(operations.action, &[], &[I32])[0];
+    let action = scheduler::host_action(&mut b, operations, HostTurn::Dispatch);
     b.ret(&[action]);
     b.finish(&mut module, entry)?;
     let callback = builder::declare(&mut module, "[callback][async-lift]run", &[I32; 3], &[I32]);

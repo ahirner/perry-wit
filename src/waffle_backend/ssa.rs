@@ -1237,6 +1237,18 @@ impl<'a> FunctionLowerer<'a> {
         outcome.payload
     }
 
+    fn source_checkpoint(&mut self) {
+        if let Some(runtime) = &self.registry.promises {
+            self.op(
+                Operator::Call {
+                    function_index: runtime.native.scheduler.checkpoint,
+                },
+                &[],
+                &[],
+            );
+        }
+    }
+
     fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
         if super::values::is_dynamic(&self.infer_expr_type(expr)) {
             let value = self.expression(expr)?;
@@ -1248,15 +1260,7 @@ impl<'a> FunctionLowerer<'a> {
                 &[value],
             );
             let value = abi::decode_payload(&mut self.body, self.block, payload, true);
-            if let Some(runtime) = &self.registry.promises {
-                self.op(
-                    Operator::Call {
-                        function_index: runtime.yield_thread,
-                    },
-                    &[],
-                    &[],
-                );
-            }
+            self.source_checkpoint();
             return Ok(self.continuation(if is_statement { None } else { Some(value) }));
         }
         if let Some(runtime) = &self.registry.promises {
@@ -1276,13 +1280,7 @@ impl<'a> FunctionLowerer<'a> {
                     ))
                 }
             } else {
-                self.op(
-                    Operator::Call {
-                        function_index: runtime.yield_thread,
-                    },
-                    &[],
-                    &[],
-                );
+                self.source_checkpoint();
                 if is_statement { None } else { Some(value) }
             };
             return Ok(self.continuation(result));
@@ -2346,18 +2344,11 @@ impl<'a> FunctionLowerer<'a> {
         ) {
             return;
         }
-        let runtime = self.registry.promises.as_ref().unwrap();
+        let await_result = self.registry.promises.as_ref().unwrap().await_result;
         let record = abi::decode_payload(&mut self.body, self.block, payload, true);
         self.reference_values.insert(record);
-        self.op(
-            Operator::Call {
-                function_index: runtime.yield_thread,
-            },
-            &[],
-            &[],
-        );
-        let outcome =
-            abi::emit_fallible_call(&mut self.body, self.block, runtime.await_result, &[record]);
+        self.source_checkpoint();
+        let outcome = abi::emit_fallible_call(&mut self.body, self.block, await_result, &[record]);
         self.block = outcome.err_block;
         self.emit_terminal_throw(outcome.payload);
         self.block = outcome.ok_block;

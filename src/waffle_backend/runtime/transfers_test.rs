@@ -1,6 +1,7 @@
 //! Native stream/future acknowledgements share the subtask owner registry.
 use super::*;
 use crate::waffle_backend::runtime::imports;
+use crate::waffle_backend::runtime::scheduler::{self, HostTurn};
 use waffle::{Export, ExportKind, MemoryData, TableData};
 
 #[derive(Clone, Copy)]
@@ -232,7 +233,7 @@ fn component(probe: Probe) -> Result<Vec<u8>> {
     };
     let thread = b.call(spawn, &[zero, input], &[I32])[0];
     b.call(resume, &[thread], &[I32]);
-    let action = b.call(operations.action, &[], &[I32])[0];
+    let action = scheduler::host_action(&mut b, operations, HostTurn::Dispatch);
     b.ret(&[action]);
     b.finish(&mut module, entry)?;
     let callback = builder::declare(&mut module, "[callback][async-lift]run", &[I32; 3], &[I32]);
@@ -254,7 +255,7 @@ fn component(probe: Probe) -> Result<Vec<u8>> {
     let wait = b.body.add_block();
     b.branch(done, finish, wait);
     b.block = wait;
-    let action = b.call(operations.action, &[], &[I32])[0];
+    let action = scheduler::host_action(&mut b, operations, HostTurn::Dispatch);
     b.ret(&[action]);
     b.block = finish;
     b.call(operations.finish, &[], &[I32]);

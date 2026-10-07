@@ -115,7 +115,6 @@ pub(crate) struct PromiseImports {
     pub(crate) new: Func,
     pub(crate) await_result: Func,
     pub(crate) await_native: Func,
-    pub(crate) yield_thread: Func,
     pub(crate) starts: BTreeMap<TaskTarget, Func>,
 }
 

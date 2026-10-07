@@ -112,8 +112,8 @@ pub(super) fn emit_cancel_unused(
     };
     let function = builder::declare(module, "fetch.cancel-unused", &[], &[]);
     let mut b = Builder::new(module, function, memory);
-    use crate::waffle_backend::runtime::callbacks::{Worker, worker_count};
-    worker_count(&mut b, true, Worker::Native);
+    use crate::waffle_backend::runtime::scheduler::{CountChange, Worker, worker_count};
+    worker_count(&mut b, CountChange::Started, Worker::Native);
     let cancelled = b.call(operations.cancelled, &[], &[I32])[0];
     let restart = b.body.add_block();
     let done = b.body.add_block();
@@ -148,7 +148,7 @@ pub(super) fn emit_cancel_unused(
     b.call(t.allocator.frame_drop, &[frame], &[]);
     b.jump(restart, &[]);
     b.block = done;
-    worker_count(&mut b, false, Worker::Native);
+    worker_count(&mut b, CountChange::Finished, Worker::Native);
     b.ret(&[]);
     b.finish(module, function)?;
     Ok(Some(function))

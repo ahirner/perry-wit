@@ -2,6 +2,7 @@
 
 use super::builder::{self, Builder};
 use super::pending_result::PendingExportResult;
+use super::scheduler::{self, HostTurn};
 use crate::waffle_backend::{
     registry::{FunctionExport, ModuleRegistry},
     resolve::ResolvedContract,
@@ -15,8 +16,6 @@ use waffle::{
     Type::{self, I32},
 };
 
-pub(crate) const LIVE_WORKERS: u32 = 120;
-pub(crate) const NATIVE_WORKERS: u32 = 136;
 const CONTEXT: u32 = 124;
 const DONE: u32 = 128;
 const FRAME: u32 = 132;
@@ -85,31 +84,6 @@ pub(crate) fn declare(module: &mut Module<'static>, contract: &ResolvedContract)
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Worker {
-    Source,
-    Native,
-}
-
-pub(crate) fn worker_count(b: &mut Builder, started: bool, kind: Worker) {
-    for address in std::iter::once(LIVE_WORKERS)
-        .chain(matches!(kind, Worker::Native).then_some(NATIVE_WORKERS))
-    {
-        let address = b.integer(address);
-        let count = b.load(address, 0, I32);
-        let one = b.integer(1);
-        if !started {
-            b.require(count);
-        }
-        let count = b.op(
-            if started { O::I32Add } else { O::I32Sub },
-            &[count, one],
-            I32,
-        );
-        b.store(address, 0, count, I32);
-    }
-}
-
 pub(crate) fn emit(
     module: &mut Module<'static>,
     registry: &ModuleRegistry,
@@ -150,7 +124,7 @@ pub(crate) fn emit(
         b.call(cancel, &[], &[]);
     }
     if let Some(promises) = &registry.promises {
-        b.call(promises.native.complete, &[], &[]);
+        b.call(promises.native.scheduler.complete_source, &[], &[]);
     }
     let address = b.integer(DONE);
     let one = b.integer(1);
@@ -183,18 +157,13 @@ pub(crate) fn emit(
     let mut b = Builder::new(module, publish, memory);
     let address = b.integer(DONE);
     let done = b.load(address, 0, I32);
-    let address = b.integer(LIVE_WORKERS);
-    let workers = b.load(address, 0, I32);
-    let pending = b.call(operations.pending, &[], &[I32])[0];
-    let pending = b.op(O::I32Or, &[pending, workers], I32);
-    let idle = b.op(O::I32Eqz, &[pending], I32);
-    let finished = b.op(O::I32And, &[idle, done], I32);
+    let finished = scheduler::can_publish(&mut b, operations, done);
     let finish = b.body.add_block();
     let wait = b.body.add_block();
     b.branch(finished, finish, wait);
     b.block = wait;
-    let action = b.call(operations.action, &[], &[I32])[0];
-    b.ret(&[action]);
+    let pending = b.integer(1);
+    b.ret(&[pending]);
     b.block = finish;
     if let Some(fetch) = registry.fetch_helpers {
         b.call(fetch.finish, &[], &[]);
@@ -272,14 +241,13 @@ pub(crate) fn emit(
     let address = b.integer(CONTEXT);
     b.store(address, 0, context, I32);
     let zero = b.integer(0);
-    for address in [DONE, LIVE_WORKERS, NATIVE_WORKERS] {
-        let address = b.integer(address);
-        b.store(address, 0, zero, I32);
-    }
+    let done = b.integer(DONE);
+    b.store(done, 0, zero, I32);
+    scheduler::reset_workers(&mut b);
     let index = b.integer(index);
     let thread = b.call(imports.new_thread, &[index, context], &[I32])[0];
     b.call(imports.resume, &[thread], &[I32]);
-    let action = b.call(operations.action, &[], &[I32])[0];
+    let action = scheduler::host_action(&mut b, operations, HostTurn::Dispatch);
     b.ret(&[action]);
     b.finish(module, entry)?;
 
@@ -309,31 +277,24 @@ pub(crate) fn emit(
     );
     b.jump(finish, &[]);
     b.block = finish;
-    let action = b.call(publish, &[], &[I32])[0];
-    if registry.promises.is_some() {
-        let one = b.integer(1);
-        let yielded = b.op(O::I32Eq, &[action, one], I32);
-        let idle_turn = b.op(O::I32Eqz, &[b.param(0)], I32);
-        let idle_turn = b.op(O::I32And, &[yielded, idle_turn], I32);
-        let active_address = b.integer(crate::waffle_backend::promises::native::RUNNABLE_SOURCE);
-        let runnable_source = b.load(active_address, 0, I32);
-        let workers_address = b.integer(NATIVE_WORKERS);
-        let workers = b.load(workers_address, 0, I32);
-        let active_work = b.op(O::I32Or, &[runnable_source, workers], I32);
-        let source_idle = b.op(O::I32Eqz, &[active_work], I32);
-        let idle_turn = b.op(O::I32And, &[idle_turn, source_idle], I32);
-        let done_address = b.integer(DONE);
-        let done = b.load(done_address, 0, I32);
-        let running = b.op(O::I32Eqz, &[done], I32);
-        let idle_turn = b.op(O::I32And, &[idle_turn, running], I32);
-        let idle = b.body.add_block();
-        let active = b.body.add_block();
-        b.branch(idle_turn, idle, active);
-        b.block = idle;
-        let idle_action = b.call(operations.idle, &[], &[I32])[0];
-        b.ret(&[idle_action]);
-        b.block = active;
-    }
+    let pending = b.call(publish, &[], &[I32])[0];
+    let running = b.body.add_block();
+    let finished = b.body.add_block();
+    b.branch(pending, running, finished);
+    b.block = finished;
+    let zero = b.integer(0);
+    b.ret(&[zero]);
+    b.block = running;
+    let turn = if registry.promises.is_some() {
+        let done = b.integer(DONE);
+        HostTurn::SourceCallback {
+            event: b.param(0),
+            source_done: b.load(done, 0, I32),
+        }
+    } else {
+        HostTurn::Dispatch
+    };
+    let action = scheduler::host_action(&mut b, operations, turn);
     b.ret(&[action]);
     b.finish(module, callback)?;
     for (name, function) in [(entry_name, entry), (callback_name, callback)] {
