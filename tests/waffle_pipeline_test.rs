@@ -21,6 +21,8 @@ fn make_async_engine() -> Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model_async(true);
     config.wasm_component_model_more_async_builtins(true);
+    config.wasm_component_model_threading(true);
+    config.wasm_component_model_async_stackful(true);
     Ok(Engine::new(&config)?)
 }
 
@@ -1027,13 +1029,30 @@ async fn test_waffle_component_entry_signatures() -> Result<()> {
             );
         }
     }
-    let error = compile_typescript_waffle(
-        "export function run(input: number, a: ByteStream, b: ByteStream): number { return input; }",
-        "stream_param.ts",
-        &WaffleCompileOptions::default(),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("ByteStream"));
+    for (streams, valid) in [
+        ("a: ReadableStream<Uint8Array>", true),
+        (
+            "a: ReadableStream<Uint8Array>, b: ReadableStream<Uint8Array>",
+            false,
+        ),
+    ] {
+        let source =
+            format!("export function run(input: number, {streams}): number {{ return input; }}");
+        let compiled = waffle_fixture::compile_typescript_for_fixture_world(
+            &source,
+            "stream_params.ts",
+            &WaffleCompileOptions::default(),
+        );
+        if valid {
+            Component::new(&engine, compiled?.component.unwrap())?;
+        } else {
+            let error = compiled.unwrap_err().to_string();
+            assert!(
+                error.contains("WIT streams require one direct stream<u8> input parameter"),
+                "{error}"
+            );
+        }
+    }
     Ok(())
 }
 

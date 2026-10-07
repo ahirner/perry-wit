@@ -188,11 +188,64 @@ async fn producer_traps_and_store_disposal_release_pending_streams() -> Result<(
 }
 
 #[test]
+fn legacy_stream_api_is_rejected() {
+    for (source, diagnostic) in [
+        (
+            "declare function byteAt(index: number): number; export function run(): number { return byteAt(0); }",
+            "WIT world has no import for core function 'byteAt'",
+        ),
+        (
+            "declare function readChunk(input: ByteStream): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readChunk(input); }",
+            "Type Named(\"ByteStream\") cannot be directly mapped to a primitive WAFFLE type",
+        ),
+        (
+            "declare function readInto(input: ByteStream, bytes: Uint8Array): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readInto(input,new Uint8Array(1)); }",
+            "Type Named(\"ByteStream\") cannot be directly mapped to a primitive WAFFLE type",
+        ),
+    ] {
+        let error =
+            compile_typescript_waffle(source, "legacy-stream.ts", &WaffleCompileOptions::default())
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains(diagnostic), "{error}: {source}");
+    }
+}
+
+#[test]
+fn stream_bindings_preserve_logical_type_across_branches() -> Result<()> {
+    for replacement in ["input", "true"] {
+        let source = format!(
+            r#"
+            export async function run(flag: boolean, input: ReadableStream<Uint8Array>): Promise<boolean> {{
+                if (flag) {{ input = {replacement}; }}
+                const reader = input.getReader();
+                const result = await reader.read();
+                reader.releaseLock();
+                return result.done;
+            }}
+        "#
+        );
+        let compiled = compile_typescript_waffle(
+            &source,
+            "stream-assignment.ts",
+            &WaffleCompileOptions::default(),
+        );
+        if replacement == "input" {
+            compiled?;
+        } else {
+            let error = compiled.unwrap_err().to_string();
+            assert!(
+                error.contains("A stream binding cannot change its logical type"),
+                "{error}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn unsupported_stream_ownership_is_diagnosed() {
     for source in [
-        "declare function byteAt(index: number): number; export function run(): number { return byteAt(0); }",
-        "declare function readChunk(input: ByteStream): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readChunk(input); }",
-        "declare function readInto(input: ByteStream, bytes: Uint8Array): Promise<number>; export async function run(input: ByteStream): Promise<number> { return await readInto(input,new Uint8Array(1)); }",
         "export async function run(input: ReadableStream<string>): Promise<number> {return 1;}",
         "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {input.getReader({mode:'invalid'});return 1;}",
         "export async function run(input: ReadableStream<Uint8Array>): Promise<number> {input.tee();return 1;}",
