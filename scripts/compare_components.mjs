@@ -67,7 +67,7 @@ const metadata = {
   rustflags: process.env.RUSTFLAGS ?? "",
   harness_sha256: hash(readFileSync(join(root, "tests/component_measurement.rs"))),
   flake_lock_sha256: hash(readFileSync(join(root, "flake.lock"))),
-  method: "Median of five sample means on a reused instance after five warmup calls. Stream/HTTP: five calls per sample. Builds, compilation, instantiation, input preparation and outcome assertions are outside the stream/HTTP timers. HTTP uses an in-memory host response; no network is timed.",
+  method: "Median of five sample means on a reused instance after five warmup calls. Execution is directly awaited by the root future of a current-thread Tokio runtime, not a spawned task. Stream/HTTP: five calls per sample. Builds, compilation, instantiation, input preparation and outcome assertions are outside the stream/HTTP timers. HTTP uses an in-memory host response; no network is timed.",
 };
 writeFileSync(join(output, "current.patch"), command("git", ["diff", "HEAD", "--binary"]));
 copyFileSync(fileURLToPath(import.meta.url), join(output, "compare_components.mjs"));
