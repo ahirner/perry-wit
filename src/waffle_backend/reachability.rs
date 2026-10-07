@@ -15,13 +15,6 @@ pub(super) fn retain_reachable(module: &mut Module<'_>) -> Result<()> {
         })
         .collect::<Vec<_>>();
     pending.extend(module.start_func);
-    for import in &module.imports {
-        if let ImportKind::Func(function) = import.kind
-            && import.module != super::link::HELPER_MODULE
-        {
-            pending.push(function);
-        }
-    }
     for (_, table) in module.tables.entries() {
         if let Some(elements) = &table.func_elements {
             pending.extend(
@@ -39,7 +32,7 @@ pub(super) fn retain_reachable(module: &mut Module<'_>) -> Result<()> {
         }
         match &module.funcs[function] {
             FuncDecl::Body(_, _, body) => {
-                for (_, value) in body.values.entries() {
+                for value in body.blocks.entries().flat_map(|(_, block)| &block.insts) {
                     if let ValueDef::Operator(
                         Operator::Call { function_index }
                         | Operator::RefFunc {
@@ -47,7 +40,7 @@ pub(super) fn retain_reachable(module: &mut Module<'_>) -> Result<()> {
                         },
                         _,
                         _,
-                    ) = value
+                    ) = &body.values[body.resolve_alias(*value)]
                     {
                         pending.push(*function_index);
                     }
@@ -82,7 +75,11 @@ pub(super) fn retain_reachable(module: &mut Module<'_>) -> Result<()> {
                     _,
                 ) = value
                 {
-                    *function_index = relocated[function_index];
+                    if let Some(index) = relocated.get(function_index) {
+                        *function_index = *index;
+                    } else {
+                        *value = ValueDef::None;
+                    }
                 }
             }
         }
@@ -124,6 +121,7 @@ mod tests {
             r#"(module
             (type $callback (func (result i32)))
             (import "__perry_helper" "unused" (func $unused (result i64)))
+            (import "host" "unused" (func (result i64)))
             (global $value (mut i32) (i32.const 0))
             (func $dead (result i64) (call $unused))
             (func $initialize (global.set $value (i32.const 40)))

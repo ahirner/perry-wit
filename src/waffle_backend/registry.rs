@@ -642,35 +642,31 @@ impl ModuleRegistry {
         } else {
             None
         };
-        let web_streams =
-            (contract.has_body() || contract.has_web_input() || contract.has_writable())
-                .then(|| {
-                    super::streams::web::emit(
-                        module,
-                        memory,
-                        &super::streams::web::Runtime {
-                            byob: contract.promises.as_ref().is_some_and(|plan| {
-                                plan.tasks
-                                    .contains_key(&super::promises::TaskTarget::WebStream(
-                                        super::streams::web::Method::ReadInto,
-                                    ))
-                            }),
-                            allocator: allocator.unwrap(),
-                            bytes: byte_helpers.unwrap(),
-                            objects: object_helpers.unwrap(),
-                            promises: promises.as_ref(),
-                            pool: string_pool,
-                            native: fetch_helpers.and_then(|h| h.stream),
-                            output: writable_output,
-                            input: input_imports.map(|imports| super::streams::incoming::Runtime {
-                                imports,
-                                operations,
-                                controller: input_controller,
-                            }),
-                        },
-                    )
-                })
-                .transpose()?;
+        let web_streams = (contract.has_body()
+            || contract.has_web_input()
+            || contract.has_writable())
+        .then(|| {
+            super::streams::web::emit(
+                module,
+                memory,
+                &super::streams::web::Runtime {
+                    readers: super::streams::web::ReaderModes::for_plan(contract.promises.as_ref()),
+                    allocator: allocator.unwrap(),
+                    bytes: byte_helpers.unwrap(),
+                    objects: object_helpers.unwrap(),
+                    promises: promises.as_ref(),
+                    pool: string_pool,
+                    native: fetch_helpers.and_then(|h| h.stream),
+                    output: writable_output,
+                    input: input_imports.map(|imports| super::streams::incoming::Runtime {
+                        imports,
+                        operations,
+                        controller: input_controller,
+                    }),
+                },
+            )
+        })
+        .transpose()?;
         for (name, intrinsic) in &contract.intrinsics {
             if matches!(
                 intrinsic,

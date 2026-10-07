@@ -106,7 +106,7 @@ pub(crate) fn emit(
     registry: &ModuleRegistry,
     contract: &ResolvedContract,
     strings: &crate::waffle_backend::strings::StringPool,
-) -> Result<()> {
+) -> Result<Vec<crate::waffle_backend::constant_arguments::CapturedArguments>> {
     use Type::{F64, I32};
     let runtime = registry.promises.as_ref().unwrap();
     let native = &runtime.native;
@@ -164,6 +164,7 @@ pub(crate) fn emit(
     emit_cancel_all(module, registry)?;
 
     let mut workers = Vec::new();
+    let mut captures = Vec::new();
     for (target, task) in &contract.promises.as_ref().unwrap().tasks {
         let start = runtime.starts[target];
         let parameters = task.arguments.core_types()?;
@@ -221,6 +222,13 @@ pub(crate) fn emit(
             .enumerate()
             .map(|(index, ty)| b.load(context, 8 * (index as u32 + 1), *ty))
             .collect::<Vec<_>>();
+        captures.push(
+            crate::waffle_backend::constant_arguments::CapturedArguments {
+                start,
+                worker,
+                loads: args.clone(),
+            },
+        );
         let mut roots = vec![record, context];
         roots.extend(
             parameters
@@ -316,7 +324,7 @@ pub(crate) fn emit(
         name: "__indirect_function_table".into(),
         kind: ExportKind::Table(table),
     });
-    Ok(())
+    Ok(captures)
 }
 
 fn filesystem_adapter(

@@ -78,7 +78,8 @@ pub(super) fn emit_pull(
     let stream = b.param(0);
     let destination = b.param(1);
     let copy_chunk = r
-        .byob
+        .readers
+        .has_byob()
         .then(|| super::byob::emit_copy_chunk(module, memory, r))
         .transpose()?;
     let zero = b.integer(0);
@@ -149,17 +150,22 @@ pub(super) fn emit_pull(
     let body = b.load(stream, BODY, I32);
     let bytes = b.load(body, 12, I32);
     let copy = if let Some(copy_chunk) = copy_chunk {
-        let copy_default = b.body.add_block();
-        let use_source = b.body.add_block();
-        let buffered_ready = b.body.add_block();
-        let source = b.body.add_blockparam(buffered_ready, I32);
-        b.branch(destination, use_source, copy_default);
-        b.block = copy_default;
-        let copy = b.call(r.bytes.copy, &[bytes], &[I32])[0];
-        b.jump(buffered_ready, &[copy]);
-        b.block = use_source;
-        b.jump(buffered_ready, &[bytes]);
-        b.block = buffered_ready;
+        let source = if r.readers.has_default() {
+            let copy_default = b.body.add_block();
+            let use_source = b.body.add_block();
+            let buffered_ready = b.body.add_block();
+            let source = b.body.add_blockparam(buffered_ready, I32);
+            b.branch(destination, use_source, copy_default);
+            b.block = copy_default;
+            let copy = b.call(r.bytes.copy, &[bytes], &[I32])[0];
+            b.jump(buffered_ready, &[copy]);
+            b.block = use_source;
+            b.jump(buffered_ready, &[bytes]);
+            b.block = buffered_ready;
+            source
+        } else {
+            bytes
+        };
         b.call(copy_chunk, &[stream, source, destination], &[I32])[0]
     } else {
         b.call(r.bytes.copy, &[bytes], &[I32])[0]
@@ -243,7 +249,7 @@ pub(super) fn emit_pull(
         b.call(r.allocator.frame_drop, &[frame], &[]);
         b.ret(&[reason, zero, one]);
         b.block = bytes;
-        b.store(view, 4, length, I32);
+        super::byob::received(&mut b, r, destination, view, length);
         b.call(r.allocator.frame_drop, &[frame], &[]);
         b.ret(&[zero, view, zero]);
     } else {

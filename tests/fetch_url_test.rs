@@ -2,6 +2,83 @@
 mod url;
 
 #[test]
+fn ipv6_compression_and_ipv4_suffix_boundaries_match_node() {
+    let mut hosts = Vec::new();
+    for start in 0..8 {
+        for end in start + 1..=8 {
+            for piece in ["0", "1", "0001", "00Ab", "ffff"] {
+                let left = vec![piece; start].join(":");
+                let right = vec![piece; 8 - end].join(":");
+                hosts.push(format!("{left}::{right}"));
+            }
+        }
+    }
+    for prefix in [
+        "::",
+        "::ffff:",
+        "1:2:3:4:5:6:",
+        "1:2:3:4:5::",
+        "1:2:3:4:5:6::",
+        "1:2:3:4:5:6:7:",
+    ] {
+        for tail in [
+            "0.0.0.0",
+            "255.255.255.255",
+            "192.0.2.1",
+            "256.0.0.1",
+            "1.02.3.4",
+            "0x1.2.3.4",
+            "1.2.3",
+            "1.2.3.4.5",
+            "1..2.3",
+            "1.2.3.",
+            "1.2.3.4:",
+        ] {
+            hosts.push(format!("{prefix}{tail}"));
+        }
+    }
+    hosts.extend(
+        [
+            "",
+            ":",
+            ":1",
+            ":::1",
+            "1:::2",
+            "1::2::3",
+            "1:2:3:4:5:6:7:8",
+            "1:2:3:4:5:6:7",
+            "1:2:3:4:5:6:7:8:9",
+            "1:2:3:4:5:6:7:8::",
+            "::fffff",
+            "::g",
+            "::1%25zone",
+            "::é",
+            "1:",
+            "1:2:3:4:5:6:7::",
+        ]
+        .map(str::to_owned),
+    );
+    let inputs = hosts
+        .into_iter()
+        .map(|host| format!("http://[{host}]:8080/"))
+        .collect::<Vec<_>>();
+    let script = "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(s=>{try{return new URL(s).href}catch{return null}})))";
+    let output = std::process::Command::new("node")
+        .args(["-e", script, &serde_json::to_string(&inputs).unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let expected: Vec<Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
+    for (input, expected) in inputs.iter().zip(expected) {
+        let mut bytes = [0; 512];
+        let actual = url::normalize(input.as_bytes(), &mut bytes)
+            .ok()
+            .map(|metadata| String::from_utf8(bytes[..metadata[4] as usize].to_vec()).unwrap());
+        assert_eq!(actual, expected, "{input}");
+    }
+}
+
+#[test]
 fn http_url_normalization_matches_node_for_host_path_and_query_shapes() {
     let cases = [
         "HTTP://Example.COM:00080?q=hello world#ignored",

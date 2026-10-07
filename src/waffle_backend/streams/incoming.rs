@@ -168,7 +168,7 @@ pub(super) fn emit(
     b.call(r.allocator.frame_drop, &[frame], &[]);
     b.ret(&[reason, zero, one]);
     b.block = bytes;
-    b.store(view, 4, length, I32);
+    super::web::byob::received(&mut b, r, destination, view, length);
     b.call(r.allocator.frame_drop, &[frame], &[]);
     b.ret(&[zero, view, zero]);
     b.finish(module, pull)?;

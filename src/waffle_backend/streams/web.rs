@@ -154,8 +154,43 @@ pub(crate) struct NativeBody {
     pub(crate) release: Func,
     pub(crate) operations: Operations,
 }
+pub(crate) enum ReaderModes {
+    Default,
+    Byob,
+    Both,
+}
+impl ReaderModes {
+    pub(crate) fn for_plan(plan: Option<&crate::waffle_backend::promises::PromisePlan>) -> Self {
+        use crate::waffle_backend::promises::TaskTarget;
+        let Some(plan) = plan else {
+            return Self::Default;
+        };
+        if !plan
+            .tasks
+            .contains_key(&TaskTarget::WebStream(Method::ReadInto))
+        {
+            return Self::Default;
+        }
+        if plan.tasks.keys().any(|target| {
+            matches!(
+                target,
+                TaskTarget::HttpBody(_) | TaskTarget::WebStream(Method::Read)
+            )
+        }) {
+            Self::Both
+        } else {
+            Self::Byob
+        }
+    }
+    pub(crate) fn has_default(&self) -> bool {
+        !matches!(self, Self::Byob)
+    }
+    pub(crate) fn has_byob(&self) -> bool {
+        !matches!(self, Self::Default)
+    }
+}
 pub(crate) struct Runtime<'a> {
-    pub(crate) byob: bool,
+    pub(crate) readers: ReaderModes,
     pub(crate) allocator: AllocationFuncs,
     pub(crate) bytes: ByteHelpers,
     pub(crate) objects: ObjectHelpers,

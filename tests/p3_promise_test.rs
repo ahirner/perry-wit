@@ -27,6 +27,46 @@ fn make_engine() -> Result<Engine> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn captured_arguments_preserve_distinct_calls_and_instance_reuse() -> Result<()> {
+    let source = r#"
+        async function choose(flag:boolean):Promise<number> {
+            await 0;
+            return flag ? 11 : 22;
+        }
+        async function constant(flag:boolean):Promise<number> {
+            await 0;
+            return flag ? 1000 : 100;
+        }
+        export async function run(input:number):Promise<number> {
+            const first = choose(false);
+            const second = choose(input === 1);
+            const third = constant(false);
+            return (await first) + (await second) + (await third);
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "captured_arguments.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for input in [1.0, 0.0, 1.0, -1.0] {
+        assert_eq!(
+            run.call_async(&mut store, (input,)).await?.0,
+            if input == 1.0 { 133.0 } else { 144.0 }
+        );
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn core_export_results_survive_ready_task_collection() -> Result<()> {
     for (result_type, expression, expected) in [
         (

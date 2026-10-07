@@ -7,11 +7,14 @@ pub(in crate::waffle_backend::streams) fn destination(
     provided: Value,
     default_capacity: u32,
 ) -> (Value, Value, Value) {
+    if !r.readers.has_default() {
+        return (provided, b.load(provided, 0, I32), b.load(provided, 4, I32));
+    }
     let allocate = b.body.add_block();
     let supplied = b.body.add_block();
     let ready = b.body.add_block();
     let view = b.body.add_blockparam(ready, I32);
-    if r.byob {
+    if r.readers.has_byob() {
         b.branch(provided, supplied, allocate);
     } else {
         b.jump(allocate, &[]);
@@ -19,9 +22,9 @@ pub(in crate::waffle_backend::streams) fn destination(
     b.block = supplied;
     b.jump(ready, &[provided]);
     b.block = allocate;
-    let capacity = b.number(f64::from(default_capacity));
-    let result = b.call(r.bytes.new, &[capacity], &[I32, F64]);
-    let created = b.op(O::I32TruncF64U, &[result[1]], I32);
+    let data = b.allocate(r.allocator.realloc, default_capacity, 1);
+    let capacity = b.integer(default_capacity);
+    let created = b.call(r.bytes.lift_canonical, &[data, capacity], &[I32])[0];
     b.jump(ready, &[created]);
     b.block = ready;
     let data = b.load(view, 0, I32);
@@ -39,12 +42,14 @@ pub(super) fn emit_copy_chunk(
     let stream = b.param(0);
     let source = b.param(1);
     let destination = b.param(2);
-    let copy = b.body.add_block();
-    let direct = b.body.add_block();
-    b.branch(destination, copy, direct);
-    b.block = direct;
-    b.ret(&[source]);
-    b.block = copy;
+    if r.readers.has_default() {
+        let copy = b.body.add_block();
+        let direct = b.body.add_block();
+        b.branch(destination, copy, direct);
+        b.block = direct;
+        b.ret(&[source]);
+        b.block = copy;
+    }
     let available = b.load(source, 4, I32);
     let capacity = b.load(destination, 4, I32);
     let partial = b.op(O::I32GtU, &[available, capacity], I32);
@@ -172,4 +177,31 @@ pub(super) fn emit(
     b.ret(&[error, result, ended]);
     b.finish(module, f)?;
     Ok(f)
+}
+
+/// A default chunk exposes only received bytes; transferred buffers keep their full capacity.
+pub(in crate::waffle_backend::streams) fn received(
+    b: &mut Builder,
+    r: &Runtime<'_>,
+    provided: Value,
+    view: Value,
+    length: Value,
+) {
+    b.store(view, 4, length, I32);
+    if !r.readers.has_default() {
+        return;
+    }
+    if r.readers.has_byob() {
+        let resize = b.body.add_block();
+        let done = b.body.add_block();
+        b.branch(provided, done, resize);
+        b.block = resize;
+        let buffer = b.load(view, 8, I32);
+        b.store(buffer, 4, length, I32);
+        b.jump(done, &[]);
+        b.block = done;
+    } else {
+        let buffer = b.load(view, 8, I32);
+        b.store(buffer, 4, length, I32);
+    }
 }

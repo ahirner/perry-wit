@@ -248,9 +248,11 @@ pub(crate) fn lower_module(
         state.emit(&mut module, plan, &registry)?;
     }
     let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
-    if registry.promises.is_some() {
-        super::promises::native::emit(&mut module, &registry, contract, &string_pool)?;
-    }
+    let captures = if registry.promises.is_some() {
+        super::promises::native::emit(&mut module, &registry, contract, &string_pool)?
+    } else {
+        Vec::new()
+    };
 
     // 5. Lower each function body using the established registry contracts
     for func in &hir.functions {
@@ -311,14 +313,6 @@ pub(crate) fn lower_module(
                 }
             }
         }
-        if let Some(plan) = &contract.promises
-            && let Some(task) = plan.tasks.get(&super::promises::TaskTarget::Guest(func.id))
-        {
-            module.exports.push(Export {
-                name: task.symbol.clone(),
-                kind: ExportKind::Func(info.func_index),
-            });
-        }
     }
 
     if let Some(limits) = contract.http_handler {
@@ -329,6 +323,7 @@ pub(crate) fn lower_module(
             http_handler_imports.as_ref().unwrap(),
         )?;
     }
+    super::constant_arguments::optimize(&mut module, &captures);
     Ok(module)
 }
 
