@@ -128,6 +128,22 @@ The development-only `perry-conformance` crate owns strategies, examples, observ
 
 The default smoke campaign generates eight programs per contract at depth three and runs the preserved IEEE-754 boundary corpus. Select contracts or capability groups with `--select node.fs`, extend budgets with `--cases 200 --depth 4 --seed 100`, and replay a concrete saved case with `cargo run -p perry-conformance -- replay target/conformance/run-EXAMPLE/CONTRACT/minimal.json`. `--shrink-limit`, `--fuel`, `--memory` (bytes), and `--timeout` (seconds) bound reduction and execution. Proptest state machines generate complete valid start, host-release, completion, cancellation, observation, and reuse traces before compilation. The lifecycle adapter supplies controlled clocks to both Node and Wasmtime. These traces do not exhaustively explore asynchronous schedules. Ordinary Rust tests remain a separate CI gate.
 
+### Compare component performance with main
+
+Run the opt-in comparison in the pinned development environment:
+
+```sh
+nix develop -c node scripts/compare_components.mjs
+```
+
+The script archives local `main` (or an optional baseline ref argument), builds the same `tests/component_measurement.rs` harness against both compiler revisions in release mode, then prints a comparison table. It leaves the checkout and branch untouched. Run on an idle machine; both builds finish before measurements start.
+
+Incoming-stream execution sums a 4 MiB input under a 64 KiB guest memory limit. Bounded HTTP reads a 4 MiB in-memory host response, with exact-limit success and one-byte overflow measured separately under a 16 MiB guest limit. Each workload uses a reused instance, five warmup calls, and five samples of five calls. Timers exclude builds, guest and Wasmtime compilation, instantiation, input preparation, and outcome assertions. Checks verify results, resource cleanup, and no memory growth after warmup. HTTP timing includes P3 host transfers but no network. The two revisions use equivalent programs targeting their respective APIs; historical imports are confined to the baseline measurement source.
+
+The table reports median sample times and stripped component bytes, including size-only comparisons of each revision's `examples/merge_docs.ts`, `examples/merge_task.ts`, and `template/src/index.ts`. Raw samples, guest sources, component binaries, exact revisions, source fingerprints, toolchain identity, and the table are saved under `target/conformance/comparisons/run-*`. The existing text/filesystem measurements remain in the JSON report. Timing changes are local observations; repeat the command before interpreting small differences as improvements.
+
+The first comparison against `main` at `96f82989` measured a 26.7× stream slowdown and roughly 11× HTTP slowdowns. Stripped stream and HTTP components grew by 168% and 131%, and `merge_docs.ts` grew by 40%; both task examples stayed the same size. The optimization goal is to bring all three execution medians within 10% of that baseline across three independent comparisons, prioritizing the stream sum. Preserve the 64 KiB stream limit, HTTP's current 4,390,912-byte steady guest allocation, result checks, and resource cleanup. The subsequent size target is to remove at least half of each increase: at most 12,745 bytes for incoming stream, 46,198 bytes for bounded HTTP, and 111,449 bytes for `merge_docs.ts`, without growing either task example. These are pending targets, not achieved improvements; profile the emitted byte loop and stream transfers before changing them.
+
 ## Authoring Components
 
 Initialize a new TypeScript component from the template:
