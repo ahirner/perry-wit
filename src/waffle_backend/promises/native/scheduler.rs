@@ -1,5 +1,7 @@
 //! P3 schedules runnable continuations; records retain only pending observers.
 //! The immediate caller resumes at a child's first suspension, preserving eager starts.
+//! Settled awaits need no host yield when neither another source continuation nor
+//! native work can advance; pending native work still gets its polling opportunity.
 
 use super::*;
 use waffle::Value;
@@ -119,6 +121,28 @@ pub(super) fn emit(module: &mut Module<'static>, registry: &ModuleRegistry) -> R
         );
         b.ret(&[]);
         b.block = release;
+        if matches!(continuation, Continuation::Yield) {
+            let address = b.integer(RUNNABLE);
+            let runnable = b.load(address, 0, I32);
+            let one = b.integer(1);
+            let alone = b.op(Operator::I32Eq, &[runnable, one], I32);
+            let address = b.integer(crate::waffle_backend::runtime::callbacks::NATIVE_WORKERS);
+            let workers = b.load(address, 0, I32);
+            let pending = if let Some(operations) = registry.operations {
+                let pending = b.call(operations.pending, &[], &[I32])[0];
+                b.op(Operator::I32Or, &[workers, pending], I32)
+            } else {
+                workers
+            };
+            let idle = b.op(Operator::I32Eqz, &[pending], I32);
+            let uncontended = b.op(Operator::I32And, &[alone, idle], I32);
+            let ready = b.body.add_block();
+            let yield_host = b.body.add_block();
+            b.branch(uncontended, ready, yield_host);
+            b.block = ready;
+            b.ret(&[]);
+            b.block = yield_host;
+        }
         if !matches!(continuation, Continuation::Complete) {
             b.call(
                 if matches!(continuation, Continuation::Suspend) {

@@ -27,6 +27,46 @@ fn make_engine() -> Result<Engine> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn settled_awaits_without_competing_work_do_not_repoll_the_host() -> Result<()> {
+    use std::future::{Future, poll_fn};
+    let compiled = compile_typescript_waffle(
+        r#"
+        async function value(): Promise<number> { return 1; }
+        export async function run(count: number): Promise<number> {
+            const ready = value();
+            let sum = 0;
+            for (let i = 0; i < count; i++) sum += await ready;
+            return sum;
+        }
+        "#,
+        "settled-awaits.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for count in [1.0, 1000.0, 1.0] {
+        let mut polls = 0;
+        let result = {
+            let mut pending = std::pin::pin!(run.call_async(&mut store, (count,)));
+            poll_fn(|context| {
+                polls += 1;
+                pending.as_mut().poll(context)
+            })
+            .await?
+        };
+        assert_eq!(result.0, count);
+        assert!(polls <= 4, "{polls} host polls for {count} settled awaits");
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn captured_arguments_preserve_distinct_calls_and_instance_reuse() -> Result<()> {
     let source = r#"
         async function choose(flag:boolean):Promise<number> {

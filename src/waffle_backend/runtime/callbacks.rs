@@ -16,7 +16,7 @@ use waffle::{
 };
 
 pub(crate) const LIVE_WORKERS: u32 = 120;
-const NATIVE_WORKERS: u32 = 136;
+pub(crate) const NATIVE_WORKERS: u32 = 136;
 const CONTEXT: u32 = 124;
 const DONE: u32 = 128;
 const FRAME: u32 = 132;
