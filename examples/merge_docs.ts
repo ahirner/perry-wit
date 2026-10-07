@@ -5,20 +5,24 @@ async function readBounded(response: Response, limit: number): Promise<Uint8Arra
     throw 12;
   }
   if (body === null) return new Uint8Array(0);
-  const reader = body.getReader();
-  const bytes = new Uint8Array(limit);
+  const reader = body.getReader({ mode: 'byob' });
+  let buffer = new Uint8Array(limit);
   let length = 0;
   try {
-    let result = await reader.read();
-    while (!result.done) {
-      const chunk = result.value;
-      if (chunk === undefined) throw 12;
-      if (chunk.length > limit - length) throw 8;
-      bytes.set(chunk, length);
-      length += chunk.length;
-      result = await reader.read();
+    while (length < limit) {
+      const result = await reader.read(buffer.subarray(length));
+      const bytes = result.value;
+      if (bytes === undefined) throw 12;
+      length += bytes.length;
+      // A BYOB read transfers the backing buffer; recover its returned owner.
+      buffer = new Uint8Array(bytes.buffer);
+      if (result.done) return buffer.subarray(0, length);
     }
-    return bytes.subarray(0, length);
+    const end = await reader.read(new Uint8Array(1));
+    const extra = end.value;
+    if (extra !== undefined && extra.length > 0) throw 8;
+    if (!end.done) throw 12;
+    return buffer.subarray(0, length);
   } finally {
     await reader.cancel();
     reader.releaseLock();
