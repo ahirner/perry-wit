@@ -99,6 +99,41 @@ async fn retained_subviews_keep_backing_bytes_alive_during_collection() -> Resul
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn allocation_free_byte_loops_have_a_bounded_instruction_cost() -> Result<()> {
+    let compiled = compile_typescript_waffle(
+        r#"export function run(): number {
+            let total = 0;
+            for (let round = 0; round < 4; round++) {
+                const bytes = new Uint8Array([7]);
+                for (let index = 0; index < 20000; index++) total += bytes[0];
+            }
+            return total;
+        }"#,
+        "byte-loop-cost.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65536).build(),
+    );
+    store.limiter(|limits| limits);
+    store.set_fuel(10_000_000)?;
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..3 {
+        store.set_fuel(10_000_000)?;
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 560000.0);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn subarray_bounds_and_argument_effects_match_node() -> Result<()> {
     let source = r#"
     function start(owner: Uint8Array): number { owner[0] = 20; return -3; }

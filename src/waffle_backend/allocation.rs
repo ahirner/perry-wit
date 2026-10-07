@@ -20,7 +20,7 @@ pub(crate) struct AllocationFuncs {
     pub(crate) realloc: Func,
     pub(crate) frame_new: Func,
     pub(crate) frame_drop: Func,
-    pub(crate) collect: Func,
+    pub(crate) collect_if_allocated: Func,
     pub(crate) retained_frame_new: Func,
     pub(crate) post_return: Func,
 }
@@ -56,7 +56,7 @@ pub(crate) fn emit_allocator(
         realloc,
         frame_new: functions["frame-new"],
         frame_drop: functions["frame-drop"],
-        collect: functions["collect"],
+        collect_if_allocated: functions["collect-if-allocated"],
         retained_frame_new: functions["retained-frame-new"],
         post_return: functions["post-return"],
     })

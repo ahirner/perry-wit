@@ -5,6 +5,8 @@
   (import "heap" "index" (func $index))
   ;; Memory[36,40,44] holds block head, block tail, and active root-frame head.
   ;; Memory[72] holds the retained root-frame head across component invocations.
+  ;; Memory[144] records allocation since the last collection. Allocation-free
+  ;; source loops cannot increase garbage and only need to poll this word.
   ;; Block headers: next, span, payload offset, payload size, kind, mark, reserved.
   ;; The word immediately before every payload points back to its block header.
   ;; Kinds: 0 bytes, 1 string, 2 string array, 3 scalar Promise, 4 reference Promise,
@@ -24,6 +26,7 @@
     (if (i32.or (i32.eqz (local.get $alignment))
       (i32.ne (i32.and (local.get $alignment) (i32.sub (local.get $alignment) (i32.const 1))) (i32.const 0))) (then unreachable))
     (if (i32.eqz (local.get $size)) (then (return (i32.const 0))))
+    (i32.store (i32.const 144) (i32.const 1))
     (if (i32.eqz (i32.load (i32.const 0))) (then
       (i32.store (i32.const 36) (i32.const 0))
       (i32.store (i32.const 40) (i32.const 0))
@@ -171,9 +174,13 @@
       (then (call $collect))
       (else (i32.store (i32.const 0) (i32.const 0)))))
 
+  (func (export "collect-if-allocated")
+    (if (i32.load (i32.const 144)) (then (call $collect))))
+
   (func $collect (export "collect")
     (local $block i32) (local $next i32) (local $previous i32) (local $pointer i32)
     (local $kind i32) (local $changed i32) (local $index i32) (local $count i32)
+    (i32.store (i32.const 144) (i32.const 0))
     (call $index)
     ;; Completed native transports no longer need the invocation's pending root.
     (local.set $pointer (i32.load (i32.const 4)))
