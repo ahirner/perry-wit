@@ -143,9 +143,10 @@ Asynchronous TypeScript functions execute eagerly until they reach an initial su
 ### Execution
 Completed tasks store their settlement state and outcome value for repeated observation.
 
-Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue. `runtime/scheduler.rs` owns runnable-source and worker counts, eager parent handoffs, source checkpoints, shutdown draining, and callback yield/wait decisions. The raw host-yield primitive is private to that scheduler.
-
-Source lowering requests a checkpoint at each required scheduling boundary. An already-settled await allocates no observer and skips the host handoff when no competing continuation, native worker, or pending operation can advance. Pending source awaits leave the runnable count until settlement wakes them; native transport owners park independently until terminal acknowledgement. Export callbacks supply notification and completion state to the same scheduler, which waits on the native operation set when idle. Publication requires source completion and no remaining worker or operation owners.
+Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue.
+Awaits on already-settled promises advance inline when uncontended, yielding to the host only when competing work can make progress.
+This avoids thousands of redundant host context switches for already-resolved promises, which are
+prone to escalate into costly OS-level event polling in common runtimes.
 
 ### Settlement
 Guest task records maintain explicit settlement states, observer lists, and outcome values in the guest heap. Combinator operations (`all`, `allSettled`, `race`) register as observers on operand tasks and propagate settlements deterministically when dependencies resolve.
