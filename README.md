@@ -101,6 +101,14 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
 - **Async Exports**: An export must be declared as `async func` in WIT if it can suspend, including during module initialization or through filesystem, timer, and HTTP calls.
 - **Core Wasm Output**: Pass `--core-only` (or use a `.core.wasm` extension) to emit unlinked core Wasm for custom embedding.
 
+### Fetch
+
+Use the standard global `fetch`. For ordinary JSON, text, or binary responses, consume the body with `response.json()`, `response.text()`, or `response.arrayBuffer()`. These methods read the whole body without an application byte limit.
+
+For a hard size limit, use a BYOB reader. [merge_docs.ts](examples/merge_docs.ts) accepts only status 200 and at most 64 KiB of valid UTF-8 per document. One `read(buffer, { min: 65537 })` waits for EOF or the first excess byte; the `finally` block cancels the reader and releases its lock. The SDK supplies the standard `min` declaration for older TypeScript DOM libraries. This example uses Node 20.17+ or Perry.
+
+The repository's `tsconfig.json` checks the examples and authored SDK declarations, excluding generated test artifacts. Run `tsc -p tsconfig.json`; ordinary TypeScript language servers use the same configuration.
+
 ### Test
 
 Perry-WIT includes ordinary Rust tests, one executable conformance registry for directed and generated checks against Node.js, and end-to-end integration tests:

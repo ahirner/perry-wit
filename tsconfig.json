@@ -2,6 +2,10 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleDetection": "force",
-    "target": "ESNext"
-  }
+    "target": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true
+  },
+  "include": ["examples/**/*.ts", "types/**/*.d.ts"]
 }

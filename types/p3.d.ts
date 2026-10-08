@@ -31,6 +31,11 @@
  * literals, and byte-view/Stats/Promise serialization are unsupported. Parsed
  * graphs retain guest identity across helpers, collection, and stored Promises;
  * component boundaries carry JSON strings. */
+/** Standard BYOB minimum-fill option, missing from older TypeScript DOM libraries. */
+interface ReadableStreamBYOBReader {
+  read<T extends ArrayBufferView>(view: T, options: { min: number }): Promise<ReadableStreamReadResult<T>>;
+}
+
 declare namespace NodeJS {
   interface ProcessEnv {
     readonly [key: string]: string | undefined;

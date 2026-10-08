@@ -126,9 +126,10 @@
           pname = "example-merge-docs";
           version = "0.1.0";
           inherit src;
-          nativeBuildInputs = [ perryWitBin ];
+          nativeBuildInputs = [ perryWitBin pkgs.typescript ];
           buildPhase = ''
             export WASI_WIT_PATH="${wasiP3Wit}"
+            tsc -p tsconfig.json
             mkdir -p dist
             perry-wit examples/merge_docs.ts \
               --wit wit \
