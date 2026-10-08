@@ -5,6 +5,7 @@ pub fn generate_default_tsconfig() -> String {
     r#"{
   "compilerOptions": {
     "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
     "module": "ESNext",
     "moduleDetection": "force",
     "moduleResolution": "bundler",
