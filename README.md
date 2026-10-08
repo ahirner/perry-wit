@@ -200,6 +200,8 @@ cargo run -p perry-conformance -- check --select node.fs
 
 All verified capability contracts are declared in [crates/conformance/src/registry.rs](crates/conformance/src/registry.rs).
 
+Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling.rs](crates/conformance/src/scaling.rs)) bound guest fuel growth between inputs n and 4n. Contracts listed in `scaling::KNOWN_FAILURES` are reported as `known_failure` and do not fail the campaign. A listed contract that passes does fail the campaign, so that its entry gets removed.
+
 ## Performance
 
 Component performance and resource utilization can be measured using the dedicated benchmark suite:

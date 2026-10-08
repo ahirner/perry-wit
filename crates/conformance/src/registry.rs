@@ -48,6 +48,13 @@ pub enum Case {
         diagnostic: String,
     },
     Lifecycle(Vec<Action>),
+    /// Calls `run(base)`, `run(base)`, `run(base * factor)` on one instance and bounds fuel growth.
+    Scaling {
+        source: String,
+        base: u32,
+        factor: u32,
+        max_growth: u32,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,12 +62,14 @@ pub enum ExpectedOutcome {
     EquivalentExecution,
     CompilerRejection,
     InjectedFaultDetection,
+    BoundedGrowth,
 }
 impl Case {
     pub fn expected_outcome(&self) -> ExpectedOutcome {
         match self {
             Self::Reject { .. } => ExpectedOutcome::CompilerRejection,
             Self::Fault { .. } => ExpectedOutcome::InjectedFaultDetection,
+            Self::Scaling { .. } => ExpectedOutcome::BoundedGrowth,
             _ => ExpectedOutcome::EquivalentExecution,
         }
     }
@@ -90,7 +99,8 @@ impl Case {
             Self::Lifecycle(actions) => crate::transitions::source(actions),
             Self::Function { source, .. }
             | Self::Command { source, .. }
-            | Self::Reject { source, .. } => source.clone(),
+            | Self::Reject { source, .. }
+            | Self::Scaling { source, .. } => source.clone(),
         }
     }
     pub fn asynchronous(&self) -> bool {
@@ -499,6 +509,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     contracts.push(crate::fetch::byob_contract());
     contracts.extend(crate::capabilities::contracts());
     contracts.push(crate::handler::contract());
+    contracts.extend(crate::scaling::contracts());
     let mut ids = std::collections::HashSet::new();
     for contract in &contracts {
         ensure!(
@@ -519,6 +530,12 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 contract.id
             );
         }
+    }
+    for (id, _) in crate::scaling::KNOWN_FAILURES {
+        ensure!(
+            ids.contains(id),
+            "known failure names unknown contract {id}"
+        );
     }
     Ok(contracts)
 }

@@ -4,6 +4,7 @@ pub mod fetch;
 pub mod program;
 pub mod registry;
 pub mod runner;
+pub mod scaling;
 pub mod strategies;
 pub mod streams;
 pub mod transitions;
