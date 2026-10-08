@@ -1,0 +1,1017 @@
+//! perry MIR → pliron `wasm` dialect → core Wasm (`TODOs.md` P4).
+//!
+//! The output imports linear memory and a few functions from `perry-runtime` ([RUNTIME_WASM])
+//! under [perry_runtime::MODULE]. Representation decisions for this first slice:
+//!
+//! - `f64` stays `f64`; `i1` and `i32` become `i32`; records, arrays, strings and promises are
+//!   `i32` addresses.
+//! - `undefined` (R8) is the signalling-NaN bit pattern [UNDEFINED_BITS] for numbers, the null
+//!   address for references and `2` for booleans. Wasm arithmetic only produces quiet NaNs, so
+//!   no computed number can be mistaken for `undefined`; `perry.to_number` canonicalizes
+//!   before arithmetic.
+//! - Records are an `i32` shape id followed by 8-byte field slots in declaration order; arrays
+//!   use the layout in [perry_runtime::array]. Exact layouts are P3.6.
+//! - Every allocation is `task` tier: the builder cannot express module state yet (R4), so no
+//!   value outlives its export call. Exports are wrapped in `perry_task_begin`/`_end`.
+//! - Exceptions use the status convention: a function that may throw returns an extra `i32`
+//!   status after its results (0 = normal, otherwise an [ErrorKind] code), and callers branch on
+//!   it. The status reaches the export; P6.1 maps it to the WIT result.
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use perry_mir::{
+    attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
+    calls::{CallOp as MirCallOp, is_exported},
+    collections::{ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp},
+    control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
+    exceptions::MayThrowInterface,
+    heap::{AllocOp, FieldGetOp, FieldSetOp},
+    locals::UndefOp,
+    optional::{IsUndefinedOp, ToNumberOp, UndefinedOp, UnwrapOp, WrapOp},
+    scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
+    types::{ArrayType, OptionalType, PromiseType, RecordType, StringType},
+};
+use perry_runtime::array as layout;
+use pliron::{
+    basic_block::BasicBlock,
+    builtin::{
+        attributes::{FPDoubleAttr, IntegerAttr},
+        op_interfaces::{
+            BranchOpInterface, OneRegionInterface, OneResultInterface, SingleBlockRegionInterface,
+            SymbolOpInterface,
+        },
+        ops::{ConstantOp, FuncOp, ModuleOp},
+        type_interfaces::FunctionTypeInterface,
+        types::{FP64Type, FunctionType, IntegerType, Signedness},
+    },
+    context::{Context, Ptr},
+    identifier::Identifier,
+    linked_list::ContainsLinkedList,
+    op::{Op, op_cast},
+    operation::{Operation, verify_operation},
+    printable::Printable,
+    region::Region,
+    r#type::{TypeHandle, Typed, TypedHandle},
+    utils::apint::APInt,
+    value::Value,
+};
+use pliron_wasm::{
+    attrs::{MemKind, NumOpcode},
+    control::{BrOp, CondBrOp, ReturnOp},
+    emit::{EmitOptions, Memory, emit_module},
+    ops::{CallOp, ImportFuncOp, LoadOp, NumOp, SelectOp, StoreOp, set_export},
+};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    num::NonZeroUsize,
+};
+
+/// `perry-runtime` built for wasm32. Instantiate it first and satisfy the compiled module's
+/// [perry_runtime::MODULE] imports from its exports.
+pub const RUNTIME_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/perry_runtime.wasm"));
+
+/// Bits of `undefined` in a `number | undefined` slot: a signalling NaN.
+pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
+/// `undefined` in a `boolean | undefined` slot.
+const UNDEFINED_BOOL: i32 = 2;
+
+/// Lower a canonicalized MIR module and encode it as a core Wasm module.
+pub fn compile(ctx: &mut Context, mir: &ModuleOp) -> Result<Vec<u8>> {
+    let wasm = lower(ctx, mir)?;
+    verify_operation(wasm.get_operation(), ctx)
+        .map_err(|error| anyhow!("{}", error.disp(ctx)))
+        .context("verifying the lowered wasm module")?;
+    let options = EmitOptions {
+        memory: Memory::Import {
+            module: perry_runtime::MODULE.into(),
+            name: "memory".into(),
+            min_pages: 1,
+        },
+        names: true,
+    };
+    Ok(emit_module(ctx, &wasm, &options)?)
+}
+
+/// The status code of an exception kind; 0 means no exception.
+pub fn status_code(kind: ErrorKind) -> i32 {
+    match kind {
+        ErrorKind::Any => 3,
+        ErrorKind::TypeError => 1,
+        ErrorKind::RangeError => 2,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Runtime {
+    Alloc,
+    ArrayNew,
+    ArrayGrow,
+    F64Rem,
+    TaskBegin,
+    TaskEnd,
+}
+
+impl Runtime {
+    fn name(self) -> &'static str {
+        match self {
+            Runtime::Alloc => "perry_alloc",
+            Runtime::ArrayNew => "perry_array_new",
+            Runtime::ArrayGrow => "perry_array_grow",
+            Runtime::F64Rem => "perry_f64_rem",
+            Runtime::TaskBegin => "perry_task_begin",
+            Runtime::TaskEnd => "perry_task_end",
+        }
+    }
+
+    fn symbol(self) -> Identifier {
+        format!("rt_{}", &self.name()["perry_".len()..])
+            .try_into()
+            .expect("identifier")
+    }
+
+    /// (parameters, results) as (f64?, count) pairs: all runtime values are i32 or f64.
+    fn signature(self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
+        let i32 = i32_type(ctx);
+        let f64: TypeHandle = FP64Type::get(ctx).into();
+        match self {
+            Runtime::Alloc | Runtime::ArrayNew => (vec![i32], vec![i32]),
+            Runtime::ArrayGrow => (vec![i32], vec![]),
+            Runtime::F64Rem => (vec![f64, f64], vec![f64]),
+            Runtime::TaskBegin | Runtime::TaskEnd => (vec![], vec![]),
+        }
+    }
+}
+
+fn i32_type(ctx: &mut Context) -> TypeHandle {
+    IntegerType::get(ctx, 32, Signedness::Signless).into()
+}
+
+/// How a MIR type is represented in Wasm.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Repr {
+    F64,
+    Bool,
+    I32,
+    Ref,
+}
+
+fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
+    let deref = ty.deref(ctx);
+    if deref.is::<FP64Type>() {
+        return Ok(Repr::F64);
+    }
+    if let Some(int) = deref.downcast_ref::<IntegerType>() {
+        return match int.width() {
+            1 => Ok(Repr::Bool),
+            32 => Ok(Repr::I32),
+            width => bail!("integers of width {width} are not supported"),
+        };
+    }
+    if deref.is::<RecordType>()
+        || deref.is::<ArrayType>()
+        || deref.is::<StringType>()
+        || deref.is::<PromiseType>()
+    {
+        return Ok(Repr::Ref);
+    }
+    if let Some(optional) = deref.downcast_ref::<OptionalType>() {
+        let inner = optional.value();
+        drop(deref);
+        return repr(ctx, inner);
+    }
+    bail!("type {} has no Wasm representation", ty.disp(ctx))
+}
+
+fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
+    Ok(match repr(ctx, ty)? {
+        Repr::F64 => FP64Type::get(ctx).into(),
+        _ => i32_type(ctx),
+    })
+}
+
+fn slot_kind(ctx: &Context, ty: TypeHandle) -> Result<MemKind> {
+    Ok(match repr(ctx, ty)? {
+        Repr::F64 => MemKind::F64,
+        _ => MemKind::I32,
+    })
+}
+
+fn optional_inner(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
+    perry_mir::optional::optional_value(ctx, ty)
+}
+
+fn module_functions(ctx: &Context, module: &ModuleOp) -> Vec<FuncOp> {
+    module
+        .get_body(ctx, 0)
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+        .collect()
+}
+
+fn function_ops(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
+    let mut ops = Vec::new();
+    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+        ops.extend(block.deref(ctx).iter(ctx));
+    }
+    ops
+}
+
+/// Functions that may complete with an exception: those with a throwing op other than a call,
+/// and, to a fixpoint, those calling one of them.
+fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier> {
+    let mut throws = HashSet::new();
+    let mut calls: Vec<(Identifier, Vec<Identifier>)> = Vec::new();
+    for function in functions {
+        let name = function.get_symbol_name(ctx);
+        let mut callees = Vec::new();
+        for op in function_ops(ctx, function) {
+            if let Some(call) = Operation::get_op::<MirCallOp>(op, ctx) {
+                callees.push(call.callee(ctx));
+            } else if op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref())
+                .is_some()
+            {
+                throws.insert(name.clone());
+            }
+        }
+        calls.push((name, callees));
+    }
+    loop {
+        let before = throws.len();
+        for (name, callees) in &calls {
+            if callees.iter().any(|callee| throws.contains(callee)) {
+                throws.insert(name.clone());
+            }
+        }
+        if throws.len() == before {
+            return throws;
+        }
+    }
+}
+
+struct ModuleState {
+    wasm: ModuleOp,
+    throws: HashSet<Identifier>,
+    runtime: BTreeSet<Runtime>,
+    shapes: HashMap<String, i32>,
+}
+
+/// Lower canonicalized MIR (after `perry_mir::pipeline::canonicalize`) to the `wasm` dialect.
+pub fn lower(ctx: &mut Context, mir: &ModuleOp) -> Result<ModuleOp> {
+    let name = mir.get_symbol_name(ctx);
+    let functions = module_functions(ctx, mir);
+    let mut state = ModuleState {
+        wasm: ModuleOp::new(ctx, name),
+        throws: throwing_functions(ctx, &functions),
+        runtime: BTreeSet::new(),
+        shapes: HashMap::new(),
+    };
+    for function in &functions {
+        let symbol = function.get_symbol_name(ctx);
+        let lowered = FunctionLowering::lower(ctx, &mut state, function)
+            .with_context(|| format!("lowering function {symbol} to wasm"))?;
+        state.wasm.append_operation(ctx, lowered.get_operation(), 0);
+        if is_exported(ctx, function) {
+            let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
+            state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
+        }
+    }
+    for runtime in state.runtime.clone() {
+        let (params, results) = runtime.signature(ctx);
+        let ty = FunctionType::get(ctx, params, results);
+        let import = ImportFuncOp::new(
+            ctx,
+            runtime.symbol(),
+            ty,
+            perry_runtime::MODULE,
+            runtime.name(),
+        );
+        state.wasm.append_operation(ctx, import.get_operation(), 0);
+    }
+    Ok(state.wasm)
+}
+
+/// `export_<name>`, exported as `<name>`: runs the function as one task.
+fn export_wrapper(
+    ctx: &mut Context,
+    state: &mut ModuleState,
+    inner: &FuncOp,
+    name: &Identifier,
+) -> Result<FuncOp> {
+    let ty = TypedHandle::<FunctionType>::from_handle(inner.get_type(ctx), ctx)
+        .map_err(|_| anyhow!("function type"))?;
+    let (params, results) = {
+        let ty = ty.deref(ctx);
+        (ty.arg_types(), ty.res_types())
+    };
+    let wrapper_name: Identifier = format!("export_{name}").try_into().expect("identifier");
+    let wrapper = FuncOp::new(ctx, wrapper_name, ty);
+    set_export(ctx, &wrapper, name.as_ref());
+    let entry = wrapper.get_entry_block(ctx);
+    let args: Vec<_> = entry.deref(ctx).arguments().collect();
+    state.runtime.insert(Runtime::TaskBegin);
+    state.runtime.insert(Runtime::TaskEnd);
+    let begin = CallOp::new(ctx, Runtime::TaskBegin.symbol(), vec![], vec![]);
+    begin.get_operation().insert_at_back(entry, ctx);
+    let call = CallOp::new(ctx, name.clone(), args, results);
+    call.get_operation().insert_at_back(entry, ctx);
+    let values: Vec<_> = call.get_operation().deref(ctx).results().collect();
+    let end = CallOp::new(ctx, Runtime::TaskEnd.symbol(), vec![], vec![]);
+    end.get_operation().insert_at_back(entry, ctx);
+    let ret = ReturnOp::new(ctx, values);
+    ret.get_operation().insert_at_back(entry, ctx);
+    for param in params {
+        ensure!(
+            repr(ctx, param)? != Repr::Ref,
+            "export {name} takes a reference; reference arguments need the component boundary (P6.1)"
+        );
+    }
+    Ok(wrapper)
+}
+
+struct FunctionLowering<'s> {
+    state: &'s mut ModuleState,
+    region: Ptr<Region>,
+    block: Ptr<BasicBlock>,
+    values: HashMap<Value, Value>,
+    blocks: HashMap<Ptr<BasicBlock>, Ptr<BasicBlock>>,
+    throws: bool,
+    results: Vec<TypeHandle>,
+    throw_block: Option<Ptr<BasicBlock>>,
+}
+
+impl<'s> FunctionLowering<'s> {
+    fn lower(ctx: &mut Context, state: &'s mut ModuleState, mir: &FuncOp) -> Result<FuncOp> {
+        let symbol = mir.get_symbol_name(ctx);
+        let throws = state.throws.contains(&symbol);
+        let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
+            .map_err(|_| anyhow!("function type"))?;
+        let (mir_params, mir_results) = {
+            let ty = ty.deref(ctx);
+            (ty.arg_types(), ty.res_types())
+        };
+        let params = mir_params
+            .into_iter()
+            .map(|t| wasm_type(ctx, t))
+            .collect::<Result<Vec<_>>>()?;
+        let results = mir_results
+            .into_iter()
+            .map(|t| wasm_type(ctx, t))
+            .collect::<Result<Vec<_>>>()?;
+        let mut signature_results = results.clone();
+        if throws {
+            signature_results.push(i32_type(ctx));
+        }
+        let fn_ty = FunctionType::get(ctx, params, signature_results);
+        let function = FuncOp::new(ctx, symbol, fn_ty);
+        let region = function.get_region(ctx);
+        let entry = function.get_entry_block(ctx);
+
+        let mut lowering = FunctionLowering {
+            state,
+            region,
+            block: entry,
+            values: HashMap::new(),
+            blocks: HashMap::new(),
+            throws,
+            results,
+            throw_block: None,
+        };
+        let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
+        for (index, &mir_block) in mir_blocks.iter().enumerate() {
+            let block = if index == 0 {
+                entry
+            } else {
+                let mir_types: Vec<_> = mir_block
+                    .deref(ctx)
+                    .arguments()
+                    .map(|arg| arg.get_type(ctx))
+                    .collect();
+                let types = mir_types
+                    .into_iter()
+                    .map(|t| wasm_type(ctx, t))
+                    .collect::<Result<Vec<_>>>()?;
+                lowering.new_block(ctx, types)
+            };
+            let pairs: Vec<_> = mir_block
+                .deref(ctx)
+                .arguments()
+                .zip(block.deref(ctx).arguments())
+                .collect();
+            lowering.values.extend(pairs);
+            lowering.blocks.insert(mir_block, block);
+        }
+        for mir_block in mir_blocks {
+            lowering.block = lowering.blocks[&mir_block];
+            let ops: Vec<_> = mir_block.deref(ctx).iter(ctx).collect();
+            for op in ops {
+                lowering.op(ctx, op).with_context(|| {
+                    format!("lowering {}", Operation::get_op_dyn(op, ctx).get_opid())
+                })?;
+            }
+        }
+        Ok(function)
+    }
+
+    // --- construction helpers ---------------------------------------------------------------
+
+    fn new_block(&mut self, ctx: &mut Context, args: Vec<TypeHandle>) -> Ptr<BasicBlock> {
+        let block = BasicBlock::new(ctx, None, args);
+        block.insert_at_back(self.region, ctx);
+        block
+    }
+
+    fn insert(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Ptr<Operation> {
+        op.insert_at_back(self.block, ctx);
+        op
+    }
+
+    fn result(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Value {
+        self.insert(ctx, op).deref(ctx).get_result(0)
+    }
+
+    fn i32_const(&mut self, ctx: &mut Context, value: i32) -> Value {
+        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+        let attr = IntegerAttr::new(
+            ty,
+            APInt::from_u64(value as u32 as u64, NonZeroUsize::new(32).unwrap()),
+        );
+        let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+        self.result(ctx, op)
+    }
+
+    fn i64_const(&mut self, ctx: &mut Context, value: u64) -> Value {
+        let ty = IntegerType::get(ctx, 64, Signedness::Signless);
+        let attr = IntegerAttr::new(ty, APInt::from_u64(value, NonZeroUsize::new(64).unwrap()));
+        let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+        self.result(ctx, op)
+    }
+
+    fn f64_const(&mut self, ctx: &mut Context, value: f64) -> Value {
+        let op = ConstantOp::new(ctx, Box::new(FPDoubleAttr::from(value))).get_operation();
+        self.result(ctx, op)
+    }
+
+    fn num(&mut self, ctx: &mut Context, opcode: NumOpcode, operands: Vec<Value>) -> Value {
+        let op = NumOp::new(ctx, opcode, operands).get_operation();
+        self.result(ctx, op)
+    }
+
+    fn select(
+        &mut self,
+        ctx: &mut Context,
+        condition: Value,
+        then: Value,
+        otherwise: Value,
+    ) -> Value {
+        let op = SelectOp::new(ctx, condition, then, otherwise).get_operation();
+        self.result(ctx, op)
+    }
+
+    fn load(&mut self, ctx: &mut Context, kind: MemKind, address: Value, offset: u32) -> Value {
+        let op = LoadOp::new(ctx, kind, address, offset).get_operation();
+        self.result(ctx, op)
+    }
+
+    fn store(
+        &mut self,
+        ctx: &mut Context,
+        kind: MemKind,
+        address: Value,
+        offset: u32,
+        value: Value,
+    ) {
+        let op = StoreOp::new(ctx, kind, address, offset, value).get_operation();
+        self.insert(ctx, op);
+    }
+
+    fn runtime(&mut self, ctx: &mut Context, function: Runtime, args: Vec<Value>) -> Option<Value> {
+        self.state.runtime.insert(function);
+        let (_, results) = function.signature(ctx);
+        let op = CallOp::new(ctx, function.symbol(), args, results).get_operation();
+        self.insert(ctx, op);
+        op.deref(ctx).results().next()
+    }
+
+    fn br(&mut self, ctx: &mut Context, dest: Ptr<BasicBlock>, args: Vec<Value>) {
+        let op = BrOp::new(ctx, dest, args).get_operation();
+        self.insert(ctx, op);
+    }
+
+    fn cond_br(
+        &mut self,
+        ctx: &mut Context,
+        condition: Value,
+        then: (Ptr<BasicBlock>, Vec<Value>),
+        otherwise: (Ptr<BasicBlock>, Vec<Value>),
+    ) {
+        let op =
+            CondBrOp::new(ctx, condition, then.0, then.1, otherwise.0, otherwise.1).get_operation();
+        self.insert(ctx, op);
+    }
+
+    fn mapped(&self, value: Value) -> Result<Value> {
+        self.values
+            .get(&value)
+            .copied()
+            .ok_or_else(|| anyhow!("operand defined after its use"))
+    }
+
+    fn operands(&self, ctx: &Context, op: Ptr<Operation>) -> Result<Vec<Value>> {
+        op.deref(ctx).operands().map(|v| self.mapped(v)).collect()
+    }
+
+    fn define(&mut self, ctx: &Context, op: Ptr<Operation>, value: Value) {
+        self.values.insert(op.deref(ctx).get_result(0), value);
+    }
+
+    // --- exceptions ---------------------------------------------------------------------------
+
+    /// The block that returns zero results with the status in its argument.
+    fn throw_block(&mut self, ctx: &mut Context) -> Ptr<BasicBlock> {
+        if let Some(block) = self.throw_block {
+            return block;
+        }
+        let i32 = i32_type(ctx);
+        let block = self.new_block(ctx, vec![i32]);
+        let saved = std::mem::replace(&mut self.block, block);
+        let mut values = Vec::new();
+        for ty in self.results.clone() {
+            let zero = if ty.deref(ctx).is::<FP64Type>() {
+                self.f64_const(ctx, 0.0)
+            } else {
+                self.i32_const(ctx, 0)
+            };
+            values.push(zero);
+        }
+        values.push(block.deref(ctx).get_argument(0));
+        let op = ReturnOp::new(ctx, values).get_operation();
+        self.insert(ctx, op);
+        self.block = saved;
+        self.throw_block = Some(block);
+        block
+    }
+
+    /// Throw `status` if `failed` is non-zero; code after this runs on the normal path.
+    fn throw_if(&mut self, ctx: &mut Context, failed: Value, kind: ErrorKind) {
+        debug_assert!(
+            self.throws,
+            "throwing op in a function classified as non-throwing"
+        );
+        let throw = self.throw_block(ctx);
+        let status = self.i32_const(ctx, status_code(kind));
+        let next = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, failed, (throw, vec![status]), (next, vec![]));
+        self.block = next;
+    }
+
+    // --- optional values ----------------------------------------------------------------------
+
+    fn undefined(&mut self, ctx: &mut Context, inner: TypeHandle) -> Result<Value> {
+        Ok(match repr(ctx, inner)? {
+            Repr::F64 => {
+                let bits = self.i64_const(ctx, UNDEFINED_BITS);
+                self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits])
+            }
+            Repr::Bool => self.i32_const(ctx, UNDEFINED_BOOL),
+            Repr::Ref => self.i32_const(ctx, 0),
+            Repr::I32 => bail!("i32 | undefined has no representation"),
+        })
+    }
+
+    fn is_undefined(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        inner: TypeHandle,
+    ) -> Result<Value> {
+        Ok(match repr(ctx, inner)? {
+            Repr::F64 => {
+                let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
+                let undefined = self.i64_const(ctx, UNDEFINED_BITS);
+                self.num(ctx, NumOpcode::I64Eq, vec![bits, undefined])
+            }
+            Repr::Bool => {
+                let undefined = self.i32_const(ctx, UNDEFINED_BOOL);
+                self.num(ctx, NumOpcode::I32Eq, vec![value, undefined])
+            }
+            Repr::Ref => self.num(ctx, NumOpcode::I32Eqz, vec![value]),
+            Repr::I32 => bail!("i32 | undefined has no representation"),
+        })
+    }
+
+    // --- arrays -------------------------------------------------------------------------------
+
+    /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
+    fn element_index(
+        &mut self,
+        ctx: &mut Context,
+        index: Value,
+        len: Value,
+    ) -> Result<(Value, Value, Option<Value>)> {
+        if index.get_type(ctx).deref(ctx).is::<FP64Type>() {
+            let i = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![index]);
+            let back = self.num(ctx, NumOpcode::F64ConvertI32U, vec![i]);
+            let integral = self.num(ctx, NumOpcode::F64Eq, vec![back, index]);
+            let below = self.num(ctx, NumOpcode::I32LtU, vec![i, len]);
+            let ok = self.num(ctx, NumOpcode::I32And, vec![integral, below]);
+            Ok((i, ok, Some(integral)))
+        } else {
+            let ok = self.num(ctx, NumOpcode::I32LtU, vec![index, len]);
+            Ok((index, ok, None))
+        }
+    }
+
+    fn slot_address(&mut self, ctx: &mut Context, data: Value, index: Value) -> Value {
+        let three = self.i32_const(ctx, 3);
+        let offset = self.num(ctx, NumOpcode::I32Shl, vec![index, three]);
+        self.num(ctx, NumOpcode::I32Add, vec![data, offset])
+    }
+
+    /// Append `value` to `array`, growing it through the runtime when full.
+    fn push(&mut self, ctx: &mut Context, array: Value, value: Value, kind: MemKind) {
+        let len = self.load(ctx, MemKind::I32, array, layout::LEN);
+        let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
+        let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
+        let grow = self.new_block(ctx, vec![]);
+        let write = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, full, (grow, vec![]), (write, vec![]));
+        self.block = grow;
+        self.runtime(ctx, Runtime::ArrayGrow, vec![array]);
+        self.br(ctx, write, vec![]);
+        self.block = write;
+        let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+        let address = self.slot_address(ctx, data, len);
+        self.store(ctx, kind, address, 0, value);
+        let one = self.i32_const(ctx, 1);
+        let next = self.num(ctx, NumOpcode::I32Add, vec![len, one]);
+        self.store(ctx, MemKind::I32, array, layout::LEN, next);
+    }
+
+    fn element_type(ctx: &Context, array: Value) -> Result<TypeHandle> {
+        let ty = TypedHandle::<ArrayType>::from_handle(array.get_type(ctx), ctx)
+            .map_err(|_| anyhow!("expected an array"))?;
+        Ok(ty.deref(ctx).element())
+    }
+
+    fn field_slot(ctx: &Context, record: Value, field: &Identifier) -> Result<(u32, TypeHandle)> {
+        let ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
+            .map_err(|_| anyhow!("expected a record"))?;
+        let ty = ty.deref(ctx);
+        let (index, field_ty) = ty
+            .field(field)
+            .ok_or_else(|| anyhow!("record has no field {field}"))?;
+        Ok((8 + 8 * index as u32, field_ty))
+    }
+
+    // --- ops ----------------------------------------------------------------------------------
+
+    fn op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
+        if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
+            let attr = constant
+                .get_attr_builtin_constant_value(ctx)
+                .ok_or_else(|| anyhow!("constant without value"))?
+                .clone();
+            let value = if let Some(double) = attr.downcast_ref::<FPDoubleAttr>() {
+                self.f64_const(ctx, f64::from(double.clone()))
+            } else if let Some(int) = attr.downcast_ref::<IntegerAttr>() {
+                let bits: APInt = int.clone().into();
+                self.i32_const(ctx, bits.to_u64() as u32 as i32)
+            } else {
+                bail!("unsupported constant")
+            };
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<UndefOp>(op, ctx).is_some() {
+            let ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let value = match repr(ctx, ty)? {
+                Repr::F64 => self.f64_const(ctx, 0.0),
+                _ => self.i32_const(ctx, 0),
+            };
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(binary) = Operation::get_op::<MirBinaryOp>(op, ctx) {
+            let operands = self.operands(ctx, op)?;
+            let is_f64 = operands[0].get_type(ctx).deref(ctx).is::<FP64Type>();
+            let value = match (binary.kind(ctx), is_f64) {
+                (BinaryKind::Rem, true) => self
+                    .runtime(ctx, Runtime::F64Rem, operands)
+                    .expect("result"),
+                (kind, true) => {
+                    let opcode = match kind {
+                        BinaryKind::Add => NumOpcode::F64Add,
+                        BinaryKind::Sub => NumOpcode::F64Sub,
+                        BinaryKind::Mul => NumOpcode::F64Mul,
+                        BinaryKind::Div => NumOpcode::F64Div,
+                        BinaryKind::Rem => unreachable!(),
+                    };
+                    self.num(ctx, opcode, operands)
+                }
+                (BinaryKind::Add, false) => self.num(ctx, NumOpcode::I32Add, operands),
+                (BinaryKind::Sub, false) => self.num(ctx, NumOpcode::I32Sub, operands),
+                (BinaryKind::Mul, false) => self.num(ctx, NumOpcode::I32Mul, operands),
+                (kind, false) => bail!("i32 {kind:?} is not supported"),
+            };
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(compare) = Operation::get_op::<MirCompareOp>(op, ctx) {
+            let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let operands = self.operands(ctx, op)?;
+            let kind = compare.kind(ctx);
+            let value = if let Some(inner) = optional_inner(ctx, mir_ty)
+                && repr(ctx, inner)? == Repr::F64
+            {
+                // Strict equality on `number | undefined`: undefined equals only undefined.
+                let (a, b) = (operands[0], operands[1]);
+                let bits_a = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![a]);
+                let bits_b = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![b]);
+                let same = self.num(ctx, NumOpcode::I64Eq, vec![bits_a, bits_b]);
+                let undefined = self.is_undefined(ctx, a, inner)?;
+                let both = self.num(ctx, NumOpcode::I32And, vec![same, undefined]);
+                let equal = self.num(ctx, NumOpcode::F64Eq, vec![a, b]);
+                let eq = self.num(ctx, NumOpcode::I32Or, vec![both, equal]);
+                match kind {
+                    CompareKind::Eq => eq,
+                    CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
+                    other => bail!("ordered comparison {other:?} on number | undefined"),
+                }
+            } else if operands[0].get_type(ctx).deref(ctx).is::<FP64Type>() {
+                let opcode = match kind {
+                    CompareKind::Lt => NumOpcode::F64Lt,
+                    CompareKind::Le => NumOpcode::F64Le,
+                    CompareKind::Gt => NumOpcode::F64Gt,
+                    CompareKind::Ge => NumOpcode::F64Ge,
+                    CompareKind::Eq => NumOpcode::F64Eq,
+                    CompareKind::Ne => NumOpcode::F64Ne,
+                };
+                self.num(ctx, opcode, operands)
+            } else {
+                let opcode = match kind {
+                    CompareKind::Lt => NumOpcode::I32LtS,
+                    CompareKind::Le => NumOpcode::I32LeS,
+                    CompareKind::Gt => NumOpcode::I32GtS,
+                    CompareKind::Ge => NumOpcode::I32GeS,
+                    CompareKind::Eq => NumOpcode::I32Eq,
+                    CompareKind::Ne => NumOpcode::I32Ne,
+                };
+                self.num(ctx, opcode, operands)
+            };
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(convert) = Operation::get_op::<ConvertOp>(op, ctx) {
+            let operands = self.operands(ctx, op)?;
+            let opcode = match convert.kind(ctx) {
+                ConvertKind::I32ToF64 => NumOpcode::F64ConvertI32S,
+                ConvertKind::F64ToI32 => NumOpcode::I32TruncSatF64S,
+            };
+            let value = self.num(ctx, opcode, operands);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<MirBrOp>(op, ctx).is_some() {
+            let dest = self.blocks[&op.deref(ctx).get_successor(0)];
+            let args = self.operands(ctx, op)?;
+            self.br(ctx, dest, args);
+            return Ok(());
+        }
+        if let Some(cond_br) = Operation::get_op::<MirCondBrOp>(op, ctx) {
+            let condition = self.mapped(op.deref(ctx).get_operand(0))?;
+            let mut arms = Vec::new();
+            for succ in 0..2 {
+                let dest = self.blocks[&op.deref(ctx).get_successor(succ)];
+                let args = cond_br
+                    .successor_operands(ctx, succ)
+                    .into_iter()
+                    .map(|v| self.mapped(v))
+                    .collect::<Result<Vec<_>>>()?;
+                arms.push((dest, args));
+            }
+            let otherwise = arms.pop().unwrap();
+            let then = arms.pop().unwrap();
+            self.cond_br(ctx, condition, then, otherwise);
+            return Ok(());
+        }
+        if Operation::get_op::<MirReturnOp>(op, ctx).is_some() {
+            let mut values = self.operands(ctx, op)?;
+            if self.throws {
+                values.push(self.i32_const(ctx, 0));
+            }
+            let ret = ReturnOp::new(ctx, values).get_operation();
+            self.insert(ctx, ret);
+            return Ok(());
+        }
+        if let Some(call) = Operation::get_op::<MirCallOp>(op, ctx) {
+            let callee = call.callee(ctx);
+            let args = self.operands(ctx, op)?;
+            let mir_results: Vec<_> = op.deref(ctx).results().collect();
+            let mut results = mir_results
+                .iter()
+                .map(|v| v.get_type(ctx))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|t| wasm_type(ctx, t))
+                .collect::<Result<Vec<_>>>()?;
+            let callee_throws = self.state.throws.contains(&callee);
+            if callee_throws {
+                results.push(i32_type(ctx));
+            }
+            let wasm_call = CallOp::new(ctx, callee, args, results).get_operation();
+            self.insert(ctx, wasm_call);
+            let values: Vec<_> = wasm_call.deref(ctx).results().collect();
+            for (mir, wasm) in mir_results.iter().zip(&values) {
+                self.values.insert(*mir, *wasm);
+            }
+            if callee_throws {
+                let status = *values.last().unwrap();
+                let throw = self.throw_block(ctx);
+                let next = self.new_block(ctx, vec![]);
+                self.cond_br(ctx, status, (throw, vec![status]), (next, vec![]));
+                self.block = next;
+            }
+            return Ok(());
+        }
+        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
+            let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let (name, fields) = {
+                let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
+                    .map_err(|_| anyhow!("expected a record"))?;
+                let record = record.deref(ctx);
+                let fields: Vec<_> = record
+                    .fields()
+                    .map_err(|_| anyhow!("record without fields"))?
+                    .iter()
+                    .map(|(_, ty)| *ty)
+                    .collect();
+                (record.name().to_string(), fields)
+            };
+            let next_shape = self.state.shapes.len() as i32 + 1;
+            let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+            let operands = self.operands(ctx, op)?;
+            let size = self.i32_const(ctx, 8 + 8 * fields.len() as i32);
+            let object = self
+                .runtime(ctx, Runtime::Alloc, vec![size])
+                .expect("address");
+            let shape = self.i32_const(ctx, shape);
+            self.store(ctx, MemKind::I32, object, 0, shape);
+            for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
+                let kind = slot_kind(ctx, ty)?;
+                self.store(ctx, kind, object, 8 + 8 * index as u32, value);
+            }
+            self.define(ctx, op, object);
+            return Ok(());
+        }
+        if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
+            let record = op.deref(ctx).get_operand(0);
+            let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
+            let kind = slot_kind(ctx, ty)?;
+            let object = self.mapped(record)?;
+            let value = self.load(ctx, kind, object, offset);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(set) = Operation::get_op::<FieldSetOp>(op, ctx) {
+            let record = op.deref(ctx).get_operand(0);
+            let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
+            let kind = slot_kind(ctx, ty)?;
+            let operands = self.operands(ctx, op)?;
+            self.store(ctx, kind, operands[0], offset, operands[1]);
+            return Ok(());
+        }
+        if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
+            let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
+            let kind = slot_kind(ctx, element)?;
+            let operands = self.operands(ctx, op)?;
+            let capacity = self.i32_const(ctx, operands.len() as i32);
+            let array = self
+                .runtime(ctx, Runtime::ArrayNew, vec![capacity])
+                .expect("array");
+            if !operands.is_empty() {
+                let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+                for (index, value) in operands.iter().enumerate() {
+                    self.store(ctx, kind, data, layout::SLOT * index as u32, *value);
+                }
+                let len = self.i32_const(ctx, operands.len() as i32);
+                self.store(ctx, MemKind::I32, array, layout::LEN, len);
+            }
+            self.define(ctx, op, array);
+            return Ok(());
+        }
+        if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
+            let array = self.operands(ctx, op)?[0];
+            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
+            self.define(ctx, op, len);
+            return Ok(());
+        }
+        if Operation::get_op::<ArrayPushOp>(op, ctx).is_some() {
+            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let kind = slot_kind(ctx, element)?;
+            let operands = self.operands(ctx, op)?;
+            self.push(ctx, operands[0], operands[1], kind);
+            return Ok(());
+        }
+        if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+            // Branch-free: read slot 0 when out of range (capacity is never 0), then select.
+            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let kind = slot_kind(ctx, element)?;
+            let operands = self.operands(ctx, op)?;
+            let (array, index) = (operands[0], operands[1]);
+            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
+            let (i, ok, _) = self.element_index(ctx, index, len)?;
+            let zero = self.i32_const(ctx, 0);
+            let slot = self.select(ctx, ok, i, zero);
+            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+            let address = self.slot_address(ctx, data, slot);
+            let loaded = self.load(ctx, kind, address, 0);
+            let undefined = self.undefined(ctx, element)?;
+            let value = self.select(ctx, ok, loaded, undefined);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<ArraySetOp>(op, ctx).is_some() {
+            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let kind = slot_kind(ctx, element)?;
+            let operands = self.operands(ctx, op)?;
+            let (array, index, value) = (operands[0], operands[1], operands[2]);
+            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
+            let (i, ok, integral) = self.element_index(ctx, index, len)?;
+            let write = self.new_block(ctx, vec![]);
+            let outside = self.new_block(ctx, vec![]);
+            let done = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
+            self.block = write;
+            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+            let address = self.slot_address(ctx, data, i);
+            self.store(ctx, kind, address, 0, value);
+            self.br(ctx, done, vec![]);
+            // Writing at `length` appends; any other index would make a hole.
+            self.block = outside;
+            let at_end = self.num(ctx, NumOpcode::I32Eq, vec![i, len]);
+            let append = match integral {
+                Some(integral) => self.num(ctx, NumOpcode::I32And, vec![at_end, integral]),
+                None => at_end,
+            };
+            let hole = self.num(ctx, NumOpcode::I32Eqz, vec![append]);
+            self.throw_if(ctx, hole, ErrorKind::RangeError);
+            self.push(ctx, array, value, kind);
+            self.br(ctx, done, vec![]);
+            self.block = done;
+            return Ok(());
+        }
+        if let Some(undefined) = Operation::get_op::<UndefinedOp>(op, ctx) {
+            let ty = undefined.get_result(ctx).get_type(ctx);
+            let inner = optional_inner(ctx, ty).ok_or_else(|| anyhow!("optional"))?;
+            let value = self.undefined(ctx, inner)?;
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<WrapOp>(op, ctx).is_some() {
+            let value = self.operands(ctx, op)?[0];
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<IsUndefinedOp>(op, ctx).is_some() {
+            let mir = op.deref(ctx).get_operand(0);
+            let inner =
+                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
+            let value = self.mapped(mir)?;
+            let result = self.is_undefined(ctx, value, inner)?;
+            self.define(ctx, op, result);
+            return Ok(());
+        }
+        if Operation::get_op::<ToNumberOp>(op, ctx).is_some() {
+            let mir = op.deref(ctx).get_operand(0);
+            let inner =
+                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
+            let value = self.mapped(mir)?;
+            let undefined = self.is_undefined(ctx, value, inner)?;
+            let nan = self.f64_const(ctx, f64::NAN);
+            let result = self.select(ctx, undefined, nan, value);
+            self.define(ctx, op, result);
+            return Ok(());
+        }
+        if Operation::get_op::<UnwrapOp>(op, ctx).is_some() {
+            let mir = op.deref(ctx).get_operand(0);
+            let inner =
+                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
+            let value = self.mapped(mir)?;
+            let undefined = self.is_undefined(ctx, value, inner)?;
+            self.throw_if(ctx, undefined, ErrorKind::TypeError);
+            // The defined value has the same representation.
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        let name = Operation::get_op_dyn(op, ctx).get_opid().to_string();
+        if name.starts_with("perry.string") || name == "perry.to_string" {
+            bail!("strings are not supported by the MIR backend yet ({name})");
+        }
+        if name == "perry.async_call" || name == "perry.await" {
+            bail!("async is not supported by the MIR backend yet ({name})");
+        }
+        bail!("{name} has no lowering to wasm (did canonicalize run?)")
+    }
+}
+
+#[cfg(test)]
+mod tests;

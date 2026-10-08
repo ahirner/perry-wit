@@ -1,0 +1,22 @@
+[package]
+name = "perry-codegen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Lowers perry MIR to the pliron `wasm` dialect and links the perry runtime (TODOs.md P4)"
+
+[dependencies]
+anyhow = "1.0"
+perry-mir = { path = "../perry-mir" }
+perry-runtime = { path = "../perry-runtime" }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
+pliron-wasm = { path = "../pliron-wasm" }
+
+[build-dependencies]
+wasmparser = "0.261"
+
+[dev-dependencies]
+perry-lower = { path = "../perry-lower" }
+wasmparser = "0.261"
+wasmprinter = "0.261"
+wasmtime = { version = "49.0.2", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }

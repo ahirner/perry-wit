@@ -39,6 +39,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "allocator-api2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
+
+[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -224,7 +230,7 @@ version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.2.21",
 ]
 
 [[package]]
@@ -845,7 +851,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 dependencies = [
  "ahash",
- "allocator-api2",
+ "allocator-api2 0.2.21",
 ]
 
 [[package]]
@@ -860,7 +866,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.2.21",
  "equivalent",
  "foldhash",
  "serde",
@@ -1369,6 +1375,21 @@ version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry?rev=9e29f59d435ee08df161ef460ee6f204fb381d4f#9e29f59d435ee08df161ef460ee6f204fb381d4f"
 
 [[package]]
+name = "perry-codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "perry-lower",
+ "perry-mir",
+ "perry-runtime",
+ "pliron",
+ "pliron-wasm",
+ "wasmparser 0.261.0",
+ "wasmprinter 0.261.0",
+ "wasmtime",
+]
+
+[[package]]
 name = "perry-conformance"
 version = "0.1.0"
 dependencies = [
@@ -1471,6 +1492,14 @@ dependencies = [
  "swc_ecma_parser 32.0.0",
  "swc_ecma_transforms_base",
  "swc_ecma_visit",
+]
+
+[[package]]
+name = "perry-runtime"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "talc",
 ]
 
 [[package]]
@@ -1828,7 +1857,7 @@ version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.2.21",
  "bumpalo",
  "hashbrown 0.17.1",
  "log",
@@ -2409,6 +2438,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "talc"
+version = "5.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53f8ad14fa1c1b8635114abf9721076fe1e869572a5f26a52690f407292c80dc"
+dependencies = [
+ "allocator-api2 0.4.0",
+ "lock_api",
 ]
 
 [[package]]

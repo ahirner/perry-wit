@@ -218,3 +218,27 @@ impl crate::exceptions::MayThrowInterface for AwaitOp {
         crate::attrs::ErrorKind::Any
     }
 }
+
+/// Function attribute marking a module export; each call of one is a task (D3, D5).
+pub const EXPORT_KEY: &str = "perry_export";
+
+/// Mark `function` as exported from the component.
+pub fn set_exported(ctx: &mut Context, function: &FuncOp) {
+    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
+    function
+        .get_operation()
+        .deref_mut(ctx)
+        .attributes
+        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+}
+
+/// Whether `function` is exported from the component.
+pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
+    let key: Identifier = EXPORT_KEY.try_into().expect("identifier");
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<pliron::builtin::attributes::BoolAttr>(&key)
+        .is_some_and(|flag| bool::from(flag.clone()))
+}

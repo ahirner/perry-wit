@@ -126,6 +126,9 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
     for function in &hir.functions {
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes)
             .with_context(|| format!("lowering function {}", function.name))?;
+        if function.is_exported {
+            perry_mir::calls::set_exported(ctx, &func);
+        }
         module.append_operation(ctx, func.get_operation(), 0);
     }
     Ok(module)
