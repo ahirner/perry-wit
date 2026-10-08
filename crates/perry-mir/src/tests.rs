@@ -229,3 +229,181 @@ fn dce_keeps_field_writes() -> Result<()> {
     );
     Ok(())
 }
+
+/// The sum loop as the builder emits it: mutable `let` bindings as slots, no SSA joins.
+const SLOTTED_LOOP: &str = r#"
+builtin.module @m {
+  ^module():
+    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
+      ^entry(n: builtin.fp64):
+        i = perry.local : perry.slot <builtin.fp64>;
+        sum = perry.local : perry.slot <builtin.fp64>;
+        zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+        perry.store i = zero;
+        perry.store sum = zero;
+        perry.br ^header()
+      ^header():
+        iv = perry.load i : builtin.fp64;
+        more = perry.compare Lt iv, n : builtin.integer i1;
+        perry.cond_br if more ^body() else ^exit()
+      ^body():
+        ib = perry.load i : builtin.fp64;
+        sb = perry.load sum : builtin.fp64;
+        next_sum = perry.binary Add sb, ib : builtin.fp64;
+        perry.store sum = next_sum;
+        one = builtin.constant <builtin.double 1.0> : builtin.fp64;
+        next_i = perry.binary Add ib, one : builtin.fp64;
+        perry.store i = next_i;
+        perry.br ^header()
+      ^exit():
+        result = perry.load sum : builtin.fp64;
+        perry.return result
+    }
+}
+"#;
+
+#[test]
+fn mem2reg_turns_slots_into_block_arguments() -> Result<()> {
+    let ctx = &mut Context::new();
+    let module = parse(ctx, SLOTTED_LOOP);
+    verify_operation(module, ctx)?;
+    let status =
+        pliron::opts::mem2reg::mem2reg(module, ctx, &mut pliron::pass::AnalysisManager::default())?;
+    assert_eq!(status, IRStatus::Changed);
+    verify_operation(module, ctx)?;
+    let printed = print(ctx, module);
+    for gone in ["perry.local", "perry.load", "perry.store"] {
+        assert!(!printed.contains(gone), "{gone} survived:\n{printed}");
+    }
+    let header = printed
+        .lines()
+        .find(|line| line.trim_start().starts_with("^header"))
+        .expect("header block");
+    assert_eq!(
+        header.matches("builtin.fp64").count(),
+        2,
+        "loop header must carry i and sum: {header}"
+    );
+    Ok(())
+}
+
+#[test]
+fn verifier_rejects_ill_typed_slot_access() {
+    let error = verify_text(&single_block(
+        "s = perry.local : perry.slot <builtin.fp64>; b = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1; perry.store s = b;",
+    ))
+    .expect_err("store of the wrong type");
+    assert!(
+        error.contains("value type differs from the slot"),
+        "{error}"
+    );
+}
+
+/// `wasi.execution.scaling.retained_records` with a helper call, arrays and index conversion.
+const RETAINED_RECORDS: &str = r#"
+builtin.module @scaling {
+  ^module():
+    builtin.func @make: builtin.function <(builtin.fp64) -> (perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>)> {
+      ^entry(i: builtin.fp64):
+        two = builtin.constant <builtin.double 2.0> : builtin.fp64;
+        doubled = perry.binary Mul i, two : builtin.fp64;
+        point = perry.alloc Unassigned (i, doubled) : perry.record <Point>;
+        perry.return point
+    };
+    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.integer i32)> {
+      ^entry(n: builtin.fp64):
+        items = perry.array_new Unassigned () : perry.array <perry.record <Point>>;
+        zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
+        perry.br ^header(zero)
+      ^header(i: builtin.fp64):
+        more = perry.compare Lt i, n : builtin.integer i1;
+        perry.cond_br if more ^body() else ^exit()
+      ^body():
+        point = perry.call make (i) : perry.record <Point>;
+        perry.array_push items <- point;
+        one = builtin.constant <builtin.double 1.0> : builtin.fp64;
+        next = perry.binary Add i, one : builtin.fp64;
+        perry.br ^header(next)
+      ^exit():
+        count = perry.array_len items : builtin.integer i32;
+        last_index = perry.convert F64ToI32 zero : builtin.integer i32;
+        first = perry.array_get items[last_index] : perry.record <Point>;
+        perry.return count
+    }
+}
+"#;
+
+const ASYNC_STEP: &str = r#"
+builtin.module @tasks {
+  ^module():
+    builtin.func @step: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
+      ^entry(i: builtin.fp64):
+        perry.return i
+    };
+    builtin.func @run: builtin.function <(builtin.fp64) -> (perry.string)> {
+      ^entry(n: builtin.fp64):
+        pending = perry.async_call step (n) : perry.promise <builtin.fp64>;
+        value = perry.await pending : builtin.fp64;
+        prefix = perry.string_const "done: " : perry.string;
+        suffix = perry.string_const "漢🙂" : perry.string;
+        text = perry.string_concat prefix, suffix : perry.string;
+        length = perry.string_len text : builtin.integer i32;
+        perry.return text
+    }
+}
+"#;
+
+#[test]
+fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
+    for input in [RETAINED_RECORDS, ASYNC_STEP] {
+        let ctx = &mut Context::new();
+        let module = parse(ctx, input);
+        verify_operation(module, ctx)?;
+        let printed = print(ctx, module);
+        let reparsed_ctx = &mut Context::new();
+        let reparsed = parse(reparsed_ctx, &normalized(&printed));
+        verify_operation(reparsed, reparsed_ctx)?;
+        assert_eq!(
+            normalized(&printed),
+            normalized(&print(reparsed_ctx, reparsed))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn verifier_rejects_mismatched_calls_and_awaits() {
+    let mismatched_call = RETAINED_RECORDS.replace(
+        "point = perry.call make (i) : perry.record <Point>;",
+        "point = perry.call make (i, i) : perry.record <Point>;",
+    );
+    let error = verify_text(&mismatched_call).expect_err("argument count");
+    assert!(
+        error.contains("does not match the callee's signature"),
+        "{error}"
+    );
+
+    let unknown = RETAINED_RECORDS.replace("perry.call make", "perry.call missing");
+    let error = verify_text(&unknown).expect_err("unknown callee");
+    assert!(
+        error.contains("not a function of the enclosing module"),
+        "{error}"
+    );
+
+    let wrong_await = ASYNC_STEP.replace(
+        "value = perry.await pending : builtin.fp64;",
+        "value = perry.await pending : perry.string;",
+    );
+    let error = verify_text(&wrong_await).expect_err("await type");
+    assert!(
+        error.contains("perry.promise of the result type"),
+        "{error}"
+    );
+
+    let wrong_push = RETAINED_RECORDS.replace(
+        "perry.array_push items <- point;",
+        "perry.array_push items <- i;",
+    );
+    let error = verify_text(&wrong_push).expect_err("element type");
+    assert!(error.contains("element type differs"), "{error}");
+}

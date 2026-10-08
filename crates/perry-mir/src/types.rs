@@ -199,3 +199,62 @@ impl Parsable for RecordType {
             .into_parse_result()
     }
 }
+
+/// Storage for one mutable local before SSA construction; removed by pliron `mem2reg`.
+#[pliron_type(
+    name = "perry.slot",
+    generate_get = true,
+    format = "`<` $value `>`",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct SlotType {
+    value: TypeHandle,
+}
+
+impl SlotType {
+    pub fn value(&self) -> TypeHandle {
+        self.value
+    }
+}
+
+/// A dense, growable array of one element type (subset: no holes, no mixed elements).
+#[pliron_type(
+    name = "perry.array",
+    generate_get = true,
+    format = "`<` $element `>`",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ArrayType {
+    element: TypeHandle,
+}
+
+impl ArrayType {
+    pub fn element(&self) -> TypeHandle {
+        self.element
+    }
+}
+
+/// An immutable, validated UTF-8 string indexed by Unicode scalar values.
+#[pliron_type(name = "perry.string", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct StringType;
+
+/// The eventual value of an async call; lives no longer than its export task (subset rule R3).
+#[pliron_type(
+    name = "perry.promise",
+    generate_get = true,
+    format = "`<` $value `>`",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct PromiseType {
+    value: TypeHandle,
+}
+
+impl PromiseType {
+    pub fn value(&self) -> TypeHandle {
+        self.value
+    }
+}

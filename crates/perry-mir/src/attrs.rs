@@ -37,3 +37,14 @@ pub enum Tier {
     Task,
     Instance,
 }
+
+/// Numeric conversions between ECMAScript numbers and proven integer ranges.
+#[pliron_attr(name = "perry.convert_kind", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum ConvertKind {
+    /// Exact: every signless `i32` (read as signed) is an `f64`.
+    I32ToF64,
+    /// Traps unless the value is an integer in `i32` range. P3.5 removes the check where
+    /// integer ranges are proven.
+    F64ToI32,
+}
