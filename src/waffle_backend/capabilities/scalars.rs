@@ -13,7 +13,6 @@ use waffle::{Func, Memory, Module};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Scalar {
-    Wait,
     Timeout,
     TimeoutValue,
     Monotonic,
@@ -23,9 +22,6 @@ pub(crate) enum Scalar {
 impl Scalar {
     fn of(intrinsic: &TypedIntrinsic) -> Option<Self> {
         match intrinsic {
-            TypedIntrinsic::Capability(CapabilityOperation::Clock(ClockOperation::WaitFor)) => {
-                Some(Self::Wait)
-            }
             TypedIntrinsic::Capability(CapabilityOperation::Clock(ClockOperation::Timeout)) => {
                 Some(Self::Timeout)
             }
@@ -53,7 +49,7 @@ impl Scalar {
         Vec<&'static str>,
     ) {
         match self {
-            Self::Wait | Self::Timeout | Self::TimeoutValue => (
+            Self::Timeout | Self::TimeoutValue => (
                 "wasi:clocks/monotonic-clock@0.3.0",
                 "[async-lower]wait-for",
                 vec!["i64"],
@@ -123,7 +119,7 @@ pub(in crate::waffle_backend) fn emit(
         let helper = builder::declare(module, &name, &signature.params, &signature.returns);
         let mut b = Builder::new(module, helper, memory);
         let result = match scalar {
-            Scalar::Wait | Scalar::Timeout | Scalar::TimeoutValue => {
+            Scalar::Timeout | Scalar::TimeoutValue => {
                 if let Some(operations) = native.operations {
                     let signal = if matches!(scalar, Scalar::TimeoutValue) {
                         b.param(3)
@@ -144,20 +140,13 @@ pub(in crate::waffle_backend) fn emit(
                     b.block = begin;
                 }
                 let value = b.param(0);
-                let zero = b.number(0.0);
-                let value = if matches!(scalar, Scalar::Timeout | Scalar::TimeoutValue) {
-                    let minimum = b.number(1.0);
-                    let maximum = b.number(2147483647.0);
-                    let low = b.op(Op::F64Ge, &[value, minimum], I32);
-                    let high = b.op(Op::F64Le, &[value, maximum], I32);
-                    let valid = b.op(Op::I32And, &[low, high], I32);
-                    let selected = b.op(Op::Select, &[value, minimum, valid], F64);
-                    b.op(Op::F64Trunc, &[selected], F64)
-                } else {
-                    let valid = b.op(Op::F64Ge, &[value, zero], I32);
-                    b.require(valid);
-                    value
-                };
+                let minimum = b.number(1.0);
+                let maximum = b.number(2147483647.0);
+                let low = b.op(Op::F64Ge, &[value, minimum], I32);
+                let high = b.op(Op::F64Le, &[value, maximum], I32);
+                let valid = b.op(Op::I32And, &[low, high], I32);
+                let selected = b.op(Op::Select, &[value, minimum, valid], F64);
+                let value = b.op(Op::F64Trunc, &[selected], F64);
                 let million = b.number(1_000_000.0);
                 let ns = b.op(Op::F64Mul, &[value, million], F64);
                 let ns = b.op(Op::I64TruncF64U, &[ns], I64);

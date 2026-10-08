@@ -1,11 +1,32 @@
 //! Allocation-free HTTP URL normalization into the caller's guest-heap buffer.
-use core::fmt::{self, Write};
 
 struct Output<'a> {
     bytes: &'a mut [u8],
     length: usize,
 }
 impl Output<'_> {
+    fn bytes(&mut self, bytes: &[u8]) -> Result<(), ()> {
+        let end = self.length.checked_add(bytes.len()).ok_or(())?;
+        self.bytes
+            .get_mut(self.length..end)
+            .ok_or(())?
+            .copy_from_slice(bytes);
+        self.length = end;
+        Ok(())
+    }
+    fn number(&mut self, mut value: u32, radix: u32) -> Result<(), ()> {
+        let mut digits = [0u8; 10];
+        let mut start = digits.len();
+        loop {
+            start -= 1;
+            digits[start] = b"0123456789abcdef"[(value % radix) as usize];
+            value /= radix;
+            if value == 0 {
+                break;
+            }
+        }
+        self.bytes(&digits[start..])
+    }
     fn byte(&mut self, byte: u8) -> Result<(), ()> {
         *self.bytes.get_mut(self.length).ok_or(())? = byte;
         self.length += 1;
@@ -42,28 +63,17 @@ impl Output<'_> {
         let mut at = 0;
         while at < 8 {
             if longest.1 > 1 && at == longest.0 {
-                self.write_str("::").map_err(|_| ())?;
+                self.bytes(b"::")?;
                 at += longest.1;
             } else {
                 if at > 0 && !(longest.1 > 1 && at == longest.0 + longest.1) {
                     self.byte(b':')?;
                 }
-                write!(self, "{:x}", pieces[at]).map_err(|_| ())?;
+                self.number(u32::from(pieces[at]), 16)?;
                 at += 1;
             }
         }
         self.byte(b']')
-    }
-}
-impl Write for Output<'_> {
-    fn write_str(&mut self, text: &str) -> fmt::Result {
-        let end = self.length.checked_add(text.len()).ok_or(fmt::Error)?;
-        self.bytes
-            .get_mut(self.length..end)
-            .ok_or(fmt::Error)?
-            .copy_from_slice(text.as_bytes());
-        self.length = end;
-        Ok(())
     }
 }
 
@@ -119,6 +129,93 @@ fn ipv4(input: &[u8]) -> Result<Option<u32>, ()> {
         result += part << (8 * (3 - index));
     }
     Ok(Some(result as u32))
+}
+
+/// URL Standard IPv6 parsing, including the strict four-part decimal IPv4 suffix.
+fn ipv6(input: &[u8]) -> Result<[u16; 8], ()> {
+    let mut address = [0; 8];
+    let mut count = 0;
+    let mut compression = None;
+    let mut at = 0;
+    if input.starts_with(b":") {
+        if !input.starts_with(b"::") {
+            return Err(());
+        }
+        at = 2;
+        compression = Some(0);
+    }
+    while at < input.len() {
+        if count == 8 {
+            return Err(());
+        }
+        let start = at;
+        let mut value = 0;
+        while at < input.len() && at - start < 4 {
+            let Ok(digit) = hex(input[at]) else { break };
+            value = value * 16 + u16::from(digit);
+            at += 1;
+        }
+        if input.get(at) == Some(&b'.') {
+            if count > 6 {
+                return Err(());
+            }
+            let mut parts = input[start..].split(|byte| *byte == b'.');
+            for index in 0..4 {
+                let part = parts.next().ok_or(())?;
+                if part.is_empty() || part.len() > 3 || (part.len() > 1 && part[0] == b'0') {
+                    return Err(());
+                }
+                let mut number = 0u16;
+                for &byte in part {
+                    if !byte.is_ascii_digit() {
+                        return Err(());
+                    }
+                    number = number * 10 + u16::from(byte - b'0');
+                }
+                if number > 255 {
+                    return Err(());
+                }
+                address[count + index / 2] = address[count + index / 2] * 256 + number;
+            }
+            if parts.next().is_some() {
+                return Err(());
+            }
+            count += 2;
+            break;
+        }
+        if at == start {
+            return Err(());
+        }
+        address[count] = value;
+        count += 1;
+        if at == input.len() {
+            break;
+        }
+        if input[at] != b':' {
+            return Err(());
+        }
+        at += 1;
+        if input.get(at) == Some(&b':') {
+            if compression.is_some() {
+                return Err(());
+            }
+            compression = Some(count);
+            at += 1;
+        } else if at == input.len() {
+            return Err(());
+        }
+    }
+    if let Some(start) = compression {
+        if count >= 8 {
+            return Err(());
+        }
+        let end = start + 8 - count;
+        address.copy_within(start..count, end);
+        address[start..end].fill(0);
+    } else if count != 8 {
+        return Err(());
+    }
+    Ok(address)
 }
 
 fn dot(segment: &[u8]) -> usize {
@@ -213,15 +310,10 @@ fn canonicalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
         bytes: output,
         length: 0,
     };
-    out.write_str(if secure { "https://" } else { "http://" })
-        .map_err(|_| ())?;
+    out.bytes(if secure { b"https://" } else { b"http://" })?;
     let authority_start = out.length;
     if host.starts_with(b"[") {
-        let address = core::str::from_utf8(&host[1..host.len() - 1])
-            .map_err(|_| ())?
-            .parse::<core::net::Ipv6Addr>()
-            .map_err(|_| ())?;
-        out.ipv6(address.segments())?;
+        out.ipv6(ipv6(&host[1..host.len() - 1])?)?;
     } else {
         let mut at = 0;
         while at < host.len() {
@@ -245,15 +337,12 @@ fn canonicalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
         }
         if let Some(address) = ipv4(&out.bytes[authority_start..out.length])? {
             out.length = authority_start;
-            write!(
-                out,
-                "{}.{}.{}.{}",
-                address >> 24,
-                (address >> 16) & 255,
-                (address >> 8) & 255,
-                address & 255
-            )
-            .map_err(|_| ())?;
+            for shift in [24, 16, 8, 0] {
+                if shift != 24 {
+                    out.byte(b'.')?;
+                }
+                out.number((address >> shift) & 255, 10)?;
+            }
         }
     }
     if let Some(digits) = port
@@ -272,7 +361,8 @@ fn canonicalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
             return Err(());
         }
         if number != if secure { 443 } else { 80 } {
-            write!(out, ":{number}").map_err(|_| ())?;
+            out.byte(b':')?;
+            out.number(number, 10)?;
         }
     }
     let path_start = out.length;

@@ -332,7 +332,6 @@ fn unsupported_decoder_forms_preserve_diagnostics() {
         "export function run(): string { const options = {stream:true}; return new TextDecoder().decode(undefined, options); }",
         "export function run(flag: boolean): string { let decoder = new TextDecoder(); if (flag) { decoder = true; } else { decoder = new TextDecoder(); } return decoder.decode(); }",
         "export function run(flag: boolean): number { let bytes = new Uint8Array(1); if (flag) { bytes = true; } else { bytes = new Uint8Array(1); } return bytes[0]; }",
-        "declare function readChunk(input: ByteStream): Promise<number>; export async function run(flag: boolean, input: ByteStream): Promise<number> { if (flag) { input = true; } return await readChunk(input); }",
     ] {
         assert!(
             compile_typescript_waffle(

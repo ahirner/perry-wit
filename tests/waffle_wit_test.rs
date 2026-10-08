@@ -17,6 +17,66 @@ fn compile_records(source: &str) -> Result<WaffleCompiled> {
 }
 
 #[test]
+fn typed_record_reads_need_no_temporary_value_allocations() -> Result<()> {
+    let world = "package test:boundary; world boundary {export run:func(count:u32)->f64;}";
+    let compiled = compile_world(
+        r#"export function run(count:number):number {
+            const bytes=new Uint8Array([42]);
+            let sum=0;
+            for(let i=0;i<count;i++) {
+                const result:{value?:Uint8Array,done:boolean}={value:bytes,done:false};
+                const value=result.value;
+                if(value===undefined)throw 1;
+                if(!result.done)sum+=value[0];
+            }
+            return sum;
+        }"#,
+        world,
+    )?;
+    let core = heap_measurement::instrument(&compiled.core)?;
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "probe.wit",
+        &world.replace(
+            "export run:",
+            "export measure-allocations:func()->u64; export run:",
+        ),
+    )?;
+    let world = resolve.select_world(&[package], Some("boundary"))?;
+    let engine = Engine::default();
+    let component = Component::new(
+        &engine,
+        perry_wit::waffle_backend::encode_component(&core, resolve, world)?,
+    )?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "run")?;
+    let allocations = instance.get_typed_func::<(), (u64,)>(&mut store, "measure-allocations")?;
+    let mut counts = Vec::new();
+    for iterations in [0, 32, 256] {
+        let before = allocations.call(&mut store, ())?.0;
+        assert_eq!(
+            run.call(&mut store, (iterations,))?.0,
+            42.0 * f64::from(iterations)
+        );
+        counts.push(allocations.call(&mut store, ())?.0 - before);
+    }
+    assert!(
+        counts[1] <= counts[0] + 32,
+        "one record per iteration: {counts:?}"
+    );
+    assert!(
+        counts[2] <= counts[0] + 256,
+        "reads must not allocate boxes: {counts:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn literal_projections_avoid_materialization() -> Result<()> {
     let engine = Engine::default();
     for (kind, bodies, helpers) in [

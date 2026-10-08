@@ -1,9 +1,6 @@
 //! Boxing and checked extraction at heterogeneous guest boundaries.
 
-use super::{
-    FunctionLowerer,
-    types::{StringKind, is_reference},
-};
+use super::{FunctionLowerer, types::is_reference};
 use crate::waffle_backend::{
     abi,
     text_or_bytes::is_text_or_bytes,
@@ -253,10 +250,12 @@ impl FunctionLowerer<'_> {
                 self.op(Operator::I32Add, &[text, binary], &[Type::I32]),
                 value,
             )
-        } else if StringKind::of(ty) == Some(StringKind::Optional) {
+        } else if let Some(inner) = crate::waffle_backend::values::sentinel_inner(ty)
+            && inner != &HirType::Number
+        {
             let text = self.op(
                 Operator::I32Const {
-                    value: ValueTag::String as u32,
+                    value: ValueTag::of(inner)? as u32,
                 },
                 &[],
                 &[Type::I32],
@@ -325,8 +324,8 @@ impl FunctionLowerer<'_> {
             matches!(operation, CompareOp::Eq | CompareOp::Ne),
             "Dynamic values support strict equality; coercive comparisons are unsupported"
         );
-        let left = self.value_operand(left)?;
-        let right = self.value_operand(right)?;
+        let (_, left_tag, left_payload) = self.tagged_value(left)?;
+        let (_, right_tag, right_payload) = self.tagged_value(right)?;
         let equal = self.op(
             Operator::Call {
                 function_index: self
@@ -335,7 +334,7 @@ impl FunctionLowerer<'_> {
                     .expect("value helpers are registered")
                     .equal,
             },
-            &[left, right],
+            &[left_tag, left_payload, right_tag, right_payload],
             &[Type::I32],
         );
         Ok(if operation == CompareOp::Ne {

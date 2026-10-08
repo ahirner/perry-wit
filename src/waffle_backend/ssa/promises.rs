@@ -2,7 +2,9 @@
 
 use super::{FunctionLowerer, values::ArrayElementTypes};
 use crate::waffle_backend::{
-    capabilities::CapabilityOperation, promises::Combinator, resolve::TypedIntrinsic,
+    capabilities::CapabilityOperation,
+    promises::{Combinator, OPTIONAL_REFERENCE_TAG},
+    resolve::TypedIntrinsic,
     values::ValueTag,
 };
 use anyhow::{Result, bail, ensure};
@@ -131,6 +133,10 @@ impl FunctionLowerer<'_> {
             };
             if crate::waffle_backend::values::is_boxed(ty) {
                 Ok(255)
+            } else if let Some(inner) = crate::waffle_backend::values::sentinel_inner(ty)
+                && inner != &HirType::Number
+            {
+                Ok(OPTIONAL_REFERENCE_TAG | ValueTag::of(inner)? as u32)
             } else {
                 Ok(ValueTag::of(ty)? as u32)
             }
@@ -168,7 +174,7 @@ impl FunctionLowerer<'_> {
             else if crate::waffle_backend::values::is_boxed_union(&result) { 2 }
             else if crate::waffle_backend::text_or_bytes::is_text_or_bytes(&result) { 3 }
             else if matches!(result.as_ref(), HirType::Union(types) if types.len()==2 && types.contains(&HirType::Number) && types.contains(&HirType::Void)) { 4 }
-            else if super::types::StringKind::of(&result) == Some(super::types::StringKind::Optional) { 5 }
+            else if crate::waffle_backend::values::sentinel_inner(&result).is_some() { 5 }
             else { 0 },
             u32::from(matches!(&input_ty, HirType::Array(inner) if **inner == HirType::String)),
         ]

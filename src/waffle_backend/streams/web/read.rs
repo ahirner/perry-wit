@@ -21,6 +21,24 @@ pub(super) fn emit_finish(
     let error = b.load(stream, ERROR, I32);
     b.ret(&[error]);
     b.block = close;
+    let kind = b.load(stream, BODY_KIND, I32);
+    let input_kind = b.integer(super::super::incoming::KIND);
+    let input = b.op(O::I32Eq, &[kind, input_kind], I32);
+    let release_input = b.body.add_block();
+    let other = b.body.add_block();
+    b.branch(input, release_input, other);
+    b.block = release_input;
+    if let Some(input) = r.input {
+        let handle = b.load(stream, super::super::incoming::HANDLE, I32);
+        b.call(input.imports.drop, &[handle], &[]);
+        b.store(stream, STATE, one, I32);
+        let zero = b.integer(0);
+        b.ret(&[zero]);
+    } else {
+        b.body
+            .set_terminator(b.block, waffle::Terminator::Unreachable);
+    }
+    b.block = other;
     let native = is_native(&mut b, stream);
     let release = b.body.add_block();
     let buffered = b.body.add_block();
@@ -54,9 +72,16 @@ pub(super) fn emit_pull(
     r: &Runtime<'_>,
     f: Func,
     finish: Func,
+    input_pull: Func,
 ) -> Result<()> {
     let mut b = Builder::new(module, f, memory);
     let stream = b.param(0);
+    let destination = b.param(1);
+    let copy_chunk = r
+        .readers
+        .has_byob()
+        .then(|| super::byob::emit_copy_chunk(module, memory, r))
+        .transpose()?;
     let zero = b.integer(0);
     let one = b.integer(1);
     let two = b.integer(2);
@@ -64,6 +89,9 @@ pub(super) fn emit_pull(
     b.store(used, 0, one, I32);
     let state = b.load(stream, STATE, I32);
     let closed = b.op(O::I32Eq, &[state, one], I32);
+    let queued = b.load(stream, PENDING_CHUNK, I32);
+    let empty = b.op(O::I32Eqz, &[queued], I32);
+    let closed = b.op(O::I32And, &[closed, empty], I32);
     let done = b.body.add_block();
     let check_error = b.body.add_block();
     b.branch(closed, done, check_error);
@@ -90,7 +118,12 @@ pub(super) fn emit_pull(
     b.branch(pending, queued, check_eof);
     b.block = queued;
     b.store(stream, PENDING_CHUNK, zero, I32);
-    b.ret(&[zero, pending, zero]);
+    let view = if let Some(copy_chunk) = copy_chunk {
+        b.call(copy_chunk, &[stream, pending, destination], &[I32])[0]
+    } else {
+        pending
+    };
+    b.ret(&[zero, view, zero]);
     b.block = check_eof;
     let eof = b.load(stream, EOF, I32);
     let source = b.body.add_block();
@@ -99,6 +132,16 @@ pub(super) fn emit_pull(
     let reason = b.call(finish, &[stream], &[I32])[0];
     b.ret(&[reason, zero, one]);
     b.block = source;
+    let kind = b.load(stream, BODY_KIND, I32);
+    let input_kind = b.integer(super::super::incoming::KIND);
+    let input = b.op(O::I32Eq, &[kind, input_kind], I32);
+    let read_input = b.body.add_block();
+    let other = b.body.add_block();
+    b.branch(input, read_input, other);
+    b.block = read_input;
+    let values = b.call(input_pull, &[stream, destination], &[I32; 3]);
+    b.ret(&values);
+    b.block = other;
     let native = is_native(&mut b, stream);
     let read = b.body.add_block();
     let buffered = b.body.add_block();
@@ -106,7 +149,27 @@ pub(super) fn emit_pull(
     b.block = buffered;
     let body = b.load(stream, BODY, I32);
     let bytes = b.load(body, 12, I32);
-    let copy = b.call(r.bytes.copy, &[bytes], &[I32])[0];
+    let copy = if let Some(copy_chunk) = copy_chunk {
+        let source = if r.readers.has_default() {
+            let copy_default = b.body.add_block();
+            let use_source = b.body.add_block();
+            let buffered_ready = b.body.add_block();
+            let source = b.body.add_blockparam(buffered_ready, I32);
+            b.branch(destination, use_source, copy_default);
+            b.block = copy_default;
+            let copy = b.call(r.bytes.copy, &[bytes], &[I32])[0];
+            b.jump(buffered_ready, &[copy]);
+            b.block = use_source;
+            b.jump(buffered_ready, &[bytes]);
+            b.block = buffered_ready;
+            source
+        } else {
+            bytes
+        };
+        b.call(copy_chunk, &[stream, source, destination], &[I32])[0]
+    } else {
+        b.call(r.bytes.copy, &[bytes], &[I32])[0]
+    };
     b.store(stream, EOF, one, I32);
     b.ret(&[zero, copy, zero]);
     b.block = read;
@@ -128,10 +191,9 @@ pub(super) fn emit_pull(
         let count = b.integer(2);
         let frame = b.call(r.allocator.frame_new, &[count], &[I32])[0];
         b.store(frame, 12, stream, I32);
-        let data = b.allocate(r.allocator.realloc, 16384, 1);
-        b.store(frame, 16, data, I32);
+        let (view, data, capacity) = super::byob::destination(&mut b, r, destination, 16384);
+        b.store(frame, 16, view, I32);
         let reader = b.load(body, 24, I32);
-        let capacity = b.integer(16384);
         let transfer = b.body.add_block();
         b.jump(transfer, &[]);
         b.block = transfer;
@@ -187,7 +249,7 @@ pub(super) fn emit_pull(
         b.call(r.allocator.frame_drop, &[frame], &[]);
         b.ret(&[reason, zero, one]);
         b.block = bytes;
-        let view = b.call(r.bytes.lift_canonical, &[data, length], &[I32])[0];
+        super::byob::received(&mut b, r, destination, view, length);
         b.call(r.allocator.frame_drop, &[frame], &[]);
         b.ret(&[zero, view, zero]);
     } else {
@@ -206,10 +268,7 @@ pub(super) fn emit_result(
     let bytes = b.param(0);
     let done = b.param(1);
     let count = b.integer(2);
-    let frame = b.call(r.allocator.frame_new, &[count], &[I32])[0];
-    b.store(frame, 12, bytes, I32);
-    let result = b.call(r.objects.new, &[], &[I32])[0];
-    b.store(frame, 16, result, I32);
+    let result = b.call(r.objects.record, &[count], &[I32])[0];
     let key = b.integer(r.pool.get("done").unwrap());
     let tag = b.integer(2);
     let payload = b.op(O::F64ConvertI32U, &[done], F64);
@@ -217,10 +276,9 @@ pub(super) fn emit_result(
     let key = b.integer(r.pool.get("value").unwrap());
     let zero = b.integer(0);
     let tag = b.integer(5);
-    let tag = b.op(O::Select, &[zero, tag, done], I32);
+    let tag = b.op(O::Select, &[tag, zero, bytes], I32);
     let payload = b.op(O::F64ConvertI32U, &[bytes], F64);
     b.call(r.objects.set, &[result, key, tag, payload], &[I32, F64]);
-    b.call(r.allocator.frame_drop, &[frame], &[]);
     b.ret(&[result]);
     b.finish(module, f)
 }
@@ -232,25 +290,70 @@ pub(super) fn emit_read(
     f: Func,
     pull: Func,
     result: Func,
+    byob: bool,
 ) -> Result<()> {
     let mut b = Builder::new(module, f, memory);
     let reader = b.param(0);
     let stream = b.load(reader, 4, I32);
+    let zero = b.integer(0);
+    let (destination, minimum) = if byob {
+        let view = b.param(1);
+        let length = b.load(view, 4, I32);
+        let empty = b.op(O::I32Eqz, &[length], I32);
+        reject(&mut b, empty, 12);
+        let minimum = b.param(2);
+        let maximum = b.number(18446744073709551616.0);
+        let in_range = b.op(O::F64Lt, &[minimum, maximum], I32);
+        let invalid = b.op(O::I32Eqz, &[in_range], I32);
+        reject(&mut b, invalid, 12);
+        let minimum = b.op(O::F64Trunc, &[minimum], F64);
+        let one = b.number(1.0);
+        let positive = b.op(O::F64Ge, &[minimum, one], I32);
+        let invalid = b.op(O::I32Eqz, &[positive], I32);
+        reject(&mut b, invalid, 12);
+        let length = b.op(O::F64ConvertI32U, &[length], F64);
+        let too_large = b.op(O::F64Gt, &[minimum, length], I32);
+        reject(&mut b, too_large, 10);
+        let minimum = b.op(O::I32TruncF64U, &[minimum], I32);
+        (view, minimum)
+    } else {
+        (zero, zero)
+    };
     let detached = b.op(O::I32Eqz, &[stream], I32);
     reject(&mut b, detached, 12);
+    let initial_state = b.load(stream, STATE, I32);
+    let destination = if byob {
+        let state = initial_state;
+        let errored = b.integer(ERRORED);
+        let errored = b.op(O::I32Eq, &[state, errored], I32);
+        let error = b.body.add_block();
+        let transfer = b.body.add_block();
+        b.branch(errored, error, transfer);
+        b.block = error;
+        let reason = b.load(stream, ERROR, I32);
+        let reason = b.op(O::F64ConvertI32U, &[reason], F64);
+        let one = b.integer(1);
+        b.ret(&[one, reason]);
+        b.block = transfer;
+        b.call(r.bytes.transfer, &[destination], &[I32])[0]
+    } else {
+        destination
+    };
     let Some(promises) = r.promises else {
         b.body
             .set_terminator(b.block, waffle::Terminator::Unreachable);
         return b.finish(module, f);
     };
     let three = b.integer(3);
-    let frame = b.call(r.allocator.frame_new, &[three], &[I32])[0];
+    let roots = b.integer(4);
+    let frame = b.call(r.allocator.frame_new, &[roots], &[I32])[0];
     b.store(frame, 12, stream, I32);
+    b.store(frame, 24, destination, I32);
     let node = tagged_allocation(&mut b, r.allocator, 16, 18);
     b.store(frame, 16, node, I32);
     let head = b.load(reader, 0, I32);
     b.store(node, 4, head, I32);
-    b.store(node, 8, b.param(2), I32);
+    b.store(node, 8, b.param(if byob { 3 } else { 2 }), I32);
     let link = b.body.add_block();
     let linked = b.body.add_block();
     b.branch(head, link, linked);
@@ -279,7 +382,15 @@ pub(super) fn emit_read(
     let pull_block = b.body.add_block();
     b.branch(attached, pull_block, released);
     b.block = pull_block;
-    let values = b.call(pull, &[stream], &[I32; 3]);
+    let values = if byob {
+        b.call(
+            pull,
+            &[stream, reader, destination, minimum, initial_state],
+            &[I32; 3],
+        )
+    } else {
+        b.call(pull, &[stream, zero], &[I32; 3])
+    };
     let attached = b.load(reader, 4, I32);
     let requeue = b.body.add_block();
     let observed = b.body.add_block();
@@ -372,13 +483,18 @@ pub(super) fn emit_cancel(
     b.block = cancel;
     let cancelling = b.integer(CANCELLING);
     b.store(stream, STATE, cancelling, I32);
-    if let Some(native) = r.native {
+    b.store(stream, EOF, two, I32);
+    if let Some(operations) = r
+        .native
+        .map(|n| n.operations)
+        .or_else(|| r.input.and_then(|i| i.operations))
+    {
         let owner = b.load(stream, TRANSFER, I32);
         let pending = b.body.add_block();
         let done = b.body.add_block();
         b.branch(owner, pending, done);
         b.block = pending;
-        b.call(native.operations.cancel, &[owner], &[]);
+        b.call(operations.cancel, &[owner], &[]);
         b.jump(done, &[]);
         b.block = done;
     }

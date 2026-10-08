@@ -30,15 +30,18 @@ pub(crate) fn is_dynamic(ty: &HirType) -> bool {
     matches!(ty, HirType::Named(name) if name == VALUE_TYPE)
 }
 
-/// Optional strings and numbers encode undefined in their primitive storage.
+/// References reserve pointer zero for undefined; optional numbers retain their NaN sentinel.
 pub(crate) fn sentinel_inner(ty: &HirType) -> Option<&HirType> {
     let HirType::Union(types) = ty else {
         return None;
     };
     if types.len() == 2 && types.contains(&HirType::Void) {
-        types
-            .iter()
-            .find(|ty| matches!(ty, HirType::String | HirType::Number))
+        types.iter().find(|ty| {
+            matches!(ty, HirType::Number | HirType::String)
+                || ValueTag::of(ty).is_ok_and(|tag| {
+                    tag as u32 >= ValueTag::Bytes as u32 && tag as u32 != ValueTag::WitU64 as u32
+                })
+        })
     } else {
         None
     }
@@ -93,7 +96,7 @@ pub(crate) enum ValueTag {
     Array = 12,
     Instant = 13,
     PlainDateTime = 14,
-    HttpResponse = 15,
+    Response = 15,
     WitU64 = 16,
     ArrayBuffer = 17,
     Headers = 18,
@@ -102,6 +105,9 @@ pub(crate) enum ValueTag {
     AbortSignal = 21,
     ReadableStream = 22,
     StreamReader = 23,
+    ByobReader = 27,
+    WritableStream = 25,
+    StreamWriter = 26,
     PlainDate = 24,
 }
 
@@ -120,6 +126,19 @@ impl ValueTag {
             }
             ty if super::streams::web::Kind::of(ty) == Some(super::streams::web::Kind::Reader) => {
                 Self::StreamReader
+            }
+            ty if super::streams::web::Kind::of(ty)
+                == Some(super::streams::web::Kind::ByobReader) =>
+            {
+                Self::ByobReader
+            }
+            ty if super::streams::web::Kind::of(ty)
+                == Some(super::streams::web::Kind::Writable) =>
+            {
+                Self::WritableStream
+            }
+            ty if super::streams::web::Kind::of(ty) == Some(super::streams::web::Kind::Writer) => {
+                Self::StreamWriter
             }
             ty if is_string_type(ty) => Self::String,
             HirType::Tuple(_) => Self::Array,
@@ -141,7 +160,7 @@ impl ValueTag {
             ty if super::decoder::is_decoder(ty) => Self::Decoder,
             HirType::Promise(_) => Self::Promise,
             ty if super::date::is_date(ty) => Self::Date,
-            ty if super::http::is_response(ty) => Self::HttpResponse,
+            ty if super::http::fetch::is_response(ty) => Self::Response,
             ty if super::time::TimeKind::of(ty) == Some(super::time::TimeKind::Instant) => {
                 Self::Instant
             }

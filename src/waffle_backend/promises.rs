@@ -2,6 +2,9 @@
 
 pub(crate) mod native;
 
+/// The remaining bits carry the present value's tag; payload zero means undefined.
+pub(crate) const OPTIONAL_REFERENCE_TAG: u32 = 1 << 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Combinator {
     All,
@@ -55,9 +58,14 @@ impl TaskTarget {
             None
         }
     }
-    pub(crate) fn web_stream(callee: &Expr) -> Option<Self> {
+    pub(crate) fn web_stream(callee: &Expr, args: &[Expr]) -> Option<Self> {
         if let Expr::PropertyGet { property, .. } = callee {
-            super::streams::web::Method::named(property).map(Self::WebStream)
+            let method = if property == "read" && !args.is_empty() {
+                Some(super::streams::web::Method::ReadInto)
+            } else {
+                super::streams::web::Method::named(property)
+            };
+            method.map(Self::WebStream)
         } else {
             None
         }
@@ -85,6 +93,7 @@ pub(crate) enum TaskArguments {
     FetchUpload,
     HttpBody,
     WebStream,
+    ByobRead,
     Filesystem(super::capabilities::FilesystemOperation),
     TimerValue,
 }
@@ -100,6 +109,11 @@ impl TaskArguments {
             ]),
             Self::Fetch => Ok(vec![waffle::Type::I32; 9]),
             Self::FetchUpload => Ok(vec![waffle::Type::I32; 3]),
+            Self::ByobRead => Ok(vec![
+                waffle::Type::I32,
+                waffle::Type::I32,
+                waffle::Type::F64,
+            ]),
             Self::HttpBody | Self::WebStream => Ok(vec![waffle::Type::I32; 2]),
             Self::Source(types) => types
                 .iter()
@@ -203,16 +217,35 @@ pub(crate) fn plan_promises(
                 TypedIntrinsic::RequestNew | TypedIntrinsic::ResponseNew
             )
         });
-    if has_body {
+    let has_stream = has_body
+        || intrinsics.values().any(|i| {
+            matches!(
+                i,
+                TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Writable(_))
+            )
+        })
+        || hir.functions.iter().any(|f| {
+            f.params
+                .iter()
+                .any(|p| super::streams::web::Kind::of(&p.ty).is_some())
+        });
+    if has_stream {
         for method in [
             super::streams::web::Method::Read,
+            super::streams::web::Method::ReadInto,
             super::streams::web::Method::Cancel,
+            super::streams::web::Method::Write,
+            super::streams::web::Method::Close,
         ] {
             candidates.insert(
                 TaskTarget::WebStream(method),
                 TaskPlan {
                     symbol: format!("__perry.stream.{method:?}"),
-                    arguments: TaskArguments::WebStream,
+                    arguments: if method == super::streams::web::Method::ReadInto {
+                        TaskArguments::ByobRead
+                    } else {
+                        TaskArguments::WebStream
+                    },
                     result: method.result(),
                 },
             );
@@ -237,10 +270,14 @@ pub(crate) fn plan_promises(
                 Expr::Await(inner) => (inner.as_ref(), true),
                 expression => (expression, false),
             };
-            if let Expr::Call { callee, .. } = expression
+            if let Expr::Call { callee, args, .. } = expression
                 && let Some(target) = TaskTarget::from_callee(callee)
                     .or_else(|| has_body.then(|| TaskTarget::http_body(callee)).flatten())
-                    .or_else(|| has_body.then(|| TaskTarget::web_stream(callee)).flatten())
+                    .or_else(|| {
+                        has_stream
+                            .then(|| TaskTarget::web_stream(callee, args))
+                            .flatten()
+                    })
                 && candidates.contains_key(&target)
             {
                 if awaited {
@@ -322,9 +359,10 @@ pub(crate) fn is_task_outcome(ty: &HirType) -> bool {
         || super::time::is_time(ty)
         || super::values::is_dynamic(ty)
         || super::values::is_boxed_union(ty)
+        || super::values::sentinel_inner(ty).is_some()
         || super::structured::is_string_array(ty)
         || matches!(ty, HirType::Array(_) | HirType::Tuple(_))
-        || super::http::is_response(ty)
+        || super::http::fetch::is_response(ty)
         || super::http::headers::is_headers(ty)
         || super::http::request::is_request(ty)
         || super::streams::web::Kind::of(ty).is_some()

@@ -2,7 +2,7 @@ use super::instantiate;
 use crate::waffle_fixture::compile_typescript_waffle;
 use anyhow::Result;
 use perry_wit::waffle_backend::WaffleCompileOptions;
-use std::{fs, process::Command};
+use std::fs;
 
 #[test]
 fn temporal_sdk_declares_only_the_supported_immutable_surface() -> Result<()> {
@@ -43,20 +43,20 @@ fn temporal_sdk_declares_only_the_supported_immutable_surface() -> Result<()> {
         plain.year=2000;
         // @ts-expect-error: unsupported constructor
         new Temporal.Instant();
-        // @ts-expect-error: string factory only
+        // @ts-expect-error only ISO string parsing is supported
         Temporal.PlainDateTime.from({year:2024,month:1,day:1});
-        // @ts-expect-error: bounded day arithmetic
+        // @ts-expect-error only day arithmetic is supported
         plain.add({months:1});
         // @ts-expect-error: no implicit instant conversion
         const wrong:Temporal.Instant=plain;
     "#,
     )?;
-    let output = Command::new("tsc")
+    let output = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(scratch.path())
         .args([
             "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
         ])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .args([calendar, utc, errors])
         .output()?;
     assert!(

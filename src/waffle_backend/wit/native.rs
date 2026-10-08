@@ -43,8 +43,8 @@ impl WitWorld {
                     let export = self
                         .functions
                         .values()
-                        .find(|export| export.core_name == "run")
-                        .context("Byte stream core entry requires WIT export 'run'")?;
+                        .find(|export| export.function.params.iter().any(|param| matches!(param.ty, Type::Id(id) if matches!(self.resolve.types[id].kind, TypeDefKind::Stream(Some(Type::U8))))))
+                        .context("Byte stream bindings require a direct WIT stream<u8> parameter")?;
                     let payloads = export.function.find_futures_and_streams(&self.resolve);
                     let index = payloads
                         .iter()
@@ -54,10 +54,20 @@ impl WitWorld {
                         .context("WIT entry requires a byte stream parameter")?;
                     let operation = match import.name.as_str() {
                         "read" => "stream-read",
+                        "async-read" => "[async-lower]stream-read",
+                        "cancel-read" => "[async-lower]stream-cancel-read",
                         "drop" => "stream-drop-readable",
                         other => bail!("Unsupported stream intrinsic '{other}'"),
                     };
-                    ("[export]$root".into(), format!("[{operation}-{index}]run"))
+                    {
+                        let (prefix, operation) = operation
+                            .strip_prefix("[async-lower]")
+                            .map_or(("", operation), |op| ("[async-lower]", op));
+                        (
+                            "[export]$root".into(),
+                            format!("{prefix}[{operation}-{index}]{}", export.core_name),
+                        )
+                    }
                 }
                 "http" => self.http_binding(&import.name)?,
                 "http-server" => self.http_handler_binding(&import.name)?,

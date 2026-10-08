@@ -82,13 +82,19 @@ pub(crate) fn lower_module(
                 super::http::body::BodyMethod::Json,
             ))
     });
-    reqs.objects |= contract.has_http() || contract.has_headers() || contract.wit.is_some();
+    reqs.objects |= contract.has_http()
+        || contract.has_headers()
+        || contract.wit.is_some()
+        || contract.has_web_input()
+        || contract.has_writable();
     reqs.objects |= contract
         .context_operations()
         .contains(&super::capabilities::ContextOperation::Environment);
     reqs.needs_strings |= contract
         .clock_operations()
         .contains(&super::capabilities::ClockOperation::DateNow)
+        || contract.has_web_input()
+        || contract.has_writable()
         || contract.wit.is_some()
         || super::values::required(hir)
         || super::date::required(hir)
@@ -115,7 +121,8 @@ pub(crate) fn lower_module(
         || contract.promises.is_some()
         || super::bytes::required(hir)
         || super::structured::required(hir)
-        || contract.has_stream_input()
+        || contract.has_web_input()
+        || contract.has_writable()
         || !contract.output_operations().is_empty()
         || contract.has_filesystem()
         || contract.has_abort()
@@ -137,7 +144,11 @@ pub(crate) fn lower_module(
                     }),
             );
         }
-        if contract.has_http() || contract.has_body() {
+        if contract.has_http()
+            || contract.has_body()
+            || contract.has_web_input()
+            || contract.has_writable()
+        {
             string_pool.intern("done");
             string_pool.intern("value");
             for method in ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"] {
@@ -237,9 +248,11 @@ pub(crate) fn lower_module(
         state.emit(&mut module, plan, &registry)?;
     }
     let regexes = regex::emit_runtime(&mut module, memory, regex_programs)?;
-    if registry.promises.is_some() {
-        super::promises::native::emit(&mut module, &registry, contract, &string_pool)?;
-    }
+    let captures = if registry.promises.is_some() {
+        super::promises::native::emit(&mut module, &registry, contract, &string_pool)?
+    } else {
+        Vec::new()
+    };
 
     // 5. Lower each function body using the established registry contracts
     for func in &hir.functions {
@@ -300,14 +313,6 @@ pub(crate) fn lower_module(
                 }
             }
         }
-        if let Some(plan) = &contract.promises
-            && let Some(task) = plan.tasks.get(&super::promises::TaskTarget::Guest(func.id))
-        {
-            module.exports.push(Export {
-                name: task.symbol.clone(),
-                kind: ExportKind::Func(info.func_index),
-            });
-        }
     }
 
     if let Some(limits) = contract.http_handler {
@@ -318,6 +323,7 @@ pub(crate) fn lower_module(
             http_handler_imports.as_ref().unwrap(),
         )?;
     }
+    super::constant_arguments::optimize(&mut module, &captures);
     Ok(module)
 }
 
@@ -335,7 +341,6 @@ struct FunctionLowerer<'a> {
     locals: BTreeMap<LocalId, Value>,
     local_types: BTreeMap<LocalId, HirType>,
     narrowings: BTreeMap<LocalId, HirType>,
-    stream_parameter: Option<Value>,
     awaited_calls: usize,
     unwind_ctx: UnwindContext,
     loops: Vec<loops::LoopScope>,
@@ -356,7 +361,6 @@ fn lower_function_body(
     let entry = body.entry;
     let mut locals = BTreeMap::new();
     let mut local_types = BTreeMap::new();
-    let mut stream_parameter = None;
     let mut reference_values = BTreeSet::new();
 
     // Map entry block parameters to function parameters
@@ -366,11 +370,6 @@ fn lower_function_body(
         local_types.insert(param.id, param.ty.clone());
         if types::is_reference(&param.ty) {
             reference_values.insert(val);
-        }
-        if func.id == contract.entry_func_id
-            && matches!(&param.ty, HirType::Named(n) if n == "ByteStream")
-        {
-            stream_parameter = Some(val);
         }
     }
 
@@ -387,23 +386,12 @@ fn lower_function_body(
         locals,
         local_types,
         narrowings: BTreeMap::new(),
-        stream_parameter,
         awaited_calls: 0,
         unwind_ctx: UnwindContext::new(),
         loops: Vec::new(),
         reference_values,
         collection_blocks: BTreeSet::new(),
     };
-
-    if let (Some(stream_val), Some(helpers)) = (stream_parameter, registry.stream_helpers) {
-        lowerer.op(
-            Operator::Call {
-                function_index: helpers.start,
-            },
-            &[stream_val],
-            &[],
-        );
-    }
 
     let lowered = lowerer.statements(&func.body);
     if contract.wit.is_some() {
@@ -460,6 +448,12 @@ impl<'a> FunctionLowerer<'a> {
                         ty.clone()
                     };
                     let ty = &declared;
+                    let initialized_type = super::values::sentinel_inner(ty)
+                        .filter(|inner| {
+                            **inner != HirType::Number
+                                && (**inner == inferred || inferred == HirType::Void)
+                        })
+                        .map(|_| inferred.clone());
                     if self.contract.wit.is_some()
                         && *ty != HirType::Any
                         && !(ty == &HirType::Number
@@ -473,7 +467,7 @@ impl<'a> FunctionLowerer<'a> {
                             "Temporal initializers must match their declared type"
                         );
                     }
-                    if super::http::is_response(ty) {
+                    if super::http::fetch::is_response(ty) {
                         ensure!(
                             ty == &inferred,
                             "HTTP response initializers must match their declared type"
@@ -486,7 +480,9 @@ impl<'a> FunctionLowerer<'a> {
                             && matches!(expr, Expr::Array(_)))
                     {
                         (ty.clone(), self.typed_operand(expr, ty)?)
-                    } else if super::values::is_boxed_union(ty) {
+                    } else if super::values::is_boxed_union(ty)
+                        || super::values::sentinel_inner(ty).is_some()
+                    {
                         self.check_typed_value(expr, ty)?;
                         (ty.clone(), self.typed_operand(expr, ty)?)
                     } else if is_text_or_bytes(ty) || is_text_or_bytes(&inferred) {
@@ -510,6 +506,9 @@ impl<'a> FunctionLowerer<'a> {
                     };
                     self.local_types.insert(*id, ty);
                     self.narrowings.remove(id);
+                    if let Some(ty) = initialized_type {
+                        self.narrowings.insert(*id, ty);
+                    }
                     ensure!(
                         self.locals.insert(*id, val).is_none(),
                         "Duplicate local binding id: {:?}",
@@ -683,7 +682,7 @@ impl<'a> FunctionLowerer<'a> {
             || super::filesystem::is_stats(self.return_type)
             || super::date::is_date(self.return_type)
             || super::time::is_time(self.return_type)
-            || super::http::is_response(self.return_type)
+            || super::http::fetch::is_response(self.return_type)
             || super::http::headers::is_headers(self.return_type)
             || super::http::request::is_request(self.return_type)
             || matches!(self.return_type, HirType::Array(_))
@@ -714,7 +713,7 @@ impl<'a> FunctionLowerer<'a> {
             ensure!(
                 !super::date::is_date(&self.infer_expr_type(expr))
                     && !super::time::is_time(&self.infer_expr_type(expr))
-                    && !super::http::is_response(&self.infer_expr_type(expr)),
+                    && !super::http::fetch::is_response(&self.infer_expr_type(expr)),
                 "Cannot return a Date, Temporal, or HTTP response value as {:?}",
                 self.return_type
             );
@@ -838,16 +837,6 @@ impl<'a> FunctionLowerer<'a> {
             return self.random_fill(name, args).map(Some);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
-            && matches!(
-                self.contract.intrinsics.get(name),
-                Some(super::resolve::TypedIntrinsic::Capability(
-                    super::capabilities::CapabilityOperation::HttpGet
-                ))
-            )
-        {
-            return self.http_get(name, args).map(Some);
-        }
-        if let Expr::ExternFuncRef { name, .. } = callee
             && let Some(super::resolve::TypedIntrinsic::Capability(
                 super::capabilities::CapabilityOperation::Filesystem(operation),
             )) = self.contract.intrinsics.get(name)
@@ -949,9 +938,6 @@ impl<'a> FunctionLowerer<'a> {
             {
                 return self.http_body(object, property, args).map(Some);
             }
-            if super::http::is_response(&receiver_type) {
-                return self.http_header(object, property, args).map(Some);
-            }
             if super::date::is_date(&receiver_type) {
                 return self.date_method(object, property, args).map(Some);
             }
@@ -1050,8 +1036,8 @@ impl<'a> FunctionLowerer<'a> {
                     "Object arguments must match their declared parameter types"
                 );
             }
-            if expected.is_some_and(super::http::is_response)
-                || super::http::is_response(&argument_type)
+            if expected.is_some_and(super::http::fetch::is_response)
+                || super::http::fetch::is_response(&argument_type)
                 || expected.is_some_and(super::http::request::is_request)
                 || super::http::request::is_request(&argument_type)
                 || expected.is_some_and(super::http::headers::is_headers)
@@ -1080,12 +1066,7 @@ impl<'a> FunctionLowerer<'a> {
                     "Decoder parameters require TextDecoder arguments"
                 );
             }
-            if matches!(expected, Some(HirType::Named(name)) if name == "ByteStream") {
-                ensure!(
-                    matches!(&argument_type, HirType::Named(name) if name == "ByteStream"),
-                    "Stream parameters require ByteStream arguments"
-                );
-            }
+
             if expected.is_some_and(super::bytes::is_byte_view) {
                 ensure!(
                     super::bytes::is_byte_view(&argument_type),
@@ -1267,6 +1248,18 @@ impl<'a> FunctionLowerer<'a> {
         outcome.payload
     }
 
+    fn source_checkpoint(&mut self) {
+        if let Some(runtime) = &self.registry.promises {
+            self.op(
+                Operator::Call {
+                    function_index: runtime.native.scheduler.checkpoint,
+                },
+                &[],
+                &[],
+            );
+        }
+    }
+
     fn await_expression(&mut self, expr: &Expr, is_statement: bool) -> Result<Option<Value>> {
         if super::values::is_dynamic(&self.infer_expr_type(expr)) {
             let value = self.expression(expr)?;
@@ -1278,15 +1271,7 @@ impl<'a> FunctionLowerer<'a> {
                 &[value],
             );
             let value = abi::decode_payload(&mut self.body, self.block, payload, true);
-            if let Some(runtime) = &self.registry.promises {
-                self.op(
-                    Operator::Call {
-                        function_index: runtime.yield_thread,
-                    },
-                    &[],
-                    &[],
-                );
-            }
+            self.source_checkpoint();
             return Ok(self.continuation(if is_statement { None } else { Some(value) }));
         }
         if let Some(runtime) = &self.registry.promises {
@@ -1306,13 +1291,7 @@ impl<'a> FunctionLowerer<'a> {
                     ))
                 }
             } else {
-                self.op(
-                    Operator::Call {
-                        function_index: runtime.yield_thread,
-                    },
-                    &[],
-                    &[],
-                );
+                self.source_checkpoint();
                 if is_statement { None } else { Some(value) }
             };
             return Ok(self.continuation(result));
@@ -1384,7 +1363,12 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::Compare { op, left, right }
                 if super::values::is_boxed(&self.infer_expr_type(left))
-                    || super::values::is_boxed(&self.infer_expr_type(right)) =>
+                    || super::values::is_boxed(&self.infer_expr_type(right))
+                    || [left, right].iter().any(|value| {
+                        super::values::sentinel_inner(&self.infer_expr_type(value)).is_some_and(
+                            |inner| !matches!(inner, HirType::Number | HirType::String),
+                        )
+                    }) =>
             {
                 self.value_comparison(*op, left, right)
             }
@@ -1512,6 +1496,9 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
+        if let Some(parts) = super::objects::spread_parts(expr) {
+            return self.object_spread(parts);
+        }
         match expr {
             Expr::PropertyGet {
                 object, property, ..
@@ -1561,7 +1548,7 @@ impl<'a> FunctionLowerer<'a> {
             Expr::PropertySet { object, .. }
             | Expr::IndexSet { object, .. }
             | Expr::PutValueSet { target: object, .. }
-                if super::http::is_response(&self.infer_expr_type(object)) =>
+                if super::http::fetch::is_response(&self.infer_expr_type(object)) =>
             {
                 bail!("HTTP response metadata is read-only")
             }
@@ -1705,6 +1692,7 @@ impl<'a> FunctionLowerer<'a> {
             Expr::ObjectValues(object) => self.object_enumerate(object, true),
             Expr::In { property, object } => self.object_has(property, object),
             Expr::Object(_) => self.new_object(expr, None),
+
             Expr::New { class_name, .. }
                 if self.contract.literal_shapes.contains_key(class_name) =>
             {
@@ -1896,6 +1884,7 @@ impl<'a> FunctionLowerer<'a> {
                     && (self.contract.wit.is_some()
                         || matches!(ty, HirType::Tuple(_))
                         || super::values::is_boxed_union(ty)
+                        || super::values::sentinel_inner(ty).is_some()
                         || super::values::is_boxed(&self.infer_expr_type(expr)))
                 {
                     let value = self.typed_operand(expr, ty)?;
@@ -2016,9 +2005,13 @@ impl<'a> FunctionLowerer<'a> {
                 object, property, ..
             } if super::streams::web::Kind::of(&self.infer_expr_type(object)).is_some() => {
                 ensure!(
-                    super::streams::web::Kind::of(&self.infer_expr_type(object))
-                        == Some(super::streams::web::Kind::Readable)
-                        && property == "locked",
+                    super::streams::web::Kind::of(&self.infer_expr_type(object)).is_some_and(
+                        |kind| matches!(
+                            kind,
+                            super::streams::web::Kind::Readable
+                                | super::streams::web::Kind::Writable
+                        )
+                    ) && property == "locked",
                     "Unsupported Web Stream property '{property}'"
                 );
                 let stream = self.expression(object)?;
@@ -2065,7 +2058,7 @@ impl<'a> FunctionLowerer<'a> {
             }
             Expr::PropertyGet {
                 object, property, ..
-            } if super::http::is_response(&self.infer_expr_type(object))
+            } if super::http::fetch::is_response(&self.infer_expr_type(object))
                 || super::http::request::is_request(&self.infer_expr_type(object)) =>
             {
                 self.http_property(object, property)
@@ -2294,22 +2287,7 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
 
-    fn cleanup_resources(&mut self) {
-        if let (Some(stream_val), Some(helpers)) =
-            (self.stream_parameter, self.registry.stream_helpers)
-        {
-            self.op(
-                Operator::Call {
-                    function_index: helpers.drop,
-                },
-                &[stream_val],
-                &[],
-            );
-        }
-    }
-
     fn emit_terminal_return(&mut self, ret_val: Option<Value>) {
-        self.cleanup_resources();
         let payload = abi::encode_payload(&mut self.body, self.block, ret_val);
         abi::emit_completion(
             &mut self.body,
@@ -2320,7 +2298,6 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn emit_terminal_throw(&mut self, err_val_f64: Value) {
-        self.cleanup_resources();
         abi::emit_completion(
             &mut self.body,
             self.block,
@@ -2388,18 +2365,11 @@ impl<'a> FunctionLowerer<'a> {
         ) {
             return;
         }
-        let runtime = self.registry.promises.as_ref().unwrap();
+        let await_result = self.registry.promises.as_ref().unwrap().await_result;
         let record = abi::decode_payload(&mut self.body, self.block, payload, true);
         self.reference_values.insert(record);
-        self.op(
-            Operator::Call {
-                function_index: runtime.yield_thread,
-            },
-            &[],
-            &[],
-        );
-        let outcome =
-            abi::emit_fallible_call(&mut self.body, self.block, runtime.await_result, &[record]);
+        self.source_checkpoint();
+        let outcome = abi::emit_fallible_call(&mut self.body, self.block, await_result, &[record]);
         self.block = outcome.err_block;
         self.emit_terminal_throw(outcome.payload);
         self.block = outcome.ok_block;

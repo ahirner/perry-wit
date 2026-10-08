@@ -13,7 +13,7 @@ pub(crate) enum RandomOperation {
 impl RandomOperation {
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::Number => "randomNumber",
+            Self::Number => "Math.random",
             Self::Fill => "crypto.getRandomValues",
             Self::Uuid => "crypto.randomUUID",
         }

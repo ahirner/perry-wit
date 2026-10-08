@@ -7,51 +7,6 @@ use perry_hir::{ir::Expr, types::Type as HirType};
 use waffle::{MemoryArg, Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
-    pub(super) fn http_get(&mut self, name: &str, arguments: &[Expr]) -> Result<Value> {
-        ensure!(
-            arguments.len() == 5,
-            "HTTP get requires scheme, authority, path, headers, and maximum response bytes"
-        );
-        let mut values = Vec::new();
-        for argument in &arguments[..3] {
-            values.push(self.string_receiver(argument)?);
-        }
-        let HirType::Object(headers) = self.infer_expr_type(&arguments[3]) else {
-            bail!("HTTP request headers must be a statically typed string dictionary");
-        };
-        ensure!(
-            headers
-                .properties
-                .values()
-                .all(|field| field.ty == HirType::String && !field.optional)
-                && headers
-                    .index_signature
-                    .as_deref()
-                    .is_none_or(|ty| *ty == HirType::String),
-            "HTTP request header values must be strings"
-        );
-        values.push(self.expression(&arguments[3])?);
-        ensure!(
-            self.infer_expr_type(&arguments[4]) == HirType::Number,
-            "HTTP response limit must be a number"
-        );
-        values.push(self.expression(&arguments[4])?);
-        if let Some(record) = self.start_task(
-            &crate::waffle_backend::promises::TaskTarget::Intrinsic(name.into()),
-            &values,
-            None,
-        )? {
-            return Ok(record);
-        }
-        let payload = self.call_completion(self.registry.http_helpers.unwrap().get, &values);
-        Ok(abi::decode_payload(
-            &mut self.body,
-            self.block,
-            payload,
-            true,
-        ))
-    }
-
     pub(super) fn http_property(&mut self, receiver: &Expr, property: &str) -> Result<Value> {
         if property == "body"
             && (http::request::is_request(&self.infer_expr_type(receiver))
@@ -116,74 +71,7 @@ impl FunctionLowerer<'_> {
             ));
         }
 
-        if http::fetch::is_response(&self.infer_expr_type(receiver)) {
-            return self.fetch_property(receiver, property);
-        }
-        let response = self.expression(receiver)?;
-        let offset = match property {
-            "status" => 0,
-            "headerCount" => 8,
-            "body" => 12,
-            _ => bail!("Unsupported HttpResponse property '{property}'"),
-        };
-        let value = self.op(
-            Operator::I32Load {
-                memory: MemoryArg {
-                    align: 2,
-                    offset,
-                    memory: self.registry.memory,
-                },
-            },
-            &[response],
-            &[Type::I32],
-        );
-        Ok(if property == "body" {
-            value
-        } else {
-            self.op(Operator::F64ConvertI32U, &[value], &[Type::F64])
-        })
-    }
-
-    pub(super) fn http_header(
-        &mut self,
-        receiver: &Expr,
-        method: &str,
-        arguments: &[Expr],
-    ) -> Result<Value> {
-        ensure!(
-            http::is_response(&self.infer_expr_type(receiver)),
-            "Expected an HTTP response"
-        );
-        ensure!(
-            matches!(method, "headerName" | "headerValue"),
-            "Unsupported HttpResponse method '{method}'"
-        );
-        ensure!(
-            arguments.len() == 1 && self.infer_expr_type(&arguments[0]) == HirType::Number,
-            "HttpResponse.{method} requires one numeric index"
-        );
-        let response = self.expression(receiver)?;
-        let index = self.expression(&arguments[0])?;
-        let bytes = self.op(
-            Operator::I32Const {
-                value: u32::from(method == "headerValue"),
-            },
-            &[],
-            &[Type::I32],
-        );
-        let payload = self.call_completion(
-            self.registry
-                .http_helpers
-                .context("HTTP response methods require a GET operation in this module")?
-                .header,
-            &[response, index, bytes],
-        );
-        Ok(abi::decode_payload(
-            &mut self.body,
-            self.block,
-            payload,
-            true,
-        ))
+        self.fetch_property(receiver, property)
     }
 }
 
@@ -439,10 +327,7 @@ impl FunctionLowerer<'_> {
         )? {
             return Ok(record);
         }
-        let payload = self.call_completion(
-            self.registry.http_helpers.unwrap().fetch.unwrap().fetch,
-            &values,
-        );
+        let payload = self.call_completion(self.registry.fetch_helpers.unwrap().fetch, &values);
         Ok(abi::decode_payload(
             &mut self.body,
             self.block,
@@ -459,18 +344,120 @@ impl FunctionLowerer<'_> {
         arguments: &[Expr],
     ) -> Result<Value> {
         use crate::waffle_backend::streams::web::{Kind, Method};
-        ensure!(
-            arguments.is_empty(),
-            "Web Stream {method} takes no arguments in the supported byte-stream surface"
-        );
+        if matches!(kind, Kind::Writable | Kind::Writer) {
+            let helpers = self.registry.web_streams.context("Web output helpers")?;
+            let value = self.expression(receiver)?;
+            match (kind, method) {
+                (Kind::Writable, "getWriter") | (Kind::Writer, "releaseLock") => {
+                    ensure!(arguments.is_empty(), "Web writer method takes no arguments");
+                    let payload = self.call_completion(
+                        if method == "getWriter" {
+                            helpers.reader
+                        } else {
+                            helpers.release
+                        },
+                        &[value],
+                    );
+                    return Ok(abi::decode_payload(
+                        &mut self.body,
+                        self.block,
+                        payload,
+                        method == "getWriter",
+                    ));
+                }
+                (Kind::Writer, "write" | "close") => {
+                    let write = method == "write";
+                    ensure!(
+                        arguments.len() == usize::from(write),
+                        "Web writer method has unsupported arguments"
+                    );
+                    let data = if write {
+                        ensure!(
+                            crate::waffle_backend::bytes::is_byte_view(
+                                &self.infer_expr_type(&arguments[0])
+                            ),
+                            "Web writer.write requires Uint8Array"
+                        );
+                        self.expression(&arguments[0])?
+                    } else {
+                        self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32])
+                    };
+                    return self
+                        .start_task(
+                            &crate::waffle_backend::promises::TaskTarget::WebStream(if write {
+                                Method::Write
+                            } else {
+                                Method::Close
+                            }),
+                            &[value, data],
+                            None,
+                        )?
+                        .context("Web writer requires retained tasks");
+                }
+                _ => bail!("Unsupported Web writer method '{method}'"),
+            }
+        }
         let helpers = self
             .registry
             .web_streams
             .context("Web Stream methods require a native body")?;
         let value = self.expression(receiver)?;
+        if kind == Kind::Readable && method == "getReader" && !arguments.is_empty() {
+            ensure!(
+                arguments.len() == 1,
+                "getReader supports only {{mode: 'byob'}}"
+            );
+            let fields = super::options::literal_properties(self.contract, &arguments[0])?
+                .context("getReader options must be a literal {mode: 'byob'}")?;
+            let fields: Vec<_> = fields.collect();
+            ensure!(
+                fields.len() == 1
+                    && fields[0].0 == "mode"
+                    && matches!(fields[0].1, Expr::String(s) if s == "byob"),
+                "getReader supports only {{mode: 'byob'}}"
+            );
+        } else if kind == Kind::ByobReader && method == "read" {
+            ensure!(
+                (1..=2).contains(&arguments.len()),
+                "BYOB read requires Uint8Array and optional {{min}}"
+            );
+            ensure!(
+                crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(&arguments[0])),
+                "BYOB read requires Uint8Array"
+            );
+            let view = self.expression(&arguments[0])?;
+            let minimum = if arguments.len() == 2 {
+                let fields = super::options::literal_properties(self.contract, &arguments[1])?
+                    .context("BYOB read options must be a literal {min}")?;
+                let fields: Vec<_> = fields.collect();
+                ensure!(
+                    fields.len() == 1 && fields[0].0 == "min",
+                    "BYOB read supports only {{min}}"
+                );
+                ensure!(
+                    self.infer_expr_type(fields[0].1) == perry_hir::types::Type::Number,
+                    "BYOB min must be a number"
+                );
+                self.expression(fields[0].1)?
+            } else {
+                self.expression(&Expr::Number(1.0))?
+            };
+            return self
+                .start_task(
+                    &crate::waffle_backend::promises::TaskTarget::WebStream(Method::ReadInto),
+                    &[value, view, minimum],
+                    None,
+                )?
+                .context("BYOB read requires retained tasks");
+        } else {
+            ensure!(
+                arguments.is_empty(),
+                "Web Stream {method} has unsupported arguments"
+            );
+        }
         let sync = match (kind, method) {
             (Kind::Readable, "getReader") => Some((helpers.reader, true)),
-            (Kind::Reader, "releaseLock") => Some((helpers.release, false)),
+            (Kind::Reader | Kind::ByobReader, "releaseLock") => Some((helpers.release, false)),
             _ => None,
         };
         if let Some((function, reference)) = sync {
@@ -489,7 +476,7 @@ impl FunctionLowerer<'_> {
         };
         let reader = self.op(
             Operator::I32Const {
-                value: u32::from(kind == Kind::Reader),
+                value: u32::from(matches!(kind, Kind::Reader | Kind::ByobReader)),
             },
             &[],
             &[Type::I32],

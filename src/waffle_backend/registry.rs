@@ -100,13 +100,12 @@ pub(crate) struct ModuleRegistry {
     pub(crate) response_constructor: Option<Func>,
     pub(crate) time_helpers: BTreeMap<&'static str, Func>,
     pub(crate) decoder_helpers: Option<super::decoder::DecoderHelpers>,
-    pub(crate) http_helpers: Option<super::http::HttpHelpers>,
+    pub(crate) fetch_helpers: Option<super::http::fetch::Helpers>,
     pub(crate) filesystem_helpers: Option<super::filesystem::FilesystemHelpers>,
     pub(crate) object_helpers: Option<super::objects::ObjectHelpers>,
     pub(crate) structured_helpers: Option<super::structured::StructuredHelpers>,
     pub(crate) functions: BTreeMap<FuncId, FunctionInfo>,
     pub(crate) intrinsics: BTreeMap<String, Func>,
-    pub(crate) stream_helpers: Option<super::streams::StreamHelpers>,
     pub(crate) string_helpers: Option<crate::waffle_backend::strings::StringHelperFuncs>,
     pub(crate) memory: waffle::Memory,
 }
@@ -116,7 +115,6 @@ pub(crate) struct PromiseImports {
     pub(crate) new: Func,
     pub(crate) await_result: Func,
     pub(crate) await_native: Func,
-    pub(crate) yield_thread: Func,
     pub(crate) starts: BTreeMap<TaskTarget, Func>,
 }
 
@@ -183,10 +181,7 @@ impl ModuleRegistry {
             }
             if matches!(
                 intrinsic,
-                TypedIntrinsic::ReadChunk
-                    | TypedIntrinsic::ReadInto
-                    | TypedIntrinsic::ByteAt
-                    | TypedIntrinsic::DecoderNew
+                TypedIntrinsic::DecoderNew
                     | TypedIntrinsic::DateNew
                     | TypedIntrinsic::AbortNew
                     | TypedIntrinsic::HeadersNew
@@ -223,10 +218,9 @@ impl ModuleRegistry {
             .filter(|_| callbacks.is_none())
             .map(|_| super::runtime::subtasks::declare(module));
 
-        let stream_imports = contract
-            .has_stream_input()
-            .then(|| super::streams::declare_imports(module));
-
+        let input_imports = contract
+            .has_web_input()
+            .then(|| super::streams::incoming::Imports::declare(module, callbacks.is_some()));
         let output_operations = contract.output_operations();
         let output_imports = (!output_operations.is_empty()).then(|| {
             super::streams::output::declare_imports(module, &output_operations, callbacks.is_some())
@@ -347,6 +341,10 @@ impl ModuleRegistry {
                 ));
             }
         }
+        let input_controller = transfers.len() as u32 + 1;
+        if let Some(controller) = input_imports.and_then(|i| i.controller()) {
+            transfers.push(controller);
+        }
         let operations = operation_imports
             .map(|imports| {
                 super::runtime::operations::emit(
@@ -390,16 +388,21 @@ impl ModuleRegistry {
             },
         )?);
 
-        let byte_helpers =
-            if super::bytes::required(hir) || contract.has_http() || contract.has_body() {
-                Some(super::bytes::emit_runtime(
-                    module,
-                    memory,
-                    allocator.expect("byte storage requires an allocator"),
-                )?)
-            } else {
-                None
-            };
+        let byte_helpers = if filesystem_imports.is_some()
+            || super::bytes::required(hir)
+            || contract.has_http()
+            || contract.has_body()
+            || contract.has_web_input()
+            || contract.has_writable()
+        {
+            Some(super::bytes::emit_runtime(
+                module,
+                memory,
+                allocator.expect("byte storage requires an allocator"),
+            )?)
+        } else {
+            None
+        };
 
         let text_or_bytes_lift = if hir.functions.iter().any(|function| {
             function
@@ -526,27 +529,7 @@ impl ModuleRegistry {
             None
         };
 
-        let stream_helpers = if let Some(imports) = stream_imports {
-            let helpers = super::streams::emit_runtime(
-                module,
-                memory,
-                allocator.expect("stream buffers require an allocator"),
-                imports,
-            )?;
-            for (name, intrinsic) in &contract.intrinsics {
-                let function = match intrinsic {
-                    TypedIntrinsic::ReadChunk => helpers.read_chunk,
-                    TypedIntrinsic::ReadInto => helpers.read_into,
-                    TypedIntrinsic::ByteAt => helpers.byte_at,
-                    _ => continue,
-                };
-                intrinsics.insert(name.clone(), function);
-            }
-            Some(helpers)
-        } else {
-            None
-        };
-
+        let mut writable_output = None;
         if let Some(mut imports) = output_imports {
             if let Some(owners) = operations {
                 super::runtime::transfers::emit(
@@ -568,6 +551,12 @@ impl ModuleRegistry {
                 imports,
                 &output_operations,
             )?;
+            if contract.has_writable() {
+                writable_output = Some([
+                    helpers.get("writeStdout").copied(),
+                    helpers.get("writeStderr").copied(),
+                ]);
+            }
             for (name, intrinsic) in &contract.intrinsics {
                 if let TypedIntrinsic::Capability(
                     super::capabilities::CapabilityOperation::Stdio(operation),
@@ -630,19 +619,18 @@ impl ModuleRegistry {
                 )
             })
             .transpose()?;
-        let http_helpers = if let Some(mut imports) = http_imports {
+        let fetch_helpers = if let Some(mut imports) = http_imports {
             if let Some(operations) = operations {
                 super::http::operations::emit(module, memory, &mut imports, operations)?;
             }
-            Some(super::http::emit_source_runtime(
+            Some(super::http::fetch::emit(
                 module,
                 memory,
-                super::http::SourceRuntime {
+                &super::http::FetchRuntime {
                     abort: abort_helpers,
                     allocator: allocator.unwrap(),
                     imports: &imports,
                     strings: string_helpers.unwrap(),
-                    bytes: byte_helpers.unwrap(),
                     headers: headers_helpers,
                     request: request_helpers,
                     pool: string_pool,
@@ -653,23 +641,39 @@ impl ModuleRegistry {
         } else {
             None
         };
-        let web_streams = contract
-            .has_body()
-            .then(|| {
-                super::streams::web::emit(
-                    module,
-                    memory,
-                    &super::streams::web::Runtime {
-                        allocator: allocator.unwrap(),
-                        bytes: byte_helpers.unwrap(),
-                        objects: object_helpers.unwrap(),
-                        promises: promises.as_ref(),
-                        pool: string_pool,
-                        native: http_helpers.and_then(|h| h.fetch).and_then(|h| h.stream),
-                    },
-                )
-            })
-            .transpose()?;
+        let web_streams = (contract.has_body()
+            || contract.has_web_input()
+            || contract.has_writable())
+        .then(|| {
+            super::streams::web::emit(
+                module,
+                memory,
+                &super::streams::web::Runtime {
+                    readers: super::streams::web::ReaderModes::for_plan(contract.promises.as_ref()),
+                    allocator: allocator.unwrap(),
+                    bytes: byte_helpers.unwrap(),
+                    objects: object_helpers.unwrap(),
+                    promises: promises.as_ref(),
+                    pool: string_pool,
+                    native: fetch_helpers.and_then(|h| h.stream),
+                    output: writable_output,
+                    input: input_imports.map(|imports| super::streams::incoming::Runtime {
+                        imports,
+                        operations,
+                        controller: input_controller,
+                    }),
+                },
+            )
+        })
+        .transpose()?;
+        for (name, intrinsic) in &contract.intrinsics {
+            if matches!(
+                intrinsic,
+                TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Writable(_))
+            ) {
+                intrinsics.insert(name.clone(), web_streams.unwrap().writable);
+            }
+        }
         let body_helpers = body_decode
             .map(|decode| {
                 super::http::body::emit(
@@ -712,6 +716,7 @@ impl ModuleRegistry {
                 memory,
                 allocator.expect("filesystem storage requires an allocator"),
                 imports,
+                byte_helpers.unwrap().lift_canonical,
                 string_helpers
                     .expect("filesystem paths require strings")
                     .str_compare,
@@ -721,24 +726,13 @@ impl ModuleRegistry {
             None
         };
 
-        if let Some(helpers) = http_helpers {
-            for (name, intrinsic) in &contract.intrinsics {
-                if matches!(
-                    intrinsic,
-                    TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::HttpGet)
-                ) {
-                    intrinsics.insert(name.clone(), helpers.get);
-                }
-            }
-        }
-
-        if let Some(helpers) = http_helpers {
+        if let Some(helpers) = fetch_helpers {
             for (name, intrinsic) in &contract.intrinsics {
                 if matches!(
                     intrinsic,
                     TypedIntrinsic::Capability(super::capabilities::CapabilityOperation::Fetch)
                 ) {
-                    intrinsics.insert(name.clone(), helpers.fetch.unwrap().fetch);
+                    intrinsics.insert(name.clone(), helpers.fetch);
                 }
             }
         }
@@ -926,13 +920,12 @@ impl ModuleRegistry {
             response_constructor,
             body_helpers,
             web_streams,
-            http_helpers,
+            fetch_helpers,
             filesystem_helpers,
             object_helpers,
             structured_helpers,
             functions,
             intrinsics,
-            stream_helpers,
             string_helpers,
             memory,
         };
@@ -965,12 +958,11 @@ pub(crate) fn map_type_to_waffle(ty: &HirType) -> Result<Type> {
         ty if super::values::is_string_type(ty) => Ok(Type::I32),
         HirType::Tuple(_) => Ok(Type::I32),
         HirType::Promise(inner) if super::promises::is_task_outcome(inner) => Ok(Type::I32),
-        HirType::Named(name) if name == "ByteStream" => Ok(Type::I32),
         ty if super::bytes::is_byte_storage(ty) => Ok(Type::I32),
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)
-            || super::http::is_response(ty)
+            || super::http::fetch::is_response(ty)
             || super::http::headers::is_headers(ty)
             || super::http::request::is_request(ty) =>
         {
@@ -1001,7 +993,7 @@ pub(crate) fn map_return_type_to_waffle(ty: &HirType) -> Result<Vec<Type>> {
         ty if super::decoder::is_decoder(ty)
             || super::date::is_date(ty)
             || super::time::is_time(ty)
-            || super::http::is_response(ty)
+            || super::http::fetch::is_response(ty)
             || super::http::headers::is_headers(ty)
             || super::http::request::is_request(ty) =>
         {

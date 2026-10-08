@@ -103,6 +103,7 @@ pub(crate) struct Runtime<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct Helpers {
     pub(crate) new: Func,
+    pub(crate) wrap: Func,
     pub(crate) lookup: Func,
     pub(crate) edit: Func,
     pub(crate) default_type: Func,
@@ -236,6 +237,25 @@ pub(crate) fn emit(
 ) -> Result<Helpers> {
     let edit = emit_edit(module, memory, r)?;
     let lookup = emit_lookup(module, memory, r)?;
+    let wrap = builder::declare(module, "headers.wrap", &[I32; 3], &[I32]);
+    let mut b = Builder::new(module, wrap, memory);
+    let headers = b.allocate(r.allocator.realloc, 16, 4);
+    let zero = b.integer(0);
+    for (offset, value) in [
+        (0, b.param(2)),
+        (4, b.param(0)),
+        (8, b.param(1)),
+        (12, zero),
+    ] {
+        b.store(headers, offset, value, I32);
+    }
+    let four = b.integer(4);
+    let backlink = b.op(O::I32Sub, &[headers, four], I32);
+    let allocation = b.load(backlink, 0, I32);
+    let kind = b.integer(13);
+    b.store(allocation, 16, kind, I32);
+    b.ret(&[headers]);
+    b.finish(module, wrap)?;
     let function = builder::declare(module, "headers.new", &[I32; 2], &[I32, F64]);
     let mut b = Builder::new(module, function, memory);
     let mode = b.param(0);
@@ -246,15 +266,9 @@ pub(crate) fn emit(
     let three = b.integer(3);
     let frame = b.call(r.allocator.frame_new, &[two], &[I32])[0];
     b.store(frame, 12, input, I32);
-    let headers = b.allocate(r.allocator.realloc, 16, 4);
+    let headers = b.call(wrap, &[zero, zero, zero], &[I32])[0];
     b.store(frame, 16, headers, I32);
-    let size = b.integer(16);
-    b.effect(O::MemoryFill { mem: memory }, &[headers, zero, size]);
     let four = b.integer(4);
-    let backlink = b.op(O::I32Sub, &[headers, four], I32);
-    let allocation = b.load(backlink, 0, I32);
-    let kind = b.integer(13);
-    b.store(allocation, 16, kind, I32);
     let finish = b.body.add_block();
     let nonempty = b.body.add_block();
     b.branch(mode, nonempty, finish);
@@ -327,6 +341,7 @@ pub(crate) fn emit(
     b.finish(module, function)?;
     let default_type = emit_default_type(module, memory, lookup, edit)?;
     Ok(Helpers {
+        wrap,
         default_type,
         new: function,
         lookup,

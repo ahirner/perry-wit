@@ -483,7 +483,7 @@ fn unsupported_builtin_forms_have_explicit_diagnostics() {
 #[tokio::test(flavor = "current_thread")]
 async fn mixed_clock_random_tasks_retain_values_across_suspension_and_disposal() -> Result<()> {
     let source = r#"
-    import {waitFor} from 'perry:clocks';
+    import {setTimeout as waitFor} from 'node:timers/promises';
     async function produce(bytes:Uint8Array):Promise<string> {
         crypto.getRandomValues(bytes);
         const id=crypto.randomUUID();
@@ -529,7 +529,7 @@ async fn mixed_clock_random_tasks_retain_values_across_suspension_and_disposal()
                 let finish = finish.clone();
                 let dropped = dropped.clone();
                 Box::pin(async move {
-                    assert_eq!(duration, 3_250_000);
+                    assert_eq!(duration, 3_000_000);
                     let _owner = WaitOwner(dropped);
                     entered.notify_one();
                     finish.notified().await;

@@ -76,10 +76,10 @@ fn error_code(b: &mut Builder, scratch: Value) -> Value {
     b.op(O::Select, &[code, zero, failed], I32)
 }
 
-pub(super) fn emit(
+pub(crate) fn emit(
     module: &mut Module<'static>,
     memory: Memory,
-    runtime: &super::SourceRuntime<'_>,
+    runtime: &super::FetchRuntime<'_>,
 ) -> Result<Helpers> {
     let allocator = runtime.allocator;
     let strings = runtime.strings;
@@ -349,12 +349,9 @@ fn emit_fetch(
     let out = offset(&mut b, response, 4);
     b.call(t.native["copy-fields"], &[headers, out], &[]);
     b.call(t.native["drop-fields"], &[headers], &[]);
-    let copy = b.integer(3);
-    let fields = b.call(t.headers.new, &[copy, response], &[I32, F64]);
-    let valid = b.op(O::I32Eqz, &[fields[0]], I32);
-    b.require(valid);
-    let fields = b.op(O::I32TruncF64U, &[fields[1]], I32);
-    b.store(fields, 0, one, I32);
+    let data = b.load(response, 4, I32);
+    let count = b.load(response, 8, I32);
+    let fields = b.call(t.headers.wrap, &[data, count, one], &[I32])[0];
     b.store(response, super::response::HEADERS, fields, I32);
     let ack = b.call(t.native["new-completion"], &[], &[I64])[0];
     let reader = low(&mut b, ack);

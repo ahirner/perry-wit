@@ -27,6 +27,86 @@ fn make_engine() -> Result<Engine> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn settled_awaits_without_competing_work_do_not_repoll_the_host() -> Result<()> {
+    use std::future::{Future, poll_fn};
+    let compiled = compile_typescript_waffle(
+        r#"
+        async function value(): Promise<number> { return 1; }
+        export async function run(count: number): Promise<number> {
+            const ready = value();
+            let sum = 0;
+            for (let i = 0; i < count; i++) sum += await ready;
+            return sum;
+        }
+        "#,
+        "settled-awaits.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for count in [1.0, 1000.0, 1.0] {
+        let mut polls = 0;
+        let result = {
+            let mut pending = std::pin::pin!(run.call_async(&mut store, (count,)));
+            poll_fn(|context| {
+                polls += 1;
+                pending.as_mut().poll(context)
+            })
+            .await?
+        };
+        assert_eq!(result.0, count);
+        assert!(polls <= 4, "{polls} host polls for {count} settled awaits");
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn captured_arguments_preserve_distinct_calls_and_instance_reuse() -> Result<()> {
+    let source = r#"
+        async function choose(flag:boolean):Promise<number> {
+            await 0;
+            return flag ? 11 : 22;
+        }
+        async function constant(flag:boolean):Promise<number> {
+            await 0;
+            return flag ? 1000 : 100;
+        }
+        export async function run(input:number):Promise<number> {
+            const first = choose(false);
+            const second = choose(input === 1);
+            const third = constant(false);
+            return (await first) + (await second) + (await third);
+        }
+    "#;
+    let compiled = compile_typescript_waffle(
+        source,
+        "captured_arguments.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let engine = make_engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for input in [1.0, 0.0, 1.0, -1.0] {
+        assert_eq!(
+            run.call_async(&mut store, (input,)).await?.0,
+            if input == 1.0 { 133.0 } else { 144.0 }
+        );
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn core_export_results_survive_ready_task_collection() -> Result<()> {
     for (result_type, expression, expected) in [
         (
@@ -196,8 +276,8 @@ async fn long_invocations_reclaim_dead_promises_and_retain_shared_outcomes() -> 
 #[tokio::test(flavor = "current_thread")]
 async fn collection_retains_suspended_tasks_observers_and_finally_returns() -> Result<()> {
     let source = r#"
-        import { waitFor } from "perry:clocks";
-        import { randomNumber } from "perry:random";
+        import { setTimeout as waitFor } from "node:timers/promises";
+
         function churn(s: string): void {
             for (let i = 0; i < 2000; i++) {
                 const temporary = s.toLowerCase().split(".").join("-");
@@ -211,14 +291,14 @@ async fn collection_retains_suspended_tasks_observers_and_finally_returns() -> R
         }
         async function observe(shared: Promise<string>, s: string): Promise<string> {
             try { return (await shared).slice(0); }
-            finally { churn(s); randomNumber(); }
+            finally { churn(s); Math.random(); }
         }
         export async function run(s: string, fail: boolean): Promise<Result<string, number>> {
             const shared = produce(s, fail);
             const first = observe(shared, s);
             const second = observe(shared, s);
             churn(s);
-            randomNumber();
+            Math.random();
             let error = 0;
             let result = "";
             try { result = await first; } catch (e) { error = e as number; }
@@ -280,8 +360,8 @@ async fn collection_retains_suspended_tasks_observers_and_finally_returns() -> R
 #[tokio::test(flavor = "current_thread")]
 async fn invocation_disposal_releases_parked_observers_and_ready_races() -> Result<()> {
     let source = r#"
-        import { waitFor } from "perry:clocks";
-        import { randomNumber } from "perry:random";
+        import { setTimeout as waitFor } from "node:timers/promises";
+
         async function produce(s: string, fail: boolean): Promise<string> {
             let retained = s.toUpperCase();
             await waitFor(1);
@@ -289,7 +369,7 @@ async fn invocation_disposal_releases_parked_observers_and_ready_races() -> Resu
             return retained;
         }
         async function observe(shared: Promise<string>): Promise<string> {
-            try { return await shared; } finally { randomNumber(); }
+            try { return await shared; } finally { Math.random(); }
         }
         export async function run(s: string, fail: boolean): Promise<Result<string, number>> {
             const shared = produce(s, fail);
@@ -373,7 +453,7 @@ async fn abandoned_pending_work_never_becomes_a_successful_result() -> Result<()
     let engine = make_engine()?;
     for exit in ["return 1;", "throw 8;"] {
         let source = format!(
-            r#"import {{ waitFor }} from "perry:clocks";
+            r#"import {{ setTimeout as waitFor }} from "node:timers/promises";
             export async function run(): Promise<Result<number, number>> {{ const pending = waitFor(1); {exit} }}"#
         );
         let compiled =
@@ -399,8 +479,8 @@ async fn abandoned_pending_work_never_becomes_a_successful_result() -> Result<()
 #[tokio::test(flavor = "current_thread")]
 async fn one_observers_failure_does_not_cancel_the_shared_operation() -> Result<()> {
     let source = r#"
-        import { waitFor } from "perry:clocks";
-        import { randomNumber } from "perry:random";
+        import { setTimeout as waitFor } from "node:timers/promises";
+
         async function produce(): Promise<string> { await waitFor(1); return "A🦀"; }
         async function observe(shared: Promise<string>, fail: boolean): Promise<string> {
             if (fail) throw 3;
@@ -412,7 +492,7 @@ async fn one_observers_failure_does_not_cancel_the_shared_operation() -> Result<
             const second = observe(shared, false);
             let error = 0;
             try { await first; } catch (e) { error = e as number; }
-            randomNumber();
+            Math.random();
             const value = await second;
             return error + value.length;
         }
@@ -452,7 +532,7 @@ async fn one_observers_failure_does_not_cancel_the_shared_operation() -> Result<
 
 #[tokio::test(flavor = "current_thread")]
 async fn component_encoder_serializes_overlapping_entry_calls() -> Result<()> {
-    let source = r#"import { waitFor } from "perry:clocks";
+    let source = r#"import { setTimeout as waitFor } from "node:timers/promises";
         export async function run(): Promise<number> { const pending = waitFor(1); await pending; return 1; }"#;
     let compiled =
         compile_typescript_waffle(source, "overlapping.ts", &WaffleCompileOptions::default())?;
@@ -630,7 +710,7 @@ fn unsupported_promise_uses_have_source_diagnostics() {
 #[tokio::test(flavor = "current_thread")]
 async fn concurrent_observers_receive_one_shared_outcome() -> Result<()> {
     let source = r#"
-        import { waitFor } from "perry:clocks";
+        import { setTimeout as waitFor } from "node:timers/promises";
         declare function hostDouble(value: number): Promise<number>;
         async function produce(mode: number): Promise<number> {
             if (mode === 0) await waitFor(1);
@@ -721,12 +801,14 @@ async fn concurrent_observers_receive_one_shared_outcome() -> Result<()> {
     }
     let scratch = tempfile::tempdir()?;
     let node_path = scratch.path().join("observers.mts");
-    let node_source = source.replace("import { waitFor } from \"perry:clocks\";", "const waitFor = (ms: number): Promise<void> => { trace.push(`wait:${ms * 1000000}`); return new Promise(resolve => setTimeout(resolve, 1)); };")
-        .replace("declare function hostDouble(value: number): Promise<number>;", "const hostDouble = async (value: number) => { trace.push(`observe:${value}`); return value * 2; };");
+    let node_source = format!(
+        "{}\n(globalThis as any).hostDouble=async (value:number)=>{{trace.push(`observe:${{value}}`);return value*2;}};\n{source}",
+        include_str!("support/node-task-observer.mjs")
+    );
     std::fs::write(
         &node_path,
         format!(
-            "const trace: string[] = [];\n{node_source}\nconst observed = []; for (const mode of [0,1,2,3,4]) {{ trace.length = 0; observed.push([await run(mode), [...trace]]); }} console.log(JSON.stringify(observed));"
+            "{node_source}\nconst observed = []; for (const mode of [0,1,2,3,4]) {{ trace.length = 0; observed.push([await run(mode), [...trace]]); }} console.log(JSON.stringify(observed));"
         ),
     )?;
     let node = std::process::Command::new("node").arg(node_path).output()?;
@@ -759,7 +841,7 @@ async fn concurrent_observers_receive_one_shared_outcome() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn sibling_and_dependent_observers_each_run_once() -> Result<()> {
     let source = r#"
-        import { waitFor } from "perry:clocks";
+        import { setTimeout as waitFor } from "node:timers/promises";
         interface Trace { text:string }
         async function produce(): Promise<number> { await waitFor(1); return 42; }
         async function observe(shared: Promise<number>, name: string, trace:Trace): Promise<number> {
@@ -809,7 +891,7 @@ async fn sibling_and_dependent_observers_each_run_once() -> Result<()> {
         store.assert_concurrent_state_empty();
         let scratch = tempfile::tempdir()?;
         let path = scratch.path().join("dependencies.mts");
-        let node_source = source.replace("import { waitFor } from \"perry:clocks\";", "const waitFor = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));");
+        let node_source = &source;
         std::fs::write(&path, format!("{node_source}\nconsole.log(await run());"))?;
         let node = std::process::Command::new("node").arg(path).output()?;
         assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
@@ -855,7 +937,7 @@ async fn stored_text_results_survive_repeated_observation_and_export_cleanup() -
     ] {
         let source = format!(
             r#"
-            import {{ waitFor }} from "perry:clocks";
+            import {{ setTimeout as waitFor }} from "node:timers/promises";
             async function work(s: string): Promise<string> {{
                 let retained = s.toUpperCase();
                 await waitFor(0.001);
@@ -951,12 +1033,12 @@ async fn repeated_awaits_do_not_allocate_additional_records() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn source_stored_promise_retains_identity_success_and_rejection() -> Result<()> {
     let source = r#"
-        import { waitFor } from "perry:clocks";
-        import { randomNumber } from "perry:random";
+        import { setTimeout as waitFor } from "node:timers/promises";
+
         async function work(value: number): Promise<number> {
-            randomNumber();
+            Math.random();
             await waitFor(1);
-            randomNumber();
+            Math.random();
             if (value < 0) throw 7;
             return value * 2;
         }
@@ -964,7 +1046,7 @@ async fn source_stored_promise_retains_identity_success_and_rejection() -> Resul
             const pending = work(value);
             const alias = pending;
             if (pending !== alias) return -1;
-            randomNumber();
+            Math.random();
             let total = 0;
             try { total = await pending; } catch (error) { total = error as number; }
             try { total = total + await alias; } catch (error) { total = total + (error as number); }
@@ -1027,11 +1109,11 @@ async fn source_stored_promise_retains_identity_success_and_rejection() -> Resul
     let source_path = scratch.path().join("stored.ts");
     std::fs::write(&source_path, source)?;
     let checked = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(scratch.path())
         .args([
             "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
         ])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .arg(&source_path)
         .output()?;
     assert!(
@@ -1039,18 +1121,15 @@ async fn source_stored_promise_retains_identity_success_and_rejection() -> Resul
         "{}",
         String::from_utf8_lossy(&checked.stdout)
     );
-    let node_source = source.replace(
-        "import { waitFor } from \"perry:clocks\";",
-        "const waitFor = (ms: number): Promise<void> => { trace.push(`wait:${ms * 1000000}`); return new Promise(resolve => setTimeout(resolve, 1)); };"
-    ).replace(
-        "import { randomNumber } from \"perry:random\";",
-        "const randomNumber = () => { trace.push('random'); return 0; };"
+    let node_source = format!(
+        "{}\n{source}",
+        include_str!("support/node-task-observer.mjs")
     );
     let node_path = scratch.path().join("stored.mts");
     std::fs::write(
         &node_path,
         format!(
-            "const trace: string[] = [];\n{node_source}\nconst observed = []; for (const input of [21, -1, 4]) {{ trace.length = 0; observed.push([await run(input), [...trace]]); }} console.log(JSON.stringify(observed));"
+            "{node_source}\nconst observed = []; for (const input of [21, -1, 4]) {{ trace.length = 0; observed.push([await run(input), [...trace]]); }} console.log(JSON.stringify(observed));"
         ),
     )?;
     let node = std::process::Command::new("node").arg(node_path).output()?;

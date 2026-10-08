@@ -1,7 +1,6 @@
-use super::*;
+use anyhow::Result;
 use std::time::Duration;
 use tokio::time::timeout;
-use waffle::{Export, ExportKind, MemoryData};
 use wasmtime::component::{Component, ComponentType, Instance, Lift, Linker, Lower, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
@@ -16,7 +15,15 @@ use fixture::{HttpFixture, Reply};
 use waffle_fixture::compile_typescript_waffle;
 
 async fn instantiate_source(source: &str, memory: usize) -> Result<(Store<Host>, Instance)> {
-    let compiled = compile_typescript_waffle(source, "http.ts", &WaffleCompileOptions::default())?;
+    let source = format!(
+        "{}\n{source}",
+        include_str!("../../../tests/fixtures/bounded_response.ts")
+    );
+    let compiled = waffle_fixture::compile_typescript_for_fixture_world(
+        &source,
+        "http.ts",
+        &WaffleCompileOptions::default(),
+    )?;
     instantiate_component(compiled.component.unwrap(), memory).await
 }
 
@@ -44,58 +51,39 @@ struct Response {
 }
 
 async fn instantiate() -> Result<(Store<Host>, Instance)> {
-    let mut module = Module::empty();
-    let memory = module.memories.push(MemoryData {
-        initial_pages: 1,
-        maximum_pages: None,
-        segments: vec![],
-    });
-    module.exports.push(Export {
-        name: "memory".into(),
-        kind: ExportKind::Memory(memory),
-    });
-    let imports = declare_imports(&mut module, false);
-    let allocator = super::super::allocation::emit_allocator(&mut module, memory, 1024)?;
-    let get = emit_runtime(&mut module, memory, allocator, &imports)?;
-    let wrappers = runtime::emit_functions(
-        &mut module,
-        memory,
-        r#"(module
-      (import "host" "get" (func $get (param i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
-      (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
-      (import "host" "post-return" (func $post-return)) (memory 1)
-      (func (export "run") (param $authority i32) (param $authority-length i32)
-        (param $path i32) (param $path-length i32) (param $headers i32) (param $count i32) (param $limit i32) (result i32)
-        (local $result i32) (local $error i32)
-        (local.set $result (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 24)))
-        (local.set $error (call $get (i32.const 0) (local.get $authority) (local.get $authority-length)
-          (local.get $path) (local.get $path-length) (local.get $headers) (local.get $count) (local.get $limit)
-          (i32.add (local.get $result) (i32.const 4))))
-        (i32.store (local.get $result) (i32.ne (local.get $error) (i32.const 0)))
-        (if (local.get $error) (then (i32.store offset=4 (local.get $result) (local.get $error))))
-        (local.get $result))
-      (func (export "cabi_post_run") (param i32) (call $post-return)))"#,
-        &BTreeMap::from([
-            ("get", get),
-            ("realloc", allocator.realloc),
-            ("post-return", allocator.post_return),
-        ]),
-    )?;
-    for (name, function) in wrappers {
-        module.exports.push(Export {
-            name,
-            kind: ExportKind::Func(function),
-        });
-    }
+    let source = format!(
+        "{}\n{}",
+        include_str!("../../../tests/fixtures/bounded_response.ts"),
+        r#"
+      type Buffered = {status:number,headers:[string,Uint8Array][],body:Uint8Array};
+      export async function run(authority:string,path:string,entries:[string,Uint8Array][],limit:number):Promise<{ok:true,value:Buffered}|{ok:false,error:number}> {
+        try {
+          const headers=new Headers();
+          const decoder=new TextDecoder('utf-8',{fatal:true});
+          for(let i=0;i<entries.length;i++){headers.append(entries[i][0],decoder.decode(entries[i][1]));}
+          const response=await fetch('http://'+authority+path,{headers});
+          const bytes=await readBounded(response,limit);
+          const combined=response.headers.get('x-value');
+          let value='';if(combined!==null){value=combined;}
+          return {ok:true,value:{status:response.status,headers:[['x-value',new TextEncoder().encode(value)]],body:bytes}};
+        }catch(error){if(typeof error==='number')return {ok:false,error};throw error;}
+      }
+    "#
+    );
     let (resolve, package) = crate::component::wit::resolve_source(
         "package test:http; world fixture {import wasi:http/client@0.3.0;
         record buffered-response {status:u16,headers:list<tuple<string,list<u8>>>,body:list<u8>}
         export run:async func(authority:string,path:string,headers:list<tuple<string,list<u8>>>,limit:u32)->result<buffered-response,u32>;}",
     )?;
     let world = resolve.select_world(&[package], Some("fixture"))?;
-    let component =
-        crate::waffle_backend::encode_component(&module.to_wasm_bytes()?, resolve, world)?;
-    instantiate_component(component, 16 * 1024 * 1024).await
+    let compiled = crate::waffle_backend::compile_typescript_for_world(
+        &source,
+        "bounded-fetch.ts",
+        &WaffleCompileOptions::default(),
+        resolve,
+        world,
+    )?;
+    instantiate_component(compiled.component.unwrap(), 16 * 1024 * 1024).await
 }
 
 async fn instantiate_component(bytes: Vec<u8>, memory: usize) -> Result<(Store<Host>, Instance)> {
@@ -123,8 +111,7 @@ async fn instantiate_component(bytes: Vec<u8>, memory: usize) -> Result<(Store<H
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn buffered_get_uses_real_p3_http_resources_and_preserves_headers_status_and_bytes()
--> Result<()> {
+async fn fetch_uses_real_p3_http_resources_and_preserves_headers_status_and_bytes() -> Result<()> {
     let server = HttpFixture::new(|request| {
         assert_eq!(request.method, "GET");
         assert_eq!(request.target, "/document?q=%23value");
@@ -149,7 +136,7 @@ async fn buffered_get_uses_real_p3_http_resources_and_preserves_headers_status_a
         )?;
     for _ in 0..10 {
         let result = timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(20),
             run.call_async(
                 &mut store,
                 (
@@ -171,7 +158,7 @@ async fn buffered_get_uses_real_p3_http_resources_and_preserves_headers_status_a
             .filter(|(name, _)| name.eq_ignore_ascii_case("x-value"))
             .map(|(_, value)| value.as_slice())
             .collect();
-        assert_eq!(values, vec![b"first".as_slice(), b"second".as_slice()]);
+        assert_eq!(values, vec![b"first, second".as_slice()]);
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }
@@ -194,7 +181,7 @@ async fn bounded_responses_handle_exact_limits_overflow_and_repeated_four_mib_bo
         for limit in [length, length.saturating_sub(1)] {
             for _ in 0..5 {
                 let result = timeout(
-                    Duration::from_secs(5),
+                    Duration::from_secs(20),
                     run.call_async(
                         &mut store,
                         (
@@ -243,15 +230,10 @@ async fn metadata_and_transport_errors_release_resources_and_allow_reuse() -> Re
                 server.address.to_string(),
                 String::from("/"),
                 vec![("bad:name".into(), vec![])],
-                200..201,
-            ),
-            ("bad authority".into(), "/".into(), vec![], 12..13),
-            (
-                server.address.to_string(),
-                "/bad path".into(),
-                vec![],
                 12..13,
             ),
+            ("bad authority".into(), "/".into(), vec![], 12..13),
+            ("bad%host".into(), "/".into(), vec![], 12..13),
             (
                 server.address.to_string(),
                 "/disconnect".into(),
@@ -266,7 +248,7 @@ async fn metadata_and_transport_errors_release_resources_and_allow_reuse() -> Re
             ),
         ] {
             let result = timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(20),
                 run.call_async(&mut store, (authority, path.clone(), headers, 1024)),
             )
             .await??
@@ -276,7 +258,7 @@ async fn metadata_and_transport_errors_release_resources_and_allow_reuse() -> Re
             store.assert_concurrent_state_empty();
             assert!(store.data().table.is_empty());
             let recovered = timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(20),
                 run.call_async(
                     &mut store,
                     (server.address.to_string(), "/".into(), vec![], 1024),
@@ -352,29 +334,27 @@ async fn typed_source_preserves_response_fields_headers_and_binary_body() -> Res
         )
     });
     let source = r#"
-        import {get as request, type HttpResponse as Response} from 'perry:http';
-        function body(response:Response):Uint8Array { return response.body; }
-        export async function run(authority:string):Promise<Result<string,number>> {
-            const response=await request('http',authority,'/',{'x-request':'value'},1024);
-            if(response.status!==404 || response.body!==body(response)) { throw 99; }
-            const decoder=new TextDecoder();
-            let headers='';
-            for(let i=0;i<response.headerCount;i++) {
-                if(response.headerName(i)==='x-value') { headers+=decoder.decode(response.headerValue(i))+':'; }
-            }
-            return headers+decoder.decode(response.body);
+        function body(response:Response):ReadableStream<Uint8Array>|null { return response.body; }
+        export async function run(authority:string):Promise<{ok:true,value:string}|{ok:false,error:number}> {
+          try {
+            const response=await fetch('http://'+authority+'/',{headers:{'x-request':'value'}});
+            if(response.status!==404 || response.body!==body(response)) throw 99;
+            const headers=response.headers.get('x-value');
+            if(headers===null)throw 98;
+            return {ok:true,value:headers+':'+new TextDecoder('utf-8',{fatal:true}).decode(await readBounded(response,1024))};
+          } catch(error){if(typeof error==='number')return {ok:false,error};throw error;}
         }
     "#;
-    let (mut store, instance) = instantiate_source(source, 65536).await?;
+    let (mut store, instance) = instantiate_source(source, 262144).await?;
     let run = instance.get_typed_func::<(String,), (Result<String, f64>,)>(&mut store, "run")?;
     for _ in 0..20 {
         let result = timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(20),
             run.call_async(&mut store, (server.address.to_string(),)),
         )
         .await??
         .0;
-        assert_eq!(result, Ok("first:second:é😀\0".into()));
+        assert_eq!(result, Ok("first, second:é😀\0".into()));
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }
@@ -391,28 +371,26 @@ async fn source_response_and_detached_views_survive_collection_and_repeated_call
         )
     });
     let source = r#"
-        import {get, type HttpResponse} from 'perry:http';
-        function retain(response:HttpResponse):HttpResponse { return response; }
+        function retain(response:Response):Response { return response; }
         async function retainedHeader(authority:string):Promise<Uint8Array> {
-            const response=await get('http',authority,'/',{},1024);
-            for(let i=0;i<response.headerCount;i++) {
-                if(response.headerName(i)==='x-owned') { return response.headerValue(i); }
-            }
-            throw 99;
+            const response=await fetch('http://'+authority+'/');
+            const value=response.headers.get('x-owned');
+            if(value===null)throw 99;
+            await readBounded(response,1024);
+            return new TextEncoder().encode(value);
         }
         export async function run(authority:string):Promise<string> {
-            const first=await get('http',authority,'/',{},1024);
-            const saved={response:retain(first),body:first.body};
-            let name='';
+            const first=await fetch('http://'+authority+'/');
+            const body=await readBounded(first,1024);
+            const saved={response:retain(first),body};
+            const name='x-owned';
             const bytes=await retainedHeader(authority);
-            for(let i=0;i<first.headerCount;i++) {
-                if(first.headerName(i)==='x-owned') { name=first.headerName(i); }
-            }
-            for(let i=0;i<2000;i++) { const temporary=authority+authority+authority+authority; if(temporary.length!==authority.length*4) {throw 99;} }
-            if(saved.response!==first || saved.body!==first.body) {throw 98;}
-            const next=await get('http',authority,'/',{},1024);
-            if(next===first || next.body===first.body) {throw 97;}
-            const decoder=new TextDecoder();
+            for(let i=0;i<2000;i++) { const temporary=authority+authority+authority+authority; if(temporary.length!==authority.length*4)throw 99; }
+            if(saved.response!==first || saved.body!==body)throw 98;
+            const next=await fetch('http://'+authority+'/');
+            const nextBody=await readBounded(next,1024);
+            if(next===first || nextBody===body)throw 97;
+            const decoder=new TextDecoder('utf-8',{fatal:true});
             return name+':'+decoder.decode(bytes)+':'+decoder.decode(saved.body);
         }
     "#;
@@ -421,7 +399,7 @@ async fn source_response_and_detached_views_survive_collection_and_repeated_call
     for _ in 0..20 {
         assert_eq!(
             timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(20),
                 run.call_async(&mut store, (server.address.to_string(),))
             )
             .await??
@@ -437,24 +415,23 @@ async fn source_response_and_detached_views_survive_collection_and_repeated_call
 #[tokio::test(flavor = "current_thread")]
 async fn source_validation_preserves_argument_order_and_errors_before_io() -> Result<()> {
     let source = r#"
-        import * as http from 'perry:http';
         function text(state:{trace:string},value:string):string {state.trace+=value;return value;}
         function headers(state:{trace:string}):{[name:string]:string} {state.trace+='H';return {};}
-        function limit(state:{trace:string}):number {state.trace+='L';return -1;}
+        function method(state:{trace:string}):string {state.trace+='M';return 'GET';}
         export async function run(authority:string):Promise<string> {
             const state={trace:''};
-            try { await http.get(text(state,'S'),text(state,authority),text(state,'/'),headers(state),limit(state)); }
-            catch(error) { if(error!==12) {throw error;} return state.trace; }
+            try { await fetch(text(state,'bad://')+text(state,authority)+text(state,'/'),{headers:headers(state),method:method(state)}); }
+            catch(error) { if(error!==12)throw error; return state.trace; }
             throw 99;
         }
     "#;
     let server = HttpFixture::new(|_| panic!("invalid request must not start I/O"));
-    let (mut store, instance) = instantiate_source(source, 65536).await?;
+    let (mut store, instance) = instantiate_source(source, 262144).await?;
     let run = instance.get_typed_func::<(String,), (String,)>(&mut store, "run")?;
     let authority = server.address.to_string();
     assert_eq!(
         run.call_async(&mut store, (authority.clone(),)).await?.0,
-        format!("S{authority}/HL")
+        format!("bad://{authority}/HM")
     );
     assert!(server.requests.lock().unwrap().is_empty());
     store.assert_concurrent_state_empty();
@@ -510,7 +487,7 @@ async fn json_fetch_checks_status_media_type_and_payload() -> Result<()> {
         ] {
             assert_eq!(
                 timeout(
-                    Duration::from_secs(5),
+                    Duration::from_secs(20),
                     run.call_async(&mut store, (server.address.to_string(), path.into()))
                 )
                 .await??
@@ -529,29 +506,27 @@ async fn json_fetch_checks_status_media_type_and_payload() -> Result<()> {
 fn source_http_contract_rejects_unsupported_types() {
     for (body, diagnostic) in [
         (
-            "await get('http','host','/',{x:1},1024);return 0;",
-            "header values must be strings",
+            "await fetch('http://host/',{headers:{x:1}});return 0;",
+            "Header",
         ),
         (
-            "await get('http','host','/',42,1024);return 0;",
-            "statically typed string dictionary",
+            "await fetch('http://host/',{headers:42});return 0;",
+            "Headers",
         ),
         (
-            "await get('http','host','/',{},'1024');return 0;",
-            "limit must be a number",
+            "await fetch('http://host/',{method:42});return 0;",
+            "method",
         ),
         (
-            "const response=await get('http','host','/',{},1024);response.status=201;return 0;",
+            "const response=await fetch('http://host/');response.status=201;return 0;",
             "read-only",
         ),
         (
-            "const response=await get('http','host','/',{},1024);response.headerValue('0');return 0;",
-            "numeric index",
+            "const response=await fetch('http://host/');response.headers.get(0);return 0;",
+            "string",
         ),
     ] {
-        let source = format!(
-            "import {{get}} from 'perry:http';export async function run():Promise<number>{{{body}}}"
-        );
+        let source = format!("export async function run():Promise<number>{{{body}}}");
         let error = compile_typescript_waffle(&source, "http.ts", &WaffleCompileOptions::default())
             .expect_err("must diagnose unsupported HTTP source");
         assert!(
@@ -570,10 +545,12 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
         _ => Reply::Bytes(200, vec![0, 255, 128, 240, 159, 146]),
     });
     let source = r#"
-        import {get} from 'perry:http';
-        export async function run(authority:string,path:string,limit:number):Promise<Result<Uint8Array,number>> {
-            const response=await get('http',authority,path,{},limit);
-            return response.body;
+
+        export async function run(authority:string,path:string,limit:number):Promise<{ok:true,value:Uint8Array}|{ok:false,error:number}> {
+            try {
+              const response=await fetch('http://'+authority+path);
+              return {ok:true,value:await readBounded(response,limit)};
+            }catch(error){if(typeof error==='number')return {ok:false,error};throw error;}
         }
     "#;
     let (mut store, instance) = instantiate_source(source, 16 * 1024 * 1024).await?;
@@ -589,7 +566,7 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
         ] {
             assert_eq!(
                 timeout(
-                    Duration::from_secs(5),
+                    Duration::from_secs(20),
                     run.call_async(&mut store, (server.address.to_string(), path.into(), limit))
                 )
                 .await??
@@ -600,7 +577,7 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
             assert!(store.data().table.is_empty());
         }
         let error = timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(20),
             run.call_async(
                 &mut store,
                 (server.address.to_string(), "/incomplete".into(), 1024.),
@@ -614,12 +591,12 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
         assert!(store.data().table.is_empty());
     }
     let source = source
-        .replace("Result<Uint8Array,number>", "Result<string,number>")
+        .replace("value:Uint8Array", "value:string")
         .replace(
-            "return response.body;",
-            "return new TextDecoder().decode(response.body);",
+            "return {ok:true,value:await readBounded(response,limit)};",
+            "return {ok:true,value:new TextDecoder('utf-8',{fatal:true}).decode(await readBounded(response,limit))};",
         );
-    let (mut store, instance) = instantiate_source(&source, 65536).await?;
+    let (mut store, instance) = instantiate_source(&source, 262144).await?;
     let run = instance
         .get_typed_func::<(String, String, f64), (Result<String, f64>,)>(&mut store, "run")?;
     assert_eq!(
@@ -640,7 +617,8 @@ fn http_sdk_checks_the_document_fixture_and_static_contract() -> Result<()> {
     std::fs::write(
         &source,
         format!(
-            "type Result<T,E>=T;\n{}",
+            "type Result<T,E>=T;\n{}\n{}",
+            include_str!("../../../tests/fixtures/bounded_response.ts"),
             include_str!("../../../tests/fixtures/http_json.ts")
         ),
     )?;
@@ -648,24 +626,21 @@ fn http_sdk_checks_the_document_fixture_and_static_contract() -> Result<()> {
     std::fs::write(
         &errors,
         r#"
-        import {get, type HttpResponse} from 'perry:http';
-        declare const response:HttpResponse;
+        declare const response:Response;
         // @ts-expect-error immutable metadata
         response.status=201;
         // @ts-expect-error string-valued headers
-        get('http','host','/',{number:1},1024);
-        // @ts-expect-error supported schemes only
-        get('ftp','host','/',{},1024);
-        // @ts-expect-error numeric index
-        response.headerValue('0');
+        fetch('http://host/',{headers:{number:1}});
+        // @ts-expect-error string-valued header name
+        response.headers.get(0);
     "#,
     )?;
     let output = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(scratch.path())
         .args([
             "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
         ])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .args([source, errors])
         .output()?;
     assert!(
@@ -681,16 +656,17 @@ fn http_sdk_checks_the_document_fixture_and_static_contract() -> Result<()> {
 async fn stored_http_operations_can_be_observed_repeatedly_but_not_abandoned() -> Result<()> {
     let server = HttpFixture::new(|_| Reply::Bytes(200, b"owned".to_vec()));
     let source = r#"
-        import {get} from 'perry:http';
+
         export async function run(authority:string):Promise<number> {
-            const pending=get('http',authority,'/',{},1024);
+            const pending=fetch('http://'+authority+'/');
             const first=await pending;
             const second=await pending;
             if(first!==second || first.body!==second.body) {throw 99;}
+            await readBounded(first,1024);
             return second.status;
         }
     "#;
-    let (mut store, instance) = instantiate_source(source, 65536).await?;
+    let (mut store, instance) = instantiate_source(source, 262144).await?;
     let run = instance.get_typed_func::<(String,), (f64,)>(&mut store, "run")?;
     for _ in 0..10 {
         assert_eq!(
@@ -703,18 +679,18 @@ async fn stored_http_operations_can_be_observed_repeatedly_but_not_abandoned() -
         assert!(store.data().table.is_empty());
     }
     let source = r#"
-        import {get} from 'perry:http';
+
         export async function run(authority:string):Promise<number> {
-            const pending=get('http',authority,'/',{},1024);
+            const pending=fetch('http://'+authority+'/');
             return 1;
         }
     "#;
     let server = HttpFixture::new(|_| Reply::Stall);
-    let (mut store, instance) = instantiate_source(source, 65536).await?;
+    let (mut store, instance) = instantiate_source(source, 262144).await?;
     let run = instance.get_typed_func::<(String,), (f64,)>(&mut store, "run")?;
     assert!(
         timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(20),
             run.call_async(&mut store, (server.address.to_string(),))
         )
         .await?

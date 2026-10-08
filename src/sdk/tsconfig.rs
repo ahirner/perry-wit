@@ -5,6 +5,7 @@ pub fn generate_default_tsconfig() -> String {
     r#"{
   "compilerOptions": {
     "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
     "module": "ESNext",
     "moduleDetection": "force",
     "moduleResolution": "bundler",
@@ -12,10 +13,7 @@ pub fn generate_default_tsconfig() -> String {
     "strict": true,
     "noEmit": true,
     "skipLibCheck": false,
-    "typeRoots": [
-      "./.perry/types",
-      "./node_modules/@types"
-    ]
+    "types": []
   },
   "include": [
     "src/**/*",

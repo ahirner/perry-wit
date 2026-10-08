@@ -1,6 +1,6 @@
 //! Byte-view identity, shared backing storage, and checked numeric indexing.
 
-use super::ByteHelpers;
+use super::{ByteHelpers, buffer};
 use crate::waffle_backend::{
     allocation::AllocationFuncs,
     runtime::builder::{self, Builder},
@@ -22,13 +22,18 @@ pub(super) fn emit(
     allocator: AllocationFuncs,
 ) -> Result<ByteHelpers> {
     let view = builder::declare(module, "bytes.view", &[I32, I32, I32], &[I32]);
+    let buffers = buffer::emit(module, memory, allocator, view)?;
     let allocate = builder::declare(module, "bytes.allocate", &[I32], &[I32]);
     let valid_index = builder::declare(module, "bytes.valid-index", &[I32, F64], &[I32]);
     let bound = builder::declare(module, "bytes.bound", &[F64, I32], &[I32]);
     let helpers = ByteHelpers {
         lift_canonical: builder::declare(module, "bytes.lift", &[I32, I32], &[I32]),
+        from_buffer: buffers.from_buffer,
+        validate: buffers.validate,
+        transfer: buffers.transfer,
         new: builder::declare(module, "bytes.new", &[F64], &[I32, F64]),
         copy: builder::declare(module, "bytes.copy", &[I32], &[I32]),
+        copy_into: builder::declare(module, "bytes.copy-into", &[I32, I32, F64], &[I32, F64]),
         get: builder::declare(module, "bytes.get", &[I32, F64], &[F64]),
         to_byte: builder::declare(module, "bytes.to-byte", &[F64], &[I32]),
         set: builder::declare(module, "bytes.set", &[I32, F64, F64], &[]),
@@ -39,13 +44,14 @@ pub(super) fn emit(
     let owner = b.param(0);
     let offset = b.param(1);
     let length = b.param(2);
-    let descriptor = b.allocate(allocator.realloc, 16, 4);
+    let descriptor = b.allocate(allocator.realloc, 24, 4);
     let four = b.integer(4);
     let header = b.op(Op::I32Sub, &[descriptor, four], I32);
     let header = b.load(header, 0, I32);
     let kind = b.integer(7);
     b.store(header, 16, kind, I32);
-    let data = b.op(Op::I32Add, &[owner, offset], I32);
+    let data = b.load(owner, DATA, I32);
+    let data = b.op(Op::I32Add, &[data, offset], I32);
     for (offset, value) in [
         (DATA, data),
         (LENGTH, length),
@@ -54,6 +60,18 @@ pub(super) fn emit(
     ] {
         b.store(descriptor, offset, value, I32);
     }
+    let head = b.load(owner, buffer::VIEWS, I32);
+    let zero = b.integer(0);
+    b.store(descriptor, buffer::NEXT, head, I32);
+    b.store(descriptor, buffer::PREVIOUS, zero, I32);
+    let link = b.body.add_block();
+    let linked = b.body.add_block();
+    b.branch(head, link, linked);
+    b.block = link;
+    b.store(head, buffer::PREVIOUS, descriptor, I32);
+    b.jump(linked, &[]);
+    b.block = linked;
+    b.store(owner, buffer::VIEWS, descriptor, I32);
     b.ret(&[descriptor]);
     b.finish(module, view)?;
 
@@ -64,6 +82,7 @@ pub(super) fn emit(
     let size = b.op(Op::Select, &[length, one, length], I32);
     let owner = b.call(allocator.realloc, &[zero, zero, one, size], &[I32])[0];
     b.effect(Op::MemoryFill { mem: memory }, &[owner, zero, length]);
+    let owner = b.call(buffers.new, &[owner, length], &[I32])[0];
     let result = b.call(view, &[owner, zero, length], &[I32])[0];
     b.ret(&[result]);
     b.finish(module, allocate)?;
@@ -72,7 +91,8 @@ pub(super) fn emit(
     let data = b.param(0);
     let length = b.param(1);
     let zero = b.integer(0);
-    let result = b.call(view, &[data, zero, length], &[I32])[0];
+    let buffer = b.call(buffers.new, &[data, length], &[I32])[0];
+    let result = b.call(view, &[buffer, zero, length], &[I32])[0];
     b.ret(&[result]);
     b.finish(module, helpers.lift_canonical)?;
 
@@ -116,6 +136,45 @@ pub(super) fn emit(
     );
     b.ret(&[result]);
     b.finish(module, helpers.copy)?;
+
+    let mut b = Builder::new(module, helpers.copy_into, memory);
+    let target = b.param(0);
+    let source = b.param(1);
+    let offset = b.param(2);
+    let zero = b.number(0.0);
+    let ordered = b.op(Op::F64Eq, &[offset, offset], I32);
+    let offset = b.op(Op::Select, &[offset, zero, ordered], F64);
+    let offset = b.op(Op::F64Trunc, &[offset], F64);
+    let target_length = b.load(target, LENGTH, I32);
+    let target_length = b.op(Op::F64ConvertI32U, &[target_length], F64);
+    let length = b.load(source, LENGTH, I32);
+    let source_length = b.op(Op::F64ConvertI32U, &[length], F64);
+    let end = b.op(Op::F64Add, &[offset, source_length], F64);
+    let positive = b.op(Op::F64Ge, &[offset, zero], I32);
+    let within = b.op(Op::F64Le, &[end, target_length], I32);
+    let valid = b.op(Op::I32And, &[positive, within], I32);
+    let copy = b.body.add_block();
+    let reject = b.body.add_block();
+    b.branch(valid, copy, reject);
+    b.block = reject;
+    let error = b.integer(1);
+    let code = b.number(1.0);
+    b.ret(&[error, code]);
+    b.block = copy;
+    let offset = b.op(Op::I32TruncF64U, &[offset], I32);
+    let destination = b.load(target, DATA, I32);
+    let destination = b.op(Op::I32Add, &[destination, offset], I32);
+    let source = b.load(source, DATA, I32);
+    b.effect(
+        Op::MemoryCopy {
+            src_mem: memory,
+            dst_mem: memory,
+        },
+        &[destination, source, length],
+    );
+    let success = b.integer(0);
+    b.ret(&[success, zero]);
+    b.finish(module, helpers.copy_into)?;
 
     let mut b = Builder::new(module, valid_index, memory);
     let descriptor = b.param(0);

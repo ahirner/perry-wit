@@ -49,7 +49,7 @@ fn compile(source: &str, wit: &str) -> Result<WaffleCompiled> {
     let main = wit_parser::UnresolvedPackageGroup::parse("native.wit", wit)
         .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
     let mut paths = std::fs::read_dir(PathBuf::from(
-        std::env::var("WASI_P3_WIT_PATH").context("Run native WIT tests through nix develop")?,
+        std::env::var("WASI_WIT_PATH").context("Run native WIT tests through nix develop")?,
     ))?
     .map(|entry| Ok(entry?.path()))
     .collect::<Result<Vec<_>>>()?;
@@ -60,8 +60,13 @@ fn compile(source: &str, wit: &str) -> Result<WaffleCompiled> {
         .collect::<Result<Vec<_>>>()?;
     let package = resolve.push_groups(main, dependencies)?;
     let world = resolve.select_world(&[package], Some("boundary"))?;
+    let source = if source.contains("readBounded(") {
+        format!("{}\n{source}", include_str!("fixtures/bounded_response.ts"))
+    } else {
+        source.to_owned()
+    };
     compile_typescript_for_world(
-        source,
+        &source,
         "native.ts",
         &WaffleCompileOptions::default(),
         resolve,
@@ -282,15 +287,15 @@ async fn stored_http_requests_overlap_and_complete_both_channels() -> Result<()>
     };
     let compiled = compile(
         r#"
-      import {get} from 'perry:http';
+
       export async function run(authority:string,path:string):Promise<string> {
-        const first=get('http',authority,path+'1',{},4096);
-        const second=get('http',authority,path+'2',{},4096);
+        const first=fetch('http://'+authority+path+'1');
+        const second=fetch('http://'+authority+path+'2');
         const responses=await Promise.all([first,second]);
         const retained=await first;
         if(retained!==responses[0])throw 1;
         const decoder=new TextDecoder('utf-8',{fatal:true});
-        return decoder.decode(responses[0].body)+decoder.decode(responses[1].body);
+        return decoder.decode(await readBounded(responses[0],4096))+decoder.decode(await readBounded(responses[1],4096));
       }
     "#,
         HTTP_WORLD,
@@ -333,14 +338,14 @@ async fn stored_http_requests_overlap_and_complete_both_channels() -> Result<()>
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resolved_world_http_get_uses_native_component_bindings() -> Result<()> {
+async fn resolved_world_fetch_uses_native_component_bindings() -> Result<()> {
     let compiled = compile(
         r#"
-      import {get} from 'perry:http';
+
       export async function run(authority:string,path:string):Promise<string> {
-        const response=await get('http',authority,path,{accept:'application/json'},65536);
+        const response=await fetch('http://'+authority+path,{headers:{accept:'application/json'}});
         if(response.status!==200) {throw 1;}
-        const text=new TextDecoder('utf-8',{fatal:true}).decode(response.body);
+        const text=new TextDecoder('utf-8',{fatal:true}).decode(await readBounded(response,65536));
         JSON.parse(text);
         for(let index=0;index<400;index++) {JSON.parse(text);}
         return text;
@@ -382,7 +387,7 @@ async fn resolved_world_http_get_uses_native_component_bindings() -> Result<()> 
 async fn resolved_world_platform_io_uses_shared_guest_memory() -> Result<()> {
     let compiled = compile(
         r#"
-      import {waitFor} from 'perry:clocks';
+      import {setTimeout as waitFor} from 'node:timers/promises';
       import {readFile,writeFile,stat,readdir} from 'node:fs/promises';
       export async function run(path:string):Promise<string> {
         const before=performance.now();
@@ -913,11 +918,11 @@ fn resolved_world_rejects_detached_tasks_and_missing_capabilities() {
 async fn resolved_world_http_domain_failures_release_resources_before_reuse() -> Result<()> {
     let compiled = compile(
         r#"
-        import {get} from 'perry:http';
+
         export async function run(authority:string,path:string):Promise<{ok:true,value:Uint8Array}|{ok:false,error:number}> {
           try {
-            const response=await get('http',authority,path,{},8);
-            return {ok:true,value:response.body};
+            const response=await fetch('http://'+authority+path);
+            return {ok:true,value:await readBounded(response,8)};
           } catch(error) {
             if(typeof error==='number') {return {ok:false,error};}
             throw error;
@@ -972,10 +977,10 @@ async fn resolved_world_http_domain_failures_release_resources_before_reuse() ->
 async fn resolved_world_http_disposal_releases_suspended_headers_and_body() -> Result<()> {
     let compiled = compile(
         r#"
-      import {get} from 'perry:http';
+
       export async function run(authority:string,path:string):Promise<string> {
-        const response=await get('http',authority,path,{},128);
-        return new TextDecoder().decode(response.body);
+        const response=await fetch('http://'+authority+path);
+        return new TextDecoder().decode(await readBounded(response,65536));
       }
     "#,
         HTTP_WORLD,
@@ -2508,54 +2513,58 @@ async fn standard_fetch_rejects_unconsumed_body_at_call_boundary() -> Result<()>
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> {
-    let server = fixture::HttpFixture::new(|_| fixture::Reply::Body(200, "from fetch".into()));
-    let source = format!(
-        r#"
-        const response:Response = await fetch("http://{}/");
-        console.log(await response.text());
-    "#,
-        server.address
-    );
-    let compiled = compile(
-        &source,
-        r#"package test:fetch-command; world boundary {
-        include wasi:cli/imports@0.3.0;
-        import wasi:http/client@0.3.0;
-        export wasi:cli/run@0.3.0;
-    }"#,
+async fn merge_docs_example_matches_node_and_reuses_the_instance() -> Result<()> {
+    let server = fixture::HttpFixture::new(|request| {
+        fixture::Reply::Body(
+            200,
+            if request.target == "/doc1.json" {
+                r#"{"first":1,"shared":"old"}"#
+            } else {
+                r#"{"shared":"new","second":2}"#
+            }
+            .into(),
+        )
+    });
+    let source = include_str!("../examples/merge_docs.ts")
+        .replace("127.0.0.1:8080", &server.address.to_string());
+    let directory = tempfile::tempdir()?;
+    let file = directory.path().join("merge_docs.ts");
+    std::fs::write(&file, &source)?;
+    let compiled = perry_wit::compile_file(
+        &file,
+        &perry_wit::CompileOptions {
+            wit_dir: "wit".into(),
+            world: Some("merge-docs".into()),
+            core_only: false,
+        },
     )?;
     let engine = engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let component = Component::new(&engine, compiled.stripped.context("example component")?)?;
     let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     let mut store = store(&engine);
-    let captured = output_capture::MemoryOutput::new(1024);
-    store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
-        .stdout(captured.clone())
-        .build();
     let instance = linker.instantiate_async(&mut store, &component).await?;
-    let interface = instance
-        .get_export_index(&mut store, None, "wasi:cli/run@0.3.0")
-        .context("CLI interface")?;
-    let export = instance
-        .get_export_index(&mut store, Some(&interface), "run")
-        .context("CLI run")?;
-    let run = instance.get_typed_func::<(), (std::result::Result<(), ()>,)>(&mut store, export)?;
-    assert_eq!(run.call_async(&mut store, ()).await?.0, Ok(()));
-    assert_eq!(captured.contents().as_ref(), b"from fetch\n");
-    store.assert_concurrent_state_empty();
-    let directory = tempfile::tempdir()?;
-    let file = directory.path().join("main.ts");
-    std::fs::write(&file, source)?;
-    let output = std::process::Command::new("node").arg(file).output()?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "merge-docs")?;
+    let expected = r#"{"first":1,"shared":"new","second":2}"#;
+    for _ in 0..5 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, expected);
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let output = std::process::Command::new("node")
+        .current_dir(directory.path())
+        .args([
+            "--input-type=module",
+            "-e",
+            "import {mergeDocs} from './merge_docs.ts'; console.log(await mergeDocs());",
+        ])
+        .output()?;
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"from fetch\n");
+    assert_eq!(output.stdout, format!("{expected}\n").as_bytes());
     Ok(())
 }
 
@@ -3625,55 +3634,65 @@ async fn standard_byte_readers_release_pending_requests_and_cancel_owned_transfe
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let compiled = compile(
-        include_str!("fixtures/fetch/readers.ts"),
-        "package test:reader-ownership; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->f64;}",
-    )?;
-    let released = Arc::new(AtomicBool::new(false));
-    let gate = released.clone();
-    let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
-        "/gated" => fixture::Reply::GatedResponse(200, vec![], b"hello".to_vec(), gate.clone()),
-        "/release" => {
-            gate.store(true, Ordering::Release);
-            fixture::Reply::Body(200, "ok".into())
+    for (fixture_source, fixture_name) in [
+        (include_str!("fixtures/fetch/readers.ts"), "readers.ts"),
+        (
+            include_str!("fixtures/fetch/byob_readers.ts"),
+            "byob_readers.ts",
+        ),
+    ] {
+        let compiled = compile(
+            fixture_source,
+            "package test:reader-ownership; world boundary {import wasi:http/client@0.3.0;export run:async func(base:string)->f64;}",
+        )?;
+        let released = Arc::new(AtomicBool::new(false));
+        let gate = released.clone();
+        let server = fixture::HttpFixture::new(move |request| match request.target.as_str() {
+            "/gated" => fixture::Reply::GatedResponse(200, vec![], b"hello".to_vec(), gate.clone()),
+            "/release" => {
+                gate.store(true, Ordering::Release);
+                fixture::Reply::Body(200, "ok".into())
+            }
+            "/stall" => fixture::Reply::StallBody,
+            _ => fixture::Reply::Disconnect,
+        });
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+        let mut store = store(&engine);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
+        let base = format!("http://{}", server.address);
+        for _ in 0..20 {
+            released.store(false, Ordering::Release);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
+                    .await??
+                    .0,
+                5.0
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
         }
-        "/stall" => fixture::Reply::StallBody,
-        _ => fixture::Reply::Disconnect,
-    });
-    let engine = engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap())?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = store(&engine);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
-    let base = format!("http://{}", server.address);
-    for _ in 0..20 {
         released.store(false, Ordering::Release);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&base,)))
-                .await??
-                .0,
-            5.0
+        let module = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fetch")
+            .join(fixture_name);
+        let script = format!(
+            "import {{run}} from {};console.log(await run(process.argv[1]));",
+            serde_json::to_string(&module.to_string_lossy())?
         );
-        store.assert_concurrent_state_empty();
-        assert!(store.data().table.is_empty());
+        let node = std::process::Command::new("node")
+            .args(["--input-type=module", "-e", &script, &base])
+            .output()?;
+        assert!(
+            node.status.success(),
+            "{}",
+            String::from_utf8_lossy(&node.stderr)
+        );
+        assert_eq!(String::from_utf8(node.stdout)?.trim(), "5");
     }
-    released.store(false, Ordering::Release);
-    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fetch/readers.ts");
-    let script = format!(
-        "import {{run}} from {};console.log(await run(process.argv[1]));",
-        serde_json::to_string(&module.to_string_lossy())?
-    );
-    let node = std::process::Command::new("node")
-        .args(["--input-type=module", "-e", &script, &base])
-        .output()?;
-    assert!(
-        node.status.success(),
-        "{}",
-        String::from_utf8_lossy(&node.stderr)
-    );
-    assert_eq!(String::from_utf8(node.stdout)?.trim(), "5");
     Ok(())
 }
 
@@ -3752,9 +3771,9 @@ fn native_byte_streams_reject_invalid_shapes_and_synchronous_effects() {
             "Uint8Array chunks",
         ),
         (
-            "export async function run():Promise<void> {const response=new Response('x');const body=response.body;if(body===null)throw 1;body.getReader({mode:'byob'});}",
+            "export async function run():Promise<void> {const response=new Response('x');const body=response.body;if(body===null)throw 1;body.getReader({mode:'invalid'});}",
             true,
-            "takes no arguments",
+            "getReader supports only",
         ),
         (
             "export function run():void {const response=new Response('x');const body=response.body;if(body===null)throw 1;for await(const chunk of body){}}",
@@ -3763,6 +3782,11 @@ fn native_byte_streams_reject_invalid_shapes_and_synchronous_effects() {
         ),
         (
             "type __perry_byte_reader = number;export function run():void{}",
+            false,
+            "Reserved compiler type name",
+        ),
+        (
+            "type __perry_byob_reader = number;export function run():void{}",
             false,
             "Reserved compiler type name",
         ),
@@ -4129,6 +4153,57 @@ async fn pending_export_ownership_releases_after_cancellation_acknowledgement() 
             );
             store.assert_concurrent_state_empty();
         }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn incoming_wit_streams_use_standard_readers_and_release_owned_handles() -> Result<()> {
+    use wasmtime::component::StreamReader;
+    let compiled = compile(
+        r#"
+      export async function scan(input:ReadableStream<Uint8Array>,stop:boolean):Promise<number> {
+        const reader=input.getReader();
+        if(!input.locked)throw 90;
+        let sum=0;
+        let result=await reader.read();
+        while(!result.done) {
+          const bytes=result.value;if(bytes===undefined)throw 91;
+          for(let i=0;i<bytes.length;i++){sum+=bytes[i];}
+          if(stop){await reader.cancel();break;}
+          result=await reader.read();
+        }
+        reader.releaseLock();
+        if(input.locked)throw 92;
+        return sum;
+      }
+    "#,
+        "package test:incoming;world boundary {export scan:async func(input:stream<u8>,stop:bool)->f64;}",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = store(&engine);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let scan = instance.get_typed_func::<(StreamReader<u8>, bool), (f64,)>(&mut store, "scan")?;
+    for (length, stop) in [
+        (0, false),
+        (1, false),
+        (8193, false),
+        (4 * 1024 * 1024, false),
+        (9000, true),
+        (17, false),
+    ] {
+        let bytes = vec![3u8; length];
+        let input = StreamReader::new(&mut store, bytes)?;
+        let expected = if stop { length.min(8192) } else { length };
+        assert_eq!(
+            scan.call_async(&mut store, (input, stop)).await?.0,
+            (expected * 3) as f64
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
     }
     Ok(())
 }

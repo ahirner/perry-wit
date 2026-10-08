@@ -57,12 +57,9 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         &imports_path,
         codegen::generate_import_declarations(&resolve, &resolve.worlds[world]),
     )?;
-    fs::write(
-        options.out_dir.join("p3.d.ts"),
-        include_str!("../../types/p3.d.ts"),
-    )?;
+    write_runtime_declarations(&options.out_dir)?;
     let dts = format!(
-        "/// <reference path=\"./imports.d.ts\" />\n/// <reference path=\"./p3.d.ts\" />\n{dts}"
+        "/// <reference path=\"./runtime.d.ts\" />\n/// <reference path=\"./imports.d.ts\" />\n{dts}"
     );
 
     let dts_path = options.out_dir.join("world.d.ts");
@@ -112,7 +109,7 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     };
 
     let mut check_config = serde_json::json!({
-        "compilerOptions": {"target": "ES2022", "module": "ESNext", "moduleDetection": "force", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false},
+        "compilerOptions": {"target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"], "module": "ESNext", "moduleDetection": "force", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false, "types": []},
         "files": ["implementation-check.ts"],
         "include": [],
         "exclude": []
@@ -131,6 +128,13 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         check_path,
         tsconfig_path: generated_tsconfig,
     })
+}
+
+/// Emits the compiler's supported ambient runtime surface for editors and `tsc`.
+pub fn write_runtime_declarations(out_dir: &Path) -> Result<()> {
+    fs::create_dir_all(out_dir)?;
+    fs::write(out_dir.join("runtime.d.ts"), include_str!("runtime.d.ts"))?;
+    Ok(())
 }
 
 fn relative_path(from: &Path, to: &Path) -> Result<String> {

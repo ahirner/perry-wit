@@ -65,10 +65,7 @@ fn resolve_packages(
         available.extend(group.nested.iter().map(|package| package.name.clone()));
     }
 
-    for variable in ["WASI_P3_WIT_PATH", "WASI_WIT_PATH"] {
-        let Some(ambient) = std::env::var_os(variable).map(PathBuf::from) else {
-            continue;
-        };
+    if let Some(ambient) = std::env::var_os("WASI_WIT_PATH").map(PathBuf::from) {
         for mut group in read_dependencies(&ambient, resolve)? {
             if available.insert(group.main.name.clone()) {
                 group

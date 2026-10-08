@@ -1,6 +1,7 @@
 //! Each operand installs one observer; the last observer releases shared roots.
 
 use super::*;
+use crate::waffle_backend::promises::OPTIONAL_REFERENCE_TAG;
 use crate::waffle_backend::strings::StringPool;
 use waffle::Value;
 
@@ -52,10 +53,10 @@ fn race_direct_value(b: &mut Builder, representation: Value, tag: Value, payload
         F64,
     );
     let value = b.op(Operator::Select, &[nan, value, missing_number], F64);
-    let optional_string = eq(b, representation, 5);
-    let missing_string = b.op(Operator::I32And, &[optional_string, undefined], I32);
+    let optional_pointer = eq(b, representation, 5);
+    let missing_pointer = b.op(Operator::I32And, &[optional_pointer, undefined], I32);
     let zero = b.op(Operator::F64Const { value: 0 }, &[], F64);
-    b.op(Operator::Select, &[zero, value, missing_string], F64)
+    b.op(Operator::Select, &[zero, value, missing_pointer], F64)
 }
 
 pub(super) fn emit(
@@ -147,11 +148,7 @@ pub(super) fn emit(
         b.store(context, offset, value, I32);
     }
     let worker_index = b.integer(worker_index);
-    crate::waffle_backend::runtime::callbacks::worker_count(
-        &mut b,
-        true,
-        crate::waffle_backend::runtime::callbacks::Worker::Source,
-    );
+    scheduler::worker_count(&mut b, CountChange::Started, Worker::Source);
     let thread = b.call(native.new_thread, &[worker_index, context], &[I32])[0];
     let input_tag = b.load(input_value, 0, I32);
     let promise = eq(&mut b, input_tag, 10);
@@ -165,7 +162,7 @@ pub(super) fn emit(
     b.call(native.observe, &[record, thread], &[]);
     b.jump(registered, &[]);
     b.block = schedule;
-    b.call(native.schedule, &[thread], &[]);
+    b.call(native.scheduler.wake_source, &[thread], &[]);
     b.jump(registered, &[]);
     b.block = registered;
     let one = b.integer(1);
@@ -247,7 +244,17 @@ fn emit_observer(
     let value = b.load(pointer, 8, F64);
     b.jump(typed, &[tag, value]);
     b.block = unchanged;
-    b.jump(typed, &[outcome_tag, payload]);
+    let zero = b.integer(0);
+    let optional_flag = b.integer(OPTIONAL_REFERENCE_TAG);
+    let optional = b.op(Operator::I32And, &[outcome_tag, optional_flag], I32);
+    let optional = b.op(Operator::I32Ne, &[optional, zero], I32);
+    let mask = b.integer(OPTIONAL_REFERENCE_TAG - 1);
+    let tag = b.op(Operator::I32And, &[outcome_tag, mask], I32);
+    let zero_payload = b.number(0.0);
+    let absent = b.op(Operator::F64Eq, &[payload, zero_payload], I32);
+    let absent = b.op(Operator::I32And, &[optional, absent], I32);
+    let tag = b.op(Operator::Select, &[zero, tag, absent], I32);
+    b.jump(typed, &[tag, payload]);
     b.block = typed;
     let outcome_tag = typed_tag;
     let payload = typed_payload;
@@ -382,12 +389,8 @@ fn emit_observer(
     b.jump(done, &[]);
     b.block = done;
     b.call(registry.allocator.unwrap().frame_drop, &[frame], &[]);
-    b.call(native.complete, &[], &[]);
-    crate::waffle_backend::runtime::callbacks::worker_count(
-        &mut b,
-        false,
-        crate::waffle_backend::runtime::callbacks::Worker::Source,
-    );
+    b.call(native.scheduler.complete_source, &[], &[]);
+    scheduler::worker_count(&mut b, CountChange::Finished, Worker::Source);
     b.ret(&[]);
     b.finish(module, worker)
 }

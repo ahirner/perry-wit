@@ -34,8 +34,8 @@ impl WasiView for Host {
 async fn native_output_preserves_arbitrary_bytes_and_subview_ranges_beyond_guest_memory()
 -> Result<()> {
     let source = r#"
-    import { writeStdout as send } from "perry:stdio";
-    import * as output from "perry:stdio";
+    import { Writable as Output } from "node:stream";
+    import * as output from "node:stream";
     export async function run(count: number): Promise<number> {
         const storage = new Uint8Array(259);
         storage[0] = 71;
@@ -43,15 +43,15 @@ async fn native_output_preserves_arbitrary_bytes_and_subview_ranges_beyond_guest
         const bytes = storage.subarray(1, 258);
         let index = 0;
         while (index < bytes.length) { bytes[index] = index; index = index + 1; }
-        await send(new Uint8Array(0));
+        await Output.toWeb(process.stdout).getWriter().write(new Uint8Array(0));
         index = 0;
         while (index < count) {
-            await send(bytes);
+            await Output.toWeb(process.stdout).getWriter().write(bytes);
             const scratch = new Uint8Array(1024);
             scratch[0] = index;
             index = index + 1;
         }
-        await output.writeStderr(storage.subarray(0, 1));
+        await output.Writable.toWeb(process.stderr).getWriter().write(storage.subarray(0, 1));
         return storage[0] + storage[258];
     }"#;
     let stdout = MemoryOutput::new(16 * 1024 * 1024);
@@ -118,18 +118,14 @@ async fn string_logging_preserves_utf8_nuls_order_and_stored_task_lifetimes() ->
 #[tokio::test(flavor = "current_thread")]
 async fn input_views_forward_to_output_without_buffering_the_full_stream() -> Result<()> {
     let source = r#"
-    import {writeStdout} from "perry:stdio";
-    declare function readInto(input: ByteStream, bytes: Uint8Array): Promise<number>;
-    export async function run(input: ByteStream): Promise<number> {
-        const bytes = new Uint8Array(4093);
-        let total = 0;
-        let count = await readInto(input, bytes);
-        while (count > 0) {
-            await writeStdout(bytes.subarray(0, count));
-            total = total + count;
-            count = await readInto(input, bytes);
+    import {Writable} from "node:stream";
+    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+        const reader=input.getReader();let total=0;let result=await reader.read();
+        while(!result.done) {
+            const bytes=result.value;if(bytes===undefined)throw 1;
+            await Writable.toWeb(process.stdout).getWriter().write(bytes);total+=bytes.length;result=await reader.read();
         }
-        return total;
+        reader.releaseLock();return total;
     }"#;
     let stdout = MemoryOutput::new(8 * 1024 * 1024);
     let context = WasiCtxBuilder::new().stdout(stdout.clone()).build();
@@ -197,7 +193,7 @@ fn output_contracts_and_binding_identity_are_checked_before_io() -> Result<()> {
         "export function run(): number { console.log(42); return 0; }",
         "export function run(): number { const write = console.log; write('a'); return 0; }",
         "export function run(name: string): number { console[name]('a'); return 0; }",
-        "import {writeStdout} from 'perry:stdio'; export async function run(): Promise<number> { await writeStdout(true); return 0; }",
+        "import {Writable} from 'node:stream'; export async function run(): Promise<number> { await Writable.toWeb(process.stdout).getWriter().write(true); return 0; }",
     ] {
         assert!(
             compile_typescript_waffle(source, "invalid.ts", &WaffleCompileOptions::default())
@@ -207,8 +203,8 @@ fn output_contracts_and_binding_identity_are_checked_before_io() -> Result<()> {
     }
     for source in [
         "function console(value: number): number { return value + 1; } export function run(): number { return console(3); }",
-        "function writeStdout(value: number): number { return value + 1; } export function run(): number { return writeStdout(3); }",
-        "import {writeStdout} from 'perry:stdio'; export function run(): number { return 3; }",
+        "function outputValue(value: number): number { return value + 1; } export function run(): number { return outputValue(3); }",
+        "import {Writable} from 'node:stream'; export function run(): number { return 3; }",
     ] {
         let compiled =
             compile_typescript_waffle(source, "shadow.ts", &WaffleCompileOptions::default())?;
@@ -245,7 +241,7 @@ use std::{fs, process::Command};
 
 #[tokio::test(flavor = "current_thread")]
 async fn stored_output_operations_settle_once_and_preserve_bytes() -> Result<()> {
-    let source = "import {writeStdout} from 'perry:stdio'; export async function run(): Promise<number> { const pending = writeStdout(new Uint8Array([65,0,255])); await pending; await pending; return 1; }";
+    let source = "import {Writable} from 'node:stream'; export async function run(): Promise<number> { const pending = Writable.toWeb(process.stdout).getWriter().write(new Uint8Array([65,0,255])); await pending; await pending; return 1; }";
     let output = MemoryOutput::new(1024);
     let context = WasiCtxBuilder::new().stdout(output.clone()).build();
     let (mut store, instance) = instantiate(source, context).await?;
@@ -256,5 +252,39 @@ async fn stored_output_operations_settle_once_and_preserve_bytes() -> Result<()>
         assert!(store.data().table.is_empty());
     }
     assert_eq!(output.contents().as_ref(), [65, 0, 255].repeat(20));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn web_writer_queues_writes_and_close_before_releasing_the_lock() -> Result<()> {
+    let source = r#"
+    import {Writable} from 'node:stream';
+    export async function run():Promise<number> {
+      const stream=Writable.toWeb(process.stdout);
+      const writer=stream.getWriter();
+      if(!stream.locked)throw 1;
+      const a=new Uint8Array(2);a[0]=255;a[1]=0;
+      const b=new Uint8Array(1);b[0]=71;
+      const first=writer.write(a);
+      const second=writer.write(b);
+      const closed=writer.close();
+      await first;await second;await closed;await first;
+      let rejected=0;
+      try {await writer.write(b);}catch{rejected++;}
+      writer.releaseLock();
+      if(stream.locked)throw 2;
+      try{await writer.write(a);}catch{rejected++;}
+      return rejected;
+    }"#;
+    let output = MemoryOutput::new(1000);
+    let (mut store, instance) =
+        instantiate(source, WasiCtxBuilder::new().stdout(output.clone()).build()).await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..30 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 2.);
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    assert_eq!(output.contents().as_ref(), [255, 0, 71].repeat(30));
     Ok(())
 }

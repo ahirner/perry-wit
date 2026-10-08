@@ -120,7 +120,7 @@ pub(crate) fn track_roots(
             body.add_op(
                 block,
                 Operator::Call {
-                    function_index: allocator.collect,
+                    function_index: allocator.collect_if_allocated,
                 },
                 &[],
                 &[],

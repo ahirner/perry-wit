@@ -9,24 +9,19 @@ use wasmtime::component::StreamReader;
 use super::{ControlledProducer, Observations, instantiate};
 
 const SCAN_SCALARS: &str = r#"
-declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-export async function run(input: ByteStream): Promise<Result<number, number>> {
-    const decoder = new TextDecoder();
-    const buffer = new Uint8Array(257);
-    let total = 0;
-    let count = await readInto(input, buffer);
-    while (count > 0) {
-        const text = decoder.decode(buffer.subarray(0, count), {stream: true});
-        let index = 0;
-        while (index < 8) {
-            const scratch = new Uint8Array(128);
-            scratch[0] = index;
-            index = index + 1;
-        }
-        total = total + text.length;
-        count = await readInto(input, buffer);
+export async function run(input: ReadableStream<Uint8Array>): Promise<Result<number, number>> {
+    const decoder=new TextDecoder('utf-8',{fatal:true});
+    const reader=input.getReader();let total=0;
+    let chunk=await reader.read();
+    while(!chunk.done) {
+        const bytes=chunk.value;if(bytes===undefined)throw 1;
+        const text=decoder.decode(bytes,{stream:true});
+        for(let index=0;index<8;index++) {const scratch=new Uint8Array(128);scratch[0]=index;}
+        total+=text.length;
+        chunk=await reader.read();
     }
-    return total + decoder.decode().length;
+    total+=decoder.decode().length;
+    reader.releaseLock();return total;
 }
 "#;
 

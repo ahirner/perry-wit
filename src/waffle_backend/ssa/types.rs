@@ -8,7 +8,7 @@ use perry_hir::{
 
 /// Perry's private for-of holder keeps a string snapshot with scalar indexing.
 /// It cannot be named by a TypeScript type annotation or cross a call boundary.
-const SCALAR_ITERATION: &str = "perry:scalar-iteration";
+pub(crate) const SCALAR_ITERATION: &str = "__perry_scalar_iteration";
 
 pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
     match ty {
@@ -21,7 +21,6 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::http::fetch::is_response(ty) => Some("Response"),
         ty if crate::waffle_backend::http::headers::is_headers(ty) => Some("Headers"),
         ty if crate::waffle_backend::http::request::is_request(ty) => Some("Request"),
-        ty if crate::waffle_backend::http::is_response(ty) => Some("HttpResponse"),
         ty if crate::waffle_backend::abort::Kind::of(ty).is_some() => Some("abort object"),
         ty if crate::waffle_backend::date::is_date(ty) => Some("Date"),
         ty if crate::waffle_backend::time::is_time(ty) => {
@@ -34,7 +33,6 @@ pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
         ty if crate::waffle_backend::filesystem::is_stats(ty) => Some("Stats"),
         HirType::Array(inner) if **inner == HirType::String => Some("string[]"),
         HirType::Array(_) => Some("array"),
-        HirType::Named(name) if name == "ByteStream" => Some("ByteStream"),
         _ => None,
     }
 }
@@ -49,7 +47,7 @@ pub(crate) fn is_reference(ty: &HirType) -> bool {
             || crate::waffle_backend::abort::Kind::of(ty).is_some()
             || crate::waffle_backend::date::is_date(ty)
             || crate::waffle_backend::time::is_time(ty)
-            || crate::waffle_backend::http::is_response(ty)
+            || crate::waffle_backend::http::fetch::is_response(ty)
             || crate::waffle_backend::http::headers::is_headers(ty)
             || crate::waffle_backend::http::request::is_request(ty) =>
         {
@@ -97,6 +95,12 @@ impl StringKind {
 
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
+        if crate::waffle_backend::objects::spread_parts(expr).is_some() {
+            return HirType::Object(perry_hir::types::ObjectType {
+                index_signature: Some(Box::new(crate::waffle_backend::values::value_type())),
+                ..Default::default()
+            });
+        }
         match expr {
             Expr::PropertyGet {
                 object, property, ..
@@ -205,15 +209,6 @@ impl FunctionLowerer<'_> {
                     _ => HirType::Number,
                 }
             }
-            Expr::PropertyGet {
-                object, property, ..
-            } if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) => {
-                if property == "body" {
-                    HirType::Named("Uint8Array".into())
-                } else {
-                    HirType::Number
-                }
-            }
             Expr::Logical { left, right, .. }
                 if self.infer_expr_type(left) == HirType::Boolean
                     && self.infer_expr_type(right) == HirType::Boolean =>
@@ -297,6 +292,13 @@ impl FunctionLowerer<'_> {
                 HirType::Named("Uint8Array".into())
             }
             Expr::Uint8ArrayLength(_) => HirType::Number,
+            Expr::PropertyGet {
+                object, property, ..
+            } if property == "buffer"
+                && crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object)) =>
+            {
+                HirType::Named("ArrayBuffer".into())
+            }
             Expr::PropertyGet {
                 object, property, ..
             } if property == "length"
@@ -412,7 +414,14 @@ impl FunctionLowerer<'_> {
                         .is_some()
                     {
                         return match property.as_str() {
-                            "getReader" => crate::waffle_backend::streams::web::Kind::Reader.ty(),
+                            "getReader" => {
+                                if args.is_empty() {
+                                    crate::waffle_backend::streams::web::Kind::Reader.ty()
+                                } else {
+                                    crate::waffle_backend::streams::web::Kind::ByobReader.ty()
+                                }
+                            }
+                            "getWriter" => crate::waffle_backend::streams::web::Kind::Writer.ty(),
                             "releaseLock" => HirType::Void,
                             name => crate::waffle_backend::streams::web::Method::named(name)
                                 .map(|m| HirType::Promise(Box::new(m.result())))
@@ -427,13 +436,6 @@ impl FunctionLowerer<'_> {
                         crate::waffle_backend::http::body::BodyMethod::named(property)
                     {
                         return HirType::Promise(Box::new(method.result()));
-                    }
-                    if crate::waffle_backend::http::is_response(&self.infer_expr_type(object)) {
-                        return if property == "headerName" {
-                            HirType::String
-                        } else {
-                            HirType::Named("Uint8Array".into())
-                        };
                     }
                     if crate::waffle_backend::time::is_time(&self.infer_expr_type(object)) {
                         return if property == "toString" {
@@ -458,6 +460,11 @@ impl FunctionLowerer<'_> {
                         && property == "decode"
                     {
                         return HirType::String;
+                    }
+                    if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
+                        && property == "set"
+                    {
+                        return HirType::Void;
                     }
                     if crate::waffle_backend::bytes::is_byte_view(&self.infer_expr_type(object))
                         && matches!(property.as_str(), "subarray" | "slice")

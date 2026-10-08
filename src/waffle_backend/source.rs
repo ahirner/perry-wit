@@ -53,6 +53,39 @@ fn underlying_expression(mut expression: &ast::Expr) -> &ast::Expr {
     }
 }
 
+fn promise_all_arity(expression: &ast::Expr, unresolved: SyntaxContext) -> Option<usize> {
+    let ast::Expr::Await(awaited) = underlying_expression(expression) else {
+        return None;
+    };
+    let ast::Expr::Call(call) = underlying_expression(&awaited.arg) else {
+        return None;
+    };
+    let ast::Callee::Expr(callee) = &call.callee else {
+        return None;
+    };
+    let ast::Expr::Member(member) = underlying_expression(callee) else {
+        return None;
+    };
+    if !matches!(underlying_expression(&member.obj), ast::Expr::Ident(name) if name.sym == "Promise" && name.ctxt == unresolved)
+        || !matches!(&member.prop, ast::MemberProp::Ident(name) if name.sym == "all")
+    {
+        return None;
+    }
+    let [argument] = call.args.as_slice() else {
+        return None;
+    };
+    let ast::Expr::Array(array) = underlying_expression(&argument.expr) else {
+        return None;
+    };
+    (argument.spread.is_none()
+        && array.elems.iter().all(|element| {
+            element
+                .as_ref()
+                .is_some_and(|element| element.spread.is_none())
+        }))
+    .then_some(array.elems.len())
+}
+
 pub(crate) fn resolve_bindings(
     module: &mut ast::Module,
     wit: Option<&super::wit::WitWorld>,
@@ -73,13 +106,18 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::values::VALUE_TYPE)
                 && !names.0.contains(super::context::ENVIRONMENT_TYPE)
                 && !names.0.contains(super::date::DATE_TYPE)
-                && !names.0.contains(super::http::RESPONSE_TYPE)
                 && !names.0.contains(super::http::fetch::RESPONSE_TYPE)
                 && !names.0.contains(super::http::headers::HEADERS_TYPE)
                 && !names.0.contains(super::http::request::REQUEST_TYPE)
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
+                && !names.0.contains(super::ssa::types::SCALAR_ITERATION)
                 && !names.0.contains(super::streams::web::Kind::Readable.name())
                 && !names.0.contains(super::streams::web::Kind::Reader.name())
+                && !names
+                    .0
+                    .contains(super::streams::web::Kind::ByobReader.name())
+                && !names.0.contains(super::streams::web::Kind::Writable.name())
+                && !names.0.contains(super::streams::web::Kind::Writer.name())
                 && !names.0.contains(super::time::TimeKind::Instant.type_name())
                 && !names
                     .0
@@ -89,37 +127,16 @@ pub(crate) fn resolve_bindings(
             "Reserved compiler type name in source"
         );
         let mut bindings = HashMap::new();
-        let mut http_types = HashSet::new();
         for item in &module.body {
             let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item else {
                 continue;
             };
-            if import.src.value.as_str() == Some("perry:http") {
-                for specifier in &import.specifiers {
-                    if let ast::ImportSpecifier::Named(named) = specifier {
-                        let name = named.imported.as_ref().map_or_else(
-                            || named.local.sym.to_string(),
-                            |name| name.atom().to_string(),
-                        );
-                        if name == "HttpResponse" {
-                            ensure!(
-                                import.type_only || named.is_type_only,
-                                "Import HttpResponse with import type"
-                            );
-                            http_types.insert(named.local.to_id());
-                        }
-                    }
-                }
-            }
             if import.type_only {
                 continue;
             }
             let namespace = match import.src.value.as_str() {
-                Some("perry:clocks") => CapabilityNamespace::Clocks,
                 Some("node:timers/promises") => CapabilityNamespace::TimerPromises,
-                Some("perry:random") => CapabilityNamespace::Random,
-                Some("perry:stdio") => CapabilityNamespace::Stdio,
-                Some("perry:http") => CapabilityNamespace::Http,
+                Some("node:stream") => CapabilityNamespace::Stream,
                 Some("fs" | "node:fs") => CapabilityNamespace::Filesystem,
                 Some("fs/promises" | "node:fs/promises") => CapabilityNamespace::FilesystemPromises,
                 _ => bail!("Unsupported capability import: {:?}", import.src.value),
@@ -163,7 +180,6 @@ pub(crate) fn resolve_bindings(
         });
         let mut calls = SourceCalls {
             bindings,
-            http_types,
             unresolved: SyntaxContext::empty().apply_mark(unresolved),
             names: names.0,
             shadow_names: HashMap::new(),
@@ -283,11 +299,13 @@ pub(crate) fn resolve_bindings(
 
 fn source_type(ty: &HirType) -> Result<String> {
     match ty {
-        HirType::Named(name) if super::http::is_response(ty) => Ok(name.clone()),
-        ty if *ty == super::http::headers_type() => Ok("{[key: string]: string}".into()),
+        HirType::Named(name) if super::http::fetch::is_response(ty) => Ok(name.clone()),
         ty if super::text_or_bytes::is_text_or_bytes(ty) => Ok("string | Uint8Array".into()),
         ty if *ty == ProcessOperation::GetExitCode.lower().result => {
             Ok("number | undefined".into())
+        }
+        ty if super::streams::web::Kind::of(ty).is_some() => {
+            Ok(super::streams::web::Kind::of(ty).unwrap().name().into())
         }
         HirType::Number => Ok("number".into()),
         HirType::Boolean => Ok("boolean".into()),
@@ -306,12 +324,9 @@ fn source_type(ty: &HirType) -> Result<String> {
 #[derive(Clone, Copy)]
 enum CapabilityNamespace {
     TimerPromises,
-    Clocks,
-    Random,
-    Stdio,
+    Stream,
     Filesystem,
     FilesystemPromises,
-    Http,
 }
 
 impl CapabilityNamespace {
@@ -330,19 +345,11 @@ impl CapabilityNamespace {
             return Ok(CapabilityOperation::Filesystem(operation));
         }
         match (self, name) {
-            (Self::Http, "get") => Ok(CapabilityOperation::HttpGet),
-            (Self::Clocks, "waitFor") => Ok(CapabilityOperation::Clock(ClockOperation::WaitFor)),
             (Self::TimerPromises, "setTimeout") => {
                 Ok(CapabilityOperation::Clock(ClockOperation::Timeout))
             }
-            (Self::Random, "randomNumber") => {
-                Ok(CapabilityOperation::Random(RandomOperation::Number))
-            }
-            (Self::Stdio, "writeStdout") => {
-                Ok(CapabilityOperation::Stdio(StdioOperation::WriteStdout))
-            }
-            (Self::Stdio, "writeStderr") => {
-                Ok(CapabilityOperation::Stdio(StdioOperation::WriteStderr))
+            (Self::Stream, "Writable") => {
+                Ok(CapabilityOperation::Writable(StdioOperation::WriteStdout))
             }
             (Self::Filesystem, _) => bail!(
                 "Unsupported filesystem operation '{name}': synchronous and callback APIs are not supported; use node:fs/promises"
@@ -358,7 +365,6 @@ enum CapabilityBinding {
 }
 
 struct SourceCalls {
-    http_types: HashSet<ast::Id>,
     bindings: HashMap<ast::Id, CapabilityBinding>,
     unresolved: SyntaxContext,
     names: HashSet<String>,
@@ -539,6 +545,66 @@ impl SourceCalls {
 }
 
 impl VisitMut for SourceCalls {
+    fn visit_mut_var_decl(&mut self, declaration: &mut ast::VarDecl) {
+        let mut declarations = Vec::new();
+        for mut binding in std::mem::take(&mut declaration.decls) {
+            // Promise.all produces a dense tuple with no user-defined iterator.
+            let tuple_length = binding
+                .init
+                .as_deref()
+                .and_then(|expression| promise_all_arity(expression, self.unresolved));
+            if let ast::Pat::Array(pattern) = &binding.name
+                && let Some(length) = tuple_length
+            {
+                if pattern.type_ann.is_some()
+                    || pattern.elems.len() > length
+                    || pattern
+                        .elems
+                        .iter()
+                        .flatten()
+                        .any(|pattern| !matches!(pattern, ast::Pat::Ident(_)))
+                {
+                    self.error.get_or_insert_with(|| anyhow::anyhow!("Promise.all destructuring supports in-range names and elisions without defaults, rest, or pattern annotations"));
+                    return;
+                }
+                let names = pattern.elems.clone();
+                let temporary = ast::Ident::new(
+                    self.fresh_name().into(),
+                    binding.span,
+                    SyntaxContext::empty(),
+                );
+                binding.name = ast::Pat::Ident(temporary.clone().into());
+                let span = binding.span;
+                declarations.push(binding);
+                for (index, name) in names.into_iter().enumerate() {
+                    if let Some(name) = name {
+                        declarations.push(ast::VarDeclarator {
+                            span,
+                            name,
+                            definite: false,
+                            init: Some(Box::new(ast::Expr::Member(ast::MemberExpr {
+                                span,
+                                obj: Box::new(ast::Expr::Ident(temporary.clone())),
+                                prop: ast::MemberProp::Computed(ast::ComputedPropName {
+                                    span,
+                                    expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
+                                        span,
+                                        value: index as f64,
+                                        raw: None,
+                                    }))),
+                                }),
+                            }))),
+                        });
+                    }
+                }
+            } else {
+                declarations.push(binding);
+            }
+        }
+        declaration.decls = declarations;
+        declaration.visit_mut_children_with(self);
+    }
+
     fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
         statement.visit_mut_children_with(self);
         if let ast::Stmt::ForOf(loop_) = statement
@@ -659,6 +725,12 @@ impl VisitMut for SourceCalls {
             }
             match self.operation(callee) {
                 Ok(Some(mut operation)) => {
+                    if matches!(operation, CapabilityOperation::Writable(_)) {
+                        self.error.get_or_insert_with(|| {
+                            anyhow::anyhow!("Writable supports only toWeb(process.stdout/stderr)")
+                        });
+                        return;
+                    }
                     if operation == CapabilityOperation::Process(ProcessOperation::Exit)
                         && call.args.is_empty()
                     {
@@ -749,10 +821,14 @@ impl VisitMut for SourceCalls {
     }
 
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
+        if let Err(error) = self.rewrite_writable(expression) {
+            self.error.get_or_insert(error);
+            return;
+        }
         self.rewrite_process_assignment(expression);
         self.rewrite_process_value(expression);
         if matches!(expression, ast::Expr::Object(_))
-            && let Err(error) = options::validate_plain_options(expression, "Object")
+            && let Err(error) = options::validate_properties(expression, "Object")
         {
             self.error.get_or_insert(error);
             return;
@@ -830,25 +906,32 @@ impl VisitMut for SourceCalls {
             && name.ctxt == self.unresolved
             && matches!(
                 name.sym.as_ref(),
-                "ReadableStream" | "ReadableStreamDefaultReader"
+                "ReadableStream"
+                    | "ReadableStreamDefaultReader"
+                    | "ReadableStreamBYOBReader"
+                    | "WritableStream"
+                    | "WritableStreamDefaultWriter"
             )
         {
-            let bytes = reference.type_params.as_ref().is_some_and(|params| {
-                params.params.len() == 1
-                    && matches!(params.params[0].as_ref(),
+            let bytes = (name.sym == "ReadableStreamBYOBReader" && reference.type_params.is_none())
+                || reference.type_params.as_ref().is_some_and(|params| {
+                    params.params.len() == 1
+                        && matches!(params.params[0].as_ref(),
                     ast::TsType::TsTypeRef(ty) if matches!(&ty.type_name,
                         ast::TsEntityName::Ident(name) if name.sym == "Uint8Array"))
-            });
+                });
             if !bytes {
                 self.error.get_or_insert_with(|| {
                     anyhow::anyhow!("Native Web Streams require Uint8Array chunks")
                 });
                 return;
             }
-            let kind = if name.sym == "ReadableStream" {
-                super::streams::web::Kind::Readable
-            } else {
-                super::streams::web::Kind::Reader
+            let kind = match name.sym.as_ref() {
+                "ReadableStream" => super::streams::web::Kind::Readable,
+                "ReadableStreamDefaultReader" => super::streams::web::Kind::Reader,
+                "ReadableStreamBYOBReader" => super::streams::web::Kind::ByobReader,
+                "WritableStream" => super::streams::web::Kind::Writable,
+                _ => super::streams::web::Kind::Writer,
             };
             name.sym = kind.name().into();
             reference.type_params = None;
@@ -881,11 +964,6 @@ impl VisitMut for SourceCalls {
             && name.ctxt == self.unresolved
         {
             name.sym = super::http::fetch::RESPONSE_TYPE.into();
-        }
-        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
-            && self.http_types.contains(&name.to_id())
-        {
-            name.sym = super::http::RESPONSE_TYPE.into();
         }
         if let Err(error) = self.rewrite_time_type(reference) {
             self.error.get_or_insert(error);

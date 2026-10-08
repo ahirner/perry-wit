@@ -1,0 +1,19 @@
+{
+  "expression": {
+    "Choose": [
+      {
+        "Literal": false
+      },
+      "Input",
+      {
+        "Array": [
+          "Input",
+          "Input",
+          "Input",
+          1
+        ]
+      }
+    ]
+  },
+  "form": "Direct"
+}

@@ -70,32 +70,19 @@ impl FunctionLowerer<'_> {
             crate::waffle_backend::bytes::is_array_buffer(&self.infer_expr_type(argument))
         }) {
             let buffer = self.expression(argument)?;
-            let mut parts = Vec::new();
-            for offset in [0, 4] {
-                parts.push(self.op(
-                    Operator::I32Load {
-                        memory: MemoryArg {
-                            align: 2,
-                            offset,
-                            memory: self.registry.memory,
-                        },
-                    },
-                    &[buffer],
-                    &[Type::I32],
-                ));
-            }
-            return Ok(self.op(
-                Operator::Call {
-                    function_index: helpers.lift_canonical,
-                },
-                &parts,
-                &[Type::I32],
+            let payload = self.call_completion(helpers.from_buffer, &[buffer]);
+            return Ok(abi::decode_payload(
+                &mut self.body,
+                self.block,
+                payload,
+                true,
             ));
         }
         if let Some(argument) =
             argument.filter(|argument| is_byte_view(&self.infer_expr_type(argument)))
         {
             let source = self.byte_receiver(argument)?;
+            self.call_completion(helpers.validate, &[source]);
             return Ok(self.op(
                 Operator::Call {
                     function_index: helpers.copy,
@@ -198,6 +185,19 @@ impl FunctionLowerer<'_> {
             "Unsupported ArrayBuffer property '{property}'"
         );
         let view = self.expression(array)?;
+        if property == "buffer" && crate::waffle_backend::bytes::is_byte_view(&ty) {
+            return Ok(self.op(
+                Operator::I32Load {
+                    memory: MemoryArg {
+                        align: 2,
+                        offset: 8,
+                        memory: self.registry.memory,
+                    },
+                },
+                &[view],
+                &[Type::I32],
+            ));
+        }
         let offset = match property {
             "length" | "byteLength" => 4,
             "byteOffset" => 12,
@@ -223,6 +223,22 @@ impl FunctionLowerer<'_> {
         method: &str,
         arguments: &[Expr],
     ) -> Result<Value> {
+        if method == "set" {
+            ensure!(
+                !arguments.is_empty() && arguments.len() <= 2,
+                "Uint8Array.set requires a Uint8Array and optional numeric offset"
+            );
+            let view = self.byte_receiver(array)?;
+            let source = self.byte_receiver(&arguments[0])?;
+            let offset = self.byte_number(arguments.get(1), 0.0)?;
+            let validate = self.registry.byte_helpers.unwrap().validate;
+            self.call_completion(validate, &[view]);
+            self.call_completion(validate, &[source]);
+            return Ok(self.call_completion(
+                self.registry.byte_helpers.unwrap().copy_into,
+                &[view, source, offset],
+            ));
+        }
         ensure!(
             matches!(method, "subarray" | "slice"),
             "Unsupported Uint8Array method '{method}'"
@@ -235,6 +251,7 @@ impl FunctionLowerer<'_> {
         let start = self.byte_number(arguments.first(), 0.0)?;
         let end = self.byte_number(arguments.get(1), f64::INFINITY)?;
         let helpers = self.registry.byte_helpers.unwrap();
+        self.call_completion(helpers.validate, &[view]);
         let result = self.op(
             Operator::Call {
                 function_index: helpers.subarray,

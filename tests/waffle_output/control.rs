@@ -14,13 +14,13 @@ use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use super::instantiate;
 
 const WRITE: &str = r#"
-import {writeStdout, writeStderr} from "perry:stdio";
+import {Writable} from "node:stream";
 export async function run(): Promise<Result<number, number>> {
     const bytes = new Uint8Array([0,255,128,65,66,67,68]);
     try {
-        await writeStdout(bytes.subarray(1, 6));
+        await Writable.toWeb(process.stdout).getWriter().write(bytes.subarray(1, 6));
         return 7;
-    } finally { await writeStderr(new Uint8Array([91])); }
+    } finally { await Writable.toWeb(process.stderr).getWriter().write(new Uint8Array([91])); }
 }"#;
 
 #[tokio::test(flavor = "current_thread")]

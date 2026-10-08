@@ -78,8 +78,7 @@ pub(crate) struct Operations {
     pub(crate) notify: Func,
     pub(crate) cancel: Func,
     pub(crate) cancel_all: Func,
-    pub(crate) action: Func,
-    pub(crate) idle: Func,
+    pub(crate) wait_action: Func,
     pub(crate) finish: Func,
 }
 fn current_scope(b: &mut Builder) -> Value {
@@ -113,8 +112,7 @@ pub(crate) fn emit(
         notify: builder::declare(module, "operations.notify", &[I32; 3], &[]),
         cancel: builder::declare(module, "operations.cancel", &[I32], &[]),
         cancel_all: builder::declare(module, "operations.cancel-all", &[], &[]),
-        action: builder::declare(module, "operations.action", &[], &[I32]),
-        idle: builder::declare(module, "operations.idle", &[], &[I32]),
+        wait_action: builder::declare(module, "operations.wait-action", &[], &[I32]),
         finish: builder::declare(module, "operations.finish", &[], &[I32]),
     };
     for (function, offset) in [(r.cancelled, 8), (r.pending, 12)] {
@@ -517,20 +515,7 @@ pub(crate) fn emit(
     b.ret(&[]);
     b.finish(module, r.abort_signal)?;
 
-    let mut b = Builder::new(module, r.action, memory);
-    let scope = current_scope(&mut b);
-    let count = b.load(scope, 12, I32);
-    let set = b.load(scope, 4, I32);
-    let four = b.integer(4);
-    let wait = b.op(O::I32Shl, &[set, four], I32);
-    let two = b.integer(2);
-    let wait = b.op(O::I32Or, &[wait, two], I32);
-    let yield_ = b.integer(1);
-    let action = b.op(O::Select, &[wait, yield_, count], I32);
-    b.ret(&[action]);
-    b.finish(module, r.action)?;
-
-    let mut b = Builder::new(module, r.idle, memory);
+    let mut b = Builder::new(module, r.wait_action, memory);
     let scope = current_scope(&mut b);
     let set = b.load(scope, 4, I32);
     let four = b.integer(4);
@@ -538,7 +523,7 @@ pub(crate) fn emit(
     let two = b.integer(2);
     let wait = b.op(O::I32Or, &[wait, two], I32);
     b.ret(&[wait]);
-    b.finish(module, r.idle)?;
+    b.finish(module, r.wait_action)?;
 
     let mut b = Builder::new(module, r.finish, memory);
     let scope = current_scope(&mut b);

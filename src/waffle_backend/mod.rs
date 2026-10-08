@@ -6,6 +6,7 @@ pub(crate) mod allocation;
 pub(crate) mod audit;
 mod bytes;
 pub(crate) mod capabilities;
+mod constant_arguments;
 mod context;
 pub(crate) mod control_flow;
 mod date;
@@ -22,6 +23,7 @@ mod number;
 mod objects;
 pub(crate) mod promises;
 mod random;
+mod reachability;
 mod regex;
 pub(crate) mod registry;
 pub(crate) mod resolve;
@@ -34,6 +36,7 @@ mod structured;
 pub mod text_contract;
 mod text_or_bytes;
 mod time;
+mod type_compaction;
 mod values;
 mod visit;
 mod wit;
@@ -195,11 +198,21 @@ fn compile_resolved_hir(
     if let Some(exports) = native_handler.as_ref().or(contract.wit.as_ref()) {
         exports.bind_native_imports(&mut waffle_mod)?;
     }
+    reachability::retain_reachable(&mut waffle_mod)?;
+    constant_arguments::optimize(&mut waffle_mod, &[]);
+    reachability::retain_reachable(&mut waffle_mod)?;
+    for (_, function) in waffle_mod.funcs.entries_mut() {
+        if let waffle::FuncDecl::Body(_, _, body) = function {
+            body.validate()?;
+            body.verify_reducible()?;
+        }
+    }
     let waffle_ir = format!("{}", waffle_mod.display());
     let core = waffle_mod
         .to_wasm_bytes()
         .context("Emitting core Wasm bytes from WAFFLE")?;
     let core = link::link_helpers(core).context("Linking guest helpers into core Wasm")?;
+    let core = type_compaction::compact(&core).context("Interning core function signatures")?;
 
     let (component_wat, component) = if options.componentize {
         let (wat, bytes) = native_handler

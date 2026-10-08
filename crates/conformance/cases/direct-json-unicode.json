@@ -1,0 +1,15 @@
+{
+  "expression": {
+    "JsonLength": {
+      "Concat": [
+        {
+          "Literal": "é\u0000"
+        },
+        {
+          "Literal": "漢"
+        }
+      ]
+    }
+  },
+  "form": "Direct"
+}

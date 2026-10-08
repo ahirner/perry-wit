@@ -5,6 +5,8 @@
   (import "heap" "index" (func $index))
   ;; Memory[36,40,44] holds block head, block tail, and active root-frame head.
   ;; Memory[72] holds the retained root-frame head across component invocations.
+  ;; Memory[144] records allocation since the last collection. Allocation-free
+  ;; source loops cannot increase garbage and only need to poll this word.
   ;; Block headers: next, span, payload offset, payload size, kind, mark, reserved.
   ;; The word immediately before every payload points back to its block header.
   ;; Kinds: 0 bytes, 1 string, 2 string array, 3 scalar Promise, 4 reference Promise,
@@ -24,6 +26,7 @@
     (if (i32.or (i32.eqz (local.get $alignment))
       (i32.ne (i32.and (local.get $alignment) (i32.sub (local.get $alignment) (i32.const 1))) (i32.const 0))) (then unreachable))
     (if (i32.eqz (local.get $size)) (then (return (i32.const 0))))
+    (i32.store (i32.const 144) (i32.const 1))
     (if (i32.eqz (i32.load (i32.const 0))) (then
       (i32.store (i32.const 36) (i32.const 0))
       (i32.store (i32.const 40) (i32.const 0))
@@ -171,9 +174,13 @@
       (then (call $collect))
       (else (i32.store (i32.const 0) (i32.const 0)))))
 
+  (func (export "collect-if-allocated")
+    (if (i32.load (i32.const 144)) (then (call $collect))))
+
   (func $collect (export "collect")
     (local $block i32) (local $next i32) (local $previous i32) (local $pointer i32)
-    (local $kind i32) (local $changed i32) (local $index i32) (local $count i32)
+    (local $kind i32) (local $changed i32) (local $index i32) (local $count i32) (local $entry i32)
+    (i32.store (i32.const 144) (i32.const 0))
     (call $index)
     ;; Completed native transports no longer need the invocation's pending root.
     (local.set $pointer (i32.load (i32.const 4)))
@@ -219,9 +226,19 @@
               (then (call $mark (i32.trunc_f64_u (f64.load offset=8 (local.get $pointer))))))))
           (if (i32.eq (local.get $kind) (i32.const 5)) (then (call $mark (i32.load offset=4 (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 7)) (then (call $mark (i32.load offset=8 (local.get $pointer)))))
+          (if (i32.eq (local.get $kind) (i32.const 20)) (then (call $mark (i32.load (local.get $pointer)))))
           (if (i32.eq (local.get $kind) (i32.const 8)) (then
             (if (i32.load offset=16 (local.get $pointer)) (then (call $mark (i32.load offset=12 (local.get $pointer)))))))
-          (if (i32.eq (local.get $kind) (i32.const 9)) (then (call $mark (i32.load (local.get $pointer)))))
+          (if (i32.eq (local.get $kind) (i32.const 9)) (then
+            (local.set $entry (i32.load (local.get $pointer)))
+            (block $properties_done (loop $properties
+              (br_if $properties_done (i32.eqz (local.get $entry)))
+              (call $mark (local.get $entry))
+              (call $mark (i32.load offset=4 (local.get $entry)))
+              (if (i32.ge_u (i32.load offset=8 (local.get $entry)) (i32.const 4))
+                (then (call $mark (i32.trunc_f64_u (f64.load offset=16 (local.get $entry))))))
+              (local.set $entry (i32.load (local.get $entry)))
+              (br $properties)))))
           (if (i32.eq (local.get $kind) (i32.const 10)) (then
             (call $mark (i32.load (local.get $pointer)))
             (call $mark (i32.load offset=4 (local.get $pointer)))
@@ -304,8 +321,17 @@
     (local.set $block (i32.load (i32.const 36)))
     (block $swept (loop $sweep
       (br_if $swept (i32.eqz (local.get $block)))
-      (if (i32.eqz (i32.load offset=20 (local.get $block)))
-        (then (i32.store offset=16 (local.get $block) (i32.const -1))))
+      (if (i32.eqz (i32.load offset=20 (local.get $block))) (then
+        ;; Buffer view links are weak. Unlink a dead view before reusing its storage.
+        (if (i32.eq (i32.load offset=16 (local.get $block)) (i32.const 7)) (then
+          (local.set $pointer (i32.add (local.get $block) (i32.load offset=8 (local.get $block))))
+          (local.set $next (i32.load offset=16 (local.get $pointer)))
+          (local.set $previous (i32.load offset=20 (local.get $pointer)))
+          (if (local.get $previous)
+            (then (i32.store offset=16 (local.get $previous) (local.get $next)))
+            (else (i32.store offset=12 (i32.load offset=8 (local.get $pointer)) (local.get $next))))
+          (if (local.get $next) (then (i32.store offset=20 (local.get $next) (local.get $previous))))))
+        (i32.store offset=16 (local.get $block) (i32.const -1))))
       (i32.store offset=20 (local.get $block) (i32.const 0))
       (local.set $block (i32.load (local.get $block)))
       (br $sweep)))

@@ -36,6 +36,25 @@ async fn byte_views_preserve_aliases_copies_and_lengths() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn backing_buffers_preserve_identity_and_reclaim_dead_aliases() -> Result<()> {
+    let source = r#"export function run(): number {
+        const bytes = new Uint8Array([3, 7, 11]);
+        const buffer = bytes.buffer;
+        const alias = new Uint8Array(buffer);
+        if (alias.buffer !== buffer || buffer.byteLength !== 3) return -1;
+        for (let index = 0; index < 10000; index++) {
+            const view = alias.subarray(1, 2);
+            if (view.buffer !== buffer || view.byteOffset !== 1 || view.byteLength !== 1) return -2;
+            view[0] = index;
+        }
+        if (new Uint8Array(bytes).buffer === buffer) return -3;
+        return bytes[1];
+    }"#;
+    assert_eq!(run(source, &[]).await?, vec![15.0; 3]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn byte_conversions_and_out_of_bounds_access_are_explicit() -> Result<()> {
     let source = r#"
     export function run(value: number): number {
@@ -95,6 +114,41 @@ async fn retained_subviews_keep_backing_bytes_alive_during_collection() -> Resul
         return live[0];
     }"#;
     assert_eq!(run(source, &[]).await?, vec![7.0; 3]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn allocation_free_byte_loops_have_a_bounded_instruction_cost() -> Result<()> {
+    let compiled = compile_typescript_waffle(
+        r#"export function run(): number {
+            let total = 0;
+            for (let round = 0; round < 4; round++) {
+                const bytes = new Uint8Array([7]);
+                for (let index = 0; index < 20000; index++) total += bytes[0];
+            }
+            return total;
+        }"#,
+        "byte-loop-cost.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65536).build(),
+    );
+    store.limiter(|limits| limits);
+    store.set_fuel(10_000_000)?;
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..3 {
+        store.set_fuel(10_000_000)?;
+        assert_eq!(run.call_async(&mut store, ()).await?.0, 560000.0);
+    }
     Ok(())
 }
 
@@ -346,4 +400,47 @@ async fn run(source: &str, inputs: &[f64]) -> Result<Vec<f64>> {
     );
     assert_eq!(results, serde_json::from_slice::<Vec<f64>>(&node.stdout)?);
     Ok(results)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn typed_array_set_preserves_overlap_ranges_offsets_and_failure_atomicity() -> Result<()> {
+    let source = r#"
+    export function run(offset:number):number {
+      const bytes=new Uint8Array([1,2,3,4,5]);
+      bytes.set(bytes.subarray(0,4),1);
+      if(bytes[0]!==1||bytes[1]!==1||bytes[2]!==2||bytes[3]!==3||bytes[4]!==4)throw 1;
+      bytes.set(bytes.subarray(1),0);
+      if(bytes[0]!==1||bytes[1]!==2||bytes[2]!==3||bytes[3]!==4||bytes[4]!==4)throw 2;
+      const target=bytes.subarray(1,4);
+      try {target.set(new Uint8Array([7,8]),offset);}
+      catch {return bytes[0]*10000+bytes[1]*1000+bytes[2]*100+bytes[3]*10+bytes[4];}
+      return bytes[0]*10000+bytes[1]*1000+bytes[2]*100+bytes[3]*10+bytes[4];
+    }"#;
+    let inputs = [
+        f64::NAN,
+        -0.9,
+        1.9,
+        2.,
+        -1.,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        1e20,
+    ];
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("set.mts");
+    fs::write(
+        &script,
+        format!(
+            "{source}\nconsole.log(JSON.stringify([NaN,-0.9,1.9,2,-1,Infinity,-Infinity,1e20].map(run)));"
+        ),
+    )?;
+    let node = Command::new("node").arg(script).output()?;
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: Vec<f64> = serde_json::from_slice(&node.stdout)?;
+    assert_eq!(run(source, &inputs).await?, expected);
+    Ok(())
 }

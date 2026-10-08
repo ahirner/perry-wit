@@ -58,7 +58,8 @@ jobs:
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - run: nix develop -c node scripts/check_conformance.mjs
+    - run: nix develop -c cargo test --workspace
+    - run: nix develop -c cargo run -p perry-conformance -- check
     - run: nix develop -c cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   build-artifacts:
@@ -100,7 +101,7 @@ jobs:
     - run: nix build -L .#core-helpers --out-link result-helpers
     - run: |
         mkdir -p dist
-        tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib include
+        tar -czf dist/perry-wit-core-helpers.tar.gz -C result-helpers lib
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'
       with:

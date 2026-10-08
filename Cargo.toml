@@ -9,6 +9,7 @@ members = [
     ".",
     "crates/json-helper",
     "crates/time-helper",
+    "crates/conformance",
 ]
 
 [profile.dev.package.perry-hir]

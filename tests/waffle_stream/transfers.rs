@@ -11,18 +11,16 @@ use super::{ControlledProducer, Observations, check_typescript, instantiate};
 #[tokio::test(flavor = "current_thread")]
 async fn reads_fill_only_the_visible_destination_prefix() -> Result<()> {
     let source = r#"
-    declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-    async function fill(input: ByteStream, view: Uint8Array): Promise<number> {
-        return await readInto(input, view);
+    export async function run(input: ReadableStream<Uint8Array>, bytes: Uint8Array): Promise<Result<Uint8Array, number>> {
+        const reader=input.getReader();const result=await reader.read();
+        const chunk=result.value;let count=0;
+        if(chunk!==undefined) {
+            const view=bytes.subarray(2,6);count=(view.length<chunk.length ? view.length : chunk.length);
+            for(let index=0;index<count;index++) {view[index]=chunk[index];}
+        }
+        await reader.cancel();reader.releaseLock();bytes[0]=count;return bytes;
     }
-    export async function run(input: ByteStream, bytes: Uint8Array): Promise<Result<Uint8Array, number>> {
-        const empty = bytes.subarray(bytes.length);
-        if (await fill(input, empty) !== 0) { throw 1; }
-        const view = bytes.subarray(2, 6);
-        const count = await fill(input, view);
-        bytes[0] = count;
-        return bytes;
-    }"#;
+    "#;
     let (mut store, instance) = instantiate(source).await?;
     let run = instance
         .get_typed_func::<(StreamReader<u8>, Vec<u8>), (std::result::Result<Vec<u8>, f64>,)>(
@@ -49,27 +47,21 @@ async fn reads_fill_only_the_visible_destination_prefix() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn partial_reads_retain_subviews_across_suspension_and_collection() -> Result<()> {
     let source = r#"
-    declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-    function destination(): Uint8Array {
-        return new Uint8Array([9, 91, 91, 91, 91, 91, 7]).subarray(1, 6);
-    }
-    export async function run(input: ByteStream): Promise<Uint8Array> {
-        const saved = destination();
-        if (await readInto(input, saved.subarray(0, 0)) !== 0) { throw 1; }
-        let total = 0;
-        let count = await readInto(input, saved);
-        while (count > 0) {
-            total = total + count;
-            let i = 0;
-            while (i < 2000) {
-                const scratch = new Uint8Array(33);
-                scratch[0] = i;
-                i = i + 1;
-            }
-            count = await readInto(input, saved.subarray(total));
+    function destination():Uint8Array {return new Uint8Array([9,91,91,91,91,91,7]).subarray(1,6);}
+    export async function run(input:ReadableStream<Uint8Array>):Promise<Uint8Array> {
+        const saved=destination();const reader=input.getReader();let total=0;
+        let result=await reader.read();
+        while(!result.done) {
+            const bytes=result.value;if(bytes===undefined)throw 1;
+            const view=saved.subarray(total);
+            for(let index=0;index<bytes.length;index++) {view[index]=bytes[index];}
+            total+=bytes.length;
+            for(let i=0;i<2000;i++) {const scratch=new Uint8Array(33);scratch[0]=i;}
+            result=await reader.read();
         }
-        return saved;
-    }"#;
+        reader.releaseLock();return saved;
+    }
+    "#;
     let (mut store, instance) = instantiate(source).await?;
     let run = instance.get_typed_func::<(StreamReader<u8>,), (Vec<u8>,)>(&mut store, "run")?;
     for _ in 0..3 {
@@ -93,7 +85,7 @@ async fn partial_reads_retain_subviews_across_suspension_and_collection() -> Res
                 .is_err()
         );
         assert_eq!(observations.bytes.load(Ordering::SeqCst), 0);
-        assert_eq!(observations.max_request.load(Ordering::SeqCst), 5);
+        assert_eq!(observations.max_request.load(Ordering::SeqCst), 8192);
         let feed = async move {
             for bytes in [vec![], vec![0, 255], vec![], vec![17], vec![]] {
                 sender.send(Ok(bytes)).await.unwrap();
@@ -114,38 +106,25 @@ async fn partial_reads_retain_subviews_across_suspension_and_collection() -> Res
 #[tokio::test(flavor = "current_thread")]
 async fn shared_transfers_reuse_bounded_storage_and_mix_with_chunk_reads() -> Result<()> {
     let source = r#"
-    declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-    declare function readChunk(input: ByteStream): Promise<number>;
-    declare function byteAt(index: number): number;
-    export async function run(input: ByteStream): Promise<number> {
-        const bytes = new Uint8Array(263);
-        bytes[0] = 23;
-        bytes[262] = 99;
-        const view = bytes.subarray(3, 260);
-        let total = 0;
-        let count = await readChunk(input);
-        let index = 0;
-        while (index < count) {
-            total = total + byteAt(index);
-            index = index + 1;
-        }
-        count = await readInto(input, view);
-        while (count > 0) {
-            const scratch = new Uint8Array(128);
-            scratch[0] = count;
-            let index = 0;
-            while (index < count) {
-                total = total + view[index];
-                index = index + 1;
+    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+        const bytes=new Uint8Array(263);bytes[0]=23;bytes[262]=99;
+        const view=bytes.subarray(3,260);const reader=input.getReader();let total=0;
+        let result=await reader.read();
+        while(!result.done) {
+            const chunk=result.value;if(chunk===undefined)throw 1;
+            for(let offset=0;offset<chunk.length;offset+=view.length) {
+                const count=(view.length<chunk.length-offset ? view.length : chunk.length-offset);
+                for(let index=0;index<count;index++) {view[index]=chunk[offset+index];}
+                const scratch=new Uint8Array(128);scratch[0]=count;
+                for(let index=0;index<count;index++) {total+=view[index];}
             }
-            count = await readInto(input, view);
+            result=await reader.read();
         }
-        if (bytes[0] !== 23) { return -1; }
-        if (bytes[262] !== 99) { return -1; }
-        if (await readChunk(input) !== 0) { return -2; }
-        if (await readInto(input, view) !== 0) { return -2; }
-        return total;
-    }"#;
+        if(bytes[0]!==23 || bytes[262]!==99)return -1;
+        const eof=await reader.read();if(!eof.done)return -2;
+        reader.releaseLock();return total;
+    }
+    "#;
     check_typescript(source)?;
     let (mut store, instance) = instantiate(source).await?;
     let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
@@ -162,23 +141,19 @@ async fn shared_transfers_reuse_bounded_storage_and_mix_with_chunk_reads() -> Re
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn read_into_invalidates_the_previous_chunk() -> Result<()> {
-    for capacity in [0, 1] {
-        let source = format!(
-            r#"
-        declare function readChunk(input: ByteStream): Promise<number>;
-        declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-        declare function byteAt(index: number): number;
-        export async function run(input: ByteStream): Promise<number> {{
-            const length = await readChunk(input);
-            const count = await readInto(input, new Uint8Array({capacity}));
-            return byteAt(0);
-        }}"#
-        );
-        let (mut store, instance) = instantiate(&source).await?;
-        let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+async fn retained_chunks_survive_subsequent_reads() -> Result<()> {
+    let source = r#"export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+        const reader=input.getReader();const first=await reader.read();
+        const bytes=first.value;if(bytes===undefined)throw 1;
+        await reader.read();await reader.cancel();reader.releaseLock();
+        return bytes[0];
+    }"#;
+    let (mut store, instance) = instantiate(source).await?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    for _ in 0..3 {
         let input = StreamReader::new(&mut store, vec![7u8; 8193])?;
-        assert!(run.call_async(&mut store, (input,)).await.is_err());
+        assert_eq!(run.call_async(&mut store, (input,)).await?.0, 7.0);
+        store.assert_concurrent_state_empty();
     }
     Ok(())
 }
@@ -186,24 +161,22 @@ async fn read_into_invalidates_the_previous_chunk() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn returned_views_and_errors_survive_finally_transfers_before_cleanup() -> Result<()> {
     let source = r#"
-    declare function readInto(input: ByteStream, destination: Uint8Array): Promise<number>;
-    export async function run(fail: boolean, input: ByteStream): Promise<Result<Uint8Array, number>> {
-        const bytes = new Uint8Array(2);
+    export async function run(fail:boolean,input:ReadableStream<Uint8Array>):Promise<Result<Uint8Array,number>> {
+        const bytes=new Uint8Array(2);const reader=input.getReader();
         try {
-            const count = await readInto(input, bytes);
-            if (fail) { throw 91; }
-            return bytes.subarray(0, count);
+            const first=await reader.read();const chunk=first.value;if(chunk===undefined)throw 1;
+            for(let i=0;i<chunk.length;i++) {bytes[i]=chunk[i];}
+            if(fail)throw 91;
+            return bytes.subarray(0,chunk.length);
         } finally {
-            let index = 0;
-            while (index < 2000) {
-                const scratch = new Uint8Array(64);
-                scratch[0] = index;
-                index = index + 1;
-            }
-            const count = await readInto(input, bytes);
-            if (fail) { throw count + bytes[0]; }
+            for(let index=0;index<2000;index++) {const scratch=new Uint8Array(64);scratch[0]=index;}
+            const second=await reader.read();const chunk=second.value;if(chunk===undefined)throw 1;
+            for(let i=0;i<chunk.length;i++) {bytes[i]=chunk[i];}
+            await reader.cancel();reader.releaseLock();
+            if(fail)throw chunk.length+bytes[0];
         }
-    }"#;
+    }
+    "#;
     let (mut store, instance) = instantiate(source).await?;
     let run = instance
         .get_typed_func::<(bool, StreamReader<u8>), (std::result::Result<Vec<u8>, f64>,)>(

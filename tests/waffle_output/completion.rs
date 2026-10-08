@@ -17,9 +17,9 @@ use wasmtime_wasi::p3::bindings::cli::types::ErrorCode;
 #[tokio::test(flavor = "current_thread")]
 async fn successful_transfer_still_awaits_the_separate_capability_outcome() -> Result<()> {
     let source = r#"
-    import {writeStdout} from "perry:stdio";
+    import {Writable} from "node:stream";
     export async function run(): Promise<number> {
-        try { await writeStdout(new Uint8Array([0,128,255])); return 0; }
+        try { await Writable.toWeb(process.stdout).getWriter().write(new Uint8Array([0,128,255])); return 0; }
         catch (error) { return error; }
     }"#;
     let compiled =
@@ -27,6 +27,8 @@ async fn successful_transfer_still_awaits_the_separate_capability_outcome() -> R
     let mut config = Config::new();
     config.wasm_component_model_async(true);
     config.wasm_component_model_more_async_builtins(true);
+    config.wasm_component_model_threading(true);
+    config.wasm_component_model_async_stackful(true);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, compiled.component.unwrap())?;
     let mut linker = Linker::new(&engine);

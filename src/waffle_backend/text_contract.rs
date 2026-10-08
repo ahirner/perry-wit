@@ -24,7 +24,7 @@ use perry_hir::ir::{Expr, Module as HirModule};
 pub enum IndexUnit {
     /// Unicode scalar values (U+0000..U+D7FF, U+E000..U+10FFFF).
     ScalarValue,
-    /// UTF-16 code units (legacy ECMAScript). Disallowed in Perry-WIT.
+    /// UTF-16 code units. Disallowed in Perry-WIT.
     Utf16CodeUnit,
     /// Byte offsets/lengths, used at Canonical ABI and binary boundaries.
     Byte,

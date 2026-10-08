@@ -143,7 +143,10 @@ Asynchronous TypeScript functions execute eagerly until they reach an initial su
 ### Execution
 Completed tasks store their settlement state and outcome value for repeated observation.
 
-Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue. Awaits on already-settled promises yield immediately through native wakeups without allocating observer nodes.
+Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue.
+Awaits on already-settled promises advance inline when uncontended, yielding to the host only when competing work can make progress.
+This avoids thousands of redundant host context switches for already-resolved promises, which are
+prone to escalate into costly OS-level event polling in common runtimes.
 
 ### Settlement
 Guest task records maintain explicit settlement states, observer lists, and outcome values in the guest heap. Combinator operations (`all`, `allSettled`, `race`) register as observers on operand tasks and propagate settlements deterministically when dependencies resolve.

@@ -104,6 +104,7 @@ fn run() -> Result<()> {
     let ts_file = Path::new(&ts_file_path);
     println!("Compiling {}...", ts_file.display());
     let compiled = compile_file(ts_file, &options)?;
+    perry_wit::sdk::write_runtime_declarations(Path::new(".perry/types"))?;
 
     if let Some(parent) = Path::new(&out_file_path).parent() {
         fs::create_dir_all(parent)?;

@@ -18,27 +18,40 @@ use waffle::{
     Value,
 };
 
+pub(super) mod byob;
 mod read;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Readable,
     Reader,
+    ByobReader,
+    Writable,
+    Writer,
 }
 impl Kind {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Readable => "__perry_readable_bytes",
             Self::Reader => "__perry_byte_reader",
+            Self::ByobReader => "__perry_byob_reader",
+            Self::Writable => "__perry_writable_bytes",
+            Self::Writer => "__perry_byte_writer",
         }
     }
     pub(crate) fn ty(self) -> HirType {
         HirType::Named(self.name().into())
     }
     pub(crate) fn of(ty: &HirType) -> Option<Self> {
-        [Self::Readable, Self::Reader]
-            .into_iter()
-            .find(|kind| kind.ty() == *ty)
+        [
+            Self::Readable,
+            Self::Reader,
+            Self::ByobReader,
+            Self::Writable,
+            Self::Writer,
+        ]
+        .into_iter()
+        .find(|kind| kind.ty() == *ty)
     }
 }
 pub(crate) fn body_type() -> HirType {
@@ -72,20 +85,25 @@ pub(crate) fn read_type() -> HirType {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Method {
     Read,
+    ReadInto,
     Cancel,
+    Write,
+    Close,
 }
 impl Method {
     pub(crate) fn named(name: &str) -> Option<Self> {
         match name {
             "read" => Some(Self::Read),
             "cancel" => Some(Self::Cancel),
+            "write" => Some(Self::Write),
+            "close" => Some(Self::Close),
             _ => None,
         }
     }
     pub(crate) fn result(self) -> HirType {
         match self {
-            Self::Read => read_type(),
-            Self::Cancel => HirType::Void,
+            Self::Read | Self::ReadInto => read_type(),
+            Self::Cancel | Self::Write | Self::Close => HirType::Void,
         }
     }
 }
@@ -102,14 +120,20 @@ pub(crate) const PENDING_CHUNK: u32 = 32;
 const SIZE: u32 = 36;
 const CLOSED: u32 = 1;
 const ERRORED: u32 = 2;
-const CANCELLING: u32 = 3;
+pub(super) const CANCELLING: u32 = 3;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Helpers {
     pub(crate) body: Func,
+    pub(crate) input: Func,
+    pub(crate) writable: Func,
+    pub(crate) write: Func,
+    pub(crate) close: Func,
+    pub(crate) dispose: Func,
     pub(crate) reader: Func,
     pub(crate) release: Func,
     pub(crate) read: Func,
+    pub(crate) read_into: Func,
     pub(crate) cancel: Func,
     pub(crate) pull: Func,
 }
@@ -117,7 +141,10 @@ impl Helpers {
     pub(crate) fn method(self, method: Method) -> Func {
         match method {
             Method::Read => self.read,
+            Method::ReadInto => self.read_into,
             Method::Cancel => self.cancel,
+            Method::Write => self.write,
+            Method::Close => self.close,
         }
     }
 }
@@ -127,19 +154,57 @@ pub(crate) struct NativeBody {
     pub(crate) release: Func,
     pub(crate) operations: Operations,
 }
+pub(crate) enum ReaderModes {
+    Default,
+    Byob,
+    Both,
+}
+impl ReaderModes {
+    pub(crate) fn for_plan(plan: Option<&crate::waffle_backend::promises::PromisePlan>) -> Self {
+        use crate::waffle_backend::promises::TaskTarget;
+        let Some(plan) = plan else {
+            return Self::Default;
+        };
+        if !plan
+            .tasks
+            .contains_key(&TaskTarget::WebStream(Method::ReadInto))
+        {
+            return Self::Default;
+        }
+        if plan.tasks.keys().any(|target| {
+            matches!(
+                target,
+                TaskTarget::HttpBody(_) | TaskTarget::WebStream(Method::Read)
+            )
+        }) {
+            Self::Both
+        } else {
+            Self::Byob
+        }
+    }
+    pub(crate) fn has_default(&self) -> bool {
+        !matches!(self, Self::Byob)
+    }
+    pub(crate) fn has_byob(&self) -> bool {
+        !matches!(self, Self::Default)
+    }
+}
 pub(crate) struct Runtime<'a> {
+    pub(crate) readers: ReaderModes,
     pub(crate) allocator: AllocationFuncs,
     pub(crate) bytes: ByteHelpers,
     pub(crate) objects: ObjectHelpers,
     pub(crate) promises: Option<&'a PromiseImports>,
     pub(crate) pool: &'a StringPool,
     pub(crate) native: Option<NativeBody>,
+    pub(crate) input: Option<super::incoming::Runtime>,
+    pub(crate) output: Option<[Option<Func>; 2]>,
 }
 fn pointer(b: &mut Builder, base: Value, offset: u32) -> Value {
     let offset = b.integer(offset);
     b.op(O::I32Add, &[base, offset], I32)
 }
-fn reject(b: &mut Builder, condition: Value, code: u32) {
+pub(super) fn reject(b: &mut Builder, condition: Value, code: u32) {
     let bad = b.body.add_block();
     let next = b.body.add_block();
     b.branch(condition, bad, next);
@@ -149,7 +214,12 @@ fn reject(b: &mut Builder, condition: Value, code: u32) {
     b.ret(&[one, error]);
     b.block = next;
 }
-fn tagged_allocation(b: &mut Builder, a: AllocationFuncs, size: u32, kind: u32) -> Value {
+pub(super) fn tagged_allocation(
+    b: &mut Builder,
+    a: AllocationFuncs,
+    size: u32,
+    kind: u32,
+) -> Value {
     let value = b.allocate(a.realloc, size, 4);
     let zero = b.integer(0);
     let size = b.integer(size);
@@ -172,7 +242,11 @@ fn used_address(b: &mut Builder, stream: Value) -> Value {
     let request = b.integer(crate::waffle_backend::http::request::BODY_USED);
     let response = b.integer(20);
     let offset = b.op(O::Select, &[response, request, kind], I32);
-    b.op(O::I32Add, &[body, offset], I32)
+    let address = b.op(O::I32Add, &[body, offset], I32);
+    let input_kind = b.integer(super::incoming::KIND);
+    let input = b.op(O::I32Eq, &[kind, input_kind], I32);
+    let used = pointer(b, stream, super::incoming::USED);
+    b.op(O::Select, &[used, address, input], I32)
 }
 fn is_native(b: &mut Builder, stream: Value) -> Value {
     let kind = b.load(stream, BODY_KIND, I32);
@@ -197,22 +271,32 @@ pub(crate) fn emit(
     r: &Runtime<'_>,
 ) -> Result<Helpers> {
     let h = Helpers {
+        writable: builder::declare(module, "web.writable", &[F64], &[I32]),
+        write: builder::declare(module, "web.write", &[I32; 3], &[I32, F64]),
+        close: builder::declare(module, "web.close", &[I32; 3], &[I32, F64]),
+        input: builder::declare(module, "web.input", &[I32], &[I32]),
+        dispose: builder::declare(module, "web.dispose-input", &[I32], &[]),
         body: builder::declare(module, "web.body", &[I32; 2], &[I32]),
         reader: builder::declare(module, "web.get-reader", &[I32], &[I32, F64]),
         release: builder::declare(module, "web.release-reader", &[I32], &[I32, F64]),
         read: builder::declare(module, "web.read", &[I32; 3], &[I32, F64]),
+        read_into: builder::declare(module, "web.read-into", &[I32, I32, F64, I32], &[I32, F64]),
         cancel: builder::declare(module, "web.cancel", &[I32; 3], &[I32, F64]),
-        pull: builder::declare(module, "web.pull", &[I32], &[I32; 3]),
+        pull: builder::declare(module, "web.pull", &[I32; 2], &[I32; 3]),
     };
     let finish = builder::declare(module, "web.finish", &[I32], &[I32]);
     let result = builder::declare(module, "web.read-result", &[I32; 2], &[I32]);
     emit_body(module, memory, r, h.body)?;
     emit_reader(module, memory, r, h)?;
     read::emit_finish(module, memory, r, finish)?;
-    read::emit_pull(module, memory, r, h.pull, finish)?;
+    let input_pull = super::incoming::emit(module, memory, r, h, finish)?;
+    read::emit_pull(module, memory, r, h.pull, finish, input_pull)?;
     read::emit_result(module, memory, r, result)?;
-    read::emit_read(module, memory, r, h.read, h.pull, result)?;
+    let byob_pull = byob::emit(module, memory, h.pull, finish)?;
+    read::emit_read(module, memory, r, h.read, h.pull, result, false)?;
+    read::emit_read(module, memory, r, h.read_into, byob_pull, result, true)?;
     read::emit_cancel(module, memory, r, h.cancel, finish)?;
+    super::writable::emit(module, memory, r, h)?;
     Ok(h)
 }
 fn emit_body(module: &mut Module<'static>, memory: Memory, r: &Runtime<'_>, f: Func) -> Result<()> {

@@ -1,0 +1,21 @@
+{
+  "expression": {
+    "ByteGet": [
+      {
+        "Mark": "Input"
+      },
+      {
+        "Mark": {
+          "Integer": 1
+        }
+      },
+      {
+        "Mark": {
+          "Integer": 2
+        }
+      },
+      0
+    ]
+  },
+  "form": "Direct"
+}
