@@ -32,16 +32,7 @@ fn disposable_sdk_checks_the_entry_without_rewriting_authored_configuration() {
     fs::write(root.join("tsconfig.json"), config).unwrap();
     fs::write(root.join("src/unrelated.ts"), "export {};\n").unwrap();
     for valid in [true, false] {
-        for obsolete in ["p3.d.ts", "http-handler.d.ts"] {
-            fs::write(
-                options.out_dir.join(obsolete),
-                "declare const stale: never;",
-            )
-            .unwrap();
-        }
         generate_sdk_files(&options).unwrap();
-        assert!(!options.out_dir.join("p3.d.ts").exists());
-        assert!(!options.out_dir.join("http-handler.d.ts").exists());
         assert_eq!(
             fs::read_to_string(root.join("tsconfig.json")).unwrap(),
             config

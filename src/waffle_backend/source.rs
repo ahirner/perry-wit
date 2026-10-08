@@ -110,6 +110,7 @@ pub(crate) fn resolve_bindings(
                 && !names.0.contains(super::http::headers::HEADERS_TYPE)
                 && !names.0.contains(super::http::request::REQUEST_TYPE)
                 && !names.0.contains(super::objects::INFERRED_RECORD_TYPE)
+                && !names.0.contains(super::ssa::types::SCALAR_ITERATION)
                 && !names.0.contains(super::streams::web::Kind::Readable.name())
                 && !names.0.contains(super::streams::web::Kind::Reader.name())
                 && !names

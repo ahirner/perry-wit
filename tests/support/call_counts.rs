@@ -36,7 +36,7 @@ pub struct Counts {
     pub promises: u64,
     pub collections: u64,
     pub heap_bumps: u64,
-    pub boxed_values: Option<u64>,
+    pub boxed_values: u64,
     pub functions: BTreeMap<String, u64>,
 }
 
@@ -167,9 +167,7 @@ impl Counters {
         };
         Counts {
             host_polls,
-            stream_reads: count(&|name| {
-                name.contains("[stream-read-") || name == "http#read" || name == "streams#read"
-            }),
+            stream_reads: count(&|name| name == "streams#read" || name.contains("[stream-read-")),
             worker_starts: count(&|name| name.contains("[thread-new")),
             callbacks: count(&|name| name.starts_with("[callback]")),
             allocations: count(&|name| name == "allocate"),
@@ -178,11 +176,7 @@ impl Counters {
             promises: count(&|name| name == "tasks.new"),
             collections: count(&|name| name == "collect"),
             heap_bumps: count(&|name| name == "heap.bump"),
-            boxed_values: self
-                .names
-                .iter()
-                .any(|name| name == "value.new")
-                .then(|| count(&|name| name == "value.new")),
+            boxed_values: count(&|name| name == "value.new"),
             functions: self
                 .names
                 .iter()

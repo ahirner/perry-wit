@@ -108,14 +108,6 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         None
     };
 
-    for obsolete in ["p3.d.ts", "http-handler.d.ts"] {
-        match fs::remove_file(options.out_dir.join(obsolete)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-
     let mut check_config = serde_json::json!({
         "compilerOptions": {"target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"], "module": "ESNext", "moduleDetection": "force", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false, "types": []},
         "files": ["implementation-check.ts"],

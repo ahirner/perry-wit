@@ -49,7 +49,7 @@ fn compile(source: &str, wit: &str) -> Result<WaffleCompiled> {
     let main = wit_parser::UnresolvedPackageGroup::parse("native.wit", wit)
         .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
     let mut paths = std::fs::read_dir(PathBuf::from(
-        std::env::var("WASI_P3_WIT_PATH").context("Run native WIT tests through nix develop")?,
+        std::env::var("WASI_WIT_PATH").context("Run native WIT tests through nix develop")?,
     ))?
     .map(|entry| Ok(entry?.path()))
     .collect::<Result<Vec<_>>>()?;
@@ -2513,7 +2513,7 @@ async fn standard_fetch_rejects_unconsumed_body_at_call_boundary() -> Result<()>
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> {
+async fn merge_docs_example_matches_node_and_reuses_the_instance() -> Result<()> {
     let server = fixture::HttpFixture::new(|request| {
         fixture::Reply::Body(
             200,
@@ -2527,51 +2527,44 @@ async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> 
     });
     let source = include_str!("../examples/merge_docs.ts")
         .replace("127.0.0.1:8080", &server.address.to_string());
-    let compiled = compile(
-        &source,
-        r#"package test:fetch-command; world boundary {
-        include wasi:cli/imports@0.3.0;
-        import wasi:http/client@0.3.0;
-        export wasi:cli/run@0.3.0;
-    }"#,
+    let directory = tempfile::tempdir()?;
+    let file = directory.path().join("merge_docs.ts");
+    std::fs::write(&file, &source)?;
+    let compiled = perry_wit::compile_file(
+        &file,
+        &perry_wit::CompileOptions {
+            wit_dir: "wit".into(),
+            world: Some("merge-docs".into()),
+            core_only: false,
+        },
     )?;
     let engine = engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let component = Component::new(&engine, compiled.stripped.context("example component")?)?;
     let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     let mut store = store(&engine);
-    let captured = output_capture::MemoryOutput::new(1024);
-    store.data_mut().wasi = wasmtime_wasi::WasiCtxBuilder::new()
-        .stdout(captured.clone())
-        .build();
     let instance = linker.instantiate_async(&mut store, &component).await?;
-    let interface = instance
-        .get_export_index(&mut store, None, "wasi:cli/run@0.3.0")
-        .context("CLI interface")?;
-    let export = instance
-        .get_export_index(&mut store, Some(&interface), "run")
-        .context("CLI run")?;
-    let run = instance.get_typed_func::<(), (std::result::Result<(), ()>,)>(&mut store, export)?;
-    assert_eq!(run.call_async(&mut store, ()).await?.0, Ok(()));
-    assert_eq!(
-        captured.contents().as_ref(),
-        b"{\"first\":1,\"shared\":\"new\",\"second\":2}\n"
-    );
-    store.assert_concurrent_state_empty();
-    let directory = tempfile::tempdir()?;
-    let file = directory.path().join("main.ts");
-    std::fs::write(&file, source)?;
-    let output = std::process::Command::new("node").arg(file).output()?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "merge-docs")?;
+    let expected = r#"{"first":1,"shared":"new","second":2}"#;
+    for _ in 0..5 {
+        assert_eq!(run.call_async(&mut store, ()).await?.0, expected);
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    let output = std::process::Command::new("node")
+        .current_dir(directory.path())
+        .args([
+            "--input-type=module",
+            "-e",
+            "import {mergeDocs} from './merge_docs.ts'; console.log(await mergeDocs());",
+        ])
+        .output()?;
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        output.stdout,
-        b"{\"first\":1,\"shared\":\"new\",\"second\":2}\n"
-    );
+    assert_eq!(output.stdout, format!("{expected}\n").as_bytes());
     Ok(())
 }
 

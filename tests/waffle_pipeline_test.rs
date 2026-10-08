@@ -261,6 +261,14 @@ async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result
 fn test_waffle_capability_dynamic_forms_and_initialization_are_diagnosed() {
     for (source, expected) in [
         (
+            "import {unknown} from 'unsupported:module'; export function run(): number {return unknown();}",
+            "Unsupported capability import: \"unsupported:module\"",
+        ),
+        (
+            "type __perry_scalar_iteration = number; export function run(): number {return 1;}",
+            "Reserved compiler type name in source",
+        ),
+        (
             "import * as numbers from 'node:timers/promises'; export function run(key: string): number { return numbers[key](); }",
             "Dynamic capability member lookup is unsupported",
         ),

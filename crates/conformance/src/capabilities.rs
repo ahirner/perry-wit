@@ -105,50 +105,22 @@ pub fn contracts() -> Vec<Contract> {
         contracts.push(Contract{id,description,specification,domain:"Uint8Array sources of 0..256 bytes; each source evaluated over every IEEE-754 boundary input; byte reads checked explicitly",witnesses:vec![Witness{partition:"empty",case:build(vec![])},Witness{partition:"binary-subview",case:build(vec![0,255,128,1,17])}],strategy:prop::collection::vec(any::<u8>(),0..=256).prop_map(build).boxed(),check:check_equivalence});
     }
     contracts.push(Contract{id:"node.stream.writable_to_web",description:"Queued acknowledged writes, writer locks and closed-writer rejection",specification:"https://nodejs.org/api/stream.html#streamwritabletowebstreamwritable",domain:"stdout/stderr Uint8Array writes and subviews; two queued writes, repeat observation, close, rejected released-writer use and a new stdio wrapper; exact output bytes",witnesses:vec![Witness{partition:"empty",case:writer(vec![])},Witness{partition:"binary-and-close",case:writer(vec![0,255,128,10,13])}],strategy:prop::collection::vec(any::<u8>(),1..=256).prop_map(writer).boxed(),check:check_equivalence});
-    for (id, sources) in [
-        (
-            "node.timers.callbacks.unsupported",
-            vec![(
-                "callback-timer",
-                "import {setTimeout} from 'node:timers';setTimeout(()=>{},1);".to_owned(),
-            )],
-        ),
-        (
-            "wasi.imports.legacy_rejection",
-            vec![
-                (
-                    "clocks",
-                    "import {waitFor} from 'perry:clocks';await waitFor(1);".into(),
-                ),
-                (
-                    "random",
-                    "import {randomU64} from 'perry:random';console.log(randomU64());".into(),
-                ),
-                (
-                    "http",
-                    "import {get} from 'perry:http';await get('http://localhost');".into(),
-                ),
-                (
-                    "stdio",
-                    "import {writeStdout} from 'perry:stdio';await writeStdout(new Uint8Array(0));"
-                        .into(),
-                ),
-            ],
-        ),
-    ] {
-        let witnesses = sources
-            .into_iter()
-            .map(|(partition, source)| Witness {
-                partition,
-                case: Case::Reject {
-                    source,
-                    diagnostic: "Unsupported capability import".into(),
-                },
-            })
-            .collect::<Vec<_>>();
-        let cases = witnesses.iter().map(|w| w.case.clone()).collect::<Vec<_>>();
-        contracts.push(Contract{id,description:"Explicit compiler rejection outside the supported source domain",specification:"https://nodejs.org/api/timers.html",domain:"Named unsupported imports; rejection is the expected result and never evidence of runtime support",witnesses,strategy:prop::sample::select(cases).boxed(),check:check_equivalence});
-    }
+    let callback_timer = Case::Reject {
+        source: "import {setTimeout} from 'node:timers';setTimeout(()=>{},1);".into(),
+        diagnostic: "Unsupported capability import".into(),
+    };
+    contracts.push(Contract {
+        id: "node.timers.callbacks.unsupported",
+        description: "Explicit compiler rejection of callback timers",
+        specification: "https://nodejs.org/api/timers.html",
+        domain: "Callback timers are outside the supported source domain",
+        witnesses: vec![Witness {
+            partition: "callback-timer",
+            case: callback_timer.clone(),
+        }],
+        strategy: Just(callback_timer).boxed(),
+        check: check_equivalence,
+    });
     contracts.extend(additional_contracts());
     contracts.extend(combinator_contracts());
     contracts

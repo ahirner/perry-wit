@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
-if [[ -z "${WASI_P3_WIT_PATH:-}" ]]; then
+if [[ -z "${WASI_WIT_PATH:-}" ]]; then
   exec nix develop -c bash "$SCRIPT_DIR/test_e2e.sh"
 fi
 

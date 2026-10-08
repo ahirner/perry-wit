@@ -130,7 +130,7 @@
             mkdir -p dist
             perry-wit examples/merge_docs.ts \
               --wit wit \
-              --world command \
+              --world merge-docs \
               -o dist/perry_merge_docs.stripped.wasm
           '';
           installPhase = ''
@@ -198,7 +198,6 @@
             name = "perry-wit-sdk";
             packages = [ perryWitBin pkgs.nodejs pkgs.typescript pkgs.wasmtime pkgs.wasm-tools ];
             WASI_WIT_PATH = wasiP3Wit;
-            WASI_P3_WIT_PATH = wasiP3Wit;
             shellHook = ''
               ${perryWitBin}/bin/perry-wit gen-types --no-tsconfig \
                 --wit ${pkgs.lib.escapeShellArg (toString wit)} \
@@ -248,12 +247,10 @@
           default = perryWitBin;
           perry-wit = perryWitBin;
           core-helpers = coreHelpers;
-          helpers = coreHelpers;
           example-merge-docs = exampleMergeDocs;
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
           wasi-wit = wasiP3Wit;
-          wasi-p3-wit = wasiP3Wit;
         };
 
         lib = {
@@ -261,7 +258,7 @@
         };
 
         checks = {
-          wasi-p3-wit = checkP3Wit;
+          wasi-wit = checkP3Wit;
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
@@ -281,7 +278,6 @@
           ];
 
           WASI_WIT_PATH = wasiP3Wit;
-          WASI_P3_WIT_PATH = wasiP3Wit;
 
           shellHook = ''
             if [ -d wit ] && [ ! -e wit/deps ]; then

@@ -578,7 +578,7 @@ fn resolve_world(
     let package = if asynchronous {
         let main = wit_parser::UnresolvedPackageGroup::parse("generated.wit", &wit)
             .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
-        let mut paths = fs::read_dir(env::var("WASI_P3_WIT_PATH")?)?
+        let mut paths = fs::read_dir(env::var("WASI_WIT_PATH")?)?
             .map(|entry| Ok(entry?.path()))
             .collect::<Result<Vec<_>>>()?;
         paths.sort();

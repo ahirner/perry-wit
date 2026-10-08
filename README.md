@@ -20,7 +20,7 @@ nix develop
 ```
 
 This supplies Rust, Node.js, TypeScript, Wasmtime, and `wasm-tools`.
-- `WASI_WIT_PATH` and `WASI_P3_WIT_PATH` identify the official WASI 0.3 packages.
+- `WASI_WIT_PATH` identifies the official WASI 0.3 packages.
 - Application WIT dependencies in `wit/deps` automatically take precedence over ambient packages.
 
 For component development outside this checkout, use [the starter template](template/README.md). In this repository, `nix develop .#sdk` generates the SDK for `examples/merge_task.ts`.

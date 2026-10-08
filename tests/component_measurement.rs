@@ -121,7 +121,6 @@ struct Report {
 }
 #[derive(Serialize)]
 struct Measurement {
-    pipeline: &'static str,
     workload: &'static str,
     component_bytes: usize,
     memory_limit_bytes: usize,
@@ -175,15 +174,13 @@ async fn measure_campaign(placement: String) -> Result<()> {
         ("io", "/sandbox/input", file_data.as_str(), file_data.len()),
     ] {
         let source = Path::new("tests/fixtures/measurement").join(format!("{workload}.ts"));
-        let pipeline = "production";
-        let version = "0.3.0";
-        let wit = directory.path().join(format!("wit-{pipeline}"));
+        let wit = directory.path().join("wit");
         fs::create_dir_all(&wit)?;
         let async_export = if workload == "io" { "async " } else { "" };
         fs::write(
             wit.join("world.wit"),
             format!(
-                "package test:measurement; world task {{ include wasi:cli/imports@{version}; export run-task: {async_export}func(input: string) -> string; }}"
+                "package test:measurement; world task {{ include wasi:cli/imports@0.3.0; export run-task: {async_export}func(input: string) -> string; }}"
             ),
         )?;
         let bytes = compile_file(
@@ -232,7 +229,7 @@ async fn measure_campaign(placement: String) -> Result<()> {
         store.assert_concurrent_state_empty();
         ensure!(
             store.data().table.is_empty(),
-            "resources remain after {pipeline} {workload}"
+            "resources remain after {workload}"
         );
         if workload == "io" {
             assert_eq!(
@@ -241,7 +238,6 @@ async fn measure_campaign(placement: String) -> Result<()> {
             );
         }
         let result = Measurement {
-            pipeline,
             workload,
             component_bytes,
             memory_limit_bytes: store.data().memory.limit,
@@ -256,21 +252,21 @@ async fn measure_campaign(placement: String) -> Result<()> {
         eprintln!("{}", serde_json::to_string(&result)?);
         measurements.push(result);
     }
-    let legacy =
-        fs::read_to_string("src/waffle_backend/source.rs")?.contains("Some(\"perry:http\") =>");
-    measurements.push(measure_stream(&engine, artifacts, legacy, false).await?);
-    if legacy {
-        measurements.extend(measure_http(&engine, artifacts, HttpRead::Legacy).await?);
-    } else {
-        measurements.push(measure_stream(&engine, artifacts, false, true).await?);
-        for reader in [HttpRead::Default, HttpRead::Byob, HttpRead::ArrayBuffer] {
-            measurements.extend(measure_http(&engine, artifacts, reader).await?);
-        }
+    for byob in [false, true] {
+        measurements.push(measure_stream(&engine, artifacts, byob).await?);
+    }
+    for reader in [HttpRead::Default, HttpRead::Byob, HttpRead::ArrayBuffer] {
+        measurements.extend(measure_http(&engine, artifacts, reader).await?);
     }
 
     let mut sizes = Vec::new();
     for (workload, source, wit, world) in [
-        ("merge_docs.ts", "examples/merge_docs.ts", "wit", "command"),
+        (
+            "merge_docs.ts",
+            "examples/merge_docs.ts",
+            "wit",
+            "merge-docs",
+        ),
         (
             "merge_task.ts",
             "examples/merge_task.ts",
@@ -316,20 +312,6 @@ const WARMUP_CALLS: usize = 5;
 const SAMPLE_COUNT: usize = 5;
 const CALLS_PER_SAMPLE: usize = 5;
 
-// Historical source is only compiled by the archived compiler that declares these APIs.
-const LEGACY_STREAM: &str = r#"
-declare function readChunk(input: ByteStream): Promise<number>;
-declare function byteAt(index: number): number;
-export async function run(input: ByteStream): Promise<number> {
-    let total=0;
-    let length=await readChunk(input);
-    while(length>0) {
-        for(let index=0;index<length;index++)total+=byteAt(index);
-        length=await readChunk(input);
-    }
-    return total;
-}
-"#;
 const STREAM: &str = r#"
 export async function run(input: ReadableStream<Uint8Array>): Promise<number> {
     const reader=input.getReader();
@@ -360,20 +342,9 @@ export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
 }
 "#;
 
-async fn measure_stream(
-    engine: &Engine,
-    artifacts: &Path,
-    legacy: bool,
-    byob: bool,
-) -> Result<Measurement> {
+async fn measure_stream(engine: &Engine, artifacts: &Path, byob: bool) -> Result<Measurement> {
     use wasmtime::component::StreamReader;
-    let source = if legacy {
-        LEGACY_STREAM
-    } else if byob {
-        BYOB_STREAM
-    } else {
-        STREAM
-    };
+    let source = if byob { BYOB_STREAM } else { STREAM };
     let workload = if byob {
         "incoming-stream-byob"
     } else {
@@ -473,7 +444,6 @@ async fn measure_stream(
     counted_store.assert_concurrent_state_empty();
     let after = counters.snapshot(&mut counted_store, &counted).await?;
     Ok(Measurement {
-        pipeline: "production",
         workload,
         component_bytes: stream_size,
         memory_limit_bytes: store.data().limit,
@@ -488,7 +458,6 @@ async fn measure_stream(
 }
 
 enum HttpRead {
-    Legacy,
     Default,
     Byob,
     ArrayBuffer,
@@ -500,9 +469,6 @@ async fn measure_http(
     reader: HttpRead,
 ) -> Result<Vec<Measurement>> {
     let read = match reader {
-        HttpRead::Legacy => {
-            "const response=await get('http',authority,'/',{},limit);const body=response.body;"
-        }
         HttpRead::Default | HttpRead::Byob => {
             "const response=await fetch('http://'+authority+'/');const body=await readBounded(response,limit);"
         }
@@ -511,7 +477,6 @@ async fn measure_http(
         }
     };
     let prefix = match reader {
-        HttpRead::Legacy => "import {get} from 'perry:http';",
         HttpRead::Default => include_str!("fixtures/bounded_response.ts"),
         HttpRead::Byob => include_str!("fixtures/bounded_byob_response.ts"),
         HttpRead::ArrayBuffer => "",
@@ -528,7 +493,7 @@ export async function run(authority:string,limit:number):Promise<number> {{
 "#
     );
     let name = match reader {
-        HttpRead::Legacy | HttpRead::Default => "bounded-http",
+        HttpRead::Default => "bounded-http",
         HttpRead::Byob => "bounded-http-byob",
         HttpRead::ArrayBuffer => "unbounded-http-array-buffer",
     };
@@ -565,7 +530,7 @@ export async function run(authority:string,limit:number):Promise<number> {{
     let run = instance.get_typed_func::<(&str, f64), (f64,)>(&mut store, "run")?;
     let mut measurements = Vec::new();
     let outcomes: &[(&str, usize, f64)] = match reader {
-        HttpRead::Legacy | HttpRead::Default => &[
+        HttpRead::Default => &[
             ("bounded-http-exact", PAYLOAD_BYTES, PAYLOAD_BYTES as f64),
             ("bounded-http-overflow", PAYLOAD_BYTES - 1, -8.0),
         ],
@@ -632,7 +597,6 @@ export async function run(authority:string,limit:number):Promise<number> {{
         );
         let after = counters.snapshot(&mut counted_store, &counted).await?;
         measurements.push(Measurement {
-            pipeline: "production",
             workload,
             component_bytes,
             memory_limit_bytes: store.data().memory.limit,

@@ -8,7 +8,7 @@ use perry_hir::{
 
 /// Perry's private for-of holder keeps a string snapshot with scalar indexing.
 /// It cannot be named by a TypeScript type annotation or cross a call boundary.
-const SCALAR_ITERATION: &str = "perry:scalar-iteration";
+pub(crate) const SCALAR_ITERATION: &str = "__perry_scalar_iteration";
 
 pub(super) fn identity_kind(ty: &HirType) -> Option<&'static str> {
     match ty {
