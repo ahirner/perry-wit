@@ -14,6 +14,8 @@ members = [
     "crates/perry-mir",
     "crates/perry-lower",
     "crates/pliron-wasm",
+    "crates/perry-runtime",
+    "crates/perry-codegen",
 ]
 
 [profile.dev.package.perry-hir]

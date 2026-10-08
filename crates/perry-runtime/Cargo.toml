@@ -1,0 +1,15 @@
+[package]
+name = "perry-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Runtime linked into perry-wit components built by the MIR backend (TODOs.md P5)"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+libm = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+talc = { version = "5.1.1", default-features = false }

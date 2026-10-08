@@ -58,7 +58,20 @@ Every allocation site is assigned a **tier** by static analysis on MIR. Each tie
 | `frame` | Does not escape the function activation and is not live across `await`. | Per-task bump stack | When the function exits (pop) |
 | `task` | Escapes the function but not the export task. Covers async frames, promises, readers, request/response temporaries. | Per-task region made of bump chunks; objects carry shape headers | In bulk at `task.return` / `task.cancel` (O(chunks)) |
 | `instance` | May be reachable from module state across invocations, or fails the loop-growth rule. | Size-class pages, non-moving | Precise mark-sweep (below) |
-| `buffer` | Canonical ABI return areas, list and string lowering, stream and BYOB byte storage. | Off-the-shelf allocator (`talc` or `dlmalloc`) | Explicit owner: call, transfer acknowledgement, or stream object |
+| `buffer` | Canonical ABI return areas, list and string lowering, stream and BYOB byte storage; region chunks. | `talc` 5.1 (decided below) | Explicit owner: call, transfer acknowledgement, or stream object |
+
+**Allocator decision (2026-10-08): `talc` 5.1, `WasmDynamicTalc`.** Measured with `bench/allocators/run.sh` (wasm32, `opt-level=z`, LTO; Node timings, ±30 % run to run):
+
+| Allocator | Code bytes | Stream 8 KiB | Grow 4 MiB (doubling) | Grow 4 MiB (+8 KiB exact) | Churn (16 B–64 KiB, 1k live) | 64 KiB chunk regions |
+|---|---:|---:|---:|---:|---:|---:|
+| talc 5.1.1 | 1,876 | 38–49 ns | 0.5 µs, 9.3 MiB | 23 ns, 7.4 MiB | 69–84 ns, 5.7 MiB | 1.7–2.6 µs, 5.9 MiB |
+| dlmalloc 0.2.14 | 6,724 | 25–156 ns | 0.4–0.6 µs, 9.3 MiB | 18–39 ns, 7.4 MiB | 94–146 ns, 5.2 MiB | 2.0–2.1 µs, 5.8 MiB |
+| rlsf 0.2.3 (small / full) | 1,351 / 2,505 | 19–25 ns | 12–14 µs | 12–200 µs, 87–273 MiB | 61–91 ns | 1.5–3.8 µs, 10.6 MiB |
+| lol_alloc 0.4.1 | 680 | 32 ns | 13 µs | 150–171 µs | 700–900 ns | 8.5–9 µs |
+
+- talc is 3.6× smaller than dlmalloc and as fast or faster everywhere it matters. Its in-place `realloc` keeps list and string growth linear.
+- rlsf copies on every grow and fragments badly under region churn. lol_alloc is O(n) per free.
+- talc uses about 10 % more memory than dlmalloc under random churn. That is acceptable because hot paths do not go through it: regions recycle their own chunks, and the runtime will recycle stream buffers itself.
 
 Tier rules:
 
@@ -186,7 +199,8 @@ The phases run in order. Items within a phase can run in parallel unless they ar
     - The compile-time guard is `tests/compile_scaling_test.rs`. Depth 32 must compile within 10 s; the test is `#[ignore]` until P1.1 lands.
     - The allocator-entries metric moves to P0.2.
 - [ ] **P0.2 Freeze the benchmark baseline.**
-  - Extend `scripts/compare_components.mjs` with: the critique microbenchmarks, AssemblyScript 0.28 `-O3` reference numbers, component sizes for all examples, and committed linear-memory peaks.
+  - Extend `scripts/compare_components.mjs` with: the critique microbenchmarks, component sizes for all examples, and committed linear-memory peaks.
+  - AssemblyScript comparisons stay out of the repo. Run them by hand for anecdotal checks only.
   - *Done when:* there is one command and a committed baseline table.
 - [ ] **P0.3 Legacy stopgaps (optional, hours).**
   - Memoize `infer_expr_type` with a per-function table.
@@ -301,27 +315,44 @@ Owned (each with unit tests on MIR snippets):
 
 ### P4. Wasm emission without WAFFLE
 
-- [ ] **P4.1 `wasm` dialect** close to core instructions: locals stay implicit as SSA, with block arguments. Lower via pliron dialect conversion from `perry.*`.
-- [ ] **P4.2 → Emitter** in `crates/perry-emit`:
-  - verify reducibility;
-  - dominator-tree stackifier (Ramsey);
-  - local allocation with copy coalescing;
-  - parallel moves with cycle temporaries;
-  - stack scheduling of single-use values;
-  - output with `wasm-encoder` 0.261.
+- [x] **P4.1 `wasm` dialect** close to core instructions: values stay SSA, with block arguments.
+  - *Status:* `crates/pliron-wasm` is kept free of perry code so it can be published later.
+  - Ops: `wasm.num` (an opcode attribute carrying its signature and effect class, covering i32, i64, f64 and conversions), `wasm.select`, `wasm.load`/`wasm.store`, `wasm.memory_size`/`wasm.memory_grow`, `wasm.call`, `wasm.import_func`, and `wasm.br`/`wasm.cond_br`/`wasm.return`/`wasm.unreachable`.
+  - Constants and functions are pliron builtins. Exports are a function attribute.
+  - Lowering from `perry.*` is a direct translation in `crates/perry-codegen`, not pliron dialect conversion. The translation splits blocks for throws and array growth, which the conversion framework does not model well.
+- [ ] **P4.2 → Emitter** (`pliron_wasm::emit`, replacing the planned `crates/perry-emit`):
+  - [x] verify reducibility;
+  - [x] dominator-tree structuring (Ramsey, "Beyond Relooper");
+  - [x] tree folding of single-use values that keeps effects and traps in order;
+  - [x] rematerialized constants;
+  - [x] cyclic block-argument moves through the operand stack, so no temporaries are needed;
+  - [x] type-grouped local declarations and an optional name section;
+  - [x] output with `wasm-encoder` 0.261;
+  - [ ] local coalescing by liveness (pliron `analyses::liveness`);
+  - [ ] peephole: drop a `br` to the end of the directly enclosing `block` when it is in tail position. Ramsey emits `if … br 1 else br 1 end` for diamonds whose arms only join;
+  - [ ] `local.tee` for a value that is used once in the next statement and again later;
+  - [ ] `br_table` for switch-shaped CFGs.
   - *Done when:* differential tests against the legacy output for scalar, control flow and exception fixtures pass, and the output is no larger than WAFFLE's on those fixtures.
+  - *Status:* 8 tests validate with wasmparser and execute in wasmtime: diamonds, loops, nested loops with break/continue, parameter swaps, recursion, memory, imports, effect ordering, and rejection of irreducible CFGs. The differential comparison against WAFFLE waits for P6.1.
 - [ ] **P4.3 Keep and generalize `link.rs`.** Link `perry-runtime.wasm` the same way as the helper libraries (`__perry_helper` imports, PIC placement, table relocation). Run `wasm-opt -Oz` as an optional post-link step only if it stays a dev or optional tool dependency.
 - [ ] **P4.4 Remove `waffle`** from `Cargo.toml`. Delete `constant_arguments.rs`; P3.1 SCCP plus the inliner replace it. *Done when:* `cargo tree -i waffle` is empty.
 
 ### P5. Runtime as Rust (`crates/perry-runtime`, `no_std`, compiled like the helpers)
 
-- [ ] **P5.1 Buffer allocator.** `talc` or `dlmalloc` behind `cabi_realloc`. Owner records for call, transfer and stream. *Done when:* canonical return areas and stream buffers are released at owner end, which the tests check.
+- [ ] **P5.1 Buffer allocator.** `talc` (decided in D3) behind `cabi_realloc`. Owner records for call, transfer and stream. *Done when:* canonical return areas and stream buffers are released at owner end, which the tests check.
 - [ ] **P5.2 Regions.**
   - Frame stack: a bump stack per task.
   - Task regions: chunk lists with a per-region list of objects that hold references.
   - Bulk free at `task.return` / `task.cancel`.
+  - *Status:* `crates/perry-runtime` (4.8 KB on wasm32 with talc and `fmod`) provides:
+    - task regions: a 64 KiB chunk chain with a free list, dedicated chunks above 16 KiB, and nested `perry_task_begin`/`_end` marks;
+    - dense arrays (`perry_array_new`/`_grow`, layout in `array.rs`);
+    - `perry_f64_rem`.
+  - It owns memory, exports it, and links with a 64 KiB stack. `crates/perry-codegen/build.rs` builds and embeds it the way the root `build.rs` builds the helpers.
+  - Still open: the frame stack and the per-region list of reference-holding objects. That list matters only once `instance` objects exist (P5.3).
 - [ ] **P5.3 `instance` heap.** Size-class pages, large objects, side mark bitmaps, explicit mark stack, lazy sweep, proportional trigger, shape pointer-map tracing.
   - *Done when:* the P0.1 scaling contracts pass on the MIR backend.
+  - *Status of that criterion:* already met at core-module level without the collector. Since the builder cannot express module state (R4), every allocation is `task` tier. `perry-codegen`'s `scaling_contracts_are_linear` measures a fuel ratio for 4n vs n of 3.99 for `retained_records`, 3.98 for `number_push` and 4.01 for `temporary_records` (both of the first two are known failures on the legacy backend), at 130–200 fuel per item. The collector is needed once module state lands.
   - A cycle-collection contract passes.
   - Allocator entries are 0 per iteration for the temporary-record loop.
 - [ ] **P5.4 Scheduler.**
@@ -335,6 +366,14 @@ Owned (each with unit tests on MIR snippets):
 ### P6. Feature migration onto the MIR backend (dual backend, whole program)
 
 - [ ] **P6.1 Add `--backend=mir|legacy`.** Default stays `legacy`. Conformance runs both. MIR rejects unsupported programs with a diagnostic and never falls back silently.
+  - *Next:* the core module already exists (`perry_codegen::compile`, linked against `perry_codegen::RUNTIME_WASM`). What remains is the component boundary:
+    - link the runtime into one core module (P4.3);
+    - lower WIT parameters and results, including the `{ value, trace }` records the scaling contracts return;
+    - map the status result to the export's error result;
+    - strings (`perry.string_*`, `perry.to_string`).
+  - Smaller MIR follow-ups found while emitting:
+    - remove a `perry.unwrap` dominated by another unwrap of the same value (P3.5b). `point.x; point.y` currently checks twice;
+    - inline `fmod` for proven integers (P3.5). `perry_f64_rem` is the largest per-iteration cost in the scaling loops.
 - [ ] **P6.2 Migrate in registry order.** Each group is done when its conformance contracts and the matching `tests/*` suites pass on MIR:
   1. `ecma.number`, `ecma.math`, `ecma.string`
   2. `ecma.object`, `ecma.array`
@@ -395,7 +434,7 @@ Owned (each with unit tests on MIR snippets):
 
 ## Open questions
 
-- **Exceptions:** keep the `(i32 status, payload)` multi-value convention, or move to Wasm exception handling once host support is confirmed? The MIR models explicit successors, so either lowering works.
-- **pliron is pre-1.0:** pin it, and budget for upstream contributions (a Wasm dialect, the inliner, SROA). Decide whether `perry-emit` should become a `pliron-wasm` crate.
+- **Exceptions (decided for now):** the status convention. A function that may throw returns an extra `i32` status after its results, callers branch on it, and the codes are `perry_codegen::status_code`. Wasm exception handling stays a later lowering swap; the MIR's throwing ops are marked, so either lowering works.
+- **pliron is pre-1.0:** pin it, and budget for upstream contributions (the inliner, SROA). The Wasm dialect and emitter live in `crates/pliron-wasm`, which is free of perry code and can be published.
 - **Strings:** rope or builder lowering for append loops, which already beat AssemblyScript but are super-linear.
 - **R5 scope:** which array and promise builtins accept inlined arrows in the first release.
