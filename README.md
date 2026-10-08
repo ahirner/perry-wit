@@ -101,17 +101,9 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
 - **Async Exports**: An export must be declared as `async func` in WIT if it can suspend, including during module initialization or through filesystem, timer, and HTTP calls.
 - **Core Wasm Output**: Pass `--core-only` (or use a `.core.wasm` extension) to emit unlinked core Wasm for custom embedding.
 
-### Fetch
-
-Use the standard global `fetch`. For ordinary JSON, text, or binary responses, consume the body with `response.json()`, `response.text()`, or `response.arrayBuffer()`. These methods read the whole body without an application byte limit.
-
-For a hard size limit, use a BYOB reader. [merge_docs.ts](examples/merge_docs.ts) accepts only status 200 and at most 64 KiB of valid UTF-8 per document. One `read(buffer, { min: 65537 })` waits for EOF or the first excess byte; the `finally` block cancels the reader and releases its lock. The SDK supplies the standard `min` declaration for older TypeScript DOM libraries. This example uses Node 20.17+ or Perry.
-
-The repository's `tsconfig.json` checks the examples and authored SDK declarations, excluding generated test artifacts. Run `tsc -p tsconfig.json`; ordinary TypeScript language servers use the same configuration.
-
 ### Test
 
-Perry-WIT includes ordinary Rust tests, one executable conformance registry for directed and generated checks against Node.js, and end-to-end integration tests:
+Perry-WIT includes ordinary Rust tests, an executable conformance registry for directed and generated checks against Node.js, and end-to-end integration tests:
 
 ```sh
 # Run unit and integration tests
@@ -132,25 +124,7 @@ cargo fmt --all -- --check
 nix flake check
 ```
 
-The development-only `perry-conformance` crate owns strategies, examples, observation checks, and reports. Each declared boundary partition has a mandatory witness. Catalogs and reports distinguish equivalent execution, expected compiler rejection, and deliberate fault detection. Node and Perry execute identical source; failures include concrete minimized inputs, every metamorphic source form, configuration, toolchain versions, and source identity under `target/conformance`. An incomplete, skipped, exhausted, or stale execution cannot establish a passing claim. Registered domains describe bounded coverage, not total ECMAScript or Node conformance.
-
-The default smoke campaign generates eight programs per contract at depth three and runs the preserved IEEE-754 boundary corpus. Select contracts or capability groups with `--select node.fs`, extend budgets with `--cases 200 --depth 4 --seed 100`, and replay a concrete saved case with `cargo run -p perry-conformance -- replay target/conformance/run-EXAMPLE/CONTRACT/minimal.json`. `--shrink-limit`, `--fuel`, `--memory` (bytes), and `--timeout` (seconds) bound reduction and execution. Proptest state machines generate complete valid start, host-release, completion, cancellation, observation, and reuse traces before compilation. The lifecycle adapter supplies controlled clocks to both Node and Wasmtime. These traces do not exhaustively explore asynchronous schedules. Ordinary Rust tests remain a separate CI gate.
-
-### Compare component performance with main
-
-Run the opt-in comparison in the pinned development environment:
-
-```sh
-nix develop -c node scripts/compare_components.mjs
-```
-
-The script archives local `main` (or an optional baseline ref argument), builds the same `tests/component_measurement.rs` harness against both compiler revisions in release mode, then prints a comparison table. It leaves the checkout and branch untouched. Run on an idle machine; both builds finish before measurements start.
-
-Incoming-stream execution sums a 4 MiB input under a 64 KiB guest memory limit. Bounded HTTP reads a 4 MiB in-memory host response, with exact-limit success and one-byte overflow measured separately under a 16 MiB guest limit. Each workload uses a reused instance, five warmup calls, and five samples of five calls. Both revisions run in both placements on a current-thread Tokio runtime: directly awaited by its root future, and in an ordinary spawned task. Root placement can amplify repeated guest yields; the table keeps the two placements separate and compares matching placements. Timers exclude builds, guest and Wasmtime compilation, instantiation, input preparation, and outcome assertions. Checks verify results, resource cleanup, and no memory growth after warmup. HTTP timing includes P3 host transfers but no network. The two revisions use equivalent programs targeting their respective APIs; historical imports are confined to the baseline measurement source.
-
-The original default-reader rows remain visible. Three additional BYOB rows compare direct reads into reusable caller buffers with the corresponding original API workload on the baseline. Both HTTP readers enforce the cap and check for overflow. An additional unbounded `response.arrayBuffer()` row reads the whole body without BYOB or a guest body-size cap. Its baseline reference is the original exact-limit read of the same body, which still enforces its cap; the overflow guarantees differ. One guest-level await can perform multiple internal stream reads. BYOB must match or beat the old API's execution medians under the same memory constraints.
-
-The tables report median sample times, stripped component bytes, and committed guest linear memory after warmup (not process RSS), including size-only comparisons of each revision's `examples/merge_docs.ts`, `examples/merge_task.ts`, and `template/src/index.ts`. Raw samples, guest sources, component binaries, exact revisions, source fingerprints, toolchain identity, and the table are saved under `target/conformance/comparisons/run-*`. The existing text/filesystem measurements remain in the JSON report. Timing changes are local observations; repeat the command before interpreting small differences as improvements.
+The `perry-conformance` suite validates TypeScript semantics and WASI capability contracts against Node.js, distinguishing equivalent execution, expected compiler rejection, and deliberate fault detection.
 
 ## Authoring Components
 
