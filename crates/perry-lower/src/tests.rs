@@ -160,8 +160,56 @@ export function run(x: number): number {
         "perry.array_get",
         "perry.array_set",
         "perry.field_set",
-        "perry.convert F64ToI32",
+        "perry.unwrap",
     ] {
+        assert!(printed.contains(op), "missing {op}:\n{printed}");
+    }
+    // Indices stay f64: the bounds and integrality check is part of `perry.array_get`.
+    assert!(!printed.contains("perry.convert F64ToI32"), "{printed}");
+}
+
+#[test]
+fn out_of_bounds_reads_are_undefined_not_traps() {
+    let printed = lowered(
+        r#"
+export function run(n: number): number {
+  const xs: number[] = [1, 2];
+  const missing = xs[n];
+  if (missing === undefined) {
+    return -1;
+  }
+  return xs[n + 5] * 2 + missing;
+}
+"#,
+    );
+    for op in [
+        "perry.optional <builtin.fp64 >",
+        "perry.is_undefined",
+        "perry.to_number",
+    ] {
+        assert!(printed.contains(op), "missing {op}:\n{printed}");
+    }
+    // Arithmetic coerces undefined to NaN; nothing on this path throws.
+    assert!(!printed.contains("perry.unwrap"), "{printed}");
+}
+
+#[test]
+fn typed_boundaries_unwrap_with_type_error() {
+    let printed = lowered(
+        r#"
+interface Point { x: number; y: number }
+function norm(p: Point): number {
+  return p.x + p.y;
+}
+export function run(n: number): string {
+  const points: Point[] = [{ x: n, y: n }];
+  const names: string[] = ["a"];
+  const total = norm(points[n]);
+  return "name: " + names[n + total];
+}
+"#,
+    );
+    for op in ["perry.to_string", "perry.unwrap"] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
     }
 }

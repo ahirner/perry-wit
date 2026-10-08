@@ -32,6 +32,7 @@ use perry_mir::{
     control::{BrOp, CondBrOp, ReturnOp},
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
+    optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UnwrapOp, WrapOp, optional_value},
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{ArrayType, RecordType, StringType},
 };
@@ -372,17 +373,21 @@ impl<'s> FunctionBuilder<'s> {
                     .as_ref()
                     .map(|e| self.expression_with(ctx, e, declared))
                     .transpose()?;
+                // A binding initialized with `T | undefined` (an out-of-bounds read, R8) holds
+                // `undefined` at runtime even when declared `T`, as in ECMAScript.
                 let ty = match (declared, init) {
+                    (Some(ty), Some(value))
+                        if optional_value(ctx, value.get_type(ctx)) == Some(ty) =>
+                    {
+                        value.get_type(ctx)
+                    }
                     (Some(ty), _) => ty,
                     (None, Some(value)) => value.get_type(ctx),
                     (None, None) => bail!("an untyped binding needs an initializer"),
                 };
                 let slot = self.entry_slot(ctx, ty);
                 if let Some(value) = init {
-                    ensure!(
-                        value.get_type(ctx) == ty,
-                        "initializer type differs from the declared type"
-                    );
+                    let value = self.fit(ctx, value, ty)?;
                     self.store(ctx, slot, value);
                 }
                 self.locals.insert(*id, slot);
@@ -393,8 +398,13 @@ impl<'s> FunctionBuilder<'s> {
             Stmt::Return(value) => {
                 let values = match value {
                     Some(expr) => {
-                        let expected = self.results.first().copied();
-                        vec![self.expression_with(ctx, expr, expected)?]
+                        let expected = self
+                            .results
+                            .first()
+                            .copied()
+                            .context("a void function returns a value")?;
+                        let value = self.expression_with(ctx, expr, Some(expected))?;
+                        vec![self.fit(ctx, value, expected)?]
                     }
                     None => vec![],
                 };
@@ -558,12 +568,14 @@ impl<'s> FunctionBuilder<'s> {
                 let slot = self.local(*id)?;
                 let slot_type = self.slot_type(ctx, slot)?;
                 let value = self.expression_with(ctx, value, Some(slot_type))?;
+                let value = self.fit(ctx, value, slot_type)?;
                 self.store(ctx, slot, value);
                 value
             }
             Expr::Update { id, op, prefix } => {
                 let slot = self.local(*id)?;
                 let old = self.load(ctx, slot)?;
+                let old = self.arithmetic(ctx, old);
                 ensure!(kind(ctx, old)? == Kind::Number, "++/-- needs a number");
                 let one = self.number(ctx, 1.0);
                 let kind = match op {
@@ -571,12 +583,16 @@ impl<'s> FunctionBuilder<'s> {
                     UpdateOp::Decrement => BinaryKind::Sub,
                 };
                 let new = self.binary(ctx, kind, old, one);
-                self.store(ctx, slot, new);
+                let slot_type = self.slot_type(ctx, slot)?;
+                let stored = self.fit(ctx, new, slot_type)?;
+                self.store(ctx, slot, stored);
                 if *prefix { new } else { old }
             }
             Expr::Binary { op, left, right } => {
                 let lhs = self.expression(ctx, left)?;
+                let lhs = self.arithmetic(ctx, lhs);
                 let rhs = self.expression(ctx, right)?;
+                let rhs = self.arithmetic(ctx, rhs);
                 match (op, kind(ctx, lhs)?, kind(ctx, rhs)?) {
                     (BinaryOp::Add, Kind::String, Kind::String) => {
                         self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, lhs, rhs))
@@ -598,8 +614,48 @@ impl<'s> FunctionBuilder<'s> {
                 }
             }
             Expr::Compare { op, left, right } => {
+                if let (CompareOp::Eq | CompareOp::Ne, Some(other)) = (
+                    op,
+                    match (&**left, &**right) {
+                        (Expr::Undefined, other) | (other, Expr::Undefined) => Some(other),
+                        _ => None,
+                    },
+                ) {
+                    // `x === undefined`: a definedness test; always false for defined types.
+                    let value = self.expression(ctx, other)?;
+                    let undefined = if self.is_optional(ctx, value) {
+                        self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value))
+                    } else {
+                        self.boolean(ctx, false)
+                    };
+                    return Ok(if matches!(op, CompareOp::Eq) {
+                        undefined
+                    } else {
+                        let no = self.boolean(ctx, false);
+                        self.compare(ctx, CompareKind::Eq, undefined, no)
+                    });
+                }
                 let lhs = self.expression(ctx, left)?;
                 let rhs = self.expression(ctx, right)?;
+                if matches!(op, CompareOp::Eq | CompareOp::Ne)
+                    && (self.is_optional(ctx, lhs) || self.is_optional(ctx, rhs))
+                {
+                    // Strict equality with `undefined` in play: compare as `T | undefined`.
+                    let kind = if matches!(op, CompareOp::Eq) {
+                        CompareKind::Eq
+                    } else {
+                        CompareKind::Ne
+                    };
+                    let lhs = self.optional(ctx, lhs);
+                    let rhs = self.optional(ctx, rhs);
+                    ensure!(
+                        lhs.get_type(ctx) == rhs.get_type(ctx),
+                        "comparison of different types is not supported"
+                    );
+                    return Ok(self.compare(ctx, kind, lhs, rhs));
+                }
+                let lhs = self.arithmetic(ctx, lhs);
+                let rhs = self.arithmetic(ctx, rhs);
                 let (left_kind, right_kind) = (kind(ctx, lhs)?, kind(ctx, rhs)?);
                 ensure!(
                     left_kind == right_kind,
@@ -667,10 +723,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.jump(ctx, join);
                 self.switch_to(otherwise);
                 let else_value = self.expression(ctx, else_expr)?;
-                ensure!(
-                    else_value.get_type(ctx) == ty,
-                    "?: arms have different types"
-                );
+                let else_value = self.fit(ctx, else_value, ty)?;
                 self.store(ctx, result, else_value);
                 self.jump(ctx, join);
                 self.switch_to(join);
@@ -678,6 +731,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::Unary { op, operand } => {
                 let value = self.expression(ctx, operand)?;
+                let value = self.arithmetic(ctx, value);
                 match (op, kind(ctx, value)?) {
                     (UnaryOp::Neg, Kind::Number) => {
                         // `0 - x` loses the sign of zero; `-1 * x` keeps IEEE negation.
@@ -699,6 +753,8 @@ impl<'s> FunctionBuilder<'s> {
                 object, property, ..
             } => {
                 let value = self.expression(ctx, object)?;
+                // Property access on `undefined` throws TypeError, in ECMAScript and here.
+                let value = self.defined(ctx, value)?;
                 match (kind(ctx, value)?, property.as_str()) {
                     (Kind::String, "length") => {
                         let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
@@ -756,7 +812,12 @@ impl<'s> FunctionBuilder<'s> {
                     };
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
-                    values.push(self.expression_with(ctx, item, element)?);
+                    let value = self.expression_with(ctx, item, element)?;
+                    let value = match element {
+                        Some(element) => self.fit(ctx, value, element)?,
+                        None => self.defined(ctx, value)?,
+                    };
+                    values.push(value);
                 }
                 let element = match (element, values.first()) {
                     (Some(element), _) => element,
@@ -776,10 +837,7 @@ impl<'s> FunctionBuilder<'s> {
                 let array = self.load(ctx, slot)?;
                 let element = self.array_element(ctx, array)?;
                 let value = self.expression_with(ctx, value, Some(element))?;
-                ensure!(
-                    value.get_type(ctx) == element,
-                    "pushed value type differs from the element type"
-                );
+                let value = self.fit(ctx, value, element)?;
                 self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
                 let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
                 self.emit_value(ctx, |ctx| {
@@ -788,6 +846,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
+                let array = self.defined(ctx, array)?;
                 ensure!(
                     kind(ctx, array)? == Kind::Array,
                     "indexing is only supported on arrays so far"
@@ -835,14 +894,67 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
-    /// An ECMAScript number used as an array index; `perry.convert` traps unless integral.
+    /// An ECMAScript number used as an array index (R8: reads miss with `undefined`).
     fn index(&mut self, ctx: &mut Context, index: &Expr) -> Result<Value> {
         let index = self.expression(ctx, index)?;
+        let index = self.arithmetic(ctx, index);
         ensure!(
             kind(ctx, index)? == Kind::Number,
             "array indices must be numbers"
         );
-        Ok(self.emit_value(ctx, |ctx| ConvertOp::new(ctx, ConvertKind::F64ToI32, index)))
+        Ok(index)
+    }
+
+    fn is_optional(&self, ctx: &Context, value: Value) -> bool {
+        optional_value(ctx, value.get_type(ctx)).is_some()
+    }
+
+    /// ECMAScript coercion of `T | undefined` for arithmetic, ordering and concatenation:
+    /// `undefined` becomes `NaN` or `"undefined"`. Other values pass through.
+    fn arithmetic(&mut self, ctx: &mut Context, value: Value) -> Value {
+        let Some(inner) = optional_value(ctx, value.get_type(ctx)) else {
+            return value;
+        };
+        if inner.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
+            self.emit_value(ctx, |ctx| ToNumberOp::new(ctx, value))
+        } else if inner.deref(ctx).is::<StringType>() {
+            self.emit_value(ctx, |ctx| ToStringOp::new(ctx, value))
+        } else {
+            value
+        }
+    }
+
+    /// The defined value of `T | undefined`; throws `TypeError` on `undefined`.
+    fn defined(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if !self.is_optional(ctx, value) {
+            return Ok(value);
+        }
+        let op = UnwrapOp::new(ctx, value)?;
+        Ok(self.append_value(ctx, &op))
+    }
+
+    /// View `value` as `T | undefined`.
+    fn optional(&mut self, ctx: &mut Context, value: Value) -> Value {
+        if self.is_optional(ctx, value) {
+            value
+        } else {
+            self.emit_value(ctx, |ctx| WrapOp::new(ctx, value))
+        }
+    }
+
+    /// Convert `value` to the type of a typed boundary: wrap into `T | undefined`, or unwrap
+    /// (throwing `TypeError` on `undefined`) where `T` is required.
+    fn fit(&mut self, ctx: &mut Context, value: Value, target: TypeHandle) -> Result<Value> {
+        let ty = value.get_type(ctx);
+        if ty == target {
+            Ok(value)
+        } else if optional_value(ctx, target) == Some(ty) {
+            Ok(self.optional(ctx, value))
+        } else if optional_value(ctx, ty) == Some(target) {
+            self.defined(ctx, value)
+        } else {
+            bail!("value type differs from the expected type")
+        }
     }
 
     /// `array[index] = value`; computed keys on records are rejected (subset rule R1).
@@ -854,6 +966,7 @@ impl<'s> FunctionBuilder<'s> {
         value: &Expr,
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
+        let array = self.defined(ctx, array)?;
         ensure!(
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"
@@ -861,10 +974,7 @@ impl<'s> FunctionBuilder<'s> {
         let element = self.array_element(ctx, array)?;
         let index = self.index(ctx, index)?;
         let value = self.expression_with(ctx, value, Some(element))?;
-        ensure!(
-            value.get_type(ctx) == element,
-            "stored value type differs from the element type"
-        );
+        let value = self.fit(ctx, value, element)?;
         self.emit(ctx, |ctx| ArraySetOp::new(ctx, array, index, value));
         Ok(value)
     }
@@ -877,6 +987,7 @@ impl<'s> FunctionBuilder<'s> {
         value: &Expr,
     ) -> Result<Value> {
         let record = self.expression(ctx, object)?;
+        let record = self.defined(ctx, record)?;
         ensure!(
             kind(ctx, record)? == Kind::Record,
             "property writes are only supported on records so far"
@@ -891,10 +1002,7 @@ impl<'s> FunctionBuilder<'s> {
                 anyhow!("property {field} does not exist on this shape (subset rule R1)")
             })?;
         let value = self.expression_with(ctx, value, Some(field_type))?;
-        ensure!(
-            value.get_type(ctx) == field_type,
-            "property {field} has a different type than the value"
-        );
+        let value = self.fit(ctx, value, field_type)?;
         self.emit(ctx, |ctx| FieldSetOp::new(ctx, record, field, value));
         Ok(value)
     }
@@ -926,7 +1034,12 @@ impl<'s> FunctionBuilder<'s> {
                 (Some(record), Ok(field)) => record.deref(ctx).field(&field).map(|(_, ty)| ty),
                 _ => None,
             };
-            values.push((name.clone(), self.expression_with(ctx, arg, field_type)?));
+            let value = self.expression_with(ctx, arg, field_type)?;
+            let value = match field_type {
+                Some(field_type) => self.fit(ctx, value, field_type)?,
+                None => self.defined(ctx, value)?,
+            };
+            values.push((name.clone(), value));
         }
         let fields = values
             .iter()
@@ -960,7 +1073,10 @@ impl<'s> FunctionBuilder<'s> {
         let values = args
             .iter()
             .zip(&params)
-            .map(|(arg, param)| self.expression_with(ctx, arg, Some(*param)))
+            .map(|(arg, param)| {
+                let value = self.expression_with(ctx, arg, Some(*param))?;
+                self.fit(ctx, value, *param)
+            })
             .collect::<Result<Vec<_>>>()?;
         let op = CallOp::new(ctx, name, values, results);
         self.append(ctx, &op);

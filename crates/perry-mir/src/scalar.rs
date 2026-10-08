@@ -66,7 +66,10 @@ impl SideEffects for BinaryOp {
     }
 }
 
-/// Comparison of two operands of one scalar type, producing an `i1`.
+/// Comparison of two operands of one type, producing an `i1`.
+///
+/// On `perry.optional` operands `Eq`/`Ne` are ECMAScript strict equality (`undefined` equals
+/// only `undefined`); the builder coerces with `perry.to_number` before ordered comparisons.
 #[pliron_op(
     name = "perry.compare",
     format = "attr($perry_compare_kind, $CompareKind) ` ` $0 `, ` $1 ` : ` type($0)",
