@@ -191,7 +191,7 @@ impl TextContractMatrix {
             status: OperationStatus::SupportedBoundary,
             coercion: "UTF-8 labels only; Uint8Array input; literal boolean options preserve evaluation order",
             boundary_behavior: "Incremental strict decoding retains split scalars, handles BOMs, and reports malformed or unfinished bytes through catch/finally",
-            node_difference: "Defaults to fatal and rejects replacement decoding; numeric errors replace Error objects; streaming errors retain the Encoding Standard input queue, which Node currently discards",
+            node_difference: "Defaults to fatal and rejects replacement decoding; decoding failures use Error with a numeric code instead of TypeError; streaming errors retain the Encoding Standard input queue, which Node currently discards",
         },
         TextOperationEntry {
             operation: "canonical_abi_string",

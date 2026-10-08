@@ -55,4 +55,16 @@
     (if (i32.eq (i32.load (local.get $value)) (i32.const 10))
       (then (return (i32.const 1) (f64.const 12))))
     (i32.const 0) (f64.convert_i32_u (local.get $value)))
+
+  (func (export "value.exception") (param $status i32) (param $payload f64) (result f64)
+    (if (i32.eq (local.get $status) (i32.const 3)) (then (return (local.get $payload))))
+    (f64.convert_i32_u (call $value.new (i32.const 3) (local.get $payload))))
+
+  ;; The fixture-only Result<T, number> boundary accepts numeric thrown values.
+  (func (export "value.exception-number") (param $status i32) (param $payload f64) (result f64)
+    (local $value i32)
+    (if (i32.eq (local.get $status) (i32.const 1)) (then (return (local.get $payload))))
+    (local.set $value (i32.trunc_f64_u (local.get $payload)))
+    (if (i32.ne (i32.load (local.get $value)) (i32.const 3)) (then unreachable))
+    (f64.load offset=8 (local.get $value)))
 )

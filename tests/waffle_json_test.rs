@@ -61,7 +61,7 @@ async fn malformed_source_json_unwinds_through_catch_and_allocating_finally() ->
             let result = 0;
             for (let i = 0; i < count; i++) {
                 try { JSON.parse(input); }
-                catch (error) { result = error; }
+                catch (error) { result = error.code; }
                 finally { const cleanup = JSON.stringify({ok: "😀"}); result = result + cleanup.length; }
             }
             return result;
@@ -216,10 +216,12 @@ async fn json_and_text_helpers_share_memory_and_keep_wit_error_channels() -> Res
     run_json_cases(
         r#"
         export function run(input: string): Result<string, number> {
-            const value = JSON.parse(input);
-            value.text = value.text.toUpperCase();
-            if (value.text.indexOf("SS") !== 1) throw 90;
-            return JSON.stringify(value);
+            try {
+                const value = JSON.parse(input);
+                value.text = value.text.toUpperCase();
+                if (value.text.indexOf("SS") !== 1) throw 90;
+                return JSON.stringify(value);
+            } catch(error) {if(error instanceof Error)throw error.code;throw error;}
         }
     "#,
         &[

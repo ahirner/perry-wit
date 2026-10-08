@@ -71,7 +71,7 @@ fn temporal_sdk_declares_only_the_supported_immutable_surface() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn plain_dates_survive_tagged_storage_and_reject_utc_designators() -> Result<()> {
     let source = r#"
-    export function run(count:number):Result<string,number> {
+    export function run(count:number):Result<string,number> { try {
         const date=Temporal.PlainDate.from('2024-01-01T23:59:59+03:00');
         if(date.dayOfWeek!==1) {throw 70;}
         const object={date:date};
@@ -87,7 +87,7 @@ async fn plain_dates_survive_tagged_storage_and_reject_utc_designators() -> Resu
         try {Temporal.PlainDate.from('2024-01-01T00:00z');} catch {caught=caught+1;}
         if(caught!==2) {throw 97;}
         return object.date.add({days:1}).toString();
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let (mut store, instance) = instantiate(source, 131072, |_| Ok(())).await?;
     let run = instance.get_typed_func::<(f64,), (Result<String, f64>,)>(&mut store, "run")?;
     for count in [0.0, 1.0, 3000.0] {
@@ -191,13 +191,13 @@ async fn strict_utc_source_boundary_preserves_precision_and_rejects_other_iso_fo
 async fn temporal_instants_preserve_nanoseconds_offsets_and_numeric_range_errors() -> Result<()> {
     let source = r#"
     function format(value:Temporal.Instant):string {return value.toString();}
-    export function run(text:string):Result<string,number> {
+    export function run(text:string):Result<string,number> { try {
         const value=Temporal.Instant.from(text);
         const milliseconds=value.epochMilliseconds;
         const rounded=Temporal.Instant.fromEpochMilliseconds(milliseconds);
         if(rounded.epochMilliseconds!==milliseconds) {throw 99;}
         return format(value);
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let compiled =
         compile_typescript_waffle(source, "instant.ts", &WaffleCompileOptions::default())?;
     assert!(!compiled.component_wat.unwrap().contains("wasi:"));
@@ -247,14 +247,14 @@ async fn temporal_plain_day_arithmetic_preserves_fields_and_ignores_numeric_offs
     function shift(value:Temporal.PlainDateTime, duration:{days:number}):Temporal.PlainDateTime {
         return value.add(duration);
     }
-    export function run(text:string, days:number):Result<string,number> {
+    export function run(text:string, days:number):Result<string,number> { try {
         const original=Temporal.PlainDateTime.from(text);
         const shifted=shift(original,{days:days});
         if(shifted===original) {throw 99;}
         if(shifted.hour!==original.hour || shifted.minute!==original.minute || shifted.second!==original.second) {throw 98;}
         if(shifted.millisecond!==original.millisecond || shifted.microsecond!==original.microsecond || shifted.nanosecond!==original.nanosecond) {throw 97;}
         return shifted.toString();
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let (mut store, instance) = instantiate(source, 262144, |_| Ok(())).await?;
     let run =
         instance.get_typed_func::<(String, f64), (Result<String, f64>,)>(&mut store, "run")?;
@@ -293,7 +293,7 @@ async fn temporal_values_retain_identity_through_objects_promises_and_collection
     let source = r#"
     async function make(text:string):Promise<Temporal.Instant> {return Temporal.Instant.from(text);}
     function format(value:Temporal.Instant):string {return value.toString();}
-    export async function run(text:string):Promise<Result<string,number>> {
+    export async function run(text:string):Promise<Result<string,number>> { try {
         const promise=make(text);
         const value=await promise;
         const owner={instant:value, plain:Temporal.PlainDateTime.from('2024-02-29')};
@@ -308,7 +308,7 @@ async fn temporal_values_retain_identity_through_objects_promises_and_collection
         if(owner.plain.month!==2) {throw owner.plain.month;}
         if(owner.plain.day!==29) {throw owner.plain.day;}
         return format(owner.instant);
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let (mut store, instance) = instantiate(source, 262144, |_| Ok(())).await?;
     let run = instance.get_typed_func::<(String,), (Result<String, f64>,)>(&mut store, "run")?;
     for _ in 0..10 {
@@ -391,7 +391,7 @@ async fn temporal_numeric_range_errors_and_returns_survive_allocating_finally() 
             while(index<1000) {Temporal.Instant.fromEpochMilliseconds(index).toString();index=index+1;}
         }
     }
-    export function run(milliseconds:number):Result<string,number> {
+    export function run(milliseconds:number):Result<string,number> { try {
         const state=new Uint8Array(1);
         try {
             const result=checked(milliseconds,state);
@@ -399,9 +399,9 @@ async fn temporal_numeric_range_errors_and_returns_survive_allocating_finally() 
             return result;
         } catch(error) {
             if(state[0]!==1) {throw 98;}
-            throw error;
+            if(error instanceof Error)throw error.code;throw error;
         }
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let (mut store, instance) = instantiate(source, 262144, |_| Ok(())).await?;
     let run = instance.get_typed_func::<(f64,), (Result<String, f64>,)>(&mut store, "run")?;
     for _ in 0..5 {

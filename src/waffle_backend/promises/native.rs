@@ -78,6 +78,16 @@ fn allocate(b: &mut Builder, registry: &ModuleRegistry, size: u32) -> waffle::Va
     )[0]
 }
 
+fn require_completion(b: &mut Builder, status: waffle::Value) {
+    use crate::waffle_backend::abi::CompletionStatus;
+    let native_failure = b.integer(CompletionStatus::NativeFailure as u32);
+    let native = b.op(Operator::I32LeU, &[status, native_failure], Type::I32);
+    let threw = b.integer(CompletionStatus::Threw as u32);
+    let threw = b.op(Operator::I32Eq, &[status, threw], Type::I32);
+    let valid = b.op(Operator::I32Or, &[native, threw], Type::I32);
+    b.require(valid);
+}
+
 pub(crate) fn emit(
     module: &mut Module<'static>,
     registry: &ModuleRegistry,
@@ -185,6 +195,22 @@ pub(crate) fn emit(
             }
             _ => None,
         };
+        let fetch_failure = if matches!(target, TaskTarget::Intrinsic(name)
+            if matches!(contract.intrinsics[name], crate::waffle_backend::resolve::TypedIntrinsic::Capability(crate::waffle_backend::capabilities::CapabilityOperation::Fetch)))
+        {
+            Some(crate::waffle_backend::errors::emit_fetch_failure(
+                module,
+                registry,
+                strings,
+                &contract
+                    .wit
+                    .as_ref()
+                    .map(|wit| wit.http_error_names())
+                    .unwrap_or_default(),
+            )?)
+        } else {
+            None
+        };
         let mut b = Builder::new(module, worker, memory);
         let context = b.param(0);
         let record = b.load(context, 0, I32);
@@ -241,6 +267,21 @@ pub(crate) fn emit(
                 Some(value) if results[0] == I32 => b.op(Operator::F64ConvertI32U, &[*value], F64),
                 Some(value) => *value,
             };
+            (tag, payload)
+        };
+        let (tag, payload) = if let Some(function) = fetch_failure {
+            let outcome = b.call(function, &[tag, payload, args[0]], &[I32, F64]);
+            (outcome[0], outcome[1])
+        } else {
+            (tag, payload)
+        };
+        let (tag, payload) = if !guest
+            && !matches!(target, TaskTarget::FetchUpload)
+            && let Some(errors) = registry.errors
+        {
+            let outcome = b.call(errors.completion, &[tag, payload], &[I32, F64]);
+            (outcome[0], outcome[1])
+        } else {
             (tag, payload)
         };
         if matches!(
@@ -443,8 +484,7 @@ fn emit_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result
     b.jump(ready, &[]);
     b.block = ready;
     let tag = b.load(record, 4, I32);
-    let settled = b.op(Operator::I32LtU, &[tag, two], I32);
-    b.require(settled);
+    require_completion(&mut b, tag);
     let payload = b.load(record, 8, F64);
     b.ret(&[tag, payload]);
     b.finish(module, runtime.await_result)
@@ -473,8 +513,7 @@ fn emit_native_await(module: &mut Module<'static>, registry: &ModuleRegistry) ->
     b.jump(ready, &[]);
     b.block = ready;
     let tag = b.load(record, 4, I32);
-    let settled = b.op(Operator::I32LtU, &[tag, two], I32);
-    b.require(settled);
+    require_completion(&mut b, tag);
     let payload = b.load(record, 8, F64);
     b.ret(&[tag, payload]);
     b.finish(module, runtime.await_native)
@@ -502,8 +541,7 @@ fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     } else {
         b.require(pending);
     }
-    let valid = b.op(Operator::I32LtU, &[tag, two], I32);
-    b.require(valid);
+    require_completion(&mut b, tag);
     b.store(record, 8, payload, F64);
     b.store(record, 4, tag, I32);
     b.store(record, 0, two, I32);

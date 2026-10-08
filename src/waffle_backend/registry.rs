@@ -90,6 +90,8 @@ pub(crate) struct ModuleRegistry {
     pub(crate) text_or_bytes_lift: Option<Func>,
     pub(crate) value_helpers: Option<super::values::ValueHelpers>,
     pub(crate) value_access: Option<super::values::ValueAccessHelpers>,
+    pub(crate) errors: Option<super::errors::Helpers>,
+    pub(crate) report_error: Option<Func>,
     pub(crate) json_helpers: Option<super::json::JsonHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
     pub(crate) number_remainder: Option<Func>,
@@ -277,6 +279,9 @@ impl ModuleRegistry {
             .then(|| super::json::declare_imports(module));
 
         let number_remainder = super::number::declare_remainder(module, hir);
+        let number_format = string_reqs
+            .objects
+            .then(|| super::number::declare_format(module));
         let date_import = (super::date::required(hir) || string_reqs.json)
             .then(|| super::date::declare_imports(module));
         let time_helpers = if super::time::required(hir) {
@@ -470,6 +475,20 @@ impl ModuleRegistry {
             None
         };
 
+        let errors = if let Some(objects) = object_helpers {
+            Some(super::errors::emit(
+                module,
+                memory,
+                string_helpers.unwrap(),
+                objects,
+                value_helpers.unwrap(),
+                number_format.unwrap(),
+                string_pool,
+            )?)
+        } else {
+            None
+        };
+
         let value_access = if let Some(objects) = object_helpers {
             Some(super::values::emit_access_runtime(
                 module,
@@ -530,6 +549,7 @@ impl ModuleRegistry {
         };
 
         let mut writable_output = None;
+        let mut report_error = None;
         if let Some(mut imports) = output_imports {
             if let Some(owners) = operations {
                 super::runtime::transfers::emit(
@@ -551,6 +571,16 @@ impl ModuleRegistry {
                 imports,
                 &output_operations,
             )?;
+            if let (Some(errors), Some(output)) = (errors, helpers.get("console.error")) {
+                report_error = Some(super::errors::emit_report(
+                    module,
+                    memory,
+                    errors,
+                    string_helpers.unwrap(),
+                    *output,
+                    string_pool,
+                )?);
+            }
             if contract.has_writable() {
                 writable_output = Some([
                     helpers.get("writeStdout").copied(),
@@ -788,7 +818,7 @@ impl ModuleRegistry {
                 );
                 ensure!(
                     matches!(type_args[1], HirType::Number | HirType::Any),
-                    "WIT Result error payloads must be numeric until the exception ABI preserves primitive type tags"
+                    "WIT Result error payloads must be numeric without a resolved WIT contract"
                 );
                 Some(match &type_args[0] {
                     ty if super::values::is_dynamic(ty) => ValuePayload::Number,
@@ -914,6 +944,8 @@ impl ModuleRegistry {
             time_helpers,
             json_helpers,
             value_access,
+            errors,
+            report_error,
             decoder_helpers,
             headers_helpers,
             request_helpers,

@@ -107,7 +107,7 @@ async fn stat_layout_preserves_signed_timestamps_sizes_and_descriptor_variants()
             if (stats.isFile()) { return 5; }
             if (stats.isDirectory()) { return 2; }
             return 7;
-        } catch (error) { return 0 - error; }
+        } catch (error) { return 0 - error.code; }
     }
 import { stat as existenceStat } from "node:fs/promises";
 async function exists(path: string): Promise<boolean> { try { await existenceStat(path); return true; } catch { return false; } }
@@ -199,7 +199,7 @@ async fn metadata_confines_paths_denies_mutations_and_protects_preopen_roots() -
     std::os::unix::fs::symlink(outside.path(), inner.path().join("escape"))?;
     let source = r#"
     import fs from 'fs/promises';
-    export async function run(path: string, op: number): Promise<Result<number, number>> {
+    export async function run(path: string, op: number): Promise<Result<number, number>> { try {
         if (op === 0) { const stats = (await fs.stat(path)); if (stats.isDirectory()) { return 100; } return stats.size; }
         if (op === 1) { if ((await exists(path))) { return 1; } return 0; }
         if (op === 2) { (await fs.mkdir(path, undefined)); }
@@ -207,7 +207,7 @@ async fn metadata_confines_paths_denies_mutations_and_protects_preopen_roots() -
         if (op === 4) { (await fs.rmdir(path, undefined)); }
         if (op === 5) { return (await fs.readdir(path)).length; }
         return 0;
-    }
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }
 import { stat as existenceStat } from "node:fs/promises";
 async function exists(path: string): Promise<boolean> { try { await existenceStat(path); return true; } catch { return false; } }
 "#;
@@ -471,7 +471,7 @@ async fn metadata_options_are_checked_after_effects_and_before_io() -> Result<()
         function flag(state: Uint8Array, value: boolean): boolean {{ state[0] = state[0] + 10; return value; }}
         export async function run(): Promise<number> {{
             const state = new Uint8Array(1);
-            try {{ {call}; }} catch (error) {{ return 0 - error * 100 - state[0]; }}
+            try {{ {call}; }} catch (error) {{ return 0 - error.code * 100 - state[0]; }}
         }}"#
         );
         let context = WasiCtxBuilder::new()

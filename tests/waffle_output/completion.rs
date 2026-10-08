@@ -20,7 +20,7 @@ async fn successful_transfer_still_awaits_the_separate_capability_outcome() -> R
     import {Writable} from "node:stream";
     export async function run(): Promise<number> {
         try { await Writable.toWeb(process.stdout).getWriter().write(new Uint8Array([0,128,255])); return 0; }
-        catch (error) { return error; }
+        catch (error) { return error.code; }
     }"#;
     let compiled =
         compile_typescript_waffle(source, "completion.ts", &WaffleCompileOptions::default())?;

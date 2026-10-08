@@ -28,7 +28,7 @@ async fn options_retain_aliases_mutations_and_unknown_fields_through_helpers_and
         if (options!==alias) {return 'lost identity';}
         const invalid={encoding:options.encoding,flag:options.flag,extra:new Uint8Array(128)};
         try {(await fs.readFile('/outside/file',invalid));return 'accepted unknown';}
-        catch(error) {if(error!==12) {throw error;}}
+        catch(error) {if(error.code !== 12) {throw error;}}
         const bytes=(await fs.readFile('/sandbox/file',options));
         options.flag='w';
         (await fs.writeFile('/sandbox/copy',bytes,options));
@@ -72,7 +72,7 @@ async fn options_keep_source_order_duplicate_effects_and_rejection_before_io() -
         const state=new Uint8Array(1);
         const invalid=make(state);
         try {(await fs.writeFile(effect(state,path),effect(state,'changed'),invalid));return 0;}
-        catch(error) {if(error!==12) {throw error;}}
+        catch(error) {if(error.code !== 12) {throw error;}}
         if(state[0]!==6) {return -1;}
         const options:Options={encoding:invalid.encoding,flag:invalid.flag};
         (await fs.writeFile('/sandbox/copy','é😀',options));
@@ -155,13 +155,13 @@ async fn stored_metadata_options_validate_current_fields_and_types() -> Result<(
         const alias=listing;
         const key='rec'+'ursive';
         alias[key]=true;
-        try {(await fs.readdir('/outside',listing));return -5;} catch(error) {if(error!==12) {throw error;}}
+        try {(await fs.readdir('/outside',listing));return -5;} catch(error) {if(error.code !== 12) {throw error;}}
         alias[key]=false;
         stat.bigint=true;
-        try {(await fs.stat('/outside',stat));return -6;} catch(error) {if(error!==12) {throw error;}}
+        try {(await fs.stat('/outside',stat));return -6;} catch(error) {if(error.code !== 12) {throw error;}}
         stat.bigint=false;
         const invalid={encoding:listing.encoding,unknown:{encoding:'utf8'}};
-        try {(await fs.readdir('/outside',invalid));return -7;} catch(error) {if(error!==12) {throw error;}}
+        try {(await fs.readdir('/outside',invalid));return -7;} catch(error) {if(error.code !== 12) {throw error;}}
         return (await fs.stat('/sandbox/é😀',stat)).size+(await fs.readdir('/sandbox',listing)).length;
     }"#;
     let context = WasiCtxBuilder::new()
@@ -182,13 +182,13 @@ async fn typed_property_reads_reject_missing_or_retagged_fields() -> Result<()> 
     let source = r#"
     interface Options {encoding:string;}
     function read(options:Options):string {return options.encoding;}
-    export function run(mode:number):Result<string,number> {
+    export function run(mode:number):Result<string,number> { try {
         const options:Options={encoding:'utf8'};
         const key='enc'+'oding';
         if(mode===1) {options[key]=123;}
         if(mode===2) {options[key]=undefined;}
         return read(options);
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let (mut store, instance) = instantiate(source, WasiCtxBuilder::new().build()).await?;
     let run = instance.get_typed_func::<(f64,), (Result<String, f64>,)>(&mut store, "run")?;
     for (mode, expected) in [(0.0, Ok("utf8".into())), (1.0, Err(12.0)), (2.0, Err(12.0))] {

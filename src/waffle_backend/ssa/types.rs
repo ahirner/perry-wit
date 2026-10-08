@@ -101,6 +101,9 @@ impl FunctionLowerer<'_> {
                 ..Default::default()
             });
         }
+        if crate::waffle_backend::errors::is_constructor(expr) {
+            return crate::waffle_backend::values::value_type();
+        }
         match expr {
             Expr::PropertyGet {
                 object, property, ..
@@ -160,7 +163,7 @@ impl FunctionLowerer<'_> {
                     _ => HirType::Unknown,
                 }
             }
-            Expr::ArrayPush { .. } | Expr::ErrorNew(_) => HirType::Number,
+            Expr::ArrayPush { .. } => HirType::Number,
             Expr::IndexGet { object, .. } if matches!(self.infer_expr_type(object), HirType::Array(inner) if *inner != HirType::String) =>
             {
                 let HirType::Array(inner) = self.infer_expr_type(object) else {
@@ -239,7 +242,7 @@ impl FunctionLowerer<'_> {
             Expr::ObjectKeys(_) | Expr::ObjectValues(_) => {
                 HirType::Array(Box::new(HirType::String))
             }
-            Expr::In { .. } | Expr::ArrayIsArray(_) => HirType::Boolean,
+            Expr::In { .. } | Expr::ArrayIsArray(_) | Expr::InstanceOf { .. } => HirType::Boolean,
             Expr::Null => HirType::Null,
             Expr::Delete(_) => HirType::Boolean,
             Expr::Object(_) => self.object_literal_type(expr),
@@ -326,7 +329,8 @@ impl FunctionLowerer<'_> {
             Expr::PutValueSet { value, .. } => self.infer_expr_type(value),
             Expr::LocalSet(_, value) => self.infer_expr_type(value),
             Expr::ForOfToArray(_) => HirType::Named(SCALAR_ITERATION.into()),
-            Expr::TypeOf(_)
+            Expr::ErrorMessage(_)
+            | Expr::TypeOf(_)
             | Expr::String(_)
             | Expr::TemplateStringCoerce(_)
             | Expr::StringCoerce(_)

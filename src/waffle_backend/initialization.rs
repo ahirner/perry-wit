@@ -137,6 +137,7 @@ pub(crate) struct ModuleState {
     pub(crate) evaluate: Func,
     state: Global,
     failure: Global,
+    failure_status: Global,
 }
 
 impl ModuleState {
@@ -170,6 +171,7 @@ impl ModuleState {
             roots: global(module, Type::I32),
             state: global(module, Type::I32),
             failure: global(module, Type::F64),
+            failure_status: global(module, Type::I32),
             evaluate: builder::declare(module, "module.evaluate", &[], &[Type::I32, Type::F64]),
         })
     }
@@ -207,7 +209,14 @@ impl ModuleState {
             &[],
             Type::F64,
         );
-        b.ret(&[failed, error]);
+        let status = b.op(
+            Operator::GlobalGet {
+                global_index: self.failure_status,
+            },
+            &[],
+            Type::I32,
+        );
+        b.ret(&[status, error]);
         b.block = start;
         let running = b.integer(EvaluationState::Running as u32);
         b.effect(
@@ -221,13 +230,9 @@ impl ModuleState {
             .values()
             .filter(|binding| binding.root.is_some())
             .count();
-        if count != 0 {
-            let count = b.integer(count as u32);
-            let roots = b.call(
-                registry.allocator.unwrap().retained_frame_new,
-                &[count],
-                &[Type::I32],
-            )[0];
+        if let Some(allocator) = registry.allocator {
+            let count = b.integer(count as u32 + 1);
+            let roots = b.call(allocator.retained_frame_new, &[count], &[Type::I32])[0];
             b.effect(
                 Operator::GlobalSet {
                     global_index: self.roots,
@@ -241,7 +246,29 @@ impl ModuleState {
             &[Type::I32, Type::F64],
         );
         let ready = b.integer(EvaluationState::Ready as u32);
-        let state = b.op(Operator::I32Add, &[ready, completion[0]], Type::I32);
+        let failed = b.integer(EvaluationState::Failed as u32);
+        let state = b.op(Operator::Select, &[failed, ready, completion[0]], Type::I32);
+        b.effect(
+            Operator::GlobalSet {
+                global_index: self.failure_status,
+            },
+            &[completion[0]],
+        );
+        if registry.allocator.is_some() {
+            let frame = b.op(
+                Operator::GlobalGet {
+                    global_index: self.roots,
+                },
+                &[],
+                Type::I32,
+            );
+            let thrown = b.integer(super::abi::CompletionStatus::Threw as u32);
+            let thrown = b.op(Operator::I32Eq, &[completion[0], thrown], Type::I32);
+            let pointer = b.op(Operator::I32TruncSatF64U, &[completion[1]], Type::I32);
+            let zero = b.integer(0);
+            let pointer = b.op(Operator::Select, &[pointer, zero, thrown], Type::I32);
+            b.store(frame, 12 + 4 * count as u32, pointer, Type::I32);
+        }
         b.effect(
             Operator::GlobalSet {
                 global_index: self.state,

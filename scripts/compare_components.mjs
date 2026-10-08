@@ -17,7 +17,7 @@ function command(program, args, options = {}) {
     cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...options,
   });
   if (result.error || result.status !== 0) {
-    throw new Error(`${program} ${args.join(" ")} failed: ${result.error || result.stderr || result.stdout || result.status}`);
+    throw new Error(`${program} ${args.join(" ")} failed: ${result.error || result.stderr?.trim() || result.signal || `exit status ${result.status}`}`);
   }
   return result.stdout;
 }
@@ -61,7 +61,7 @@ copyFileSync(fileURLToPath(import.meta.url), join(output, "compare_components.mj
 console.log("Building measurement test (release)…");
 const build = command("cargo", [
   "test", "--release", "--locked", "-p", "perry-wit", "--test", "component_measurement",
-  "--no-run", "--message-format=json",
+  "--no-run", "--message-format=json-render-diagnostics",
 ], { stdio: ["ignore", "pipe", "inherit"] });
 writeFileSync(join(output, "build.jsonl"), build);
 const artifact = build.split("\n").filter(Boolean).map((line) => JSON.parse(line))

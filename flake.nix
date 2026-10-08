@@ -154,7 +154,7 @@
               --wit wit \
               --world task-runner \
               -o dist/perry_merge_task.wasm
-            wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("hermetic-build")' dist/perry_merge_task.wasm
+            wasmtime run -C cache=n -S p3=y -W component-model-async=y -W component-model-more-async-builtins=y --invoke 'run-task("hermetic-build")' dist/perry_merge_task.wasm
           '';
           installPhase = ''
             mkdir -p "$out/lib"
@@ -223,7 +223,7 @@
         } ''
           export HOME="$TMPDIR"
           export WASMTIME_CACHE_ENABLED=false
-          wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("template-hello")' "${templateComponent}/lib/template-task.wasm"
+          wasmtime run -C cache=n -S p3=y -W component-model-async=y -W component-model-more-async-builtins=y --invoke 'run-task("template-hello")' "${templateComponent}/lib/template-task.wasm"
           touch "$out"
         '';
 

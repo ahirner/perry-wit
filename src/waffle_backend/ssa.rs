@@ -10,6 +10,7 @@ mod boolean;
 mod bytes;
 mod date;
 mod decoder;
+mod errors;
 mod filesystem;
 mod http;
 mod loops;
@@ -185,6 +186,20 @@ pub(crate) fn lower_module(
         if reqs.decoder {
             string_pool.intern("utf-8");
         }
+        if let Some(wit) = &contract.wit {
+            for name in wit.http_error_names() {
+                string_pool.intern(name);
+            }
+        }
+        if reqs.objects {
+            for key in super::errors::KEYS
+                .iter()
+                .copied()
+                .chain(super::errors::NAMES)
+            {
+                string_pool.intern(key);
+            }
+        }
         string_pool.populate_memory_segments(&mut module.memories[memory]);
         let (regex_programs, next_free) = regex::emit_tables(
             &mut module,
@@ -213,7 +228,7 @@ pub(crate) fn lower_module(
         if super::time::required(hir) || super::date::required(hir) || reqs.json {
             helper_libraries.push(super::libraries::LibraryId::Time);
         }
-        if super::number::remainder_required(hir) {
+        if super::number::remainder_required(hir) || reqs.objects {
             helper_libraries.push(super::libraries::LibraryId::Number);
         }
         if !helper_libraries.is_empty() {
@@ -550,15 +565,8 @@ impl<'a> FunctionLowerer<'a> {
                     self.emit_return(ret_val);
                 }
                 Stmt::Throw(expr) => {
-                    let err_val = if super::values::is_dynamic(&self.infer_expr_type(expr)) {
-                        self.unbox_value(expr, &HirType::Number)?
-                    } else {
-                        self.expression(expr)?
-                    };
-                    ensure!(
-                        self.body.values[err_val].ty(&self.body.type_pool) == Some(Type::F64),
-                        "Only numeric thrown payloads are supported until the exception ABI preserves primitive type tags"
-                    );
+                    let value = self.value_operand(expr)?;
+                    let err_val = abi::encode_payload(&mut self.body, self.block, Some(value));
                     self.emit_throw(err_val);
                 }
                 Stmt::Try {
@@ -1243,7 +1251,9 @@ impl<'a> FunctionLowerer<'a> {
     fn call_completion(&mut self, function: waffle::Func, args: &[Value]) -> Value {
         let outcome = abi::emit_fallible_call(&mut self.body, self.block, function, args);
         self.block = outcome.err_block;
-        self.emit_throw(outcome.payload);
+        if let Some(payload) = self.normalize_error(outcome.status, outcome.payload) {
+            self.emit_throw(payload);
+        }
         self.block = outcome.ok_block;
         outcome.payload
     }
@@ -1487,6 +1497,9 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn expression(&mut self, expr: &Expr) -> Result<Value> {
+        if super::errors::is_constructor(expr) {
+            return self.error_constructor(expr);
+        }
         let reference = types::is_reference(&self.infer_expr_type(expr));
         let value = self.lower_expression(expr)?;
         if reference && self.body.values[value].ty(&self.body.type_pool) == Some(Type::I32) {
@@ -2271,18 +2284,8 @@ impl<'a> FunctionLowerer<'a> {
                 let rounded = self.op(Operator::Select, &[next, floor, up], &[Type::F64]);
                 Ok(self.op(Operator::F64Copysign, &[rounded, val], &[Type::F64]))
             }
-            Expr::ErrorNew(message) => {
-                if let Some(message) = message {
-                    self.expression(message)?;
-                }
-                Ok(self.op(
-                    Operator::F64Const {
-                        value: 1f64.to_bits(),
-                    },
-                    &[],
-                    &[Type::F64],
-                ))
-            }
+            Expr::ErrorMessage(object) => self.error_message(object),
+            Expr::InstanceOf { expr, ty, ty_expr } => self.error_instanceof(expr, ty, ty_expr),
             _ => bail!("Unsupported expression in WAFFLE lowering: {expr:?}"),
         }
     }
@@ -2371,7 +2374,9 @@ impl<'a> FunctionLowerer<'a> {
         self.source_checkpoint();
         let outcome = abi::emit_fallible_call(&mut self.body, self.block, await_result, &[record]);
         self.block = outcome.err_block;
-        self.emit_terminal_throw(outcome.payload);
+        if let Some(payload) = self.normalize_error(outcome.status, outcome.payload) {
+            self.emit_terminal_throw(payload);
+        }
         self.block = outcome.ok_block;
         self.emit_terminal_return(Some(outcome.payload));
     }
@@ -2432,7 +2437,10 @@ impl<'a> FunctionLowerer<'a> {
             self.locals = blocks.catch_environment(&self.body);
             self.narrowings = incoming_narrowings.clone();
             if let Some((id, _)) = &c_clause.param {
-                self.local_types.insert(*id, HirType::Number);
+                let value = abi::decode_payload(&mut self.body, self.block, self.locals[id], true);
+                self.locals.insert(*id, value);
+                self.reference_values.insert(value);
+                self.local_types.insert(*id, super::values::value_type());
             }
 
             self.statements(&c_clause.body)?;
@@ -2450,6 +2458,26 @@ impl<'a> FunctionLowerer<'a> {
             self.block = fb;
             let environment = blocks.finally_environment(&self.body);
             self.locals = environment.locals;
+            let throwing = self.op(
+                Operator::I32Const {
+                    value: ExitReason::Throw.tag(),
+                },
+                &[],
+                &[Type::I32],
+            );
+            let throwing = self.op(
+                Operator::I32Eq,
+                &[environment.exit_reason, throwing],
+                &[Type::I32],
+            );
+            let pointer = self.op(
+                Operator::I32TruncSatF64U,
+                &[environment.payload],
+                &[Type::I32],
+            );
+            let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+            let retained = self.op(Operator::Select, &[pointer, zero, throwing], &[Type::I32]);
+            self.reference_values.insert(retained);
             self.narrowings = incoming_narrowings.clone();
 
             self.statements(f_stmts)?;

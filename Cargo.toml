@@ -8,6 +8,7 @@ default-run = "perry-wit"
 members = [
     ".",
     "crates/json-helper",
+    "crates/number-helper",
     "crates/time-helper",
     "crates/conformance",
 ]

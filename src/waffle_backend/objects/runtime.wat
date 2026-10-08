@@ -4,12 +4,13 @@
   (import "host" "box" (func $box (param i32 f64) (result i32)))
   (memory 1)
   ;; Object: first, last, frozen flag, unused inline entries, end of inline entries.
-  ;; Entry: next, key, tag, padding, f64 payload.
+  ;; Entry: next, key, tag, non-enumerable flag, f64 payload.
   (func $record (export "object.record") (param $capacity i32) (result i32) (local $object i32) (local $size i32)
     (if (i32.gt_u (local.get $capacity) (i32.const 178956969)) (then unreachable))
     (local.set $size (i32.add (i32.const 24) (i32.mul (local.get $capacity) (i32.const 24))))
     (local.set $object (call $realloc (i32.const 0) (i32.const 0) (i32.const 8) (local.get $size)))
     (i32.store offset=16 (i32.load (i32.sub (local.get $object) (i32.const 4))) (i32.const 9))
+    (i32.store offset=20 (local.get $object) (i32.const 0))
     (i32.store (local.get $object) (i32.const 0))
     (i32.store offset=4 (local.get $object) (i32.const 0))
     (i32.store offset=8 (local.get $object) (i32.const 0))
@@ -38,6 +39,7 @@
         (else
           (local.set $entry (call $realloc (i32.const 0) (i32.const 0) (i32.const 8) (i32.const 24)))
           (i32.store offset=16 (i32.load (i32.sub (local.get $entry) (i32.const 4))) (i32.const 10))))
+      (i32.store offset=12 (local.get $entry) (i32.const 0))
       (i32.store (local.get $entry) (i32.const 0))
       (i32.store offset=4 (local.get $entry) (local.get $key))
       (local.set $last (i32.load offset=4 (local.get $object)))

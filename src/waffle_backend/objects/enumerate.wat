@@ -5,6 +5,8 @@
     (local.set $entry (i32.load (local.get $object)))
     (block $counted (loop $count
       (br_if $counted (i32.eqz (local.get $entry)))
+      (if (i32.load offset=12 (local.get $entry)) (then
+        (local.set $entry (i32.load (local.get $entry))) (br $count)))
       (if (i32.and (local.get $values) (i32.ne (i32.load offset=8 (local.get $entry)) (i32.const 4)))
         (then (return (i32.const 1) (f64.const 12))))
       (local.set $count (i32.add (local.get $count) (i32.const 1)))
@@ -18,6 +20,8 @@
     (local.set $entry (i32.load (local.get $object)))
     (block $copied (loop $copy
       (br_if $copied (i32.eqz (local.get $entry)))
+      (if (i32.load offset=12 (local.get $entry)) (then
+        (local.set $entry (i32.load (local.get $entry))) (br $copy)))
       (if (local.get $values)
         (then (local.set $descriptor (i32.trunc_f64_u (f64.load offset=16 (local.get $entry)))))
         (else (local.set $descriptor (i32.load offset=4 (local.get $entry)))))
@@ -33,6 +37,8 @@
     (local.set $entry (i32.load (local.get $source)))
     (block $done (loop $copy
       (br_if $done (i32.eqz (local.get $entry)))
+      (if (i32.load offset=12 (local.get $entry)) (then
+        (local.set $entry (i32.load (local.get $entry))) (br $copy)))
       (call $set (local.get $target) (i32.load offset=4 (local.get $entry))
         (i32.load offset=8 (local.get $entry)) (f64.load offset=16 (local.get $entry)))
       local.set $payload local.set $status

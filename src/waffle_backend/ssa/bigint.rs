@@ -47,7 +47,7 @@ impl FunctionLowerer<'_> {
             &[],
             &[Type::F64],
         );
-        self.emit_throw(reason);
+        self.emit_native_throw(reason);
         self.block = success;
         let integer = self.op(Operator::I64TruncF64S, &[number], &[Type::I64]);
         let zero = self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]);

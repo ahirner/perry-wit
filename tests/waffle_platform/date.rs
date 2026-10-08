@@ -91,7 +91,7 @@ async fn invalid_dates_unwind_and_retained_dates_survive_collection() -> Result<
         catch(error) {
             if(date.getTime()===date.getTime()) {throw 97;}
             if(new Date(date.getTime()).getTime()===new Date(date.getTime()).getTime()) {throw 94;}
-            throw error+1;
+            throw error.code+1;
         } finally {
             let cleanup=0;
             while(cleanup<1000) {new Date(cleanup).toISOString(); cleanup=cleanup+1;}

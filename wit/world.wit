@@ -7,16 +7,18 @@ world command {
 
 world merge-docs {
   import wasi:http/client@0.3.0;
-  export merge-docs: async func() -> string;
+  record merge-error {
+    name: string,
+    message: string,
+  }
+  export merge-docs: async func() -> result<string, merge-error>;
 }
 
 world task-runner {
-  include wasi:cli/imports@0.3.0;
   export run-task: func(input: string) -> string;
 }
 
 world merge-task {
-  include wasi:cli/imports@0.3.0;
   export run-task: func(input: string) -> string;
   export merge-task: func(input: string) -> string;
 }

@@ -13,6 +13,9 @@ use super::types::StringKind;
 impl FunctionLowerer<'_> {
     /// Rejects unsupported coercions before a primitive can become a descriptor address.
     pub(super) fn string_operand(&mut self, expr: &Expr) -> Result<Value> {
+        if crate::waffle_backend::values::is_dynamic(&self.infer_expr_type(expr)) {
+            return self.unbox_value(expr, &HirType::String);
+        }
         if StringKind::of(&self.infer_expr_type(expr)) == Some(StringKind::Optional) {
             let value = self.expression(expr)?;
             let undefined = self.expression(&Expr::String("undefined".into()))?;

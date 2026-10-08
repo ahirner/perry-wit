@@ -59,12 +59,12 @@ async fn text_reads_preserve_boms_nuls_and_scalar_lengths_and_reject_invalid_utf
     let directory = tempfile::tempdir()?;
     let source = r#"
     import {readFile as read} from "fs/promises";
-    export async function run(path: string): Promise<Result<string, number>> {
+    export async function run(path: string): Promise<Result<string, number>> { try {
         const text = (await read(path, {encoding: 'UTF-8', flag: 'r'}));
         let index = 0;
         while (index < 2000) { const temporary = new Uint8Array(256); index = index + 1; }
         return text;
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
         .build();
@@ -116,7 +116,7 @@ async fn read_options_preserve_effects_and_fail_before_preopen_resolution() -> R
     export async function run(target: string, value: string): Promise<number> {
         const state = new Uint8Array(1);
         try { (await readFile(path(state, target), {encoding: "utf8", flag: flag(state, value)})); return state[0]; }
-        catch (error) { return error * 100 + state[0]; }
+        catch (error) { return error.code * 100 + state[0]; }
     }"#;
     let directory = tempfile::tempdir()?;
     fs::write(directory.path().join("file"), "keep")?;
@@ -209,7 +209,7 @@ async fn static_read_options_and_repeated_reads_keep_their_result_contract() -> 
         ("{unknown: true}", -12.0),
     ] {
         let source = format!(
-            "import {{readFile}} from 'fs/promises'; export async function run(): Promise<number> {{ try {{ return (await readFile('/sandbox/text', {options})).length; }} catch (error) {{ return 0 - error; }} }}"
+            "import {{readFile}} from 'fs/promises'; export async function run(): Promise<number> {{ try {{ return (await readFile('/sandbox/text', {options})).length; }} catch (error) {{ return 0 - error.code; }} }}"
         );
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadOnly)?
@@ -234,7 +234,7 @@ async fn static_read_options_and_repeated_reads_keep_their_result_contract() -> 
             try {
                 if (bad) { (await readFile('/sandbox/bad', 'utf8')); }
                 else { count = count + (await readFile('/sandbox/text', 'utf8')).length; }
-            } catch (error) { count = count + error; }
+            } catch (error) { count = count + error.code; }
             bad = bad === false;
             index = index + 1;
         }
@@ -361,7 +361,7 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
     import {readFile} from "fs/promises";
     async function read(): Promise<string> {
         try { return (await readFile('/sandbox/input', 'utf8')); }
-        catch (error) { if (error === 37) { return 'failed'; } throw error; }
+        catch (error) { if (error.code === 37) { return 'failed'; } throw error; }
     }
     export async function run(encoding: string): Promise<string> {
         const pending = read();
@@ -374,7 +374,7 @@ async fn read_owners_survive_partial_input_sibling_collection_and_separate_compl
     import {readFile} from "fs/promises";
     async function read(encoding: string): Promise<string | Uint8Array> {
         try { return (await readFile('/sandbox/input', {encoding})); }
-        catch (error) { if (error === 37) { return 'failed'; } throw error; }
+        catch (error) { if (error.code === 37) { return 'failed'; } throw error; }
     }
     function text(value: string | Uint8Array): string {
         if (typeof value === "string") { return value; }

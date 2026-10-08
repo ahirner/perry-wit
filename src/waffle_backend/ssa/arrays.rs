@@ -185,7 +185,7 @@ impl FunctionLowerer<'_> {
             &[],
             &[Type::F64],
         );
-        self.emit_throw(error);
+        self.emit_native_throw(error);
         self.block = present;
         let data = self.op(
             Operator::I32Load {

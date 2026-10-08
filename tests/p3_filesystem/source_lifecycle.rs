@@ -22,7 +22,7 @@ const WRITE: &str = r#"
 import {writeFile} from "fs/promises";
 async function save(path: string, text: string): Promise<number> {
     try { (await writeFile(path, text)); return 0; }
-    catch (error) { return error; }
+    catch (error) { return error.code; }
 }
 export async function run(): Promise<number> {
     const pending = save("/sandbox/" + "file", "é" + "😀\0");
@@ -101,7 +101,7 @@ async fn incomplete_transfers_fail_and_host_traps_bypass_language_cleanup() -> R
     import {writeFile} from "fs/promises";
     export async function run(): Promise<number> {
         try { (await writeFile("/sandbox/file", "must be transferred")); return 0; }
-        catch (error) { return error; }
+        catch (error) { return error.code; }
         finally { console.log("finished"); }
     }"#;
     for trap in [false, true] {

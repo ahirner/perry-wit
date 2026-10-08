@@ -122,6 +122,8 @@
       (if (i32.eq (local.get $tag) (i32.const 6))
         (then
           (br_if $done (i32.eqz (local.get $item)))
+          (if (i32.load offset=12 (local.get $item)) (then
+            (local.set $item (i32.load (local.get $item))) (br $children)))
           (local.set $item-tag (i32.load offset=8 (local.get $item)))
           (local.set $item-value (f64.load offset=16 (local.get $item)))
           (local.set $key (i32.load offset=4 (local.get $item)))

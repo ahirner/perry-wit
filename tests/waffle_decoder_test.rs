@@ -212,10 +212,10 @@ async fn utf8_labels_are_checked_and_default_decoding_is_strict() -> Result<()> 
         const decoder = new TextDecoder();
         if (decoder.fatal !== true) { throw 99; }
         let failures = 0;
-        try { new TextDecoder("utf-16"); } catch (error) { if (error !== 1) { throw 98; } failures = failures + 1; }
-        try { new TextDecoder("utf8", {fatal: false}); } catch (error) { if (error !== 1) { throw 97; } failures = failures + 1; }
+        try { new TextDecoder("utf-16"); } catch (error) { if (error.code !== 1) { throw 98; } failures = failures + 1; }
+        try { new TextDecoder("utf8", {fatal: false}); } catch (error) { if (error.code !== 1) { throw 97; } failures = failures + 1; }
         if (failures !== 2) { throw 96; }
-        return decoder.decode(new Uint8Array([255]));
+        try {return decoder.decode(new Uint8Array([255]));} catch(error) {throw error.code;}
     }"#;
     let (mut store, instance) = instantiate(strict).await?;
     let run =

@@ -236,7 +236,12 @@ pub(super) fn emit_from_code_point(
         },
     );
 
-    abi::emit_completion(&mut body, err_block, CompletionStatus::Threw, code_point);
+    abi::emit_completion(
+        &mut body,
+        err_block,
+        CompletionStatus::NativeFailure,
+        code_point,
+    );
 
     let one = body.add_op(ok_block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
     let desc = StringDescriptor {

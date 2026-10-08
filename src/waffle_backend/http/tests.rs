@@ -56,7 +56,7 @@ async fn instantiate() -> Result<(Store<Host>, Instance)> {
         include_str!("../../../tests/fixtures/bounded_response.ts"),
         r#"
       type Buffered = {status:number,headers:[string,Uint8Array][],body:Uint8Array};
-      export async function run(authority:string,path:string,entries:[string,Uint8Array][],limit:number):Promise<{ok:true,value:Buffered}|{ok:false,error:number}> {
+      export async function run(authority:string,path:string,entries:[string,Uint8Array][],limit:number):Promise<{ok:true,value:Buffered}|{ok:false,error:string}> {
         try {
           const headers=new Headers();
           const decoder=new TextDecoder('utf-8',{fatal:true});
@@ -66,14 +66,14 @@ async fn instantiate() -> Result<(Store<Host>, Instance)> {
           const combined=response.headers.get('x-value');
           let value='';if(combined!==null){value=combined;}
           return {ok:true,value:{status:response.status,headers:[['x-value',new TextEncoder().encode(value)]],body:bytes}};
-        }catch(error){if(typeof error==='number')return {ok:false,error};throw error;}
+        }catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
       }
     "#
     );
     let (resolve, package) = crate::component::wit::resolve_source(
         "package test:http; world fixture {import wasi:http/client@0.3.0;
         record buffered-response {status:u16,headers:list<tuple<string,list<u8>>>,body:list<u8>}
-        export run:async func(authority:string,path:string,headers:list<tuple<string,list<u8>>>,limit:u32)->result<buffered-response,u32>;}",
+        export run:async func(authority:string,path:string,headers:list<tuple<string,list<u8>>>,limit:u32)->result<buffered-response,string>;}",
     )?;
     let world = resolve.select_world(&[package], Some("fixture"))?;
     let compiled = crate::waffle_backend::compile_typescript_for_world(
@@ -131,7 +131,7 @@ async fn fetch_uses_real_p3_http_resources_and_preserves_headers_status_and_byte
     });
     let (mut store, instance) = instantiate().await?;
     let run = instance
-        .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, u32>,)>(
+        .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, String>,)>(
             &mut store, "run",
         )?;
     for _ in 0..10 {
@@ -174,7 +174,7 @@ async fn bounded_responses_handle_exact_limits_overflow_and_repeated_four_mib_bo
     });
     let (mut store, instance) = instantiate().await?;
     let run = instance
-        .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, u32>,)>(
+        .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, String>,)>(
             &mut store, "run",
         )?;
     for length in [0_u32, 1, 8192, 8193, 4 * 1024 * 1024] {
@@ -195,7 +195,7 @@ async fn bounded_responses_handle_exact_limits_overflow_and_repeated_four_mib_bo
                 .await??
                 .0;
                 if limit < length {
-                    assert_eq!(result.unwrap_err(), 8);
+                    assert_eq!(result.unwrap_err(), "8");
                 } else {
                     let response = result.unwrap();
                     assert_eq!(response.status, 200);
@@ -221,7 +221,7 @@ async fn metadata_and_transport_errors_release_resources_and_allow_reuse() -> Re
     });
     let (mut store, instance) = instantiate().await?;
     let run = instance
-        .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, u32>,)>(
+        .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, String>,)>(
             &mut store, "run",
         )?;
     for _ in 0..10 {
@@ -254,7 +254,20 @@ async fn metadata_and_transport_errors_release_resources_and_allow_reuse() -> Re
             .await??
             .0;
             let error = result.expect_err("invalid metadata and failed transfers cannot succeed");
-            assert!(expected.contains(&error), "{path}: {error}");
+            assert!(
+                error
+                    .parse::<u32>()
+                    .is_ok_and(|code| expected.contains(&code))
+                    || expected.start == 100
+                        && [
+                            "HTTP-protocol-error",
+                            "connection-terminated",
+                            "HTTP-response-incomplete",
+                            "internal-error"
+                        ]
+                        .contains(&error.as_str()),
+                "{path}: {error}"
+            );
             store.assert_concurrent_state_empty();
             assert!(store.data().table.is_empty());
             let recovered = timeout(
@@ -296,7 +309,7 @@ async fn disposal_abandons_pending_headers_and_body_transfers() -> Result<()> {
         });
         let (mut store, instance) = instantiate().await?;
         let run = instance
-            .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, u32>,)>(
+            .get_typed_func::<(String, String, Vec<(String, Vec<u8>)>, u32), (Result<Response, String>,)>(
                 &mut store, "run",
             )?;
         assert!(
@@ -335,18 +348,18 @@ async fn typed_source_preserves_response_fields_headers_and_binary_body() -> Res
     });
     let source = r#"
         function body(response:Response):ReadableStream<Uint8Array>|null { return response.body; }
-        export async function run(authority:string):Promise<{ok:true,value:string}|{ok:false,error:number}> {
+        export async function run(authority:string):Promise<{ok:true,value:string}|{ok:false,error:string}> {
           try {
             const response=await fetch('http://'+authority+'/',{headers:{'x-request':'value'}});
             if(response.status!==404 || response.body!==body(response)) throw 99;
             const headers=response.headers.get('x-value');
             if(headers===null)throw 98;
             return {ok:true,value:headers+':'+new TextDecoder('utf-8',{fatal:true}).decode(await readBounded(response,1024))};
-          } catch(error){if(typeof error==='number')return {ok:false,error};throw error;}
+          } catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
         }
     "#;
     let (mut store, instance) = instantiate_source(source, 262144).await?;
-    let run = instance.get_typed_func::<(String,), (Result<String, f64>,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "run")?;
     for _ in 0..20 {
         let result = timeout(
             Duration::from_secs(20),
@@ -421,7 +434,7 @@ async fn source_validation_preserves_argument_order_and_errors_before_io() -> Re
         export async function run(authority:string):Promise<string> {
             const state={trace:''};
             try { await fetch(text(state,'bad://')+text(state,authority)+text(state,'/'),{headers:headers(state),method:method(state)}); }
-            catch(error) { if(error!==12)throw error; return state.trace; }
+            catch(error) { if(!(error instanceof TypeError)||error.cause.code!=='12')throw error; return state.trace; }
             throw 99;
         }
     "#;
@@ -474,16 +487,16 @@ async fn json_fetch_checks_status_media_type_and_payload() -> Result<()> {
     });
     let (mut store, instance) =
         instantiate_source(include_str!("../../../tests/fixtures/http_json.ts"), 524288).await?;
-    let run =
-        instance.get_typed_func::<(String, String), (Result<String, f64>,)>(&mut store, "run")?;
+    let run = instance
+        .get_typed_func::<(String, String), (Result<String, String>,)>(&mut store, "run")?;
     for _ in 0..10 {
         for (path, expected) in [
             ("/json", Ok("{\"text\":\"é😀\"}".into())),
-            ("/status", Err(400.)),
-            ("/missing", Err(401.)),
-            ("/duplicate", Err(401.)),
-            ("/unsupported", Err(402.)),
-            ("/bad-json", Err(1.)),
+            ("/status", Err("400".into())),
+            ("/missing", Err("401".into())),
+            ("/duplicate", Err("401".into())),
+            ("/unsupported", Err("402".into())),
+            ("/bad-json", Err("1".into())),
         ] {
             assert_eq!(
                 timeout(
@@ -546,22 +559,22 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
     });
     let source = r#"
 
-        export async function run(authority:string,path:string,limit:number):Promise<{ok:true,value:Uint8Array}|{ok:false,error:number}> {
+        export async function run(authority:string,path:string,limit:number):Promise<{ok:true,value:Uint8Array}|{ok:false,error:string}> {
             try {
               const response=await fetch('http://'+authority+path);
               return {ok:true,value:await readBounded(response,limit)};
-            }catch(error){if(typeof error==='number')return {ok:false,error};throw error;}
+            }catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
         }
     "#;
     let (mut store, instance) = instantiate_source(source, 16 * 1024 * 1024).await?;
     let run = instance
-        .get_typed_func::<(String, String, f64), (Result<Vec<u8>, f64>,)>(&mut store, "run")?;
+        .get_typed_func::<(String, String, f64), (Result<Vec<u8>, String>,)>(&mut store, "run")?;
     for _ in 0..5 {
         for (path, limit, expected) in [
             ("/", 6., Ok(vec![0, 255, 128, 240, 159, 146])),
-            ("/", 5., Err(8.)),
-            ("/", f64::NAN, Err(12.)),
-            ("/", -1., Err(12.)),
+            ("/", 5., Err("8".into())),
+            ("/", f64::NAN, Err("12".into())),
+            ("/", -1., Err("12".into())),
             ("/large", 4194304., Ok(vec![255; 4 * 1024 * 1024])),
         ] {
             assert_eq!(
@@ -586,7 +599,7 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
         .await??
         .0
         .unwrap_err();
-        assert!((100.0..139.0).contains(&error));
+        assert!((100..139).contains(&error.parse::<u32>()?));
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }
@@ -598,12 +611,12 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
         );
     let (mut store, instance) = instantiate_source(&source, 262144).await?;
     let run = instance
-        .get_typed_func::<(String, String, f64), (Result<String, f64>,)>(&mut store, "run")?;
+        .get_typed_func::<(String, String, f64), (Result<String, String>,)>(&mut store, "run")?;
     assert_eq!(
         run.call_async(&mut store, (server.address.to_string(), "/".into(), 1024.))
             .await?
             .0,
-        Err(2.)
+        Err("2".into())
     );
     store.assert_concurrent_state_empty();
     assert!(store.data().table.is_empty());

@@ -17,6 +17,114 @@ fn compile_records(source: &str) -> Result<WaffleCompiled> {
 }
 
 #[test]
+fn export_completions_map_to_results_without_changing_internal_calls() -> Result<()> {
+    let wit = "package test:boundary; world boundary {
+        type outcome = result<string,string>;
+        export run:func(input:string,fail:bool)->outcome;
+        export caught:func(input:string)->string;
+    }";
+    let source = r#"
+        export function run(input:string, fail:boolean):string {
+            for(let i=0;i<100;i++){const garbage=[input+'!'];}
+            if(fail)throw input+' failed';
+            return input+' returned';
+        }
+        export function caught(input:string):string {
+            try {return run(input,true);} catch(error){return 'caught:'+error;}
+        }
+    "#;
+    check_sdk_source(wit, source)?;
+    let compiled = compile_world(source, wit)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(
+        &engine,
+        StoreLimitsBuilder::new().memory_size(65536).build(),
+    );
+    store.limiter(|limits| limits);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run =
+        instance.get_typed_func::<(&str, bool), (Result<String, String>,)>(&mut store, "run")?;
+    let caught = instance.get_typed_func::<(&str,), (String,)>(&mut store, "caught")?;
+    for i in 0..100 {
+        let input = format!("{i}雪\0");
+        for fail in [false, true] {
+            let expected = if fail {
+                Err(format!("{input} failed"))
+            } else {
+                Ok(format!("{input} returned"))
+            };
+            assert_eq!(run.call(&mut store, (&input, fail))?.0, expected);
+        }
+        assert_eq!(
+            caught.call(&mut store, (&input,))?.0,
+            format!("caught:{input} failed")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn completion_mapping_supports_unit_payloads_and_checks_the_error_type() -> Result<()> {
+    let engine = Engine::default();
+    for result in ["result", "result<_,string>"] {
+        let wit = format!(
+            "package test:boundary; world boundary {{export run:func(fail:bool)->{result};}}"
+        );
+        let source = "export function run(fail:boolean):void {if(fail)throw 'failed';}";
+        check_sdk_source(&wit, source)?;
+        let compiled = compile_world(source, &wit)?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let run = instance.get_func(&mut store, "run").unwrap();
+        for fail in [false, true, false] {
+            let mut output = [Val::Bool(false)];
+            run.call(&mut store, &[Val::Bool(fail)], &mut output)?;
+            assert_eq!(
+                output[0],
+                Val::Result(if fail {
+                    Err((result != "result").then(|| Box::new(Val::String("failed".into()))))
+                } else {
+                    Ok(None)
+                })
+            );
+        }
+    }
+    let compiled = compile_world(
+        "export function run():string {throw 42;}",
+        "package test:boundary; world boundary {export run:func()->result<string,string>;}",
+    )?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(), (Result<String, String>,)>(&mut store, "run")?;
+    assert!(run.call(&mut store, ()).is_err());
+    Ok(())
+}
+
+#[test]
+fn scalar_completions_preserve_canonical_result_discriminants_and_payloads() -> Result<()> {
+    let compiled = compile_world(
+        "export function run(value:number):number {if(value<0)throw -value; return value;}",
+        "package test:boundary; world boundary {export run:func(value:f64)->result<f64,u32>;}",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(f64,), (Result<f64, u32>,)>(&mut store, "run")?;
+    for input in [0., 1.5, -42., f64::INFINITY] {
+        assert_eq!(
+            run.call(&mut store, (input,))?.0,
+            if input < 0. { Err(42) } else { Ok(input) }
+        );
+    }
+    assert!(run.call(&mut store, (-1.5,)).is_err());
+    Ok(())
+}
+
+#[test]
 fn typed_record_reads_need_no_temporary_value_allocations() -> Result<()> {
     let world = "package test:boundary; world boundary {export run:func(count:u32)->f64;}";
     let compiled = compile_world(
@@ -421,7 +529,7 @@ fn conditional_tagged_values_are_checked_only_on_the_selected_branch() -> Result
             export function run(input:string, select:boolean):{{ok:true,value:number}}|{{ok:false,error:number}} {{
                 const data = JSON.parse(input);
                 try {{ {body} }}
-                catch(error) {{ return {{ok:false,error:error}}; }}
+                catch(error) {{ return {{ok:false,error:error.code}}; }}
             }}
         "#
         );
@@ -493,7 +601,7 @@ fn resolved_guest_calls_extract_dynamic_json_arguments_and_reject_wrong_tags() -
     export function run(input:string):{ok:true,value:number}|{ok:false,error:number} {
         const value=JSON.parse(input);
         try {return {ok:true,value:increment(value.n)+length(value.s)+field(value.obj)};}
-        catch(error) {return {ok:false,error:error};}
+        catch(error) {return {ok:false,error:error.code};}
     }"#;
     let compiled = compile_world(
         source,

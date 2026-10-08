@@ -81,7 +81,7 @@ async fn invalid_options_preserve_files_and_argument_effects_before_preopen_reso
     export async function run(target: string, flag: string): Promise<number> {
         const state = new Uint8Array(1);
         try { (await writeFile(path(state, target), data(state), {flag: option(state, flag)})); return 0; }
-        catch (error) { return error * 100 + state[0]; }
+        catch (error) { return error.code * 100 + state[0]; }
     }"#;
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("keep"), b"original")?;
@@ -114,7 +114,7 @@ async fn filesystem_paths_select_the_longest_mount_and_reject_escapes_without_le
 {
     let source = r#"
     import * as disk from "fs/promises";
-    export async function run(path: string): Promise<Result<number, number>> { (await disk.writeFile(path, "é😀")); return 1; }
+    export async function run(path: string): Promise<Result<number, number>> { try { (await disk.writeFile(path, "é😀")); return 1; } catch(error) {if(error instanceof Error)throw error.code;throw error;} }
     "#;
     let outer = tempfile::tempdir()?;
     let inner = tempfile::tempdir()?;
@@ -189,12 +189,12 @@ async fn write_options_defaults_duplicates_and_coercion_limits_are_explicit() ->
     let source = r#"
     import {writeFile as save} from "node:fs/promises";
     function effect(state: Uint8Array, value: string): string { state[0] = state[0] + 1; return value; }
-    export async function run(path: string, encoding: string, binary: boolean): Promise<Result<number, number>> {
+    export async function run(path: string, encoding: string, binary: boolean): Promise<Result<number, number>> { try {
         const state = new Uint8Array(1);
         if (binary) { (await save(path, new Uint8Array([0,255,128]), {encoding, flag: "w"})); }
         else { (await save(path, "😀\0é", {flag: effect(state, "a"), flag: effect(state, "w"), encoding})); }
         return state[0];
-    }"#;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;} }"#;
     let directory = tempfile::tempdir()?;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
@@ -251,7 +251,7 @@ async fn write_options_defaults_duplicates_and_coercion_limits_are_explicit() ->
         "{flag: undefined}",
     ] {
         let source = format!(
-            "import {{writeFile}} from 'fs/promises'; export async function run(): Promise<Result<number, number>> {{ (await writeFile('/sandbox/options', '', {options})); return 1; }}"
+            "import {{writeFile}} from 'fs/promises'; export async function run(): Promise<Result<number, number>> {{ try {{ (await writeFile('/sandbox/options', '', {options})); return 1; }} catch(error) {{if(error instanceof Error)throw error.code;throw error;}} }}"
         );
         let context = WasiCtxBuilder::new()
             .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
@@ -418,7 +418,7 @@ async fn symlink_resolution_stays_within_the_selected_preopen() -> Result<()> {
     symlink(outside.path().join("file"), directory.path().join("escape"))?;
     symlink(outside.path(), directory.path().join("escaped-dir"))?;
     symlink("cycle", directory.path().join("cycle"))?;
-    let source = "import {writeFile} from 'fs/promises'; export async function run(path: string): Promise<Result<number, number>> { (await writeFile(path, 'after')); return 1; }";
+    let source = "import {writeFile} from 'fs/promises'; export async function run(path: string): Promise<Result<number, number>> { try { (await writeFile(path, 'after')); return 1; } catch(error) {if(error instanceof Error)throw error.code;throw error;} }";
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?
         .build();
@@ -464,7 +464,7 @@ async fn filesystem_bindings_preserve_user_functions_and_prune_unused_imports() 
         let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
         assert_eq!(run.call_async(&mut store, ()).await?.0, 4.0);
     }
-    let source = "import fs from 'node:fs/promises'; export async function run(): Promise<Result<number, number>> { await fs['writeFile']('/missing', 'text'); return 1; }";
+    let source = "import fs from 'node:fs/promises'; export async function run(): Promise<Result<number, number>> { try { await fs['writeFile']('/missing', 'text'); return 1; } catch(error) {if(error instanceof Error)throw error.code;throw error;} }";
     let compiled =
         compile_typescript_waffle(source, "imports.ts", &WaffleCompileOptions::default())?;
     let wat = compiled.component_wat.unwrap();

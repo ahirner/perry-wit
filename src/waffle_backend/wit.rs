@@ -114,6 +114,39 @@ pub(crate) struct WitExport {
 }
 
 impl WitWorld {
+    pub(crate) fn has_stderr(&self) -> bool {
+        self.imports
+            .contains_key("wasi:cli/stderr@0.3.0#write-via-stream")
+    }
+
+    pub(crate) fn http_error_names(&self) -> Vec<&str> {
+        self.resolve
+            .interfaces
+            .iter()
+            .find_map(|(_, interface)| {
+                let package = &self.resolve.packages[interface.package?];
+                if package.name.namespace != "wasi"
+                    || package.name.name != "http"
+                    || interface.name.as_deref() != Some("types")
+                {
+                    return None;
+                }
+                let id = interface.types.get("error-code")?;
+                let wit_parser::TypeDefKind::Variant(variant) = &self.resolve.types[*id].kind
+                else {
+                    return None;
+                };
+                Some(
+                    variant
+                        .cases
+                        .iter()
+                        .map(|case| case.name.as_str())
+                        .collect(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
     pub(super) fn new(resolve: Resolve, world: WorldId) -> Result<Self> {
         let resolved = Self::for_encoding(resolve, world)?;
         let mut stream_exports = 0;
@@ -262,12 +295,37 @@ impl WitWorld {
                 ty => ty,
             };
             ensure!(
-                outbound_matches(result, &expected),
+                outbound_matches(result, &expected)
+                    || self
+                        .completion_result(export.function.result, result)?
+                        .is_some(),
                 "WIT export '{name}' result must match {expected:?}, found {:?}",
                 function.return_type
             );
         }
         Ok(())
+    }
+
+    fn completion_result(
+        &self,
+        result: Option<Type>,
+        source: &HirType,
+    ) -> Result<Option<&wit_parser::Result_>> {
+        let Some(ty) = result else {
+            return Ok(None);
+        };
+        if outbound_matches(source, &hir_type(&self.resolve, ty)?) {
+            return Ok(None);
+        }
+        let Some(result) = crate::abi::result_type(&self.resolve, ty) else {
+            return Ok(None);
+        };
+        let expected = result
+            .ok
+            .map(|ty| hir_type(&self.resolve, ty))
+            .transpose()?
+            .unwrap_or(HirType::Void);
+        Ok(outbound_matches(source, &expected).then_some(result))
     }
 
     pub(super) fn validate_suspension(

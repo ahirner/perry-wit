@@ -919,19 +919,20 @@ async fn resolved_world_http_domain_failures_release_resources_before_reuse() ->
     let compiled = compile(
         r#"
 
-        export async function run(authority:string,path:string):Promise<{ok:true,value:Uint8Array}|{ok:false,error:number}> {
+        export async function run(authority:string,path:string):Promise<{ok:true,value:Uint8Array}|{ok:false,error:string}> {
           try {
             const response=await fetch('http://'+authority+path);
             return {ok:true,value:await readBounded(response,8)};
           } catch(error) {
-            if(typeof error==='number') {return {ok:false,error};}
-            throw error;
+            if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};
+            if(error instanceof TypeError)return {ok:false,error:error.cause.code};
+            return {ok:false,error:JSON.stringify(error.code)};
           }
         }
     "#,
         r#"package test:http-errors; world boundary {
       import wasi:http/client@0.3.0;
-      export run:async func(authority:string,path:string)->result<list<u8>,f64>;
+      export run:async func(authority:string,path:string)->result<list<u8>,string>;
     }"#,
     )?;
     let server = fixture::HttpFixture::new(|request| match request.target.as_str() {
@@ -946,8 +947,9 @@ async fn resolved_world_http_domain_failures_release_resources_before_reuse() ->
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     let mut store = store(&engine);
     let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance
-        .get_typed_func::<(&str, &str), (std::result::Result<Vec<u8>, f64>,)>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(&str, &str), (std::result::Result<Vec<u8>, String>,)>(
+        &mut store, "run",
+    )?;
     for _ in 0..25 {
         for path in ["/overflow", "/truncated", "/disconnect", "/valid"] {
             let result = tokio::time::timeout(
@@ -961,9 +963,20 @@ async fn resolved_world_http_domain_failures_release_resources_before_reuse() ->
             } else {
                 let error = result.unwrap_err();
                 if path == "/overflow" {
-                    assert_eq!(error, 8.0);
+                    assert_eq!(error, "8");
                 } else {
-                    assert!((100.0..139.0).contains(&error), "{path}: {error}");
+                    assert!(
+                        error
+                            .parse::<u32>()
+                            .is_ok_and(|code| (100..139).contains(&code))
+                            || [
+                                "HTTP-protocol-error",
+                                "connection-terminated",
+                                "internal-error"
+                            ]
+                            .contains(&error.as_str()),
+                        "{path}: {error}"
+                    );
                 }
             }
             store.assert_concurrent_state_empty();
@@ -2221,7 +2234,16 @@ async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_own
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    for phase in ["headers", "body", "unused", "reader"] {
+    for (phase, result) in [
+        ("headers", "u32"),
+        ("body", "u32"),
+        ("unused", "u32"),
+        ("reader", "u32"),
+        ("headers", "result<u32,u32>"),
+        ("body", "result<u32,u32>"),
+        ("unused", "result<u32,u32>"),
+        ("reader", "result<u32,u32>"),
+    ] {
         let ready = Arc::new(tokio::sync::Notify::new());
         let started = ready.clone();
         let server = fixture::HttpFixture::new(move |request| {
@@ -2266,10 +2288,10 @@ async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_own
             }}
         "#
         );
-        let callee = compile(&source, r#"package test:fetch-cancel;
-            interface host { wait:async func(mode:u32)->u32; }
-            world boundary { import host; import wasi:http/client@0.3.0; export run:async func(mode:u32)->u32; }
-        "#)?.component.unwrap();
+        let callee_wit = format!("package test:fetch-cancel;
+            interface host {{ wait:async func(mode:u32)->u32; }}
+            world boundary {{ import host; import wasi:http/client@0.3.0; export run:async func(mode:u32)->{result}; }}");
+        let callee = compile(&source, &callee_wit)?.component.unwrap();
         let mut transfers = 0;
         for payload in wasmparser::Parser::new(0).parse_all(&callee) {
             if let wasmparser::Payload::ComponentCanonicalSection(section) = payload? {
@@ -2293,7 +2315,9 @@ async fn standard_fetch_host_cancellation_drains_headers_body_and_unconsumed_own
         let wit = tempfile::tempdir()?;
         std::fs::write(
             wit.path().join("world.wit"),
-            "package test:cancel; world caller { import wait:async func(mode:u32)->u32; import operation:async func(mode:u32)->u32; export run:async func(mode:u32)->u32; }",
+            format!(
+                "package test:cancel; world caller {{ import wait:async func(mode:u32)->u32; import operation:async func(mode:u32)->{result}; export run:async func(mode:u32)->u32; }}"
+            ),
         )?;
         let caller = perry_wit::component::embed_and_encode(
             &wat::parse_str(include_str!("fixtures/cancellation/caller.wat"))?,
@@ -2513,6 +2537,62 @@ async fn standard_fetch_rejects_unconsumed_body_at_call_boundary() -> Result<()>
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn export_values_are_retained_until_pending_source_work_finishes() -> Result<()> {
+    #[derive(Debug, PartialEq, Eq, ComponentType, Lift)]
+    #[component(record)]
+    struct View {
+        value: String,
+    }
+    let source = r#"
+        type View={value:string};
+        async function change(value:View):Promise<void> {
+            await 0;
+            for(let i=0;i<100;i++){value.value='later '+JSON.stringify(i);}
+        }
+        export function run(fail:boolean):View {
+            const value:View={value:'first'};
+            const pending=change(value);
+            if(fail)throw value;
+            return value;
+        }
+    "#;
+    for mapped in [false, true] {
+        let result = if mapped { "result<view,view>" } else { "view" };
+        let wit = format!(
+            "package test:completion; world boundary {{
+            record view {{value:string}}
+            export run:async func(fail:bool)->{result};
+        }}"
+        );
+        let compiled = compile(source, &wit)?;
+        let engine = engine()?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = store(&engine);
+        let instance = Linker::new(&engine)
+            .instantiate_async(&mut store, &component)
+            .await?;
+        for fail in [false, true].into_iter().cycle().take(20) {
+            let expected = View {
+                value: "later 99".into(),
+            };
+            if mapped {
+                let run =
+                    instance.get_typed_func::<(bool,), (Result<View, View>,)>(&mut store, "run")?;
+                assert_eq!(
+                    run.call_async(&mut store, (fail,)).await?.0,
+                    if fail { Err(expected) } else { Ok(expected) }
+                );
+            } else {
+                let run = instance.get_typed_func::<(bool,), (View,)>(&mut store, "run")?;
+                assert_eq!(run.call_async(&mut store, (false,)).await?.0, expected);
+            }
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn merge_docs_example_matches_node_and_reuses_the_instance() -> Result<()> {
     let server = fixture::HttpFixture::new(|request| {
         fixture::Reply::Body(
@@ -2544,10 +2624,17 @@ async fn merge_docs_example_matches_node_and_reuses_the_instance() -> Result<()>
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     let mut store = store(&engine);
     let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(), (String,)>(&mut store, "merge-docs")?;
+    #[derive(Debug, PartialEq, Eq, ComponentType, Lift)]
+    #[component(record)]
+    struct MergeError {
+        name: String,
+        message: String,
+    }
+    let run =
+        instance.get_typed_func::<(), (Result<String, MergeError>,)>(&mut store, "merge-docs")?;
     let expected = r#"{"first":1,"shared":"new","second":2}"#;
     for _ in 0..5 {
-        assert_eq!(run.call_async(&mut store, ()).await?.0, expected);
+        assert_eq!(run.call_async(&mut store, ()).await?.0, Ok(expected.into()));
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }

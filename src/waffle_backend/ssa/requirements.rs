@@ -28,6 +28,7 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
             reqs.needs_strings = true;
         }
         visit::visit_statement_nodes(&func.body, &mut |statement| {
+            reqs.objects |= matches!(statement, Stmt::Try { .. });
             if let Stmt::Let { ty, .. } = statement {
                 reqs.needs_strings |= type_has_string(ty);
             }
@@ -44,6 +45,11 @@ pub(super) fn scan_module_string_requirements(hir: &HirModule) -> RequiredString
 }
 
 fn scan_expr_requirements(expr: &Expr, reqs: &mut RequiredStringHelpers) {
+    if crate::waffle_backend::errors::is_constructor(expr)
+        || matches!(expr, Expr::InstanceOf { .. })
+    {
+        reqs.objects = true;
+    }
     match expr {
         Expr::JsonParse(_)
         | Expr::JsonParseTyped { .. }

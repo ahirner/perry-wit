@@ -32,7 +32,7 @@ pub(crate) enum LibraryId {
 impl LibraryId {
     pub(crate) fn for_entry(entry: &str) -> Result<Self> {
         Ok(match entry {
-            "number_remainder" => Self::Number,
+            "number_remainder" | "number_format" => Self::Number,
             "fetch_status_text" | "fetch_url" | "fetch_redirect" | "fetch_decode"
             | "fetch_method" | "fetch_header_value" | "fetch_header_size" | "fetch_header_get"
             | "fetch_header_name" | "fetch_header_edit" => Self::Fetch,
@@ -174,6 +174,7 @@ impl Library {
             let mut frame = None;
             let mut depth = 0;
             let mut restored = false;
+            let mut restored_returns = BTreeSet::new();
             let mut calls = Vec::new();
             for (index, op) in ops.iter().enumerate() {
                 match op {
@@ -204,10 +205,27 @@ impl Library {
                                 Op::I32Add,
                             ] = &ops[index - 3..index]
                             && frame == Some((*local_index, *value))
-                            && depth == 0
                             && !restored
                         {
-                            restored = true;
+                            if depth == 0 {
+                                restored = true;
+                            } else {
+                                let tail = &ops[index + 1..];
+                                let returned = tail.iter().position(|op| {
+                                    !matches!(
+                                        op,
+                                        Op::LocalGet { .. }
+                                            | Op::I32Const { .. }
+                                            | Op::I64Const { .. }
+                                            | Op::F32Const { .. }
+                                            | Op::F64Const { .. }
+                                    )
+                                })?;
+                                if !matches!(tail[returned], Op::Return) {
+                                    return None;
+                                }
+                                restored_returns.insert(index + 1 + returned);
+                            }
                         } else {
                             return None;
                         }
@@ -219,7 +237,18 @@ impl Library {
                     }
                     Op::Block { .. } | Op::Loop { .. } | Op::If { .. } => depth += 1,
                     Op::End if depth > 0 => depth -= 1,
-                    Op::Return | Op::End if frame.is_some() && !restored => return None,
+                    Op::Return
+                        if frame.is_some() && !restored && !restored_returns.contains(&index) =>
+                    {
+                        return None;
+                    }
+                    Op::End
+                        if frame.is_some()
+                            && !restored
+                            && !matches!(ops.get(index.wrapping_sub(1)), Some(Op::Unreachable)) =>
+                    {
+                        return None;
+                    }
                     Op::Br { relative_depth } | Op::BrIf { relative_depth }
                         if frame.is_some() && *relative_depth >= depth =>
                     {
@@ -610,18 +639,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn time_helper_has_a_checked_small_stack() {
-        let library = Library::parse(TIME).unwrap();
-        assert!(
-            library.fixed_stack_bound().is_some_and(|size| size < 8192),
-            "{:?}",
-            library.fixed_stack_bound()
-        );
+    fn numeric_and_time_helpers_have_checked_small_stacks() {
+        for bytes in [TIME, NUMBER] {
+            let library = Library::parse(bytes).unwrap();
+            assert!(
+                library.fixed_stack_bound().is_some_and(|size| size < 8192),
+                "{:?}",
+                library.fixed_stack_bound()
+            );
+        }
     }
 
     #[test]
     fn unbounded_or_unbalanced_helpers_keep_the_full_stack_reservation() {
         for body in [
+            "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 i32.const 1 if local.get 0 i32.const 16 i32.add global.set 0 return end)",
             "(func call 0)",
             "(func (local i32) loop global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 br 0 end)",
             "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 return)",

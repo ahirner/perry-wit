@@ -11,13 +11,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/helpers").display()
     );
-    for helper in ["search", "text", "fetch", "number"] {
-        let source = manifest_dir.join(format!("src/helpers/{helper}.rs"));
-        if source.exists() {
-            compile_helper(&manifest_dir, &out_dir, helper);
-        }
+    for helper in ["search", "text", "fetch"] {
+        compile_helper(&manifest_dir, &out_dir, helper);
     }
-    for helper in ["json", "time"] {
+    for helper in ["json", "time", "number"] {
         compile_cargo_helper(&manifest_dir, &out_dir, helper);
     }
 }

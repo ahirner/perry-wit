@@ -220,9 +220,7 @@ fn emit_observer(
     b.block = wait;
     let record = b.op(Operator::I32TruncF64U, &[input_payload], I32);
     let record_status = b.load(record, 4, I32);
-    let two = b.integer(2);
-    let settled = b.op(Operator::I32LtU, &[record_status, two], I32);
-    b.require(settled);
+    require_completion(&mut b, record_status);
     let record_payload = b.load(record, 8, F64);
     b.jump(observed, &[record_status, record_payload]);
     b.block = plain;
@@ -330,10 +328,16 @@ fn emit_observer(
             &[I32, F64],
         );
         let key = b.integer(strings.get(field).unwrap());
-        let tag = if field == "reason" {
-            b.integer(3)
+        let (tag, payload) = if field == "reason" {
+            let value = b.call(
+                registry.errors.unwrap().normalize,
+                &[status, payload],
+                &[F64],
+            )[0];
+            let pointer = b.op(Operator::I32TruncF64U, &[value], I32);
+            (b.load(pointer, 0, I32), b.load(pointer, 8, F64))
         } else {
-            outcome_tag
+            (outcome_tag, payload)
         };
         b.call(
             registry.object_helpers.unwrap().set,

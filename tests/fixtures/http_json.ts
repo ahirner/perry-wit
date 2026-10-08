@@ -1,4 +1,4 @@
-export async function run(authority: string, path: string): Promise<{ok:true,value:string}|{ok:false,error:number}> {
+export async function run(authority: string, path: string): Promise<{ok:true,value:string}|{ok:false,error:string}> {
   try {
   const response = await fetch("http://" + authority + path, { headers: { accept: "application/json" } });
   const bytes = await readBounded(response, 65536);
@@ -9,5 +9,7 @@ export async function run(authority: string, path: string): Promise<{ok:true,val
   const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   JSON.parse(text);
   return {ok:true,value:text};
-  } catch(error) { if(typeof error==='number') return {ok:false,error};throw error; }
+  } catch(error) { if(typeof error==='number') return {ok:false,error:JSON.stringify(error)};
+    if(error instanceof Error && 'code' in error) return {ok:false,error:JSON.stringify(error.code)};
+    throw error; }
 }

@@ -1,0 +1,88 @@
+(module
+  (import "host" "record" (func $record (param i32) (result i32)))
+  (import "host" "set" (func $set (param i32 i32 i32 f64) (result i32 f64)))
+  (import "host" "get" (func $get (param i32 i32) (result i32)))
+  (import "host" "dynamic" (func $dynamic (param i32) (result i32)))
+  (import "host" "box" (func $box (param i32 f64) (result i32)))
+  (import "host" "concat" (func $concat (param i32 i32) (result i32)))
+  (import "host" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
+  (import "host" "lift" (func $lift (param i32 i32) (result i32)))
+  (import "host" "number-format" (func $number-format (param f64 i32) (result i32)))
+  (memory 1)
+
+  (func $hidden (param $object i32) (param $key i32) (param $tag i32) (param $payload f64)
+    (call $set (local.get $object) (local.get $key) (local.get $tag) (local.get $payload)) drop drop
+    (i32.store offset=12 (call $get (local.get $object) (local.get $key)) (i32.const 1)))
+
+  (func $new (export "error.new") (param $kind i32) (param $message i32) (param $cause i32) (result i32)
+    (local $object i32) (local $name i32)
+    (local.set $object (call $record (i32.const 3)))
+    (i32.store offset=20 (local.get $object) (i32.add (local.get $kind) (i32.const 1)))
+    (local.set $name (i32.const {{Error}}))
+    (if (i32.eq (local.get $kind) (i32.const 1)) (then (local.set $name (i32.const {{TypeError}}))))
+    (if (i32.eq (local.get $kind) (i32.const 2)) (then (local.set $name (i32.const {{RangeError}}))))
+    (if (i32.eq (local.get $kind) (i32.const 3)) (then (local.set $name (i32.const {{ReferenceError}}))))
+    (if (i32.eq (local.get $kind) (i32.const 4)) (then (local.set $name (i32.const {{SyntaxError}}))))
+    (call $hidden (local.get $object) (i32.const {{name}}) (i32.const 4) (f64.convert_i32_u (local.get $name)))
+    (call $hidden (local.get $object) (i32.const {{message}}) (i32.const 4) (f64.convert_i32_u (local.get $message)))
+    (if (local.get $cause) (then
+      (call $hidden (local.get $object) (i32.const {{cause}})
+        (i32.load (local.get $cause)) (f64.load offset=8 (local.get $cause)))))
+    (call $box (i32.const 6) (f64.convert_i32_u (local.get $object))))
+
+  (func (export "error.cause") (param $options i32) (result i32)
+    (local $entry i32)
+    (if (i32.ne (i32.load (local.get $options)) (i32.const 6)) (then (return (i32.const 0))))
+    (local.set $entry (call $get (i32.trunc_f64_u (f64.load offset=8 (local.get $options))) (i32.const {{cause}})))
+    (if (i32.eqz (local.get $entry)) (then (return (i32.const 0))))
+    (call $dynamic (local.get $entry)))
+
+  (func (export "error.is") (param $value i32) (param $kind i32) (result i32)
+    (local $brand i32)
+    (if (i32.ne (i32.load (local.get $value)) (i32.const 6)) (then (return (i32.const 0))))
+    (local.set $brand (i32.load offset=20 (i32.trunc_f64_u (f64.load offset=8 (local.get $value)))))
+    (if (i32.eqz (local.get $kind)) (then (return (i32.ne (local.get $brand) (i32.const 0)))))
+    (i32.eq (local.get $brand) (i32.add (local.get $kind) (i32.const 1))))
+
+  ;; Formatting never invokes user code or recursively serializes arbitrary objects.
+  (func $describe (export "error.describe") (param $value i32) (result i32)
+    (local $tag i32) (local $payload f64) (local $object i32)
+    (local $name i32) (local $message i32) (local $buffer i32)
+    (local.set $tag (i32.load (local.get $value)))
+    (local.set $payload (f64.load offset=8 (local.get $value)))
+    (if (i32.eqz (local.get $tag)) (then (return (i32.const {{undefined}}))))
+    (if (i32.eq (local.get $tag) (i32.const 1)) (then (return (i32.const {{null}}))))
+    (if (i32.eq (local.get $tag) (i32.const 2)) (then
+      (return (select (i32.const {{true}}) (i32.const {{false}}) (f64.ne (local.get $payload) (f64.const 0))))))
+    (if (i32.eq (local.get $tag) (i32.const 3)) (then
+      (local.set $buffer (call $realloc (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 40)))
+      (return (call $lift (local.get $buffer) (call $number-format (local.get $payload) (local.get $buffer))))))
+    (if (i32.eq (local.get $tag) (i32.const 4)) (then (return (i32.trunc_f64_u (local.get $payload)))))
+    (if (i32.eq (local.get $tag) (i32.const 6)) (then
+      (local.set $object (i32.trunc_f64_u (local.get $payload)))
+      (if (i32.load offset=20 (local.get $object)) (then
+        (local.set $name (call $get (local.get $object) (i32.const {{name}})))
+        (local.set $message (call $get (local.get $object) (i32.const {{message}})))
+        (if (i32.and (i32.eq (i32.load offset=8 (local.get $name)) (i32.const 4))
+                     (i32.eq (i32.load offset=8 (local.get $message)) (i32.const 4))) (then
+          (local.set $name (i32.trunc_f64_u (f64.load offset=16 (local.get $name))))
+          (local.set $message (i32.trunc_f64_u (f64.load offset=16 (local.get $message))))
+          (if (i32.eqz (i32.load offset=4 (local.get $message))) (then (return (local.get $name))))
+          (if (i32.eqz (i32.load offset=4 (local.get $name))) (then (return (local.get $message))))
+          (return (call $concat (call $concat (local.get $name) (i32.const {{: }})) (local.get $message)))))))))
+    (i32.const {{[object Object]}}))
+
+  (func $normalize (export "error.normalize") (param $status i32) (param $payload f64) (result f64)
+    (local $code i32) (local $message i32) (local $error i32)
+    (if (i32.eq (local.get $status) (i32.const 3)) (then (return (local.get $payload))))
+    (local.set $code (call $box (i32.const 3) (local.get $payload)))
+    (local.set $message (call $concat (i32.const {{Runtime operation failed}}) (i32.const {{: }})))
+    (local.set $message (call $concat (local.get $message) (call $describe (local.get $code))))
+    (local.set $error (call $new (i32.const 0) (local.get $message) (i32.const 0)))
+    (call $hidden (i32.trunc_f64_u (f64.load offset=8 (local.get $error))) (i32.const {{code}}) (i32.const 3) (local.get $payload))
+    (f64.convert_i32_u (local.get $error)))
+
+  (func (export "error.completion") (param $status i32) (param $payload f64) (result i32 f64)
+    (if (i32.eqz (local.get $status)) (then (return (local.get $status) (local.get $payload))))
+    (i32.const 3) (call $normalize (local.get $status) (local.get $payload)))
+)
