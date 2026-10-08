@@ -111,6 +111,7 @@ These restrictions are added to README "Semantics", each with a diagnostic and a
 - **R5 Closures stay unsupported**, except non-escaping arrow arguments to known array and promise builtins. Those are always inlined and never allocated.
 - **R6 No `any`.** Untyped data is a `JsonValue` variant tree.
 - **R7 Cycles are allowed only in `instance`.** The collector handles them. `task` cycles are freed in bulk anyway.
+- **R8 Arrays are dense.** An out-of-bounds read or write traps, and a non-integral index traps. Node instead returns `undefined` or creates a hole. Arrays grow only through `push`. P3.5 removes the checks where indices are proven.
 
 ### D5. Stackless async on the P3 callback ABI
 
@@ -193,6 +194,9 @@ The phases run in order. Items within a phase can run in parallel unless they ar
 ### P1. Frontend consolidation
 
 - [ ] **P1.1 Type table.** Compute every expression's type once per function, keyed by HIR expression identity, and pass it to MIR construction. Delete the 228 recursive `infer_expr_type` calls with the legacy backend. *Done when:* the P0.1 compile-time contract passes.
+  - *Status:* the compile-time contract passes.
+    - Legacy: `infer_expr_type` keeps a per-query memo (`ssa/types.rs` `TypeMemo`), and depth 32 compiles in 0.4 s in a debug build. The memo cannot go stale, because the lowering environment cannot change during a `&self` query.
+    - MIR: `crates/perry-lower` takes expression types from the MIR types of lowered operands, so it does not need a separate type table. The item stays open until the legacy backend is deleted.
 - [ ] **P1.2 Merge validators into one subset checker that runs before MIR.**
   - Merge these passes, which run today in `mod.rs::compile_source`/`compile_resolved_hir`:
     - `text_contract` (AST and HIR);
@@ -224,17 +228,34 @@ The phases run in order. Items within a phase can run in parallel unless they ar
   - *Status (in progress):*
     - `crates/perry-mir` provides these ops: `perry.binary`, `perry.compare`, `perry.br`, `perry.cond_br`, `perry.return`, `perry.alloc{tier}`, `perry.field_get` and `perry.field_set`.
     - It also provides the nominal, possibly recursive `perry.record` type and the `perry.tier`, `binary_kind` and `compare_kind` attributes. Constants use `builtin.constant`.
-    - Verifiers and DCE side-effect interfaces are in place. Six tests cover round trip, verifier rejections, recursive records and DCE.
+    - Verifiers and DCE side-effect interfaces are in place.
+    - Added since: `perry.local`, `perry.load`, `perry.store` and `perry.undef`. The local ops implement the pliron promotable interfaces, and `mem2reg` turns them into block arguments.
+    - Also added:
+      - `perry.call` and `perry.async_call`, each verified against the callee's signature in the enclosing module;
+      - `perry.await` and the `perry.promise` type;
+      - `perry.array_new`, `perry.array_len`, `perry.array_get`, `perry.array_set` and `perry.array_push`;
+      - `perry.string_const`, `perry.string_concat` and `perry.string_len`;
+      - `perry.convert`.
+    - Ten tests pass.
     - Remaining:
-      - arrays, strings, dict/JSON, `iface.*`, bytes;
-      - `perry.async`, `perry.canon`, `perry.intrinsic`;
-      - call ops;
-      - promotable interfaces.
+      - dict/JSON, `iface.*`, bytes;
+      - `perry.canon` and `perry.intrinsic`. The plan for `perry.intrinsic` is one table-driven op, not one op per capability.
+      - a record-field promotion story for SROA. `mem2reg` promotes whole slots, so record fields need their own pass (P3.4).
     - pliron constraint: attribute keys are global, so ops use `perry_*` attribute names.
 - [ ] **P2.2 → HIR→MIR builder.**
   - One structural lowering in `src/frontend/to_mir.rs`, driven by the type table. It makes no representation decisions: tiers and layouts are left to passes.
   - The `await` continuation blocks, root tracking and per-type special cases in `ssa.rs` disappear.
   - *Done when:* every conformance-registry source builds into verified MIR. Codegen is not required yet.
+  - *Status (first slice):* the builder is `crates/perry-lower` (`lower_source`, `lower_module`), a separate crate rather than `src/frontend/to_mir.rs`.
+    - Every local is a `perry.local` slot, and pliron `mem2reg` then builds the SSA joins and loop-carried block arguments, so the builder hand-rolls no SSA.
+    - Supported:
+      - synchronous functions over number, boolean and string;
+      - locals, `=`, `++`/`--`;
+      - arithmetic, comparisons, `&&`/`||` (short-circuit through slots), `!`, unary `-`/`+`, `?:`;
+      - `if`, `while`, `do`/`while`, `for`, `break`/`continue`, `return`;
+      - direct calls, string `+` and `.length`.
+    - Everything else is rejected with a diagnostic.
+    - Next: objects and arrays (`perry.alloc`, `perry.array_*`), async (`perry.async_call` and `perry.await`), globals and module state, truthiness, string comparison, labeled control flow, try/throw.
 - [ ] **P2.3 MIR snapshot tests** replace the 10 `waffle_ir` references in the test suite.
 
 ### P3. Pass pipeline
@@ -242,6 +263,7 @@ The phases run in order. Items within a phase can run in parallel unless they ar
 Reused from pliron:
 
 - [ ] **P3.1** Configure SCCP, DCE, `simplify_cfg` and `mem2reg` in the pass manager.
+  - *Status:* `perry_mir::pipeline::canonicalize` runs mem2reg, then DCE and `simplify_cfg` to a fixpoint, verifying before and after. SCCP still needs constant-folding interfaces on the `perry.*` ops.
 
 Owned (each with unit tests on MIR snippets):
 

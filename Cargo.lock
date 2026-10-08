@@ -1432,6 +1432,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-lower"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "perry-hir",
+ "perry-mir",
+ "perry-parser",
+ "pliron",
+]
+
+[[package]]
 name = "perry-mir"
 version = "0.1.0"
 dependencies = [
