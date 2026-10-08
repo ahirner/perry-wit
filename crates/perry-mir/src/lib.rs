@@ -7,8 +7,12 @@
 //! The control-flow ops are adapted from `pliron-llvm`, which perry-wit must not depend on:
 //! that crate's default feature links `llvm-sys`, which the LLVM audit rejects.
 pub mod attrs;
+pub mod calls;
+pub mod collections;
 pub mod control;
 pub mod heap;
+pub mod locals;
+pub mod pipeline;
 pub mod scalar;
 pub mod types;
 
