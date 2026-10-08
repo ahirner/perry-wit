@@ -13,6 +13,7 @@ members = [
     "crates/conformance",
     "crates/perry-mir",
     "crates/perry-lower",
+    "crates/pliron-wasm",
 ]
 
 [profile.dev.package.perry-hir]
