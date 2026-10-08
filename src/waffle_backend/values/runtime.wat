@@ -3,7 +3,7 @@
   (import "host" "compare" (func $compare (param i32 i32) (result i32)))
   (memory 1)
   ;; Immutable value: tag, padding, f64 payload. References use numeric pointers.
-  (func (export "value.new") (param $tag i32) (param $payload f64) (result i32)
+  (func $value.new (export "value.new") (param $tag i32) (param $payload f64) (result i32)
     (local $value i32)
     (local.set $value (call $realloc (i32.const 0) (i32.const 0) (i32.const 8) (i32.const 16)))
     (i32.store offset=16 (i32.load (i32.sub (local.get $value) (i32.const 4))) (i32.const 11))

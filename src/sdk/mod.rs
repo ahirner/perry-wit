@@ -40,21 +40,6 @@ pub struct SdkResult {
     pub tsconfig_path: Option<PathBuf>,
 }
 
-/// Generate the native HTTP handler's source types directly from its WIT contract.
-pub fn generate_http_handler_declarations() -> Result<String> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str(
-        "handler.wit",
-        include_str!("../waffle_backend/http/handler/world.wit"),
-    )?;
-    let world = resolve.select_world(&[package], Some("handler"))?;
-    let support = codegen::SUPPORT_TYPES.replace("declare const", "const");
-    let types = codegen::world_type_declarations(&resolve, &resolve.worlds[world]);
-    Ok(format!(
-        "// Generated from src/waffle_backend/http/handler/world.wit by the SDK.\ndeclare module \"perry:http-handler/types\" {{\n{support}{types}\n}}\n"
-    ))
-}
-
 /// Generates world/import declarations, an implementation check, and a missing tsconfig.
 pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
@@ -67,21 +52,14 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         )
     })?;
 
-    fs::write(
-        options.out_dir.join("http-handler.d.ts"),
-        generate_http_handler_declarations()?,
-    )?;
     let imports_path = options.out_dir.join("imports.d.ts");
     fs::write(
         &imports_path,
         codegen::generate_import_declarations(&resolve, &resolve.worlds[world]),
     )?;
-    fs::write(
-        options.out_dir.join("p3.d.ts"),
-        include_str!("../../types/p3.d.ts"),
-    )?;
+    write_runtime_declarations(&options.out_dir)?;
     let dts = format!(
-        "/// <reference path=\"./imports.d.ts\" />\n/// <reference path=\"./p3.d.ts\" />\n{dts}"
+        "/// <reference path=\"./runtime.d.ts\" />\n/// <reference path=\"./imports.d.ts\" />\n{dts}"
     );
 
     let dts_path = options.out_dir.join("world.d.ts");
@@ -130,8 +108,16 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         None
     };
 
+    for obsolete in ["p3.d.ts", "http-handler.d.ts"] {
+        match fs::remove_file(options.out_dir.join(obsolete)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
     let mut check_config = serde_json::json!({
-        "compilerOptions": {"target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"], "module": "ESNext", "moduleDetection": "force", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false},
+        "compilerOptions": {"target": "ES2022", "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"], "module": "ESNext", "moduleDetection": "force", "moduleResolution": "bundler", "allowImportingTsExtensions": true, "strict": true, "noEmit": true, "skipLibCheck": false, "types": []},
         "files": ["implementation-check.ts"],
         "include": [],
         "exclude": []
@@ -150,6 +136,13 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
         check_path,
         tsconfig_path: generated_tsconfig,
     })
+}
+
+/// Emits the compiler's supported ambient runtime surface for editors and `tsc`.
+pub fn write_runtime_declarations(out_dir: &Path) -> Result<()> {
+    fs::create_dir_all(out_dir)?;
+    fs::write(out_dir.join("runtime.d.ts"), include_str!("runtime.d.ts"))?;
+    Ok(())
 }
 
 fn relative_path(from: &Path, to: &Path) -> Result<String> {

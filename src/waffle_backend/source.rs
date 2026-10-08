@@ -53,6 +53,39 @@ fn underlying_expression(mut expression: &ast::Expr) -> &ast::Expr {
     }
 }
 
+fn promise_all_arity(expression: &ast::Expr, unresolved: SyntaxContext) -> Option<usize> {
+    let ast::Expr::Await(awaited) = underlying_expression(expression) else {
+        return None;
+    };
+    let ast::Expr::Call(call) = underlying_expression(&awaited.arg) else {
+        return None;
+    };
+    let ast::Callee::Expr(callee) = &call.callee else {
+        return None;
+    };
+    let ast::Expr::Member(member) = underlying_expression(callee) else {
+        return None;
+    };
+    if !matches!(underlying_expression(&member.obj), ast::Expr::Ident(name) if name.sym == "Promise" && name.ctxt == unresolved)
+        || !matches!(&member.prop, ast::MemberProp::Ident(name) if name.sym == "all")
+    {
+        return None;
+    }
+    let [argument] = call.args.as_slice() else {
+        return None;
+    };
+    let ast::Expr::Array(array) = underlying_expression(&argument.expr) else {
+        return None;
+    };
+    (argument.spread.is_none()
+        && array.elems.iter().all(|element| {
+            element
+                .as_ref()
+                .is_some_and(|element| element.spread.is_none())
+        }))
+    .then_some(array.elems.len())
+}
+
 pub(crate) fn resolve_bindings(
     module: &mut ast::Module,
     wit: Option<&super::wit::WitWorld>,
@@ -511,6 +544,66 @@ impl SourceCalls {
 }
 
 impl VisitMut for SourceCalls {
+    fn visit_mut_var_decl(&mut self, declaration: &mut ast::VarDecl) {
+        let mut declarations = Vec::new();
+        for mut binding in std::mem::take(&mut declaration.decls) {
+            // Promise.all produces a dense tuple with no user-defined iterator.
+            let tuple_length = binding
+                .init
+                .as_deref()
+                .and_then(|expression| promise_all_arity(expression, self.unresolved));
+            if let ast::Pat::Array(pattern) = &binding.name
+                && let Some(length) = tuple_length
+            {
+                if pattern.type_ann.is_some()
+                    || pattern.elems.len() > length
+                    || pattern
+                        .elems
+                        .iter()
+                        .flatten()
+                        .any(|pattern| !matches!(pattern, ast::Pat::Ident(_)))
+                {
+                    self.error.get_or_insert_with(|| anyhow::anyhow!("Promise.all destructuring supports in-range names and elisions without defaults, rest, or pattern annotations"));
+                    return;
+                }
+                let names = pattern.elems.clone();
+                let temporary = ast::Ident::new(
+                    self.fresh_name().into(),
+                    binding.span,
+                    SyntaxContext::empty(),
+                );
+                binding.name = ast::Pat::Ident(temporary.clone().into());
+                let span = binding.span;
+                declarations.push(binding);
+                for (index, name) in names.into_iter().enumerate() {
+                    if let Some(name) = name {
+                        declarations.push(ast::VarDeclarator {
+                            span,
+                            name,
+                            definite: false,
+                            init: Some(Box::new(ast::Expr::Member(ast::MemberExpr {
+                                span,
+                                obj: Box::new(ast::Expr::Ident(temporary.clone())),
+                                prop: ast::MemberProp::Computed(ast::ComputedPropName {
+                                    span,
+                                    expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
+                                        span,
+                                        value: index as f64,
+                                        raw: None,
+                                    }))),
+                                }),
+                            }))),
+                        });
+                    }
+                }
+            } else {
+                declarations.push(binding);
+            }
+        }
+        declaration.decls = declarations;
+        declaration.visit_mut_children_with(self);
+    }
+
     fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
         statement.visit_mut_children_with(self);
         if let ast::Stmt::ForOf(loop_) = statement
@@ -734,7 +827,7 @@ impl VisitMut for SourceCalls {
         self.rewrite_process_assignment(expression);
         self.rewrite_process_value(expression);
         if matches!(expression, ast::Expr::Object(_))
-            && let Err(error) = options::validate_plain_options(expression, "Object")
+            && let Err(error) = options::validate_properties(expression, "Object")
         {
             self.error.get_or_insert(error);
             return;

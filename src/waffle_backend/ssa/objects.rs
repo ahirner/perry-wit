@@ -76,6 +76,47 @@ impl FunctionLowerer<'_> {
         self.project_values(fields.map(|(_, expression)| expression), selected)
     }
 
+    pub(super) fn object_spread(&mut self, parts: Vec<(Option<&str>, &Expr)>) -> Result<Value> {
+        let helpers = self.registry.object_helpers.unwrap();
+        let capacity = self.op(
+            Operator::I32Const {
+                value: parts.len().try_into()?,
+            },
+            &[],
+            &[Type::I32],
+        );
+        let object = self.op(
+            Operator::Call {
+                function_index: helpers.record,
+            },
+            &[capacity],
+            &[Type::I32],
+        );
+        self.reference_values.insert(object);
+        for (name, expression) in parts {
+            let ty = self.infer_expr_type(expression);
+            if name.is_none() {
+                ensure!(
+                    is_object(&ty)
+                        || crate::waffle_backend::values::is_dynamic(&ty)
+                        || matches!(
+                            ty,
+                            HirType::Null | HirType::Void | HirType::Number | HirType::Boolean
+                        ),
+                    "Object spread supports plain objects and non-string primitives"
+                );
+            }
+            let (_, tag, payload) = self.tagged_value(expression)?;
+            if let Some(name) = name {
+                let key = self.expression(&Expr::String(name.into()))?;
+                self.call_completion(helpers.set, &[object, key, tag, payload]);
+            } else {
+                self.call_completion(helpers.spread, &[object, tag, payload]);
+            }
+        }
+        Ok(object)
+    }
+
     pub(super) fn object_assign(&mut self, target: &Expr, sources: &[Expr]) -> Result<Value> {
         ensure!(
             is_object(&self.infer_expr_type(target)),

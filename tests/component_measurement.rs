@@ -7,6 +7,8 @@ use perry_wit::{CompileOptions, compile_file};
 use serde::Serialize;
 use std::{fs, future::Future, path::Path, time::Instant};
 use wasmtime_wasi_http::{WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView};
+#[path = "support/call_counts.rs"]
+mod call_counts;
 #[path = "support/waffle.rs"]
 mod waffle_fixture;
 use wasmtime::component::{Component, Linker, ResourceTable};
@@ -129,6 +131,7 @@ struct Measurement {
     calls_per_sample: usize,
     payload_bytes: usize,
     milliseconds_per_call: Vec<f64>,
+    counts: Option<call_counts::Counts>,
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -248,11 +251,13 @@ async fn measure_campaign(placement: String) -> Result<()> {
             calls_per_sample,
             payload_bytes,
             milliseconds_per_call,
+            counts: None,
         };
         eprintln!("{}", serde_json::to_string(&result)?);
         measurements.push(result);
     }
-    let legacy = fs::read_to_string("types/p3.d.ts")?.contains("declare module \"perry:http\"");
+    let legacy =
+        fs::read_to_string("src/waffle_backend/source.rs")?.contains("Some(\"perry:http\") =>");
     measurements.push(measure_stream(&engine, artifacts, legacy, false).await?);
     if legacy {
         measurements.extend(measure_http(&engine, artifacts, HttpRead::Legacy).await?);
@@ -381,7 +386,7 @@ async fn measure_stream(
         &Default::default(),
     )?;
     let stream_bytes =
-        perry_wit::strip::component(&compiled.component.context("stream component")?)?;
+        perry_wit::strip::component(compiled.component.as_deref().context("stream component")?)?;
     fs::write(artifacts.join(format!("{workload}.wasm")), &stream_bytes)?;
     let stream_size = stream_bytes.len();
     let stream = Component::new(engine, stream_bytes)?;
@@ -426,6 +431,47 @@ async fn measure_stream(
         store.data().allocated == memory_after_warmup,
         "stream memory grew after warmup"
     );
+    let counters = call_counts::Counters::new(
+        &compiled,
+        "package test:measurement; world task {export run:async func(input:stream<u8>)->f64;}",
+        artifacts,
+        workload,
+    )?;
+    let component = Component::new(engine, &counters.component)?;
+    let mut counted_store = Store::new(
+        engine,
+        MemoryUsage {
+            allocated: 0,
+            limit: 65536,
+        },
+    );
+    counted_store.limiter(|memory| memory);
+    let counted = Linker::new(engine)
+        .instantiate_async(&mut counted_store, &component)
+        .await?;
+    let counted_run =
+        counted.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut counted_store, "run")?;
+    for _ in 0..WARMUP_CALLS {
+        let input = StreamReader::new(&mut counted_store, payload.clone())?;
+        ensure!(
+            counted_run
+                .call_async(&mut counted_store, (input,))
+                .await?
+                .0
+                == expected,
+            "instrumented stream checksum differs"
+        );
+    }
+    let before = counters.snapshot(&mut counted_store, &counted).await?;
+    let input = StreamReader::new(&mut counted_store, payload)?;
+    let (result, polls) =
+        call_counts::count_polls(counted_run.call_async(&mut counted_store, (input,))).await;
+    ensure!(
+        result?.0 == expected,
+        "instrumented stream checksum differs"
+    );
+    counted_store.assert_concurrent_state_empty();
+    let after = counters.snapshot(&mut counted_store, &counted).await?;
     Ok(Measurement {
         pipeline: "production",
         workload,
@@ -437,6 +483,7 @@ async fn measure_stream(
         calls_per_sample: CALLS_PER_SAMPLE,
         payload_bytes: PAYLOAD_BYTES,
         milliseconds_per_call,
+        counts: Some(counters.difference(&before, &after, polls)),
     })
 }
 
@@ -487,44 +534,33 @@ export async function run(authority:string,limit:number):Promise<number> {{
     };
     fs::write(artifacts.join(format!("{name}.ts")), &source)?;
     let wit = tempfile::tempdir()?;
-    fs::write(
-        wit.path().join("world.wit"),
-        "package test:measurement; world task {import wasi:http/client@0.3.0; export run:async func(authority:string,limit:f64)->f64;}",
-    )?;
-    let bytes = perry_wit::compile_typescript(
+    let world_source = "package test:measurement; world task {import wasi:http/client@0.3.0; export run:async func(authority:string,limit:f64)->f64;}";
+    fs::write(wit.path().join("world.wit"), world_source)?;
+    let (resolve, package) = perry_wit::component::wit::resolve_wit(wit.path())?;
+    let world = resolve.select_world(&[package], Some("task"))?;
+    let compiled = perry_wit::waffle_backend::compile_typescript_for_world(
         &source,
         &format!("{name}.ts"),
-        &CompileOptions {
-            wit_dir: wit.path().into(),
-            world: Some("task".into()),
-            core_only: false,
-        },
-    )?
-    .stripped
-    .context("stripped HTTP component")?;
+        &Default::default(),
+        resolve,
+        world,
+    )?;
+    let bytes =
+        perry_wit::strip::component(compiled.component.as_deref().context("HTTP component")?)?;
+    let counters = call_counts::Counters::new(&compiled, world_source, artifacts, name)?;
     fs::write(artifacts.join(format!("{name}.wasm")), &bytes)?;
     let component_bytes = bytes.len();
     let component = Component::new(engine, bytes)?;
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        engine,
-        Host {
-            wasi: WasiCtx::default(),
-            table: ResourceTable::new(),
-            http: WasiHttpCtx::new(),
-            response: ResponseFixture {
-                body: Bytes::from((0..PAYLOAD_BYTES).map(|i| i as u8).collect::<Vec<_>>()),
-                requests: 0,
-            },
-            memory: MemoryUsage {
-                allocated: 0,
-                limit: 16 * 1024 * 1024,
-            },
-        },
-    );
-    store.limiter(|host| &mut host.memory);
+    let mut store = http_store(engine);
+    let counted_component = Component::new(engine, &counters.component)?;
+    let mut counted_store = http_store(engine);
+    let counted = linker
+        .instantiate_async(&mut counted_store, &counted_component)
+        .await?;
+    let counted_run = counted.get_typed_func::<(&str, f64), (f64,)>(&mut counted_store, "run")?;
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(&str, f64), (f64,)>(&mut store, "run")?;
     let mut measurements = Vec::new();
@@ -573,6 +609,28 @@ export async function run(authority:string,limit:number):Promise<number> {{
             store.data().memory.allocated == memory_after_warmup,
             "HTTP memory grew after warmup"
         );
+        for _ in 0..WARMUP_CALLS {
+            ensure!(
+                counted_run
+                    .call_async(&mut counted_store, ("measurement.invalid", limit as f64))
+                    .await?
+                    .0
+                    == expected,
+                "instrumented HTTP outcome differs"
+            );
+        }
+        let before = counters.snapshot(&mut counted_store, &counted).await?;
+        let (result, polls) = call_counts::count_polls(
+            counted_run.call_async(&mut counted_store, ("measurement.invalid", limit as f64)),
+        )
+        .await;
+        ensure!(result?.0 == expected, "instrumented HTTP outcome differs");
+        counted_store.assert_concurrent_state_empty();
+        ensure!(
+            counted_store.data().table.is_empty(),
+            "instrumented HTTP resources remain"
+        );
+        let after = counters.snapshot(&mut counted_store, &counted).await?;
         measurements.push(Measurement {
             pipeline: "production",
             workload,
@@ -584,6 +642,7 @@ export async function run(authority:string,limit:number):Promise<number> {{
             calls_per_sample: CALLS_PER_SAMPLE,
             payload_bytes: PAYLOAD_BYTES,
             milliseconds_per_call,
+            counts: Some(counters.difference(&before, &after, polls)),
         });
     }
     ensure!(
@@ -592,4 +651,25 @@ export async function run(authority:string,limit:number):Promise<number> {{
         "missing HTTP requests"
     );
     Ok(measurements)
+}
+
+fn http_store(engine: &Engine) -> Store<Host> {
+    let mut store = Store::new(
+        engine,
+        Host {
+            wasi: WasiCtx::default(),
+            table: ResourceTable::new(),
+            http: WasiHttpCtx::new(),
+            response: ResponseFixture {
+                body: Bytes::from((0..PAYLOAD_BYTES).map(|i| i as u8).collect::<Vec<_>>()),
+                requests: 0,
+            },
+            memory: MemoryUsage {
+                allocated: 0,
+                limit: 16 * 1024 * 1024,
+            },
+        },
+    );
+    store.limiter(|host| &mut host.memory);
+    store
 }

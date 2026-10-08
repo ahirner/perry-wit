@@ -100,7 +100,7 @@
           doCheck = false;
           nativeBuildInputs = with pkgs; [ pkg-config ];
           postInstall = ''
-            mkdir -p "$out/lib/perry-wit-helpers" "$out/include"
+            mkdir -p "$out/lib/perry-wit-helpers"
             for f in search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
               wasm_file=$(find target -name "$f" -print -quit)
               if [ -n "$wasm_file" ]; then
@@ -110,15 +110,13 @@
                 exit 1
               fi
             done
-            cp types/*.d.ts "$out/include/"
           '';
         };
 
-        # Core WASM helper libraries and Preview 3 TypeScript declarations
+        # Core WASM helper libraries
         coreHelpers = pkgs.runCommand "perry-wit-core-helpers-0.1.0" {} ''
-          mkdir -p "$out/lib" "$out/include"
+          mkdir -p "$out/lib"
           cp ${perryWitBin}/lib/perry-wit-helpers/*.wasm "$out/lib/"
-          cp ${perryWitBin}/include/*.d.ts "$out/include/"
         '';
 
         # Example WASIp3 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
@@ -126,10 +124,9 @@
           pname = "example-merge-docs";
           version = "0.1.0";
           inherit src;
-          nativeBuildInputs = [ perryWitBin pkgs.typescript ];
+          nativeBuildInputs = [ perryWitBin ];
           buildPhase = ''
             export WASI_WIT_PATH="${wasiP3Wit}"
-            tsc -p tsconfig.json
             mkdir -p dist
             perry-wit examples/merge_docs.ts \
               --wit wit \

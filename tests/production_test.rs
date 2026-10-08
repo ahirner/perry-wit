@@ -218,7 +218,7 @@ async fn async_reexports_use_disposable_sdk_types() -> Result<()> {
         initialize_tsconfig: false,
         ..Default::default()
     })?;
-    let check = Command::new("tsc")
+    let check = std::process::Command::new("tsc")
         .current_dir(root)
         .args(["-p", ".perry/types"])
         .output()?;

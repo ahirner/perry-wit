@@ -1,8 +1,8 @@
 #[path = "support/waffle.rs"]
 mod waffle_fixture;
+use std::fs;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
-use std::{fs, process::Command};
 use waffle_fixture::compile_typescript_waffle;
 
 use anyhow::Result;
@@ -436,10 +436,10 @@ fn check_typescript(source: &str) -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("scan.ts");
     fs::write(&path, source)?;
-    let checked = Command::new("tsc")
+    let checked = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(directory.path())
         .args(["--noEmit", "--strict", "--target", "ES2022"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .arg(path)
         .output()?;
     assert!(

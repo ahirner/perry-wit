@@ -3,7 +3,7 @@
 use super::{allocation::AllocationFuncs, runtime};
 use anyhow::{Result, ensure};
 use perry_hir::{
-    ir::{Module as HirModule, Stmt},
+    ir::{Expr, Module as HirModule, Stmt},
     types::{ObjectType, PropertyInfo, Type as HirType},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,6 +21,44 @@ pub(crate) struct ObjectHelpers {
     pub(crate) dynamic: Func,
     pub(crate) enumerate: Func,
     pub(crate) assign: Func,
+    pub(crate) spread: Func,
+}
+
+/// Recover the frontend's ordered object-literal IIFE without allocating a closure.
+pub(crate) fn spread_parts(expression: &Expr) -> Option<Vec<(Option<&str>, &Expr)>> {
+    let Expr::Call { callee, args, .. } = expression else {
+        return None;
+    };
+    let Expr::Closure { params, body, .. } = callee.as_ref() else {
+        return None;
+    };
+    let [parameter] = params.as_slice() else {
+        return None;
+    };
+    if parameter.name != "__perry_obj_iife"
+        || !matches!(args.as_slice(), [Expr::Object(fields)] if fields.is_empty())
+    {
+        return None;
+    }
+    let (Stmt::Return(Some(Expr::LocalGet(id))), fields) = body.split_last()? else {
+        return None;
+    };
+    if *id != parameter.id {
+        return None;
+    }
+    fields.iter().map(|field| match field {
+        Stmt::Expr(Expr::Call { callee, args, .. })
+            if matches!(callee.as_ref(), Expr::ExternFuncRef {name, ..} if name == "js_object_assign_one") => {
+                let [Expr::LocalGet(id), source] = args.as_slice() else { return None };
+                (*id == parameter.id).then_some((None, source))
+            }
+        Stmt::Expr(Expr::IndexSet {object, index, value})
+            if matches!(object.as_ref(), Expr::LocalGet(id) if *id == parameter.id) => {
+                let Expr::String(name) = index.as_ref() else { return None };
+                Some((Some(name.as_str()), value.as_ref()))
+            }
+        _ => None,
+    }).collect()
 }
 
 pub(crate) fn property_type(field: &PropertyInfo) -> HirType {
@@ -155,6 +193,7 @@ pub(crate) fn emit_runtime(
         dynamic: functions["object.dynamic"],
         enumerate: functions["object.enumerate"],
         assign: functions["object.assign"],
+        spread: functions["object.spread"],
     })
 }
 

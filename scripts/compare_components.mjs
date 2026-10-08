@@ -42,8 +42,8 @@ function sourceIdentity() {
 
 const baselineCommit = command("git", ["rev-parse", "--verify", `${baselineRef}^{commit}`]).trim();
 const currentIdentity = sourceIdentity();
-mkdirSync(join(root, "target/conformance/comparisons"), { recursive: true });
-const output = mkdtempSync(join(root, "target/conformance/comparisons/run-"));
+mkdirSync(join(root, "target/performance/comparisons"), { recursive: true });
+const output = mkdtempSync(join(root, "target/performance/comparisons/run-"));
 console.log(`Artifacts: ${output}`);
 const baselineSource = join(output, "baseline-source");
 mkdirSync(baselineSource);
@@ -51,7 +51,7 @@ command("git", ["archive", "--format=tar", `--output=${join(output, "baseline.ta
 command("tar", ["-xf", join(output, "baseline.tar"), "-C", baselineSource]);
 
 // Both revisions use exactly the same harness. Each keeps its own compiler and examples.
-for (const path of ["tests/component_measurement.rs", "tests/fixtures/bounded_response.ts", "tests/fixtures/bounded_byob_response.ts"]) {
+for (const path of ["tests/component_measurement.rs", "tests/fixtures/bounded_response.ts", "tests/fixtures/bounded_byob_response.ts", "tests/support/call_counts.rs", "tests/support/core_probe.rs"]) {
   mkdirSync(dirname(join(baselineSource, path)), { recursive: true });
   copyFileSync(join(root, path), join(baselineSource, path));
 }
@@ -134,12 +134,11 @@ const rows = ["incoming-stream", "incoming-stream-byob", "bounded-http-exact",
   "unbounded-http-array-buffer"];
 function comparison(workload, placement) {
   return revisions.map(({ reports }, index) => {
-    const name = index !== 0 ? workload
-      : workload === "unbounded-http-array-buffer" ? "bounded-http-exact"
-        : workload.replace(/-byob$/, "");
-    const report = reports[placement];
-    const result = [...report.timings, ...report.sizes].find((item) => item.workload === name);
-    if (!result) throw new Error(`Missing workload: ${name} (${placement})`);
+    const items = [...reports[placement].timings, ...reports[placement].sizes];
+    const fallback = workload === "unbounded-http-array-buffer" ? "bounded-http-exact" : workload.replace(/-byob$/, "");
+    const result = items.find((item) => item.workload === workload)
+      ?? (index === 0 ? items.find((item) => item.workload === fallback) : undefined);
+    if (!result) throw new Error(`Missing workload: ${workload} (${placement})`);
     return result;
   });
 }
@@ -170,12 +169,29 @@ for (const workload of [...rows, "merge_docs.ts", "merge_task.ts", "template-tas
   }
   sizeTable.push(`| ${workload} | ${before.component_bytes} | ${after.component_bytes} | ${delta(before.component_bytes, after.component_bytes)} | ${before.memory_after_samples ?? "—"} | ${after.memory_after_samples ?? "—"} |`);
 }
+function countTable(metrics) {
+  const table = [
+    `| Workload / placement | ${metrics.map(([, title]) => title).join(" | ")} |`,
+    `| --- | ${metrics.map(() => "---:").join(" | ")} |`,
+  ];
+  for (const placement of placements) {
+    for (const workload of rows) {
+      const counts = comparison(workload, placement).map((item) => item.counts);
+      if (counts.some((value) => !value)) throw new Error(`Missing call counts: ${workload}`);
+      table.push(`| ${workload} / ${placement} | ${metrics.map(([metric]) => counts.map((value) => value[metric] ?? "—").join(" → ")).join(" | ")} |`);
+    }
+  }
+  return table.join("\n");
+}
 const report = [
   `Baseline: \`${baselineRef}\` at \`${baselineCommit}\`.`,
   `Current: \`${currentIdentity.commit}\`${currentIdentity.status ? " (working tree changes; see metadata.json and current.patch)" : ""}.`,
   metadata.method,
   timingTable.join("\n"),
   sizeTable.join("\n"),
+  "Call counts per response, baseline → current. Counted on a separate instrumented instance after five warmup calls; instrumentation is excluded from reported time and size. Allocator entries include realloc/free calls and root frames, not system malloc calls. Raw per-function counts are in measurements.json. A dash means the binary has no identifiable named probe for that metric.",
+  countTable([["host_polls", "Host polls"], ["stream_reads", "Read transfers"], ["worker_starts", "Worker starts"], ["callbacks", "Callbacks"]]),
+  countTable([["allocations", "Allocator entries"], ["reallocations", "Realloc entries"], ["root_frames", "Root frames"], ["boxed_values", "Boxed values"], ["promises", "Promise records"], ["collections", "Collections"], ["heap_bumps", "Heap bumps"]]),
   "All sizes are stripped component bytes. Guest memory is committed Wasm linear memory after warmup, not process RSS. Exact and overflow HTTP rows share a component and a 4 MiB response; limits are 4 MiB and 4 MiB − 1 byte. Incoming stream sums 4 MiB under a 64 KiB guest memory limit. HTTP has a 16 MiB guest limit. Neither grows after warmup; every call checks its result and resource cleanup.",
   "BYOB rows compare caller-provided buffers with the same workload using the original API on the baseline. Original default-reader rows remain separate. Both HTTP implementations enforce the same cap and probe for overflow.",
   "The unbounded row uses new Uint8Array(await response.arrayBuffer()), with no guest body-size cap and no caller-provided buffer. It is one guest-level await, not necessarily one internal read. Its baseline reference is the original perry:http exact-limit read of the same 4 MiB body: the baseline retains its cap, so these rows have different overflow guarantees. The harness memory limit still applies.",

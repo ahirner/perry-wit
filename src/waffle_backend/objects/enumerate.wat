@@ -27,7 +27,7 @@
       (br $copy)))
     (i32.const 0) (f64.convert_i32_u (local.get $result)))
 
-  (func (export "object.assign") (param $target i32) (param $source i32) (result i32 f64)
+  (func $assign (export "object.assign") (param $target i32) (param $source i32) (result i32 f64)
     (local $entry i32)
     (local $status i32) (local $payload f64)
     (local.set $entry (i32.load (local.get $source)))
@@ -40,3 +40,11 @@
       (local.set $entry (i32.load (local.get $entry)))
       (br $copy)))
     (local.get $status) (local.get $payload))
+
+  ;; Non-string primitives have no enumerable fields. Other reference kinds are unsupported.
+  (func (export "object.spread") (param $target i32) (param $tag i32) (param $payload f64) (result i32 f64)
+    (if (i32.lt_u (local.get $tag) (i32.const 4))
+      (then (return (i32.const 0) (f64.const 0))))
+    (if (i32.ne (local.get $tag) (i32.const 6))
+      (then (return (i32.const 1) (f64.const 12))))
+    (call $assign (local.get $target) (i32.trunc_f64_u (local.get $payload))))

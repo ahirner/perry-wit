@@ -52,7 +52,7 @@ async fn drain(accessor: &Accessor<Host>) {
     }
 }
 
-async fn instantiate(source: &str, limit: u32) -> Result<(Store<Host>, Service)> {
+fn handler_source(source: &str) -> Result<tempfile::TempDir> {
     let directory = tempfile::tempdir()?;
     perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
         wit_dir: std::path::PathBuf::from(concat!(
@@ -66,19 +66,14 @@ async fn instantiate(source: &str, limit: u32) -> Result<(Store<Host>, Service)>
         initialize_tsconfig: false,
     })?;
     std::fs::write(directory.path().join("handler.ts"), source)?;
+    Ok(directory)
+}
+
+async fn instantiate(source: &str, limit: u32) -> Result<(Store<Host>, Service)> {
+    let directory = handler_source(source)?;
     let checked = std::process::Command::new("tsc")
         .current_dir(directory.path())
-        .args([
-            "--ignoreConfig",
-            "--noEmit",
-            "--strict",
-            "--target",
-            "ES2022",
-            "--module",
-            "esnext",
-            "handler.ts",
-            "p3.d.ts",
-        ])
+        .args(["--noEmit", "-p", "."])
         .output()?;
     anyhow::ensure!(
         checked.status.success(),
@@ -88,7 +83,7 @@ async fn instantiate(source: &str, limit: u32) -> Result<(Store<Host>, Service)>
     );
     let compiled = compile_http_handler(
         source,
-        "handler.ts",
+        directory.path().join("handler.ts").to_str().unwrap(),
         &WaffleCompileOptions::default(),
         HttpHandlerOptions {
             max_request_bytes: limit,
@@ -123,7 +118,7 @@ async fn instantiate(source: &str, limit: u32) -> Result<(Store<Host>, Service)>
 #[tokio::test(flavor = "current_thread")]
 async fn bounded_handler_roundtrips_binary_and_duplicate_headers() -> Result<()> {
     let source = r#"
-        import type {Request, Response} from "perry:http-handler/types";
+        import type {PerryHttpHandlerTypesRequest as Request, PerryHttpHandlerTypesResponse as Response} from "./world";
         export function handle(request:Request):Response {
             if(request.method.tag!=='put') {throw 1;}
             if(request.pathWithQuery!=='/echo?q=1') {throw 2;}
@@ -173,7 +168,7 @@ async fn bounded_handler_roundtrips_binary_and_duplicate_headers() -> Result<()>
 }
 
 const ECHO: &str = r#"
-    import type {Request, Response} from "perry:http-handler/types";
+    import type {PerryHttpHandlerTypesRequest as Request, PerryHttpHandlerTypesResponse as Response} from "./world";
     export function handle(request:Request):Response {
         return {status:200,headers:request.headers,body:request.body};
     }
@@ -320,7 +315,7 @@ async fn invalid_responses_and_response_limit_return_domain_errors() -> Result<(
 #[tokio::test(flavor = "current_thread")]
 async fn async_handler_retains_text_bytes_and_metadata_through_delays() -> Result<()> {
     let source = r#"
-        import type {Request, Response} from "perry:http-handler/types";
+        import type {PerryHttpHandlerTypesRequest as Request, PerryHttpHandlerTypesResponse as Response} from "./world";
         import {setTimeout as waitFor} from 'node:timers/promises';
         export async function handle(request:Request):Promise<Response> {
             const text=new TextDecoder('utf-8',{fatal:true}).decode(request.body);
@@ -508,7 +503,10 @@ fn handler_imports_only_required_capabilities_and_checks_source_types() -> Resul
         max_request_bytes: 65536,
         max_response_bytes: 65536,
     };
-    let component = compile_http_handler(ECHO, "handler.ts", &options, limits)?
+    let directory = handler_source(ECHO)?;
+    let file = directory.path().join("handler.ts");
+    let file = file.to_str().unwrap();
+    let component = compile_http_handler(ECHO, file, &options, limits)?
         .component_wat
         .unwrap();
     assert!(component.contains("wasi:http/handler@0.3.0"));
@@ -528,20 +526,20 @@ fn handler_imports_only_required_capabilities_and_checks_source_types() -> Resul
         assert!(
             format!(
                 "{:#}",
-                compile_http_handler(&source, "invalid.ts", &options, limits).unwrap_err()
+                compile_http_handler(&source, file, &options, limits).unwrap_err()
             )
             .contains("D5")
         );
     }
     let source = ECHO.replace("body:request.body", "body:'text'");
-    assert!(compile_http_handler(&source, "invalid.ts", &options, limits).is_err());
+    assert!(compile_http_handler(&source, file, &options, limits).is_err());
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn custom_method_scheme_and_absent_coordinates_preserve_variants() -> Result<()> {
     let source = r#"
-        import type {Request,Response} from 'perry:http-handler/types';
+        import type {PerryHttpHandlerTypesRequest as Request, PerryHttpHandlerTypesResponse as Response} from './world';
         export function handle(request:Request):Response {
             const method=request.method;
             if(method.tag!=='other') {throw 1;}

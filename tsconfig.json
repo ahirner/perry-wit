@@ -6,7 +6,8 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
     "moduleResolution": "bundler",
     "strict": true,
-    "noEmit": true
+    "noEmit": true,
+    "types": []
   },
-  "include": ["examples/**/*.ts", "types/**/*.d.ts"]
+  "include": ["examples/**/*.ts", "src/sdk/runtime.d.ts"]
 }

@@ -538,15 +538,17 @@ fn environment(directory: &Path) -> Result<()> {
     fs::write(directory.join("async-world.wit"), async_wit())?;
     fs::write(
         directory.join("capabilities.d.ts"),
-        format!(
-            "{}\ndeclare module \"test:generated/control\" {{ export function release():void; }}",
-            include_str!("../../../types/p3.d.ts")
-        ),
+        "/// <reference path=\"./handler-types/runtime.d.ts\" />\ndeclare module \"test:generated/control\" { export function release():void; }",
     )?;
-    fs::write(
-        directory.join("http-handler.d.ts"),
-        perry_wit::sdk::generate_http_handler_declarations()?,
-    )?;
+    perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
+        wit_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/waffle_backend/http/handler"),
+        world: Some("handler".into()),
+        out_dir: directory.join("handler-types"),
+        project_root: Some(directory.into()),
+        entry: "case.ts".into(),
+        initialize_tsconfig: false,
+    })?;
     fs::write(directory.join("oracle.mjs"), include_str!("oracle.mjs"))?;
     fs::write(
         directory.join("inputs.json"),

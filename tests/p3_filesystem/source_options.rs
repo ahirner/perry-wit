@@ -205,7 +205,6 @@ fn unsupported_objects_are_diagnosed_before_losing_property_effects() {
     for declaration in [
         "const options={get encoding() {return 'utf8';}};",
         "const options={set encoding(value:string) {}};",
-        "const options={...{encoding:'utf8'}};",
         "const options={['encoding']:'utf8'};",
         "const options={__proto__:{encoding:'utf8'}};",
         "const options={encoding() {return 'utf8';}};",
@@ -246,6 +245,8 @@ async fn stored_options_match_node_for_supported_encodings_and_metadata() -> Res
         if(typeof bytes==='string') {return 'expected bytes';}
         const metadata={bigint:false,throwIfNoEntry:true};
         if((await fs.stat(file,metadata)).size!==bytes.length) {return 'wrong size';}
+        const copied={...{encoding:'utf8'}};
+        if(await fs.readFile(file,copied)!==text)throw 1;
         (await fs.unlink(file));
         return text+new TextDecoder().decode(bytes);
     }"#;
@@ -307,9 +308,9 @@ fn reusable_options_and_structured_promises_match_sdk_declarations() -> Result<(
     let path = directory.path().join("options.ts");
     fs::write(&path, source)?;
     let checked = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(directory.path())
         .args(["--noEmit", "--strict", "--target", "ES2022"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .arg(path)
         .output()?;
     assert!(

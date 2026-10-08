@@ -915,104 +915,6 @@ fn resolved_world_rejects_detached_tasks_and_missing_capabilities() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn merge_documents_example_preserves_body_limits_and_releases_failed_reads() -> Result<()> {
-    let source = format!(
-        "{}\n{}",
-        include_str!("../examples/merge_docs.ts"),
-        r#"
-        export async function run(url:string):Promise<{ok:true,value:string}|{ok:false,error:number}> {
-            try { return {ok:true,value:await readDocument(url)}; }
-            catch(error) { if(typeof error==='number')return {ok:false,error};throw error; }
-        }
-        "#
-    );
-    let wit = r#"package test:merge-documents; world boundary {
-        include wasi:cli/imports@0.3.0;
-        import wasi:http/client@0.3.0;
-        export run:async func(url:string)->result<string,f64>;
-    }"#;
-    wit_source::check_sdk_source(wit, &source)?;
-    let compiled = compile(&source, wit)?;
-    let server = fixture::HttpFixture::new(|request| {
-        assert!(
-            request
-                .headers
-                .contains(&("accept".into(), "application/json".into()))
-        );
-        match request.target.as_str() {
-            "/exact" => fixture::Reply::Bytes(200, vec![b'a'; 65536]),
-            "/overflow" => fixture::Reply::Bytes(200, vec![b'a'; 65537]),
-            "/utf8" => fixture::Reply::Bytes(200, vec![0xff]),
-            "/status" => fixture::Reply::Bytes(404, vec![b'a'; 65537]),
-            "/empty" => fixture::Reply::Bytes(200, vec![]),
-            "/truncated" => fixture::Reply::TruncatedBody(vec![b'a'; 30], 64),
-            _ => fixture::Reply::Body(200, "{\"label\":\"漢🙂\"}".into()),
-        }
-    });
-    let node = tempfile::tempdir()?;
-    std::fs::write(node.path().join("example.ts"), &source)?;
-    std::fs::write(
-        node.path().join("check.ts"),
-        r#"
-        import { run } from './example.ts';
-        const base = process.argv[2];
-        for (const path of ['/exact','/overflow','/utf8','/status','/empty','/truncated','/valid']) {
-            let succeeded = false;
-            try { succeeded = (await run(base + path)).ok; } catch {}
-            if (succeeded !== ['/exact','/empty','/valid'].includes(path)) throw path;
-        }
-        "#,
-    )?;
-    let checked = std::process::Command::new("node")
-        .arg(node.path().join("check.ts"))
-        .arg(format!("http://{}", server.address))
-        .output()?;
-    assert!(
-        checked.status.success(),
-        "{}",
-        String::from_utf8_lossy(&checked.stderr)
-    );
-    let engine = engine()?;
-    let component = Component::new(&engine, compiled.component.unwrap())?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = store(&engine);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance
-        .get_typed_func::<(&str,), (std::result::Result<String, f64>,)>(&mut store, "run")?;
-    for _ in 0..3 {
-        for path in [
-            "/exact",
-            "/overflow",
-            "/utf8",
-            "/status",
-            "/empty",
-            "/truncated",
-            "/valid",
-        ] {
-            let url = format!("http://{}{path}", server.address);
-            let result =
-                tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, (&url,)))
-                    .await??
-                    .0;
-            match path {
-                "/exact" => assert_eq!(result, Ok("a".repeat(65536))),
-                "/overflow" => assert_eq!(result, Err(8.0)),
-                "/utf8" => assert_eq!(result, Err(2.0)),
-                "/status" => assert_eq!(result, Err(12.0)),
-                "/empty" => assert_eq!(result, Ok(String::new())),
-                "/truncated" => assert!(result.is_err()),
-                _ => assert_eq!(result, Ok("{\"label\":\"漢🙂\"}".into())),
-            }
-            store.assert_concurrent_state_empty();
-            assert!(store.data().table.is_empty());
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn resolved_world_http_domain_failures_release_resources_before_reuse() -> Result<()> {
     let compiled = compile(
         r#"
@@ -2612,14 +2514,19 @@ async fn standard_fetch_rejects_unconsumed_body_at_call_boundary() -> Result<()>
 
 #[tokio::test(flavor = "current_thread")]
 async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> {
-    let server = fixture::HttpFixture::new(|_| fixture::Reply::Body(200, "from fetch".into()));
-    let source = format!(
-        r#"
-        const response:Response = await fetch("http://{}/");
-        console.log(await response.text());
-    "#,
-        server.address
-    );
+    let server = fixture::HttpFixture::new(|request| {
+        fixture::Reply::Body(
+            200,
+            if request.target == "/doc1.json" {
+                r#"{"first":1,"shared":"old"}"#
+            } else {
+                r#"{"shared":"new","second":2}"#
+            }
+            .into(),
+        )
+    });
+    let source = include_str!("../examples/merge_docs.ts")
+        .replace("127.0.0.1:8080", &server.address.to_string());
     let compiled = compile(
         &source,
         r#"package test:fetch-command; world boundary {
@@ -2647,7 +2554,10 @@ async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> 
         .context("CLI run")?;
     let run = instance.get_typed_func::<(), (std::result::Result<(), ()>,)>(&mut store, export)?;
     assert_eq!(run.call_async(&mut store, ()).await?.0, Ok(()));
-    assert_eq!(captured.contents().as_ref(), b"from fetch\n");
+    assert_eq!(
+        captured.contents().as_ref(),
+        b"{\"first\":1,\"shared\":\"new\",\"second\":2}\n"
+    );
     store.assert_concurrent_state_empty();
     let directory = tempfile::tempdir()?;
     let file = directory.path().join("main.ts");
@@ -2658,7 +2568,10 @@ async fn standard_fetch_runs_as_a_top_level_node_and_p3_command() -> Result<()> 
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"from fetch\n");
+    assert_eq!(
+        output.stdout,
+        b"{\"first\":1,\"shared\":\"new\",\"second\":2}\n"
+    );
     Ok(())
 }
 

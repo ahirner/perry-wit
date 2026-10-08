@@ -226,12 +226,12 @@ async fn test_waffle_capability_argument_effects_and_adapter_sharing() -> Result
     let scratch = tempfile::tempdir()?;
     let source_path = scratch.path().join("effects.ts");
     fs::write(&source_path, source)?;
-    let checked = Command::new("tsc")
+    let checked = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(scratch.path())
         .args([
             "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
         ])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .arg(&source_path)
         .output()?;
     assert!(

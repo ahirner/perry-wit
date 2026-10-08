@@ -1109,11 +1109,11 @@ async fn source_stored_promise_retains_identity_success_and_rejection() -> Resul
     let source_path = scratch.path().join("stored.ts");
     std::fs::write(&source_path, source)?;
     let checked = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(scratch.path())
         .args([
             "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
         ])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .arg(&source_path)
         .output()?;
     assert!(

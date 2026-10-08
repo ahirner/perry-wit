@@ -13,10 +13,7 @@ pub fn generate_default_tsconfig() -> String {
     "strict": true,
     "noEmit": true,
     "skipLibCheck": false,
-    "typeRoots": [
-      "./.perry/types",
-      "./node_modules/@types"
-    ]
+    "types": []
   },
   "include": [
     "src/**/*",

@@ -95,6 +95,12 @@ impl StringKind {
 
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
+        if crate::waffle_backend::objects::spread_parts(expr).is_some() {
+            return HirType::Object(perry_hir::types::ObjectType {
+                index_signature: Some(Box::new(crate::waffle_backend::values::value_type())),
+                ..Default::default()
+            });
+        }
         match expr {
             Expr::PropertyGet {
                 object, property, ..

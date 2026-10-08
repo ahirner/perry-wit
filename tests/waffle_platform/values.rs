@@ -415,3 +415,30 @@ async fn missing_string_values_remain_undefined_when_inspected_and_serialized() 
     assert_eq!(run.call_async(&mut store, ()).await?.0, "{}");
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn spread_copies_json_fields_in_source_order_without_mutating_inputs() -> Result<()> {
+    let source = r#"
+    function mutate(value:any):any {value.a=9; return {b:3};}
+    async function value(input:any):Promise<any> {return input;}
+    export async function run():Promise<string> {
+        const [first,second]=await Promise.all([value(JSON.parse('{"a":1,"same":1}')),value(JSON.parse('{"same":2,"nested":{"x":4}}'))]);
+        const merged={...first,...mutate(first),...second,last:true};
+        if(first.a!==9||first.same!==1||merged.a!==1||merged.nested!==second.nested)throw 1;
+        const absent=JSON.parse('null');
+        const scalar=JSON.parse('42');
+        const ignored={...absent,...scalar,...undefined,...false};
+        if(JSON.stringify(ignored)!=='{}')throw 2;
+        return JSON.stringify(merged);
+    }"#;
+    let (mut store, instance) = instantiate(source, 262144, |_| Ok(())).await?;
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    for _ in 0..30 {
+        assert_eq!(
+            run.call_async(&mut store, ()).await?.0,
+            r#"{"a":1,"same":2,"b":3,"nested":{"x":4},"last":true}"#
+        );
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}

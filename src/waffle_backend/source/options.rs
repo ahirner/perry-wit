@@ -5,6 +5,19 @@ use perry_parser::swc_ecma_ast as ast;
 
 pub(super) fn validate_plain_options(expression: &ast::Expr, domain: &str) -> Result<()> {
     if let ast::Expr::Object(object) = super::underlying_expression(expression) {
+        ensure!(
+            !object
+                .props
+                .iter()
+                .any(|property| matches!(property, ast::PropOrSpread::Spread(_))),
+            "Spread {domain} options are unsupported"
+        );
+    }
+    validate_properties(expression, domain)
+}
+
+pub(super) fn validate_properties(expression: &ast::Expr, domain: &str) -> Result<()> {
+    if let ast::Expr::Object(object) = super::underlying_expression(expression) {
         for property in &object.props {
             match property {
                 ast::PropOrSpread::Prop(property) => match property.as_ref() {
@@ -24,7 +37,7 @@ pub(super) fn validate_plain_options(expression: &ast::Expr, domain: &str) -> Re
                     }
                     _ => bail!("{domain} options require plain properties with static names"),
                 },
-                _ => bail!("Spread {domain} options are unsupported"),
+                ast::PropOrSpread::Spread(_) => {}
             }
         }
     }

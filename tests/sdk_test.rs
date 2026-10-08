@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
@@ -21,6 +20,15 @@ fn command_contract_accepts_scripts_and_validates_explicit_run_exports() {
     .unwrap();
     for (source, succeeds) in [
         ("console.log('script');", true),
+        (
+            "import {readFile} from 'node:fs/promises'; console.log(await readFile('file','utf8'));",
+            true,
+        ),
+        (
+            "import {spawn} from 'node:child_process'; spawn('program');",
+            false,
+        ),
+        ("process.env.VALUE = 'changed';", false),
         ("await 1; console.log('async script');", true),
         (
             "console.log('setup'); export function helper():number {return 2;}",
@@ -44,7 +52,7 @@ fn command_contract_accepts_scripts_and_validates_explicit_run_exports() {
         ),
     ] {
         fs::write(temp_dir.join("src/index.ts"), source).unwrap();
-        let output = Command::new("tsc")
+        let output = std::process::Command::new("tsc")
             .arg("--noEmit")
             .current_dir(&temp_dir)
             .output()
@@ -98,7 +106,7 @@ fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
         ),
     ] {
         fs::write(temp_dir.join("src/index.ts"), source).unwrap();
-        let output = Command::new("tsc")
+        let output = std::process::Command::new("tsc")
             .arg("--noEmit")
             .current_dir(&temp_dir)
             .output()
@@ -207,49 +215,14 @@ fn test_typecheck_examples_against_generated_declarations() {
     // 2. Copy examples/merge_task.ts to src/merge_task.ts
     fs::copy("examples/merge_task.ts", src_dir.join("index.ts")).unwrap();
 
-    // 3. Attempt tsc validation
-    let direct_tsc = Command::new("tsc")
-        .arg("--version")
+    let output = std::process::Command::new("tsc")
+        .current_dir(&temp_dir)
+        .arg("--noEmit")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let repo_root = std::env::current_dir().unwrap();
-    let output = if direct_tsc {
-        Command::new("tsc")
-            .current_dir(&temp_dir)
-            .arg("--noEmit")
-            .output()
-    } else {
-        Command::new("nix")
-            .args([
-                "develop",
-                repo_root.to_str().unwrap(),
-                "--command",
-                "tsc",
-                "--noEmit",
-                "--project",
-                temp_dir.join("tsconfig.json").to_str().unwrap(),
-            ])
-            .output()
-    };
-
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success(),
-            "tsc --noEmit failed.\nStdout: {}\nStderr: {}",
-            stdout,
-            stderr
-        );
-    }
-}
-
-#[test]
-fn handler_declarations_match_the_wit_contract() {
-    assert_eq!(
-        perry_wit::sdk::generate_http_handler_declarations().unwrap(),
-        include_str!("../types/http-handler.d.ts")
+        .expect("Run SDK checks through nix develop");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }

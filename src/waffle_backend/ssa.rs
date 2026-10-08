@@ -1496,6 +1496,9 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn lower_expression(&mut self, expr: &Expr) -> Result<Value> {
+        if let Some(parts) = super::objects::spread_parts(expr) {
+            return self.object_spread(parts);
+        }
         match expr {
             Expr::PropertyGet {
                 object, property, ..
@@ -1689,6 +1692,7 @@ impl<'a> FunctionLowerer<'a> {
             Expr::ObjectValues(object) => self.object_enumerate(object, true),
             Expr::In { property, object } => self.object_has(property, object),
             Expr::Object(_) => self.new_object(expr, None),
+
             Expr::New { class_name, .. }
                 if self.contract.literal_shapes.contains_key(class_name) =>
             {

@@ -16,7 +16,7 @@ impl HandlerCase {
     pub fn source(&self) -> String {
         format!(
             r#"
-import type {{Request,Response}} from 'perry:http-handler/types';
+import type {{PerryHttpHandlerTypesRequest as Request,PerryHttpHandlerTypesResponse as Response}} from './handler-types/world';
 export function handle(request:Request):Response {{
   if(request.method.tag!=='put'||request.pathWithQuery!=='/contract?q=1')throw 1;
   const scheme=request.scheme;

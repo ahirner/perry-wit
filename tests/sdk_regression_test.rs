@@ -32,8 +32,16 @@ fn disposable_sdk_checks_the_entry_without_rewriting_authored_configuration() {
     fs::write(root.join("tsconfig.json"), config).unwrap();
     fs::write(root.join("src/unrelated.ts"), "export {};\n").unwrap();
     for valid in [true, false] {
-        fs::remove_dir_all(root.join(".perry")).unwrap();
+        for obsolete in ["p3.d.ts", "http-handler.d.ts"] {
+            fs::write(
+                options.out_dir.join(obsolete),
+                "declare const stale: never;",
+            )
+            .unwrap();
+        }
         generate_sdk_files(&options).unwrap();
+        assert!(!options.out_dir.join("p3.d.ts").exists());
+        assert!(!options.out_dir.join("http-handler.d.ts").exists());
         assert_eq!(
             fs::read_to_string(root.join("tsconfig.json")).unwrap(),
             config
@@ -47,7 +55,7 @@ fn disposable_sdk_checks_the_entry_without_rewriting_authored_configuration() {
             },
         )
         .unwrap();
-        let output = get_tsc_cmd()
+        let output = std::process::Command::new("tsc")
             .current_dir(root)
             .args(["--noEmit", "-p", ".perry/types"])
             .output()
@@ -117,26 +125,6 @@ fn cli_and_sdk_reject_colliding_implementation_names() {
     }
 }
 
-fn get_tsc_cmd() -> Command {
-    if let Ok(path) = std::env::var("TSC") {
-        return Command::new(path);
-    }
-    if Command::new("tsc").arg("--version").output().is_ok() {
-        return Command::new("tsc");
-    }
-    if let Ok(entries) = std::fs::read_dir("/nix/store") {
-        for entry in entries.flatten() {
-            let path = entry.path().join("bin/tsc");
-            if path.exists() {
-                return Command::new(path);
-            }
-        }
-    }
-    let mut cmd = Command::new("nix");
-    cmd.args(["develop", "--command", "tsc"]);
-    cmd
-}
-
 #[test]
 fn generated_contract_checks_the_selected_implementation_module() {
     for custom in [false, true] {
@@ -183,7 +171,7 @@ fn generated_contract_checks_the_selected_implementation_module() {
             ("export const unrelated = 1;", false),
         ] {
             fs::write(root.join(entry), source).unwrap();
-            let output = get_tsc_cmd()
+            let output = std::process::Command::new("tsc")
                 .current_dir(&root)
                 .args(["--noEmit", "--skipLibCheck", "true"])
                 .output()
@@ -241,7 +229,7 @@ fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
     "#,
     )
     .unwrap();
-    let output = get_tsc_cmd()
+    let output = std::process::Command::new("tsc")
         .current_dir(&root)
         .args(["--noEmit", "--skipLibCheck", "false"])
         .output()
@@ -282,7 +270,7 @@ fn cli_generates_a_checked_sdk_with_default_relative_paths() {
     );
     assert!(root.join("tsconfig.json").exists());
     assert!(root.join(".perry/types/implementation-check.ts").exists());
-    let output = get_tsc_cmd()
+    let output = std::process::Command::new("tsc")
         .current_dir(&root)
         .arg("--noEmit")
         .output()
@@ -333,7 +321,7 @@ fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
         // @ts-expect-error the generated nested list must require strings
         const invalid: Outcome = { ok: true, value: [[42], {text: "item"}] };
     "#).unwrap();
-    let output = get_tsc_cmd()
+    let output = std::process::Command::new("tsc")
         .current_dir(&root)
         .args(["--noEmit", "--skipLibCheck", "false"])
         .output()
@@ -382,7 +370,10 @@ fn asynchronous_wit_functions_have_promise_sdk_signatures() -> anyhow::Result<()
                 "import {{load}} from 'test:async-sdk/lookup'; export async function run(key:string):Promise<string> {{{body}}}"
             ),
         )?;
-        let output = get_tsc_cmd().current_dir(root).arg("--noEmit").output()?;
+        let output = std::process::Command::new("tsc")
+            .current_dir(root)
+            .arg("--noEmit")
+            .output()?;
         assert_eq!(
             output.status.success(),
             valid,

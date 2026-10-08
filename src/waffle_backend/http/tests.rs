@@ -636,11 +636,11 @@ fn http_sdk_checks_the_document_fixture_and_static_contract() -> Result<()> {
     "#,
     )?;
     let output = std::process::Command::new("tsc")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/runtime.d.ts"))
         .current_dir(scratch.path())
         .args([
             "--noEmit", "--strict", "--target", "ES2022", "--module", "esnext",
         ])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/types/p3.d.ts"))
         .args([source, errors])
         .output()?;
     assert!(
