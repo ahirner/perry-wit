@@ -1,0 +1,28 @@
+[package]
+name = "perry-allocator-bench"
+version = "0.0.0"
+edition = "2024"
+[lib]
+crate-type = ["cdylib"]
+[features]
+talc = ["dep:talc"]
+dlmalloc = ["dep:dlmalloc"]
+rlsf = ["dep:rlsf"]
+rlsf_full = ["dep:rlsf"]
+talc_noip = ["dep:talc", "talc/disable-realloc-in-place"]
+lol = ["dep:lol_alloc"]
+workloads = []
+[dependencies]
+talc = { version = "5.1.1", optional = true, default-features = false }
+dlmalloc = { version = "0.2.14", optional = true, features = ["global"] }
+rlsf = { version = "0.2.3", optional = true }
+lol_alloc = { version = "0.4.1", optional = true }
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true
+
+# Not part of the perry-wit workspace: built for wasm32 only.
+[workspace]
