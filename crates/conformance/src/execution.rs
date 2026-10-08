@@ -50,6 +50,9 @@ pub enum Outcome {
         stderr: Vec<u8>,
         max_fuel_used: u64,
         component_bytes: usize,
+        /// Fuel consumed by each call, in input order; empty for the Node oracle.
+        #[serde(default)]
+        fuel_used: Vec<u64>,
     },
     Command(Captured),
     Compile(String),
@@ -68,6 +71,7 @@ impl std::fmt::Debug for Outcome {
                 stderr,
                 max_fuel_used,
                 component_bytes,
+                fuel_used,
             } => f
                 .debug_struct("Values")
                 .field("observations", &observations.len())
@@ -85,6 +89,7 @@ impl std::fmt::Debug for Outcome {
                 .field("stderr_bytes", &stderr.len())
                 .field("max_fuel_used", max_fuel_used)
                 .field("component_bytes", component_bytes)
+                .field("fuel_used", fuel_used)
                 .finish(),
             Self::Command(value) => f
                 .debug_struct("Command")
@@ -341,6 +346,7 @@ impl Executor {
         let path = directory.join("case.ts");
         fs::write(&path, source)?;
         environment(directory)?;
+        crate::scaling::override_inputs(case, directory)?;
         fs::write(directory.join("input-case.json"), serde_json::to_vec(case)?)?;
         if !matches!(case, Case::Reject { .. }) {
             let checked = command(
@@ -408,6 +414,7 @@ impl Executor {
                     stderr: captured.stderr,
                     max_fuel_used: 0,
                     component_bytes: 0,
+                    fuel_used: Vec::new(),
                 }
             }
         };
@@ -674,12 +681,18 @@ fn execute_function(
     match runtime.block_on(observations(
         &engine, &component, directory, limits, fault, case,
     )) {
-        Ok((observations, max_fuel_used, stdout, stderr)) => Outcome::Values {
+        Ok(Run {
+            observations,
+            fuel_used,
+            stdout,
+            stderr,
+        }) => Outcome::Values {
             observations,
             stdout,
             stderr,
-            max_fuel_used,
+            max_fuel_used: fuel_used.iter().copied().max().unwrap_or(0),
             component_bytes,
+            fuel_used,
         },
         Err(error)
             if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) =>
@@ -723,6 +736,13 @@ impl wasmtime_wasi_http::WasiHttpView for Host {
     }
 }
 
+struct Run {
+    observations: Vec<Observation>,
+    fuel_used: Vec<u64>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
 async fn observations(
     engine: &Engine,
     component: &Component,
@@ -730,7 +750,7 @@ async fn observations(
     limits: &Limits,
     fault: Option<Fault>,
     case: &Case,
-) -> Result<(Vec<Observation>, u64, Vec<u8>, Vec<u8>)> {
+) -> Result<Run> {
     let fuel = limits.fuel;
     let directory = tempfile::tempdir()?;
     fs::write(
@@ -795,7 +815,7 @@ async fn observations(
         )
         .await?;
         let mut observations = Vec::new();
-        let mut max_fuel_used = 0;
+        let mut fuel_used = Vec::new();
         for _ in 0..3 {
             store.set_fuel(fuel)?;
             let request = http::Request::builder()
@@ -842,23 +862,23 @@ async fn observations(
                 })
                 .await??;
             observations.push(observation);
-            max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
+            fuel_used.push(fuel - store.get_fuel()?);
             store.assert_concurrent_state_empty();
             ensure!(
                 store.data().table.is_empty(),
                 "host resources leaked after handler"
             );
         }
-        return Ok((
+        return Ok(Run {
             observations,
-            max_fuel_used,
-            stdout.contents().to_vec(),
-            stderr.contents().to_vec(),
-        ));
+            fuel_used,
+            stdout: stdout.contents().to_vec(),
+            stderr: stderr.contents().to_vec(),
+        });
     }
     let instance = linker.instantiate_async(&mut store, component).await?;
     let mut values = Vec::new();
-    let mut max_fuel_used = 0;
+    let mut fuel_used = Vec::new();
     if let Case::Stream(case) = case {
         let run = instance
             .get_typed_func::<(wasmtime::component::StreamReader<u8>,), (GuestObservation,)>(
@@ -868,7 +888,7 @@ async fn observations(
             store.set_fuel(fuel)?;
             let input = wasmtime::component::StreamReader::new(&mut store, case.bytes.clone())?;
             let (value,) = run.call_async(&mut store, (input,)).await?;
-            max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
+            fuel_used.push(fuel - store.get_fuel()?);
             store.assert_concurrent_state_empty();
             ensure!(
                 store.data().table.is_empty(),
@@ -879,12 +899,12 @@ async fn observations(
                 trace: value.trace.into_iter().map(number).collect(),
             });
         }
-        return Ok((
-            values,
-            max_fuel_used,
-            stdout.contents().to_vec(),
-            stderr.contents().to_vec(),
-        ));
+        return Ok(Run {
+            observations: values,
+            fuel_used,
+            stdout: stdout.contents().to_vec(),
+            stderr: stderr.contents().to_vec(),
+        });
     }
     if let Case::Fetch(case) = case {
         let reply = case.clone();
@@ -900,7 +920,7 @@ async fn observations(
         for _ in 0..3 {
             store.set_fuel(fuel)?;
             let (value,) = run.call_async(&mut store, (&url,)).await?;
-            max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
+            fuel_used.push(fuel - store.get_fuel()?);
             store.assert_concurrent_state_empty();
             ensure!(
                 store.data().table.is_empty(),
@@ -921,16 +941,16 @@ async fn observations(
                         .any(|(n, v)| n == "x-contract" && v == "bounded")),
             "Fetch side effects differ from the model"
         );
-        return Ok((
-            values,
-            max_fuel_used,
-            stdout.contents().to_vec(),
-            stderr.contents().to_vec(),
-        ));
+        return Ok(Run {
+            observations: values,
+            fuel_used,
+            stdout: stdout.contents().to_vec(),
+            stderr: stderr.contents().to_vec(),
+        });
     }
     let run = instance.get_typed_func::<(f64,), (GuestObservation,)>(&mut store, "run")?;
     let mut values = Vec::new();
-    let mut max_fuel_used = 0;
+    let mut fuel_used = Vec::new();
     // Reuse the instance to catch retained state and allocation lifetime errors.
     let inputs: Vec<String> = serde_json::from_slice(&fs::read(artifacts.join("inputs.json"))?)?;
     for encoded in inputs {
@@ -945,7 +965,7 @@ async fn observations(
             .await
             .map_err(anyhow::Error::from)
             .with_context(|| format!("input {input:?}"))?;
-        max_fuel_used = max_fuel_used.max(fuel - store.get_fuel()?);
+        fuel_used.push(fuel - store.get_fuel()?);
         if fault == Some(Fault::Resource) {
             store.data_mut().table.push(())?;
         }
@@ -959,12 +979,12 @@ async fn observations(
             trace: value.trace.into_iter().map(number).collect(),
         });
     }
-    Ok((
-        values,
-        max_fuel_used,
-        stdout.contents().to_vec(),
-        stderr.contents().to_vec(),
-    ))
+    Ok(Run {
+        observations: values,
+        fuel_used,
+        stdout: stdout.contents().to_vec(),
+        stderr: stderr.contents().to_vec(),
+    })
 }
 
 pub fn number(value: f64) -> String {

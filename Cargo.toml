@@ -11,6 +11,7 @@ members = [
     "crates/number-helper",
     "crates/time-helper",
     "crates/conformance",
+    "crates/perry-mir",
 ]
 
 [profile.dev.package.perry-hir]
@@ -23,8 +24,8 @@ panic = "abort"
 strip = true
 
 [dependencies]
-perry-parser = { git = "https://github.com/PerryTS/perry" }
-perry-hir = { git = "https://github.com/PerryTS/perry" }
+perry-parser = { git = "https://github.com/PerryTS/perry", rev = "9e29f59d435ee08df161ef460ee6f204fb381d4f" }
+perry-hir = { git = "https://github.com/PerryTS/perry", rev = "9e29f59d435ee08df161ef460ee6f204fb381d4f" }
 swc_ecma_visit = "19.0"
 swc_common = "18.0"
 swc_ecma_transforms_base = "32.0"

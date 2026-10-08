@@ -60,6 +60,8 @@ pub enum Status {
     Running,
     Passed,
     Failed,
+    /// Failed for a reason recorded in `scaling::KNOWN_FAILURES`; does not fail the campaign.
+    KnownFailure,
 }
 #[derive(Serialize)]
 pub struct PartitionResult {
@@ -335,6 +337,18 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
                     }
                 }
             }
+        }
+        match (crate::scaling::known_failure(contract.id), result.status) {
+            (Some(reason), Status::Failed) => {
+                result.status = Status::KnownFailure;
+                eprintln!("{}: known failure ({reason})", contract.id);
+            }
+            (Some(_), Status::Passed) => {
+                result.status = Status::Failed;
+                result.error =
+                    Some("listed in scaling::KNOWN_FAILURES but passed; remove the entry".into());
+            }
+            _ => {}
         }
         if let Some(error) = &result.error {
             eprintln!("{}: {error}", contract.id);

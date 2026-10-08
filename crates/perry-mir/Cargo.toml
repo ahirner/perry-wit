@@ -1,0 +1,14 @@
+[package]
+name = "perry-mir"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Typed middle IR for perry-wit, built on pliron (TODOs.md P2)"
+
+[dependencies]
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
+thiserror = "2"
+
+[dev-dependencies]
+expect-test = "1"
+regex = "1"
