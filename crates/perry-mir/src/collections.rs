@@ -1,10 +1,12 @@
 //! Dense arrays and UTF-8 strings.
 //!
-//! Lengths and indices are signless `i32`; the builder converts ECMAScript numbers with
-//! `perry.convert` once integer ranges are proven (P3.5) or bounds-checks them explicitly.
+//! Lengths are signless `i32`. Reads and writes take ECMAScript numbers as indices and follow
+//! subset rule R8: reads miss with `undefined`, writes past `length` throw `RangeError`.
+//! P3.5 narrows indices to `i32` and removes checks where ranges are proven.
 use crate::{
-    attrs::Tier,
-    types::{ArrayType, StringType},
+    attrs::{ErrorKind, Tier},
+    exceptions::MayThrowInterface,
+    types::{ArrayType, OptionalType, StringType},
 };
 use pliron::{
     builtin::{
@@ -36,6 +38,8 @@ pub enum CollectionErr {
     Element(&'static str),
     #[error("{0} index or length must be a signless i32")]
     Index(&'static str),
+    #[error("{0} index must be a number (f64) or a signless i32")]
+    NumberIndex(&'static str),
     #[error("{0} expects perry.string operands and result")]
     NotString(&'static str),
 }
@@ -61,6 +65,13 @@ fn element(ctx: &Context, array: Value, op: &'static str) -> Result<TypeHandle> 
             CollectionErr::NotArray(op)
         ),
     }
+}
+
+fn is_number(ctx: &Context, value: Value) -> bool {
+    value
+        .get_type(ctx)
+        .deref(ctx)
+        .is::<pliron::builtin::types::FP64Type>()
 }
 
 fn is_string(ctx: &Context, value: Value) -> bool {
@@ -161,8 +172,10 @@ impl SideEffects for ArrayLenOp {
     }
 }
 
-/// Read an element. Traps when the index is out of bounds (the subset has no holes, so
-/// there is no `undefined` element); P3.5 removes the check where indices are proven.
+/// Read an element as `T | undefined`, as ECMAScript does: an index that is not an integer
+/// in `[0, length)` yields `undefined` (arrays are dense, so in-range reads never miss).
+/// The index is an ECMAScript number (`f64`) or a range-proven `i32` (P3.5); with a proven
+/// in-bounds index P3.5 rewrites the result to the plain element type.
 #[pliron_op(
     name = "perry.array_get",
     format = "$0 `[` $1 `] : ` type($0)",
@@ -172,7 +185,8 @@ pub struct ArrayGetOp;
 
 impl ArrayGetOp {
     pub fn new(ctx: &mut Context, array: Value, index: Value) -> Result<Self> {
-        let ty = element(ctx, array, "perry.array_get")?;
+        let element = element(ctx, array, "perry.array_get")?;
+        let ty = OptionalType::get(ctx, element).into();
         Ok(ArrayGetOp {
             op: Operation::new(
                 ctx,
@@ -189,12 +203,15 @@ impl ArrayGetOp {
 impl Verify for ArrayGetOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let op = self.get_operation().deref(ctx);
-        if element(ctx, op.get_operand(0), "perry.array_get")? != self.get_result(ctx).get_type(ctx)
-        {
+        let element = element(ctx, op.get_operand(0), "perry.array_get")?;
+        let result = self.get_result(ctx).get_type(ctx);
+        let optional = TypedHandle::<OptionalType>::from_handle(result, ctx)
+            .is_ok_and(|optional| optional.deref(ctx).value() == element);
+        if !optional {
             verify_err!(self.loc(ctx), CollectionErr::Element("perry.array_get"))?
         }
-        if !is_index(ctx, op.get_operand(1)) {
-            verify_err!(self.loc(ctx), CollectionErr::Index("perry.array_get"))?
+        if !is_index(ctx, op.get_operand(1)) && !is_number(ctx, op.get_operand(1)) {
+            verify_err!(self.loc(ctx), CollectionErr::NumberIndex("perry.array_get"))?
         }
         Ok(())
     }
@@ -207,7 +224,8 @@ impl SideEffects for ArrayGetOp {
     }
 }
 
-/// Overwrite an element. Traps when the index is out of bounds; use `perry.array_push` to grow.
+/// Write an element at an index in `[0, length]`; writing at `length` appends.
+/// Any other index throws a catchable `RangeError` instead of creating a hole (subset rule R8).
 #[pliron_op(
     name = "perry.array_set",
     format = "$0 `[` $1 `] = ` $2",
@@ -236,10 +254,17 @@ impl Verify for ArraySetOp {
         if element(ctx, op.get_operand(0), "perry.array_set")? != op.get_operand(2).get_type(ctx) {
             verify_err!(self.loc(ctx), CollectionErr::Element("perry.array_set"))?
         }
-        if !is_index(ctx, op.get_operand(1)) {
-            verify_err!(self.loc(ctx), CollectionErr::Index("perry.array_set"))?
+        if !is_index(ctx, op.get_operand(1)) && !is_number(ctx, op.get_operand(1)) {
+            verify_err!(self.loc(ctx), CollectionErr::NumberIndex("perry.array_set"))?
         }
         Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl MayThrowInterface for ArraySetOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::RangeError
     }
 }
 

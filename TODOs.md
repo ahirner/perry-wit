@@ -111,7 +111,14 @@ These restrictions are added to README "Semantics", each with a diagnostic and a
 - **R5 Closures stay unsupported**, except non-escaping arrow arguments to known array and promise builtins. Those are always inlined and never allocated.
 - **R6 No `any`.** Untyped data is a `JsonValue` variant tree.
 - **R7 Cycles are allowed only in `instance`.** The collector handles them. `task` cycles are freed in bulk anyway.
-- **R8 Arrays are dense.** An out-of-bounds read or write traps, and a non-integral index traps. Node instead returns `undefined` or creates a hole. Arrays grow only through `push`. P3.5 removes the checks where indices are proven.
+- **R8 Arrays are dense; misses are `undefined`, failures are exceptions.**
+  - A read outside `[0, length)` or at a non-integral index returns `undefined`, as in ECMAScript. In MIR the read has type `perry.optional<T>`.
+  - `undefined` is a reserved NaN payload for numbers and a null reference for references, so the bounds check is one compare and a select.
+  - Arithmetic and ordering coerce `undefined` to `NaN` (`perry.to_number`), concatenation to `"undefined"` (`perry.to_string`), and `=== undefined` is a definedness test.
+  - A typed boundary that requires `T` (parameter, return, field, element, property access) unwraps with `perry.unwrap`, which throws a catchable `TypeError` on `undefined`.
+  - A write at `length` appends. Any other out-of-range or non-integral write throws a catchable `RangeError`, because holes are not representable.
+  - Nothing in the subset traps. Wasm traps cannot be caught by `try`/`catch`, so every subset failure is an ECMAScript exception instead.
+  - P3.5 removes the check, the optional wrapper and the unwrap where the index is proven in range, so hot loops pay nothing.
 
 ### D5. Stackless async on the P3 callback ABI
 
@@ -236,7 +243,8 @@ The phases run in order. Items within a phase can run in parallel unless they ar
       - `perry.array_new`, `perry.array_len`, `perry.array_get`, `perry.array_set` and `perry.array_push`;
       - `perry.string_const`, `perry.string_concat` and `perry.string_len`;
       - `perry.convert`.
-    - Ten tests pass.
+    - R8 support: the `perry.optional` type; `perry.undefined`, `perry.wrap`, `perry.is_undefined`, `perry.to_number`, `perry.to_string` (pure) and `perry.unwrap` (throws `TypeError`); `MayThrowInterface` with a `perry.error_kind` (`Any`, `TypeError`, `RangeError`). `perry.array_get` takes an f64 or i32 index and returns `perry.optional<T>`.
+    - Twelve tests pass.
     - Remaining:
       - dict/JSON, `iface.*`, bytes;
       - `perry.canon` and `perry.intrinsic`. The plan for `perry.intrinsic` is one table-driven op, not one op per capability.
@@ -255,7 +263,8 @@ The phases run in order. Items within a phase can run in parallel unless they ar
       - `if`, `while`, `do`/`while`, `for`, `break`/`continue`, `return`;
       - direct calls, string `+` and `.length`.
     - Everything else is rejected with a diagnostic.
-    - Next: objects and arrays (`perry.alloc`, `perry.array_*`), async (`perry.async_call` and `perry.await`), globals and module state, truthiness, string comparison, labeled control flow, try/throw.
+    - Since added: records (interfaces and literals unify by sorted field names), arrays, `push`, index and property reads and writes, R8 optionals with ECMAScript coercions and `=== undefined`. Eight tests pass.
+    - Next: async (`perry.async_call` and `perry.await`), globals and module state, truthiness, string comparison, labeled control flow, try/throw.
 - [ ] **P2.3 MIR snapshot tests** replace the 10 `waffle_ir` references in the test suite.
 
 ### P3. Pass pipeline
@@ -271,6 +280,9 @@ Owned (each with unit tests on MIR snippets):
 - [ ] **P3.3 Escape summaries.** Per function parameter, computed to an optimistic fixpoint (Zena `escape.zena`). Store, return, throw, capture into module state, passing to an escaping parameter, identity comparison and import arguments all count as escapes.
 - [ ] **P3.4 SROA.** Non-escaping `alloc` dissolves into SSA values and block parameters (Zena `sroa.zena`).
 - [ ] **P3.5 Integer ranges.** Loop counters, indices and lengths become i32/i64 where proven. Otherwise use f64.
+  - Where `0 <= i < length` is proven, rewrite `perry.array_get` to an unchecked read, drop `perry.optional` and fold the `perry.unwrap`/`perry.to_number` uses (R8).
+  - Use `perry.is_undefined` guards as range facts on the defined branch.
+- [ ] **P3.5b Throw edges.** Ops implementing `MayThrowInterface` (`perry.call`, `perry.await`, `perry.unwrap`, `perry.array_set`) get explicit exception successors to the nearest handler or the function's exceptional exit. Runs before codegen, after P3.5 has removed provably safe checks.
 - [ ] **P3.6 Shapes and interface views.**
   - Exact layouts for closed types: references 4 bytes, f64/i64 8-aligned, packed booleans, optional-presence bits.
   - Per-(shape, interface) field-offset tables.

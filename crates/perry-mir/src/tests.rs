@@ -299,7 +299,7 @@ fn verifier_rejects_ill_typed_slot_access() {
     );
 }
 
-/// `wasi.execution.scaling.retained_records` with a helper call, arrays and index conversion.
+/// `wasi.execution.scaling.retained_records` with a helper call, arrays and an optional read.
 const RETAINED_RECORDS: &str = r#"
 builtin.module @scaling {
   ^module():
@@ -326,8 +326,8 @@ builtin.module @scaling {
         perry.br ^header(next)
       ^exit():
         count = perry.array_len items : builtin.integer i32;
-        last_index = perry.convert F64ToI32 zero : builtin.integer i32;
-        first = perry.array_get items[last_index] : perry.record <Point>;
+        maybe = perry.array_get items[zero] : perry.optional <perry.record <Point>>;
+        first = perry.unwrap maybe : perry.record <Point>;
         perry.return count
     }
 }
@@ -406,4 +406,98 @@ fn verifier_rejects_mismatched_calls_and_awaits() {
     );
     let error = verify_text(&wrong_push).expect_err("element type");
     assert!(error.contains("element type differs"), "{error}");
+}
+
+#[test]
+fn optional_reads_coerce_and_unwrap() {
+    let numbers = "perry.array <builtin.fp64>";
+    let maybe = "perry.optional <builtin.fp64>";
+    let read = format!(
+        "a = perry.array_new Unassigned (v) : {numbers}; m = perry.array_get a[v] : {maybe};"
+    );
+    verify_text(&single_block(&format!(
+        "{read} n = perry.to_number m : builtin.fp64; s = perry.binary Add n, v : builtin.fp64; \
+         u = perry.is_undefined m : builtin.integer i1; w = perry.wrap v : {maybe}; \
+         e = perry.compare Eq m, w : builtin.integer i1; d = perry.unwrap m : builtin.fp64; \
+         x = perry.undefined : {maybe}; perry.array_set a[v] = d;"
+    )))
+    .expect("well-typed optional ops verify");
+
+    let cases = [
+        (
+            format!(
+                "a = perry.array_new Unassigned (v) : {numbers}; m = perry.array_get a[v] : builtin.fp64;"
+            ),
+            "element type differs",
+        ),
+        (
+            format!(
+                "{read} b = builtin.constant <builtin.integer <1: i1>> : builtin.integer i1; g = perry.array_get a[b] : {maybe};"
+            ),
+            "index must be a number",
+        ),
+        (
+            format!("{read} n = perry.to_number v : builtin.fp64;"),
+            "expects a perry.optional operand",
+        ),
+        (
+            format!("{read} s = perry.to_string m : perry.string;"),
+            "result type does not match",
+        ),
+        (
+            "x = perry.undefined : builtin.fp64;".to_string(),
+            "perry.undefined result type",
+        ),
+    ];
+    for (body, expected) in cases {
+        let error = verify_text(&single_block(&body)).expect_err(&body);
+        assert!(
+            error.contains(expected),
+            "{body}: expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn may_throw_marks_calls_unwraps_and_writes() {
+    use crate::exceptions::MayThrowInterface;
+    use pliron::{
+        graph::walkers::{
+            IRNode, WALKCONFIG_PREORDER_FORWARD, uninterruptible::immutable::walk_op,
+        },
+        op::op_cast,
+    };
+    let ctx = &mut Context::new();
+    let module = parse(
+        ctx,
+        &RETAINED_RECORDS.replace(
+            "perry.return count",
+            "perry.array_set items[zero] = first;\n        perry.return count",
+        ),
+    );
+    verify_operation(module, ctx).expect("verifies");
+    let mut throwing: Vec<String> = Vec::new();
+    walk_op(
+        ctx,
+        &mut throwing,
+        &WALKCONFIG_PREORDER_FORWARD,
+        module,
+        |ctx, throwing, node| {
+            if let IRNode::Operation(op) = node {
+                let op = Operation::get_op_dyn(op, ctx);
+                if let Some(may_throw) = op_cast::<dyn MayThrowInterface>(&*op) {
+                    throwing.push(format!("{} {:?}", op.get_opid(), may_throw.exception(ctx)));
+                }
+            }
+        },
+    );
+    assert_eq!(
+        throwing,
+        [
+            "perry.call Any",
+            "perry.unwrap TypeError",
+            "perry.array_set RangeError"
+        ],
+        "array_get, to_number and the rest are pure reads"
+    );
 }

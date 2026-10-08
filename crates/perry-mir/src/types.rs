@@ -258,3 +258,24 @@ impl PromiseType {
         self.value
     }
 }
+
+/// `T | undefined`. Produced by reads that may miss (out-of-bounds array reads, later optional
+/// fields); consumed through `perry.to_number`, `perry.to_string`, `perry.is_undefined` and
+/// `perry.unwrap`. The representation is chosen at lowering: a reserved NaN payload for numbers
+/// (so arithmetic yields NaN as in ECMAScript), a null reference for references.
+#[pliron_type(
+    name = "perry.optional",
+    generate_get = true,
+    format = "`<` $value `>`",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct OptionalType {
+    value: TypeHandle,
+}
+
+impl OptionalType {
+    pub fn value(&self) -> TypeHandle {
+        self.value
+    }
+}

@@ -204,3 +204,17 @@ impl SideEffects for AwaitOp {
         true
     }
 }
+
+#[op_interface_impl]
+impl crate::exceptions::MayThrowInterface for CallOp {
+    fn exception(&self, _ctx: &Context) -> crate::attrs::ErrorKind {
+        crate::attrs::ErrorKind::Any
+    }
+}
+
+#[op_interface_impl]
+impl crate::exceptions::MayThrowInterface for AwaitOp {
+    fn exception(&self, _ctx: &Context) -> crate::attrs::ErrorKind {
+        crate::attrs::ErrorKind::Any
+    }
+}
