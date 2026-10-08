@@ -12,6 +12,7 @@ members = [
     "crates/time-helper",
     "crates/conformance",
     "crates/perry-mir",
+    "crates/perry-lower",
 ]
 
 [profile.dev.package.perry-hir]
