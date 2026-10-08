@@ -187,7 +187,7 @@ pub(crate) fn lower_module(
             string_pool.intern("utf-8");
         }
         if let Some(wit) = &contract.wit {
-            for name in wit.http_error_names() {
+            for name in wit.error_names("http").chain(wit.error_names("filesystem")) {
                 string_pool.intern(name);
             }
         }
@@ -196,17 +196,19 @@ pub(crate) fn lower_module(
                 .iter()
                 .copied()
                 .chain(super::errors::NAMES)
+                .chain(super::errors::native::strings())
             {
                 string_pool.intern(key);
             }
         }
         string_pool.populate_memory_segments(&mut module.memories[memory]);
-        let (regex_programs, next_free) = regex::emit_tables(
-            &mut module,
-            memory,
-            regex_tables,
-            string_pool.next_free_address(),
-        )?;
+        let next_free = if reqs.objects {
+            super::errors::native::emit_data(&string_pool, contract, &mut module.memories[memory])
+        } else {
+            string_pool.next_free_address()
+        };
+        let (regex_programs, next_free) =
+            regex::emit_tables(&mut module, memory, regex_tables, next_free)?;
         let mut helper_libraries = Vec::new();
         if contract.has_headers() {
             helper_libraries.push(super::libraries::LibraryId::Fetch);
@@ -1250,7 +1252,16 @@ impl<'a> FunctionLowerer<'a> {
     fn call_completion(&mut self, function: waffle::Func, args: &[Value]) -> Value {
         let outcome = abi::emit_fallible_call(&mut self.body, self.block, function, args);
         self.block = outcome.err_block;
-        if let Some(payload) = self.normalize_error(outcome.status, outcome.payload) {
+        let domain = self
+            .registry
+            .native_errors
+            .get(&function)
+            .copied()
+            .unwrap_or(super::errors::native::Domain::Runtime);
+        let context = domain.context().map(|_| args[0]);
+        if let Some(payload) =
+            self.normalize_native_error(domain, outcome.status, outcome.payload, context)
+        {
             self.emit_throw(payload);
         }
         self.block = outcome.ok_block;

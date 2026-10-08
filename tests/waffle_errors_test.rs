@@ -9,8 +9,8 @@ use wasmtime_wasi_http::{WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, 
 #[path = "support/output_capture.rs"]
 mod output_capture;
 
-struct Refused;
-impl WasiHttpHooks for Refused {
+struct Failure(wasmtime_wasi_http::Error);
+impl WasiHttpHooks for Failure {
     fn send_request(
         &mut self,
         _: http::Request<WasiBody>,
@@ -27,14 +27,15 @@ impl WasiHttpHooks for Refused {
                 >,
             > + Send,
     > {
-        Box::new(async { Err(wasmtime_wasi_http::Error::ConnectionRefused) })
+        let error = std::mem::replace(&mut self.0, wasmtime_wasi_http::Error::ConnectionRefused);
+        Box::new(async { Err(error) })
     }
 }
 struct Host {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
-    refused: Refused,
+    failure: Failure,
 }
 impl WasiView for Host {
     fn ctx(&mut self) -> WasiCtxView<'_> {
@@ -49,7 +50,7 @@ impl WasiHttpView for Host {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: &mut self.refused,
+            hooks: &mut self.failure,
         }
     }
 }
@@ -96,7 +97,7 @@ async fn instantiate(
             wasi: WasiCtx::builder().stderr(output.clone()).build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
-            refused: Refused,
+            failure: Failure(wasmtime_wasi_http::Error::ConnectionRefused),
         },
     );
     let instance = linker.instantiate_async(&mut store, &component).await?;
@@ -144,27 +145,41 @@ async fn uncaught_values_report_the_actual_failure() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_rejections_keep_category_url_and_identity() -> Result<()> {
-    let (result, stderr) = invoke(
+    let (mut store, instance, output) = instantiate(
         r#"
         export async function run():Promise<string> {
             const pending=fetch('http://refused.invalid/doc.json');
             try {await pending;} catch(original) {
               try {await pending;} catch(e) {
                 if(e!==original || !(e instanceof TypeError))throw new Error('identity lost');
-                return e.name+':'+e.cause.code+':'+e.cause.url;
+                return e.name+'|'+e.message+'|'+e.cause.code+'|'+e.cause.url;
               }
             }
             return 'unexpected success';
         }
     "#,
-        true,
+        "package test:errors; world boundary {import wasi:http/client@0.3.0; export run:async func()->string;}",
     )
     .await?;
-    assert_eq!(
-        result?.0,
-        "TypeError:connection-refused:http://refused.invalid/doc.json"
-    );
-    assert_eq!(stderr, "");
+    let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+    use wasmtime_wasi_http::Error as HttpError;
+    for (error, category) in [
+        (HttpError::DnsTimeout, "DNS-timeout"),
+        (HttpError::ConnectionRefused, "connection-refused"),
+        (HttpError::HttpRequestDenied, "HTTP-request-denied"),
+        (HttpError::InternalError(None), "internal-error"),
+    ] {
+        store.data_mut().failure.0 = error;
+        assert_eq!(
+            run.call_async(&mut store, ()).await?.0,
+            format!(
+                "TypeError|fetch failed: {category}: http://refused.invalid/doc.json|{category}|http://refused.invalid/doc.json"
+            )
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    assert!(output.contents().is_empty());
     Ok(())
 }
 
@@ -205,6 +220,136 @@ async fn caught_fetch_does_not_replace_a_later_uncaught_error() -> Result<()> {
 struct ExportError {
     name: String,
     message: String,
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn json_failures_preserve_locations_identity_and_recovery() -> Result<()> {
+    let (mut store, instance, output) = instantiate(r#"
+        async function parse(input:string, mode:number):Promise<string> {
+            if(mode===1)return JSON.stringify(await new Response(input).json());
+            if(mode===2)return JSON.stringify(await new Request('http://example.test/', {method:'POST',body:input}).json());
+            return JSON.stringify(JSON.parse(input));
+        }
+        export async function run(input:string, mode:number):Promise<string> {
+            const pending=parse(input,mode);
+            try {return await pending;}
+            catch(original) {
+                try {await Promise.all([pending]);}
+                catch(repeated) {
+                    if(repeated!==original || !(repeated instanceof SyntaxError))throw new Error('JSON error lost');
+                }
+                throw original;
+            }
+        }
+    "#, "package test:errors; world boundary {
+        record failure {name:string,message:string}
+        export run:async func(input:string,mode:u32)->result<string,failure>;
+    }").await?;
+    let run = instance
+        .get_typed_func::<(&str, u32), (Result<String, ExportError>,)>(&mut store, "run")?;
+    for mode in 0..3 {
+        for (input, position) in [
+            ("", "0 (line 1, column 1)"),
+            ("[1,", "3 (line 1, column 4)"),
+            ("{\"é\":\"😀\",}", "13 (line 1, column 11)"),
+            ("{\r\n \"x\": }\r\n", "9 (line 2, column 7)"),
+        ] {
+            assert_eq!(
+                run.call_async(&mut store, (input, mode)).await?.0,
+                Err(ExportError {
+                    name: "SyntaxError".into(),
+                    message: format!("Invalid JSON at byte {position}")
+                })
+            );
+            assert_eq!(
+                run.call_async(&mut store, ("{\"ok\":true}", mode)).await?.0,
+                Ok("{\"ok\":true}".into())
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+        }
+    }
+    assert!(output.contents().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_failures_keep_their_domain_at_the_error_boundary() -> Result<()> {
+    for (operation, name, message) in [
+        (
+            "new Date(NaN).toISOString()",
+            "RangeError",
+            "Invalid time value",
+        ),
+        (
+            "new TextDecoder('invalid')",
+            "RangeError",
+            "Unsupported text encoding",
+        ),
+        (
+            "new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array([255]))",
+            "TypeError",
+            "Invalid UTF-8 data",
+        ),
+        (
+            "String.fromCodePoint(1114112)",
+            "RangeError",
+            "Invalid Unicode code point",
+        ),
+        (
+            "new Uint8Array(-1)",
+            "RangeError",
+            "Value is outside the supported range",
+        ),
+        (
+            "Temporal.Instant.from('bad')",
+            "RangeError",
+            "Invalid ISO date or time",
+        ),
+    ] {
+        let source =
+            format!("export function run():string{{{operation}; return 'unexpected success';}}");
+        let (mut store, instance, _) = instantiate(
+            &source,
+            "package test:errors; world boundary {
+            record failure {name:string,message:string}
+            export run:func()->result<string,failure>;
+        }",
+        )
+        .await?;
+        let run =
+            instance.get_typed_func::<(), (Result<String, ExportError>,)>(&mut store, "run")?;
+        assert_eq!(
+            run.call_async(&mut store, ()).await?.0,
+            Err(ExportError {
+                name: name.into(),
+                message: message.into()
+            }),
+            "{operation}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn filesystem_failures_include_category_and_path() -> Result<()> {
+    let (mut store, instance, _) = instantiate(r#"
+        import {readFile} from 'node:fs/promises';
+        export async function run():Promise<string>{await readFile('/missing.json');return 'unexpected success';}
+    "#, "package test:errors; world boundary {
+        import wasi:filesystem/preopens@0.3.0;
+        record failure {name:string,message:string}
+        export run:async func()->result<string,failure>;
+    }").await?;
+    let run = instance.get_typed_func::<(), (Result<String, ExportError>,)>(&mut store, "run")?;
+    let error = run.call_async(&mut store, ()).await?.0.unwrap_err();
+    assert_eq!(error.name, "Error");
+    assert_eq!(
+        error.message,
+        "Filesystem operation failed: access: /missing.json"
+    );
+    assert!(store.data().table.is_empty());
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

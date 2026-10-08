@@ -10,6 +10,7 @@
   (import "host" "populate" (func $populate (param i32 i32 i32 i32) (result i64)))
   (import "host" "serialized-size" (func $serialized-size (param i32 i32 i32) (result i64)))
   (import "host" "serialize" (func $serialize (param i32 i32 i32 i32 i32) (result i64)))
+  (import "host" "error" (func $failure (param i64 i32) (result i32 f64)))
   (memory 1)
 
   (func $allocate (param $size i32) (result i32)
@@ -58,14 +59,14 @@
     (local $result i64) (local $size i32) (local $graph i32) (local $code i32)
     (local.set $result (call $measure (i32.load (local.get $text)) (i32.load offset=4 (local.get $text))))
     (local.set $code (call $error (local.get $result)))
-    (if (local.get $code) (then (return (i32.const 1) (f64.convert_i32_u (local.get $code)))))
+    (if (local.get $code) (then (return (call $failure (local.get $result) (local.get $text)))))
     (local.set $size (i32.wrap_i64 (local.get $result)))
     (local.set $graph (call $allocate (local.get $size)))
     (local.set $result (call $populate (i32.load (local.get $text)) (i32.load offset=4 (local.get $text)) (local.get $graph) (local.get $size)))
     (local.set $code (call $error (local.get $result)))
     (if (local.get $code) (then
       (call $release (local.get $graph) (local.get $size))
-      (return (i32.const 1) (f64.convert_i32_u (local.get $code)))))
+      (return (call $failure (local.get $result) (local.get $text)))))
     (i32.const 0) (f64.convert_i32_u (call $from-node (i32.wrap_i64 (local.get $result)))))
 
   ;; The same traversal measures and writes a confined graph. No guest callbacks
@@ -114,7 +115,7 @@
       (then (local.set $item (i32.load (local.get $pointer))))
       (else
         (if (i32.eqz (i32.or (i32.eq (local.get $tag) (i32.const 8)) (i32.eq (local.get $tag) (i32.const {{array-tag}}))))
-          (then (return (i32.const 12) (i32.const 0) (local.get $end))))
+          (then (return (i32.const 5) (i32.const 0) (local.get $end))))
         (local.set $length (i32.load offset=4 (local.get $pointer)))
         (local.set $pointer (i32.load (local.get $pointer)))
         (if (local.get $output) (then (i32.store (local.get $node) (i32.const 5))))))
@@ -166,7 +167,8 @@
     (if (i32.eqz (i32.load (local.get $value))) (then (return (i32.const 0) (f64.const 0))))
     (call $graph (i32.load (local.get $value)) (f64.load offset=8 (local.get $value)) (i32.const 0) (i32.const 0) (i32.const 0))
     local.set $size local.set $root local.set $status
-    (if (local.get $status) (then (return (i32.const 1) (f64.convert_i32_u (local.get $status)))))
+    (if (local.get $status) (then (return (call $failure
+      (i64.shl (i64.extend_i32_u (local.get $status)) (i64.const 32)) (i32.const 0)))))
     (local.set $graph (call $allocate (local.get $size)))
     (call $graph (i32.load (local.get $value)) (f64.load offset=8 (local.get $value)) (local.get $graph) (i32.const 0) (i32.const 0))
     local.set $end local.set $root local.set $status
@@ -175,7 +177,7 @@
     (local.set $status (call $error (local.get $result)))
     (if (local.get $status) (then
       (call $release (local.get $graph) (local.get $size))
-      (return (i32.const 1) (f64.convert_i32_u (local.get $status)))))
+      (return (call $failure (local.get $result) (i32.const 0)))))
     (local.set $length (i32.wrap_i64 (local.get $result)))
     (local.set $output (call $allocate (local.get $length)))
     (local.set $result (call $serialize (local.get $graph) (local.get $size) (local.get $root) (local.get $output) (local.get $length)))
@@ -183,6 +185,6 @@
     (local.set $status (call $error (local.get $result)))
     (if (local.get $status) (then
       (call $release (local.get $output) (local.get $length))
-      (return (i32.const 1) (f64.convert_i32_u (local.get $status)))))
+      (return (call $failure (local.get $result) (i32.const 0)))))
     (i32.const 0) (f64.convert_i32_u (call $lift (local.get $output) (local.get $length))))
 )

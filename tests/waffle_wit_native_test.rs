@@ -925,7 +925,7 @@ async fn resolved_world_http_domain_failures_release_resources_before_reuse() ->
             return {ok:true,value:await readBounded(response,8)};
           } catch(error) {
             if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};
-            if(error instanceof TypeError)return {ok:false,error:error.cause.code};
+            if(error instanceof TypeError && 'cause' in error)return {ok:false,error:error.cause.code};
             return {ok:false,error:JSON.stringify(error.code)};
           }
         }
@@ -2513,7 +2513,7 @@ async fn standard_fetch_releases_failures_and_grows_bodies_incrementally() -> Re
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn standard_fetch_rejects_unconsumed_body_at_call_boundary() -> Result<()> {
+async fn standard_fetch_releases_unconsumed_body_at_call_boundary() -> Result<()> {
     let compiled = compile(
         r#"export async function run(url:string):Promise<number> {
         const response = await fetch(url); return response.status;
@@ -2532,7 +2532,11 @@ async fn standard_fetch_rejects_unconsumed_body_at_call_boundary() -> Result<()>
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let run = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "run")?;
     let url = format!("http://{}/", server.address);
-    assert!(run.call_async(&mut store, (&url,)).await.is_err());
+    for _ in 0..5 {
+        assert_eq!(run.call_async(&mut store, (&url,)).await?.0, 200.0);
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
     Ok(())
 }
 
@@ -2594,10 +2598,18 @@ async fn export_values_are_retained_until_pending_source_work_finishes() -> Resu
 
 #[tokio::test(flavor = "current_thread")]
 async fn merge_docs_example_matches_node_and_reuses_the_instance() -> Result<()> {
-    let server = fixture::HttpFixture::new(|request| {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let invalid_document = Arc::new(AtomicUsize::new(0));
+    let selected = invalid_document.clone();
+    let server = fixture::HttpFixture::new(move |request| {
         fixture::Reply::Body(
             200,
-            if request.target == "/doc1.json" {
+            if request.target == format!("/doc{}.json", selected.load(Ordering::SeqCst)) {
+                "{\n  \"id\": \"doc-alpha\"\n  \"name\": \"broken\"\n}"
+            } else if request.target == "/doc1.json" {
                 r#"{"first":1,"shared":"old"}"#
             } else {
                 r#"{"shared":"new","second":2}"#
@@ -2638,6 +2650,21 @@ async fn merge_docs_example_matches_node_and_reuses_the_instance() -> Result<()>
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }
+    for invalid in [1, 0, 2, 0, 1, 2, 0] {
+        invalid_document.store(invalid, Ordering::SeqCst);
+        let result = tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, ()))
+            .await??
+            .0;
+        if invalid == 0 {
+            assert_eq!(result, Ok(expected.into()));
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.name, "SyntaxError");
+            assert_eq!(error.message, "Invalid JSON at byte 24 (line 3, column 3)");
+        }
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
     let output = std::process::Command::new("node")
         .current_dir(directory.path())
         .args([
@@ -2652,6 +2679,59 @@ async fn merge_docs_example_matches_node_and_reuses_the_instance() -> Result<()>
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, format!("{expected}\n").as_bytes());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unused_fetch_bodies_are_released_after_return_or_caught_rejection() -> Result<()> {
+    let server = fixture::HttpFixture::new(|request| {
+        if request.target == "/stall" {
+            fixture::Reply::StallBody
+        } else {
+            fixture::Reply::Body(200, "{bad}".into())
+        }
+    });
+    let compiled = compile(
+        r#"
+        export async function run(url:string, parse:boolean):Promise<string> {
+            const [first, second]=await Promise.all([fetch(url),fetch(url+'stall')]);
+            if(parse) {
+                try {await first.json();}
+                catch(error) {return error.name+':'+error.message;}
+            }
+            return 'unread';
+        }
+    "#,
+        "package test:cleanup; world boundary {
+        import wasi:http/client@0.3.0;
+        export run:async func(url:string,parse:bool)->string;
+    }",
+    )?;
+    let engine = engine()?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, bool), (String,)>(&mut store, "run")?;
+    for parse in [false, true].into_iter().cycle().take(10) {
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run.call_async(&mut store, (&format!("http://{}/", server.address), parse)),
+        )
+        .await??
+        .0;
+        assert_eq!(
+            result,
+            if parse {
+                "SyntaxError:Invalid JSON at byte 1 (line 1, column 2)"
+            } else {
+                "unread"
+            }
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
     Ok(())
 }
 

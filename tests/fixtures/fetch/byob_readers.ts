@@ -27,7 +27,12 @@ export async function run(base: string): Promise<number> {
   const first = reader.read(new Uint8Array(8),{min:8});
   const second = reader.read(new Uint8Array(8));
   reader.releaseLock();
-  try { await first; } catch { rejected++; }
+  try { await first; } catch (original) {
+    try { await first; } catch (repeated) {
+      if (repeated !== original || !(repeated instanceof TypeError)) throw new Error('Read rejection identity changed');
+    }
+    rejected++;
+  }
   try { await second; } catch { rejected++; }
   if (rejected !== 5 || body.locked) throw 93;
   const resumed = size(body);

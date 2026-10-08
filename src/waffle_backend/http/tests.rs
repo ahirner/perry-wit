@@ -66,7 +66,7 @@ async fn instantiate() -> Result<(Store<Host>, Instance)> {
           const combined=response.headers.get('x-value');
           let value='';if(combined!==null){value=combined;}
           return {ok:true,value:{status:response.status,headers:[['x-value',new TextEncoder().encode(value)]],body:bytes}};
-        }catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
+        }catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError && 'cause' in error)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
       }
     "#
     );
@@ -355,7 +355,7 @@ async fn typed_source_preserves_response_fields_headers_and_binary_body() -> Res
             const headers=response.headers.get('x-value');
             if(headers===null)throw 98;
             return {ok:true,value:headers+':'+new TextDecoder('utf-8',{fatal:true}).decode(await readBounded(response,1024))};
-          } catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
+          } catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError && 'cause' in error)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
         }
     "#;
     let (mut store, instance) = instantiate_source(source, 262144).await?;
@@ -496,7 +496,10 @@ async fn json_fetch_checks_status_media_type_and_payload() -> Result<()> {
             ("/missing", Err("401".into())),
             ("/duplicate", Err("401".into())),
             ("/unsupported", Err("402".into())),
-            ("/bad-json", Err("1".into())),
+            (
+                "/bad-json",
+                Err("Invalid JSON at byte 1 (line 1, column 2)".into()),
+            ),
         ] {
             assert_eq!(
                 timeout(
@@ -563,7 +566,7 @@ async fn source_binary_boundaries_keep_limits_and_completion_errors_separate_fro
             try {
               const response=await fetch('http://'+authority+path);
               return {ok:true,value:await readBounded(response,limit)};
-            }catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
+            }catch(error){if(typeof error==='number')return {ok:false,error:JSON.stringify(error)};if(error instanceof TypeError && 'cause' in error)return {ok:false,error:error.cause.code};return {ok:false,error:JSON.stringify(error.code)};}
         }
     "#;
     let (mut store, instance) = instantiate_source(source, 16 * 1024 * 1024).await?;

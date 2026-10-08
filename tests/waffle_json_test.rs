@@ -61,7 +61,10 @@ async fn malformed_source_json_unwinds_through_catch_and_allocating_finally() ->
             let result = 0;
             for (let i = 0; i < count; i++) {
                 try { JSON.parse(input); }
-                catch (error) { result = error.code; }
+                catch (error) {
+                    if (!(error instanceof SyntaxError) || !error.message.includes(' at byte ')) throw error;
+                    result = 1;
+                }
                 finally { const cleanup = JSON.stringify({ok: "😀"}); result = result + cleanup.length; }
             }
             return result;
@@ -76,7 +79,7 @@ async fn malformed_source_json_unwinds_through_catch_and_allocating_finally() ->
             ),
             (
                 vec![Val::String("\"\\uD800\"".into()), Val::Float64(1000.0)],
-                Val::Float64(12.0),
+                Val::Float64(11.0),
             ),
         ],
     )
@@ -221,7 +224,14 @@ async fn json_and_text_helpers_share_memory_and_keep_wit_error_channels() -> Res
                 value.text = value.text.toUpperCase();
                 if (value.text.indexOf("SS") !== 1) throw 90;
                 return JSON.stringify(value);
-            } catch(error) {if(error instanceof Error)throw error.code;throw error;}
+            } catch(error) {
+                if(error instanceof SyntaxError) {
+                    if(error.message !== 'Invalid JSON at byte 3 (line 1, column 4)')throw 91;
+                    throw 1;
+                }
+                if(error instanceof Error)throw error.code;
+                throw error;
+            }
         }
     "#,
         &[

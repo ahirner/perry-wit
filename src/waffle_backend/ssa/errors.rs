@@ -6,19 +6,42 @@ use waffle::{Operator, Type, Value};
 
 impl FunctionLowerer<'_> {
     pub(super) fn normalize_error(&mut self, status: Value, payload: Value) -> Option<Value> {
+        self.normalize_native_error(errors::native::Domain::Runtime, status, payload, None)
+    }
+
+    pub(super) fn normalize_native_error(
+        &mut self,
+        domain: errors::native::Domain,
+        status: Value,
+        payload: Value,
+        context: Option<Value>,
+    ) -> Option<Value> {
         if let Some(values) = self.registry.value_helpers {
-            Some(
-                self.op(
-                    Operator::Call {
-                        function_index: self
-                            .registry
-                            .errors
-                            .map_or(values.exception, |errors| errors.normalize),
+            if let Some(errors) = self.registry.errors {
+                let domain = self.op(
+                    Operator::I32Const {
+                        value: domain.address(errors.native_data),
                     },
-                    &[status, payload],
+                    &[],
+                    &[Type::I32],
+                );
+                let context = context
+                    .unwrap_or_else(|| self.op(Operator::I32Const { value: 0 }, &[], &[Type::I32]));
+                return Some(self.op(
+                    Operator::Call {
+                        function_index: errors.native,
+                    },
+                    &[domain, status, payload, context],
                     &[Type::F64],
-                ),
-            )
+                ));
+            }
+            Some(self.op(
+                Operator::Call {
+                    function_index: values.exception,
+                },
+                &[status, payload],
+                &[Type::F64],
+            ))
         } else {
             abi::emit_completion(
                 &mut self.body,
@@ -30,7 +53,7 @@ impl FunctionLowerer<'_> {
         }
     }
 
-    pub(super) fn emit_native_throw(&mut self, payload: Value) {
+    pub(super) fn emit_native_throw(&mut self, domain: errors::native::Domain, payload: Value) {
         let status = self.op(
             Operator::I32Const {
                 value: abi::CompletionStatus::NativeFailure as u32,
@@ -38,7 +61,7 @@ impl FunctionLowerer<'_> {
             &[],
             &[Type::I32],
         );
-        if let Some(payload) = self.normalize_error(status, payload) {
+        if let Some(payload) = self.normalize_native_error(domain, status, payload, None) {
             self.emit_throw(payload);
         }
     }

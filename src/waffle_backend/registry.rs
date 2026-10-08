@@ -12,6 +12,7 @@ use waffle::{
 };
 
 use crate::waffle_backend::capabilities::{CapabilityImplementation, LowerCapability};
+use crate::waffle_backend::errors::native::Domain;
 use crate::waffle_backend::promises::TaskTarget;
 use crate::waffle_backend::resolve::{ResolvedContract, TypedIntrinsic};
 
@@ -91,6 +92,7 @@ pub(crate) struct ModuleRegistry {
     pub(crate) value_helpers: Option<super::values::ValueHelpers>,
     pub(crate) value_access: Option<super::values::ValueAccessHelpers>,
     pub(crate) errors: Option<super::errors::Helpers>,
+    pub(crate) native_errors: BTreeMap<Func, Domain>,
     pub(crate) report_error: Option<Func>,
     pub(crate) json_helpers: Option<super::json::JsonHelpers>,
     pub(crate) date_helpers: Option<super::date::DateHelpers>,
@@ -133,6 +135,7 @@ impl ModuleRegistry {
     ) -> Result<Self> {
         // 1. Declare async intrinsics as imports
         let mut intrinsics = BTreeMap::new();
+        let mut native_errors = BTreeMap::new();
         let process_imports = super::capabilities::process::declare(module, contract);
         let scalar_imports = super::capabilities::scalars::declare_imports(module, contract);
         let resource_functions = super::wit::resources::declare(module, contract);
@@ -309,6 +312,9 @@ impl ModuleRegistry {
             } else {
                 None
             };
+        if let Some(function) = string_helpers.and_then(|h| h.str_from_code_point) {
+            native_errors.insert(function, Domain::CodePoint);
+        }
         let allocator = if let Some(helpers) = &string_helpers {
             Some(helpers.allocator)
         } else if let Some(base) = string_heap_base {
@@ -439,6 +445,9 @@ impl ModuleRegistry {
         } else {
             None
         };
+        if let Some(helpers) = date_helpers {
+            native_errors.insert(helpers.iso, Domain::Date);
+        }
         let decoder_helpers = if string_reqs.decoder {
             Some(super::decoder::emit_runtime(
                 module,
@@ -449,6 +458,9 @@ impl ModuleRegistry {
             None
         };
 
+        if let Some(helpers) = decoder_helpers {
+            native_errors.extend([helpers.new, helpers.decode].map(|f| (f, Domain::Encoding)));
+        }
         let value_helpers = if super::values::required(hir) || string_reqs.objects {
             Some(super::values::emit_runtime(
                 module,
@@ -504,6 +516,7 @@ impl ModuleRegistry {
         };
 
         let json_helpers = if let Some(mut imports) = json_imports {
+            imports.insert("error", errors.unwrap().json);
             imports.insert("array-new", value_access.unwrap().array_new);
             imports.insert("date-iso", date_helpers.unwrap().iso);
             Some(super::json::emit_runtime(
@@ -593,6 +606,7 @@ impl ModuleRegistry {
                 ) = intrinsic
                 {
                     intrinsics.insert(name.clone(), helpers[operation.name()]);
+                    native_errors.insert(helpers[operation.name()], Domain::Output);
                 }
             }
         }
@@ -611,6 +625,7 @@ impl ModuleRegistry {
                     && operation.needs_bytes()
                 {
                     intrinsics.insert(name.clone(), helpers[operation.name()]);
+                    native_errors.insert(helpers[operation.name()], Domain::Random);
                 }
             }
         }
@@ -696,6 +711,21 @@ impl ModuleRegistry {
             )
         })
         .transpose()?;
+        if let Some(helpers) = web_streams {
+            native_errors.extend(
+                [
+                    helpers.reader,
+                    helpers.release,
+                    helpers.read,
+                    helpers.read_into,
+                    helpers.cancel,
+                ]
+                .map(|f| (f, Domain::Stream)),
+            );
+            native_errors.extend(
+                [helpers.write, helpers.close, helpers.writable].map(|f| (f, Domain::Output)),
+            );
+        }
         for (name, intrinsic) in &contract.intrinsics {
             if matches!(
                 intrinsic,
@@ -720,6 +750,13 @@ impl ModuleRegistry {
                 )
             })
             .transpose()?;
+        if let Some(helpers) = body_helpers {
+            for method in super::http::body::BodyMethod::ALL {
+                if method != super::http::body::BodyMethod::Json || json_helpers.is_some() {
+                    native_errors.insert(helpers.method(method), Domain::Body);
+                }
+            }
+        }
         let filesystem_helpers = if let Some(mut imports) = filesystem_imports {
             if let Some(owners) = operations {
                 super::filesystem::operations::emit(
@@ -757,6 +794,7 @@ impl ModuleRegistry {
         };
 
         if let Some(helpers) = fetch_helpers {
+            native_errors.insert(helpers.fetch, Domain::Fetch);
             for (name, intrinsic) in &contract.intrinsics {
                 if matches!(
                     intrinsic,
@@ -945,6 +983,7 @@ impl ModuleRegistry {
             json_helpers,
             value_access,
             errors,
+            native_errors,
             report_error,
             decoder_helpers,
             headers_helpers,

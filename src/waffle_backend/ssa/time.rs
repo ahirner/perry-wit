@@ -227,7 +227,10 @@ impl FunctionLowerer<'_> {
         );
         self.block = error;
         let payload = self.op(Operator::F64ConvertI32U, &[status], &[Type::F64]);
-        self.emit_native_throw(payload);
+        self.emit_native_throw(
+            crate::waffle_backend::errors::native::Domain::Temporal,
+            payload,
+        );
         self.block = ok;
         self.op(Operator::I32WrapI64, &[result], &[Type::I32])
     }

@@ -119,14 +119,14 @@ impl WitWorld {
             .contains_key("wasi:cli/stderr@0.3.0#write-via-stream")
     }
 
-    pub(crate) fn http_error_names(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn error_names(&self, package_name: &str) -> impl Iterator<Item = &str> {
         self.resolve
             .interfaces
             .iter()
             .find_map(|(_, interface)| {
                 let package = &self.resolve.packages[interface.package?];
                 if package.name.namespace != "wasi"
-                    || package.name.name != "http"
+                    || package.name.name != package_name
                     || interface.name.as_deref() != Some("types")
                 {
                     return None;

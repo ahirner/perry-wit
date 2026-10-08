@@ -6,6 +6,8 @@ use perry_hir::ir::Expr;
 use std::{collections::BTreeMap, fmt::Write};
 use waffle::{Func, Memory, Module};
 
+pub(crate) mod native;
+
 pub(crate) const NAMES: [&str; 5] = [
     "Error",
     "TypeError",
@@ -19,6 +21,7 @@ pub(crate) const KEYS: &[&str] = &[
     "cause",
     "code",
     "url",
+    "path",
     "",
     ": ",
     "Uncaught ",
@@ -27,8 +30,18 @@ pub(crate) const KEYS: &[&str] = &[
     "true",
     "false",
     "[object Object]",
-    "Runtime operation failed",
     "fetch failed",
+    "Invalid JSON",
+    "Unpaired surrogate in JSON",
+    "JSON nesting limit exceeded",
+    "JSON storage limit exceeded",
+    "Invalid JSON value",
+    "Invalid JSON memory range",
+    "Invalid UTF-8 in JSON",
+    " at byte ",
+    " (line ",
+    ", column ",
+    ")",
 ];
 
 pub(crate) fn is_constructor(expr: &Expr) -> bool {
@@ -50,8 +63,11 @@ pub(crate) struct Helpers {
     pub(crate) is: Func,
     pub(crate) describe: Func,
     pub(crate) normalize: Func,
+    pub(crate) native: Func,
+    pub(crate) native_data: u32,
     pub(crate) completion: Func,
     pub(crate) cause: Func,
+    pub(crate) json: Func,
 }
 
 fn runtime_source(pool: &super::strings::StringPool) -> String {
@@ -62,7 +78,12 @@ fn runtime_source(pool: &super::strings::StringPool) -> String {
             .split_once("}}")
             .expect("closed string-address placeholder");
         source.push_str(prefix);
-        write!(source, "{}", pool.get(key).unwrap()).unwrap();
+        let address = if key == "native-errors" {
+            pool.next_free_address()
+        } else {
+            pool.get(key).unwrap()
+        };
+        write!(source, "{address}").unwrap();
         template = rest;
     }
     source.push_str(template);
@@ -99,8 +120,11 @@ pub(crate) fn emit(
         is: functions["error.is"],
         describe: functions["error.describe"],
         normalize: functions["error.normalize"],
+        native: functions["error.native"],
+        native_data: pool.next_free_address(),
         completion: functions["error.completion"],
         cause: functions["error.cause"],
+        json: functions["error.json"],
     })
 }
 
@@ -128,69 +152,6 @@ pub(crate) fn emit_report(
     let message = b.call(strings.str_concat, &[prefix, message], &[I32])[0];
     b.call(output, &[message], &[I32, F64]);
     b.ret(&[]);
-    b.finish(module, function)?;
-    Ok(function)
-}
-
-pub(crate) fn emit_fetch_failure<'a>(
-    module: &mut Module<'static>,
-    registry: &super::registry::ModuleRegistry,
-    pool: &super::strings::StringPool,
-    categories: impl IntoIterator<Item = &'a str>,
-) -> Result<Func> {
-    let memory = registry.memory;
-    let errors = registry.errors.unwrap();
-    let objects = registry.object_helpers.unwrap();
-    let values = registry.value_helpers.unwrap();
-    let strings = registry.string_helpers.unwrap();
-    use super::runtime::builder::{self, Builder};
-    use waffle::{
-        Operator,
-        Type::{F64, I32},
-    };
-    let function = builder::declare(module, "error.fetch", &[I32, F64, I32], &[I32, F64]);
-    let mut b = Builder::new(module, function, memory);
-    let status = b.param(0);
-    let payload = b.param(1);
-    let url = b.param(2);
-    let native = b.integer(1);
-    let failed = b.op(Operator::I32Eq, &[status, native], I32);
-    let failure = b.body.add_block();
-    let unchanged = b.body.add_block();
-    b.branch(failed, failure, unchanged);
-    b.block = unchanged;
-    b.ret(&[status, payload]);
-    b.block = failure;
-    let number = b.integer(3);
-    let code = b.call(values.new, &[number, payload], &[I32])[0];
-    let mut category = b.call(errors.describe, &[code], &[I32])[0];
-    for (index, name) in categories.into_iter().enumerate() {
-        let code = b.number(100.0 + index as f64);
-        let matches = b.op(Operator::F64Eq, &[payload, code], I32);
-        let name = b.integer(pool.get(name).unwrap());
-        category = b.op(Operator::Select, &[name, category, matches], I32);
-    }
-    let capacity = b.integer(2);
-    let cause = b.call(objects.record, &[capacity], &[I32])[0];
-    let string = b.integer(4);
-    for (key, value) in [("code", category), ("url", url)] {
-        let key = b.integer(pool.get(key).unwrap());
-        let value = b.op(Operator::F64ConvertI32U, &[value], F64);
-        b.call(objects.set, &[cause, key, string, value], &[I32, F64]);
-    }
-    let object = b.integer(6);
-    let cause = b.op(Operator::F64ConvertI32U, &[cause], F64);
-    let cause = b.call(values.new, &[object, cause], &[I32])[0];
-    let prefix = b.integer(pool.get("fetch failed").unwrap());
-    let separator = b.integer(pool.get(": ").unwrap());
-    let message = b.call(strings.str_concat, &[prefix, separator], &[I32])[0];
-    let message = b.call(strings.str_concat, &[message, category], &[I32])[0];
-    let message = b.call(strings.str_concat, &[message, separator], &[I32])[0];
-    let message = b.call(strings.str_concat, &[message, url], &[I32])[0];
-    let error = b.call(errors.new, &[native, message, cause], &[I32])[0];
-    let payload = b.op(Operator::F64ConvertI32U, &[error], F64);
-    let thrown = b.integer(3);
-    b.ret(&[thrown, payload]);
     b.finish(module, function)?;
     Ok(function)
 }

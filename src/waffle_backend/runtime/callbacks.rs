@@ -121,7 +121,8 @@ pub(crate) fn emit(
         b.store(context, result_offset + 8 * index as u32, *value, *ty);
     }
     if let Some(cancel) = registry.fetch_helpers.and_then(|fetch| fetch.cancel_unused) {
-        b.call(cancel, &[], &[]);
+        let closing = b.integer(0);
+        b.call(cancel, &[closing], &[]);
     }
     if let Some(promises) = &registry.promises {
         b.call(promises.native.scheduler.complete_source, &[], &[]);

@@ -10,6 +10,6 @@ export async function run(authority: string, path: string): Promise<{ok:true,val
   JSON.parse(text);
   return {ok:true,value:text};
   } catch(error) { if(typeof error==='number') return {ok:false,error:JSON.stringify(error)};
-    if(error instanceof Error && 'code' in error) return {ok:false,error:JSON.stringify(error.code)};
+    if(error instanceof Error) return {ok:false,error:error.message};
     throw error; }
 }
