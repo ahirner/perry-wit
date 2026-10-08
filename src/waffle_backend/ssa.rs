@@ -140,7 +140,7 @@ pub(crate) fn lower_module(
                     .intrinsics
                     .values()
                     .filter_map(|intrinsic| match intrinsic {
-                        super::resolve::TypedIntrinsic::WitImport { key, .. } => Some(key.clone()),
+                        super::resolve::TypedIntrinsic::WitImport { key, .. } => Some(key.as_str()),
                         _ => None,
                     }),
             );
@@ -613,14 +613,14 @@ impl<'a> FunctionLowerer<'a> {
         if super::values::is_boxed_union(self.return_type)
             || super::values::sentinel_inner(self.return_type).is_some()
         {
-            return self.typed_operand(expr, &self.return_type.clone());
+            return self.typed_operand(expr, self.return_type);
         }
         if self.contract.wit.is_some() {
             self.check_typed_value(expr, self.return_type)?;
             if super::objects::is_object(self.return_type)
                 || matches!(self.return_type, HirType::Array(_) | HirType::Tuple(_))
             {
-                return self.typed_operand(expr, &self.return_type.clone());
+                return self.typed_operand(expr, self.return_type);
             }
         }
         if matches!(self.return_type, HirType::Tuple(_))
@@ -641,7 +641,7 @@ impl<'a> FunctionLowerer<'a> {
                 return self.box_typed_value(value, &result);
             }
             if super::values::is_dynamic(&result) {
-                return self.extract_value(value, &self.return_type.clone());
+                return self.extract_value(value, self.return_type);
             }
             ensure!(
                 super::text_or_bytes::equivalent(&result, self.return_type),
@@ -669,8 +669,7 @@ impl<'a> FunctionLowerer<'a> {
             return Ok(value);
         }
         if super::values::is_dynamic(&self.infer_expr_type(expr)) {
-            let expected = self.return_type.clone();
-            return self.unbox_value(expr, &expected);
+            return self.unbox_value(expr, self.return_type);
         }
         if is_text_or_bytes(self.return_type) {
             self.text_or_bytes_operand(expr)

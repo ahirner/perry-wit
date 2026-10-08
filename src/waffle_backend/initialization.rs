@@ -96,12 +96,6 @@ impl ModulePlan {
             .functions
             .iter()
             .find(|function| function.name == INITIALIZER)?;
-        let mut bindings = BTreeMap::new();
-        super::visit::visit_statement_nodes(&initializer.body, &mut |stmt| {
-            if let Stmt::Let { id, ty, .. } = stmt {
-                bindings.insert(*id, ty.clone());
-            }
-        });
         let mut captured = BTreeSet::new();
         for function in &hir.functions {
             if function.id != initializer.id {
@@ -115,7 +109,14 @@ impl ModulePlan {
                 });
             }
         }
-        bindings.retain(|id, _| captured.contains(id));
+        let mut bindings = BTreeMap::new();
+        super::visit::visit_statement_nodes(&initializer.body, &mut |stmt| {
+            if let Stmt::Let { id, ty, .. } = stmt
+                && captured.contains(id)
+            {
+                bindings.insert(*id, ty.clone());
+            }
+        });
         Some(Self {
             function: initializer.id,
             bindings,

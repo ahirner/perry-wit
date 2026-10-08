@@ -202,11 +202,7 @@ pub(crate) fn emit(
                 module,
                 registry,
                 strings,
-                &contract
-                    .wit
-                    .as_ref()
-                    .map(|wit| wit.http_error_names())
-                    .unwrap_or_default(),
+                contract.wit.iter().flat_map(|wit| wit.http_error_names()),
             )?)
         } else {
             None

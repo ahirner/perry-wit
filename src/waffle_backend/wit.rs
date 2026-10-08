@@ -119,7 +119,7 @@ impl WitWorld {
             .contains_key("wasi:cli/stderr@0.3.0#write-via-stream")
     }
 
-    pub(crate) fn http_error_names(&self) -> Vec<&str> {
+    pub(crate) fn http_error_names(&self) -> impl Iterator<Item = &str> {
         self.resolve
             .interfaces
             .iter()
@@ -136,15 +136,11 @@ impl WitWorld {
                 else {
                     return None;
                 };
-                Some(
-                    variant
-                        .cases
-                        .iter()
-                        .map(|case| case.name.as_str())
-                        .collect(),
-                )
+                Some(variant.cases.as_slice())
             })
             .unwrap_or_default()
+            .iter()
+            .map(|case| case.name.as_str())
     }
 
     pub(super) fn new(resolve: Resolve, world: WorldId) -> Result<Self> {
@@ -409,13 +405,17 @@ impl WitWorld {
         Ok(())
     }
 
-    pub(super) fn intern_keys(&self, pool: &mut StringPool, used: impl Iterator<Item = String>) {
+    pub(super) fn intern_keys<'a>(
+        &self,
+        pool: &mut StringPool,
+        used: impl Iterator<Item = &'a str>,
+    ) {
         for id in self.resources.keys() {
             pool.intern(&resources::key(*id));
         }
         pool.intern(resources::STATE);
         for name in used {
-            let function = &self.imports[&name].function;
+            let function = &self.imports[name].function;
             for param in &function.params {
                 self.intern_type(param.ty, pool);
             }
@@ -672,7 +672,7 @@ pub(super) fn outbound_type(ty: HirType) -> HirType {
         HirType::Union(types) => HirType::Union(types.into_iter().map(outbound_type).collect()),
         HirType::Object(mut record) => {
             for field in record.properties.values_mut() {
-                field.ty = outbound_type(field.ty.clone());
+                field.ty = outbound_type(std::mem::replace(&mut field.ty, HirType::Void));
             }
             HirType::Object(record)
         }

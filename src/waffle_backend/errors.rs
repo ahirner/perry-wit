@@ -3,7 +3,7 @@
 use super::{objects::ObjectHelpers, runtime, strings::StringHelperFuncs, values::ValueHelpers};
 use anyhow::Result;
 use perry_hir::ir::Expr;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::Write};
 use waffle::{Func, Memory, Module};
 
 pub(crate) const NAMES: [&str; 5] = [
@@ -54,6 +54,21 @@ pub(crate) struct Helpers {
     pub(crate) cause: Func,
 }
 
+fn runtime_source(pool: &super::strings::StringPool) -> String {
+    let mut template = include_str!("errors/runtime.wat");
+    let mut source = String::with_capacity(template.len());
+    while let Some((prefix, placeholder)) = template.split_once("{{") {
+        let (key, rest) = placeholder
+            .split_once("}}")
+            .expect("closed string-address placeholder");
+        source.push_str(prefix);
+        write!(source, "{}", pool.get(key).unwrap()).unwrap();
+        template = rest;
+    }
+    source.push_str(template);
+    source
+}
+
 pub(crate) fn emit(
     module: &mut Module<'static>,
     memory: Memory,
@@ -63,17 +78,10 @@ pub(crate) fn emit(
     number_format: Func,
     pool: &super::strings::StringPool,
 ) -> Result<Helpers> {
-    let mut source = include_str!("errors/runtime.wat").to_owned();
-    for key in KEYS.iter().copied().chain(NAMES) {
-        source = source.replace(
-            &format!("{{{{{key}}}}}"),
-            &pool.get(key).unwrap().to_string(),
-        );
-    }
     let functions = runtime::emit_functions(
         module,
         memory,
-        &source,
+        &runtime_source(pool),
         &BTreeMap::from([
             ("dynamic", objects.dynamic),
             ("record", objects.record),
@@ -124,11 +132,11 @@ pub(crate) fn emit_report(
     Ok(function)
 }
 
-pub(crate) fn emit_fetch_failure(
+pub(crate) fn emit_fetch_failure<'a>(
     module: &mut Module<'static>,
     registry: &super::registry::ModuleRegistry,
     pool: &super::strings::StringPool,
-    categories: &[&str],
+    categories: impl IntoIterator<Item = &'a str>,
 ) -> Result<Func> {
     let memory = registry.memory;
     let errors = registry.errors.unwrap();
@@ -156,7 +164,7 @@ pub(crate) fn emit_fetch_failure(
     let number = b.integer(3);
     let code = b.call(values.new, &[number, payload], &[I32])[0];
     let mut category = b.call(errors.describe, &[code], &[I32])[0];
-    for (index, name) in categories.iter().enumerate() {
+    for (index, name) in categories.into_iter().enumerate() {
         let code = b.number(100.0 + index as f64);
         let matches = b.op(Operator::F64Eq, &[payload, code], I32);
         let name = b.integer(pool.get(name).unwrap());
