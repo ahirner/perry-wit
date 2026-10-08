@@ -1,6 +1,6 @@
 //! TODOs.md P0.1: compile time must stay polynomial in expression nesting.
-//! Each extra `.c` currently multiplies compile time by about 8 (recursive, unmemoized type
-//! inference), so depth 6 already takes tens of seconds.
+//! Before the per-query type memo (P1.1), each extra `.c` multiplied compile time by about 8,
+//! so depth 6 took tens of seconds.
 use perry_wit::{WaffleCompileOptions, compile_typescript_waffle};
 use std::{
     sync::mpsc,
@@ -59,7 +59,6 @@ fn shallow_property_chain_compiles() {
 }
 
 #[test]
-#[ignore = "known exponential type inference; fixed by TODOs.md P1.1 (type table)"]
 fn deep_property_chain_compiles_quickly() {
     compile_within(32, Duration::from_secs(10)).unwrap();
 }

@@ -363,6 +363,8 @@ struct FunctionLowerer<'a> {
     loops: Vec<loops::LoopScope>,
     reference_values: BTreeSet<Value>,
     collection_blocks: BTreeSet<Block>,
+    /// Per-query memo for [FunctionLowerer::infer_expr_type]; see `types.rs`.
+    type_memo: types::TypeMemo,
 }
 
 fn lower_function_body(
@@ -408,6 +410,7 @@ fn lower_function_body(
         loops: Vec::new(),
         reference_values,
         collection_blocks: BTreeSet::new(),
+        type_memo: Default::default(),
     };
 
     let lowered = lowerer.statements(&func.body);

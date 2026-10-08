@@ -93,8 +93,47 @@ impl StringKind {
     }
 }
 
+/// Memo of expression types during one outermost [FunctionLowerer::infer_expr_type] query.
+///
+/// Inference recurses into receivers from several guards per node, which made nested
+/// property chains exponential (TODOs.md P1.1). The lowering environment (`local_types`,
+/// `narrowings`) cannot change during a `&self` query, so entries are valid until the
+/// outermost call returns, when the memo is dropped. Keys are node addresses of the borrowed
+/// HIR, which outlives the query.
+#[derive(Default)]
+pub(super) struct TypeMemo(
+    std::cell::RefCell<Option<std::collections::HashMap<*const Expr, HirType>>>,
+);
+
 impl FunctionLowerer<'_> {
     pub(super) fn infer_expr_type(&self, expr: &Expr) -> HirType {
+        let key = expr as *const Expr;
+        let outermost = {
+            let mut memo = self.type_memo.0.borrow_mut();
+            match memo.as_ref() {
+                None => {
+                    *memo = Some(Default::default());
+                    true
+                }
+                Some(types) => {
+                    if let Some(ty) = types.get(&key) {
+                        return ty.clone();
+                    }
+                    false
+                }
+            }
+        };
+        let ty = self.infer_expr_type_uncached(expr);
+        let mut memo = self.type_memo.0.borrow_mut();
+        if outermost {
+            *memo = None;
+        } else if let Some(types) = memo.as_mut() {
+            types.insert(key, ty.clone());
+        }
+        ty
+    }
+
+    fn infer_expr_type_uncached(&self, expr: &Expr) -> HirType {
         if crate::waffle_backend::objects::spread_parts(expr).is_some() {
             return HirType::Object(perry_hir::types::ObjectType {
                 index_signature: Some(Box::new(crate::waffle_backend::values::value_type())),
