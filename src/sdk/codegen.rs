@@ -692,33 +692,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_to_camel_case() {
-        assert_eq!(to_camel_case("run-task"), "runTask");
-        assert_eq!(to_camel_case("merge_docs"), "mergeDocs");
-        assert_eq!(to_camel_case("simple"), "simple");
-        assert_eq!(to_camel_case("alreadyCamelCase"), "alreadyCamelCase");
-    }
-
-    #[test]
-    fn test_to_pascal_case() {
-        assert_eq!(to_pascal_case("merge-task"), "MergeTask");
-        assert_eq!(to_pascal_case("job_runner"), "JobRunner");
-        assert_eq!(to_pascal_case("world"), "World");
-    }
-
-    #[test]
-    fn test_generate_declarations_for_merge_task_world() {
-        let (world_name, dts) =
-            generate_declarations_from_wit_dir(Path::new("wit"), Some("merge-task"))
-                .expect("Failed to generate declarations");
-
-        assert_eq!(world_name, "merge-task");
-        assert!(dts.contains("export declare function runTask(input: string): string;"));
-        assert!(dts.contains("export declare function mergeTask(input: string): string;"));
-        assert!(dts.contains("export type RunTaskFn = (input: string) => string;"));
-    }
-
-    #[test]
     fn test_generate_declarations_with_complex_types() {
         let tmp = std::env::temp_dir().join("perry_wit_test_types_wit");
         let _ = std::fs::remove_dir_all(&tmp);

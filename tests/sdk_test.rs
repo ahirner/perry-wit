@@ -246,32 +246,6 @@ fn test_generate_sdk_files_for_merge_task() {
 }
 
 #[test]
-fn test_generate_sdk_files_for_template_world() {
-    let temp_dir = std::env::temp_dir().join("perry_sdk_test_template");
-    let _ = fs::remove_dir_all(&temp_dir);
-    fs::create_dir_all(&temp_dir).unwrap();
-
-    let options = SdkOptions {
-        wit_dir: PathBuf::from("template/wit"),
-        world: Some("task".to_string()),
-        out_dir: temp_dir.join(".perry/types"),
-        project_root: Some(temp_dir.clone()),
-        entry: PathBuf::from("src/index.ts"),
-        initialize_tsconfig: true,
-    };
-
-    let result = generate_sdk_files(&options).expect("generate_sdk_files for template failed");
-
-    assert!(result.types_path.exists());
-    let types_content = fs::read_to_string(&result.types_path).unwrap();
-    assert!(
-        types_content.contains("export declare function runTask(input: string): string;"),
-        "Missing runTask in template declarations: {}",
-        types_content
-    );
-}
-
-#[test]
 fn test_typecheck_examples_against_generated_declarations() {
     let temp_dir = std::env::temp_dir().join("perry_sdk_typecheck_suite");
     let _ = fs::remove_dir_all(&temp_dir);

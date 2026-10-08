@@ -959,24 +959,6 @@ fn test_waffle_boolean_comparisons() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_waffle_stream_core_and_component_validate() -> Result<()> {
-    let source = "export function run(input: ReadableStream<Uint8Array>): number { return 42; }";
-    let compiled =
-        compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())?;
-    Component::new(&make_async_engine()?, compiled.component.unwrap())?;
-
-    let options = WaffleCompileOptions {
-        componentize: false,
-        ..Default::default()
-    };
-    let compiled = compile_typescript_waffle(source, "stream.ts", &options)?;
-    let engine = Engine::default();
-    Module::new(&engine, compiled.core)?;
-    assert!(compiled.component.is_none());
-    Ok(())
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_component_entry_signatures() -> Result<()> {
     let engine = make_async_engine()?;

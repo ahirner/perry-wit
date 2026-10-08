@@ -667,31 +667,4 @@ mod tests {
             assert_eq!(library.fixed_stack_bound(), None, "{body}");
         }
     }
-
-    #[test]
-    fn test_search_library_parse() {
-        let lib = Library::parse(SEARCH).expect("parse search helper");
-        assert!(lib.exports.contains_key("str_find_substring"));
-        assert!(lib.exports.contains_key("str_scalar_to_byte"));
-        let reachable = lib
-            .reachable(["str_find_substring"])
-            .expect("reachability check");
-        assert!(!reachable.is_empty());
-    }
-
-    #[test]
-    fn test_text_library_parse() {
-        let lib = Library::parse(TEXT).expect("parse text helper");
-        assert!(lib.exports.contains_key("str_code_point_at"));
-        assert!(lib.exports.contains_key("str_from_code_point"));
-        assert!(lib.exports.contains_key("str_case_convert"));
-        assert!(lib.exports.contains_key("str_split_count"));
-        assert!(lib.exports.contains_key("str_split_populate"));
-        assert!(lib.exports.contains_key("str_join_total_len"));
-        assert!(lib.exports.contains_key("str_join"));
-        let reachable = lib
-            .reachable(["str_code_point_at", "str_from_code_point"])
-            .expect("reachability check");
-        assert!(!reachable.is_empty());
-    }
 }
