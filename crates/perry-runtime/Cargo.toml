@@ -10,6 +10,4 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 libm = "0.2"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
 talc = { version = "5.1.1", default-features = false }
