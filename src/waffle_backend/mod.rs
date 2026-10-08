@@ -11,6 +11,7 @@ mod context;
 pub(crate) mod control_flow;
 mod date;
 mod decoder;
+mod errors;
 pub(crate) mod exceptions;
 mod filesystem;
 mod http;

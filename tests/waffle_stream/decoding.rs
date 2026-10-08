@@ -10,6 +10,7 @@ use super::{ControlledProducer, Observations, instantiate};
 
 const SCAN_SCALARS: &str = r#"
 export async function run(input: ReadableStream<Uint8Array>): Promise<Result<number, number>> {
+    try {
     const decoder=new TextDecoder('utf-8',{fatal:true});
     const reader=input.getReader();let total=0;
     let chunk=await reader.read();
@@ -22,6 +23,7 @@ export async function run(input: ReadableStream<Uint8Array>): Promise<Result<num
     }
     total+=decoder.decode().length;
     reader.releaseLock();return total;
+    } catch(error) {if(error instanceof Error)throw error.code;throw error;}
 }
 "#;
 

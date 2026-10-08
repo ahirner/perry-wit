@@ -234,7 +234,7 @@ async fn runtime_options_preserve_effects_and_validate_the_selected_data_kind() 
             const value = (await readFile(step(state, '/sandbox/input'), {encoding: step(state, encoding), flag: step(state, 'r')}));
             (await writeFile(step(state, '/sandbox/output'), value, {encoding: step(state, writeEncoding), flag: step(state, 'w')}));
             return value.length * 100 + state[0];
-        } catch (error) { return 0 - error * 100 - state[0]; }
+        } catch (error) { return 0 - error.code * 100 - state[0]; }
     }"#;
     let context = WasiCtxBuilder::new()
         .preopened_dir(directory.path(), "/sandbox", FsPerms::ReadWrite)?

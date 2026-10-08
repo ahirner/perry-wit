@@ -42,7 +42,11 @@ fn settlement(ty: HirType) -> HirType {
     };
     HirType::Union(vec![
         record("fulfilled", "value", ty),
-        record("rejected", "reason", HirType::Number),
+        record(
+            "rejected",
+            "reason",
+            crate::waffle_backend::values::value_type(),
+        ),
     ])
 }
 impl FunctionLowerer<'_> {

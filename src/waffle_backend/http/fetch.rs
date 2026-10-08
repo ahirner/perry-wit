@@ -110,7 +110,8 @@ pub(crate) fn emit(
     redirects::emit(module, memory, fetch, send, discard, &transport, runtime)?;
     let mut b = Builder::new(module, finish, memory);
     if let Some(cleanup) = cancel_unused {
-        b.call(cleanup, &[], &[]);
+        let closing = b.integer(1);
+        b.call(cleanup, &[closing], &[]);
     }
     let address = b.integer(OWNERS);
     let pending = b.load(address, 0, I32);

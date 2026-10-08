@@ -132,10 +132,10 @@ async fn random_rejection_preserves_argument_effects_and_avoids_host_calls() -> 
         const bytes=new Uint8Array(size);
         bytes[0]=7;bytes[size-1]=9;
         try {crypto.getRandomValues(bytes);return -1;}
-        catch(error) {if(error!==2) {throw error;}}
+        catch(error) {if(error.code !== 2) {throw error;}}
         const state=new Uint8Array(1);
         try {crypto.getRandomValues(invalid(state));return -2;}
-        catch(error) {if(error!==1) {throw error;}}
+        catch(error) {if(error.code !== 1) {throw error;}}
         return bytes[0]+bytes[size-1]+state[0];
     }"#;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -167,7 +167,7 @@ async fn random_rejection_preserves_argument_effects_and_avoids_host_calls() -> 
         "['text']",
     ] {
         let source = format!(
-            "export function run():Result<Uint8Array,number> {{return crypto.getRandomValues({argument});}}"
+            "export function run():Result<Uint8Array,number> {{try {{return crypto.getRandomValues({argument});}} catch(error) {{throw error.code;}}}}"
         );
         let (mut store, instance) = instantiate(&source, 65536, |linker| {
             linker.instance("wasi:random/random@0.3.0")?.func_wrap(
@@ -341,7 +341,7 @@ async fn filled_views_survive_retained_promises_and_runtime_string_alternatives(
     async function fill(view:Uint8Array,text:boolean):Promise<Uint8Array> {
         let value:string|Uint8Array=view;
         if(text) {value='wrong type';}
-        return crypto.getRandomValues(value);
+        try {return crypto.getRandomValues(value);} catch(error) {throw error.code;}
     }
     export async function run(text:boolean):Promise<Result<Uint8Array,number>> {
         const bytes=new Uint8Array([7,0,0,0,9]);

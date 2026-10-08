@@ -1,0 +1,10 @@
+[package]
+name = "perry-number-helper"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+ryu-js = { version = "1.0.3", features = ["small"] }

@@ -167,7 +167,7 @@ async fn filesystem_structured_results_preserve_values_errors_and_finally_throug
                         if (result!==await pending) {{throw 99;}}
                         if(fail) {{throw 123;}}
                         return result;
-                    }} finally {{let index=0;while(index<2000) {{const temporary=new Uint8Array(256);index=index+1;}}}}
+                    }} catch(error) {{if(error instanceof Error)throw error.code;throw error;}} finally {{let index=0;while(index<2000) {{const temporary=new Uint8Array(256);index=index+1;}}}}
                 }}"#
                 )
             } else {
@@ -176,6 +176,7 @@ async fn filesystem_structured_results_preserve_values_errors_and_finally_throug
                 import fs from 'fs/promises';
                 export async function run(path:string,fail:boolean):Promise<Result<{ty},number>> {{
                     try {{const result={call};if(fail) {{throw 123;}}return result;}}
+                    catch(error) {{if(error instanceof Error)throw error.code;throw error;}}
                     finally {{let index=0;while(index<2000) {{const temporary=new Uint8Array(256);index=index+1;}}}}
                 }}"#
                 )

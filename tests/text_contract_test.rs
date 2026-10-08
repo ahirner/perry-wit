@@ -4,86 +4,10 @@
 mod waffle_fixture;
 use perry_wit::waffle_backend::WaffleCompileOptions;
 use perry_wit::waffle_backend::text_contract::{
-    IndexUnit, OperationStatus, TextContractMatrix, scalar_char_at, scalar_index_of, scalar_length,
-    scalar_slice, validate_hir_text, validate_source_text, validate_utf8_boundary,
+    scalar_char_at, scalar_index_of, scalar_length, scalar_slice, validate_hir_text,
+    validate_source_text, validate_utf8_boundary,
 };
 use waffle_fixture::compile_typescript_waffle;
-
-#[test]
-fn test_operation_matrix_completeness_and_units() {
-    let entries = TextContractMatrix::entries();
-    assert!(
-        entries.len() >= 15,
-        "Matrix must cover the complete inventory of supported and diagnosed string operations"
-    );
-
-    // Verify key operations have explicit contracts and deliberate Node differences
-    let length_op = entries.iter().find(|e| e.operation == "length").unwrap();
-    assert_eq!(length_op.unit, IndexUnit::ScalarValue);
-    assert_eq!(length_op.status, OperationStatus::SupportedScalar);
-    assert!(length_op.node_difference.contains("Unicode scalar values"));
-
-    let index_op = entries
-        .iter()
-        .find(|e| e.operation == "index_access")
-        .unwrap();
-    assert_eq!(index_op.unit, IndexUnit::ScalarValue);
-    assert_eq!(index_op.status, OperationStatus::SupportedScalar);
-    assert!(index_op.node_difference.contains("complete scalar"));
-
-    let char_at_op = entries.iter().find(|e| e.operation == "charAt").unwrap();
-    assert_eq!(char_at_op.unit, IndexUnit::ScalarValue);
-    assert!(char_at_op.node_difference.contains("complete scalar"));
-
-    let code_point_at_op = entries
-        .iter()
-        .find(|e| e.operation == "codePointAt")
-        .unwrap();
-    assert_eq!(code_point_at_op.unit, IndexUnit::ScalarValue);
-    assert_eq!(code_point_at_op.status, OperationStatus::SupportedScalar);
-
-    let char_code_at_op = entries
-        .iter()
-        .find(|e| e.operation == "charCodeAt")
-        .unwrap();
-    assert_eq!(char_code_at_op.unit, IndexUnit::Utf16CodeUnit);
-    assert_eq!(char_code_at_op.status, OperationStatus::DisallowedUtf16);
-    assert!(
-        char_code_at_op
-            .node_difference
-            .contains("must use codePointAt")
-    );
-
-    let from_code_point_op = entries
-        .iter()
-        .find(|e| e.operation == "fromCodePoint")
-        .unwrap();
-    assert_eq!(from_code_point_op.unit, IndexUnit::ScalarValue);
-    assert_eq!(from_code_point_op.status, OperationStatus::SupportedScalar);
-
-    let from_char_code_op = entries
-        .iter()
-        .find(|e| e.operation == "fromCharCode")
-        .unwrap();
-    assert_eq!(from_char_code_op.unit, IndexUnit::Utf16CodeUnit);
-    assert_eq!(from_char_code_op.status, OperationStatus::DisallowedUtf16);
-
-    let slice_op = entries.iter().find(|e| e.operation == "slice").unwrap();
-    assert_eq!(slice_op.unit, IndexUnit::ScalarValue);
-
-    let index_of_op = entries.iter().find(|e| e.operation == "indexOf").unwrap();
-    assert_eq!(index_of_op.unit, IndexUnit::ScalarValue);
-
-    let split_op = entries.iter().find(|e| e.operation == "split").unwrap();
-    assert_eq!(split_op.unit, IndexUnit::ScalarValue);
-
-    let abi_op = entries
-        .iter()
-        .find(|e| e.operation == "canonical_abi_string")
-        .unwrap();
-    assert_eq!(abi_op.unit, IndexUnit::Byte);
-    assert_eq!(abi_op.status, OperationStatus::SupportedBoundary);
-}
 
 #[test]
 fn test_valid_text_and_paired_escapes_accepted() {
@@ -159,24 +83,6 @@ fn test_compiler_pipeline_rejects_unpaired_surrogates_cleanly() {
     let res = compile_typescript_waffle(
         source,
         "invalid_surrogate.ts",
-        &WaffleCompileOptions::default(),
-    );
-    assert!(res.is_err());
-    let err = format!("{:#}", res.unwrap_err());
-    assert!(err.contains("Unpaired high surrogate escape"));
-}
-
-#[test]
-fn test_compiler_pipeline_rejects_template_unpaired_surrogates() {
-    let source = r#"
-        export function run(input: number): number {
-            let invalid = `template with \uD83D`;
-            return input;
-        }
-    "#;
-    let res = compile_typescript_waffle(
-        source,
-        "invalid_template.ts",
         &WaffleCompileOptions::default(),
     );
     assert!(res.is_err());

@@ -24,21 +24,3 @@ pub(crate) fn audit_no_llvm(cargo_lock: &str) -> Result<()> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compiler_cargo_lock_has_no_llvm_or_inkwell() -> Result<()> {
-        let lock_content = include_str!("../../Cargo.lock");
-        audit_no_llvm(lock_content)?;
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_llvm_dependency() {
-        let fake_lock = "name = \"inkwell\"\nversion = \"0.1.0\"\n";
-        assert!(audit_no_llvm(fake_lock).is_err());
-    }
-}

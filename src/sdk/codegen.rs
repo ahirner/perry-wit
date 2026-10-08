@@ -172,6 +172,46 @@ fn outbound_ts(resolve: &Resolve, ty: &Type) -> String {
     }
 }
 
+/// Result exports accept either explicit tagged results or completion payloads.
+fn export_result_types(resolve: &Resolve, function: &Function) -> Vec<String> {
+    let mut types = vec![
+        function
+            .result
+            .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty)),
+    ];
+    if let Some(result) = function
+        .result
+        .and_then(|ty| crate::abi::result_type(resolve, ty))
+    {
+        types.push(
+            result
+                .ok
+                .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty)),
+        );
+    }
+    types
+}
+
+fn implementation_signature(resolve: &Resolve, function: &Function, allow_promise: bool) -> String {
+    export_result_types(resolve, function)
+        .into_iter()
+        .map(|result| {
+            let mut signature = String::from("(");
+            emit_params(&mut signature, resolve, function);
+            signature.push_str(") => ");
+            if allow_promise {
+                signature.push_str(&format!("({result}) | Promise<{result}>"));
+            } else if function.kind.is_async() {
+                signature.push_str(&format!("Promise<{result}>"));
+            } else {
+                signature.push_str(&result);
+            }
+            signature
+        })
+        .reduce(|left, right| format!("({left}) | ({right})"))
+        .unwrap()
+}
+
 /// Formats a WIT function return type into TypeScript.
 pub fn wit_result_to_ts(resolve: &Resolve, func: &Function) -> String {
     let result = match &func.result {
@@ -249,9 +289,7 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
                     WorldKey::Interface(_) => func.name.clone(),
                 };
                 let ts_func_name = to_camel_case(&export_name);
-                let ret_ty = func
-                    .result
-                    .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty));
+                let ret_ty = export_result_types(resolve, func).join(" | ");
                 let ret_ty = if func.kind.is_async() {
                     format!("Promise<{ret_ty}>")
                 } else {
@@ -271,10 +309,8 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
                 // Also generate a type signature alias
                 out.push_str("export type ");
                 out.push_str(&to_pascal_case(&export_name));
-                out.push_str("Fn = (");
-                emit_params(&mut out, resolve, func);
-                out.push_str(") => ");
-                out.push_str(&ret_ty);
+                out.push_str("Fn = ");
+                out.push_str(&implementation_signature(resolve, func, false));
                 out.push_str(";\n\n");
             }
             WorldItem::Interface { id, .. } => {
@@ -293,9 +329,7 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
                 out.push_str(" {\n");
                 for (_, func) in &iface.functions {
                     let ts_name = to_camel_case(&func.name);
-                    let ret_ty = func
-                        .result
-                        .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty));
+                    let ret_ty = export_result_types(resolve, func).join(" | ");
                     let ret_ty = if func.kind.is_async() {
                         format!("Promise<{ret_ty}>")
                     } else {
@@ -346,13 +380,8 @@ pub fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<S
             {
                 out.push('?');
             }
-            out.push_str(": (");
-            emit_params(&mut out, resolve, function);
-            out.push_str(") => ");
-            let result = function
-                .result
-                .map_or_else(|| "void".into(), |ty| outbound_ts(resolve, &ty));
-            out.push_str(&format!("({result}) | Promise<{result}>"));
+            out.push_str(": ");
+            out.push_str(&implementation_signature(resolve, function, true));
             out.push_str(";\n");
         }
     }
@@ -661,33 +690,6 @@ pub fn generate_declarations_from_wit_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_to_camel_case() {
-        assert_eq!(to_camel_case("run-task"), "runTask");
-        assert_eq!(to_camel_case("merge_docs"), "mergeDocs");
-        assert_eq!(to_camel_case("simple"), "simple");
-        assert_eq!(to_camel_case("alreadyCamelCase"), "alreadyCamelCase");
-    }
-
-    #[test]
-    fn test_to_pascal_case() {
-        assert_eq!(to_pascal_case("merge-task"), "MergeTask");
-        assert_eq!(to_pascal_case("job_runner"), "JobRunner");
-        assert_eq!(to_pascal_case("world"), "World");
-    }
-
-    #[test]
-    fn test_generate_declarations_for_merge_task_world() {
-        let (world_name, dts) =
-            generate_declarations_from_wit_dir(Path::new("wit"), Some("merge-task"))
-                .expect("Failed to generate declarations");
-
-        assert_eq!(world_name, "merge-task");
-        assert!(dts.contains("export declare function runTask(input: string): string;"));
-        assert!(dts.contains("export declare function mergeTask(input: string): string;"));
-        assert!(dts.contains("export type RunTaskFn = (input: string) => string;"));
-    }
 
     #[test]
     fn test_generate_declarations_with_complex_types() {

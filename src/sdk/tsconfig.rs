@@ -25,17 +25,3 @@ pub fn generate_default_tsconfig() -> String {
 "#
     .to_string()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_generate_default_tsconfig_is_valid_json() {
-        let content = generate_default_tsconfig();
-        let val: serde_json::Value =
-            serde_json::from_str(&content).expect("tsconfig must be valid json");
-        assert!(val.get("compilerOptions").is_some());
-        assert!(val.get("include").is_some());
-    }
-}

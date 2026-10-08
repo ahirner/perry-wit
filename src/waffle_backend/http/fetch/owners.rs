@@ -110,11 +110,12 @@ pub(super) fn emit_cancel_unused(
     let Some(operations) = t.operations else {
         return Ok(None);
     };
-    let function = builder::declare(module, "fetch.cancel-unused", &[], &[]);
+    let function = builder::declare(module, "fetch.cancel-unused", &[I32], &[]);
     let mut b = Builder::new(module, function, memory);
     use crate::waffle_backend::runtime::scheduler::{CountChange, Worker, worker_count};
     worker_count(&mut b, CountChange::Started, Worker::Native);
     let cancelled = b.call(operations.cancelled, &[], &[I32])[0];
+    let cancelled = b.op(O::I32Or, &[cancelled, b.param(0)], I32);
     let restart = b.body.add_block();
     let done = b.body.add_block();
     b.jump(restart, &[]);

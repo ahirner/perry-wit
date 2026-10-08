@@ -114,6 +114,35 @@ pub(crate) struct WitExport {
 }
 
 impl WitWorld {
+    pub(crate) fn has_stderr(&self) -> bool {
+        self.imports
+            .contains_key("wasi:cli/stderr@0.3.0#write-via-stream")
+    }
+
+    pub(crate) fn error_names(&self, package_name: &str) -> impl Iterator<Item = &str> {
+        self.resolve
+            .interfaces
+            .iter()
+            .find_map(|(_, interface)| {
+                let package = &self.resolve.packages[interface.package?];
+                if package.name.namespace != "wasi"
+                    || package.name.name != package_name
+                    || interface.name.as_deref() != Some("types")
+                {
+                    return None;
+                }
+                let id = interface.types.get("error-code")?;
+                let wit_parser::TypeDefKind::Variant(variant) = &self.resolve.types[*id].kind
+                else {
+                    return None;
+                };
+                Some(variant.cases.as_slice())
+            })
+            .unwrap_or_default()
+            .iter()
+            .map(|case| case.name.as_str())
+    }
+
     pub(super) fn new(resolve: Resolve, world: WorldId) -> Result<Self> {
         let resolved = Self::for_encoding(resolve, world)?;
         let mut stream_exports = 0;
@@ -262,12 +291,37 @@ impl WitWorld {
                 ty => ty,
             };
             ensure!(
-                outbound_matches(result, &expected),
+                outbound_matches(result, &expected)
+                    || self
+                        .completion_result(export.function.result, result)?
+                        .is_some(),
                 "WIT export '{name}' result must match {expected:?}, found {:?}",
                 function.return_type
             );
         }
         Ok(())
+    }
+
+    fn completion_result(
+        &self,
+        result: Option<Type>,
+        source: &HirType,
+    ) -> Result<Option<&wit_parser::Result_>> {
+        let Some(ty) = result else {
+            return Ok(None);
+        };
+        if outbound_matches(source, &hir_type(&self.resolve, ty)?) {
+            return Ok(None);
+        }
+        let Some(result) = crate::abi::result_type(&self.resolve, ty) else {
+            return Ok(None);
+        };
+        let expected = result
+            .ok
+            .map(|ty| hir_type(&self.resolve, ty))
+            .transpose()?
+            .unwrap_or(HirType::Void);
+        Ok(outbound_matches(source, &expected).then_some(result))
     }
 
     pub(super) fn validate_suspension(
@@ -351,13 +405,17 @@ impl WitWorld {
         Ok(())
     }
 
-    pub(super) fn intern_keys(&self, pool: &mut StringPool, used: impl Iterator<Item = String>) {
+    pub(super) fn intern_keys<'a>(
+        &self,
+        pool: &mut StringPool,
+        used: impl Iterator<Item = &'a str>,
+    ) {
         for id in self.resources.keys() {
             pool.intern(&resources::key(*id));
         }
         pool.intern(resources::STATE);
         for name in used {
-            let function = &self.imports[&name].function;
+            let function = &self.imports[name].function;
             for param in &function.params {
                 self.intern_type(param.ty, pool);
             }
@@ -614,7 +672,7 @@ pub(super) fn outbound_type(ty: HirType) -> HirType {
         HirType::Union(types) => HirType::Union(types.into_iter().map(outbound_type).collect()),
         HirType::Object(mut record) => {
             for field in record.properties.values_mut() {
-                field.ty = outbound_type(field.ty.clone());
+                field.ty = outbound_type(std::mem::replace(&mut field.ty, HirType::Void));
             }
             HirType::Object(record)
         }

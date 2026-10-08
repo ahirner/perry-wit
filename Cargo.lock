@@ -1238,6 +1238,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-number-helper"
+version = "0.1.0"
+dependencies = [
+ "ryu-js",
+]
+
+[[package]]
 name = "perry-parser"
 version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry#9e29f59d435ee08df161ef460ee6f204fb381d4f"

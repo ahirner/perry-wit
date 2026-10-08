@@ -320,6 +320,12 @@ impl ResolvedContract {
                     None
                 }
             }))
+            .chain(
+                self.wit
+                    .as_ref()
+                    .filter(|wit| wit.has_stderr())
+                    .map(|_| StdioOperation::Error),
+            )
             .collect()
     }
 

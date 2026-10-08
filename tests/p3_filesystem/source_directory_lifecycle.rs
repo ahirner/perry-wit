@@ -51,7 +51,7 @@ async fn directory_entries_and_completion_keep_owners_through_suspension_collect
             if(first !== second) {return 'lost identity';}
             return first[0].slice(0)+first[80].slice(0)+second[0].slice(0)+second[80].slice(0);
         } catch(error) {
-            if(error !== 37) {throw error;}
+            if(error.code !== 37) {throw error;}
             try {await pending;return 'lost rejection';}
             catch(again) {if(again === error) {return 'failedfailed';}throw again;}
         }

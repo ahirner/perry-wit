@@ -20,7 +20,7 @@ export async function run(): Promise<Result<number, number>> {
     try {
         await Writable.toWeb(process.stdout).getWriter().write(bytes.subarray(1, 6));
         return 7;
-    } finally { await Writable.toWeb(process.stderr).getWriter().write(new Uint8Array([91])); }
+    } catch(error) {throw error.code;} finally { await Writable.toWeb(process.stderr).getWriter().write(new Uint8Array([91])); }
 }"#;
 
 #[tokio::test(flavor = "current_thread")]

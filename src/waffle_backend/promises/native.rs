@@ -78,6 +78,16 @@ fn allocate(b: &mut Builder, registry: &ModuleRegistry, size: u32) -> waffle::Va
     )[0]
 }
 
+fn require_completion(b: &mut Builder, status: waffle::Value) {
+    use crate::waffle_backend::abi::CompletionStatus;
+    let native_failure = b.integer(CompletionStatus::NativeFailure as u32);
+    let native = b.op(Operator::I32LeU, &[status, native_failure], Type::I32);
+    let threw = b.integer(CompletionStatus::Threw as u32);
+    let threw = b.op(Operator::I32Eq, &[status, threw], Type::I32);
+    let valid = b.op(Operator::I32Or, &[native, threw], Type::I32);
+    b.require(valid);
+}
+
 pub(crate) fn emit(
     module: &mut Module<'static>,
     registry: &ModuleRegistry,
@@ -243,6 +253,35 @@ pub(crate) fn emit(
             };
             (tag, payload)
         };
+        let (tag, payload) = if !guest
+            && !matches!(target, TaskTarget::FetchUpload)
+            && let Some(errors) = registry.errors
+        {
+            use crate::waffle_backend::errors::native::Domain;
+            let origin = if filesystem.is_some() {
+                Domain::Filesystem
+            } else {
+                registry
+                    .native_errors
+                    .get(&callee)
+                    .copied()
+                    .unwrap_or(Domain::Runtime)
+            };
+            let context = if origin.context().is_some() {
+                args[0]
+            } else {
+                b.integer(0)
+            };
+            let origin = b.integer(origin.address(errors.native_data));
+            let outcome = b.call(
+                errors.completion,
+                &[origin, tag, payload, context],
+                &[I32, F64],
+            );
+            (outcome[0], outcome[1])
+        } else {
+            (tag, payload)
+        };
         if matches!(
             target,
             TaskTarget::WebStream(
@@ -315,17 +354,13 @@ fn filesystem_adapter(
     let arguments = (0..parameters.len() - 1)
         .map(|index| b.param(index))
         .collect::<Vec<_>>();
+    let cancelled = registry.operations.map(|_| b.body.add_block());
     if let Some(operations) = registry.operations {
         let signal = b.param(parameters.len() - 1);
         b.call(operations.bind_signal, &[signal], &[]);
         let aborted = b.call(operations.aborted, &[], &[I32])[0];
-        let failed = b.body.add_block();
         let start = b.body.add_block();
-        b.branch(aborted, failed, start);
-        b.block = failed;
-        let thrown = b.integer(1);
-        let reason = b.number(20.0);
-        b.ret(&[thrown, reason]);
+        b.branch(aborted, cancelled.unwrap(), start);
         b.block = start;
     }
     let outcome = match operation {
@@ -349,13 +384,8 @@ fn filesystem_adapter(
     };
     if let Some(operations) = registry.operations {
         let aborted = b.call(operations.aborted, &[], &[I32])[0];
-        let failed = b.body.add_block();
         let complete = b.body.add_block();
-        b.branch(aborted, failed, complete);
-        b.block = failed;
-        let thrown = b.integer(1);
-        let reason = b.number(20.0);
-        b.ret(&[thrown, reason]);
+        b.branch(aborted, cancelled.unwrap(), complete);
         b.block = complete;
     }
     if operation == F::ReadValue {
@@ -373,6 +403,18 @@ fn filesystem_adapter(
         b.ret(&[outcome[0], payload]);
     } else {
         b.ret(&outcome);
+    }
+    if let Some(cancelled) = cancelled {
+        b.block = cancelled;
+        let thrown = b.integer(1);
+        let reason = b.number(20.0);
+        if let Some(errors) = registry.errors {
+            let reason = b.call(errors.normalize, &[thrown, reason], &[F64])[0];
+            let thrown = b.integer(3);
+            b.ret(&[thrown, reason]);
+        } else {
+            b.ret(&[thrown, reason]);
+        }
     }
     b.finish(module, function)?;
     Ok(function)
@@ -443,8 +485,7 @@ fn emit_await(module: &mut Module<'static>, registry: &ModuleRegistry) -> Result
     b.jump(ready, &[]);
     b.block = ready;
     let tag = b.load(record, 4, I32);
-    let settled = b.op(Operator::I32LtU, &[tag, two], I32);
-    b.require(settled);
+    require_completion(&mut b, tag);
     let payload = b.load(record, 8, F64);
     b.ret(&[tag, payload]);
     b.finish(module, runtime.await_result)
@@ -473,8 +514,7 @@ fn emit_native_await(module: &mut Module<'static>, registry: &ModuleRegistry) ->
     b.jump(ready, &[]);
     b.block = ready;
     let tag = b.load(record, 4, I32);
-    let settled = b.op(Operator::I32LtU, &[tag, two], I32);
-    b.require(settled);
+    require_completion(&mut b, tag);
     let payload = b.load(record, 8, F64);
     b.ret(&[tag, payload]);
     b.finish(module, runtime.await_native)
@@ -502,8 +542,19 @@ fn emit_settle(module: &mut Module<'static>, registry: &ModuleRegistry) -> Resul
     } else {
         b.require(pending);
     }
-    let valid = b.op(Operator::I32LtU, &[tag, two], I32);
-    b.require(valid);
+    require_completion(&mut b, tag);
+    let (tag, payload) = if let Some(errors) = registry.errors {
+        let metadata = b.integer(errors.native_data);
+        let context = b.integer(0);
+        let result = b.call(
+            errors.completion,
+            &[metadata, tag, payload, context],
+            &[I32, F64],
+        );
+        (result[0], result[1])
+    } else {
+        (tag, payload)
+    };
     b.store(record, 8, payload, F64);
     b.store(record, 4, tag, I32);
     b.store(record, 0, two, I32);

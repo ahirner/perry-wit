@@ -49,7 +49,10 @@ impl FunctionLowerer<'_> {
             &[],
             &[Type::F64],
         );
-        self.emit_throw(error);
+        self.emit_native_throw(
+            crate::waffle_backend::errors::native::Domain::Binding,
+            error,
+        );
         self.block = ready;
         let ty = self.module.globals[binding.value].ty;
         self.op(

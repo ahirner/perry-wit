@@ -184,6 +184,8 @@ pub(crate) struct ValueHelpers {
     pub(crate) equal: Func,
     pub(crate) scalar_number: Func,
     pub(crate) async_result: Func,
+    pub(crate) exception: Func,
+    pub(crate) exception_number: Func,
 }
 
 #[derive(Clone, Copy)]
@@ -246,6 +248,9 @@ pub(crate) fn required(hir: &HirModule) -> bool {
         visit::visit_function_expressions(function, &mut |expression| {
             required |= matches!(expression, Expr::Object(_) | Expr::New { .. });
         });
+        visit::visit_statement_nodes(&function.body, &mut |statement| {
+            required |= matches!(statement, Stmt::Throw(_) | Stmt::Try { .. });
+        });
         required
     })
 }
@@ -270,6 +275,8 @@ pub(crate) fn emit_runtime(
         equal: functions["value.equal"],
         scalar_number: functions["value.scalar-number"],
         async_result: functions["value.async-result"],
+        exception: functions["value.exception"],
+        exception_number: functions["value.exception-number"],
     })
 }
 
@@ -290,6 +297,7 @@ fn contains_dynamic(ty: &HirType) -> bool {
 fn normalize_type(ty: &mut HirType) {
     match ty {
         HirType::Any => *ty = value_type(),
+        HirType::Named(name) if super::errors::NAMES.contains(&name.as_str()) => *ty = value_type(),
         HirType::Promise(inner) | HirType::Array(inner) => normalize_type(inner),
         HirType::Generic { base, type_args } if base == "Result" => {
             if let Some(success) = type_args.first_mut() {

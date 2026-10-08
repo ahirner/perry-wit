@@ -5,7 +5,6 @@ use crate::{
     sdk::codegen::to_camel_case,
     waffle_backend::{
         abi,
-        allocation::RetainedValues,
         registry::{FunctionExport, FunctionInfo, ModuleRegistry},
         strings::StringPool,
         values::ValueTag,
@@ -19,6 +18,7 @@ use waffle::{
 };
 use wit_parser::{Int, SizeAlign, Type, TypeDefKind};
 
+mod completions;
 mod flags;
 mod lists;
 mod resources;
@@ -117,46 +117,52 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
         }
         args.push(adapter.lift(param.ty, &mut source)?);
     }
+    let completion_result =
+        wit.completion_result(declaration.function.result, callee.success_type())?;
+    let rejection = completion_result.map(|_| {
+        let block = adapter.body.add_block();
+        adapter.body.add_blockparam(block, CoreType::I32);
+        adapter.body.add_blockparam(block, CoreType::F64);
+        block
+    });
     if let Some(state) = &registry.module_state {
-        let allocator = registry.allocator.unwrap();
-        let mut references = Vec::new();
         for (argument, param) in args.iter().zip(&declaration.function.params) {
             if crate::waffle_backend::ssa::types::is_reference(&super::hir_type(
                 &wit.resolve,
                 param.ty,
             )?) {
-                references.push(*argument);
+                adapter.scratch.as_ref().unwrap().retain(
+                    &mut adapter.body,
+                    adapter.block,
+                    *argument,
+                );
             }
         }
-        let roots = (!references.is_empty()).then(|| {
-            RetainedValues::new(
-                &mut adapter.body,
-                adapter.block,
-                registry.memory,
-                allocator,
-                &references,
-            )
-        });
-        adapter.call_checked(state.evaluate, &[]);
-        if let Some(roots) = roots {
-            roots.release(&mut adapter.body, adapter.block);
-        }
+        adapter.call_fallible(state.evaluate, &[], rejection);
     }
-    let payload = adapter.call_checked(callee.func_index, &args);
-    let result = declaration
-        .function
-        .result
-        .map(|ty| adapter.decode(ty, payload))
-        .transpose()?;
-    if let Some(ty) = declaration.function.result
-        && crate::waffle_backend::ssa::types::is_reference(&super::hir_type(&wit.resolve, ty)?)
-    {
-        adapter
-            .scratch
-            .as_ref()
-            .unwrap()
-            .retain(&mut adapter.body, adapter.block, result.unwrap());
-    }
+    let payload = adapter.call_fallible(callee.func_index, &args, rejection);
+    let result = if let Some(ty) = declaration.function.result {
+        Some(if let Some(result) = completion_result {
+            ExportValue::Completion(adapter.retain_completion(
+                result,
+                callee.success_type(),
+                payload,
+                rejection.unwrap(),
+            )?)
+        } else {
+            let value = adapter.decode(ty, payload)?;
+            if crate::waffle_backend::ssa::types::is_reference(callee.success_type()) {
+                adapter
+                    .scratch
+                    .as_ref()
+                    .unwrap()
+                    .retain(&mut adapter.body, adapter.block, value);
+            }
+            ExportValue::Guest(value)
+        })
+    } else {
+        None
+    };
     adapter.finish_resources()?;
     adapter.finish_invocation();
     if declaration.core_name == "wasi:cli/run@0.3.0#run"
@@ -173,12 +179,22 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
     }
     let mut returned = Vec::new();
     if let Some(ty) = declaration.function.result {
-        let value = result.unwrap();
-        let size = adapter.sizes.size(&ty).size_wasm32() as u32;
-        let alignment = adapter.sizes.align(&ty).align_wasm32() as u32;
-        let address = adapter.allocate(size.max(1), alignment);
-        adapter.lower(ty, value, address, 0, callee.success_type())?;
-        adapter.retain_canonical_value(ty, address, 0);
+        let address = match result.unwrap() {
+            ExportValue::Completion(completion) => adapter.lower_completion_result(
+                ty,
+                completion_result.unwrap(),
+                callee.success_type(),
+                completion,
+            )?,
+            ExportValue::Guest(value) => {
+                let size = adapter.sizes.size(&ty).size_wasm32() as u32;
+                let alignment = adapter.sizes.align(&ty).align_wasm32() as u32;
+                let address = adapter.allocate(size.max(1), alignment);
+                adapter.lower(ty, value, address, 0, callee.success_type())?;
+                adapter.retain_canonical_value(ty, address, 0);
+                address
+            }
+        };
         if signature.retptr {
             returned.push(address);
         } else {
@@ -245,6 +261,11 @@ pub(in crate::waffle_backend) fn build_export_wrapper(
     adapter.body.validate()?;
     adapter.body.verify_reducible()?;
     Ok(adapter.body)
+}
+
+enum ExportValue {
+    Guest(Value),
+    Completion(completions::Completion),
 }
 
 enum Input<'a> {
@@ -364,39 +385,61 @@ impl Adapter<'_> {
         value
     }
     fn call_checked(&mut self, function: Func, args: &[Value]) -> Value {
+        self.call_fallible(function, args, None)
+    }
+    fn call_fallible(&mut self, function: Func, args: &[Value], rejection: Option<Block>) -> Value {
         let outcome = abi::emit_fallible_call(&mut self.body, self.block, function, args);
-        let failure = if let Some(block) = self.cancellation_failure {
-            let ordinary = self.command_failure.unwrap_or_else(|| {
-                let trap = self.body.add_block();
-                self.body.set_terminator(trap, Terminator::Unreachable);
-                trap
-            });
-            let saved = self.block;
-            self.block = outcome.err_block;
+        self.block = outcome.err_block;
+        if let Some(cancelled_block) = self.cancellation_failure {
+            let ordinary = self.body.add_block();
             let cancelled = self.call(self.registry.operations.unwrap().cancelled, &[]);
-            self.block = saved;
-            Terminator::CondBr {
-                cond: cancelled,
-                if_true: BlockTarget {
-                    block,
-                    args: vec![],
+            self.body.set_terminator(
+                self.block,
+                Terminator::CondBr {
+                    cond: cancelled,
+                    if_true: BlockTarget {
+                        block: cancelled_block,
+                        args: vec![],
+                    },
+                    if_false: BlockTarget {
+                        block: ordinary,
+                        args: vec![],
+                    },
                 },
-                if_false: BlockTarget {
-                    block: ordinary,
-                    args: vec![],
+            );
+            self.block = ordinary;
+        }
+        if let Some(block) = rejection {
+            self.body.set_terminator(
+                self.block,
+                Terminator::Br {
+                    target: BlockTarget {
+                        block,
+                        args: vec![outcome.status, outcome.payload],
+                    },
                 },
-            }
-        } else if let Some(block) = self.command_failure {
-            Terminator::Br {
-                target: BlockTarget {
-                    block,
-                    args: vec![],
-                },
-            }
+            );
         } else {
-            Terminator::Unreachable
-        };
-        self.body.set_terminator(outcome.err_block, failure);
+            if let Some(report) = self.registry.report_error {
+                self.body.add_op(
+                    self.block,
+                    Operator::Call {
+                        function_index: report,
+                    },
+                    &[outcome.status, outcome.payload],
+                    &[],
+                );
+            }
+            let failure = self
+                .command_failure
+                .map_or(Terminator::Unreachable, |block| Terminator::Br {
+                    target: BlockTarget {
+                        block,
+                        args: vec![],
+                    },
+                });
+            self.body.set_terminator(self.block, failure);
+        }
         self.block = outcome.ok_block;
         outcome.payload
     }
@@ -1078,7 +1121,7 @@ pub(in crate::waffle_backend) fn build_import_wrapper(
         abi::emit_completion(
             &mut adapter.body,
             adapter.block,
-            abi::CompletionStatus::Threw,
+            abi::CompletionStatus::NativeFailure,
             reason,
         );
         adapter.block = success;

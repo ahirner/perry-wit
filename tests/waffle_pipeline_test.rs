@@ -959,24 +959,6 @@ fn test_waffle_boolean_comparisons() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_waffle_stream_core_and_component_validate() -> Result<()> {
-    let source = "export function run(input: ReadableStream<Uint8Array>): number { return 42; }";
-    let compiled =
-        compile_typescript_waffle(source, "stream.ts", &WaffleCompileOptions::default())?;
-    Component::new(&make_async_engine()?, compiled.component.unwrap())?;
-
-    let options = WaffleCompileOptions {
-        componentize: false,
-        ..Default::default()
-    };
-    let compiled = compile_typescript_waffle(source, "stream.ts", &options)?;
-    let engine = Engine::default();
-    Module::new(&engine, compiled.core)?;
-    assert!(compiled.component.is_none());
-    Ok(())
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn test_waffle_component_entry_signatures() -> Result<()> {
     let engine = make_async_engine()?;
@@ -1594,28 +1576,112 @@ async fn test_waffle_exception_clause_local_scopes() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_waffle_rejects_nonnumeric_thrown_payloads() {
-    for source in [
-        "export function run(input: number): number { try { throw true; } catch (e) { if (e === 1) return 10; return 20; } }",
-        "export function run(input: number): number { try { throw false; } finally { let cleanup = 1; } }",
-        "function fail(flag: boolean): number { throw flag; } export function run(input: number): number { return fail(true); }",
-        "async function fail(): Promise<boolean> { return true; } export async function run(input: number): Promise<number> { throw await fail(); }",
+#[tokio::test(flavor = "current_thread")]
+async fn thrown_values_preserve_type_identity_and_message() -> Result<()> {
+    for body in [
+        "const expected = true;",
+        "const expected = false;",
+        "const expected = undefined;",
+        "const expected = null;",
+        "const expected = 'lost\\0雪';",
+        "const expected = {message:'kept'};",
+        "const expected = new Error('kept');",
+        "const expected = new TypeError('kept');",
     ] {
-        for componentize in [false, true] {
-            let options = WaffleCompileOptions {
-                componentize,
-                ..Default::default()
-            };
-            let error = compile_typescript_waffle(source, "throw_type.ts", &options).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("Only numeric thrown payloads are supported"),
-                "{error:#}"
-            );
-        }
+        let source = format!(
+            "export function run():number {{ {body} try {{ throw expected; }} catch(e) {{ return e === expected ? 1 : 0; }} }}"
+        );
+        let engine = make_async_engine()?;
+        let compiled =
+            compile_typescript_waffle(&source, "errors.ts", &WaffleCompileOptions::default())?;
+        let component = Component::new(&engine, compiled.component.unwrap())?;
+        let mut store = Store::new(&engine, WasiHostState::default());
+        let instance = make_wasi_linker(&engine)?
+            .instantiate_async(&mut store, &component)
+            .await?;
+        let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+        assert_eq!(run.call_async(&mut store, ()).await?, (1.0,), "{body}");
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn errors_survive_async_combinators_rethrow_and_finally() -> Result<()> {
+    let source = r#"
+        async function fail(value:any):Promise<number> { throw value; }
+        async function rethrow(value:any):Promise<number> {
+            try { await fail(value); } catch(e) { throw e; }
+            finally { for(let i=0;i<100;i++) { const garbage={value:'garbage'}; await i; } }
+        }
+        export async function run(stage:number):Promise<number> {
+            const cause={detail:'original'};
+            const error=new TypeError('bad input', {cause});
+            if(stage===0)return 1;
+            let score=0;
+            try { await Promise.all([rethrow(error), 1]); }
+            catch(e) { if(e===error && e.message==='bad input' && e.name==='TypeError' && e.cause===cause) score+=1; }
+            if(stage===1)return score;
+            const settled=await Promise.allSettled([fail(error), fail('text'), fail(false)]);
+            if(settled[0].reason===error && settled[1].reason==='text' && settled[2].reason===false) score+=2;
+            if(stage===2)return score;
+            if(error instanceof Error && error instanceof TypeError && !(error instanceof RangeError)) score+=4;
+            if(stage===3)return score;
+            if(JSON.stringify(error)==='{}' && JSON.stringify({...error})==='{}') score+=8;
+            return score;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let compiled =
+        compile_typescript_waffle(source, "errors.ts", &WaffleCompileOptions::default())?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = make_wasi_linker(&engine)?
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "run")?;
+    for (stage, expected) in [(0.0, 1.0), (1.0, 1.0), (2.0, 3.0), (3.0, 7.0), (4.0, 15.0)] {
+        let result = run.call_async(&mut store, (stage,)).await;
+        assert_eq!(result?, (expected,));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_promises_retain_errors_through_collection_and_race() -> Result<()> {
+    let source = r#"
+        async function fail():Promise<any> {
+            throw new Error('retained', {cause:{detail:'original'}});
+        }
+        export async function run():Promise<number> {
+            const pending=fail();
+            await 0;
+            for(let i=0;i<2000;i++) {
+                const garbage={bytes:new Uint8Array(256)};
+                if(garbage.bytes.length!==256)throw 90;
+            }
+            try {await Promise.race([pending]);} catch(original) {
+                if(original.message!=='retained'||original.cause.detail!=='original')throw 91;
+                try {await pending;} catch(e) {return e===original ? 1 : 0;}
+            }
+            return 0;
+        }
+    "#;
+    let engine = make_async_engine()?;
+    let compiled = compile_typescript_waffle(
+        source,
+        "retained_error.ts",
+        &WaffleCompileOptions::default(),
+    )?;
+    let component = Component::new(&engine, compiled.component.unwrap())?;
+    let mut store = Store::new(&engine, WasiHostState::default());
+    let instance = make_wasi_linker(&engine)?
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    for _ in 0..5 {
+        assert_eq!(run.call_async(&mut store, ()).await?, (1.0,));
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

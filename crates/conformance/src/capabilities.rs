@@ -123,7 +123,54 @@ pub fn contracts() -> Vec<Contract> {
     });
     contracts.extend(additional_contracts());
     contracts.extend(combinator_contracts());
+    contracts.push(Contract {
+        id: "ecma.error.values",
+        description: "Error messages, causes and identity across promise rejection and rethrow",
+        specification: "https://tc39.es/ecma262/#sec-error-objects",
+        domain: "TypeError with a string message and cause; repeated awaits, all/allSettled/race, rethrow and finally; hidden built-in fields; Unicode messages of 0..32 scalar values",
+        witnesses: vec![
+            Witness { partition: "empty-message", case: error_case(String::new()) },
+            Witness { partition: "nul-and-unicode", case: error_case("failed\0é雪😀".into()) },
+        ],
+        strategy: prop::collection::vec(any::<char>(), 0..=32)
+            .prop_map(|chars| error_case(chars.into_iter().collect())).boxed(),
+        check: check_equivalence,
+    });
     contracts
+}
+
+fn error_case(message: String) -> Case {
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            r#"
+async function fail(message:string):Promise<number> {{
+    throw new TypeError(message, {{cause:message}});
+}}
+export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
+    const message={message};
+    const trace:number[]=[];
+    const pending=fail(message);
+    try {{await pending;}} catch(original) {{
+        if(!(original instanceof TypeError)||!(original instanceof Error))throw 90;
+        if(original.name!=='TypeError'||original.message!==message||original.cause!==message)throw 91;
+        try {{await Promise.all([pending,1]);}} catch(e) {{if(e!==original)throw 92;trace.push(1);}}
+        try {{await Promise.race([pending]);}} catch(e) {{if(e!==original)throw 93;trace.push(2);}}
+        const settled=await Promise.allSettled([pending]);
+        if(settled[0].status!=='rejected'||settled[0].reason!==original)throw 94;
+        try {{try {{throw original;}} finally {{trace.push(3);}}}}
+        catch(e) {{if(e!==original)throw 95;trace.push(4);}}
+        if(JSON.stringify(original)!=='{{}}'||JSON.stringify({{...original}})!=='{{}}')throw 96;
+        const encoded=new TextEncoder().encode('message:'+original.message);
+        for(let i=0;i<encoded.length;i++){{const byte=encoded[i];if(byte===undefined)throw 97;trace.push(byte);}}
+        return {{value:x,trace}};
+    }}
+    throw 98;
+}}
+"#,
+            message = serde_json::to_string(&message).unwrap()
+        ),
+    }
 }
 
 const DIRECTORY: &str = r#"

@@ -16,11 +16,12 @@ use crate::waffle_backend::registry::{
 };
 use perry_hir::types::Type as HirType;
 
-/// Completion tags shared by guest calls and WIT result discriminants.
+/// Internal completions: native failures carry codes; thrown values carry tagged references.
 #[derive(Clone, Copy)]
 pub(crate) enum CompletionStatus {
     Returned = 0,
-    Threw = 1,
+    NativeFailure = 1,
+    Threw = 3,
 }
 
 /// Converts an exception-aware guest completion at the host boundary only.
@@ -158,6 +159,7 @@ pub(crate) fn build_export_wrapper(
     }
     let mut outcome = emit_fallible_call(&mut body, entry, callee.func_index, &args);
     let mut error_payload = outcome.payload;
+    let mut error_status = outcome.status;
     if super::values::is_dynamic(callee.success_type()) {
         let value = decode_payload(&mut body, outcome.ok_block, outcome.payload, true);
         let tag = body.add_op(
@@ -179,16 +181,17 @@ pub(crate) fn build_export_wrapper(
         );
         let errors = body.add_block();
         error_payload = body.add_blockparam(errors, Type::F64);
-        for (block, payload) in [
-            (outcome.err_block, outcome.payload),
-            (extracted.err_block, extracted.payload),
+        error_status = body.add_blockparam(errors, Type::I32);
+        for (block, payload, status) in [
+            (outcome.err_block, outcome.payload, outcome.status),
+            (extracted.err_block, extracted.payload, extracted.status),
         ] {
             body.set_terminator(
                 block,
                 Terminator::Br {
                     target: BlockTarget {
                         block: errors,
-                        args: vec![payload],
+                        args: vec![payload, status],
                     },
                 },
             );
@@ -197,7 +200,20 @@ pub(crate) fn build_export_wrapper(
             ok_block: extracted.ok_block,
             err_block: errors,
             payload: extracted.payload,
+            status: error_status,
         };
+    }
+    if matches!(export.convention, ExportConvention::Direct)
+        && let Some(report) = registry.report_error
+    {
+        body.add_op(
+            outcome.err_block,
+            Operator::Call {
+                function_index: report,
+            },
+            &[error_status, error_payload],
+            &[],
+        );
     }
     if let Some(native) = registry.promises.as_ref().map(|runtime| &runtime.native) {
         for (block, retain) in [
@@ -206,10 +222,41 @@ pub(crate) fn build_export_wrapper(
                 super::ssa::types::is_reference(callee.success_type())
                     && !super::values::is_dynamic(callee.success_type()),
             ),
-            (outcome.err_block, false),
+            (outcome.err_block, registry.value_helpers.is_some()),
         ] {
             let root = retain.then(|| {
-                let value = decode_payload(&mut body, block, outcome.payload, true);
+                let value = if block == outcome.err_block {
+                    let tagged = body.add_op(
+                        block,
+                        Operator::I32Const {
+                            value: CompletionStatus::Threw as u32,
+                        },
+                        &[],
+                        &[Type::I32],
+                    );
+                    let tagged = body.add_op(
+                        block,
+                        Operator::I32Eq,
+                        &[error_status, tagged],
+                        &[Type::I32],
+                    );
+                    let pointer = body.add_op(
+                        block,
+                        Operator::I32TruncSatF64U,
+                        &[error_payload],
+                        &[Type::I32],
+                    );
+                    let zero =
+                        body.add_op(block, Operator::I32Const { value: 0 }, &[], &[Type::I32]);
+                    body.add_op(
+                        block,
+                        Operator::Select,
+                        &[pointer, zero, tagged],
+                        &[Type::I32],
+                    )
+                } else {
+                    decode_payload(&mut body, block, outcome.payload, true)
+                };
                 RetainedValues::new(
                     &mut body,
                     block,
@@ -320,6 +367,16 @@ pub(crate) fn build_export_wrapper(
             body.set_terminator(outcome.err_block, Terminator::Unreachable);
         }
         ExportConvention::WitResult { success } => {
+            if let Some(helpers) = registry.value_helpers {
+                error_payload = body.add_op(
+                    outcome.err_block,
+                    Operator::Call {
+                        function_index: helpers.exception_number,
+                    },
+                    &[error_status, error_payload],
+                    &[Type::F64],
+                );
+            }
             for (block, status, ty, payload) in [
                 (
                     outcome.ok_block,
@@ -436,7 +493,7 @@ fn emit_retptr_store(
     let status_val = body.add_op(
         block,
         Operator::I32Const {
-            value: status as u32,
+            value: u32::from(!matches!(status, CompletionStatus::Returned)),
         },
         &[],
         &[Type::I32],
@@ -528,6 +585,7 @@ pub(crate) struct InternalCallOutcome {
     pub(crate) ok_block: Block,
     pub(crate) err_block: Block,
     pub(crate) payload: Value,
+    pub(crate) status: Value,
 }
 
 /// Emits an internal call with `(status: i32, payload: f64)` splitting into `ok_block` and `err_block`.
@@ -575,6 +633,7 @@ pub(crate) fn emit_fallible_call(
         ok_block,
         err_block,
         payload,
+        status,
     }
 }
 

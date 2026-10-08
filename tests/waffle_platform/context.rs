@@ -232,7 +232,7 @@ async fn enumeration_and_membership_preserve_argument_effects_and_checked_values
         const mixed={value:3, missing:undefined};
         if(Object.keys(mixed).length!==2) {throw 96;}
         try {Object.values(mixed);throw 95;}
-        catch(error) {if(error!==12) {throw error;}}
+        catch(error) {if(error.code !== 12) {throw error;}}
         finally {state.trace=state.trace+'f';}
         return state.trace;
     }"#;

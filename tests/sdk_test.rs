@@ -122,6 +122,83 @@ fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
 }
 
 #[test]
+fn result_contract_accepts_completion_or_explicit_result_implementations() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::create_dir(root.join("wit")).unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("wit/world.wit"),
+        "package test:outcome; world task {
+        record failure {name:string,message:string}
+        type outcome = result<string,failure>;
+        export run:async func(fail:bool)->outcome;
+    }",
+    )
+    .unwrap();
+    generate_sdk_files(&SdkOptions {
+        wit_dir: root.join("wit"),
+        world: Some("task".into()),
+        out_dir: root.join(".perry/types"),
+        project_root: Some(root.into()),
+        entry: PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
+    })
+    .unwrap();
+    for (source, succeeds) in [
+        (
+            "export function run(fail:boolean):string {if(fail)throw new Error('failed'); return 'ok';}",
+            true,
+        ),
+        (
+            "export async function run(fail:boolean):Promise<string> {if(fail)throw new Error('failed'); return 'ok';}",
+            true,
+        ),
+        (
+            "import type {Outcome} from '../.perry/types/world'; export function run(fail:boolean):Outcome {return fail?{ok:false,error:{name:'Error',message:'failed'}}:{ok:true,value:'ok'};}",
+            true,
+        ),
+        (
+            "import type {Outcome} from '../.perry/types/world'; export async function run(fail:boolean):Promise<Outcome> {return fail?{ok:false,error:{name:'Error',message:'failed'}}:{ok:true,value:'ok'};}",
+            true,
+        ),
+        (
+            "export function run(fail:boolean):number {return 42;}",
+            false,
+        ),
+        (
+            "export async function run(fail:boolean):Promise<number> {return 42;}",
+            false,
+        ),
+        (
+            "export function run(fail:number):string {return 'ok';}",
+            false,
+        ),
+        (
+            "export function run(fail:boolean):{ok:true,value:string}|{ok:false,error:number} {return {ok:false,error:42};}",
+            false,
+        ),
+        (
+            "import type {Outcome} from '../.perry/types/world'; export function run(fail:boolean):string|Outcome {return fail?{ok:false,error:{name:'Error',message:'failed'}}:'ok';}",
+            false,
+        ),
+    ] {
+        fs::write(root.join("src/index.ts"), source).unwrap();
+        let output = std::process::Command::new("tsc")
+            .arg("--noEmit")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            succeeds,
+            "{source}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
 fn test_generate_sdk_files_for_merge_task() {
     let temp_dir = std::env::temp_dir().join("perry_sdk_test_merge_task");
     let _ = fs::remove_dir_all(&temp_dir);
@@ -165,32 +242,6 @@ fn test_generate_sdk_files_for_merge_task() {
     assert_eq!(
         parsed["compilerOptions"]["strict"],
         serde_json::Value::Bool(true)
-    );
-}
-
-#[test]
-fn test_generate_sdk_files_for_template_world() {
-    let temp_dir = std::env::temp_dir().join("perry_sdk_test_template");
-    let _ = fs::remove_dir_all(&temp_dir);
-    fs::create_dir_all(&temp_dir).unwrap();
-
-    let options = SdkOptions {
-        wit_dir: PathBuf::from("template/wit"),
-        world: Some("task".to_string()),
-        out_dir: temp_dir.join(".perry/types"),
-        project_root: Some(temp_dir.clone()),
-        entry: PathBuf::from("src/index.ts"),
-        initialize_tsconfig: true,
-    };
-
-    let result = generate_sdk_files(&options).expect("generate_sdk_files for template failed");
-
-    assert!(result.types_path.exists());
-    let types_content = fs::read_to_string(&result.types_path).unwrap();
-    assert!(
-        types_content.contains("export declare function runTask(input: string): string;"),
-        "Missing runTask in template declarations: {}",
-        types_content
     );
 }
 

@@ -36,3 +36,18 @@ pub(crate) fn declare_remainder(module: &mut Module<'static>, hir: &HirModule) -
     });
     Some(function)
 }
+
+pub(crate) fn declare_format(module: &mut Module<'static>) -> Func {
+    let signature = module.signatures.push(SignatureData {
+        params: vec![Type::F64, Type::I32],
+        returns: vec![Type::I32],
+    });
+    let name = "number_format";
+    let function = module.funcs.push(FuncDecl::Import(signature, name.into()));
+    module.imports.push(Import {
+        module: super::link::HELPER_MODULE.into(),
+        name: name.into(),
+        kind: ImportKind::Func(function),
+    });
+    function
+}

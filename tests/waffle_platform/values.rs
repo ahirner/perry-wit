@@ -29,7 +29,7 @@ async fn optional_references_preserve_absence_identity_and_live_values() -> Resu
         state.value=undefined;
         if(state.value!==undefined||saved!==bytes)throw 3;
         if(optional(identity(bytes))!==bytes||optional(identity(undefined))!==undefined)throw 4;
-        try {optional(identity(null));throw 99;}catch(error){if(error!==12)throw error;}
+        try {optional(identity(null));throw 99;}catch(error){if(error.code !== 12)throw error;}
         if(await retain(bytes)!==bytes||await retain(undefined)!==undefined)throw 5;
         if(await widen(bytes)!==bytes||await widen(undefined)!==undefined)throw 6;
         const results=await Promise.all([retain(bytes),retain(undefined)]);
@@ -109,7 +109,7 @@ async fn dynamic_values_preserve_types_equality_and_checked_boundaries() -> Resu
         if(!truth(object)) {throw 28;}
         if(arithmetic(null)!==0) {throw 29;}
         if(arithmetic(true)!==2) {throw 30;}
-        try {typed(identity(1));throw 31;} catch(error) {if(error!==12) {throw error;}}
+        try {typed(identity(1));throw 31;} catch(error) {if(error.code !== 12) {throw error;}}
         return 42;
     }"#;
     let (mut store, instance) = instantiate(source, 65536, |_| Ok(())).await?;
@@ -221,9 +221,9 @@ async fn dynamic_returns_preserve_undefined_and_adopt_typed_task_outcomes() -> R
         if(primitive!==null) {throw 90;}
         const original=date();
         try {await opaque(original);throw 89;}
-        catch(error) {if(error!==12) {throw error;}}
+        catch(error) {if(error.code !== 12) {throw error;}}
         try {await identity(original);throw 88;}
-        catch(error) {if(error!==12) {throw error;}}
+        catch(error) {if(error.code !== 12) {throw error;}}
         const settled=await original;
         return settled.getTime();
     }"#;
@@ -278,8 +278,8 @@ async fn dynamic_random_destinations_validate_runtime_tags_before_host_calls() -
     function fill(value:any):Uint8Array {return crypto.getRandomValues(value);}
     export function run():number {
         for(let index=0;index<1000;index=index+1) {
-            try {fill(0/0);throw 99;} catch(error) {if(error!==1) {throw error;}}
-            try {fill('bad');throw 98;} catch(error) {if(error!==1) {throw error;}}
+            try {fill(0/0);throw 99;} catch(error) {if(error.code !== 1) {throw error;}}
+            try {fill('bad');throw 98;} catch(error) {if(error.code !== 1) {throw error;}}
             const bytes=new Uint8Array([7,0,0,9]);
             const view=bytes.subarray(1,3);
             if(fill(view)!==view) {throw 97;}
@@ -323,7 +323,7 @@ async fn boxed_arguments_and_numeric_errors_survive_later_argument_effects_and_c
     export function run():Result<number,number> {
         if(choose(new Date(-1),churn())!==1) {throw 99;}
         try {invalid(identity('wrong receiver'));throw 98;}
-        catch(error) {if(error!==12) {throw error;}}
+        catch(error) {if(error.code !== 12) {throw error;}}
         try {return raise(identity(7));} finally {churn();}
     }"#;
     let (mut store, instance) = instantiate(source, 65536, |_| Ok(())).await?;
