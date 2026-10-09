@@ -392,6 +392,93 @@ export async function run(x: number): Promise<number> {
 }
 
 #[test]
+fn legacy_result_annotations_preserve_native_values_and_promise_adoption() {
+    let source = r#"
+        function immediate(value:number):Result<number,number>{
+            if(value<0)throw value;
+            return value;
+        }
+        function nothing():Result<void,number>{return;}
+        async function ready(value:number):Promise<Result<number,number>>{
+            return immediate(value);
+        }
+        async function text():Promise<Result<string,number>>{return 'é';}
+        async function bytes():Promise<Result<Uint8Array,number>>{return new Uint8Array([0,255]);}
+        async function finished():Promise<Result<void,number>>{nothing();return;}
+        export async function run(value:number):Promise<Result<number,number>>{
+            try{return ready(value);}finally{await finished();}
+        }
+        export async function payload(flag:boolean):Promise<Result<string|Uint8Array,number>>{
+            return flag?text():bytes();
+        }
+    "#;
+    let plain = source
+        .replace("Result<string|Uint8Array,number>", "string|Uint8Array")
+        .replace("Result<Uint8Array,number>", "Uint8Array")
+        .replace("Result<string,number>", "string")
+        .replace("Result<number,number>", "number")
+        .replace("Result<void,number>", "void");
+    assert_eq!(lowered(source), lowered(&plain));
+    for (annotation, diagnostic) in [
+        ("Result<number>", "success and error type arguments"),
+        ("Result<number,string>", "require numeric errors"),
+        ("Result<number,any>", "require numeric errors"),
+    ] {
+        let error = rejected(&format!("export function run():{annotation}{{return 1;}}"));
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn returned_promise_payloads_are_checked_against_the_settled_result() {
+    let error = rejected(
+        "async function text():Promise<string>{return 'text';} export async function run():Promise<number>{return text();}",
+    );
+    assert!(
+        error.contains("value type differs from the expected type"),
+        "{error}"
+    );
+    lowered(
+        r#"
+        type Payload=string|Uint8Array;
+        async function text():Promise<string>{return 'text';}
+        async function bytes():Promise<Uint8Array>{return new Uint8Array(1);}
+        export async function run(flag:boolean):Promise<Payload>{
+            try{return flag?text():bytes();}finally{await text();}
+        }
+    "#,
+    );
+}
+
+#[test]
+fn json_completion_annotations_adapt_settled_payloads_only() {
+    lowered(
+        r#"
+        type JsonValue=null|boolean|number|string|JsonValue[]|{[key:string]:JsonValue};
+        async function ready():Promise<number>{return 1;}
+        export async function run(flag:boolean):Promise<JsonValue>{
+            try{return flag?ready():[1,'value',null];}finally{await ready();}
+        }
+        export async function absent(flag:boolean):Promise<JsonValue|undefined>{
+            return flag?ready():undefined;
+        }
+    "#,
+    );
+    for body in [
+        "export function run():JsonValue{return ready();}",
+        "export async function run():Promise<JsonValue>{return {pending:ready()};}",
+        "export async function run():Promise<JsonValue>{const stored:JsonValue=ready();return stored;}",
+        "async function bytes():Promise<Uint8Array>{return new Uint8Array(1);} export async function run():Promise<JsonValue>{return bytes();}",
+    ] {
+        let error = rejected(&format!(
+            "type JsonValue=null|boolean|number|string|JsonValue[]|{{[key:string]:JsonValue}};
+             async function ready():Promise<number>{{return 1;}} {body}"
+        ));
+        assert!(error.contains("not JSON-compatible"), "{error}");
+    }
+}
+
+#[test]
 fn finalizers_keep_exception_values_live_across_awaits() {
     lowered(
         r#"

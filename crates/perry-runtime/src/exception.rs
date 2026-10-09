@@ -37,6 +37,11 @@ struct Exception {
     value: u64,
 }
 
+/// Layout used by canonical result adapters after checking the exception kind.
+pub const KIND: u32 = core::mem::offset_of!(Exception, kind) as u32;
+/// Offset of the exception's primitive bits or Error message reference.
+pub const VALUE: u32 = core::mem::offset_of!(Exception, value) as u32;
+
 /// Allocate an Error (string payload) or a thrown primitive (typed slot bits).
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_exception_new(kind: u32, value: u64) -> *mut u8 {

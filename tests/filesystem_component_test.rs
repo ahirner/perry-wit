@@ -7,6 +7,10 @@ use wasmtime::{
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
 
+#[path = "support/text_bytes.rs"]
+mod text_bytes;
+use text_bytes::TextOrBytes;
+
 struct Host {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -46,6 +50,111 @@ fn compile(source: &str, exports: &str) -> Result<Vec<u8>> {
     let world = resolve.select_world(&[package], Some("filesystem"))?;
     let compiled = compile_for_world(source, "filesystem.ts", &resolve, world, true)?;
     Ok(compiled.stripped.unwrap())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_file_values_and_errors_cross_wit_results() -> Result<()> {
+    let wasm = compile(
+        r#"
+        import {readFile} from 'node:fs/promises';
+        type Payload=string|Uint8Array;
+        export async function run(encoding:string):Promise<Payload>{
+            return readFile('/sandbox/input',encoding);
+        }
+        export function forwarded(encoding:string):Promise<Payload>{
+            return readFile('/sandbox/input',encoding);
+        }
+        async function read(encoding:string):Promise<Result<Payload,number>>{
+            return readFile('/sandbox/input',encoding);
+        }
+        export async function saved(encoding:string):Promise<Result<Payload,number>>{
+            const pending=read(encoding);
+            const first=await pending;
+            const second=await pending;
+            if(first!==second)throw 42;
+            return second;
+        }
+        export async function bad():Promise<Payload>{return readFile('/sandbox/bad','utf8');}
+    "#,
+        r#"
+        variant payload { text(string), bytes(list<u8>) }
+        export run:async func(encoding:string)->result<payload,f64>;
+        export forwarded:async func(encoding:string)->result<payload,f64>;
+        export saved:async func(encoding:string)->result<payload,f64>;
+        export bad:async func()->result<payload,f64>;
+    "#,
+    )?;
+    let root = tempfile::tempdir()?;
+    let input = "\u{feff}é🙂\0".repeat(8_192);
+    std::fs::write(root.path().join("input"), &input)?;
+    std::fs::write(root.path().join("bad"), [255, 0])?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, wasm)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = Store::new(
+        &engine,
+        Host {
+            ctx: WasiCtx::builder()
+                .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
+                .build(),
+            table: ResourceTable::new(),
+            peak: 0,
+        },
+    );
+    store.limiter(|host| host);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let bad = instance.get_typed_func::<(), (Result<TextOrBytes, f64>,)>(&mut store, "bad")?;
+    for _ in 0..16 {
+        for name in ["run", "saved", "forwarded"] {
+            let function = instance
+                .get_typed_func::<(&str,), (Result<TextOrBytes, f64>,)>(&mut store, name)?;
+            for (encoding, expected) in [
+                ("utf8", Ok(TextOrBytes::Text(input.clone()))),
+                ("binary", Ok(TextOrBytes::Bytes(input.as_bytes().to_vec()))),
+                ("hex", Err(12.0)),
+            ] {
+                assert_eq!(
+                    function.call_async(&mut store, (encoding,)).await?.0,
+                    expected
+                );
+                store.assert_concurrent_state_empty();
+                assert!(
+                    store.data().table.is_empty(),
+                    "result retained host resources"
+                );
+            }
+        }
+        assert_eq!(bad.call_async(&mut store, ()).await?.0, Err(9.0));
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+        assert!(
+            store.data().peak <= 1024 * 1024,
+            "result retained task memory: {}",
+            store.data().peak
+        );
+    }
+    let run = instance.get_typed_func::<(&str,), (Result<TextOrBytes, f64>,)>(&mut store, "run")?;
+    let forwarded =
+        instance.get_typed_func::<(&str,), (Result<TextOrBytes, f64>,)>(&mut store, "forwarded")?;
+    let (text, bytes, error) = store
+        .run_concurrent(async |accessor| -> wasmtime::Result<_> {
+            let (text, bytes, error) = tokio::join!(
+                run.call_concurrent(accessor, ("utf8",)),
+                forwarded.call_concurrent(accessor, ("binary",)),
+                run.call_concurrent(accessor, ("hex",)),
+            );
+            Ok((text?.0, bytes?.0, error?.0))
+        })
+        .await??;
+    assert_eq!(text, Ok(TextOrBytes::Text(input.clone())));
+    assert_eq!(bytes, Ok(TextOrBytes::Bytes(input.into_bytes())));
+    assert_eq!(error, Err(12.0));
+    store.assert_concurrent_state_empty();
+    assert!(store.data().table.is_empty());
+    Ok(())
 }
 
 const SOURCE: &str = r#"

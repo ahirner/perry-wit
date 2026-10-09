@@ -167,6 +167,17 @@ fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
             match &definition.kind {
                 TypeDefKind::Type(inner) => abi_type(resolve, inner)?,
                 TypeDefKind::List(element) => AbiType::List(Box::new(abi_type(resolve, element)?)),
+                TypeDefKind::Result(result) => AbiType::Result {
+                    ok: result.ok.as_ref().map(|ty| abi_type(resolve, ty).map(Box::new)).transpose()?,
+                    err: result.err.as_ref().map(|ty| abi_type(resolve, ty).map(Box::new)).transpose()?,
+                },
+                TypeDefKind::Variant(variant) => AbiType::TextOrBytes(
+                    crate::abi::text_bytes_order(resolve, variant).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "WIT variants currently require exactly one string and one list<u8> case"
+                        )
+                    })?,
+                ),
                 TypeDefKind::Record(record) => AbiType::Record(
                     record
                         .fields

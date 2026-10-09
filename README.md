@@ -113,8 +113,9 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("t
 
 - **Exports**: Exported TypeScript functions not named by the world stay internal, so one source can implement several worlds.
 - **Tasks**: Every export call is one task. Everything it allocates, including its arguments and results, is released in bulk after the host has read the result.
-- **Async exports**: an `async func` export is implemented by an `async` TypeScript function returning `Promise<T>`.
-- **Not yet migrated**: module-level state and initialization, general WIT function imports, and `option`, `result`, `variant`, `enum`, `flags`, `tuple` and resource types.
+- **Async exports**: WIT controls whether the host call may suspend. The SDK permits either a synchronous or promise-returning implementation. Async WIT retains the result until pending task work finishes; synchronous WIT drains ready continuations and traps if native work remains. It cannot wait for host operations.
+- **Native result boundaries**: closed WIT variants with one `string` and one `list<u8>` case map to native `string | Uint8Array`, preserving case order and aliases. Completion-style `result` exports adapt normal returns, primitive throws and built-in Error name/message records. Legacy `Result<T, number>` annotations retain native success values. Returned promises are adopted after finalizers; explicit `return await` keeps its lexical exception handling.
+- **Not yet migrated**: module-level state and initialization, general WIT function imports and variants, explicit tagged results, arbitrary structured throws, nested/parameter results, and `option`, `enum`, `flags`, `tuple` and resource types.
 - **Core Wasm Output**: Pass `--core-only` to emit the linked core module without component encoding.
 
 ### CLI Scripts

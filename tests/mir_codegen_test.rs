@@ -268,6 +268,141 @@ export async function fails(n: number): Promise<number> {
 }
 
 #[test]
+fn returned_promises_settle_after_finalizers_outside_lexical_catches() {
+    let mut program = Program::new(
+        r#"
+async function ready(value:number):Promise<number>{return value;}
+async function reject(error:Error):Promise<number>{throw error;}
+async function nothing():Promise<void>{}
+async function forwardVoid():Promise<void>{return nothing();}
+function relay(pending:Promise<number>):Promise<number>{return pending;}
+async function forward(pending:Promise<number>,trace:number[]):Promise<number>{
+  try {return relay(pending);}
+  catch(e){trace.push(99);return -1;}
+  finally{trace.push(1);}
+}
+async function explicit(pending:Promise<number>,trace:number[]):Promise<number>{
+  try {return await pending;}
+  catch(e){trace.push(3);return 40;}
+  finally{trace.push(4);}
+}
+async function replace(pending:Promise<number>):Promise<number>{
+  try{return pending;}finally{return ready(8);}
+}
+async function replaceWithError(pending:Promise<number>,error:Error):Promise<number>{
+  try{return pending;}finally{throw error;}
+}
+async function choose(flag:boolean,pending:Promise<number>,trace:number[]):Promise<number>{
+  try{return flag?pending:9;}finally{trace.push(5);}
+}
+async function nested(pending:Promise<number>,trace:number[]):Promise<number>{
+  try{try{return pending;}finally{trace.push(6);await nothing();}}
+  finally{trace.push(7);}
+}
+export async function run(flag:number):Promise<number>{
+  const error=new Error('original');
+  const pending=reject(error);
+  const trace:number[]=[];
+  const forwarded=forward(pending,trace);
+  let caught=false;
+  try{await forwarded;}catch(e){caught=e===error;trace.push(2);}
+  if(!caught || await explicit(pending,trace)!==40)throw 1;
+  if(await replace(pending)!==8)throw 2;
+  const replacement=new Error('replacement');
+  caught=false;
+  try{await replaceWithError(pending,replacement);}catch(e){caught=e===replacement;}
+  if(!caught)throw 3;
+  if(await choose(flag>0,ready(10),trace)!==(flag>0?10:9))throw 4;
+  if(await nested(ready(11),trace)!==11)throw 5;
+  await forwardVoid();
+  if(trace.length!==7)throw 6;
+  return trace[0]*1000000+trace[1]*100000+trace[2]*10000+trace[3]*1000+trace[4]*100+trace[5]*10+trace[6];
+}
+"#,
+    );
+    for flag in [0.0, 1.0] {
+        assert_eq!(program.throwing("run", flag), (1234567.0, 0));
+    }
+}
+
+#[test]
+fn adopted_json_result_checks_happen_after_finalizers_and_bypass_local_catch() {
+    let mut program = Program::new(
+        r#"
+type JsonValue=null|boolean|number|string|JsonValue[]|{[key:string]:JsonValue};
+async function wrong():Promise<JsonValue>{return JSON.parse('"wrong"');}
+async function direct(pending:Promise<JsonValue>,trace:number[]):Promise<number>{
+  try{return pending;}
+  catch(e){trace.push(99);return 0;}
+  finally{trace.push(1);}
+}
+export async function run(x:number):Promise<number>{
+  const trace:number[]=[];
+  let caught=false;
+  try{await direct(wrong(),trace);}catch(e){caught=e instanceof TypeError;trace.push(2);}
+  if(!caught || trace.length!==2)throw new Error('adoption used a stale handler');
+  return trace[0]*10+trace[1];
+}
+"#,
+    );
+    assert_eq!(program.throwing("run", 0.0), (12.0, 0));
+}
+
+#[test]
+fn returned_promises_pack_json_payloads_after_finalizers() {
+    let mut program = Program::new(
+        r#"
+type JsonValue=null|boolean|number|string|JsonValue[]|{[key:string]:JsonValue};
+interface Box { count:number }
+async function ready(value:number):Promise<number>{return value;}
+async function native(value:Box):Promise<Box>{return value;}
+async function parsed():Promise<JsonValue>{return JSON.parse('{"count":3}');}
+async function reject(error:Error):Promise<JsonValue>{throw error;}
+async function liftNumber(value:number):Promise<JsonValue>{return ready(value);}
+async function liftRecord(value:Box):Promise<JsonValue>{
+  try{return native(value);}finally{await ready(0);value.count=value.count+1;}
+}
+async function liftParsed():Promise<JsonValue>{return parsed();}
+async function choose(flag:boolean):Promise<JsonValue>{return flag?ready(7):[1,'é',null];}
+async function optional(flag:boolean):Promise<JsonValue|undefined>{
+  return flag?parsed():undefined;
+}
+async function forward(pending:Promise<JsonValue>,trace:number[]):Promise<JsonValue>{
+  try{return pending;}
+  catch(e){trace.push(99);return null;}
+  finally{trace.push(1);await ready(0);trace.push(2);}
+}
+export async function run(x:number):Promise<number>{
+  const scalar:number=await liftNumber(-0);
+  if(1/scalar!==-Infinity)throw new Error('lost signed zero');
+  const value:Box={count:x};
+  const packed=await liftRecord(value);
+  const alias:Box=packed;
+  if(alias!==value || alias.count!==x+1)throw new Error('lost native alias');
+  alias.count=alias.count+1;
+  if(packed.count!==x+2)throw new Error('copied native payload');
+  const parsedValue:Box=await liftParsed();
+  if(parsedValue.count!==3)throw new Error('lost parsed payload');
+  if(JSON.stringify(await choose(false))!=='[1,"é",null]')throw new Error('lost contextual literal');
+  const selected:number=await choose(true);
+  if(selected!==7 || await optional(false)!==undefined)throw new Error('lost optional payload');
+  const present:Box=await optional(true);
+  if(present.count!==3)throw new Error('lost present payload');
+  const trace:number[]=[];
+  const error=new Error('original');
+  let caught=false;
+  try{await forward(reject(error),trace);}catch(e){caught=e===error;trace.push(3);}
+  if(!caught || trace.length!==3)throw new Error('lost rejection scope');
+  return trace[0]*100+trace[1]*10+trace[2];
+}
+"#,
+    );
+    for input in [0.0, 7.0, -4.0] {
+        assert_eq!(program.throwing("run", input), (123.0, 0));
+    }
+}
+
+#[test]
 fn uncontended_settled_awaits_run_inline_without_per_await_storage() {
     let mut program = Program::new(
         r#"

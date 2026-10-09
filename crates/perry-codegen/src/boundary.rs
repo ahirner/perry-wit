@@ -7,17 +7,20 @@
 //! copies. Strings are UTF-8 on both sides and are passed through without transcoding.
 //!
 //! Supported: `bool`, integers, `f32`, `f64` (all ECMAScript numbers), `string`, `list<T>` and
-//! records. An uncaught exception in an export without an error result traps; `result` types
-//! follow with P6.2.
+//! records, and closed string/byte-list variants. Top-level `result` exports adapt returns
+//! and throws to primitive or Error-record cases. Other uncaught exceptions trap.
 //!
 //! Async exports (P3.8) use the callback ABI: `[async-lift]<export>` lifts the arguments,
-//! starts the async function and returns through `finish`, which drives ready frames and either
+//! invokes the implementation and returns through `finish`, which drives ready frames and either
 //! delivers the settled value with `task.return` (code `EXIT`) or suspends the task and asks the
 //! host to `WAIT` on its waitable set. `[callback][async-lift]<export>` resumes the task
 //! (kept in `context.get 0`), settles the promise of a returned host subtask and finishes again.
+mod completions;
+use completions::{Completion, EntryResult};
+
 use crate::{FunctionLowering, ModuleState, Runtime, i32_type};
 use anyhow::{Result, anyhow, bail, ensure};
-use perry_mir::types::{ArrayType, RecordType};
+use perry_mir::types::{ArrayType, BytesType, RecordType, StringType, TextOrBytesType};
 use perry_runtime::{array as layout, string as strings};
 use pliron::{
     builtin::{
@@ -54,8 +57,21 @@ pub enum AbiType {
     F64,
     String,
     List(Box<AbiType>),
+    TextOrBytes(TextBytesOrder),
+    Result {
+        ok: Option<Box<AbiType>>,
+        err: Option<Box<AbiType>>,
+    },
     /// Fields in WIT order, named as the TypeScript record fields.
     Record(Vec<(String, AbiType)>),
+}
+
+/// The discriminant of the string case in a two-case string/byte-list variant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(i32)]
+pub enum TextBytesOrder {
+    TextFirst = 0,
+    BytesFirst = 1,
 }
 
 /// One component export bound to a TypeScript function.
@@ -95,6 +111,21 @@ pub(crate) enum Flat {
     F64,
 }
 
+impl Flat {
+    fn join(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else if matches!(
+            (self, other),
+            (Self::I32 | Self::F32, Self::I32 | Self::F32)
+        ) {
+            Self::I32
+        } else {
+            Self::I64
+        }
+    }
+}
+
 impl AbiType {
     fn flatten(&self, out: &mut Vec<Flat>) {
         match self {
@@ -109,6 +140,19 @@ impl AbiType {
             AbiType::F32 => out.push(Flat::F32),
             AbiType::F64 => out.push(Flat::F64),
             AbiType::String | AbiType::List(_) => out.extend([Flat::I32, Flat::I32]),
+            AbiType::TextOrBytes(_) => out.extend([Flat::I32; 3]),
+            AbiType::Result { ok, err } => {
+                out.push(Flat::I32);
+                let ok = ok.as_ref().map_or_else(Vec::new, |ty| ty.flat());
+                let err = err.as_ref().map_or_else(Vec::new, |ty| ty.flat());
+                for i in 0..ok.len().max(err.len()) {
+                    out.push(match (ok.get(i), err.get(i)) {
+                        (Some(a), Some(b)) => a.join(*b),
+                        (Some(a), None) | (None, Some(a)) => *a,
+                        _ => unreachable!(),
+                    });
+                }
+            }
             AbiType::Record(fields) => fields.iter().for_each(|(_, ty)| ty.flatten(out)),
         }
     }
@@ -125,7 +169,13 @@ impl AbiType {
             AbiType::S16 | AbiType::U16 => 2,
             AbiType::S32 | AbiType::U32 | AbiType::F32 => 4,
             AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
-            AbiType::String | AbiType::List(_) => 4,
+            AbiType::String | AbiType::List(_) | AbiType::TextOrBytes(_) => 4,
+            AbiType::Result { ok, err } => ok
+                .iter()
+                .chain(err)
+                .map(|ty| ty.alignment())
+                .max()
+                .unwrap_or(1),
             AbiType::Record(fields) => fields.iter().map(|(_, t)| t.alignment()).max().unwrap_or(1),
         }
     }
@@ -137,6 +187,11 @@ impl AbiType {
             AbiType::S32 | AbiType::U32 | AbiType::F32 => 4,
             AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
             AbiType::String | AbiType::List(_) => 8,
+            AbiType::TextOrBytes(_) => 12,
+            AbiType::Result { ok, err } => {
+                let payload = ok.iter().chain(err).map(|ty| ty.size()).max().unwrap_or(0);
+                align(self.alignment() + payload, self.alignment())
+            }
             AbiType::Record(_) => {
                 let end = self.field_offsets().last().copied().unwrap_or(0);
                 let last = match self {
@@ -208,21 +263,7 @@ pub(crate) fn export(
     function: &FuncOp,
     export: &Export,
 ) -> Result<()> {
-    let is_async = state
-        .async_functions
-        .contains(&function.get_symbol_name(ctx));
-    ensure!(
-        is_async != matches!(export.kind, ExportKind::Sync),
-        "{} is {}async but the WIT export is {}async",
-        export.function,
-        if is_async { "" } else { "not " },
-        if !matches!(export.kind, ExportKind::Sync) {
-            ""
-        } else {
-            "not "
-        },
-    );
-    if is_async {
+    if !matches!(export.kind, ExportKind::Sync) {
         return async_export(ctx, state, function, export);
     }
     ensure!(
@@ -239,6 +280,7 @@ pub(crate) fn export(
         let ty = ty.deref(ctx);
         (ty.arg_types(), ty.res_types())
     };
+    let entry_result = EntryResult::new(ctx, state, function, &mir_results)?;
     ensure!(
         mir_params.len() == export.params.len(),
         "{} takes {} parameters but the WIT export has {}",
@@ -246,18 +288,20 @@ pub(crate) fn export(
         mir_params.len(),
         export.params.len()
     );
+    let has_value = match &export.result {
+        Some(AbiType::Result { ok, .. }) => ok.is_some(),
+        other => other.is_some(),
+    };
     ensure!(
-        mir_results.len() == usize::from(export.result.is_some()),
-        "{} returns {} values but the WIT export returns {}",
-        export.function,
-        mir_results.len(),
-        usize::from(export.result.is_some())
+        !has_value || entry_result.settled_type().is_some(),
+        "{} must return a value for this WIT export",
+        export.function
     );
-    let flat_params: Vec<Flat> = export.params.iter().flat_map(AbiType::flat).collect();
-    ensure!(
-        flat_params.len() <= MAX_FLAT_PARAMS,
-        "exports with more than {MAX_FLAT_PARAMS} flat parameters are not supported yet"
-    );
+    let mut flat_params: Vec<Flat> = export.params.iter().flat_map(AbiType::flat).collect();
+    let indirect_params = flat_params.len() > MAX_FLAT_PARAMS;
+    if indirect_params {
+        flat_params = vec![Flat::I32];
+    }
     let flat_result = export
         .result
         .as_ref()
@@ -280,49 +324,57 @@ pub(crate) fn export(
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
     b.runtime(ctx, Runtime::TaskEnter, vec![]);
-    let mut args = Vec::new();
-    for (ty, mir_ty) in export.params.iter().zip(mir_params) {
-        args.push(b.lift_flat(ctx, ty, mir_ty, &mut flat)?);
+    let args = b.lift_arguments(ctx, &export.params, &mir_params, flat, indirect_params)?;
+    let completion = b.invoke_export(ctx, function, args, entry_result)?;
+    if let Completion::Promise { promise, .. } = completion {
+        b.runtime(ctx, Runtime::PromiseObserve, vec![promise]);
+        b.finish_sync(ctx);
+        let state = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
+        let pending = b.num(ctx, NumOpcode::I32Eqz, vec![state]);
+        b.abort_if(ctx, pending);
     }
-    let throws = b.state.throws.contains(&function.get_symbol_name(ctx));
-    let mut call_results = mir_results
-        .iter()
-        .map(|t| crate::wasm_type(ctx, *t))
-        .collect::<Result<Vec<_>>>()?;
-    if throws {
-        call_results.push(i32_type(ctx));
-    }
-    let call = CallOp::new(ctx, function.get_symbol_name(ctx), args, call_results).get_operation();
-    b.insert(ctx, call);
-    let values: Vec<Value> = call.deref(ctx).results().collect();
-    if throws {
-        // An uncaught exception without a WIT error type has no value to return.
-        let trap = b.new_block(ctx, vec![]);
-        let normal = b.new_block(ctx, vec![]);
-        b.cond_br(
-            ctx,
-            *values.last().unwrap(),
-            (trap, vec![]),
-            (normal, vec![]),
-        );
-        b.block = trap;
-        b.abort_task(ctx);
-        let unreachable = UnreachableOp::new(ctx).get_operation();
-        b.insert(ctx, unreachable);
-        b.block = normal;
-    }
-    b.finish_sync(ctx);
-    let returned = match (&export.result, mir_results.first()) {
-        (Some(ty), Some(mir_ty)) if flat_result.len() == 1 => {
-            vec![b.lower_flat(ctx, ty, *mir_ty, values[0])?]
+    if !matches!(export.result, Some(AbiType::Result { .. })) {
+        let status = match completion {
+            Completion::Call { status, .. } => status,
+            Completion::Promise { promise, .. } => {
+                b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATUS)
+            }
+        };
+        if !matches!(entry_result, EntryResult::Direct { throws: false, .. }) {
+            b.abort_if(ctx, status);
         }
-        (Some(ty), Some(mir_ty)) => {
-            let size = b.i32_const(ctx, ty.size() as i32);
-            let area = b.runtime(ctx, Runtime::Alloc, vec![size]).expect("area");
-            b.lower_store(ctx, ty, *mir_ty, values[0], area, 0)?;
-            vec![area]
+        if matches!(completion, Completion::Call { .. }) {
+            b.finish_sync(ctx);
         }
-        _ => vec![],
+    }
+    let returned = match &export.result {
+        Some(ty @ AbiType::Result { .. }) => {
+            b.lower_completion(ctx, ty, completion, flat_result.len() > 1)?
+        }
+        Some(ty) => {
+            let (mir_ty, value) = match completion {
+                Completion::Call { result, .. } => result.expect("checked export result"),
+                Completion::Promise { result, promise } => {
+                    let mir_ty = result.expect("checked settled type");
+                    let kind = crate::slot_kind(ctx, mir_ty)?;
+                    (
+                        mir_ty,
+                        b.load(ctx, kind, promise, perry_runtime::promise::VALUE),
+                    )
+                }
+            };
+            if flat_result.len() <= 1 {
+                let mut flat = Vec::with_capacity(flat_result.len());
+                b.lower_flat_values(ctx, ty, mir_ty, value, &mut flat)?;
+                flat
+            } else {
+                let size = b.i32_const(ctx, ty.size() as i32);
+                let area = b.runtime(ctx, Runtime::Alloc, vec![size]).expect("area");
+                b.lower_store(ctx, ty, mir_ty, value, area, 0)?;
+                vec![area]
+            }
+        }
+        None => vec![],
     };
     let ret = ReturnOp::new(ctx, returned).get_operation();
     b.insert(ctx, ret);
@@ -368,6 +420,17 @@ fn async_export(
         let ty = ty.deref(ctx);
         (ty.arg_types(), ty.res_types())
     };
+    let entry_result = EntryResult::new(ctx, state, function, &mir_results)?;
+    let settled_type = entry_result.settled_type();
+    let has_value = match &export.result {
+        Some(AbiType::Result { ok, .. }) => ok.is_some(),
+        other => other.is_some(),
+    };
+    ensure!(
+        !has_value || settled_type.is_some(),
+        "{} must return a value for this WIT export",
+        export.function
+    );
     ensure!(
         mir_params.len() == export.params.len(),
         "{} takes {} parameters but the WIT export has {}",
@@ -375,11 +438,11 @@ fn async_export(
         mir_params.len(),
         export.params.len()
     );
-    let flat_params: Vec<Flat> = export.params.iter().flat_map(AbiType::flat).collect();
-    ensure!(
-        flat_params.len() <= MAX_FLAT_PARAMS,
-        "exports with more than {MAX_FLAT_PARAMS} flat parameters are not supported yet"
-    );
+    let mut flat_params: Vec<Flat> = export.params.iter().flat_map(AbiType::flat).collect();
+    let indirect_params = flat_params.len() > MAX_FLAT_PARAMS;
+    if indirect_params {
+        flat_params = vec![Flat::I32];
+    }
     // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
     let result_flat = if command {
         vec![Flat::I32]
@@ -408,8 +471,10 @@ fn async_export(
     let finish = FuncOp::new(ctx, finish_name.clone(), finish_ty);
     {
         let mut b = FunctionLowering::glue(state, ctx, &finish);
-        let drive = CallOp::new(ctx, crate::async_split::drive_name(), vec![], vec![]);
-        b.insert(ctx, drive.get_operation());
+        if !b.state.async_functions.is_empty() {
+            let drive = CallOp::new(ctx, crate::async_split::drive_name(), vec![], vec![]);
+            b.insert(ctx, drive.get_operation());
+        }
         let failed = b
             .runtime(ctx, Runtime::TaskFailed, vec![])
             .expect("task failure");
@@ -468,7 +533,8 @@ fn async_export(
         let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
         let rejected = if command {
             ensure!(
-                mir_results.len() == 1 && crate::repr(ctx, mir_results[0])? == crate::Repr::Bool,
+                settled_type
+                    .is_some_and(|ty| crate::repr(ctx, ty).is_ok_and(|ty| ty == crate::Repr::Bool)),
                 "command entry must return its boolean ok result"
             );
             let ok = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::VALUE);
@@ -494,28 +560,35 @@ fn async_export(
             b.insert(ctx, unreachable);
             b.block = next;
         }
+        let completion_result = matches!(export.result, Some(AbiType::Result { .. }));
         let mut flat = if command {
             vec![rejected]
+        } else if completion_result {
+            Vec::new()
         } else {
-            let trap = b.new_block(ctx, vec![]);
-            let fulfilled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
-            b.block = trap;
-            let unreachable = UnreachableOp::new(ctx).get_operation();
-            b.insert(ctx, unreachable);
-            b.block = fulfilled;
+            b.abort_if(ctx, rejected);
             Vec::new()
         };
-        if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
-            let kind = crate::slot_kind(ctx, *mir_ty)?;
+        if let Some(ty @ AbiType::Result { .. }) = &export.result {
+            flat = b.lower_completion(
+                ctx,
+                ty,
+                Completion::Promise {
+                    result: settled_type,
+                    promise,
+                },
+                indirect,
+            )?;
+        } else if let (Some(ty), Some(mir_ty)) = (&export.result, settled_type) {
+            let kind = crate::slot_kind(ctx, mir_ty)?;
             let value = b.load(ctx, kind, promise, perry_runtime::promise::VALUE);
             if indirect {
                 let size = b.i32_const(ctx, ty.size() as i32);
                 let area = b.runtime(ctx, Runtime::Alloc, vec![size]).expect("area");
-                b.lower_store(ctx, ty, *mir_ty, value, area, 0)?;
+                b.lower_store(ctx, ty, mir_ty, value, area, 0)?;
                 flat.push(area);
             } else {
-                b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
+                b.lower_flat_values(ctx, ty, mir_ty, value, &mut flat)?;
             }
         }
         b.host(ctx, task_return, flat);
@@ -541,13 +614,13 @@ fn async_export(
         let mut b = FunctionLowering::glue(state, ctx, &lift);
         let task = b.runtime(ctx, Runtime::TaskEnter, vec![]).expect("task");
         b.host(ctx, crate::Host::ContextSet0, vec![task]);
-        let mut args = Vec::new();
-        for (ty, mir_ty) in export.params.iter().zip(&mir_params) {
-            args.push(b.lift_flat(ctx, ty, *mir_ty, &mut flat)?);
-        }
-        let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
-        let promise = b.result(ctx, ramp.get_operation());
+        let args = b.lift_arguments(ctx, &export.params, &mir_params, flat, indirect_params)?;
+        let completion = b.invoke_export(ctx, function, args, entry_result)?;
+        let promise = b.completion_promise(ctx, completion);
         b.runtime(ctx, Runtime::TaskSetResult, vec![promise]);
+        if matches!(export.result, Some(AbiType::Result { .. })) {
+            b.runtime(ctx, Runtime::PromiseObserve, vec![promise]);
+        }
         let call = CallOp::new(ctx, finish_name.clone(), vec![], vec![i32]);
         let code = b.result(ctx, call.get_operation());
         let ret = ReturnOp::new(ctx, vec![code]).get_operation();
@@ -752,7 +825,29 @@ fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> 
     Ok(())
 }
 
+fn expect_boolean(ctx: &Context, mir_ty: TypeHandle) -> Result<()> {
+    ensure!(
+        mir_ty
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() == 1),
+        "WIT bool needs a TypeScript boolean"
+    );
+    Ok(())
+}
+
 impl FunctionLowering<'_> {
+    fn abort_if(&mut self, ctx: &mut Context, failed: Value) {
+        let trap = self.new_block(ctx, vec![]);
+        let done = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, failed, (trap, vec![]), (done, vec![]));
+        self.block = trap;
+        self.abort_task(ctx);
+        let unreachable = UnreachableOp::new(ctx).get_operation();
+        self.insert(ctx, unreachable);
+        self.block = done;
+    }
+
     /// End the synchronous job before its region can be released. Native work cannot
     /// outlive a synchronous export, whose ABI has no callback to resume it.
     pub(crate) fn finish_sync(&mut self, ctx: &mut Context) {
@@ -773,14 +868,7 @@ impl FunctionLowering<'_> {
             .runtime(ctx, Runtime::TaskPending, vec![])
             .expect("pending native work");
         let failed = self.num(ctx, NumOpcode::I32Or, vec![rejected, pending]);
-        let trap = self.new_block(ctx, vec![]);
-        let done = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, failed, (trap, vec![]), (done, vec![]));
-        self.block = trap;
-        self.abort_task(ctx);
-        let unreachable = UnreachableOp::new(ctx).get_operation();
-        self.insert(ctx, unreachable);
-        self.block = done;
+        self.abort_if(ctx, failed);
     }
 
     pub(crate) fn abort_task(&mut self, ctx: &mut Context) {
@@ -810,10 +898,7 @@ impl FunctionLowering<'_> {
     ) -> Result<Value> {
         let opcode = match ty {
             AbiType::Bool => {
-                ensure!(
-                    crate::repr(ctx, mir_ty)? == crate::Repr::Bool,
-                    "WIT bool needs a TypeScript boolean"
-                );
+                expect_boolean(ctx, crate::optional_inner(ctx, mir_ty).unwrap_or(mir_ty))?;
                 let zero = self.i32_const(ctx, 0);
                 return Ok(self.num(ctx, NumOpcode::I32Ne, vec![raw, zero]));
             }
@@ -832,6 +917,29 @@ impl FunctionLowering<'_> {
         Ok(self.num(ctx, opcode, vec![raw]))
     }
 
+    fn lift_arguments(
+        &mut self,
+        ctx: &mut Context,
+        types: &[AbiType],
+        mir_types: &[TypeHandle],
+        mut flat: Vec<Value>,
+        indirect: bool,
+    ) -> Result<Vec<Value>> {
+        let mut values = Vec::with_capacity(types.len());
+        let mut offset = 0;
+        for (ty, mir_ty) in types.iter().zip(mir_types) {
+            values.push(if indirect {
+                offset = align(offset, ty.alignment());
+                let value = self.lift_load(ctx, ty, *mir_ty, flat[0], offset)?;
+                offset += ty.size();
+                value
+            } else {
+                self.lift_flat(ctx, ty, *mir_ty, &mut flat)?
+            });
+        }
+        Ok(values)
+    }
+
     /// Lift a value from flat core values (consumed from the end of `flat`).
     fn lift_flat(
         &mut self,
@@ -842,6 +950,9 @@ impl FunctionLowering<'_> {
     ) -> Result<Value> {
         let mut next = || flat.pop().ok_or_else(|| anyhow!("too few flat values"));
         match ty {
+            AbiType::Result { .. } => bail!(
+                "WIT result parameters require typed result values, which are not migrated yet"
+            ),
             AbiType::String => {
                 let (ptr, len) = (next()?, next()?);
                 self.lift_string(ctx, mir_ty, ptr, len)
@@ -849,6 +960,10 @@ impl FunctionLowering<'_> {
             AbiType::List(element) => {
                 let (ptr, len) = (next()?, next()?);
                 self.lift_list(ctx, element, mir_ty, ptr, len)
+            }
+            AbiType::TextOrBytes(order) => {
+                let (tag, ptr, len) = (next()?, next()?, next()?);
+                self.lift_text_bytes(ctx, *order, mir_ty, tag, ptr, len)
             }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;
@@ -879,6 +994,9 @@ impl FunctionLowering<'_> {
         offset: u32,
     ) -> Result<Value> {
         match ty {
+            AbiType::Result { .. } => bail!(
+                "WIT result parameters require typed result values, which are not migrated yet"
+            ),
             AbiType::String => {
                 let ptr = self.load(ctx, MemKind::I32, address, offset);
                 let len = self.load(ctx, MemKind::I32, address, offset + 4);
@@ -888,6 +1006,12 @@ impl FunctionLowering<'_> {
                 let ptr = self.load(ctx, MemKind::I32, address, offset);
                 let len = self.load(ctx, MemKind::I32, address, offset + 4);
                 self.lift_list(ctx, element, mir_ty, ptr, len)
+            }
+            AbiType::TextOrBytes(order) => {
+                let tag = self.load(ctx, MemKind::I32U8, address, offset);
+                let ptr = self.load(ctx, MemKind::I32, address, offset + 4);
+                let len = self.load(ctx, MemKind::I32, address, offset + 8);
+                self.lift_text_bytes(ctx, *order, mir_ty, tag, ptr, len)
             }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;
@@ -904,6 +1028,47 @@ impl FunctionLowering<'_> {
                 self.lift_scalar(ctx, scalar, mir_ty, raw)
             }
         }
+    }
+
+    fn lift_text_bytes(
+        &mut self,
+        ctx: &mut Context,
+        order: TextBytesOrder,
+        mir_ty: TypeHandle,
+        tag: Value,
+        ptr: Value,
+        len: Value,
+    ) -> Result<Value> {
+        ensure!(
+            mir_ty.deref(ctx).is::<TextOrBytesType>(),
+            "WIT string/byte-list variant needs TypeScript string | Uint8Array"
+        );
+        let one = self.i32_const(ctx, 1);
+        let invalid = self.num(ctx, NumOpcode::I32GtU, vec![tag, one]);
+        self.abort_if(ctx, invalid);
+        let text_tag = self.i32_const(ctx, order as i32);
+        let is_text = self.num(ctx, NumOpcode::I32Eq, vec![tag, text_tag]);
+        let text = self.new_block(ctx, vec![]);
+        let bytes = self.new_block(ctx, vec![]);
+        let i64 = flat_type(ctx, Flat::I64);
+        let done = self.new_block(ctx, vec![i64]);
+        self.cond_br(ctx, is_text, (text, vec![]), (bytes, vec![]));
+        self.block = text;
+        let value = self
+            .runtime(ctx, Runtime::StringAdopt, vec![ptr, len])
+            .expect("text");
+        let value = self.num(ctx, NumOpcode::I64ExtendI32U, vec![value]);
+        self.br(ctx, done, vec![value]);
+        self.block = bytes;
+        let value = self
+            .runtime(ctx, Runtime::BytesAdopt, vec![ptr, len])
+            .expect("bytes");
+        let value = self.num(ctx, NumOpcode::I64ExtendI32U, vec![value]);
+        let tag = self.i64_const(ctx, perry_runtime::text_bytes::BYTES_TAG);
+        let value = self.num(ctx, NumOpcode::I64Or, vec![value, tag]);
+        self.br(ctx, done, vec![value]);
+        self.block = done;
+        Ok(done.deref(ctx).get_argument(0))
     }
 
     fn lift_string(
@@ -1010,7 +1175,10 @@ impl FunctionLowering<'_> {
         value: Value,
     ) -> Result<Value> {
         let opcode = match ty {
-            AbiType::Bool => return Ok(value),
+            AbiType::Bool => {
+                expect_boolean(ctx, mir_ty)?;
+                return Ok(value);
+            }
             AbiType::S8 | AbiType::S16 | AbiType::S32 => NumOpcode::I32TruncSatF64S,
             AbiType::U8 | AbiType::U16 | AbiType::U32 => NumOpcode::I32TruncSatF64U,
             AbiType::S64 => NumOpcode::I64TruncSatF64S,
@@ -1037,6 +1205,9 @@ impl FunctionLowering<'_> {
         offset: u32,
     ) -> Result<()> {
         match ty {
+            AbiType::Result { .. } => {
+                bail!("nested WIT results require typed result values, which are not migrated yet")
+            }
             AbiType::String => {
                 ensure!(
                     mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
@@ -1052,6 +1223,12 @@ impl FunctionLowering<'_> {
                 self.store(ctx, MemKind::I32, address, offset, buffer);
                 self.store(ctx, MemKind::I32, address, offset + 4, len);
             }
+            AbiType::TextOrBytes(order) => {
+                let [tag, ptr, len] = self.lower_text_bytes(ctx, *order, mir_ty, value)?;
+                self.store(ctx, MemKind::I32U8, address, offset, tag);
+                self.store(ctx, MemKind::I32, address, offset + 4, ptr);
+                self.store(ctx, MemKind::I32, address, offset + 8, len);
+            }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
@@ -1066,6 +1243,52 @@ impl FunctionLowering<'_> {
             }
         }
         Ok(())
+    }
+
+    fn lower_text_bytes(
+        &mut self,
+        ctx: &mut Context,
+        order: TextBytesOrder,
+        mir_ty: TypeHandle,
+        value: Value,
+    ) -> Result<[Value; 3]> {
+        let text_tag = self.i32_const(ctx, order as i32);
+        let bytes_tag = self.i32_const(ctx, 1 - order as i32);
+        if mir_ty.deref(ctx).is::<StringType>() {
+            let ptr = self.load(ctx, MemKind::I32, value, strings::DATA);
+            let len = self.load(ctx, MemKind::I32, value, strings::LEN);
+            return Ok([text_tag, ptr, len]);
+        }
+        let bytes_ty = BytesType::get(ctx).into();
+        if mir_ty == bytes_ty {
+            let (ptr, len) = self.lower_list(ctx, &AbiType::U8, bytes_ty, value)?;
+            return Ok([bytes_tag, ptr, len]);
+        }
+        ensure!(
+            mir_ty.deref(ctx).is::<TextOrBytesType>(),
+            "WIT string/byte-list variant needs TypeScript string | Uint8Array"
+        );
+        let is_text = self.text_bytes_is_text(ctx, value);
+        let tag = self.select(ctx, is_text, text_tag, bytes_tag);
+        let reference = self.num(ctx, NumOpcode::I32WrapI64, vec![value]);
+        let text = self.new_block(ctx, vec![]);
+        let bytes = self.new_block(ctx, vec![]);
+        let i32 = i32_type(ctx);
+        let done = self.new_block(ctx, vec![i32; 2]);
+        self.cond_br(ctx, is_text, (text, vec![]), (bytes, vec![]));
+        self.block = text;
+        let ptr = self.load(ctx, MemKind::I32, reference, strings::DATA);
+        let len = self.load(ctx, MemKind::I32, reference, strings::LEN);
+        self.br(ctx, done, vec![ptr, len]);
+        self.block = bytes;
+        let (ptr, len) = self.lower_list(ctx, &AbiType::U8, bytes_ty, reference)?;
+        self.br(ctx, done, vec![ptr, len]);
+        self.block = done;
+        Ok([
+            tag,
+            done.deref(ctx).get_argument(0),
+            done.deref(ctx).get_argument(1),
+        ])
     }
 
     /// Copy a MIR array into a canonical list buffer; returns (buffer, length).
@@ -1121,6 +1344,9 @@ impl FunctionLowering<'_> {
         out: &mut Vec<Value>,
     ) -> Result<()> {
         match ty {
+            AbiType::Result { .. } => {
+                bail!("nested WIT results require typed result values, which are not migrated yet")
+            }
             AbiType::String => {
                 ensure!(
                     mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
@@ -1132,6 +1358,9 @@ impl FunctionLowering<'_> {
             AbiType::List(element) => {
                 let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
                 out.extend([buffer, len]);
+            }
+            AbiType::TextOrBytes(order) => {
+                out.extend(self.lower_text_bytes(ctx, *order, mir_ty, value)?);
             }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;

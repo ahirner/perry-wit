@@ -17,7 +17,101 @@ pub(super) struct Cleanup {
     loop_depth: usize,
 }
 
+enum ReturnValue {
+    Immediate(Vec<Value>),
+    Adopt { promise: Value, result: TypeHandle },
+}
+
 impl FunctionBuilder<'_> {
+    pub(super) fn await_promise(&mut self, ctx: &mut Context, promise: Value) -> Result<Value> {
+        ensure!(self.is_async, "await is only valid in async functions");
+        ensure!(
+            promise.get_type(ctx).deref(ctx).is::<PromiseType>(),
+            "await of a non-promise value is not supported yet"
+        );
+        let op = AwaitOp::new(ctx, promise).map_err(|e| anyhow!("{}", e.disp(ctx)))?;
+        Ok(self.append_value(ctx, &op))
+    }
+
+    /// A returned promise is adopted after finalizers, outside the returning function's
+    /// handlers. An explicit `return await` instead awaits inside those lexical scopes.
+    pub(super) fn return_statement(
+        &mut self,
+        ctx: &mut Context,
+        expr: Option<&Expr>,
+    ) -> Result<()> {
+        if self.is_async
+            && let Some(Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            }) = expr
+        {
+            let test = self.condition(ctx, condition)?;
+            let incoming = self.refinements.clone();
+            let then = self.new_block(ctx, "return_then");
+            let otherwise = self.new_block(ctx, "return_else");
+            self.branch(ctx, test, then, otherwise);
+            self.switch_to(then);
+            self.refine_condition(ctx, condition, true)?;
+            self.return_statement(ctx, Some(then_expr))?;
+            self.refinements = incoming;
+            self.switch_to(otherwise);
+            self.refine_condition(ctx, condition, false)?;
+            return self.return_statement(ctx, Some(else_expr));
+        }
+        let value = match expr {
+            Some(expr) => {
+                let result = self
+                    .results
+                    .first()
+                    .copied()
+                    .context("a void function returns a value")?;
+                let json_completion = self.is_async
+                    && optional_value(ctx, result)
+                        .unwrap_or(result)
+                        .deref(ctx)
+                        .is::<JsonType>();
+                let value = if json_completion {
+                    self.object_operand(ctx, expr)?
+                } else {
+                    self.expression_with(ctx, expr, Some(result))?
+                };
+                if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                    ReturnValue::Adopt {
+                        promise: value,
+                        result,
+                    }
+                } else {
+                    ReturnValue::Immediate(vec![self.fit(ctx, value, result)?])
+                }
+            }
+            None => ReturnValue::Immediate(self.implicit_results(ctx)),
+        };
+        self.run_cleanups(ctx, 0)?;
+        if self.terminated(ctx) {
+            return Ok(());
+        }
+        let values = match value {
+            ReturnValue::Immediate(values) => values,
+            ReturnValue::Adopt { promise, result } => {
+                let handlers = std::mem::take(&mut self.handlers);
+                let adopted = (|| {
+                    let value = self.await_promise(ctx, promise)?;
+                    self.fit(ctx, value, result)
+                })();
+                self.handlers = handlers;
+                vec![adopted?]
+            }
+        };
+        ensure!(
+            values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
+            "return value type differs from the declared result"
+        );
+        self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
+        Ok(())
+    }
+
     pub(super) fn guard_exception(&mut self, ctx: &mut Context, op: &dyn Op) {
         if self.handlers.is_empty()
             || !op_cast::<dyn MayThrowInterface>(op).is_some_and(|op| op.may_throw(ctx))

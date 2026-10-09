@@ -296,7 +296,10 @@ fn build_module(
                     .with_context(|| format!("parameter {} of {}", param.name, function.name))
             })
             .collect::<Result<Vec<_>>>()?;
-        let results = match (&function.return_type, function.is_async) {
+        let results = match (
+            shapes::completion_type(&function.return_type)?,
+            function.is_async,
+        ) {
             (HirType::Void, false) => vec![],
             // An async function settles its promise with its result; `void` settles `undefined`.
             (HirType::Promise(inner), true) => vec![shapes.settled_type(ctx, inner)?],
@@ -744,26 +747,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.effect(ctx, expr)?;
             }
             Stmt::Return(value) => {
-                let values = match value {
-                    Some(expr) => {
-                        let expected = self
-                            .results
-                            .first()
-                            .copied()
-                            .context("a void function returns a value")?;
-                        let value = self.expression_with(ctx, expr, Some(expected))?;
-                        vec![self.fit(ctx, value, expected)?]
-                    }
-                    None => self.implicit_results(ctx),
-                };
-                ensure!(
-                    values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
-                    "return value type differs from the declared result"
-                );
-                self.run_cleanups(ctx, 0)?;
-                if !self.terminated(ctx) {
-                    self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
-                }
+                self.return_statement(ctx, value.as_ref())?;
             }
             Stmt::If {
                 condition,
@@ -1428,14 +1412,8 @@ impl<'s> FunctionBuilder<'s> {
                 .call(ctx, callee, args)?
                 .context("a void call has no value")?,
             Expr::Await(promise) => {
-                ensure!(self.is_async, "await is only valid in async functions");
                 let promise = self.expression(ctx, promise)?;
-                ensure!(
-                    TypedHandle::<PromiseType>::from_handle(promise.get_type(ctx), ctx).is_ok(),
-                    "await of a non-promise value is not supported yet"
-                );
-                let op = AwaitOp::new(ctx, promise).map_err(|e| anyhow!("{}", e.disp(ctx)))?;
-                self.append_value(ctx, &op)
+                self.await_promise(ctx, promise)?
             }
             Expr::PerformanceNow => self
                 .intrinsic(ctx, Intrinsic::MonotonicNow, vec![])

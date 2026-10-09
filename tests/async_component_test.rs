@@ -9,15 +9,22 @@ use std::sync::{
 };
 use wasmtime::{
     Config, Engine, Store,
-    component::{Component, ComponentType, Lift, Linker, ResourceTable},
+    component::{Component, ComponentType, Lift, Linker, ResourceTable, Val},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+#[path = "support/text_bytes.rs"]
+mod text_bytes;
+use text_bytes::TextOrBytes;
 
 const WIT: &str = r#"
 package test:timers;
 world timers {
   import wasi:clocks/monotonic-clock@0.3.0;
   record observation { value: f64, trace: list<f64> }
+  variant payload { text(string), bytes(list<u8>) }
+  variant reversed { bytes(list<u8>), text(string) }
+  record variants { a: payload, b: reversed, c: payload, d: reversed, e: payload, f: reversed }
   export run: async func(x: f64) -> observation;
   export label: async func(name: string) -> string;
   export count: async func(n: u32) -> u32;
@@ -25,6 +32,11 @@ world timers {
   export bytes: async func(input: list<u8>, tag: u8) -> list<u8>;
   export json: async func(input: string) -> string;
   export fail: async func();
+  export echo-variant: async func(input: payload) -> payload;
+  export variant-pack: async func(a: payload, b: reversed, c: payload, d: reversed, e: payload, f: reversed) -> variants;
+  export adoption: async func(mode: u32) -> list<f64>;
+  export deferred: async func(x: f64) -> observation;
+  export relay: async func(x: f64) -> observation;
 }
 "#;
 
@@ -32,10 +44,79 @@ const SOURCE: &str = r#"
 import { setTimeout } from 'node:timers/promises';
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 interface Observation { value: number; trace: number[] }
+async function appendLater(trace:number[]):Promise<void>{
+  await setTimeout(1);
+  trace.push(2);
+}
+export function deferred(x:number):Observation{
+  const trace:number[]=[1];
+  appendLater(trace);
+  return {value:x,trace:trace};
+}
+export function relay(x:number):Promise<Observation>{return run(x);}
 async function later(v: number): Promise<number> {
   const a = v + 1;
   await setTimeout(1);
   return a;
+}
+type Payload = string | Uint8Array;
+interface Variants { a:Payload; b:Payload; c:Payload; d:Payload; e:Payload; f:Payload }
+async function retain(input:Payload):Promise<Payload> {
+  await setTimeout(1);
+  return input;
+}
+async function forwardPayload(pending:Promise<Uint8Array|string>):Promise<Payload>{
+  try{return pending;}finally{await setTimeout(1);}
+}
+async function readyText(input:string):Promise<string>{return input;}
+async function readyBytes(input:Uint8Array):Promise<Uint8Array>{return input;}
+async function widenPayload(input:Payload):Promise<Payload>{
+  return typeof input==='string'?readyText(input):readyBytes(input);
+}
+export async function echoVariant(input:Payload):Promise<Payload> {
+  const pending=retain(input);
+  const first=await forwardPayload(pending);
+  const second=await pending;
+  const widened=await widenPayload(second);
+  if(first!==input || second!==input || widened!==input)throw new Error('lost variant identity');
+  return widened;
+}
+export async function variantPack(a:Payload,b:Payload,c:Payload,d:Payload,e:Payload,f:Payload):Promise<Variants> {
+  const result:Variants={a:a,b:b,c:c,d:d,e:e,f:f};
+  await setTimeout(1);
+  return result;
+}
+async function settle(trace:number[],fail:boolean,error:Error):Promise<number>{
+  await setTimeout(1);
+  trace.push(3);
+  if(fail)throw error;
+  return 7;
+}
+async function adopt(trace:number[],mode:number,error:Error):Promise<number>{
+  const pending=settle(trace,mode===1,error);
+  try {
+    if(mode===2)return await pending;
+    return pending;
+  } catch(e){trace.push(99);return -1;}
+  finally {
+    if(mode===3){trace.push(1);await pending;trace.push(4);}
+    else trace.push(mode===2?4:1);
+  }
+}
+export async function adoption(mode:number):Promise<number[]>{
+  const trace:number[]=[];
+  const error=new Error('adopted');
+  const pending=adopt(trace,mode,error);
+  trace.push(2);
+  if(mode===1){
+    for(let i=0;i<2;i++){
+      let caught=false;
+      try{await pending;}catch(e){caught=e===error;}
+      if(!caught)throw new Error('lost adopted rejection');
+    }
+  }else if(await pending!==7)throw new Error('lost adopted value');
+  trace.push(5);
+  return trace;
 }
 export async function run(x: number): Promise<Observation> {
   const trace: number[] = [];
@@ -53,6 +134,12 @@ export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
   return await setTimeout(2, prefix + "!");
 }
+async function retainJson(pending:Promise<JsonValue>):Promise<JsonValue>{
+  try{return pending;}finally{await setTimeout(1);}
+}
+async function retainNative(pending:Promise<{[key:string]:number;count:number}>):Promise<JsonValue>{
+  try{return pending;}finally{await setTimeout(1);}
+}
 export async function json(input: string): Promise<string> {
   const encoder=new TextEncoder();
   const encoded=encoder.encode('🙂'+input);
@@ -64,7 +151,7 @@ export async function json(input: string): Promise<string> {
   const parts = original.split('\0');
   const head = original.charAt(0);
   original = original + '!';
-  const value = JSON.parse(input);
+  const value = await retainJson(setTimeout(1,JSON.parse(input)));
   const alias = value.item;
   const typed: {count: number} = alias;
   const count: number = typed.count;
@@ -79,7 +166,7 @@ export async function json(input: string): Promise<string> {
   const optionalJson:JsonValue=optional;
   const optionalKeys=Object.keys(optional);
   optional.label='before';
-  const reference: JsonValue = native;
+  const reference: JsonValue = await retainNative(setTimeout(1,native));
   for(let i=0;i<24;i++) alias[i] = i;
   const keys = Object.keys(alias);
   const snapshot = JSON.stringify(value);
@@ -256,6 +343,8 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let instance = linker.instantiate_async(&mut store, &component).await?;
 
     let run = instance.get_typed_func::<(f64,), (Observation,)>(&mut store, "run")?;
+    let deferred = instance.get_typed_func::<(f64,), (Observation,)>(&mut store, "deferred")?;
+    let relay = instance.get_typed_func::<(f64,), (Observation,)>(&mut store, "relay")?;
     let label = instance.get_typed_func::<(&str,), (String,)>(&mut store, "label")?;
     let count = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "count")?;
     let recover = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "recover")?;
@@ -268,7 +357,57 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     );
     let json_expected = json_input.replacen("\"count\":1", "\"count\":2", 1);
     let byte_expected = [vec![7], byte_input.clone(), vec![8]].concat();
+    let variant =
+        instance.get_typed_func::<(TextOrBytes,), (TextOrBytes,)>(&mut store, "echo-variant")?;
+    let variant_pack = instance.get_func(&mut store, "variant-pack").unwrap();
+    let adoption = instance.get_typed_func::<(u32,), (Vec<f64>,)>(&mut store, "adoption")?;
+    let variant_cases = [
+        TextOrBytes::Text(String::new()),
+        TextOrBytes::Bytes(Vec::new()),
+        TextOrBytes::Text("\u{feff}é🙂\0".repeat(8_192)),
+        TextOrBytes::Bytes(byte_input.clone()),
+    ];
+    let variant_args: Vec<_> = [3, 2, 0, 1, 1, 0]
+        .into_iter()
+        .map(|i| match &variant_cases[i] {
+            TextOrBytes::Text(text) => {
+                Val::Variant("text".into(), Some(Box::new(Val::String(text.clone()))))
+            }
+            TextOrBytes::Bytes(bytes) => Val::Variant(
+                "bytes".into(),
+                Some(Box::new(Val::List(
+                    bytes.iter().copied().map(Val::U8).collect(),
+                ))),
+            ),
+        })
+        .collect();
+    let variant_expected = Val::Record(
+        ["a", "b", "c", "d", "e", "f"]
+            .into_iter()
+            .zip(variant_args.iter().cloned())
+            .map(|(name, value)| (name.into(), value))
+            .collect(),
+    );
     for round in 0..20 {
+        for (mode, expected) in [
+            (0, vec![1.0, 2.0, 3.0, 5.0]),
+            (1, vec![1.0, 2.0, 3.0, 5.0]),
+            (2, vec![2.0, 3.0, 4.0, 5.0]),
+            (3, vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+        ] {
+            assert_eq!(adoption.call_async(&mut store, (mode,)).await?.0, expected);
+        }
+        for value in &variant_cases {
+            assert_eq!(
+                variant.call_async(&mut store, (value.clone(),)).await?.0,
+                *value
+            );
+        }
+        let mut variant_results = [Val::Bool(false)];
+        variant_pack
+            .call_async(&mut store, &variant_args, &mut variant_results)
+            .await?;
+        assert_eq!(variant_results[0], variant_expected);
         assert_eq!(
             json.call_async(&mut store, (&json_input,)).await?.0,
             json_expected
@@ -278,6 +417,20 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
             byte_expected
         );
         assert_eq!(recover.call_async(&mut store, (7.0,)).await?.0, 40.0);
+        assert_eq!(
+            deferred.call_async(&mut store, (7.0,)).await?.0,
+            Observation {
+                value: 7.0,
+                trace: vec![1.0, 2.0],
+            }
+        );
+        assert_eq!(
+            relay.call_async(&mut store, (2.0,)).await?.0,
+            Observation {
+                value: 6.0,
+                trace: vec![2.0, 3.0, 3.0],
+            }
+        );
         let (observation,) = run.call_async(&mut store, (3.5,)).await?;
         assert_eq!(
             observation,
@@ -300,6 +453,17 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     assert_eq!(store.data().peak, 0, "memory grew across async tasks");
 
     // Overlapping calls on one instance: each task keeps its own frames and subtasks.
+    let (variant_text, variant_bytes) = store
+        .run_concurrent(async |accessor| -> wasmtime::Result<_> {
+            let (text, bytes) = tokio::join!(
+                variant.call_concurrent(accessor, (variant_cases[2].clone(),)),
+                variant.call_concurrent(accessor, (variant_cases[3].clone(),)),
+            );
+            Ok((text?.0, bytes?.0))
+        })
+        .await??;
+    assert_eq!(variant_text, variant_cases[2]);
+    assert_eq!(variant_bytes, variant_cases[3]);
     let (a, b, c) = store
         .run_concurrent(async |accessor| -> wasmtime::Result<_> {
             let (a, b, c) = tokio::join!(
@@ -392,6 +556,8 @@ world timers { import wasi:clocks/monotonic-clock@0.3.0; export run: func(fail: 
     for source in [
         "import {setTimeout} from 'node:timers/promises'; export function run(fail:boolean):void {setTimeout(3600000); if(fail)throw new Error('root');}",
         "import {setTimeout} from 'node:timers/promises'; export function run(fail:boolean):void {later(); if(fail)throw new Error('root');} async function later():Promise<void>{await setTimeout(3600000); throw new Error('unreachable');}",
+        "import {setTimeout} from 'node:timers/promises'; export async function run(fail:boolean):Promise<void>{const pending=setTimeout(3600000); if(fail)throw new Error('root'); await pending;}",
+        "import {setTimeout} from 'node:timers/promises'; export function run(fail:boolean):Promise<void>{const pending=setTimeout(3600000); if(fail)throw new Error('root'); return pending;}",
     ] {
         let compiled = compile_for_world(source, "sync-timers.ts", &resolve, world, true)?;
         let component = Component::new(&engine, compiled.stripped.unwrap())?;
@@ -419,7 +585,7 @@ world timers { import wasi:clocks/monotonic-clock@0.3.0; export run: func(fail: 
                     error.downcast_ref::<wasmtime::Trap>(),
                     Some(wasmtime::Trap::CannotBlockSyncTask)
                 ),
-                "{error:#}"
+                "fail={fail}, source={source}: {error:#}"
             );
             assert_eq!(activity.started.load(Ordering::SeqCst), 1);
             // Blocking cancellation traps before task.free; the poisoned store retains

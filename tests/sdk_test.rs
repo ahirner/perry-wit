@@ -134,6 +134,69 @@ fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
 }
 
 #[test]
+fn generated_text_byte_variant_contract_accepts_native_values() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::create_dir(root.join("wit")).unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("wit/world.wit"),
+        r#"
+        package test:variants; world task {
+            type octet = u8;
+            variant payload { raw(list<octet>), text(string) }
+            export run:func(input:payload)->payload;
+        }
+    "#,
+    )
+    .unwrap();
+    generate_sdk_files(&SdkOptions {
+        wit_dir: root.join("wit"),
+        world: Some("task".into()),
+        out_dir: root.join(".perry/types"),
+        project_root: Some(root.into()),
+        entry: PathBuf::from("src/index.ts"),
+        initialize_tsconfig: true,
+    })
+    .unwrap();
+    for (source, succeeds) in [
+        (
+            "import type {Payload} from '../.perry/types/world'; export function run(input:Payload):Payload {return input;}",
+            true,
+        ),
+        (
+            "export function run(input:string|Uint8Array):string|Uint8Array {return typeof input==='string'?input:input.subarray(1);}",
+            true,
+        ),
+        (
+            "export function run(input:string|Uint8Array):string {return 'ok';}",
+            true,
+        ),
+        (
+            "export function run(input:string):string {return input;}",
+            false,
+        ),
+        (
+            "export function run(input:string|Uint8Array):{tag:'text',val:string} {return {tag:'text',val:'wrong'};}",
+            false,
+        ),
+    ] {
+        fs::write(root.join("src/index.ts"), source).unwrap();
+        let output = std::process::Command::new("tsc")
+            .arg("--noEmit")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            succeeds,
+            "{source}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
 fn result_contract_accepts_completion_or_explicit_result_implementations() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path();

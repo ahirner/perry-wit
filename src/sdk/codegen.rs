@@ -120,7 +120,7 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
         }
         TypeDefKind::Stream(Some(Type::U8)) => "ReadableStream<Uint8Array>".into(),
         TypeDefKind::List(elem) => {
-            if matches!(elem, Type::U8) {
+            if crate::abi::unalias(resolve, *elem) == Type::U8 {
                 "Uint8Array".to_string()
             } else {
                 format!("Array<{}>", wit_type_to_ts(resolve, elem))
@@ -154,7 +154,8 @@ fn type_kind_to_ts(resolve: &Resolve, kind: &TypeDefKind) -> String {
 
 fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
     let Type::Id(id) = ty else { return false };
-    if matches!(resolve.types[*id].kind, TypeDefKind::List(Type::U8)) {
+    if matches!(resolve.types[*id].kind, TypeDefKind::List(element) if crate::abi::unalias(resolve, element) == Type::U8)
+    {
         return true;
     }
     let mut found = false;
@@ -608,6 +609,11 @@ fn emit_type_def(
             out.push_str(&cases.join(" | "));
             out.push_str(";\n\n");
         }
+        TypeDefKind::Variant(var) if crate::abi::text_bytes_order(resolve, var).is_some() => {
+            out.push_str(&format!(
+                "export type {type_name} = string | Uint8Array;\n\n"
+            ));
+        }
         TypeDefKind::Variant(var) => {
             let cases: Vec<String> = var
                 .cases
@@ -690,6 +696,37 @@ pub fn generate_declarations_from_wit_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_byte_variants_share_the_compiler_payload_contract() -> Result<()> {
+        let mut resolve = Resolve::default();
+        let package = resolve.push_str(
+            "variants.wit",
+            r#"
+            package test:variants;
+            world variants {
+                type octet = u8;
+                type data = list<octet>;
+                type text = string;
+                variant payload { text(text), bytes(data) }
+                variant reverse { raw(data), utf-eight(text) }
+                type alias = payload;
+                variant tagged { first(string), second(string) }
+                export echo: func(input: alias) -> reverse;
+                export other: func(input: tagged) -> tagged;
+            }
+        "#,
+        )?;
+        let world = resolve.select_world(&[package], Some("variants"))?;
+        let declarations = generate_world_declarations(&resolve, &resolve.worlds[world])?;
+        assert!(declarations.contains("export type Data = Uint8Array;"));
+        assert!(declarations.contains("export type Payload = string | Uint8Array;"));
+        assert!(declarations.contains("export type Reverse = string | Uint8Array;"));
+        assert!(declarations.contains("export type Alias = Payload;"));
+        assert!(declarations.contains("tag: \"first\"; val: string"));
+        assert!(declarations.contains("tag: \"second\"; val: string"));
+        Ok(())
+    }
 
     #[test]
     fn test_generate_declarations_with_complex_types() {

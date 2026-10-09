@@ -652,13 +652,15 @@ world worker { import wasi:clocks/monotonic-clock@0.3.0; export run: async func(
     let world = resolve.select_world(&[package], Some("worker"))?;
     let source = r#"
 import {setTimeout} from 'node:timers/promises';
-export async function run(): Promise<void> {
+async function pendingWork(): Promise<void> {
   const values: number[] = [];
   for (let i=0; i<10000; i++) values.push(i);
   setTimeout(3600000);
   try { await setTimeout(3600000); }
   finally { throw new Error("cancelled continuation ran"); }
 }
+async function forward(pending:Promise<void>):Promise<void>{return pending;}
+export async function run():Promise<void>{return forward(pendingWork());}
 "#;
     let worker = compile_for_world(source, "cancel.ts", &resolve, world, true)?
         .stripped

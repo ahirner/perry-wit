@@ -53,7 +53,7 @@ use pliron::{
         },
         ops::{ConstantOp, FuncOp, ModuleOp},
         type_interfaces::FunctionTypeInterface,
-        types::{FP64Type, FunctionType, IntegerType, Signedness},
+        types::{FP32Type, FP64Type, FunctionType, IntegerType, Signedness},
     },
     context::{Context, Ptr},
     identifier::Identifier,
@@ -1445,6 +1445,9 @@ impl<'s> FunctionLowering<'s> {
     fn zero(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
         if ty.deref(ctx).is::<FP64Type>() {
             self.f64_const(ctx, 0.0)
+        } else if ty.deref(ctx).is::<FP32Type>() {
+            let zero = self.f64_const(ctx, 0.0);
+            self.num(ctx, NumOpcode::F32DemoteF64, vec![zero])
         } else if ty
             .deref(ctx)
             .downcast_ref::<IntegerType>()

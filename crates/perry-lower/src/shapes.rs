@@ -70,6 +70,25 @@ pub(crate) fn identifier(name: &str) -> Result<Identifier> {
     Identifier::try_from(name.to_string()).map_err(|_| anyhow!("{name} is not a MIR identifier"))
 }
 
+/// Legacy numeric-error annotations carry a normal success value inside the guest.
+pub(crate) fn completion_type(ty: &HirType) -> Result<&HirType> {
+    if let HirType::Generic { base, type_args } = ty
+        && base == "Result"
+    {
+        ensure!(
+            type_args.len() == 2,
+            "Result requires success and error type arguments"
+        );
+        ensure!(
+            matches!(type_args[1], HirType::Number | HirType::Int32),
+            "legacy Result<T, E> annotations require numeric errors; use a plain completion return type for other WIT errors"
+        );
+        Ok(&type_args[0])
+    } else {
+        Ok(ty)
+    }
+}
+
 fn record_name(fields: &[&str]) -> String {
     if fields.is_empty() {
         "shape_".to_string()
@@ -121,6 +140,7 @@ impl<'h> Shapes<'h> {
 
     /// MIR type of a HIR value type, for the types supported so far.
     pub(crate) fn value_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
+        let ty = completion_type(ty)?;
         if self.hir.type_aliases.iter().any(|alias| {
             (&alias.ty == ty || matches!(ty, HirType::Named(name) if name == &alias.name))
                 && json_alias(&alias.name, &alias.ty)
@@ -211,7 +231,7 @@ impl<'h> Shapes<'h> {
 
     /// The value a promise of `ty` settles with; `void` settles `undefined`.
     pub(crate) fn settled_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
-        match ty {
+        match completion_type(ty)? {
             HirType::Void => {
                 let number = FP64Type::get(ctx).into();
                 Ok(OptionalType::get(ctx, number).into())
