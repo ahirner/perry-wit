@@ -63,6 +63,8 @@ pub struct Task {
     pub(crate) outputs: [*mut u8; 2],
     pub(crate) output_failed: bool,
     pub(crate) environment: *mut u8,
+    pub(crate) filesystem: *mut u8,
+    pub(crate) imported: *mut crate::import_buffer::Block,
 }
 
 struct Runtime {
@@ -133,6 +135,8 @@ fn new_task() -> *mut Task {
             outputs: [ptr::null_mut(); 2],
             output_failed: false,
             environment: ptr::null_mut(),
+            filesystem: ptr::null_mut(),
+            imported: ptr::null_mut(),
         })
     };
     task
@@ -244,6 +248,7 @@ pub extern "C" fn perry_task_free() {
     // SAFETY: every chunk on the task's chains belongs to it; the task was allocated by
     // [new_task].
     unsafe {
+        crate::import_buffer::release_task(task);
         let mut chunk = (*task).chunk;
         while !chunk.is_null() {
             let previous = (*chunk).previous;
@@ -272,7 +277,11 @@ pub extern "C" fn perry_task_set() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_task_pending() -> u32 {
     let task = current();
-    u32::from(!task.subtasks.is_null() || task.outputs.iter().any(|output| !output.is_null()))
+    u32::from(
+        !task.subtasks.is_null()
+            || !task.filesystem.is_null()
+            || task.outputs.iter().any(|output| !output.is_null()),
+    )
 }
 
 /// Record the waitable set created for the current task.
@@ -350,9 +359,10 @@ pub extern "C" fn perry_subtask_done(handle: u32) -> u32 {
 
 /// The canonical ABI `realloc`, exported by compiled components as `cabi_realloc`.
 ///
-/// The host only allocates (`old == 0`) to lower arguments and results; blocks live in the
+/// The host uses this allocator to lower export arguments; blocks live in the
 /// current task's region, created here when argument lowering precedes the export call, and
-/// are never freed individually. Alignment is at most 8 in the canonical ABI.
+/// are never freed individually. Import results use the independent import-buffer allocator.
+/// Alignment is at most 8 in the canonical ABI.
 ///
 /// # Safety
 /// `old` must be null or a block of `old_size` bytes from this function.

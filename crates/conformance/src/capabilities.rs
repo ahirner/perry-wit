@@ -595,6 +595,35 @@ try {
   await unlink('contract-directory/value.bin');
 } finally {await rmdir('contract-directory');}
 "#;
+fn filesystem_metadata(depth: u8) -> Case {
+    let mut operation = String::from(
+        "const file=await stat('fixture.txt'); trace.push(file.size); trace.push(file.isFile()?1:0); trace.push(file.isDirectory()?1:0);\n",
+    );
+    let mut path = String::new();
+    let mut paths = Vec::new();
+    for _ in 0..depth {
+        if !path.is_empty() {
+            path.push('/');
+        }
+        path.push_str("contract-metadata");
+        operation.push_str(&format!("await mkdir('{path}',{{recursive:false}});\n"));
+        paths.push(path.clone());
+    }
+    operation.push_str(&format!("const directory=await stat('./{path}/.');trace.push(directory.isDirectory()?1:0);trace.push(directory.isFile()?1:0);\n"));
+    for path in paths.iter().rev() {
+        operation.push_str(&format!("await rmdir('{path}');\n"));
+    }
+    operation.push_str(&format!(
+        "try{{await stat('{path}');trace.push(0);}}catch{{trace.push(1);}}\n"
+    ));
+    let Case::Function { source, .. } = bytes_function(vec![], &operation, true) else {
+        unreachable!()
+    };
+    Case::Function {
+        source: format!("import {{stat,mkdir,rmdir}} from 'node:fs/promises';\n{source}"),
+        asynchronous: true,
+    }
+}
 const DECODE: &str = r#"
 const decoder=new TextDecoder('utf-8',{fatal:true});
 let text='';
@@ -688,6 +717,24 @@ fn additional_contracts() -> Vec<Contract> {
         exit: ExitStatus::Failure,
     };
     vec![
+        Contract {
+            id: "node.fs.metadata_lifecycle",
+            description: "Native file metadata and nested directory lifecycle",
+            specification: "https://nodejs.org/api/fs.html",
+            domain: "Existing fixture size and kind; one to six nested directories, normalized paths, removal and missing-path rejection; reuse across numeric inputs. Numeric WASI errors, confinement and cancellation have separate component tests",
+            witnesses: vec![
+                Witness {
+                    partition: "one-directory",
+                    case: filesystem_metadata(1),
+                },
+                Witness {
+                    partition: "nested-directories",
+                    case: filesystem_metadata(6),
+                },
+            ],
+            strategy: (1u8..=6).prop_map(filesystem_metadata).boxed(),
+            check: check_equivalence,
+        },
         Contract {
             id: "node.fs.directories",
             description: "Directory creation, listing, metadata and deletion",

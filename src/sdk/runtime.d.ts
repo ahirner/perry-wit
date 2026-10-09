@@ -79,9 +79,9 @@ declare module "fs/promises" {
   export function readFile(path: string, options: string | { encoding?: string | null; flag?: "r"; signal?: AbortSignal }): Promise<string | Uint8Array>;
   export function writeFile(path: string, data: string | Uint8Array, options?: string | { encoding?: string | null; flag?: "w"; signal?: AbortSignal } | null): Promise<void>;
   export function stat(path: string, options?: { bigint?: false; throwIfNoEntry?: true } | null): Promise<Stats>;
-  export function mkdir(path: string): Promise<void>;
+  export function mkdir(path: string, options?: { recursive?: false } | null): Promise<void>;
   export function unlink(path: string): Promise<void>;
-  export function rmdir(path: string): Promise<void>;
+  export function rmdir(path: string, options?: { recursive?: false } | null): Promise<void>;
   export function readdir(path: string, options?: string | { encoding?: string | null; recursive?: false; withFileTypes?: false } | null): Promise<string[]>;
   const fs: { readFile: typeof readFile; writeFile: typeof writeFile; stat: typeof stat; mkdir: typeof mkdir; unlink: typeof unlink; rmdir: typeof rmdir; readdir: typeof readdir };
   export default fs;

@@ -37,8 +37,9 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, OptionalType,
-        PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TupleType,
+        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, FsStatsType, JsonType,
+        OptionalType, PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType,
+        TupleType,
     },
 };
 use perry_runtime::array as layout;
@@ -231,6 +232,14 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    FsStat,
+    FsMkdir,
+    FsUnlink,
+    FsRmdir,
+    FsStatsGet,
+    FsEvent,
+    FsCancel,
+    ImportRealloc,
     TextEncoderNew,
     TextEncode,
     TextDecoderNew,
@@ -450,6 +459,14 @@ impl Runtime {
             Runtime::ExceptionEqual => "perry_exception_equal",
             Runtime::StringEqual => "perry_string_equal",
             Runtime::CabiRealloc => "perry_cabi_realloc",
+            Runtime::FsStat => "perry_fs_stat",
+            Runtime::FsMkdir => "perry_fs_mkdir",
+            Runtime::FsUnlink => "perry_fs_unlink",
+            Runtime::FsRmdir => "perry_fs_rmdir",
+            Runtime::FsStatsGet => "perry_fs_stats_get",
+            Runtime::FsEvent => "perry_fs_event",
+            Runtime::FsCancel => "perry_fs_cancel",
+            Runtime::ImportRealloc => "perry_import_realloc",
             Runtime::TextEncoderNew => "perry_encoder_new",
             Runtime::TextEncode => "perry_text_encode",
             Runtime::TextDecoderNew => "perry_decoder_new",
@@ -599,6 +616,13 @@ impl Runtime {
             Runtime::StringCase | Runtime::StringTrim => (vec![i32, i32], vec![i32]),
             Runtime::StringRepeat => (vec![i32, f64], vec![i32]),
             Runtime::StringSplit => (vec![i32, i32, f64], vec![i32]),
+            Runtime::FsStat | Runtime::FsMkdir | Runtime::FsUnlink | Runtime::FsRmdir => {
+                (vec![i32, i32], vec![i32])
+            }
+            Runtime::FsStatsGet => (vec![i32, i32], vec![f64]),
+            Runtime::FsEvent => (vec![i32; 3], vec![]),
+            Runtime::FsCancel => (vec![], vec![]),
+            Runtime::ImportRealloc => (vec![i32; 4], vec![i32]),
             Runtime::TextEncoderNew => (vec![], vec![i32]),
             Runtime::TextEncode | Runtime::TextDecoderIgnoreBom => (vec![i32], vec![i32]),
             Runtime::TextDecoderNew | Runtime::TextDecode => (vec![i32, i32, i32], vec![i32]),
@@ -640,6 +664,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
         || deref.is::<JsonType>()
+        || deref.is::<FsStatsType>()
         || deref.is::<TextEncoderType>()
         || deref.is::<TextDecoderType>()
         || deref.is::<BytesType>()
@@ -779,6 +804,7 @@ struct ModuleState {
     uses_process: bool,
     uses_typed_views: bool,
     needs_task_cleanup: bool,
+    uses_filesystem: bool,
 }
 
 impl ModuleState {
@@ -822,6 +848,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         async_functions: async_functions.clone(),
         uses_process: false,
         needs_task_cleanup: false,
+        uses_filesystem: false,
     };
     let mut raw_sync_exports = Vec::new();
     for function in &functions {
@@ -847,6 +874,10 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
     }
     if matches!(exports, Exports::Raw) {
+        ensure!(
+            !state.uses_filesystem,
+            "filesystem operations require async WIT exports"
+        );
         ensure!(
             !state.runtime.contains(&Runtime::Stdout) && !state.runtime.contains(&Runtime::Stderr),
             "console output requires async WIT exports to drain P3 streams"
@@ -2044,7 +2075,10 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             let kind = intrinsic.kind(ctx);
-            let text_runtime = match kind {
+            let value_runtime = match kind {
+                Intrinsic::FsSize => Some((Runtime::FsStatsGet, Some(0))),
+                Intrinsic::FsMtime => Some((Runtime::FsStatsGet, Some(1))),
+                Intrinsic::FsKind => Some((Runtime::FsStatsGet, Some(2))),
                 Intrinsic::TextEncoderNew => Some((Runtime::TextEncoderNew, None)),
                 Intrinsic::TextEncode => Some((Runtime::TextEncode, None)),
                 Intrinsic::TextDecoderNew => Some((Runtime::TextDecoderNew, None)),
@@ -2069,7 +2103,7 @@ impl<'s> FunctionLowering<'s> {
                 Intrinsic::StringSplit => Some((Runtime::StringSplit, None)),
                 _ => None,
             };
-            if let Some((runtime, mode)) = text_runtime {
+            if let Some((runtime, mode)) = value_runtime {
                 let mut operands = self.operands(ctx, op)?;
                 if let Some(mode) = mode {
                     operands.push(self.i32_const(ctx, mode));
@@ -2206,7 +2240,21 @@ impl<'s> FunctionLowering<'s> {
                 }
                 return Ok(());
             }
+            if matches!(
+                kind,
+                Intrinsic::FsStat | Intrinsic::FsMkdir | Intrinsic::FsUnlink | Intrinsic::FsRmdir
+            ) {
+                self.state.uses_filesystem = true;
+                ensure!(
+                    self.state.can_import("wasi:filesystem/preopens@0.3.0"),
+                    "WIT world must import wasi:filesystem/preopens@0.3.0"
+                );
+            }
             let (runtime, interface) = match intrinsic.kind(ctx) {
+                Intrinsic::FsStat => (Runtime::FsStat, "wasi:filesystem/types@0.3.0"),
+                Intrinsic::FsMkdir => (Runtime::FsMkdir, "wasi:filesystem/types@0.3.0"),
+                Intrinsic::FsUnlink => (Runtime::FsUnlink, "wasi:filesystem/types@0.3.0"),
+                Intrinsic::FsRmdir => (Runtime::FsRmdir, "wasi:filesystem/types@0.3.0"),
                 Intrinsic::Stdout => (Runtime::Stdout, "wasi:cli/stdout@0.3.0"),
                 Intrinsic::Stderr => (Runtime::Stderr, "wasi:cli/stderr@0.3.0"),
                 Intrinsic::EnvGet => (Runtime::EnvGet, "wasi:cli/environment@0.3.0"),

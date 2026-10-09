@@ -1,6 +1,6 @@
 //! Synchronous CLI value imports. Canonical return storage and lifted values belong to
-//! the current task, including allocations made by the host through cabi_realloc.
-use crate::{array, region::current, string};
+//! the current task after explicit transfer from the canonical import allocator.
+use crate::{array, import_buffer, region::current, string};
 use core::ptr;
 
 #[repr(C)]
@@ -43,13 +43,19 @@ struct Timestamp {
 }
 
 fn variables() -> &'static [Variable] {
-    // SAFETY: imports write their canonical return area and allocate payloads in this task.
+    // SAFETY: imports initialize the return area; payload ownership is claimed before use.
     unsafe {
         let task = current();
         let mut vars = task.environment as *mut List<Variable>;
         if vars.is_null() {
             vars = task.allocate(size_of::<List<Variable>>()).cast();
             environment(vars);
+            import_buffer::claim((*vars).data.cast());
+            for index in 0..(*vars).len as usize {
+                let value = &*(*vars).data.add(index);
+                import_buffer::claim(value.key.data);
+                import_buffer::claim(value.value.data);
+            }
             current().environment = vars.cast();
         }
         if (*vars).len == 0 {
@@ -95,9 +101,13 @@ pub extern "C" fn perry_arguments() -> *mut u8 {
         data: ptr::null_mut(),
         len: 0,
     };
-    // SAFETY: canonical import writes result; host allocations belong to this task.
+    // SAFETY: canonical import initializes the result before its buffers are claimed.
     unsafe {
         arguments(&mut result);
+        import_buffer::claim(result.data.cast());
+        for index in 0..result.len as usize {
+            import_buffer::claim((*result.data.add(index)).data);
+        }
         let values = if result.len == 0 {
             &[]
         } else {

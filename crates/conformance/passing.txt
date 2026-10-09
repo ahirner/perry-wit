@@ -24,3 +24,4 @@ ecma.json.roundtrip
 ecma.subset.exclusions
 web.textdecoder.streaming
 web.textencoder.values
+node.fs.metadata_lifecycle

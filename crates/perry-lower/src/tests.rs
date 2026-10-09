@@ -62,7 +62,7 @@ fn text_codec_options_reject_forms_the_frontend_cannot_preserve() {
         "new TextDecoder().decode(new Uint8Array(0),{__proto__:null})",
     ] {
         let error = rejected(&format!("export function run():void{{{source};}}"));
-        assert!(error.contains("TextDecoder options"), "{error}");
+        assert!(error.contains("builtin options"), "{error}");
     }
 }
 
@@ -650,5 +650,21 @@ fn enumeration_retains_native_tuple_slots_and_inferred_values() {
         "export function run():number {const values=Object.values({bytes:new Uint8Array([2]),n:1});return values.length;}",
     ] {
         rejected(source);
+    }
+}
+
+#[test]
+fn filesystem_options_reject_unpreserved_frontend_forms() {
+    for options in [
+        "{get bigint(){return false;}}",
+        "{...{bigint:false}}",
+        "{['bigint']:false}",
+        "{__proto__:null}",
+        "options",
+    ] {
+        let error = rejected(&format!(
+            "import {{stat as metadata}} from 'fs/promises'; export async function run():Promise<void>{{const options={{bigint:false}};await metadata('input',{options});}}"
+        ));
+        assert!(error.contains("builtin options"), "{error}");
     }
 }

@@ -12,8 +12,8 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
     ArrayType, BufferType, BytesType, DictionaryField, DictionarySchema, DictionaryType,
-    ExceptionType, JsonType, OptionalType, PromiseType, RecordField, RecordType, StringType,
-    TextDecoderType, TextEncoderType, TupleType,
+    ExceptionType, FsStatsType, JsonType, OptionalType, PromiseType, RecordField, RecordType,
+    StringType, TextDecoderType, TextEncoderType, TupleType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -173,10 +173,11 @@ impl<'h> Shapes<'h> {
                 let element = self.value_type(ctx, element)?;
                 ArrayType::get(ctx, element).into()
             }
-            HirType::Named(name) if name == super::text_source::ENCODER => {
+            HirType::Named(name) if name == super::source::FS_STATS => FsStatsType::get(ctx).into(),
+            HirType::Named(name) if name == super::source::ENCODER => {
                 TextEncoderType::get(ctx).into()
             }
-            HirType::Named(name) if name == super::text_source::DECODER => {
+            HirType::Named(name) if name == super::source::DECODER => {
                 TextDecoderType::get(ctx).into()
             }
             HirType::Named(name) if name == "Uint8Array" => BytesType::get(ctx).into(),

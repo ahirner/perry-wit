@@ -16,11 +16,13 @@
 mod bytes;
 mod dictionaries;
 mod exceptions;
+mod filesystem;
 mod json;
+mod options;
 mod shapes;
+mod source;
 mod strings;
 mod text;
-mod text_source;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use exceptions::{Cleanup, Handler};
 use perry_hir::{
@@ -50,8 +52,8 @@ use perry_mir::{
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, PromiseType,
-        RecordType, StringType, TextDecoderType, TextEncoderType, TupleType,
+        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, FsStatsType, JsonType,
+        PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TupleType,
     },
 };
 use pliron::printable::Printable as _;
@@ -143,7 +145,7 @@ pub fn lower_source(
         bail!("{diagnostic}");
     }
     dictionaries::preserve_interface_indices(&mut ast)?;
-    text_source::prepare(&mut ast)?;
+    source::prepare(&mut ast)?;
     let inferred_spans = shapes::inferred_binding_spans(&ast);
     let mut hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
@@ -265,6 +267,7 @@ fn build_module(
             _ => None,
         })
         .collect();
+    let filesystem = filesystem::Bindings::new(hir);
     let mut signatures = HashMap::new();
     for function in &hir.functions {
         ensure!(
@@ -315,8 +318,9 @@ fn build_module(
         );
     }
     for function in &hir.functions {
-        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &timers)
-            .with_context(|| format!("lowering function {}", function.name))?;
+        let func =
+            FunctionBuilder::lower(ctx, function, &signatures, &shapes, &timers, &filesystem)
+                .with_context(|| format!("lowering function {}", function.name))?;
         if function.is_exported {
             perry_mir::calls::set_exported(ctx, &func);
         }
@@ -364,6 +368,7 @@ fn literal_index(index: &Expr) -> Option<usize> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    FsStats,
     TextEncoder,
     TextDecoder,
     Number,
@@ -386,6 +391,8 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Json)
     } else if ty.is::<FP64Type>() {
         Ok(Kind::Number)
+    } else if ty.is::<FsStatsType>() {
+        Ok(Kind::FsStats)
     } else if ty.is::<TextEncoderType>() {
         Ok(Kind::TextEncoder)
     } else if ty.is::<TextDecoderType>() {
@@ -435,6 +442,7 @@ struct FunctionBuilder<'s> {
     shapes: &'s Shapes<'s>,
     /// Local names bound to `setTimeout` from `node:timers/promises`.
     timers: &'s HashSet<String>,
+    filesystem: &'s filesystem::Bindings,
     results: Vec<TypeHandle>,
     is_async: bool,
     labels: usize,
@@ -447,6 +455,7 @@ impl<'s> FunctionBuilder<'s> {
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
         timers: &'s HashSet<String>,
+        filesystem: &'s filesystem::Bindings,
     ) -> Result<FuncOp> {
         let signature = &signatures[&function.id];
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
@@ -464,6 +473,7 @@ impl<'s> FunctionBuilder<'s> {
             signatures,
             shapes,
             timers,
+            filesystem,
             results: signature.results.clone(),
             is_async: signature.is_async,
             labels: 0,
@@ -1444,6 +1454,17 @@ impl<'s> FunctionBuilder<'s> {
                         self.intrinsic(ctx, Intrinsic::JsonGet, vec![value, key])
                             .unwrap()
                     }
+                    (Kind::FsStats, "size" | "mtimeMs") => self
+                        .intrinsic(
+                            ctx,
+                            if property == "size" {
+                                Intrinsic::FsSize
+                            } else {
+                                Intrinsic::FsMtime
+                            },
+                            vec![value],
+                        )
+                        .unwrap(),
                     (Kind::TextEncoder | Kind::TextDecoder, "encoding") => {
                         self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "utf-8"))
                     }
@@ -1503,12 +1524,8 @@ impl<'s> FunctionBuilder<'s> {
             },
             Expr::New {
                 class_name, args, ..
-            } if matches!(
-                class_name.as_str(),
-                text_source::ENCODER | text_source::DECODER
-            ) =>
-            {
-                self.codec_constructor(ctx, class_name == text_source::DECODER, args)?
+            } if matches!(class_name.as_str(), source::ENCODER | source::DECODER) => {
+                self.codec_constructor(ctx, class_name == source::DECODER, args)?
             }
             Expr::New {
                 class_name, args, ..
@@ -2063,6 +2080,9 @@ impl<'s> FunctionBuilder<'s> {
             };
             return Ok(self.intrinsic(ctx, kind, vec![text]));
         }
+        if let Some(operation) = self.filesystem.operation(callee).map(str::to_owned) {
+            return self.filesystem_call(ctx, &operation, args).map(Some);
+        }
         if let Expr::ExternFuncRef { name, .. } = callee
             && self.timers.contains(name)
         {
@@ -2074,6 +2094,19 @@ impl<'s> FunctionBuilder<'s> {
         {
             let receiver = self.expression(ctx, object)?;
             let receiver = self.defined(ctx, receiver)?;
+            if kind(ctx, receiver)? == Kind::FsStats {
+                ensure!(args.is_empty(), "Stats methods take no arguments");
+                let expected = match property.as_str() {
+                    "isFile" => 5.0,
+                    "isDirectory" => 2.0,
+                    _ => bail!("Stats method {property} is unsupported"),
+                };
+                let kind = self
+                    .intrinsic(ctx, Intrinsic::FsKind, vec![receiver])
+                    .unwrap();
+                let expected = self.number(ctx, expected);
+                return Ok(Some(self.compare(ctx, CompareKind::Eq, kind, expected)));
+            }
             if kind(ctx, receiver)? == Kind::String
                 || (json::is_json(ctx, receiver) && strings::is_string_method(property))
             {

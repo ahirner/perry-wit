@@ -57,6 +57,16 @@ pub struct BufferType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct BytesType;
 
+/// Immutable filesystem metadata returned by a native operation.
+#[pliron_type(
+    name = "perry.fs_stats",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct FsStatsType;
+
 /// A stateless UTF-8 encoder with reference identity.
 #[pliron_type(
     name = "perry.text_encoder",

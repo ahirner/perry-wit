@@ -1,8 +1,8 @@
 //! Typed built-in capabilities. Signatures are verified here; native representations and
 //! task scheduling belong to codegen and the runtime.
 use crate::types::{
-    ArrayType, BufferType, BytesType, JsonType, OptionalType, StringType, TextDecoderType,
-    TextEncoderType,
+    ArrayType, BufferType, BytesType, FsStatsType, JsonType, OptionalType, PromiseType, StringType,
+    TextDecoderType, TextEncoderType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -22,6 +22,13 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    FsStat,
+    FsMkdir,
+    FsUnlink,
+    FsRmdir,
+    FsSize,
+    FsMtime,
+    FsKind,
     TextEncoderNew,
     TextEncode,
     TextDecoderNew,
@@ -100,6 +107,9 @@ pub enum Intrinsic {
 
 #[derive(Clone, Copy)]
 enum ValueType {
+    FsStats,
+    PromiseStats,
+    PromiseVoid,
     TextEncoder,
     TextDecoder,
     OptionalBytes,
@@ -121,6 +131,16 @@ enum ValueType {
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
+            Self::FsStats => FsStatsType::get(ctx).into(),
+            Self::PromiseStats => {
+                let stats = FsStatsType::get(ctx).into();
+                PromiseType::get(ctx, stats).into()
+            }
+            Self::PromiseVoid => {
+                let number = FP64Type::get(ctx).into();
+                let value = OptionalType::get(ctx, number).into();
+                PromiseType::get(ctx, value).into()
+            }
             Self::TextEncoder => TextEncoderType::get(ctx).into(),
             Self::TextDecoder => TextDecoderType::get(ctx).into(),
             Self::OptionalBytes => {
@@ -165,6 +185,20 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
+            Self::FsStats => ty.deref(ctx).is::<FsStatsType>(),
+            Self::PromiseStats | Self::PromiseVoid => {
+                ty.deref(ctx)
+                    .downcast_ref::<PromiseType>()
+                    .is_some_and(|promise| {
+                        let value = promise.value();
+                        match self {
+                            Self::PromiseStats => value.deref(ctx).is::<FsStatsType>(),
+                            _ => value.deref(ctx).downcast_ref::<OptionalType>().is_some_and(
+                                |optional| optional.value().deref(ctx).is::<FP64Type>(),
+                            ),
+                        }
+                    })
+            }
             Self::TextEncoder => ty.deref(ctx).is::<TextEncoderType>(),
             Self::TextDecoder => ty.deref(ctx).is::<TextDecoderType>(),
             Self::OptionalBytes => ty
@@ -216,6 +250,9 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::FsStat => (&[String, Boolean], &[PromiseStats]),
+            Self::FsMkdir | Self::FsUnlink | Self::FsRmdir => (&[String, Boolean], &[PromiseVoid]),
+            Self::FsSize | Self::FsMtime | Self::FsKind => (&[FsStats], &[Number]),
             Self::TextEncoderNew => (&[], &[TextEncoder]),
             Self::TextEncode => (&[OptionalString], &[Bytes]),
             Self::TextDecoderNew => (&[OptionalString, Boolean, Boolean], &[TextDecoder]),

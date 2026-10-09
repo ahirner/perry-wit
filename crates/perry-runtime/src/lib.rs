@@ -19,6 +19,9 @@ pub mod bytes;
 #[cfg(target_arch = "wasm32")]
 mod cli;
 pub mod exception;
+#[cfg(target_arch = "wasm32")]
+mod filesystem;
+mod import_buffer;
 pub mod json;
 #[cfg(target_arch = "wasm32")]
 mod output;

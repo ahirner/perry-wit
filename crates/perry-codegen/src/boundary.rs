@@ -226,6 +226,10 @@ pub(crate) fn export(
         return async_export(ctx, state, function, export);
     }
     ensure!(
+        !state.uses_filesystem,
+        "filesystem operations require async WIT exports"
+    );
+    ensure!(
         !state.runtime.contains(&Runtime::Stdout) && !state.runtime.contains(&Runtime::Stderr),
         "console output requires async WIT exports to drain P3 streams"
     );
@@ -586,6 +590,9 @@ fn async_export(
                 b.runtime(ctx, event_handler, vec![event, handle, subtask_state]);
             }
         }
+        if b.state.uses_filesystem {
+            b.runtime(ctx, Runtime::FsEvent, vec![event, handle, subtask_state]);
+        }
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
         let returned_state = b.i32_const(ctx, SUBTASK_RETURNED);
@@ -595,7 +602,12 @@ fn async_export(
         let next = b.new_block(ctx, vec![]);
         b.cond_br(ctx, both, (settle, vec![]), (next, vec![]));
         b.block = settle;
-        b.runtime(ctx, Runtime::SubtaskDone, vec![handle]);
+        let known = b
+            .runtime(ctx, Runtime::SubtaskDone, vec![handle])
+            .expect("known subtask");
+        let drop = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, known, (drop, vec![]), (next, vec![]));
+        b.block = drop;
         b.host(ctx, crate::Host::SubtaskDrop, vec![handle]);
         b.br(ctx, next, vec![]);
         b.block = next;
@@ -616,7 +628,8 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
     if !state.needs_task_cleanup && !state.uses_process {
         return;
     }
-    let native = state.host.contains(&crate::Host::WaitableSetNew)
+    let native = state.uses_filesystem
+        || state.host.contains(&crate::Host::WaitableSetNew)
         || state.runtime.contains(&Runtime::Stdout)
         || state.runtime.contains(&Runtime::Stderr);
     let void = FunctionType::get(ctx, vec![], vec![]);
@@ -643,6 +656,9 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
     let abort = FuncOp::new(ctx, identifier("abort_task"), void);
     {
         let mut b = FunctionLowering::glue(state, ctx, &abort);
+        if b.state.uses_filesystem {
+            b.runtime(ctx, Runtime::FsCancel, vec![]);
+        }
         if b.state.runtime.contains(&Runtime::SubtaskRegister) {
             b.runtime(ctx, Runtime::SubtasksCancel, vec![]);
         }
@@ -677,6 +693,30 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
 /// `cabi_realloc`, through which the host lowers strings and lists into guest memory.
 pub(crate) fn realloc(ctx: &mut Context, state: &mut ModuleState) {
     let i32 = i32_type(ctx);
+    if state.uses_filesystem
+        || [Runtime::EnvGet, Runtime::EnvKeys, Runtime::Arguments]
+            .iter()
+            .any(|capability| state.runtime.contains(capability))
+    {
+        let ty = FunctionType::get(ctx, vec![i32; 4], vec![i32]);
+        let function = FuncOp::new(ctx, identifier("cabi_import_realloc"), ty);
+        set_export(ctx, &function, "cabi_import_realloc");
+        let args: Vec<Value> = function
+            .get_entry_block(ctx)
+            .deref(ctx)
+            .arguments()
+            .collect();
+        let mut b = FunctionLowering::glue(state, ctx, &function);
+        let result = b
+            .runtime(ctx, Runtime::ImportRealloc, args)
+            .expect("allocation");
+        let ret = ReturnOp::new(ctx, vec![result]).get_operation();
+        b.insert(ctx, ret);
+        b.state
+            .wasm
+            .append_operation(ctx, function.get_operation(), 0);
+    }
+
     let ty = FunctionType::get(ctx, vec![i32; 4], vec![i32]);
     let function = FuncOp::new(ctx, "cabi_realloc".try_into().unwrap(), ty);
     set_export(ctx, &function, "cabi_realloc");

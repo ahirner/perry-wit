@@ -1,10 +1,12 @@
-//! Preserve codec receivers and options before HIR's native shortcuts discard them.
+//! Preserve builtin types and literal options before HIR lowering can discard their semantics.
 use anyhow::{Result, bail, ensure};
 use perry_parser::swc_ecma_ast as ast;
+use std::collections::{HashMap, HashSet};
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
+pub(super) const FS_STATS: &str = "__perry_internal_fs_stats";
 pub(super) const ENCODER: &str = "__perry_internal_text_encoder";
 pub(super) const DECODER: &str = "__perry_internal_text_decoder";
 
@@ -38,7 +40,7 @@ fn options(expression: &ast::Expr) -> Result<()> {
         ast::Expr::Object(object) => {
             for entry in &object.props {
                 let ast::PropOrSpread::Prop(entry) = entry else {
-                    bail!("TextDecoder options do not support spread");
+                    bail!("builtin options do not support spread");
                 };
                 let name = match entry.as_ref() {
                     ast::Prop::KeyValue(entry) => match &entry.key {
@@ -51,12 +53,12 @@ fn options(expression: &ast::Expr) -> Result<()> {
                 };
                 ensure!(
                     name.is_some_and(|name| name != "__proto__"),
-                    "TextDecoder options require plain named data properties"
+                    "builtin options require plain named data properties"
                 );
             }
             Ok(())
         }
-        _ => bail!("TextDecoder options must be a literal object, null or undefined"),
+        _ => bail!("builtin options must be a literal object, null or undefined"),
     }
 }
 
@@ -68,7 +70,7 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
     }
     impl Visit for Names {
         fn visit_ident(&mut self, name: &ast::Ident) {
-            self.reserved |= matches!(name.sym.as_ref(), ENCODER | DECODER);
+            self.reserved |= matches!(name.sym.as_ref(), ENCODER | DECODER | FS_STATS);
             self.codecs |= matches!(name.sym.as_ref(), "TextEncoder" | "TextDecoder");
         }
         fn visit_ident_name(&mut self, name: &ast::IdentName) {
@@ -80,19 +82,72 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
     }
     let mut names = Names::default();
     module.visit_with(&mut names);
-    ensure!(!names.reserved, "reserved compiler codec name in source");
-    if !names.codecs {
+    ensure!(!names.reserved, "reserved compiler builtin name in source");
+    let has_fs = module.body.iter().any(|item| matches!(item, ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) if matches!(import.src.value.as_str(), Some("fs" | "node:fs" | "fs/promises" | "node:fs/promises"))));
+    if !names.codecs && !has_fs {
         return Ok(());
     }
-    let mut declarations = perry_parser::parse_typescript(
-        &format!("declare class {ENCODER} {{}} declare class {DECODER} {{}}"),
-        "codec-types.ts",
-    )?;
-    module.body.append(&mut declarations.body);
+    if names.codecs {
+        let mut declarations = perry_parser::parse_typescript(
+            &format!("declare class {ENCODER} {{}} declare class {DECODER} {{}}"),
+            "codec-types.ts",
+        )?;
+        module.body.append(&mut declarations.body);
+    }
     GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         module.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
-        let mut rewrite = Codecs {
+        let mut filesystem = HashMap::new();
+        let mut stats = HashSet::new();
+        for item in &module.body {
+            let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item else {
+                continue;
+            };
+            match import.src.value.as_str() {
+                Some("fs/promises" | "node:fs/promises") => {
+                    for specifier in &import.specifiers {
+                        match specifier {
+                            ast::ImportSpecifier::Named(named) => {
+                                let name = match &named.imported {
+                                    Some(ast::ModuleExportName::Ident(name)) => {
+                                        name.sym.to_string()
+                                    }
+                                    Some(ast::ModuleExportName::Str(name)) => {
+                                        name.value.to_string_lossy().into_owned()
+                                    }
+                                    None => named.local.sym.to_string(),
+                                };
+                                filesystem.insert(named.local.to_id(), Some(name));
+                            }
+                            ast::ImportSpecifier::Default(default) => {
+                                filesystem.insert(default.local.to_id(), None);
+                            }
+                            ast::ImportSpecifier::Namespace(namespace) => {
+                                filesystem.insert(namespace.local.to_id(), None);
+                            }
+                        }
+                    }
+                }
+                Some("fs" | "node:fs") => {
+                    for specifier in &import.specifiers {
+                        if let ast::ImportSpecifier::Named(named) = specifier {
+                            let name = match &named.imported {
+                                Some(ast::ModuleExportName::Ident(name)) => name.sym.as_ref(),
+                                None => named.local.sym.as_ref(),
+                                _ => continue,
+                            };
+                            if name == "Stats" {
+                                stats.insert(named.local.to_id());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut rewrite = Builtins {
+            filesystem,
+            stats,
             unresolved: SyntaxContext::empty().apply_mark(unresolved),
             error: None,
         };
@@ -104,11 +159,13 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
     })
 }
 
-struct Codecs {
+struct Builtins {
+    filesystem: HashMap<ast::Id, Option<String>>,
+    stats: HashSet<ast::Id>,
     unresolved: SyntaxContext,
     error: Option<anyhow::Error>,
 }
-impl Codecs {
+impl Builtins {
     fn constructor(&mut self, expression: &mut ast::NewExpr) -> Result<()> {
         let name = match underlying(&expression.callee) {
             ast::Expr::Ident(name) if name.ctxt == self.unresolved => Some(name.sym.as_ref()),
@@ -142,7 +199,7 @@ impl Codecs {
         Ok(())
     }
 }
-impl VisitMut for Codecs {
+impl VisitMut for Builtins {
     fn visit_mut_new_expr(&mut self, expression: &mut ast::NewExpr) {
         if let Err(error) = self.constructor(expression) {
             self.error.get_or_insert(error);
@@ -150,6 +207,11 @@ impl VisitMut for Codecs {
         expression.visit_mut_children_with(self);
     }
     fn visit_mut_ts_type_ref(&mut self, reference: &mut ast::TsTypeRef) {
+        if let ast::TsEntityName::Ident(name) = &mut reference.type_name
+            && self.stats.contains(&name.to_id())
+        {
+            name.sym = FS_STATS.into();
+        }
         if let ast::TsEntityName::Ident(name) = &mut reference.type_name
             && name.ctxt == self.unresolved
         {
@@ -162,6 +224,38 @@ impl VisitMut for Codecs {
         reference.visit_mut_children_with(self);
     }
     fn visit_mut_call_expr(&mut self, expression: &mut ast::CallExpr) {
+        if let ast::Callee::Expr(callee) = &expression.callee {
+            let operation = match underlying(callee) {
+                ast::Expr::Ident(name) => self
+                    .filesystem
+                    .get(&name.to_id())
+                    .and_then(Option::as_deref),
+                ast::Expr::Member(member) => match underlying(&member.obj) {
+                    ast::Expr::Ident(name) if self.filesystem.get(&name.to_id()) == Some(&None) => {
+                        property(&member.prop)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if matches!(operation, Some("stat" | "mkdir" | "unlink" | "rmdir")) {
+                let result = (|| {
+                    ensure!(
+                        expression.args.len() <= 2
+                            && expression.args.iter().all(|arg| arg.spread.is_none()),
+                        "filesystem operation takes a path and options without spread"
+                    );
+                    if let Some(argument) = expression.args.get(1) {
+                        options(&argument.expr)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    self.error.get_or_insert(error);
+                }
+            }
+        }
+
         if let ast::Callee::Expr(callee) = &expression.callee
             && let ast::Expr::Member(member) = underlying(callee)
             && property(&member.prop) == Some("decode")
