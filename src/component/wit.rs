@@ -46,14 +46,6 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
         .map(|package| (resolve, package))
 }
 
-pub(crate) fn resolve_source(source: &str) -> Result<(Resolve, PackageId)> {
-    let main = UnresolvedPackageGroup::parse("compiler-world.wit", source)
-        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
-    let mut resolve = Resolve::new();
-    let package = resolve_packages(main, &mut resolve, &mut Vec::new())?;
-    Ok((resolve, package))
-}
-
 fn resolve_packages(
     main: UnresolvedPackageGroup,
     resolve: &mut Resolve,

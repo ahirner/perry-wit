@@ -14,6 +14,9 @@ pub const HEADER: u32 = 12;
 pub const SLOT: u32 = 8;
 const MIN_CAPACITY: u32 = 4;
 
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(core::mem::size_of::<Array>() == HEADER as usize);
+
 #[repr(C)]
 struct Array {
     len: u32,
@@ -25,7 +28,7 @@ struct Array {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
     let cap = capacity.max(MIN_CAPACITY);
-    let array = perry_alloc(HEADER) as *mut Array;
+    let array = perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array;
     let data = perry_alloc(cap * SLOT) as *mut u64;
     // SAFETY: both blocks were just allocated with sufficient size and alignment.
     unsafe { array.write(Array { len: 0, cap, data }) };

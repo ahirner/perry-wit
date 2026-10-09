@@ -1,7 +1,10 @@
 //! perry MIR → pliron `wasm` dialect → core Wasm (`TODOs.md` P4).
 //!
-//! The output imports linear memory and a few functions from `perry-runtime` ([RUNTIME_WASM])
-//! under [perry_runtime::MODULE]. Representation decisions for this first slice:
+//! The output defines and exports linear memory, places string constants in data segments
+//! from [DATA_BASE], and imports runtime functions from [HELPER_MODULE]; `perry-wit`'s linker
+//! resolves those against `perry-runtime` and the helper libraries. Exports are either the raw
+//! functions ([Exports::Raw], for tests) or canonical-ABI component exports
+//! ([Exports::Canonical], see [boundary]). Representation decisions for this first slice:
 //!
 //! - `f64` stays `f64`; `i1` and `i32` become `i32`; records, arrays, strings and promises are
 //!   `i32` addresses.
@@ -12,7 +15,9 @@
 //! - Records are an `i32` shape id followed by 8-byte field slots in declaration order; arrays
 //!   use the layout in [perry_runtime::array]. Exact layouts are P3.6.
 //! - Every allocation is `task` tier: the builder cannot express module state yet (R4), so no
-//!   value outlives its export call. Exports are wrapped in `perry_task_begin`/`_end`.
+//!   value outlives its export call. Each export call is one task (see `perry_runtime::region`).
+//! - Strings are UTF-8 with a cached UTF-16 length (layout in [perry_runtime::string]);
+//!   constants are static objects in the data segment.
 //! - Exceptions use the status convention: a function that may throw returns an extra `i32`
 //!   status after its results (0 = normal, otherwise an [ErrorKind] code), and callers branch on
 //!   it. The status reaches the export; P6.1 maps it to the WIT result.
@@ -20,12 +25,15 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
     attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
     calls::{CallOp as MirCallOp, is_exported},
-    collections::{ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp},
+    collections::{
+        ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp, StringConstOp,
+        StringLenOp,
+    },
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
     exceptions::MayThrowInterface,
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     locals::UndefOp,
-    optional::{IsUndefinedOp, ToNumberOp, UndefinedOp, UnwrapOp, WrapOp},
+    optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{ArrayType, OptionalType, PromiseType, RecordType, StringType},
 };
@@ -56,7 +64,7 @@ use pliron::{
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
     control::{BrOp, CondBrOp, ReturnOp},
-    emit::{EmitOptions, Memory, emit_module},
+    emit::{DataSegment, EmitOptions, Memory, emit_module},
     ops::{CallOp, ImportFuncOp, LoadOp, NumOp, SelectOp, StoreOp, set_export},
 };
 use std::{
@@ -64,26 +72,47 @@ use std::{
     num::NonZeroUsize,
 };
 
-/// `perry-runtime` built for wasm32. Instantiate it first and satisfy the compiled module's
-/// [perry_runtime::MODULE] imports from its exports.
-pub const RUNTIME_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/perry_runtime.wasm"));
+pub mod boundary;
+
+/// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
+pub const HELPER_MODULE: &str = "__perry_helper";
+/// First address of static data; address 0 stays null (`undefined` for references).
+pub const DATA_BASE: u32 = 16;
+
+/// How functions are exported.
+pub enum Exports {
+    /// Every exported TypeScript function under its own name, with the core signature of its
+    /// MIR type plus the exception status, as one task per call. For tests and `--core-only`.
+    Raw,
+    /// Canonical-ABI exports of a WIT world.
+    Canonical(Vec<boundary::Export>),
+}
 
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN.
 pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 /// `undefined` in a `boolean | undefined` slot.
 const UNDEFINED_BOOL: i32 = 2;
 
-/// Lower a canonicalized MIR module and encode it as a core Wasm module.
-pub fn compile(ctx: &mut Context, mir: &ModuleOp) -> Result<Vec<u8>> {
-    let wasm = lower(ctx, mir)?;
+/// Lower a canonicalized MIR module and encode it as a core Wasm module that still imports
+/// runtime functions from [HELPER_MODULE].
+pub fn compile(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<Vec<u8>> {
+    let (wasm, data) = lower(ctx, mir, exports)?;
     verify_operation(wasm.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("verifying the lowered wasm module")?;
+    let end = DATA_BASE as usize + data.len();
     let options = EmitOptions {
-        memory: Memory::Import {
-            module: perry_runtime::MODULE.into(),
-            name: "memory".into(),
-            min_pages: 1,
+        memory: Memory::Define {
+            min_pages: end.div_ceil(65536).max(1) as u64,
+            export: Some("memory".into()),
+        },
+        data: if data.is_empty() {
+            vec![]
+        } else {
+            vec![DataSegment {
+                offset: DATA_BASE,
+                bytes: data,
+            }]
         },
         names: true,
     };
@@ -106,7 +135,11 @@ enum Runtime {
     ArrayGrow,
     F64Rem,
     TaskBegin,
+    TaskEnter,
     TaskEnd,
+    CabiRealloc,
+    StringAdopt,
+    StringConcat,
 }
 
 impl Runtime {
@@ -117,7 +150,11 @@ impl Runtime {
             Runtime::ArrayGrow => "perry_array_grow",
             Runtime::F64Rem => "perry_f64_rem",
             Runtime::TaskBegin => "perry_task_begin",
+            Runtime::TaskEnter => "perry_task_enter",
             Runtime::TaskEnd => "perry_task_end",
+            Runtime::CabiRealloc => "perry_cabi_realloc",
+            Runtime::StringAdopt => "perry_string_adopt",
+            Runtime::StringConcat => "perry_string_concat",
         }
     }
 
@@ -135,7 +172,9 @@ impl Runtime {
             Runtime::Alloc | Runtime::ArrayNew => (vec![i32], vec![i32]),
             Runtime::ArrayGrow => (vec![i32], vec![]),
             Runtime::F64Rem => (vec![f64, f64], vec![f64]),
-            Runtime::TaskBegin | Runtime::TaskEnd => (vec![], vec![]),
+            Runtime::TaskBegin | Runtime::TaskEnter | Runtime::TaskEnd => (vec![], vec![]),
+            Runtime::CabiRealloc => (vec![i32; 4], vec![i32]),
+            Runtime::StringAdopt | Runtime::StringConcat => (vec![i32, i32], vec![i32]),
         }
     }
 }
@@ -247,7 +286,40 @@ fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier
     }
 }
 
+/// Static data placed at [DATA_BASE].
+#[derive(Default)]
+struct Data {
+    bytes: Vec<u8>,
+    strings: HashMap<String, u32>,
+}
+
+impl Data {
+    /// A static string object followed by its bytes (layout of [perry_runtime::string]).
+    fn string(&mut self, text: &str) -> u32 {
+        if let Some(&address) = self.strings.get(text) {
+            return address;
+        }
+        while !self.bytes.len().is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        let address = DATA_BASE + self.bytes.len() as u32;
+        let utf16 = text.encode_utf16().count() as u32;
+        for word in [
+            text.len() as u32,
+            utf16,
+            address + perry_runtime::string::SIZE,
+            0,
+        ] {
+            self.bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        self.bytes.extend_from_slice(text.as_bytes());
+        self.strings.insert(text.to_string(), address);
+        address
+    }
+}
+
 struct ModuleState {
+    data: Data,
     wasm: ModuleOp,
     throws: HashSet<Identifier>,
     runtime: BTreeSet<Runtime>,
@@ -255,10 +327,11 @@ struct ModuleState {
 }
 
 /// Lower canonicalized MIR (after `perry_mir::pipeline::canonicalize`) to the `wasm` dialect.
-pub fn lower(ctx: &mut Context, mir: &ModuleOp) -> Result<ModuleOp> {
+pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(ModuleOp, Vec<u8>)> {
     let name = mir.get_symbol_name(ctx);
     let functions = module_functions(ctx, mir);
     let mut state = ModuleState {
+        data: Data::default(),
         wasm: ModuleOp::new(ctx, name),
         throws: throwing_functions(ctx, &functions),
         runtime: BTreeSet::new(),
@@ -269,24 +342,36 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp) -> Result<ModuleOp> {
         let lowered = FunctionLowering::lower(ctx, &mut state, function)
             .with_context(|| format!("lowering function {symbol} to wasm"))?;
         state.wasm.append_operation(ctx, lowered.get_operation(), 0);
-        if is_exported(ctx, function) {
+        if matches!(exports, Exports::Raw) && is_exported(ctx, function) {
             let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
             state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
         }
     }
+    if let Exports::Canonical(exports) = exports {
+        let mir_functions: HashMap<String, FuncOp> = functions
+            .iter()
+            .map(|f| (f.get_symbol_name(ctx).to_string(), *f))
+            .collect();
+        for export in exports {
+            let function = mir_functions.get(&export.function).ok_or_else(|| {
+                anyhow!(
+                    "WIT export {} has no function {}",
+                    export.core_name,
+                    export.function
+                )
+            })?;
+            boundary::export(ctx, &mut state, function, export)
+                .with_context(|| format!("binding WIT export {}", export.core_name))?;
+        }
+        boundary::realloc(ctx, &mut state);
+    }
     for runtime in state.runtime.clone() {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
-        let import = ImportFuncOp::new(
-            ctx,
-            runtime.symbol(),
-            ty,
-            perry_runtime::MODULE,
-            runtime.name(),
-        );
+        let import = ImportFuncOp::new(ctx, runtime.symbol(), ty, HELPER_MODULE, runtime.name());
         state.wasm.append_operation(ctx, import.get_operation(), 0);
     }
-    Ok(state.wasm)
+    Ok((state.wasm, state.data.bytes))
 }
 
 /// `export_<name>`, exported as `<name>`: runs the function as one task.
@@ -339,6 +424,21 @@ struct FunctionLowering<'s> {
 }
 
 impl<'s> FunctionLowering<'s> {
+    /// A builder appending to the entry block of `function`, which returns `results` and does
+    /// not throw. Used for component glue.
+    fn glue(state: &'s mut ModuleState, ctx: &Context, function: &FuncOp) -> Self {
+        FunctionLowering {
+            state,
+            region: function.get_region(ctx),
+            block: function.get_entry_block(ctx),
+            values: HashMap::new(),
+            blocks: HashMap::new(),
+            throws: false,
+            results: vec![],
+            throw_block: None,
+        }
+    }
+
     fn lower(ctx: &mut Context, state: &'s mut ModuleState, mir: &FuncOp) -> Result<FuncOp> {
         let symbol = mir.get_symbol_name(ctx);
         let throws = state.throws.contains(&symbol);
@@ -1002,16 +1102,47 @@ impl<'s> FunctionLowering<'s> {
             self.define(ctx, op, value);
             return Ok(());
         }
-        let name = Operation::get_op_dyn(op, ctx).get_opid().to_string();
-        if name.starts_with("perry.string") || name == "perry.to_string" {
-            bail!("strings are not supported by the MIR backend yet ({name})");
+        if let Some(constant) = Operation::get_op::<StringConstOp>(op, ctx) {
+            let text: String = constant
+                .get_attr_perry_string_value(ctx)
+                .ok_or_else(|| anyhow!("string constant without value"))?
+                .clone()
+                .into();
+            let address = self.state.data.string(&text);
+            let value = self.i32_const(ctx, address as i32);
+            self.define(ctx, op, value);
+            return Ok(());
         }
+        if Operation::get_op::<StringConcatOp>(op, ctx).is_some() {
+            let operands = self.operands(ctx, op)?;
+            let value = self
+                .runtime(ctx, Runtime::StringConcat, operands)
+                .expect("string");
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<StringLenOp>(op, ctx).is_some() {
+            let string = self.operands(ctx, op)?[0];
+            let value = self.load(ctx, MemKind::I32, string, perry_runtime::string::UTF16);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<ToStringOp>(op, ctx).is_some() {
+            let mir = op.deref(ctx).get_operand(0);
+            let inner =
+                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
+            let value = self.mapped(mir)?;
+            let undefined = self.is_undefined(ctx, value, inner)?;
+            let text = self.state.data.string("undefined");
+            let text = self.i32_const(ctx, text as i32);
+            let result = self.select(ctx, undefined, text, value);
+            self.define(ctx, op, result);
+            return Ok(());
+        }
+        let name = Operation::get_op_dyn(op, ctx).get_opid().to_string();
         if name == "perry.async_call" || name == "perry.await" {
             bail!("async is not supported by the MIR backend yet ({name})");
         }
         bail!("{name} has no lowering to wasm (did canonicalize run?)")
     }
 }
-
-#[cfg(test)]
-mod tests;

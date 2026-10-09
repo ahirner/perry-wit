@@ -10,26 +10,6 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use proptest::prelude::*;
 
-/// Contracts that fail on the current backend for a documented reason.
-/// A listed contract that passes fails the campaign so the entry is removed promptly.
-pub const KNOWN_FAILURES: &[(&str, &str)] = &[
-    (
-        "wasi.execution.scaling.retained_records",
-        "legacy heap: full collection on every allocating loop iteration with O(blocks) lookup; replaced by P5.3",
-    ),
-    (
-        "wasi.execution.scaling.number_push",
-        "legacy heap: full collection on every allocating loop iteration with O(blocks) lookup; replaced by P5.3",
-    ),
-];
-
-pub fn known_failure(id: &str) -> Option<&'static str> {
-    KNOWN_FAILURES
-        .iter()
-        .find(|(known, _)| *known == id)
-        .map(|(_, reason)| *reason)
-}
-
 const FACTOR: u32 = 4;
 /// Linear work yields 4; allow constant-factor noise and n·log n, reject quadratic (16).
 const MAX_GROWTH: u32 = 6;

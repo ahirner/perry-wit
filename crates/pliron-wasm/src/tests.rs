@@ -45,6 +45,7 @@ fn compile(input: &str) -> Vec<u8> {
                 export: None,
             },
             names: true,
+            ..Default::default()
         },
     )
 }
@@ -294,6 +295,7 @@ builtin.module @m {{
                 min_pages: 1,
             },
             names: false,
+            ..Default::default()
         },
     );
     let engine = Engine::default();

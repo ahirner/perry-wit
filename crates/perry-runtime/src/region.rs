@@ -2,7 +2,13 @@
 //!
 //! Each export call is one task (the callback ABI makes tasks sequential per instance until
 //! P5.4 adds the scheduler), so regions nest as a stack: [perry_task_begin] records the
-//! current position and [perry_task_end] returns every chunk taken since. Standard chunks go
+//! current position and [perry_task_end] returns every chunk taken since.
+//!
+//! At a component export, the host lowers string and list arguments through
+//! [perry_cabi_realloc] before the export runs. With no task active, that opens the task early;
+//! the export adopts it with [perry_task_enter], and its post-return function ends it, after
+//! the host has lifted the results. Arguments and results therefore live in the task region
+//! and are released in bulk with everything else. Standard chunks go
 //! to a free list for the next task; allocations above a quarter chunk get a dedicated chunk
 //! on a separate chain that goes straight back to the allocator.
 use alloc::alloc::{Layout, alloc, dealloc};
@@ -44,6 +50,8 @@ struct Regions {
     top: Mark,
     marks: [Mark; MAX_DEPTH],
     depth: usize,
+    /// A task opened by argument lowering that the export has not adopted yet.
+    pending: bool,
     free: *mut Chunk,
 }
 
@@ -55,6 +63,7 @@ static REGIONS: Global = Global(UnsafeCell::new(Regions {
     top: NO_MARK,
     marks: [NO_MARK; MAX_DEPTH],
     depth: 0,
+    pending: false,
     free: ptr::null_mut(),
 }));
 
@@ -158,6 +167,48 @@ pub extern "C" fn perry_task_begin() {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_task_end() {
     regions().end();
+}
+
+/// Enter an export's task: adopt the one argument lowering opened, or begin a new one.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_task_enter() {
+    let regions = regions();
+    if regions.pending {
+        regions.pending = false;
+    } else {
+        regions.begin();
+    }
+}
+
+/// The canonical ABI `realloc`, exported by compiled components as `cabi_realloc`.
+///
+/// The host only allocates (`old == 0`) to lower arguments and results; blocks live in the
+/// current task's region and are never freed individually. Alignment is at most 8 in the
+/// canonical ABI, which the region always provides.
+///
+/// # Safety
+/// `old` must be null or a block of `old_size` bytes from this function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_cabi_realloc(
+    old: *mut u8,
+    old_size: u32,
+    _align: u32,
+    new_size: u32,
+) -> *mut u8 {
+    let regions = regions();
+    if regions.depth == 0 {
+        regions.begin();
+        regions.pending = true;
+    }
+    if new_size == 0 {
+        return ALIGN as *mut u8;
+    }
+    let block = regions.allocate(new_size as usize);
+    if !old.is_null() {
+        // SAFETY: both blocks are live and distinct; the copy stays within both.
+        unsafe { ptr::copy_nonoverlapping(old, block, old_size.min(new_size) as usize) };
+    }
+    block
 }
 
 /// Allocate `size` bytes, 8-aligned, in the current task's region. Never returns null.

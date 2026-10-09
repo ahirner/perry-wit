@@ -531,10 +531,13 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             );
         }
     }
-    for (id, _) in crate::scaling::KNOWN_FAILURES {
+    for id in crate::PASSING
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
         ensure!(
-            ids.contains(id),
-            "known failure names unknown contract {id}"
+            ids.contains(id.trim()),
+            "passing.txt names unknown contract {id}"
         );
     }
     Ok(contracts)

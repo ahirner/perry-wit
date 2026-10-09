@@ -1,6 +1,10 @@
 # TODOs: MIR refactor, scalable memory, stackless async
 
-Status: plan, 2026-10-08. Baseline is `3dbf57a`.
+Status: in progress. Plan from 2026-10-08; the baseline is `3dbf57a`.
+
+- **2026-10-09: the legacy WAFFLE backend is deleted.** There is no dual backend: the MIR pipeline is the only compiler, and features return through P6.2. That covers about 40k lines under `src/waffle_backend` and 20 test suites, which are kept in git history at `45e8788`.
+- The bonus goal, removing WAFFLE (P4.4), is done.
+- Coverage is tracked by `crates/conformance/passing.txt`.
 Background: `claude/compiler-critique-2026-10-08.md` and `claude/refactor-design-notes.md` in the perry-wit project.
 
 ## Goals
@@ -198,9 +202,24 @@ The phases run in order. Items within a phase can run in parallel unless they ar
     - Passing: `temporary_records` at 3.97× and `string_append` at 4.18×.
     - The compile-time guard is `tests/compile_scaling_test.rs`. Depth 32 must compile within 10 s; the test is `#[ignore]` until P1.1 lands.
     - The allocator-entries metric moves to P0.2.
-- [ ] **P0.2 Freeze the benchmark baseline.**
-  - Extend `scripts/compare_components.mjs` with: the critique microbenchmarks, component sizes for all examples, and committed linear-memory peaks.
+- [ ] **P0.2 Benchmark baseline.**
+  - `scripts/compare_components.mjs` and `tests/component_measurement.rs` measured legacy-only workloads and were deleted with the legacy backend. Rebuild the harness on the MIR pipeline as streams and HTTP return (P6.2 groups 8–9). Include the critique microbenchmarks, component sizes for all examples, and committed linear-memory peaks.
   - AssemblyScript comparisons stay out of the repo. Run them by hand for anecdotal checks only.
+  - Legacy baseline at `aee6714`, the last legacy run (Apple M5 Pro, median ms per call; root-future / spawned-task):
+
+    | Workload | Root ms | Spawned ms | Component bytes | Guest memory bytes |
+    |---|---:|---:|---:|---:|
+    | text | 0.018 | 0.015 | 20,468 | 65,536 |
+    | io | 0.837 | 0.332 | 35,404 | 327,680 |
+    | incoming-stream (4 MiB) | 24.124 | 17.279 | 21,155 | 65,536 |
+    | incoming-stream-byob | 24.479 | 17.405 | 22,223 | 65,536 |
+    | bounded-http-exact | 9.147 | 2.565 | 58,415 | 4,325,376 |
+    | bounded-http-exact-byob | 0.425 | 0.140 | 59,550 | 4,259,840 |
+    | unbounded-http-array-buffer | 2.138 | 1.913 | 54,594 | 8,519,680 |
+
+    - Example components: `merge_docs` 114,105 bytes, `merge_task` 12,236, `template-task` 12,203.
+    - The MIR pipeline today: `merge_task` 2,801 (`task-runner`) and 2,975 (`merge-task`); `template-task` 2,765.
+    - Per 8 KiB stream chunk, legacy: 1 worker start, about 12 allocator entries, 2 promise records, 1 GC call.
   - *Done when:* there is one command and a committed baseline table.
 - [ ] **P0.3 Legacy stopgaps (optional, hours).**
   - Memoize `infer_expr_type` with a per-function table.
@@ -334,8 +353,12 @@ Owned (each with unit tests on MIR snippets):
   - [ ] `br_table` for switch-shaped CFGs.
   - *Done when:* differential tests against the legacy output for scalar, control flow and exception fixtures pass, and the output is no larger than WAFFLE's on those fixtures.
   - *Status:* 8 tests validate with wasmparser and execute in wasmtime: diamonds, loops, nested loops with break/continue, parameter swaps, recursion, memory, imports, effect ordering, and rejection of irreducible CFGs. The differential comparison against WAFFLE waits for P6.1.
-- [ ] **P4.3 Keep and generalize `link.rs`.** Link `perry-runtime.wasm` the same way as the helper libraries (`__perry_helper` imports, PIC placement, table relocation). Run `wasm-opt -Oz` as an optional post-link step only if it stays a dev or optional tool dependency.
-- [ ] **P4.4 Remove `waffle`** from `Cargo.toml`. Delete `constant_arguments.rs`; P3.1 SCCP plus the inliner replace it. *Done when:* `cargo tree -i waffle` is empty.
+- [x] **P4.3 Keep and generalize `link.rs`.** Now `src/link`.
+  - The root `build.rs` builds `perry-runtime` as one more PIC helper library (`runtime.wasm`).
+  - Codegen imports `perry_*` functions from `__perry_helper`, and the linker places their data after the module's static data.
+  - The linked module has no imports besides the WIT world's.
+  - `wasm-opt -Oz` stays optional and is not wired in.
+- [x] **P4.4 Remove `waffle`.** Done 2026-10-09 together with the whole legacy backend. `cargo tree -i waffle` is empty.
 
 ### P5. Runtime as Rust (`crates/perry-runtime`, `no_std`, compiled like the helpers)
 
@@ -363,14 +386,27 @@ Owned (each with unit tests on MIR snippets):
   - Cancellation fan-out with sync `subtask.cancel` and sync `stream.cancel-read`/`-write`.
 - [ ] **P5.5 Port the remaining `.wat` runtime** (about 1.5k lines: utf8, decoder, json, errors, filesystem, http handler, random, regex search) to Rust or to MIR builders. Delete `runtime/builder.rs`, the fixed-address scheme (addresses 0–152) and every `const OFFSET` layout. Layouts come from P3.6 or from Rust structs.
 
-### P6. Feature migration onto the MIR backend (dual backend, whole program)
+### P6. Feature migration onto the MIR pipeline (the only pipeline)
 
-- [ ] **P6.1 Add `--backend=mir|legacy`.** Default stays `legacy`. Conformance runs both. MIR rejects unsupported programs with a diagnostic and never falls back silently.
-  - *Next:* the core module already exists (`perry_codegen::compile`, linked against `perry_codegen::RUNTIME_WASM`). What remains is the component boundary:
-    - link the runtime into one core module (P4.3);
-    - lower WIT parameters and results, including the `{ value, trace }` records the scaling contracts return;
-    - map the status result to the export's error result;
-    - strings (`perry.string_*`, `perry.to_string`).
+- [x] **P6.1 Component boundary and pipeline cutover.** Decided 2026-10-09: no `--backend` switch; the legacy backend is deleted (see Status). Unsupported programs fail with a diagnostic.
+  - `src/compiler` runs TS → HIR → MIR → canonicalize → codegen → link → component. `compile_core` produces raw exports for tests.
+  - `src/compiler/bind.rs` binds WIT exports to exported TypeScript functions by SDK implementation name. Extra TypeScript exports stay internal.
+  - `perry_codegen::boundary` emits canonical-ABI glue for `bool`, integers, `f32`, `f64`, `string`, `list<T>` and records: flat or memory lifting, and lowering into a return area. It also emits `cabi_realloc`, plus `cabi_post_<export>`, which ends the task.
+  - Arguments are lowered into a task the host's `cabi_realloc` opens and the export adopts, so arguments and results live in the task region and are released in bulk.
+  - An exception escaping an export without an error type traps. `result<T, E>` exports map the status later (P6.2).
+  - Strings (decided): UTF-8 with a cached UTF-16 length, passed through the boundary without transcoding.
+    - Constants are static data.
+    - Concatenation appends in place to a shared buffer, so the `string_append` contract passes.
+    - Lone surrogates (WTF-8) are not representable yet.
+  - Conformance: `crates/conformance/passing.txt` is a ratchet. Listed contracts must pass. An unlisted contract that passes fails the campaign until it is added. Unlisted failures are `pending` and are not shrunk, so the campaign stays fast.
+  - Tests:
+    - `tests/component_test.rs` passes WIT values through wasmtime's component model, and checks that memory does not grow across calls.
+    - `tests/mir_codegen_test.rs` runs linked core modules with fuel.
+  - Builder fixes found on the way:
+    - Records with equal field names but different field types get suffixed names (`shape_c_v_2`).
+    - Recursive interfaces reserve a name.
+    - Named types are memoized.
+    - Object literals take an expected record type.
   - Smaller MIR follow-ups found while emitting:
     - remove a `perry.unwrap` dominated by another unwrap of the same value (P3.5b). `point.x; point.y` currently checks twice;
     - inline `fmod` for proven integers (P3.5). `perry_f64_rem` is the largest per-iteration cost in the scaling loops.
@@ -385,32 +421,22 @@ Owned (each with unit tests on MIR snippets):
   8. streams and BYOB
   9. Fetch, then the HTTP handler
   10. CLI command
-- [ ] **P6.3 Strip thread flags everywhere.** Remove `-W component-model-async-stackful`, `-threading` and `-more-async-builtins` from README, `scripts/`, `flake.nix`, `crates/conformance/src/execution.rs`, the template, and the roughly 20 test files that pass them. Also remove `thread-*` expectations from `tests/fixtures/cancellation/callee.wat` and `tests/support/call_counts.rs`. *Done when:* `rg -n 'thread-|stackful|threading|more-async-builtins'` returns nothing outside history.
+- [x] **P6.3 Strip thread flags everywhere.** The legacy tests, fixtures and scripts are gone, and README and conformance no longer pass the flags. Async (P3.8) must keep it that way. *Done when:* `rg -n 'thread-|stackful|threading|more-async-builtins'` returns nothing outside history and this file.
 - [ ] **P6.4 Portability check.** Emitted components validate with wasmparser **default** features, so no 🧵, 🚟 or 🚝. Optionally smoke-run `merge_task` and a CLI example in jco.
 
 ### P7. Cutover and deletion
 
-- [ ] **P7.1 Switch the default to `mir`** once every contract and test passes and the P0.2 targets hold:
-  - The temporary-record loop at least matches AssemblyScript.
-  - Retained records at 1e6 take at most 2× AssemblyScript.
-  - HTTP default reader and BYOB are at or better than the P0.2 baseline.
-  - Example component sizes are at or below `3dbf57a`.
+- [x] **P7.1 / P7.2 Cutover and deletion: superseded on 2026-10-09.** The legacy backend was deleted before feature parity, by decision, and the targets below now apply to P6.2 instead:
+  - The temporary-record loop at least matches AssemblyScript (anecdotal, by hand).
+  - Example component sizes are at or below `3dbf57a`. This already holds for `merge_task` and the template.
+  - HTTP default reader and BYOB are at or better than the P0.2 legacy baseline.
   - Stream workloads stay within the 64 KiB guest limit.
-- [ ] **P7.2 Delete the legacy backend.** Line counts are approximate, at `3dbf57a`.
-
-  | Area | Lines | Fate |
-  |---|---|---|
-  | `ssa.rs`, `ssa/*` | ~8.7k | Replaced by P2.2 and P3 |
-  | `allocation*` | ~1.2k | Replaced by P5.1–P5.3 |
-  | `runtime/{scheduler,callbacks,operations,transfers,subtasks,pending_result,builder}` | ~1.7k | Replaced by P3.8 and P5.4 |
-  | `promises/*` | ~1k | Replaced by `perry.async` |
-  | `objects*`, `values*`, `nullable`, `type_compaction`, `structured*` | – | Replaced by P3.6 |
-  | `constant_arguments` | – | Removed (P4.4) |
-  | `*.wat` | – | Removed (P5.5) |
-
-  - Keep: `link.rs`, `libraries.rs`, `sdk/`, `component/`, the helper crates, `source/`, and the `text_contract` rules, which move into the P1.2 checker.
-  - Rename `waffle_backend` to `backend`, and the `waffle_*` test files to capability names.
-- [ ] **P7.3 Update ARCHITECTURE.md:** pipeline, D3 tiers, D5 async, R1–R7.
+- What was kept from the legacy tree:
+  - `link.rs`, `libraries.rs` and `type_compaction.rs`, now in `src/link`;
+  - `audit.rs`, `sdk/`, `component/`, `abi/` and the helper crates;
+  - the handler WIT, now `crates/conformance/wit/handler`.
+- `source/` (multi-module loading, WIT import binding, command adapter) and the `text_contract` rules were deleted. They return with P1.2 and P6.2 group 10.
+- [x] **P7.3 Update ARCHITECTURE.md.** Rewritten for the MIR pipeline. Async (D5) and the collector are described once they exist.
 
 ### P8. WasmGC decision spike (after P7)
 
@@ -436,5 +462,5 @@ Owned (each with unit tests on MIR snippets):
 
 - **Exceptions (decided for now):** the status convention. A function that may throw returns an extra `i32` status after its results, callers branch on it, and the codes are `perry_codegen::status_code`. Wasm exception handling stays a later lowering swap; the MIR's throwing ops are marked, so either lowering works.
 - **pliron is pre-1.0:** pin it, and budget for upstream contributions (the inliner, SROA). The Wasm dialect and emitter live in `crates/pliron-wasm`, which is free of perry code and can be published.
-- **Strings:** rope or builder lowering for append loops, which already beat AssemblyScript but are super-linear.
+- **Strings (decided 2026-10-09):** UTF-8 with a cached UTF-16 length and an in-place append buffer. Open: WTF-8 for lone surrogates, and an index cache for non-ASCII `charAt`/`slice` (P6.2 group 1).
 - **R5 scope:** which array and promise builtins accept inlined arrows in the first release.

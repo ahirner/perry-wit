@@ -4,10 +4,7 @@ use crate::{
     registry::Case,
 };
 use anyhow::{Context, Result, ensure};
-use perry_wit::{
-    CompileOptions, compile_typescript,
-    waffle_backend::{WaffleCompileOptions, compile_typescript_for_world},
-};
+use perry_wit::{CompileOptions, compile_for_world, compile_typescript};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -501,12 +498,6 @@ pub fn worker(request: &Path, destination: &Path) -> Result<()> {
                             "p3=y",
                             "-W",
                             "component-model-async=y",
-                            "-W",
-                            "component-model-more-async-builtins=y",
-                            "-W",
-                            "component-model-async-stackful=y",
-                            "-W",
-                            "component-model-threading=y",
                             "--env",
                             "PERRY_CONFORMANCE=fixture",
                         ])
@@ -548,8 +539,7 @@ fn environment(directory: &Path) -> Result<()> {
         "/// <reference path=\"./handler-types/runtime.d.ts\" />\ndeclare module \"test:generated/control\" { export function release():void; }",
     )?;
     perry_wit::generate_sdk_files(&perry_wit::SdkOptions {
-        wit_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/waffle_backend/http/handler"),
+        wit_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
         world: Some("handler".into()),
         out_dir: directory.join("handler-types"),
         project_root: Some(directory.into()),
@@ -638,35 +628,18 @@ fn execute_function(
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
     let compilation = if matches!(case, Case::Handler(_)) {
-        perry_wit::waffle_backend::compile_http_handler(
-            source,
-            &path.to_string_lossy(),
-            &WaffleCompileOptions::default(),
-            perry_wit::waffle_backend::HttpHandlerOptions {
-                max_request_bytes: 65536,
-                max_response_bytes: 65536,
-            },
-        )
+        Err(anyhow::anyhow!(
+            "HTTP handlers are not supported by the compiler yet (TODOs.md P6.2)"
+        ))
     } else {
-        compile_typescript_for_world(
-            source,
-            &path.to_string_lossy(),
-            &WaffleCompileOptions::default(),
-            resolve,
-            world,
-        )
+        compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
     };
     let compiled = match compilation {
         Ok(compiled) => compiled,
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
     let mut config = Config::new();
-    config
-        .consume_fuel(true)
-        .wasm_component_model_async(true)
-        .wasm_component_model_more_async_builtins(true)
-        .wasm_component_model_threading(true)
-        .wasm_component_model_async_stackful(true);
+    config.consume_fuel(true).wasm_component_model_async(true);
     let engine = Engine::new(&config).unwrap();
     let bytes = compiled.component.unwrap();
     let component_bytes = bytes.len();

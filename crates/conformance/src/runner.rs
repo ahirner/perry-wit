@@ -60,8 +60,9 @@ pub enum Status {
     Running,
     Passed,
     Failed,
-    /// Failed for a reason recorded in `scaling::KNOWN_FAILURES`; does not fail the campaign.
-    KnownFailure,
+    /// Failed, and not listed in `passing.txt`: the compiler does not cover it yet
+    /// (`TODOs.md` P6.2). Does not fail the campaign.
+    Pending,
 }
 #[derive(Serialize)]
 pub struct PartitionResult {
@@ -300,9 +301,15 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         }
         if result.status != Status::Failed {
             let attempts = Cell::new(0u32);
+            // Shrinking explains regressions; a pending contract only needs its first failure.
+            let shrink = if crate::passing(contract.id) {
+                settings.shrink_limit
+            } else {
+                0
+            };
             let mut runner = TestRunner::new(Config {
                 cases: settings.cases,
-                max_shrink_iters: settings.shrink_limit,
+                max_shrink_iters: shrink,
                 rng_seed: RngSeed::Fixed(settings.seed),
                 failure_persistence: None,
                 ..Config::default()
@@ -338,15 +345,18 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
                 }
             }
         }
-        match (crate::scaling::known_failure(contract.id), result.status) {
-            (Some(reason), Status::Failed) => {
-                result.status = Status::KnownFailure;
-                eprintln!("{}: known failure ({reason})", contract.id);
+        // The ratchet: listed contracts must pass, and a newly passing one must be listed.
+        match (crate::passing(contract.id), result.status) {
+            (false, Status::Failed) => {
+                result.status = Status::Pending;
+                eprintln!("{}: pending (not in passing.txt)", contract.id);
             }
-            (Some(_), Status::Passed) => {
+            (false, Status::Passed) => {
                 result.status = Status::Failed;
-                result.error =
-                    Some("listed in scaling::KNOWN_FAILURES but passed; remove the entry".into());
+                result.error = Some(format!(
+                    "passes but is not listed; add {} to crates/conformance/passing.txt",
+                    contract.id
+                ));
             }
             _ => {}
         }

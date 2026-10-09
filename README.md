@@ -3,13 +3,15 @@
 **Perry-WIT** compiles static TypeScript ahead-of-time directly into lightweight, high-performance WebAssembly components targeting **WASI 0.3 (Preview 3)**.
 
 Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
-[Perry](https://www.perryts.com) HIR and [WAFFLE](https://crates.io/crates/waffle) SSA straight to native WebAssembly. This produces self-contained components ranging from **~5 KB** for pure compute to **tens of KB** when using filesystem operations and HTTP streaming—with instant startup times, low linear memory usage, and zero runtime bloat.
+[Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
 
-- **Dual-mode authoring**: Write standalone CLI commands using top-level `await`, export typed functions matching a WIT interface, or combine both in a single source file.
+> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers synchronous exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. Async exports, `fetch`, `node:fs`, streams, JSON, Date, CLI commands and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P3.8, P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
+
+- **WIT-first authoring**: Export typed functions matching a WIT world. Standalone CLI commands with top-level `await` return with the async migration.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
 - **Hermetic toolchain**: Fully reproducible builds, type generation, and component testing via Nix flakes.
 
-For runtime boundaries, memory layouts, and compilation pipeline details, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the pipeline, memory tiers and component boundary, see [ARCHITECTURE.md](ARCHITECTURE.md); for the plan, see [TODOs.md](TODOs.md).
 
 ## Use
 
@@ -27,7 +29,7 @@ For component development outside this checkout, use [the starter template](temp
 
 ### Run Examples
 
-The repository includes ready-to-run examples demonstrating library exports, CLI execution, and HTTP streaming.
+The repository includes ready-to-run examples.
 
 #### Library Component
 
@@ -42,22 +44,9 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
   --invoke 'run-task("hello world")' dist/merge_task.wasm
 ```
 
-#### Async HTTP Component
+[examples/merge_docs.ts](examples/merge_docs.ts) (`fetch`, `Promise.all`, JSON) is the target for the async and HTTP migration and does not compile yet.
 
-[examples/merge_docs.ts](examples/merge_docs.ts) uses standard `fetch` with `Promise.all` to fetch and combine JSON documents concurrently:
-
-```sh
-# Compile the document merger component
-cargo run -- examples/merge_docs.ts --wit wit --world merge-docs -o dist/merge_docs.wasm
-
-# Invoke with Wasmtime and HTTP capability enabled
-wasmtime run -C cache=n -S p3=y -S http=y \
-  -W component-model-async=y -W component-model-async-stackful=y \
-  -W component-model-more-async-builtins=y -W component-model-threading=y \
-  --invoke 'merge-docs()' dist/merge_docs.wasm
-```
-
-You can also run both examples directly in Node.js without compilation:
+You can also run the examples directly in Node.js without compilation:
 
 ```sh
 node -e 'import("./examples/merge_task.ts").then(m => console.log(m.runTask("hello")))'
@@ -65,7 +54,7 @@ node -e 'import("./examples/merge_task.ts").then(m => console.log(m.runTask("hel
 
 ### Test
 
-Run the standard test suite, linters, and end-to-end integration checks:
+Run the standard test suite and linters:
 
 ```sh
 # Run unit and integration tests
@@ -74,9 +63,6 @@ cargo test --workspace
 # Linting and formatting checks
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-
-# End-to-end HTTP integration tests
-./scripts/test_e2e.sh
 
 # Complete Nix flake checks
 nix flake check
@@ -97,7 +83,6 @@ nix build .#perry-wit
 
 # Build example components with Nix
 nix build .#example-merge-task
-nix build .#example-merge-docs
 nix build .#template-component
 ```
 
@@ -126,39 +111,14 @@ cargo run -- src/index.ts --wit wit --world task-runner -o dist/component.wasm
 wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("test")' dist/component.wasm
 ```
 
-- **Initialization**: Static dependencies and top-level statements execute once before the first exported call. Module state persists across subsequent invocations.
-- **Async Exports**: An export must be declared as `async func` in WIT if it can suspend, including through filesystem operations, timers, or HTTP calls.
-- **Core Wasm Output**: Pass `--core-only` (or use a `.core.wasm` extension) to emit unlinked core WebAssembly for custom embedders.
+- **Exports**: Exported TypeScript functions not named by the world stay internal, so one source can implement several worlds.
+- **Tasks**: Every export call is one task. Everything it allocates, including its arguments and results, is released in bulk after the host has read the result.
+- **Not yet migrated**: module-level state and initialization, async exports (`async func`), WIT imports, and `option`, `result`, `variant`, `enum`, `flags`, `tuple` and resource types.
+- **Core Wasm Output**: Pass `--core-only` to emit the linked core module without component encoding.
 
 ### CLI Scripts
 
-A world exporting `wasi:cli/run@0.3.0` (such as `world command` in `wit/world.wit`) turns top-level statements and top-level `await` into a command component:
-
-```ts
-// cli.ts
-import { setTimeout } from "node:timers/promises";
-
-await Promise.all([setTimeout(2), setTimeout(1)]);
-console.log("CLI finished successfully");
-```
-
-Compile and run the command component:
-
-```sh
-# Run directly in Node
-node cli.ts
-
-# Compile to a WASI 0.3 command component
-cargo run -- cli.ts --wit wit --world command -o dist/cli.wasm
-
-# Execute with Wasmtime P3
-wasmtime run -C cache=n -S p3=y \
-  -W component-model-async=y -W component-model-async-stackful=y \
-  -W component-model-more-async-builtins=y -W component-model-threading=y \
-  dist/cli.wasm
-```
-
-Use `process.exitCode = 1` to set the exit status when execution finishes, or call `process.exit(1)` to terminate immediately.
+Command components (worlds exporting `wasi:cli/run@0.3.0`, top-level `await`, `process.exit`) return with the async migration (TODOs.md P3.8, P6.2).
 
 ### Project Setup
 
@@ -200,80 +160,49 @@ cargo run -p perry-conformance -- check --select node.fs
 
 All verified capability contracts are declared in [crates/conformance/src/registry.rs](crates/conformance/src/registry.rs).
 
-Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling.rs](crates/conformance/src/scaling.rs)) bound guest fuel growth between inputs n and 4n. Contracts listed in `scaling::KNOWN_FAILURES` are reported as `known_failure` and do not fail the campaign. A listed contract that passes does fail the campaign, so that its entry gets removed.
+[crates/conformance/passing.txt](crates/conformance/passing.txt) is a ratchet:
+- A listed contract that fails is a regression and fails the campaign.
+- An unlisted contract that fails is reported as `pending` and does not fail the campaign.
+- An unlisted contract that passes fails the campaign until it is added, so the list only grows.
+
+Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling.rs](crates/conformance/src/scaling.rs)) bound guest fuel growth between inputs n and 4n.
 
 ## Performance
 
-Component performance and resource utilization can be measured using the dedicated benchmark suite:
-
-```sh
-nix develop -c node scripts/compare_components.mjs
-```
-
-The benchmark runner executes [tests/component_measurement.rs](tests/component_measurement.rs) in release mode and reports:
-- **Execution time**: Evaluated under current-thread Tokio in two placements: root-future await and spawned task execution.
-- **Component size and memory**: Stripped component byte counts and committed Wasm linear memory after warmup.
-- **Host interaction efficiency**: Counts of host poll wakeups, read transfers, worker starts, and callbacks.
-- **Runtime operations**: Allocator entries, realloc calls, root frames, and active promise records.
-- **BYOB streaming**: Compares caller-allocated buffers (`read(buffer, { min })`) with default chunked streaming, demonstrating reduced promise overhead and fewer host context switches.
+The legacy benchmark harness was removed with the legacy backend; its last numbers are kept in [TODOs.md](TODOs.md) (P0.2) as the baseline for the migrated stream and HTTP workloads. Today, size and fuel are measured by the scaling contracts, `tests/mir_codegen_test.rs` and `tests/component_test.rs`. Allocator choices are measured in [bench/allocators](bench/allocators).
 
 ## Compilation Pipeline
 
 Perry-WIT compiles TypeScript ahead-of-time directly into native WebAssembly instructions without an embedded JavaScript engine:
 
 ```text
- TypeScript AST + static ESM             WIT World Definitions
-          │                                        │
-          │◄─── 1. Bind imports, inject command ───┤
-          │        adapter before syntax erasure   │
-          ▼                                        │
-  2. Perry HIR Lowering                            │
-          │                                        │
-          │◄─── 3. Validate signatures, plan ──────┤
-          │        Canonical ABI layouts           │
-          ▼                                        │
-  4. WAFFLE SSA Lowering                           │
-          │                                        │
-  5. Code Generation ─────────────────► 6. ComponentEncoder
-                                       (Embed resolved WIT)
-                                                   │
-                                                   ▼
-                                      Validated WASI 0.3 Component
+TypeScript ──► Perry HIR ──► perry MIR (pliron)           crates/perry-lower, crates/perry-mir
+                                 │  mem2reg, DCE, CFG simplification
+                                 ▼
+                          wasm dialect (pliron)           crates/perry-codegen
+                                 │  + canonical-ABI glue for the WIT world's exports
+                                 ▼
+                     structured core Wasm                 crates/pliron-wasm (emitter)
+                                 │  + perry-runtime and helper libraries (PIC, linked)
+                                 ▼
+                      WASI 0.3 component                  wit-component ComponentEncoder
 ```
 
-1. **Source Analysis**: Resolves local ESM dependencies, validates AST constructs, binds WIT interface imports before syntax erasure, and synthesizes command adapters when targeting `wasi:cli/run`.
-2. **HIR Lowering**: Lowers the normalized AST into Perry HIR, establishing lexical scopes and guarded top-level module initialization.
-3. **Contract Resolution**: Validates HIR function signatures against WIT exports, verifies that suspending functions are declared `async func`, and derives canonical ABI memory layouts and capability plans.
-4. **SSA Lowering**: Lowers HIR into typed SSA basic blocks. Heap references are tracked in root frames across async suspension points, while complex algorithmic tasks (such as JSON codecs and date arithmetic) are statically linked from compact, allocator-free Rust helpers.
-5. **Code Generation**: WAFFLE optimizes SSA control flow graphs, enforces reducibility, and reconstructs structured core WebAssembly instructions.
-6. **Component Encoding**: Synthesizes canonical ABI import and export adapters, embeds resolved WIT interface metadata via `wit_component::ComponentEncoder`, and emits the validated WASI 0.3 component.
-
-For memory layouts, coroutine scheduling, and helper linking details, see [ARCHITECTURE.md](ARCHITECTURE.md).
+1. **Builder**: lowers Perry HIR to MIR. Every local is a slot; pliron's `mem2reg` builds SSA. Records are identified by shape, and unsupported constructs are rejected with a diagnostic.
+2. **Codegen**: translates MIR to the `wasm` dialect, chooses value representations, and emits the export glue. Strings and lists are passed in UTF-8 and the canonical layout without transcoding.
+3. **Emitter**: structures reducible control flow with Ramsey's dominator-tree algorithm, keeps single-use values on the operand stack, and encodes with `wasm-encoder`.
+4. **Link and encode**: relocates `perry-runtime` (memory tiers, strings, arrays) and the computation helpers into the module, embeds the WIT world, and encodes the component.
 
 ## Semantics
 
-Perry-WIT supports a predictable, strictly typed subset of TypeScript designed for high-performance ahead-of-time compilation.
+Perry-WIT supports a predictable, strictly typed subset of TypeScript designed for ahead-of-time compilation. The subset rules R1–R8 are in [TODOs.md](TODOs.md) (D4). Currently supported:
 
-### Types
-- **Shapes**: Declared interfaces and records, typed dictionaries, dense homogeneous arrays, finite unions, and validated JSON trees. Literal record field names are preserved even when matching builtins (`fetch`, `process`, `console`).
-- **Integers**: Both `s64` and `u64` map to TypeScript `bigint` (including nested records, lists, options, and tuples). `BigInt(value)` construction supports finite safe integers, while arbitrary-precision arithmetic and bigint literals are not implemented.
-- **Strings**: Lower directly using their UTF-8 pointer and byte length without intermediate re-encoding.
-- **Bytes**: Outbound WIT `list<u8>` accepts `string | Uint8Array` recursively across import arguments and exported results (records, options, variants, lists). The generated SDK provides `WitInput<T>` and named `TInput` aliases for outbound values. Incoming byte lists remain mutable `Uint8Array` values.
-- **Dates**: `Date` supports immutable UTC operations, while supported `Temporal` APIs provide explicit ISO timestamp and calendar calculations.
-- **Coercion**: Arbitrary runtime coercion, dynamic property deletion (`delete obj.prop`), and untyped prototype manipulation are rejected at compile time.
-
-### Concurrency
-- **Scheduling**: Execution runs eagerly until the first suspension point. Continuations are scheduled directly via native WASI 0.3 wakeups. Uncontended settled promises bypass host yields for immediate synchronous continuation.
-- **Combinators**: `Promise.all`, `Promise.allSettled`, and `Promise.race` register each operand once. Stored async tasks retain their outcomes for repeated observation.
-- **Race Semantics**: Non-winning branches in `Promise.race` continue running in the background and must settle or be cancelled before the owning call returns. Unresolved dangling work at that boundary traps.
-
-### I/O
-- **HTTP Fetch**: Standard `fetch` accepts URLs or `Request` instances, typed options, header dictionaries, pairs, or `Headers`, and string or byte bodies. It resolves at response headers, supports redirect modes, and exposes metadata alongside single-consumption `text()`, `json()`, `bytes()`, and `arrayBuffer()` methods.
-- **Byte Streams**: `Request` and `Response` bodies expose byte-stream readers with locking, cancellation, BYOB reading, and `for await` iteration.
-- **Cancellation**: `AbortController` and `AbortSignal` cancel in-flight HTTP requests, pending stream readers, and filesystem transfers.
-- **Filesystem**: Asynchronous I/O via `node:fs/promises` (`readFile` and `writeFile` with `AbortSignal` support). Synchronous and callback-based `fs` APIs receive compile-time diagnostics.
-- **Timers**: Promise-based timers via `setTimeout` from `node:timers/promises`.
-- **Resource Cleanup**: Active streams, open files, and network operations are reclaimed automatically when finished, when cancelled via `AbortSignal`, or upon unhandled traps.
+- **Numbers** are IEEE doubles with ECMAScript arithmetic, including `%`, `-0` and NaN. WIT integer and `f32` values convert at the boundary.
+- **Records**: interfaces, type literals and object literals with closed shapes. Structurally equal types are the same record, and recursive interfaces are supported.
+- **Arrays** are dense and homogeneous (R8). An out-of-range or non-integral read yields `undefined`. Writing at `length` appends; any other out-of-range write throws a `RangeError`.
+- **Strings** are UTF-8 with an O(1) UTF-16 `.length`. Concatenation in a loop is linear.
+- **Exceptions**: a `TypeError` from `undefined` at a typed use, or a `RangeError`, is catchable. Nothing in the subset traps, except an exception escaping an export that has no error type.
+- **Control flow**: `if`, loops, `break`/`continue`, `&&`/`||`, `?:`, and direct calls, including recursion.
 
 ## Contributing
 
