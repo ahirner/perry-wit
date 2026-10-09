@@ -83,6 +83,9 @@ fn compile_cargo_helper(
     println!("cargo:rerun-if-changed={crate_dir}");
     println!("cargo:rerun-if-changed=Cargo.lock");
     let target = output.join("cargo-helper-build");
+    // Symbols `src/link` resolves: `__heap_base` (end of linked data and stack).
+    let undefined = output.join("helper-undefined.txt");
+    fs::write(&undefined, "__heap_base\n").expect("write undefined symbol list");
     let status = Command::new(env::var_os("CARGO").expect("Cargo sets CARGO"))
         .current_dir(manifest)
         .env("CARGO_ENCODED_RUSTFLAGS", "-Crelocation-model=pic")
@@ -103,6 +106,7 @@ fn compile_cargo_helper(
             "-Clto=fat",
             "-Clink-arg=--shared",
             "-Clink-arg=--no-entry",
+            &format!("-Clink-arg=--allow-undefined-file={}", undefined.display()),
             "-Clink-arg=--import-memory",
             "-Clink-arg=--strip-debug",
         ])

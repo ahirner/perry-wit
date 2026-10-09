@@ -35,7 +35,52 @@ impl Reencode for CoreRelocations<'_> {
     }
 }
 
+/// Where the canonical built-ins of `stream<u8>` come from: a function of the WIT world that
+/// carries one (an import module, or `[export]…` for an export), with the stream's payload
+/// index in that function's signature. Every `stream<u8>` of a component instance has the same
+/// type, so any such function's built-ins serve all byte streams.
+#[derive(Clone, Debug)]
+pub(crate) struct StreamAnchor {
+    pub(crate) module: String,
+    pub(crate) function: String,
+    pub(crate) index: u32,
+}
+
+/// Placeholder module of byte-stream built-ins in helper libraries (`perry-web`).
+const CANON_MODULE: &str = "perry:canon";
+
+impl StreamAnchor {
+    /// The concrete import for placeholder `name` (`[async-lower][stream-read]u8`, …).
+    fn resolve(&self, name: &str) -> Result<(String, String)> {
+        let base = name
+            .strip_suffix("u8")
+            .with_context(|| format!("unknown canonical placeholder {name}"))?;
+        let (prefix, builtin) = match base.strip_prefix("[async-lower]") {
+            Some(rest) => ("[async-lower]", rest),
+            None => ("", base),
+        };
+        let builtin = builtin
+            .strip_prefix('[')
+            .and_then(|b| b.strip_suffix(']'))
+            .with_context(|| format!("malformed canonical placeholder {name}"))?;
+        Ok((
+            self.module.clone(),
+            format!("{prefix}[{builtin}-{}]{}", self.index, self.function),
+        ))
+    }
+}
+
+/// [link_helpers_with] without byte streams (helper tests link core modules directly).
+#[allow(dead_code)] // Used by the helper tests, which include this module.
 pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
+    link_helpers_with(core_wasm, None)
+}
+
+/// [link_helpers] for a module of a WIT world whose byte streams use `streams`.
+pub(crate) fn link_helpers_with(
+    core_wasm: Vec<u8>,
+    streams: Option<&StreamAnchor>,
+) -> Result<Vec<u8>> {
     // 1. First pass: check if any helper imports exist
     let mut has_helper_imports = false;
     for payload in Parser::new(0).parse_all(&core_wasm) {
@@ -230,6 +275,14 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
                 // Resolved to the other library's function once indices are assigned.
                 continue;
             }
+            let (module, name) = if module == CANON_MODULE {
+                streams
+                    .context("byte streams need a WIT function with a stream<u8> in the world")?
+                    .resolve(name)?
+            } else {
+                (module.clone(), name.clone())
+            };
+            let (module, name) = (&module, &name);
             let index = match external_imports
                 .iter()
                 .position(|(m, n, _)| m == module && n == name)
@@ -372,7 +425,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     };
     let mut lib_placements = Vec::new();
     for prep in &prepared_libs {
-        let memory_base = helper_memory.place(&prep.lib)?;
+        let memory_base = helper_memory.place(&prep.lib, Some(&prep.reachable))?;
 
         let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
         current_table_size = table_base
@@ -405,6 +458,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
             memory_base: placement.memory_base,
             stack_global: stack_global_index,
             table_base: placement.table_base,
+            heap_base: stack_top,
         };
 
         for &orig in &prep.reachable {

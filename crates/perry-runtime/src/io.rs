@@ -93,6 +93,20 @@ pub(crate) struct Output {
     queued: Bytes,
     state: State,
     result: [u8; 8],
+    /// Bytes appended and bytes the host accepted, since the task started.
+    appended: u64,
+    flushed: u64,
+    /// Acknowledged writes waiting for `flushed` to reach their end, oldest first.
+    acks: *mut Ack,
+    acks_tail: *mut Ack,
+    spare_acks: *mut Ack,
+}
+
+/// A write whose promise settles once the host accepted its last byte.
+struct Ack {
+    promise: *mut u8,
+    end: u64,
+    next: *mut Ack,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +128,28 @@ impl Output {
             queued: Bytes::new(),
             state: State::Open,
             result: [0; 8],
+            appended: 0,
+            flushed: 0,
+            acks: core::ptr::null_mut(),
+            acks_tail: core::ptr::null_mut(),
+            spare_acks: core::ptr::null_mut(),
+        }
+    }
+
+    /// Settle the acknowledged writes the host has accepted completely.
+    fn acknowledge(&mut self) {
+        // SAFETY: ack entries are live allocations of this task.
+        unsafe {
+            while !self.acks.is_null() && (*self.acks).end <= self.flushed {
+                let ack = self.acks;
+                self.acks = (*ack).next;
+                if self.acks.is_null() {
+                    self.acks_tail = core::ptr::null_mut();
+                }
+                (*ack).next = self.spare_acks;
+                self.spare_acks = ack;
+                crate::promise::perry_promise_resolve((*ack).promise, crate::UNDEFINED_BITS);
+            }
         }
     }
 
@@ -155,18 +191,71 @@ fn print_bytes(fd: usize, bytes: &[u8], newline: bool) {
         return;
     }
     output.queued.extend_from_slice(bytes);
+    output.appended += bytes.len() as u64;
     if newline {
         output.queued.push(b'\n');
+        output.appended += 1;
     }
+}
+
+/// `writer.write(bytes)` of a Web writer over output `fd`: append `len` bytes at `data` and
+/// settle `promise` once the host accepted them. Writing starts at once, so a writer that
+/// awaits each write keeps at most one chunk buffered (bounded memory for streams).
+///
+/// # Safety
+/// `data` must point to `len` readable bytes; `promise` must be a pending promise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_write_acknowledged(
+    fd: u32,
+    data: *const u8,
+    len: u32,
+    promise: *mut u8,
+) {
+    let fd = (fd as usize).min(1);
+    // SAFETY: guaranteed by the caller.
+    unsafe { perry_write(fd as u32, data, len) };
+    let task = current();
+    let output = &mut task.outputs[fd];
+    let ack = if output.spare_acks.is_null() {
+        task.allocate(core::mem::size_of::<Ack>()) as *mut Ack
+    } else {
+        let ack = output.spare_acks;
+        // SAFETY: spare entries are live allocations of this task.
+        output.spare_acks = unsafe { (*ack).next };
+        ack
+    };
+    let output = &mut current().outputs[fd];
+    // SAFETY: `ack` is exclusively ours; the tail, if any, is live.
+    unsafe {
+        ack.write(Ack {
+            promise,
+            end: output.appended,
+            next: core::ptr::null_mut(),
+        });
+        if output.acks_tail.is_null() {
+            output.acks = ack;
+        } else {
+            (*output.acks_tail).next = ack;
+        }
+    }
+    output.acks_tail = ack;
+    if output.state != State::Open {
+        output.flushed = output.appended;
+    }
+    pump(fd);
+    current().outputs[fd].acknowledge();
 }
 
 fn finish_copy(output: &mut Output, code: u32) {
     output.written += (code >> 4) as usize;
+    output.flushed += u64::from(code >> 4);
     if code & 0xF == DROPPED {
         // The reader is gone: discard the rest, like writes to a closed pipe.
         output.written = output.writing.len();
         output.queued.clear();
+        output.flushed = output.appended;
     }
+    output.acknowledge();
 }
 
 fn pump(fd: usize) {
@@ -179,7 +268,9 @@ fn pump(fd: usize) {
             if output.queued.is_empty() {
                 return;
             }
-            output.writing = core::mem::replace(&mut output.queued, Bytes::new());
+            // The drained buffer takes the next output: no allocation per swap.
+            core::mem::swap(&mut output.writing, &mut output.queued);
+            output.queued.clear();
             output.written = 0;
         }
         if output.writable == 0 {

@@ -63,6 +63,13 @@ impl<'h> Shapes<'h> {
                 ArrayType::get(ctx, element).into()
             }
             HirType::Named(name) => self.named(ctx, name)?,
+            HirType::Generic { base, type_args }
+                if base == "ReadableStream"
+                    && matches!(type_args.as_slice(), [HirType::Named(n)] if n == "Uint8Array")
+                    && !self.is_user_type(base) =>
+            {
+                perry_mir::types::ReadableType::get(ctx).into()
+            }
             HirType::Promise(inner) => {
                 let settled = self.settled_type(ctx, inner)?;
                 PromiseType::get(ctx, settled).into()

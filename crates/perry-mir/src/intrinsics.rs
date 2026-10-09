@@ -10,7 +10,8 @@ use crate::{
     exceptions::MayThrowInterface,
     types::{
         ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, OptionalType,
-        PromiseType, RequestType, ResponseType, StatsType, StringType, WritableType, WriterType,
+        PromiseType, ReadResultType, ReadableType, ReaderType, RequestType, ResponseType,
+        StatsType, StringType, WritableType, WriterType,
     },
 };
 use pliron::{
@@ -59,6 +60,10 @@ pub enum Ty {
     Request,
     Writable,
     Writer,
+    Readable,
+    Reader,
+    ReadResult,
+    PromiseReadResult,
 }
 
 impl Ty {
@@ -87,6 +92,13 @@ impl Ty {
             Ty::Request => RequestType::get(ctx).into(),
             Ty::Writable => WritableType::get(ctx).into(),
             Ty::Writer => WriterType::get(ctx).into(),
+            Ty::Readable => ReadableType::get(ctx).into(),
+            Ty::Reader => ReaderType::get(ctx).into(),
+            Ty::ReadResult => ReadResultType::get(ctx).into(),
+            Ty::PromiseReadResult => {
+                let result = ReadResultType::get(ctx).into();
+                PromiseType::get(ctx, result).into()
+            }
             Ty::PromiseString => PromiseType::get(ctx, string).into(),
             Ty::PromiseBytes => {
                 let bytes = BytesType::get(ctx).into();
@@ -147,6 +159,10 @@ impl Ty {
             Ty::Request => deref.is::<RequestType>(),
             Ty::Writable => deref.is::<WritableType>(),
             Ty::Writer => deref.is::<WriterType>(),
+            Ty::Readable => deref.is::<ReadableType>(),
+            Ty::Reader => deref.is::<ReaderType>(),
+            Ty::ReadResult => deref.is::<ReadResultType>(),
+            Ty::PromiseReadResult => promise_of(&|t| t.deref(ctx).is::<ReadResultType>()),
             Ty::PromiseString => promise_of(&string),
             Ty::PromiseBytes => promise_of(&|t| t.deref(ctx).is::<BytesType>()),
             Ty::PromiseStats => promise_of(&|t| t.deref(ctx).is::<StatsType>()),
@@ -297,6 +313,14 @@ intrinsics! {
     WriterWrite = "writer_write" (Writer, Bytes) -> (PromiseVoid);
     WriterClose = "writer_close" (Writer) -> (PromiseVoid);
     WriterReleaseLock = "writer_release_lock" (Writer) -> ();
+    ReadableLocked = "readable_locked" (Readable) -> (Bool);
+    ReadableGetReader = "readable_get_reader" (Readable) -> (Reader), throws;
+    ReadableCancel = "readable_cancel" (Readable) -> (PromiseVoid);
+    ReaderRead = "reader_read" (Reader) -> (PromiseReadResult);
+    ReaderCancel = "reader_cancel" (Reader) -> (PromiseVoid);
+    ReaderReleaseLock = "reader_release_lock" (Reader) -> ();
+    ReadDone = "read_done" (ReadResult) -> (Bool), pure;
+    ReadValue = "read_value" (ReadResult) -> (OptBytes), pure;
 }
 
 impl Intrinsic {

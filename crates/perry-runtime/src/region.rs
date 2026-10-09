@@ -14,8 +14,13 @@
 use alloc::alloc::{Layout, alloc, dealloc};
 use core::{cell::UnsafeCell, ptr};
 
-/// Size of a standard chunk, including its header.
+/// Size of the largest standard chunk, including its header. A task's chunks start at
+/// [MIN_CHUNK] and double up to this size, so a task that allocates little claims little
+/// memory (components can run in a single 64 KiB page).
 pub const CHUNK: usize = 64 * 1024;
+const MIN_CHUNK: usize = 4 * 1024;
+/// Standard chunk sizes: 4, 8, 16, 32 and 64 KiB, each with a free list.
+const CLASSES: usize = 5;
 /// Allocations above this size get a dedicated chunk.
 const LARGE: usize = CHUNK / 4;
 const ALIGN: usize = 8;
@@ -51,8 +56,14 @@ pub struct Task {
     large: *mut Chunk,
     cursor: usize,
     end: usize,
+    /// Size class of `chunk`.
+    class: usize,
     ready_head: *mut Node,
     ready_tail: *mut Node,
+    /// Queue nodes and subtask entries no longer in use: waits and wakeups in a loop reuse
+    /// them instead of growing the region.
+    spare_nodes: *mut Node,
+    spare_subtasks: *mut Subtask,
     subtasks: *mut Subtask,
     /// Waitable set of the pending subtasks and output streams, created on first use; 0 if
     /// none.
@@ -73,7 +84,7 @@ pub struct Task {
 
 struct Runtime {
     current: *mut Task,
-    free: *mut Chunk,
+    free: [*mut Chunk; CLASSES],
 }
 
 struct Global(UnsafeCell<Runtime>);
@@ -82,7 +93,7 @@ unsafe impl Sync for Global {}
 
 static RUNTIME: Global = Global(UnsafeCell::new(Runtime {
     current: ptr::null_mut(),
-    free: ptr::null_mut(),
+    free: [ptr::null_mut(); CLASSES],
 }));
 
 #[allow(clippy::mut_from_ref)]
@@ -129,8 +140,11 @@ fn new_task() -> *mut Task {
             large: ptr::null_mut(),
             cursor: 0,
             end: 0,
+            class: 0,
             ready_head: ptr::null_mut(),
             ready_tail: ptr::null_mut(),
+            spare_nodes: ptr::null_mut(),
+            spare_subtasks: ptr::null_mut(),
             subtasks: ptr::null_mut(),
             set: 0,
             result: ptr::null_mut(),
@@ -152,12 +166,21 @@ impl Task {
             return (chunk as usize + HEADER) as *mut u8;
         }
         if size > self.end - self.cursor {
-            let free = &mut runtime().free;
+            let mut class = if self.chunk.is_null() {
+                0
+            } else {
+                (self.class + 1).min(CLASSES - 1)
+            };
+            while (MIN_CHUNK << class) - HEADER < size {
+                class += 1;
+            }
+            let chunk_size = MIN_CHUNK << class;
+            let free = &mut runtime().free[class];
             let chunk = if free.is_null() {
-                new_chunk(CHUNK, self.chunk)
+                new_chunk(chunk_size, self.chunk)
             } else {
                 let chunk = *free;
-                // SAFETY: free-list chunks are live CHUNK-sized allocations owned here.
+                // SAFETY: free-list chunks are live allocations of this class owned here.
                 unsafe {
                     *free = (*chunk).previous;
                     (*chunk).previous = self.chunk;
@@ -165,22 +188,40 @@ impl Task {
                 chunk
             };
             self.chunk = chunk;
+            self.class = class;
             self.cursor = chunk as usize + HEADER;
-            self.end = chunk as usize + CHUNK;
+            self.end = chunk as usize + chunk_size;
         }
         let object = self.cursor as *mut u8;
         self.cursor += size;
         object
     }
 
-    pub(crate) fn push_ready(&mut self, frame: *mut u8) {
-        let node = self.allocate(core::mem::size_of::<Node>()) as *mut Node;
-        // SAFETY: `node` is fresh; the tail, if any, is a live node of this task.
+    /// A queue node for `frame`, reused when one is spare.
+    pub(crate) fn node(&mut self, frame: *mut u8) -> *mut Node {
+        let node = if self.spare_nodes.is_null() {
+            self.allocate(core::mem::size_of::<Node>()) as *mut Node
+        } else {
+            let node = self.spare_nodes;
+            // SAFETY: spare nodes are live allocations of this task.
+            self.spare_nodes = unsafe { (*node).next };
+            node
+        };
+        // SAFETY: `node` is exclusively ours.
         unsafe {
             node.write(Node {
                 frame,
                 next: ptr::null_mut(),
-            });
+            })
+        };
+        node
+    }
+
+    /// Queue `node` (a waiter whose promise settled) as it is.
+    pub(crate) fn push_ready_node(&mut self, node: *mut Node) {
+        // SAFETY: `node` is a live node of this task; the tail, if any, too.
+        unsafe {
+            (*node).next = ptr::null_mut();
             if self.ready_tail.is_null() {
                 self.ready_head = node;
             } else {
@@ -216,6 +257,12 @@ pub extern "C" fn perry_task_enter() -> *mut Task {
     runtime.current
 }
 
+/// The current task, as an identity for libraries that keep per-task state.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_task_current() -> *mut Task {
+    runtime().current
+}
+
 /// Make `task` current again (callback entry).
 ///
 /// # Safety
@@ -248,8 +295,9 @@ pub extern "C" fn perry_task_free() {
         let mut chunk = (*task).chunk;
         while !chunk.is_null() {
             let previous = (*chunk).previous;
-            (*chunk).previous = runtime.free;
-            runtime.free = chunk;
+            let class = ((*chunk).size / MIN_CHUNK).trailing_zeros() as usize;
+            (*chunk).previous = runtime.free[class];
+            runtime.free[class] = chunk;
             chunk = previous;
         }
         let mut large = (*task).large;
@@ -301,7 +349,10 @@ pub extern "C" fn perry_ready_pop() -> *mut u8 {
         if task.ready_head.is_null() {
             task.ready_tail = ptr::null_mut();
         }
-        (*node).frame
+        let frame = (*node).frame;
+        (*node).next = task.spare_nodes;
+        task.spare_nodes = node;
+        frame
     }
 }
 
@@ -309,7 +360,14 @@ pub extern "C" fn perry_ready_pop() -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_subtask_register(handle: u32, promise: *mut u8, value: u64) {
     let task = current();
-    let entry = task.allocate(core::mem::size_of::<Subtask>()) as *mut Subtask;
+    let entry = if task.spare_subtasks.is_null() {
+        task.allocate(core::mem::size_of::<Subtask>()) as *mut Subtask
+    } else {
+        let entry = task.spare_subtasks;
+        // SAFETY: spare entries are live allocations of this task.
+        task.spare_subtasks = unsafe { (*entry).next };
+        entry
+    };
     // SAFETY: freshly allocated.
     unsafe {
         entry.write(Subtask {
@@ -333,7 +391,10 @@ pub extern "C" fn perry_subtask_done(handle: u32) -> u32 {
             let entry = *link;
             if (*entry).handle == handle {
                 *link = (*entry).next;
-                crate::promise::perry_promise_resolve((*entry).promise, (*entry).value);
+                let (promise, value) = ((*entry).promise, (*entry).value);
+                (*entry).next = task.spare_subtasks;
+                task.spare_subtasks = entry;
+                crate::promise::perry_promise_resolve(promise, value);
                 return 1;
             }
             link = &mut (*entry).next;
@@ -399,5 +460,9 @@ pub fn chunk_counts() -> (usize, usize, usize) {
             )
         }
     };
-    (chunks, large, count(runtime.free))
+    (
+        chunks,
+        large,
+        runtime.free.iter().map(|&free| count(free)).sum(),
+    )
 }

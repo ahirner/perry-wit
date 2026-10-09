@@ -56,6 +56,8 @@ pub enum AbiType {
     List(Box<AbiType>),
     /// Fields in WIT order, named as the TypeScript record fields.
     Record(Vec<(String, AbiType)>),
+    /// `stream<u8>`: the readable end's handle, a `ReadableStream<Uint8Array>` in TypeScript.
+    ByteStream,
 }
 
 /// One component export bound to a TypeScript function.
@@ -94,7 +96,8 @@ impl AbiType {
             | AbiType::S16
             | AbiType::U16
             | AbiType::S32
-            | AbiType::U32 => out.push(Flat::I32),
+            | AbiType::U32
+            | AbiType::ByteStream => out.push(Flat::I32),
             AbiType::S64 | AbiType::U64 => out.push(Flat::I64),
             AbiType::F32 => out.push(Flat::F32),
             AbiType::F64 => out.push(Flat::F64),
@@ -113,7 +116,7 @@ impl AbiType {
         match self {
             AbiType::Bool | AbiType::S8 | AbiType::U8 => 1,
             AbiType::S16 | AbiType::U16 => 2,
-            AbiType::S32 | AbiType::U32 | AbiType::F32 => 4,
+            AbiType::S32 | AbiType::U32 | AbiType::F32 | AbiType::ByteStream => 4,
             AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
             AbiType::String | AbiType::List(_) => 4,
             AbiType::Record(fields) => fields.iter().map(|(_, t)| t.alignment()).max().unwrap_or(1),
@@ -124,7 +127,7 @@ impl AbiType {
         match self {
             AbiType::Bool | AbiType::S8 | AbiType::U8 => 1,
             AbiType::S16 | AbiType::U16 => 2,
-            AbiType::S32 | AbiType::U32 | AbiType::F32 => 4,
+            AbiType::S32 | AbiType::U32 | AbiType::F32 | AbiType::ByteStream => 4,
             AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
             AbiType::String | AbiType::List(_) => 8,
             AbiType::Record(_) => {
@@ -454,6 +457,10 @@ fn async_export(
                 b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
             }
         }
+        if b.state.uses_streams {
+            // No stream end outlives the export call.
+            b.call(ctx, "web_streams_close", &[], &[], vec![]);
+        }
         b.host(ctx, task_return, flat);
         b.runtime(ctx, Runtime::TaskCloseSet, vec![]);
         b.runtime(ctx, Runtime::TaskFree, vec![]);
@@ -507,6 +514,21 @@ fn async_export(
         let task = b.host(ctx, crate::Host::ContextGet0, vec![]).expect("task");
         b.runtime(ctx, Runtime::TaskResume, vec![task]);
         let next = b.new_block(ctx, vec![]);
+        if b.state.uses_streams {
+            // Reads of `stream<u8>`s take their stream events.
+            let handled = b
+                .call(
+                    ctx,
+                    "web_event",
+                    &[crate::W::I32; 3],
+                    &[crate::W::I32],
+                    vec![event, handle, subtask_state],
+                )
+                .expect("handled");
+            let unhandled = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
+            b.block = unhandled;
+        }
         if b.state.uses_fs {
             // `node:fs` operations take their own subtask, stream and future events.
             let handled = b
@@ -626,6 +648,10 @@ impl FunctionLowering<'_> {
                 let (ptr, len) = (next()?, next()?);
                 self.lift_list(ctx, element, mir_ty, ptr, len)
             }
+            AbiType::ByteStream => {
+                let handle = next()?;
+                self.lift_stream(ctx, mir_ty, handle)
+            }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;
                 let mut values = Vec::new();
@@ -665,6 +691,10 @@ impl FunctionLowering<'_> {
                 let len = self.load(ctx, MemKind::I32, address, offset + 4);
                 self.lift_list(ctx, element, mir_ty, ptr, len)
             }
+            AbiType::ByteStream => {
+                let handle = self.load(ctx, MemKind::I32, address, offset);
+                self.lift_stream(ctx, mir_ty, handle)
+            }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;
                 let mut values = Vec::new();
@@ -680,6 +710,29 @@ impl FunctionLowering<'_> {
                 self.lift_scalar(ctx, scalar, mir_ty, raw)
             }
         }
+    }
+
+    /// A `ReadableStream<Uint8Array>` owning the readable end `handle`.
+    fn lift_stream(
+        &mut self,
+        ctx: &mut Context,
+        mir_ty: TypeHandle,
+        handle: Value,
+    ) -> Result<Value> {
+        ensure!(
+            mir_ty.deref(ctx).is::<perry_mir::types::ReadableType>(),
+            "WIT stream<u8> needs a TypeScript ReadableStream<Uint8Array>"
+        );
+        self.state.uses_streams = true;
+        Ok(self
+            .call(
+                ctx,
+                "web_readable_new",
+                &[crate::W::I32],
+                &[crate::W::I32],
+                vec![handle],
+            )
+            .expect("stream"))
     }
 
     fn lift_string(
@@ -807,6 +860,7 @@ impl FunctionLowering<'_> {
         offset: u32,
     ) -> Result<()> {
         match ty {
+            AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
             AbiType::String => {
                 ensure!(
                     mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
@@ -881,6 +935,7 @@ impl FunctionLowering<'_> {
         out: &mut Vec<Value>,
     ) -> Result<()> {
         match ty {
+            AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
             AbiType::String => {
                 ensure!(
                     mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),

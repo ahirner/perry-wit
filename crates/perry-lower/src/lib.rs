@@ -46,8 +46,8 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
         ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, PromiseType,
-        RecordType, RequestType, ResponseType, SettledType, StatsType, StringType, WritableType,
-        WriterType,
+        ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType,
+        SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
 use pliron::printable::Printable as _;
@@ -115,6 +115,10 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
                 source,
                 "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
             );
+        ensure!(
+            !matches!(source, "fs" | "node:fs"),
+            "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
+        );
         ensure!(
             module.is_some() || !builtin,
             "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
@@ -189,7 +193,19 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
         }
         module.append_operation(ctx, func.get_operation(), 0);
     }
-    if !hir.init.is_empty() {
+    // Module initialization of named built-in imports (`Writable` from `node:stream`) has
+    // nothing to run; without other statements there is no main function.
+    let init: Vec<Stmt> = hir
+        .init
+        .iter()
+        .filter(|statement| {
+            !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
+                if matches!(&**callee, Expr::ExternFuncRef { name, .. }
+                    if name == "js_native_module_named_esm_export_value"))
+        })
+        .cloned()
+        .collect();
+    if !init.is_empty() {
         // Top-level statements (with top-level `await`) form the async main function of a
         // command (`wasi:cli/run`), settling `undefined`.
         let signature = Signature {
@@ -202,7 +218,7 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
             ctx,
             &signature,
             &[],
-            &hir.init,
+            &init,
             &signatures,
             &shapes,
             &builtins,
@@ -281,6 +297,9 @@ enum Kind {
     Request,
     Writable,
     Writer,
+    Readable,
+    Reader,
+    ReadResult,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -355,6 +374,12 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Writable)
     } else if ty.is::<WriterType>() {
         Ok(Kind::Writer)
+    } else if ty.is::<ReadableType>() {
+        Ok(Kind::Readable)
+    } else if ty.is::<ReaderType>() {
+        Ok(Kind::Reader)
+    } else if ty.is::<ReadResultType>() {
+        Ok(Kind::ReadResult)
     } else if ty
         .downcast_ref::<IntegerType>()
         .is_some_and(|int| int.width() == 1)
@@ -694,6 +719,30 @@ impl<'s> FunctionBuilder<'s> {
                     .expect("promise"));
             }
             (Kind::Writer, "close", true) => (Intrinsic::WriterClose, vec![receiver]),
+            (Kind::Readable, "locked", false) => (Intrinsic::ReadableLocked, vec![receiver]),
+            (Kind::Readable, "getReader", true) => {
+                ensure!(
+                    args.is_some_and(<[Expr]>::is_empty),
+                    "BYOB readers are not supported (accepted deviation, TODOs.md P6.2)"
+                );
+                (Intrinsic::ReadableGetReader, vec![receiver])
+            }
+            (Kind::Readable, "cancel", true) => (Intrinsic::ReadableCancel, vec![receiver]),
+            (Kind::Reader, "read", true) => {
+                ensure!(
+                    args.is_some_and(<[Expr]>::is_empty),
+                    "BYOB reads are not supported (accepted deviation, TODOs.md P6.2)"
+                );
+                (Intrinsic::ReaderRead, vec![receiver])
+            }
+            (Kind::Reader, "cancel", true) => (Intrinsic::ReaderCancel, vec![receiver]),
+            (Kind::Reader, "releaseLock", true) => {
+                self.intrinsic(ctx, Intrinsic::ReaderReleaseLock, vec![receiver]);
+                let number = FP64Type::get(ctx).into();
+                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
+            }
+            (Kind::ReadResult, "done", false) => (Intrinsic::ReadDone, vec![receiver]),
+            (Kind::ReadResult, "value", false) => (Intrinsic::ReadValue, vec![receiver]),
             (Kind::Writer, "releaseLock", true) => {
                 self.intrinsic(ctx, Intrinsic::WriterReleaseLock, vec![receiver]);
                 let number = FP64Type::get(ctx).into();
@@ -1803,7 +1852,10 @@ impl<'s> FunctionBuilder<'s> {
                         | Kind::Response
                         | Kind::Request
                         | Kind::Writable
-                        | Kind::Writer,
+                        | Kind::Writer
+                        | Kind::Readable
+                        | Kind::Reader
+                        | Kind::ReadResult,
                         name,
                     ) => self.web_member(ctx, value, name, None)?,
                     (Kind::Stats, "size") => self
@@ -2122,7 +2174,16 @@ impl<'s> FunctionBuilder<'s> {
         let receiver = self.defined(ctx, receiver)?;
         let arg = |index: usize| args.get(index);
         let value = match (kind(ctx, receiver)?, method) {
-            (Kind::Headers | Kind::Response | Kind::Request | Kind::Writable | Kind::Writer, _) => {
+            (
+                Kind::Headers
+                | Kind::Response
+                | Kind::Request
+                | Kind::Writable
+                | Kind::Writer
+                | Kind::Readable
+                | Kind::Reader,
+                _,
+            ) => {
                 return self.web_member(ctx, receiver, method, Some(args)).map(Some);
             }
             (Kind::Stats, "isFile" | "isDirectory") => {

@@ -154,6 +154,56 @@ pub(crate) fn imports(resolve: &Resolve, world_id: WorldId) -> Vec<String> {
         .collect()
 }
 
+/// The function of the world whose canonical built-ins serve every `stream<u8>`: an export's
+/// first (its stream arguments are the ones read), otherwise an import's.
+pub(crate) fn stream_anchor(
+    resolve: &Resolve,
+    world_id: WorldId,
+) -> Option<crate::link::StreamAnchor> {
+    let world = &resolve.worlds[world_id];
+    stream_functions(resolve, world.exports.iter(), true)
+        .chain(stream_functions(resolve, world.imports.iter(), false))
+        .next()
+}
+
+/// Functions of `items` with a `stream<u8>`, as stream anchors.
+fn stream_functions<'a>(
+    resolve: &'a Resolve,
+    items: impl Iterator<Item = (&'a wit_parser::WorldKey, &'a WorldItem)> + 'a,
+    export: bool,
+) -> impl Iterator<Item = crate::link::StreamAnchor> + 'a {
+    items.flat_map(move |(key, item)| {
+        let (module, functions): (String, Vec<&wit_parser::Function>) = match item {
+            WorldItem::Function(function) => (
+                if export { "[export]$root" } else { "$root" }.to_string(),
+                vec![function],
+            ),
+            WorldItem::Interface { id, .. } => (
+                format!(
+                    "{}{}",
+                    if export { "[export]" } else { "" },
+                    resolve.name_world_key(key)
+                ),
+                resolve.interfaces[*id].functions.values().collect(),
+            ),
+            WorldItem::Type { .. } => (String::new(), Vec::new()),
+        };
+        functions.into_iter().filter_map(move |function| {
+            let index = function
+                .find_futures_and_streams(resolve)
+                .iter()
+                .position(|id| {
+                    matches!(resolve.types[*id].kind, TypeDefKind::Stream(Some(Type::U8)))
+                })?;
+            Some(crate::link::StreamAnchor {
+                module: module.clone(),
+                function: function.name.clone(),
+                index: index as u32,
+            })
+        })
+    })
+}
+
 fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
     Ok(match ty {
         Type::Bool => AbiType::Bool,
@@ -173,6 +223,7 @@ fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
             match &definition.kind {
                 TypeDefKind::Type(inner) => abi_type(resolve, inner)?,
                 TypeDefKind::List(element) => AbiType::List(Box::new(abi_type(resolve, element)?)),
+                TypeDefKind::Stream(Some(Type::U8)) => AbiType::ByteStream,
                 TypeDefKind::Record(record) => AbiType::Record(
                     record
                         .fields

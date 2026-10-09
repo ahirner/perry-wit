@@ -39,3 +39,4 @@ web.headers.multimap
 web.response.bytes
 web.request.bytes
 node.stream.writable_to_web
+wasi.streams.incoming_bytes

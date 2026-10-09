@@ -14,7 +14,7 @@ Perry-WIT compiles a static subset of TypeScript to WebAssembly components targe
 | `crates/perry-runtime` | `no_std` runtime linked into every module: allocator, task regions, strings, arrays |
 | `crates/perry-std` | Built-ins on top of the runtime (string methods, `Uint8Array`, JSON, random), linked on demand |
 | `crates/perry-fs` | `node:fs/promises` over `wasi:filesystem`, linked on demand |
-| `crates/perry-web` | `Headers`, constructed `Response`/`Request`, Web writers over stdout/stderr, linked on demand |
+| `crates/perry-web` | `Headers`, constructed `Response`/`Request`, `ReadableStream` readers over `stream<u8>`, Web writers over stdout/stderr, linked on demand |
 | `crates/perry-abi` | Runtime services and layouts the on-demand libraries share (no exports of its own) |
 | `crates/*-helper`, `src/helpers` | Computation helpers (JSON, time, number formatting, text, search, URL), linked on demand |
 | `crates/conformance` | Contracts checked against Node.js as the oracle |
@@ -65,11 +65,12 @@ TypeScript ─ perry-parser ─ Perry HIR ─ perry-lower ─ perry MIR
 
 All memory comes from linear memory managed by `perry-runtime`:
 
-- **buffer.** talc 5.1 (`WasmDynamicTalc`): 1.9 KB of code, with in-place `realloc`. Chosen by measurement in `bench/allocators`.
-- **task.** A region of 64 KiB chunks per export call, released in bulk.
+- **buffer.** talc 5.1: 1.9 KB of code, with in-place `realloc`. Chosen by measurement in `bench/allocators`. It first claims the rest of the initial memory after the linked data and stack (`__heap_base`, resolved by `src/link`), then grows, so a component whose working set fits runs in a single 64 KiB page.
+- **task.** A region per export call, released in bulk. Its chunks start at 4 KiB and double up to 64 KiB, with a free list per size. Queue nodes, waiters and subtask entries are recycled within the task.
   - The host's `cabi_realloc` for argument lowering opens the task.
   - The export adopts it.
   - `cabi_post_<export>` ends it after the host has lifted the result, so results can point into the region without copies.
+- **Leases** (`perry_codegen::lease`). `reader.read()` and `writer.write()` hand out a promise, a `{ done, value }` and a chunk view per call. When the MIR proves that nothing derived from one call is live when the next call of the same kind runs (and the reader or writer stays inside the function), the call is leased: the runtime reuses one set of objects and one 8 KiB chunk buffer. Otherwise each call gets fresh objects. Writes settle when the host accepted their bytes, so a loop that awaits them keeps one chunk of output. Together, a stream of any length runs in constant memory (`wasi.streams.incoming_bytes`: 4 MiB through 64 KiB).
 - **instance.** The collector (TODOs.md P5.3) is not built. The builder cannot yet express module state (R4), so nothing outlives its task.
 
 ## Exceptions

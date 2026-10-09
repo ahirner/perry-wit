@@ -298,6 +298,31 @@ pub struct WritableType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct WriterType;
 
+/// A `ReadableStream<Uint8Array>` over a WIT `stream<u8>`.
+#[pliron_type(
+    name = "perry.readable",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ReadableType;
+
+/// A `ReadableStreamDefaultReader`.
+#[pliron_type(name = "perry.reader", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ReaderType;
+
+/// A reader's `{ done, value }`.
+#[pliron_type(
+    name = "perry.read_result",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ReadResultType;
+
 /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value. Lives in the
 /// task like every other value (R3, R4).
 #[pliron_type(

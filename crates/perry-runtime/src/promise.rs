@@ -40,6 +40,24 @@ pub extern "C" fn perry_promise_new() -> *mut u8 {
     promise as *mut u8
 }
 
+/// `promise` made pending again if it settled and nothing waits on it, otherwise a new
+/// promise. A leased operation (`perry_codegen::lease`) passes its previous promise, which no
+/// code can observe any more.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_promise_reuse(promise: *mut u8) -> *mut u8 {
+    let reusable = promise as *mut Promise;
+    // SAFETY: a non-null argument is a live promise of the current task.
+    unsafe {
+        if reusable.is_null() || (*reusable).state == PENDING || !(*reusable).waiters.is_null() {
+            return perry_promise_new();
+        }
+        (*reusable).state = PENDING;
+        (*reusable).status = 0;
+        (*reusable).value = 0;
+    }
+    promise
+}
+
 fn settle(promise: *mut u8, state: u32, status: i32, value: u64) {
     let promise = promise as *mut Promise;
     let task = current();
@@ -54,8 +72,9 @@ fn settle(promise: *mut u8, state: u32, status: i32, value: u64) {
         let mut waiter = (*promise).waiters;
         (*promise).waiters = ptr::null_mut();
         while !waiter.is_null() {
-            task.push_ready((*waiter).frame);
-            waiter = (*waiter).next;
+            let next = (*waiter).next;
+            task.push_ready_node(waiter);
+            waiter = next;
         }
     }
 }
@@ -89,13 +108,9 @@ pub extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
     let promise = promise as *mut Promise;
-    let node = current().allocate(core::mem::size_of::<Node>()) as *mut Node;
-    // SAFETY: `promise` is live; `node` is fresh. Waiters run in registration order.
+    let node = current().node(frame);
+    // SAFETY: `promise` is live; `node` is ours. Waiters run in registration order.
     unsafe {
-        node.write(Node {
-            frame,
-            next: ptr::null_mut(),
-        });
         let mut link: *mut *mut Node = &mut (*promise).waiters;
         while !(*link).is_null() {
             link = &mut (**link).next;

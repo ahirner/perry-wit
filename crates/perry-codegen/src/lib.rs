@@ -44,8 +44,8 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
         ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, OptionalType,
-        PromiseType, RecordType, RequestType, ResponseType, SettledType, StatsType, StringType,
-        WritableType, WriterType,
+        PromiseType, ReadResultType, ReadableType, ReaderType, RecordType, RequestType,
+        ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
 use perry_runtime::array as layout;
@@ -85,6 +85,7 @@ use std::{
 
 mod async_split;
 pub mod boundary;
+mod lease;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -436,6 +437,9 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<RequestType>()
         || deref.is::<WritableType>()
         || deref.is::<WriterType>()
+        || deref.is::<ReadableType>()
+        || deref.is::<ReaderType>()
+        || deref.is::<ReadResultType>()
         || deref.is::<ExceptionType>()
         || deref.is::<BytesType>()
         || deref.is::<JsonType>()
@@ -566,6 +570,10 @@ struct ModuleState {
     uses_io: bool,
     /// Whether any function starts a `node:fs` operation (callbacks pass it events).
     uses_fs: bool,
+    /// Whether the module reads `stream<u8>`s (callbacks pass them events; tasks close them).
+    uses_streams: bool,
+    /// Operations whose previous results are dead whenever they run again (`lease`).
+    leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
     json_serializers: HashMap<TypeHandle, Identifier>,
 }
@@ -601,8 +609,13 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         shapes: HashMap::new(),
         uses_io: false,
         uses_fs: false,
+        uses_streams: false,
         json_serializers: HashMap::new(),
+        leased: HashSet::new(),
     };
+    for function in &functions {
+        state.leased.extend(lease::leased(ctx, function));
+    }
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);
         if let Some(kind) = async_functions.iter().position(|f| *f == symbol) {
@@ -637,6 +650,13 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         // A command reports uncaught exceptions on stderr.
         if exports.iter().any(|e| e.command) {
             state.uses_io = true;
+        }
+        if exports.iter().any(|e| {
+            e.params
+                .iter()
+                .any(|p| matches!(p, boundary::AbiType::ByteStream))
+        }) {
+            state.uses_streams = true;
         }
         let mir_functions: HashMap<String, FuncOp> = functions
             .iter()
@@ -1486,6 +1506,27 @@ impl<'s> FunctionLowering<'s> {
                 let fd = self.i32_const(ctx, fd);
                 self.call(ctx, "web_writable_new", &[W::I32], &[W::I32], vec![fd])
             }
+            Intrinsic::WriterWrite => {
+                let leased = self.i32_const(ctx, i32::from(self.state.leased.contains(&op)));
+                self.call(
+                    ctx,
+                    "web_writer_write",
+                    &[W::I32, W::I32, W::I32],
+                    &[W::I32],
+                    vec![args[0], args[1], leased],
+                )
+            }
+            Intrinsic::ReaderRead => {
+                self.state.uses_streams = true;
+                let leased = self.i32_const(ctx, i32::from(self.state.leased.contains(&op)));
+                self.call(
+                    ctx,
+                    "web_reader_read",
+                    &[W::I32, W::I32],
+                    &[W::I32],
+                    vec![args[0], leased],
+                )
+            }
             Intrinsic::FsReadText
             | Intrinsic::FsReadBytes
             | Intrinsic::FsWriteText
@@ -1621,11 +1662,17 @@ impl<'s> FunctionLowering<'s> {
                         Intrinsic::WritableGetWriter => {
                             ("web_writable_get_writer", &[W::I32], &[W::I32])
                         }
-                        Intrinsic::WriterWrite => {
-                            ("web_writer_write", &[W::I32, W::I32], &[W::I32])
-                        }
                         Intrinsic::WriterClose => ("web_writer_close", &[W::I32], &[W::I32]),
                         Intrinsic::WriterReleaseLock => ("web_writer_release_lock", &[W::I32], &[]),
+                        Intrinsic::ReadableLocked => ("web_readable_locked", &[W::I32], &[W::I32]),
+                        Intrinsic::ReadableGetReader => {
+                            ("web_readable_get_reader", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ReadableCancel => ("web_readable_cancel", &[W::I32], &[W::I32]),
+                        Intrinsic::ReaderCancel => ("web_reader_cancel", &[W::I32], &[W::I32]),
+                        Intrinsic::ReaderReleaseLock => ("web_reader_release_lock", &[W::I32], &[]),
+                        Intrinsic::ReadDone => ("web_read_done", &[W::I32], &[W::I32]),
+                        Intrinsic::ReadValue => ("web_read_value", &[W::I32], &[W::I32]),
                         Intrinsic::RequestUrl => ("web_request_url", &[W::I32], &[W::I32]),
                         Intrinsic::RequestHeaders => ("web_request_headers", &[W::I32], &[W::I32]),
                         Intrinsic::ExceptionToNumber => {

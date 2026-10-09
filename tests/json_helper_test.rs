@@ -20,7 +20,7 @@ const OUTPUT: u32 = 458_752;
 #[test]
 fn linked_json_helpers_share_a_measured_layout_with_the_guest_heap() -> Result<()> {
     let mut placement = libraries::HelperMemory::new(59_004);
-    placement.place(&libraries::Library::parse(libraries::JSON)?)?;
+    placement.place(&libraries::Library::parse(libraries::JSON)?, None)?;
     let heap = libraries::align_to(placement.stack_top()?, 65_536)?;
     assert!(
         heap > 131_072,

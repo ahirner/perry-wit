@@ -79,6 +79,8 @@ Every allocation site is assigned a **tier** by static analysis on MIR. Each tie
 
 Tier rules:
 
+- **Leases (decided 2026-10-09).** A built-in that hands out objects per call (`reader.read()`, `writer.write()`) reuses them when liveness proves the previous call's objects dead at every call of its kind, and its receiver does not leave the function (`perry_codegen::lease`). This is the static-liveness answer for streaming loops, which the loop-growth rule would otherwise send to `instance`.
+
 - **Escape lattice:** `scalar < frame < task < instance`.
 - **Storing into an object raises the stored value to at least that object's tier.** Storing into module state raises it to `instance`. A `task` object therefore never points into `frame`, and an `instance` object never points into `task`.
 - **Loop-growth rule.** An allocation site inside a loop is promoted to `instance` unless its tier is proven `frame` or lower when either of these holds:
@@ -375,7 +377,8 @@ Owned (each with unit tests on MIR snippets):
   - Task regions: chunk lists with a per-region list of objects that hold references.
   - Bulk free at `task.return` / `task.cancel`.
   - *Status:* `crates/perry-runtime` (4.8 KB on wasm32 with talc and `fmod`) provides:
-    - task regions: a 64 KiB chunk chain with a free list, dedicated chunks above 16 KiB, and nested `perry_task_begin`/`_end` marks;
+    - task regions: chunks of 4 KiB doubling to 64 KiB with a free list per size, dedicated chunks above 16 KiB, recycled queue nodes and subtask entries, and nested `perry_task_begin`/`_end` marks;
+    - the `buffer` heap claims the initial memory after the linked data and stack before growing (`perry_runtime::heap`), and libraries reserve only the stack their reachable functions need (`src/link`);
     - dense arrays (`perry_array_new`/`_grow`, layout in `array.rs`);
     - `perry_f64_rem`.
   - It owns memory, exports it, and links with a 64 KiB stack. `crates/perry-codegen/build.rs` builds and embeds it the way the root `build.rs` builds the helpers.
@@ -425,18 +428,19 @@ Owned (each with unit tests on MIR snippets):
     - remove a `perry.unwrap` dominated by another unwrap of the same value (P3.5b). `point.x; point.y` currently checks twice;
     - inline `fmod` for proven integers (P3.5). `perry_f64_rem` is the largest per-iteration cost in the scaling loops.
 - [ ] **P6.2 Migrate in registry order.** Each group is done when its conformance contracts and the matching `tests/*` suites pass on MIR:
-  - *Status (2026-10-09):* 41 of 50 contracts pass, 4 are deferred (`crates/conformance/deferred.txt`) and 5 are pending.
-    - Passing: the scaling contracts; the expression-language contracts (`ecma.number.arithmetic`, `ecma.math.rounding`, `ecma.string.operations`, `ecma.array.dense`, `ecma.object.records`, `ecma.date.epoch`, `ecma.uint8array.conversion`, `web.textencoder.subviews`, `ecma.json.roundtrip`), `ecma.uint8array.set`; the timer value and observer contracts; `ecma.promise.all`, `race` and `all_settled`; the seven `node.fs.*` contracts; `web.headers.multimap`, `web.response.bytes`, `web.request.bytes`, `node.stream.writable_to_web`; the commands (`ecma.json.command`, `ecma.date.clock`, `web.crypto.random`, `web.console.routing`, `web.performance.monotonic`, `node.process.exit_status`, `node.process.environment`); the rejection `node.timers.callbacks.unsupported`; and the three `wasi.execution.detect_*` harness checks.
-    - Pending: `web.fetch.bounded_body` (fetch over `wasi:http/client` and `ReadableStream` readers), `wasi.streams.incoming_bytes` (needs bounded memory within a task: its 4 MiB stream runs in 64 KiB of guest memory, but task regions take 64 KiB chunks and keep every chunk buffer until the task ends), `node.timers.promises.lifecycle` (`AbortController`), `ecma.error.values` (`cause`, `JSON.stringify` and spread of errors) and `wasi.http.handler`.
-    - `tests/command_test.rs` checks `node:fs` errors and paths, and `Headers`/`Response`/`Request` against output recorded from Node; `tests/builtins_test.rs` checks the built-ins against values recorded from Node.
+  - *Status (2026-10-09):* 42 of 50 contracts pass, 4 are deferred (`crates/conformance/deferred.txt`) and 4 are pending.
+    - Passing: the scaling contracts; the expression-language contracts (`ecma.number.arithmetic`, `ecma.math.rounding`, `ecma.string.operations`, `ecma.array.dense`, `ecma.object.records`, `ecma.date.epoch`, `ecma.uint8array.conversion`, `web.textencoder.subviews`, `ecma.json.roundtrip`), `ecma.uint8array.set`; the timer value and observer contracts; `ecma.promise.all`, `race` and `all_settled`; the seven `node.fs.*` contracts; `web.headers.multimap`, `web.response.bytes`, `web.request.bytes`, `node.stream.writable_to_web`, `wasi.streams.incoming_bytes` (`stream<u8>` arguments as `ReadableStream`s, 4 MiB through 64 KiB of memory with leases); the commands (`ecma.json.command`, `ecma.date.clock`, `web.crypto.random`, `web.console.routing`, `web.performance.monotonic`, `node.process.exit_status`, `node.process.environment`); the rejection `node.timers.callbacks.unsupported`; and the three `wasi.execution.detect_*` harness checks.
+    - Pending: `web.fetch.bounded_body` (fetch over `wasi:http/client`; readers exist), `node.timers.promises.lifecycle` (`AbortController`), `ecma.error.values` (`cause`, `JSON.stringify` and spread of errors) and `wasi.http.handler`.
+    - `tests/stream_test.rs` checks kept and leased chunks of `stream<u8>` arguments in one memory page; `tests/command_test.rs` checks `node:fs` errors and paths, and `Headers`/`Response`/`Request` against output recorded from Node; `tests/builtins_test.rs` checks the built-ins against values recorded from Node.
   - Accepted deviations (documented, diagnosed at compile time where a program could observe them, and kept out of the conformance domain; as on `main`):
     - Strings: the domain is BMP scalars, where one scalar is one UTF-16 code unit, so lengths, indices and slices agree with Node. No surrogate halves, no WTF-8.
     - Scheduling: an `await` of a settled promise continues inline; there is no microtask queue, so continuations run in settlement order rather than microtask FIFO order. Continuations are scheduled by WASI 0.3 events.
     - JSON: revivers, replacers and indentation are compile-time errors. `JSON.stringify` writes record fields in shape (sorted) order, not insertion order.
     - `null` and `undefined` share the absent representation of optionals. Built-ins that return `T | null` (`Headers.get`) produce optionals; TypeScript rejects comparing `T | undefined` with `null` (TS2367), so typed programs cannot tell them apart.
-    - `node:fs`: paths resolve against the preopens with `/` as the working directory; errors carry Node's message (`ENOENT: no such file or directory, open 'x'`) but not `code`, `errno`, `syscall` or `path` properties; `readdir` returns names in host order; options other than the `utf8` encoding (`recursive`, `withFileTypes`, flags) are compile-time errors.
+    - `node:fs`: only `node:fs/promises` (as on `main`); synchronous and callback APIs are compile-time errors. Paths resolve against the preopens with `/` as the working directory; errors carry Node's message (`ENOENT: no such file or directory, open 'x'`) but not `code`, `errno`, `syscall` or `path` properties; `readdir` returns names in host order; options other than the `utf8` encoding (`recursive`, `withFileTypes`, flags) are compile-time errors.
     - `Request` accepts `http`/`https` URLs only (the fetch helper's normalization).
     - `Writable.toWeb(process.stdout)`: a write is acknowledged when the output buffer accepts it; `close()` closes the Web stream but leaves the console output open, as Node does for stdio redirected to files.
+    - `ReadableStream`: one outstanding `read()` per reader (a second rejects); `getReader({ mode: "byob" })` is a compile-time error.
     - Deferred contracts: BYOB readers (`web.streams.byob_reader`, `web.fetch.bounded_byob_body`; no detachable `ArrayBuffer`), `ecma.temporal.iso` (Temporal is flagged in Node) and `web.textdecoder.streaming` (Perry HIR drops the `stream` option).
   - Known gaps found on the way:
     - `JSON.parse` costs about 25 KB of data in a component: the JSON helper parses numbers with `core`'s `str::parse::<f64>`, whose tables dominate. A smaller exact decimal parser would fix it.

@@ -68,8 +68,9 @@ pub fn compile_for_world(
     let exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::check_main(ctx, &mir, &exports)?;
     let imports = bind::imports(resolve, world);
+    let streams = bind::stream_anchor(resolve, world);
     let core = perry_codegen::compile(ctx, &mir, &Exports::Canonical { exports, imports })?;
-    let core = finish(core)?;
+    let core = finish(core, streams.as_ref())?;
     let (component, stripped) = if componentize {
         let component = component::encode_resolved(&core, resolve, world)?;
         let stripped = strip::component(&component)?;
@@ -90,7 +91,7 @@ pub fn compile_for_world(
 pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
     let mir = lower(ctx, source, file_name)?;
-    finish(perry_codegen::compile(ctx, &mir, &Exports::Raw)?)
+    finish(perry_codegen::compile(ctx, &mir, &Exports::Raw)?, None)
 }
 
 fn lower(
@@ -105,7 +106,8 @@ fn lower(
     Ok(mir)
 }
 
-fn finish(core: Vec<u8>) -> Result<Vec<u8>> {
-    let core = link::link_helpers(core).context("linking perry-runtime and helpers")?;
+fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<Vec<u8>> {
+    let core =
+        link::link_helpers_with(core, streams).context("linking perry-runtime and helpers")?;
     link::compact(&core).context("interning core function signatures")
 }

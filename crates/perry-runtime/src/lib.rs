@@ -4,7 +4,7 @@
 //! every compiled module by `src/link`, which resolves the `__perry_helper` imports of
 //! compiled code against the `perry_*` exports here. Memory tiers (design decision D3):
 //!
-//! - `buffer`: [talc] (`WasmDynamicTalc`), chosen by the bake-off in `bench/allocators`:
+//! - `buffer`: [talc] over the memory after the linked data ([heap]), chosen by the bake-off in `bench/allocators`:
 //!   1.9 KB of code against dlmalloc's 6.7 KB, in-place `realloc`, equal or better speed.
 //! - `task`: [region] bump allocation in 64 KiB chunks taken from the buffer allocator and
 //!   released in bulk at task end.
@@ -23,14 +23,22 @@ pub mod region;
 pub mod string;
 
 #[cfg(target_arch = "wasm32")]
+pub mod heap;
+
+#[cfg(target_arch = "wasm32")]
 #[global_allocator]
-static ALLOCATOR: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
+static ALLOCATOR: talc::cell::TalcSyncCell<heap::Heap, talc::wasm::WasmBinning> =
+    talc::cell::TalcSyncCell::new_wasm(heap::Heap::new());
 
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()
 }
+
+/// Bits of `undefined` in a `number | undefined` slot (`perry_codegen::UNDEFINED_BITS`), the
+/// value of `Promise<void>`.
+pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 
 /// ECMAScript `%` on numbers: the IEEE remainder truncated toward zero (C `fmod`).
 #[unsafe(no_mangle)]

@@ -569,6 +569,8 @@ struct Writable {
 struct Writer {
     stream: *mut Writable,
     released: u32,
+    /// The previous write's promise, reused by leased writes.
+    promise: *mut u8,
 }
 
 /// `Writable.toWeb(process.stdout)` (`fd` 0) or `process.stderr` (1).
@@ -611,6 +613,7 @@ pub extern "C" fn web_writable_get_writer(stream: *mut u8) -> *mut u8 {
         writer.write(Writer {
             stream,
             released: 0,
+            promise: core::ptr::null_mut(),
         })
     };
     writer as *mut u8
@@ -642,18 +645,24 @@ fn bound(writer: *mut u8, promise: *mut u8) -> Option<&'static mut Writable> {
     }
 }
 
-/// `writer.write(bytes)`: the bytes join the output in order; the write is acknowledged when
-/// the output accepted them.
+/// `writer.write(bytes)`: the bytes join the output in order; the promise settles once the
+/// host accepted them, so awaiting each write bounds the buffered output.
 ///
 /// # Safety
 /// `writer` must be a writer and `view` a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn web_writer_write(writer: *mut u8, view: *mut u8) -> *mut u8 {
-    let promise = promise_new();
+pub unsafe extern "C" fn web_writer_write(writer: *mut u8, view: *mut u8, leased: u32) -> *mut u8 {
+    let promise = if leased != 0 {
+        // SAFETY: compiled code passes writers.
+        let previous = unsafe { &mut (*(writer as *mut Writer)).promise };
+        *previous = perry_abi::promise_reuse(*previous);
+        *previous
+    } else {
+        promise_new()
+    };
     if let Some(stream) = bound(writer, promise) {
         // SAFETY: compiled code passes a `Uint8Array`.
-        perry_abi::write(stream.fd, unsafe { view_bytes(view) });
-        resolve(promise, perry_abi::UNDEFINED_BITS);
+        perry_abi::write_acknowledged(stream.fd, unsafe { view_bytes(view) }, promise);
     }
     promise
 }
@@ -679,6 +688,473 @@ pub extern "C" fn web_writer_release_lock(writer: *mut u8) {
         if (*writer).released == 0 {
             (*writer).released = 1;
             (*(*writer).stream).locked = 0;
+        }
+    }
+}
+
+// --- ReadableStream<Uint8Array> over a WIT stream<u8> -------------------------------------
+
+/// Canonical built-ins for `stream<u8>`. `src/link` binds these placeholders to the built-ins
+/// of a function of the WIT world that carries a `stream<u8>` (all such streams share one
+/// type per component instance).
+mod canon {
+    #[cfg(target_arch = "wasm32")]
+    #[link(wasm_import_module = "perry:canon")]
+    unsafe extern "C" {
+        #[link_name = "[async-lower][stream-read]u8"]
+        pub fn read(stream: u32, buffer: *mut u8, len: u32) -> u32;
+        #[link_name = "[stream-cancel-read]u8"]
+        pub fn cancel_read(stream: u32) -> u32;
+        #[link_name = "[stream-drop-readable]u8"]
+        pub fn drop_readable(stream: u32);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::missing_safety_doc)]
+    mod host {
+        pub unsafe fn read(_: u32, _: *mut u8, _: u32) -> u32 {
+            unreachable!("streams exist in linked modules")
+        }
+        pub unsafe fn cancel_read(_: u32) -> u32 {
+            unreachable!("streams exist in linked modules")
+        }
+        pub unsafe fn drop_readable(_: u32) {}
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use host::*;
+}
+
+/// Bytes read per `read()`: the transfer size of the stream contracts.
+const READ_SIZE: u32 = 8192;
+
+const OPEN: u32 = 0;
+const ENDED: u32 = 1;
+
+/// A `ReadableStream<Uint8Array>` owning the readable end of a `stream<u8>`.
+#[repr(C)]
+struct Readable {
+    /// The readable end, 0 once dropped (ended or cancelled).
+    handle: u32,
+    state: u32,
+    locked: u32,
+    task: *mut u8,
+    next: *mut Readable,
+}
+
+/// A `ReadableStreamDefaultReader`.
+#[repr(C)]
+struct Reader {
+    stream: *mut Readable,
+    released: u32,
+    /// The outstanding read's promise, while the host fills `buffer`, and whether it is
+    /// leased.
+    pending: *mut u8,
+    pending_leased: u32,
+    buffer: *mut u8,
+    /// The previous read's promise, result and view, reused by leased reads.
+    promise: *mut u8,
+    result: *mut ReadResult,
+    view: *mut u8,
+    /// The buffer of leased reads, allocated once.
+    leased: *mut u8,
+    next: *mut Reader,
+}
+
+/// `{ done, value }`.
+#[repr(C)]
+struct ReadResult {
+    done: u32,
+    value: *mut u8,
+}
+
+struct Lists {
+    readables: *mut Readable,
+    waiting: *mut Reader,
+}
+struct Global(core::cell::UnsafeCell<Lists>);
+// SAFETY: one instance runs one thread.
+unsafe impl Sync for Global {}
+static LISTS: Global = Global(core::cell::UnsafeCell::new(Lists {
+    readables: core::ptr::null_mut(),
+    waiting: core::ptr::null_mut(),
+}));
+
+fn lists() -> &'static mut Lists {
+    // SAFETY: single-threaded; no reference outlives one entry point.
+    unsafe { &mut *LISTS.0.get() }
+}
+
+/// A stream over the readable end `handle` (an export's `stream<u8>` argument), owned by the
+/// current task: [web_streams_close] drops it at the task's end if the program did not.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_readable_new(handle: u32) -> *mut u8 {
+    let stream = alloc(core::mem::size_of::<Readable>() as u32) as *mut Readable;
+    // SAFETY: a fresh block, linked into the list of open streams.
+    unsafe {
+        stream.write(Readable {
+            handle,
+            state: OPEN,
+            locked: 0,
+            task: perry_abi::task(),
+            next: lists().readables,
+        })
+    };
+    lists().readables = stream;
+    stream as *mut u8
+}
+
+fn readable<'a>(stream: *mut u8) -> &'a mut Readable {
+    // SAFETY: compiled code passes readable streams.
+    unsafe { &mut *(stream as *mut Readable) }
+}
+
+fn reader<'a>(r: *mut u8) -> &'a mut Reader {
+    // SAFETY: compiled code passes readers.
+    unsafe { &mut *(r as *mut Reader) }
+}
+
+/// Drop the readable end and forget the stream.
+fn end(stream: &mut Readable) {
+    stream.state = ENDED;
+    if stream.handle != 0 {
+        perry_abi::unjoin(stream.handle);
+        // SAFETY: the readable end this stream owns.
+        unsafe { canon::drop_readable(stream.handle) };
+        stream.handle = 0;
+    }
+    let this = stream as *mut Readable;
+    let mut link: *mut *mut Readable = &mut lists().readables;
+    // SAFETY: the list holds live streams.
+    unsafe {
+        while !(*link).is_null() {
+            if *link == this {
+                *link = (*this).next;
+                break;
+            }
+            link = &mut (**link).next;
+        }
+    }
+}
+
+/// `stream.locked`.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_readable_locked(stream: *mut u8) -> u32 {
+    readable(stream).locked
+}
+
+/// `stream.getReader()`; `TypeError` while another reader holds the lock.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_readable_get_reader(stream: *mut u8) -> *mut u8 {
+    let source = readable(stream);
+    if source.locked != 0 {
+        perry_abi::raise(TYPE_ERROR, "Invalid state: ReadableStream is locked");
+        return core::ptr::null_mut();
+    }
+    source.locked = 1;
+    let r = alloc(core::mem::size_of::<Reader>() as u32) as *mut Reader;
+    // SAFETY: a fresh block.
+    unsafe {
+        r.write(Reader {
+            stream: stream as *mut Readable,
+            released: 0,
+            pending: core::ptr::null_mut(),
+            pending_leased: 0,
+            buffer: core::ptr::null_mut(),
+            promise: core::ptr::null_mut(),
+            result: core::ptr::null_mut(),
+            view: core::ptr::null_mut(),
+            leased: core::ptr::null_mut(),
+            next: core::ptr::null_mut(),
+        })
+    };
+    r as *mut u8
+}
+
+/// `stream.cancel()` of an unlocked stream.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_readable_cancel(stream: *mut u8) -> *mut u8 {
+    let promise = promise_new();
+    let source = readable(stream);
+    if source.locked != 0 {
+        reject_with(
+            promise,
+            TYPE_ERROR,
+            from_static("Invalid state: ReadableStream is locked"),
+        );
+    } else {
+        end(source);
+        resolve(promise, perry_abi::UNDEFINED_BITS);
+    }
+    promise
+}
+
+/// Settle `promise` with `{ done, value }`; leased reads reuse the reader's objects.
+fn settle_read(r: &mut Reader, promise: *mut u8, leased: bool, count: u32) {
+    let (result, view) = if leased && !r.result.is_null() {
+        (r.result, r.view)
+    } else {
+        (
+            alloc(core::mem::size_of::<ReadResult>() as u32) as *mut ReadResult,
+            core::ptr::null_mut(),
+        )
+    };
+    let value = if count == 0 {
+        core::ptr::null_mut()
+    } else if view.is_null() {
+        bytes_view(count, r.buffer)
+    } else {
+        // SAFETY: the reader's own view header.
+        unsafe {
+            *(view as *mut u32) = count;
+            *(view.add(4) as *mut *mut u8) = r.buffer;
+        }
+        view
+    };
+    // SAFETY: a result object of this reader or a fresh one.
+    unsafe {
+        result.write(ReadResult {
+            done: u32::from(count == 0),
+            value,
+        })
+    };
+    if leased {
+        r.result = result;
+        if !value.is_null() {
+            r.view = value;
+        }
+    }
+    resolve(promise, result as usize as u64);
+}
+
+/// A copy result: deliver the bytes, or end the stream when the writer is gone.
+fn complete(r: &mut Reader, promise: *mut u8, leased: bool, code: u32) -> bool {
+    let count = code >> 4;
+    // SAFETY: readers point at their stream.
+    let stream = unsafe { &mut *r.stream };
+    if code & 0xF != COPY_COMPLETED {
+        // The writer dropped its end (or the read was cancelled): no more bytes.
+        end(stream);
+    }
+    if count == 0 && stream.state == OPEN {
+        return false;
+    }
+    settle_read(r, promise, leased, count);
+    true
+}
+
+const COPY_COMPLETED: u32 = 0;
+
+/// `await reader.read()`. A leased read (the compiler proved that nothing from the previous
+/// read is live) reuses the reader's buffer, promise and result; others get fresh ones.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
+    let r = reader(r);
+    let leased = leased != 0;
+    let promise = if leased {
+        perry_abi::promise_reuse(r.promise)
+    } else {
+        promise_new()
+    };
+    if leased {
+        r.promise = promise;
+    }
+    if r.released != 0 {
+        reject_with(
+            promise,
+            TYPE_ERROR,
+            from_static("Invalid state: The reader is not attached to a stream"),
+        );
+        return promise;
+    }
+    if !r.pending.is_null() {
+        reject_with(
+            promise,
+            TYPE_ERROR,
+            from_static("Concurrent reads of one reader are not supported"),
+        );
+        return promise;
+    }
+    loop {
+        // SAFETY: readers point at their stream.
+        let stream = unsafe { &mut *r.stream };
+        if stream.state != OPEN {
+            settle_read(r, promise, leased, 0);
+            return promise;
+        }
+        r.buffer = if leased {
+            if r.leased.is_null() {
+                r.leased = alloc(READ_SIZE);
+            }
+            r.leased
+        } else {
+            alloc(READ_SIZE)
+        };
+        // SAFETY: the buffer stays valid until the copy completes.
+        let code = unsafe { canon::read(stream.handle, r.buffer, READ_SIZE) };
+        if code == perry_abi::BLOCKED {
+            perry_abi::join(stream.handle);
+            r.pending = promise;
+            r.pending_leased = u32::from(leased);
+            r.next = lists().waiting;
+            lists().waiting = r;
+            return promise;
+        }
+        if complete(r, promise, leased, code) {
+            return promise;
+        }
+    }
+}
+
+/// Unlink `r` from the readers waiting on the host.
+fn unwait(r: *mut Reader) {
+    let mut link: *mut *mut Reader = &mut lists().waiting;
+    // SAFETY: the list holds live readers.
+    unsafe {
+        while !(*link).is_null() {
+            if *link == r {
+                *link = (*r).next;
+                break;
+            }
+            link = &mut (**link).next;
+        }
+    }
+}
+
+/// Finish the outstanding read of `r` with copy result `code`.
+fn finish_pending(r: &mut Reader, code: u32) {
+    let promise = core::mem::replace(&mut r.pending, core::ptr::null_mut());
+    unwait(r);
+    let leased = r.pending_leased != 0;
+    if !complete(r, promise, leased, code) {
+        // An empty copy of an open stream: read again for the same promise.
+        // SAFETY: readers point at their stream.
+        let handle = unsafe { (*r.stream).handle };
+        // SAFETY: the buffer stays valid until the copy completes.
+        let code = unsafe { canon::read(handle, r.buffer, READ_SIZE) };
+        if code == perry_abi::BLOCKED {
+            r.pending = promise;
+            r.next = lists().waiting;
+            lists().waiting = r;
+        } else {
+            finish_pending(r, code);
+        }
+    }
+}
+
+/// A callback event of the current task: complete the read waiting on `handle`. Returns 1 if
+/// the event was one of a stream read.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_event(event: u32, handle: u32, code: u32) -> u32 {
+    if event != perry_abi::EVENT_STREAM_READ {
+        return 0;
+    }
+    let mut r = lists().waiting;
+    // SAFETY: waiting readers are live.
+    unsafe {
+        while !r.is_null() {
+            if (*(*r).stream).handle == handle {
+                finish_pending(&mut *r, code);
+                return 1;
+            }
+            r = (*r).next;
+        }
+    }
+    0
+}
+
+/// Cancel the outstanding read of `r`, if any: its promise settles with what was copied, or
+/// with `done`.
+fn cancel_pending(r: &mut Reader) {
+    if r.pending.is_null() {
+        return;
+    }
+    // SAFETY: readers point at their stream; the read is outstanding on its handle.
+    let code = unsafe { canon::cancel_read((*r.stream).handle) };
+    finish_pending(r, code);
+}
+
+/// `reader.cancel()`: ends the stream; an outstanding read settles first.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
+    let r = reader(r);
+    let promise = promise_new();
+    if r.released != 0 {
+        reject_with(
+            promise,
+            TYPE_ERROR,
+            from_static("Invalid state: The reader is not attached to a stream"),
+        );
+        return promise;
+    }
+    cancel_pending(r);
+    // SAFETY: readers point at their stream.
+    end(unsafe { &mut *r.stream });
+    resolve(promise, perry_abi::UNDEFINED_BITS);
+    promise
+}
+
+/// `reader.releaseLock()`: an outstanding read rejects; the stream stays open for a new
+/// reader.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_reader_release_lock(r: *mut u8) {
+    let r = reader(r);
+    if r.released != 0 {
+        return;
+    }
+    if !r.pending.is_null() {
+        let promise = core::mem::replace(&mut r.pending, core::ptr::null_mut());
+        unwait(r);
+        // SAFETY: readers point at their stream; the read is outstanding on its handle.
+        unsafe { canon::cancel_read((*r.stream).handle) };
+        reject_with(
+            promise,
+            TYPE_ERROR,
+            from_static("Invalid state: Releasing reader"),
+        );
+    }
+    r.released = 1;
+    // SAFETY: readers point at their stream.
+    unsafe { (*r.stream).locked = 0 };
+}
+
+/// `result.done`.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_read_done(result: *mut u8) -> u32 {
+    // SAFETY: compiled code passes read results.
+    unsafe { (*(result as *const ReadResult)).done }
+}
+
+/// `result.value`: a `Uint8Array`, or null (`undefined`) when done.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_read_value(result: *mut u8) -> *mut u8 {
+    // SAFETY: compiled code passes read results.
+    unsafe { (*(result as *const ReadResult)).value }
+}
+
+/// At the end of the current task: cancel its outstanding reads and drop the streams it
+/// still owns, so no host handle outlives the export call.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_streams_close() {
+    let task = perry_abi::task();
+    let mut r = lists().waiting;
+    // SAFETY: listed readers and streams are live.
+    unsafe {
+        while !r.is_null() {
+            let next = (*r).next;
+            if (*(*r).stream).task == task {
+                (*r).pending = core::ptr::null_mut();
+                unwait(r);
+                canon::cancel_read((*(*r).stream).handle);
+            }
+            r = next;
+        }
+        let mut stream = lists().readables;
+        while !stream.is_null() {
+            let next = (*stream).next;
+            if (*stream).task == task {
+                end(&mut *stream);
+            }
+            stream = next;
         }
     }
 }

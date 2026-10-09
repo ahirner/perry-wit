@@ -71,10 +71,12 @@ mod imports {
         pub fn perry_status() -> u32;
         pub fn perry_array_new(capacity: u32) -> *mut u8;
         pub fn perry_promise_new() -> *mut u8;
+        pub fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
+        pub fn perry_task_current() -> *mut u8;
         pub fn perry_promise_resolve(promise: *mut u8, value: u64);
         pub fn perry_promise_reject(promise: *mut u8, status: i32);
         pub fn perry_task_join(waitable: u32);
-        pub fn perry_write(fd: u32, data: *const u8, len: u32);
+        pub fn perry_write_acknowledged(fd: u32, data: *const u8, len: u32, promise: *mut u8);
         /// ECMAScript `Number::toString` of `value` into 40 bytes at `output` (number helper).
         pub fn number_format(value: f64, output: *mut u8) -> u32;
     }
@@ -108,9 +110,11 @@ mod imports {
         array::perry_array_new,
         exception::{perry_raise, perry_status},
         host::{subtask_drop, waitable_join},
-        io::{perry_task_join, perry_write},
-        promise::{perry_promise_new, perry_promise_reject, perry_promise_resolve},
-        region::perry_alloc,
+        io::{perry_task_join, perry_write_acknowledged},
+        promise::{
+            perry_promise_new, perry_promise_reject, perry_promise_resolve, perry_promise_reuse,
+        },
+        region::{perry_alloc, perry_task_current},
     };
 
     pub unsafe fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
@@ -239,6 +243,20 @@ pub fn promise_new() -> *mut u8 {
     unsafe { imports::perry_promise_new() }
 }
 
+/// `promise` pending again if it settled and nothing waits on it, else a new promise.
+#[allow(unused_unsafe, clippy::not_unsafe_ptr_arg_deref)]
+pub fn promise_reuse(promise: *mut u8) -> *mut u8 {
+    // SAFETY: a runtime service; a non-null argument is a promise of the current task.
+    unsafe { imports::perry_promise_reuse(promise) }
+}
+
+/// The current task's identity.
+#[allow(unused_unsafe)]
+pub fn task() -> *mut u8 {
+    // SAFETY: a runtime service without preconditions.
+    unsafe { imports::perry_task_current().cast() }
+}
+
 /// Fulfil `promise` with slot bits `value`.
 #[allow(unused_unsafe, clippy::not_unsafe_ptr_arg_deref)]
 pub fn resolve(promise: *mut u8, value: u64) {
@@ -276,11 +294,12 @@ pub fn array(values: &[u64]) -> *mut u8 {
     }
 }
 
-/// Append `bytes` to the task's output `fd` (0 stdout, 1 stderr).
-#[allow(unused_unsafe)]
-pub fn write(fd: u32, bytes: &[u8]) {
-    // SAFETY: a runtime service over a live slice.
-    unsafe { imports::perry_write(fd, bytes.as_ptr(), bytes.len() as u32) }
+/// Append `bytes` to the task's output `fd` (0 stdout, 1 stderr); `promise` settles once the
+/// host accepted them.
+#[allow(unused_unsafe, clippy::not_unsafe_ptr_arg_deref)]
+pub fn write_acknowledged(fd: u32, bytes: &[u8], promise: *mut u8) {
+    // SAFETY: a runtime service over a live slice and a pending promise.
+    unsafe { imports::perry_write_acknowledged(fd, bytes.as_ptr(), bytes.len() as u32, promise) }
 }
 
 /// Join `waitable` to the current task's waitable set.

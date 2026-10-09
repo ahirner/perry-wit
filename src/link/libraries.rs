@@ -109,7 +109,12 @@ impl HelperMemory {
         }
     }
 
-    pub(crate) fn place(&mut self, library: &Library) -> Result<u32> {
+    /// Place `library`, whose `reachable` functions (`None`: all) are linked.
+    pub(crate) fn place(
+        &mut self,
+        library: &Library,
+        reachable: Option<&BTreeSet<u32>>,
+    ) -> Result<u32> {
         let base = align_to(self.end, library.data_alignment)?;
         self.end = base
             .checked_add(library.data_size)
@@ -118,7 +123,7 @@ impl HelperMemory {
         if library.globals.contains(&Global::Stack) {
             self.stack_bytes = self
                 .stack_bytes
-                .max(library.fixed_stack_bound().unwrap_or(65_536));
+                .max(library.fixed_stack_bound(reachable).unwrap_or(65_536));
         }
         Ok(base)
     }
@@ -146,6 +151,8 @@ pub(crate) enum Global {
     Stack,
     MemoryBase,
     TableBase,
+    /// `GOT.mem.__heap_base`: the end of linked data and stack, where the heap starts.
+    HeapBase,
     Constant(i32),
 }
 
@@ -168,10 +175,12 @@ pub(crate) struct Library {
 }
 
 impl Library {
-    /// Acyclic helpers with fixed LLVM stack frames need at most the sum of all
-    /// frames. Unrecognized stack writes, recursion, and indirect calls retain
-    /// the conservative reservation. The allocator and linker use this same bound.
-    fn fixed_stack_bound(&self) -> Option<u32> {
+    /// Acyclic helpers with fixed LLVM stack frames need at most their deepest chain of
+    /// frames. Only `reachable` functions count (`None`: all), so a recursive or unrecognized
+    /// function the program never calls does not cost the full reservation. Unrecognized
+    /// stack writes, recursion, and indirect calls among reachable functions retain the
+    /// conservative reservation. The allocator and linker use this same bound.
+    fn fixed_stack_bound(&self, reachable: Option<&BTreeSet<u32>>) -> Option<u32> {
         use wasmparser::Operator as Op;
         // Imported functions are leaves: host code does not use the shadow stack.
         let imported = self.imports.len();
@@ -180,8 +189,13 @@ impl Library {
             .iter()
             .position(|global| *global == Global::Stack)? as u32;
         let mut graph = Vec::new();
-        let mut total = 0_u32;
-        for body in &self.bodies {
+        let mut frames = Vec::new();
+        for (defined, body) in self.bodies.iter().enumerate() {
+            if reachable.is_some_and(|set| !set.contains(&((imported + defined) as u32))) {
+                graph.push(Vec::new());
+                frames.push(0);
+                continue;
+            }
             let ops = body
                 .get_operators_reader()
                 .ok()?
@@ -215,7 +229,6 @@ impl Library {
                             && frame.is_none()
                         {
                             frame = Some((*local_index, *value));
-                            total = total.checked_add(*value as u32)?;
                         } else if index >= 3
                             && let [
                                 Op::LocalGet { local_index },
@@ -285,25 +298,35 @@ impl Library {
                 }
             }
             graph.push(calls);
+            frames.push(frame.map_or(0, |(_, size)| size as u32));
         }
-        fn visit(index: usize, graph: &[Vec<usize>], marks: &mut [u8]) -> Option<()> {
-            match *marks.get(index)? {
-                1 => return None,
-                2 => return Some(()),
-                _ => {}
+        /// The deepest frame chain from `index`; `None` on recursion.
+        fn depth(
+            index: usize,
+            graph: &[Vec<usize>],
+            frames: &[u32],
+            memo: &mut [Option<Option<u32>>],
+        ) -> Option<u32> {
+            match *memo.get(index)? {
+                Some(Some(depth)) => return Some(depth),
+                Some(None) => return None,
+                None => {}
             }
-            marks[index] = 1;
+            memo[index] = Some(None);
+            let mut deepest = 0_u32;
             for &callee in &graph[index] {
-                visit(callee, graph, marks)?;
+                deepest = deepest.max(depth(callee, graph, frames, memo)?);
             }
-            marks[index] = 2;
-            Some(())
+            let total = frames[index].checked_add(deepest)?;
+            memo[index] = Some(Some(total));
+            Some(total)
         }
-        let mut marks = vec![0; graph.len()];
+        let mut memo = vec![None; graph.len()];
+        let mut deepest = 0_u32;
         for index in 0..graph.len() {
-            visit(index, &graph, &mut marks)?;
+            deepest = deepest.max(depth(index, &graph, &frames, &mut memo)?);
         }
-        Some(total.max(1024))
+        Some(deepest.max(1024))
     }
 
     pub(crate) fn parse(bytes: &'static [u8]) -> Result<Self> {
@@ -358,6 +381,9 @@ impl Library {
                                     "__table_base" if !global.mutable => Global::TableBase,
                                     _ => bail!("unsupported internal helper global {name}"),
                                 });
+                            }
+                            ("GOT.mem", "__heap_base", TypeRef::Global(_)) => {
+                                library.globals.push(Global::HeapBase);
                             }
                             (module, name, TypeRef::Func(ty)) if module != "env" => {
                                 library.imports.push((module.into(), name.into(), ty));
@@ -605,6 +631,7 @@ pub(crate) struct Relocations<'a> {
     pub(crate) memory_base: u32,
     pub(crate) stack_global: u32,
     pub(crate) table_base: u32,
+    pub(crate) heap_base: u32,
 }
 
 impl Reencode for Relocations<'_> {
@@ -648,6 +675,9 @@ impl Reencode for Relocations<'_> {
                     return Ok(Instruction::I32Const(self.table_base as i32));
                 }
                 Some(Global::Constant(value)) => return Ok(Instruction::I32Const(*value)),
+                Some(Global::HeapBase) => {
+                    return Ok(Instruction::I32Const(self.heap_base as i32));
+                }
                 _ => (),
             }
         }
@@ -660,13 +690,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn numeric_and_time_helpers_have_checked_small_stacks() {
-        for bytes in [TIME, NUMBER] {
+    fn helper_libraries_have_checked_small_stacks() {
+        for bytes in [TIME, NUMBER, RUNTIME, FS, WEB] {
             let library = Library::parse(bytes).unwrap();
             assert!(
-                library.fixed_stack_bound().is_some_and(|size| size < 8192),
+                library
+                    .fixed_stack_bound(None)
+                    .is_some_and(|size| size < 8192),
                 "{:?}",
-                library.fixed_stack_bound()
+                library.fixed_stack_bound(None)
             );
         }
     }
@@ -685,7 +717,7 @@ mod tests {
             ))
             .unwrap();
             let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
-            assert_eq!(library.fixed_stack_bound(), None, "{body}");
+            assert_eq!(library.fixed_stack_bound(None), None, "{body}");
         }
     }
 }
