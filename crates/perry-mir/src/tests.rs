@@ -24,7 +24,7 @@ builtin.module @scaling {
       ^body():
         two = builtin.constant <builtin.double 2.0> : builtin.fp64;
         doubled = perry.binary Mul i, two : builtin.fp64;
-        point = perry.alloc Unassigned (i, doubled) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>;
+        point = perry.alloc Unassigned [0, 1] (i, doubled) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>;
         x = perry.field_get point.x : builtin.fp64;
         y = perry.field_get point.y : builtin.fp64;
         partial = perry.binary Add sum, x : builtin.fp64;
@@ -69,7 +69,7 @@ fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
     verify_operation(module, ctx)?;
     let printed = print(ctx, module);
     for expected in [
-        "perry.alloc Unassigned (",
+        "perry.alloc Unassigned [0, 1] (",
         "perry.record <Point { x: builtin.fp64",
         "perry.field_get",
         "perry.cond_br if",
@@ -149,24 +149,28 @@ fn verifier_rejects_ill_typed_heap_ops() {
     let flag = "builtin.integer i1";
     let cases = [
         (
-            format!("p = perry.alloc Unassigned (v) : {POINT};"),
+            format!("p = perry.alloc Unassigned [0, 1] (v) : {POINT};"),
             "has 2 fields but perry.alloc supplies 1",
         ),
         (
             format!(
-                "b = builtin.constant <builtin.integer <1: i1>> : {flag}; p = perry.alloc Unassigned (v, b) : {POINT};"
+                "b = builtin.constant <builtin.integer <1: i1>> : {flag}; p = perry.alloc Unassigned [0, 1] (v, b) : {POINT};"
             ),
             "field y has a different type",
         ),
         (
             format!(
-                "p = perry.alloc Unassigned (v, v) : {POINT}; z = perry.field_get p.z : builtin.fp64;"
+                "p = perry.alloc Unassigned [0, 1] (v, v) : {POINT}; z = perry.field_get p.z : builtin.fp64;"
             ),
             "has no field z",
         ),
         (
-            format!("p = perry.alloc Scalar (v, v) : {POINT};"),
+            format!("p = perry.alloc Scalar [0, 1] (v, v) : {POINT};"),
             "not an allocation tier",
+        ),
+        (
+            format!("p = perry.alloc Task [0, 0] (v, v) : {POINT};"),
+            "property order must contain every field index exactly once",
         ),
         (
             "c = perry.compare Lt v, v : builtin.fp64;".to_string(),
@@ -181,14 +185,14 @@ fn verifier_rejects_ill_typed_heap_ops() {
         );
     }
     verify_text(&single_block(&format!(
-        "p = perry.alloc Task (v, v) : {POINT}; perry.field_set p.y = v; y = perry.field_get p.y : builtin.fp64;"
+        "p = perry.alloc Task [0, 1] (v, v) : {POINT}; perry.field_set p.y = v; y = perry.field_get p.y : builtin.fp64;"
     )))
     .expect("well-typed heap ops verify");
 }
 
 #[test]
 fn record_redefinition_with_other_fields_is_rejected() {
-    let body = "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; q = perry.alloc Unassigned (v) : perry.record <Point { x: builtin.fp64 }>;";
+    let body = "p = perry.alloc Unassigned [0, 1] (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; q = perry.alloc Unassigned [0, 1] (v) : perry.record <Point { x: builtin.fp64 }>;";
     let error = verify_text(&single_block(body)).expect_err("conflicting shapes");
     assert!(
         error.contains("already exists with different fields"),
@@ -227,7 +231,7 @@ fn dce_removes_unused_allocation_and_reads() -> Result<()> {
     let module = parse(
         ctx,
         &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.x : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;",
+            "p = perry.alloc Unassigned [0, 1] (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.x : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;",
         ),
     );
     assert_eq!(dce(module, ctx)?, IRStatus::Changed);
@@ -248,7 +252,7 @@ fn dce_keeps_field_writes() -> Result<()> {
     let module = parse(
         ctx,
         &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; perry.field_set p.x = v;",
+            "p = perry.alloc Unassigned [0, 1] (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; perry.field_set p.x = v;",
         ),
     );
     dce(module, ctx)?;
@@ -337,7 +341,7 @@ builtin.module @scaling {
       ^entry(i: builtin.fp64):
         two = builtin.constant <builtin.double 2.0> : builtin.fp64;
         doubled = perry.binary Mul i, two : builtin.fp64;
-        point = perry.alloc Unassigned (i, doubled) : perry.record <Point>;
+        point = perry.alloc Unassigned [0, 1] (i, doubled) : perry.record <Point>;
         perry.return point
     };
     builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.integer i32)> {
@@ -601,5 +605,40 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
         verify_text(&invalid)
             .unwrap_err()
             .contains("incorrect operand or result types")
+    );
+}
+
+#[test]
+fn native_json_views_verify_types_and_property_order() {
+    let source = single_block(
+        r#"
+        point = perry.alloc Task [1, 0] (v, v) : perry.record <NativePoint { a: builtin.fp64, z: builtin.fp64 }>;
+        json = perry.json_pack point : perry.json;
+        absent = perry.undefined : perry.optional <builtin.fp64>;
+        optional = perry.json_pack absent : perry.optional <perry.json>;
+    "#,
+    );
+    verify_text(&source).expect("native views are typed");
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &source);
+    let printed = normalized(&print(ctx, module));
+    assert!(printed.contains("Task [1, 0]"), "{printed}");
+    verify_text(&printed).expect("property order survives a round trip");
+    let invalid = source.replace(
+        "optional = perry.json_pack absent : perry.optional <perry.json>",
+        "optional = perry.json_pack absent : perry.json",
+    );
+    assert!(verify_text(&invalid).is_err());
+    let invalid = single_block(
+        r#"
+        bytes = perry.intrinsic BytesNew (v) : perry.bytes;
+        status = perry.caught_status : builtin.integer i32;
+        json = perry.json_pack bytes : perry.json;
+    "#,
+    );
+    assert!(
+        verify_text(&invalid)
+            .unwrap_err()
+            .contains("JSON-compatible")
     );
 }

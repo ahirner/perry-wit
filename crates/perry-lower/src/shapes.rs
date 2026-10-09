@@ -88,6 +88,11 @@ impl<'h> Shapes<'h> {
         }) {
             return Ok(JsonType::get(ctx).into());
         }
+        if matches!(ty, HirType::Object(_))
+            && let Some(alias) = self.hir.type_aliases.iter().find(|alias| &alias.ty == ty)
+        {
+            return self.named(ctx, &alias.name);
+        }
         Ok(match ty {
             HirType::Union(types) => {
                 let (first, rest) = types.split_first().context("empty union type")?;
@@ -122,21 +127,7 @@ impl<'h> Shapes<'h> {
                 let settled = self.settled_type(ctx, inner)?;
                 PromiseType::get(ctx, settled).into()
             }
-            HirType::Object(object) => {
-                ensure!(
-                    object.index_signature.is_none(),
-                    "index signatures need the dictionary type (subset rule R1), which is not supported yet"
-                );
-                let fields = object
-                    .properties
-                    .iter()
-                    .map(|(name, info)| {
-                        ensure!(!info.optional, "optional field {name} is not supported yet");
-                        Ok((name.as_str(), &info.ty))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                self.hir_record(ctx, None, fields)?.into()
-            }
+            HirType::Object(object) => self.object(ctx, None, object)?,
             other => bail!("MIR backend does not support type {other:?} yet"),
         })
     }
@@ -192,9 +183,33 @@ impl<'h> Shapes<'h> {
                 alias.type_params.is_empty(),
                 "generic type alias {name} is not supported yet"
             );
-            return self.value_type(ctx, &alias.ty);
+            return match &alias.ty {
+                HirType::Object(object) => self.object(ctx, Some(name), object),
+                ty => self.value_type(ctx, ty),
+            };
         }
         bail!("type {name} is not supported by the MIR backend yet")
+    }
+
+    fn object(
+        &self,
+        ctx: &mut Context,
+        name: Option<&str>,
+        object: &perry_hir::types::ObjectType,
+    ) -> Result<TypeHandle> {
+        ensure!(
+            object.index_signature.is_none(),
+            "index signatures need the dictionary type (subset rule R1), which is not supported yet"
+        );
+        let fields = object
+            .properties
+            .iter()
+            .map(|(name, info)| {
+                ensure!(!info.optional, "optional field {name} is not supported yet");
+                Ok((name.as_str(), &info.ty))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self.hir_record(ctx, name, fields)?.into())
     }
 
     /// A record from HIR field types; `named` is the interface they come from, if any.

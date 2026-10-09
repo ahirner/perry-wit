@@ -1518,6 +1518,10 @@ impl<'s> FunctionBuilder<'s> {
         args: &[Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        ensure!(
+            !names.iter().any(|name| name == "__proto__"),
+            "prototype setters are outside the closed-shape subset"
+        );
         let mut wanted: Vec<&str> = names.iter().map(String::as_str).collect();
         wanted.sort_unstable();
         let expected = expected
@@ -1558,7 +1562,21 @@ impl<'s> FunctionBuilder<'s> {
         };
         values.sort_by(|a, b| a.0.cmp(&b.0));
         let operands = values.into_iter().map(|(_, v)| v).collect();
-        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
+        let order = names
+            .iter()
+            .map(|name| {
+                record
+                    .deref(ctx)
+                    .field(&identifier(name).expect("field name"))
+                    .expect("record field")
+                    .0
+            })
+            .collect();
+        Ok(self.emit_value(ctx, |ctx| {
+            let allocation = AllocOp::new(ctx, record, operands);
+            allocation.set_order(ctx, order);
+            allocation
+        }))
     }
 
     fn intrinsic(&mut self, ctx: &mut Context, kind: Intrinsic, args: Vec<Value>) -> Option<Value> {

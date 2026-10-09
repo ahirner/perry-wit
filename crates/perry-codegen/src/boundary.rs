@@ -938,14 +938,20 @@ impl FunctionLowering<'_> {
             "the WIT record has {} fields but the TypeScript type {name} has {field_count}",
             values.len()
         );
-        let next_shape = self.state.shapes.len() as i32 + 1;
-        let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+        let shape = self.state.data.descriptor(ctx, mir_ty)?;
+        let order = values
+            .iter()
+            .map(|(field, _)| record_field(ctx, record, field).map(|(index, _)| index))
+            .collect::<Result<Vec<_>>>()?;
+        let order = self.state.data.property_order(order);
         let size = self.i32_const(ctx, 8 + 8 * field_count as i32);
         let object = self
             .runtime(ctx, Runtime::Alloc, vec![size])
             .expect("record");
-        let shape = self.i32_const(ctx, shape);
+        let shape = self.i32_const(ctx, shape as i32);
         self.store(ctx, MemKind::I32, object, 0, shape);
+        let order = self.i32_const(ctx, order as i32);
+        self.store(ctx, MemKind::I32, object, 4, order);
         for (field, value) in values {
             let (index, field_mir) = record_field(ctx, record, &field)?;
             let kind = crate::slot_kind(ctx, field_mir)?;

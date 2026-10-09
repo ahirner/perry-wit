@@ -28,7 +28,11 @@ impl FunctionBuilder<'_> {
                 if is_json(ctx, value) {
                     value
                 } else {
-                    self.pack_json(ctx, value)?
+                    ensure!(
+                        perry_mir::json::compatible(ctx, value.get_type(ctx)),
+                        "value is not JSON-compatible"
+                    );
+                    self.emit_value(ctx, |ctx| perry_mir::json::PackOp::new(ctx, value))
                 }
             }
         };
@@ -101,7 +105,14 @@ impl FunctionBuilder<'_> {
             Kind::Array if self.array_element(ctx, value)?.deref(ctx).is::<JsonType>() => {
                 Intrinsic::JsonArray
             }
-            _ => bail!("JSON conversion of stored aggregates is not implemented yet"),
+            Kind::Record | Kind::Array => {
+                ensure!(
+                    perry_mir::json::compatible(ctx, value.get_type(ctx)),
+                    "aggregate contains values outside the JSON subset"
+                );
+                return Ok(self.emit_value(ctx, |ctx| perry_mir::json::PackOp::new(ctx, value)));
+            }
+            _ => bail!("value is not JSON-compatible"),
         };
         Ok(self.intrinsic(ctx, intrinsic, vec![value]).unwrap())
     }

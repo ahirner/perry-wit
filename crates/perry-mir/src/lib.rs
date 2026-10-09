@@ -13,6 +13,7 @@ pub mod control;
 pub mod exceptions;
 pub mod heap;
 pub mod intrinsics;
+pub mod json;
 pub mod locals;
 pub mod optional;
 pub mod pipeline;

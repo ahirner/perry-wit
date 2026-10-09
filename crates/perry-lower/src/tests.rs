@@ -262,10 +262,12 @@ export function run(n: number): number {
 }
 
 #[test]
-fn recursive_interfaces_get_a_reserved_name() {
-    let printed = lowered(
-        r#"
-interface Node { value: number; next: Node[] }
+fn recursive_records_get_a_reserved_name() {
+    for declaration in [
+        "interface Node { value: number; next: Node[] }",
+        "type Node = { value: number; next: Node[] };",
+    ] {
+        let body = r#"
 function total(node: Node): number {
   let sum = node.value;
   for (let i = 0; i < node.next.length; i++) {
@@ -277,9 +279,10 @@ export function run(n: number): number {
   const leaf: Node = { value: n, next: [] };
   return total({ value: 1, next: [leaf, leaf] });
 }
-"#,
-    );
-    assert!(printed.contains("shape_next_value_rec1"), "{printed}");
+"#;
+        let printed = lowered(&format!("{declaration}\n{body}"));
+        assert!(printed.contains("shape_next_value_rec1"), "{printed}");
+    }
 }
 
 #[test]
@@ -420,4 +423,11 @@ export function run(text: string): number {
         "type JsonValue = any; export function run(value: JsonValue): number { return 1; }",
     );
     assert!(invalid.contains("Any"), "{invalid}");
+    let invalid = rejected(
+        "export function run(): string { const stored = {__proto__: {x:1}, x:2}; return JSON.stringify(stored); }",
+    );
+    assert!(
+        invalid.contains("prototype setters") || invalid.contains("only direct calls"),
+        "{invalid}"
+    );
 }

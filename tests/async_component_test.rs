@@ -30,6 +30,7 @@ world timers {
 
 const SOURCE: &str = r#"
 import { setTimeout } from 'node:timers/promises';
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 interface Observation { value: number; trace: number[] }
 async function later(v: number): Promise<number> {
   const a = v + 1;
@@ -53,8 +54,12 @@ export async function label(name: string): Promise<string> {
 export async function json(input: string): Promise<string> {
   const value = JSON.parse(input);
   const alias = value.item;
+  const count: number = alias.count;
+  const native = {count:count};
+  const reference: JsonValue = native;
   await setTimeout(1);
-  alias.count = alias.count + 1;
+  reference.count = reference.count + 1;
+  alias.count = native.count;
   await setTimeout(1);
   return JSON.stringify(value);
 }

@@ -106,6 +106,18 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = Vec::new();
     contracts.push(Contract {
+        id: "ecma.json.native",
+        description: "Native aggregate serialization, creation order and shared typed/JSON storage",
+        specification: "https://tc39.es/ecma262/#sec-json.stringify",
+        domain: "Native closed records and dense numeric/boolean arrays, bidirectional alias mutation, array growth, recursive shapes and cyclic serialization; writes respect native field types",
+        witnesses: vec![
+            Witness { partition: "empty-growth", case: native_json(Vec::new(), 0) },
+            Witness { partition: "shared-storage", case: native_json(vec![-2,0,7,3], -9) },
+        ],
+        strategy: (prop::collection::vec(any::<i16>(), 0..12), any::<i16>()).prop_map(|(values, n)| native_json(values, n)).boxed(),
+        check: check_equivalence,
+    });
+    contracts.push(Contract {
         id: "ecma.json.values",
         description: "JSON variants, exact serialization, property order, aliases and catchable syntax errors",
         specification: "https://tc39.es/ecma262/#sec-json-object",
@@ -509,6 +521,45 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn native_json(values: Vec<i16>, n: i16) -> Case {
+    let values = serde_json::to_string(&values).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+const values: number[] = {values};
+const child = {{z:{n},a:{n}+1}};
+const other = {{a:{n}+2,z:{n}+3}};
+const native = {{tail:'é🙂',child:child,values:values,flags:[false,true]}};
+const reordered = {{values:values,flags:[true,false],child:other,tail:'end'}};
+console.log(JSON.stringify([native,reordered]));
+const holder = JSON.parse('{{"value":null}}');
+holder.value = native;
+const alias = holder.value.child;
+native.child.a = native.child.a + 1;
+alias.z = {n} - 1;
+if(alias !== child || alias.a !== native.child.a) throw 1;
+const list = holder.value.values;
+values.push({n});
+list[0] = {n}+7;
+list[list.length] = {n}+8;
+values.push({n}+9);
+holder.value.flags[0] = true;
+holder.value.child = other;
+if(native.child !== other || alias === native.child || list !== values) throw 2;
+console.log(JSON.stringify(native));
+console.log(JSON.stringify(reordered));
+type Tree = {{ value:number; children:Tree[] }};
+const tree: Tree = {{value:1,children:[]}};
+const children: Tree[] = tree.children;
+children.push(tree);
+try {{ JSON.stringify(tree); throw 3; }} catch(e) {{ if(!(e instanceof TypeError)) throw 4; }}
+console.log('cycle');
+"#
+        ),
+    }
 }
 
 fn json_values(document: String) -> Case {

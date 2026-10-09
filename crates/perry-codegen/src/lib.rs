@@ -12,8 +12,8 @@
 //!   address for references and `2` for booleans. Wasm arithmetic only produces quiet NaNs, so
 //!   no computed number can be mistaken for `undefined`; `perry.to_number` canonicalizes
 //!   before arithmetic.
-//! - Records are an `i32` shape id followed by 8-byte field slots in declaration order; arrays
-//!   use the layout in [perry_runtime::array]. Exact layouts are P3.6.
+//! - Records carry a static shape descriptor and property-order table before 8-byte slots;
+//!   arrays use the layout in [perry_runtime::array]. Packed layouts remain P3.6.
 //! - Every allocation is `task` tier: the builder cannot express module state yet (R4), so no
 //!   value outlives its export call. Each export call is one task (see `perry_runtime::region`).
 //! - Strings are UTF-8 with a cached UTF-16 length (layout in [perry_runtime::string]);
@@ -79,6 +79,7 @@ use std::{
 mod async_split;
 pub mod boundary;
 mod exceptions;
+mod shapes;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -229,6 +230,7 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    JsonPack,
     ExceptionStatus,
     JsonParse,
     JsonStringify,
@@ -321,6 +323,7 @@ enum Runtime {
 impl Runtime {
     fn name(self) -> &'static str {
         match self {
+            Runtime::JsonPack => "perry_json_pack",
             Runtime::ExceptionStatus => "perry_exception_status",
             Runtime::JsonParse => "perry_json_parse",
             Runtime::JsonStringify => "perry_json_stringify",
@@ -422,6 +425,7 @@ impl Runtime {
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
+            Runtime::JsonPack => (vec![i32, i64], vec![i32]),
             Runtime::ExceptionStatus => (vec![], vec![i32]),
             Runtime::JsonNull => (vec![], vec![i32]),
             Runtime::JsonNumber => (vec![f64], vec![i32]),
@@ -623,6 +627,8 @@ fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier
 struct Data {
     bytes: Vec<u8>,
     strings: HashMap<String, u32>,
+    types: HashMap<TypeHandle, u32>,
+    orders: HashMap<Vec<usize>, u32>,
 }
 
 impl Data {
@@ -660,7 +666,6 @@ struct ModuleState {
     imports: Option<HashSet<String>>,
     /// Async functions in dispatch-kind order.
     async_functions: Vec<Identifier>,
-    shapes: HashMap<String, i32>,
     uses_process: bool,
     needs_task_cleanup: bool,
 }
@@ -693,7 +698,6 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
             Exports::Canonical { imports, .. } => Some(imports.iter().cloned().collect()),
         },
         async_functions: async_functions.clone(),
-        shapes: HashMap::new(),
         uses_process: false,
         needs_task_cleanup: false,
     };
@@ -1520,9 +1524,21 @@ impl<'s> FunctionLowering<'s> {
             }
             return Ok(());
         }
-        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
+        if Operation::get_op::<perry_mir::json::PackOp>(op, ctx).is_some() {
+            let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let address = self.state.data.descriptor(ctx, ty)?;
+            let descriptor = self.i32_const(ctx, address as i32);
+            let value = self.operand(ctx, op, 0)?;
+            let bits = self.slot_bits(ctx, value);
+            let json = self
+                .runtime(ctx, Runtime::JsonPack, vec![descriptor, bits])
+                .expect("JSON value");
+            self.define(ctx, op, json);
+            return Ok(());
+        }
+        if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let (name, fields) = {
+            let fields = {
                 let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
                     .map_err(|_| anyhow!("expected a record"))?;
                 let record = record.deref(ctx);
@@ -1532,17 +1548,19 @@ impl<'s> FunctionLowering<'s> {
                     .iter()
                     .map(|(_, ty)| *ty)
                     .collect();
-                (record.name().to_string(), fields)
+                fields
             };
-            let next_shape = self.state.shapes.len() as i32 + 1;
-            let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+            let shape = self.state.data.descriptor(ctx, record_ty)?;
+            let order = self.state.data.property_order(allocation.order(ctx));
             let operands = self.operands(ctx, op)?;
             let size = self.i32_const(ctx, 8 + 8 * fields.len() as i32);
             let object = self
                 .runtime(ctx, Runtime::Alloc, vec![size])
                 .expect("address");
-            let shape = self.i32_const(ctx, shape);
+            let shape = self.i32_const(ctx, shape as i32);
             self.store(ctx, MemKind::I32, object, 0, shape);
+            let order = self.i32_const(ctx, order as i32);
+            self.store(ctx, MemKind::I32, object, 4, order);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
                 self.store(ctx, kind, object, 8 + 8 * index as u32, value);

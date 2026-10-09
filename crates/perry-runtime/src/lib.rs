@@ -25,6 +25,7 @@ mod output;
 pub mod process;
 pub mod promise;
 pub mod region;
+pub mod shape;
 pub mod string;
 
 /// Reserved representation of an absent optional number.
@@ -63,6 +64,7 @@ mod tests {
         arrays_grow_and_keep_elements();
         byte_views_preserve_aliases_and_validate_before_writing();
         json_trees_share_array_storage_and_retain_unicode();
+        native_json_optionals_use_contextual_undefined_semantics();
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
         promises_queue_waiters_and_tasks_interleave();
@@ -107,6 +109,80 @@ mod tests {
         }
         perry_task_end();
         assert_eq!(chunk_counts().0, 0);
+    }
+
+    fn native_json_optionals_use_contextual_undefined_semantics() {
+        use core::ptr;
+        use json::*;
+        use shape::{Field, Kind, Record, Type};
+        perry_task_begin();
+        // SAFETY: these descriptors, native slots and names remain live through every serialization.
+        unsafe {
+            let number = Type {
+                kind: Kind::Number,
+                detail: ptr::null(),
+                count: 0,
+            };
+            let optional = Type {
+                kind: Kind::Optional,
+                detail: (&number as *const Type).cast(),
+                count: 0,
+            };
+            let array_type = Type {
+                kind: Kind::Array,
+                detail: (&optional as *const Type).cast(),
+                count: 0,
+            };
+            let items = array::perry_array_new(3);
+            array::set_slot(items, 0, UNDEFINED_NUMBER);
+            array::set_slot(items, 1, 2.0f64.to_bits());
+            array::set_slot(items, 2, f64::NAN.to_bits());
+            let gone = string::perry_string_adopt(b"gone".as_ptr().cast_mut(), 4);
+            let kept = string::perry_string_adopt(b"kept".as_ptr().cast_mut(), 4);
+            let list = string::perry_string_adopt(b"items".as_ptr().cast_mut(), 5);
+            let fields = [
+                Field {
+                    name: gone,
+                    ty: &optional,
+                },
+                Field {
+                    name: kept,
+                    ty: &number,
+                },
+                Field {
+                    name: list,
+                    ty: &array_type,
+                },
+            ];
+            let descriptor = Type {
+                kind: Kind::Record,
+                detail: fields.as_ptr().cast(),
+                count: 3,
+            };
+            let order = [1, 0, 2];
+            let record = perry_alloc((size_of::<Record>() + 24) as u32);
+            record.cast::<Record>().write(Record {
+                shape: &descriptor,
+                order: order.as_ptr(),
+            });
+            optional.write(Record::slot(record, 0), UNDEFINED_NUMBER);
+            number.write(Record::slot(record, 1), 7.0f64.to_bits());
+            array_type.write(Record::slot(record, 2), items as usize as u64);
+            let view = perry_json_pack(&descriptor, record as usize as u64);
+            assert_eq!(
+                string::text(perry_json_stringify(view)),
+                r#"{"kept":7,"items":[null,2,null]}"#
+            );
+            assert!(perry_json_get(view, gone).is_null());
+            assert!(perry_json_pack(&optional, UNDEFINED_NUMBER).is_null());
+            perry_json_set(view, gone, perry_json_number(9.0));
+            assert_eq!(optional.read(Record::slot(record, 0)), 9.0f64.to_bits());
+            assert_eq!(
+                string::text(perry_json_stringify(view)),
+                r#"{"kept":7,"gone":9,"items":[null,2,null]}"#
+            );
+        }
+        perry_task_end();
     }
 
     fn process_status_validates_before_replacing_instance_state() {

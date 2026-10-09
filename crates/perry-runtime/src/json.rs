@@ -1,7 +1,10 @@
 //! Task-owned JSON variant trees. Arrays and objects retain identity through every lookup.
+use crate::shape::{Kind as NativeKind, Record, Type};
 use crate::{array, exception, region::perry_alloc, string};
 use core::ptr;
 use perry_json_codec::{Error, Graph, Tree, Value};
+mod native;
+pub use native::perry_json_pack;
 
 #[derive(Clone, Copy)]
 enum Json {
@@ -11,6 +14,7 @@ enum Json {
     String(*mut u8),
     Array(*mut u8),
     Object { fields: *mut Field, length: usize },
+    Native { reference: *mut u8, ty: *const Type },
 }
 #[derive(Clone, Copy)]
 struct Field {
@@ -87,6 +91,7 @@ pub unsafe extern "C" fn perry_json_object(keys: *mut u8, values: *mut u8) -> *m
 
 fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
     Ok(match graph.value(node)? {
+        Value::Undefined => return Err(Error::InvalidGraph),
         Value::Null => perry_json_null(),
         Value::Boolean(value) => perry_json_boolean(u32::from(value)),
         Value::Number(value) => perry_json_number(value),
@@ -162,11 +167,22 @@ pub unsafe extern "C" fn perry_json_parse(input: *mut u8) -> *mut u8 {
 enum Node {
     Value(*mut u8),
     Field(*const Field),
+    NativeSlot(native::Slot),
 }
 #[derive(Clone)]
 enum Children {
     Array(core::slice::Iter<'static, u64>),
     Object(core::slice::Iter<'static, Field>),
+    NativeArray {
+        next: *const u8,
+        remaining: usize,
+        ty: *const Type,
+    },
+    NativeObject {
+        reference: *mut u8,
+        next: usize,
+        ty: *const Type,
+    },
 }
 impl Iterator for Children {
     type Item = Result<Node, Error>;
@@ -176,6 +192,44 @@ impl Iterator for Children {
                 .next()
                 .map(|&value| Ok(Node::Value(value as usize as *mut u8))),
             Self::Object(fields) => fields.next().map(|field| Ok(Node::Field(field))),
+            Self::NativeArray {
+                next,
+                remaining,
+                ty,
+            } => {
+                if *remaining == 0 {
+                    return None;
+                }
+                let slot = native::Slot {
+                    address: next.cast_mut(),
+                    ty: *ty,
+                    key: ptr::null_mut(),
+                };
+                // SAFETY: this iterator was created over an immutable initialized array span.
+                *next = unsafe { next.add(8) };
+                *remaining -= 1;
+                Some(Ok(Node::NativeSlot(slot)))
+            }
+            Self::NativeObject {
+                reference,
+                next,
+                ty,
+            } => {
+                // SAFETY: the descriptor, property order and record remain live and unchanged.
+                unsafe {
+                    if *next == (**ty).count as usize {
+                        return None;
+                    }
+                    let index = (*reference.cast::<Record>()).order.add(*next).read() as usize;
+                    *next += 1;
+                    let field = &(**ty).fields()[index];
+                    Some(Ok(Node::NativeSlot(native::Slot {
+                        address: Record::slot(*reference, index),
+                        ty: field.ty,
+                        key: field.name,
+                    })))
+                }
+            }
         }
     }
 }
@@ -187,13 +241,16 @@ impl Tree for RuntimeTree {
         // SAFETY: this private adapter is only used with live task JSON nodes; serialization is read-only.
         unsafe {
             let value = match node {
-                Node::Value(value) => value,
-                Node::Field(field) => (*field).value,
+                Node::Value(value) => (!value.is_null()).then(|| *value.cast::<Json>()),
+                Node::Field(field) => {
+                    (!(*field).value.is_null()).then(|| *(*field).value.cast::<Json>())
+                }
+                Node::NativeSlot(slot) => native::read(&*slot.ty, (*slot.ty).read(slot.address)),
             };
-            if value.is_null() {
-                return Err(Error::InvalidGraph);
-            }
-            Ok(match *value.cast::<Json>() {
+            let Some(value) = value else {
+                return Ok(Value::Undefined);
+            };
+            Ok(match value {
                 Json::Null => Value::Null,
                 Json::Boolean(value) => Value::Boolean(value),
                 Json::Number(value) => Value::Number(value),
@@ -202,15 +259,26 @@ impl Tree for RuntimeTree {
                 Json::Object { fields, length } => Value::Object(Children::Object(
                     core::slice::from_raw_parts(fields, length).iter(),
                 )),
+                Json::Native { reference, ty } => {
+                    let children = native::children(reference, &*ty);
+                    if (*ty).kind == NativeKind::Array {
+                        Value::Array(children)
+                    } else {
+                        Value::Object(children)
+                    }
+                }
             })
         }
     }
     fn key(&self, node: Node) -> Result<&str, Error> {
-        let Node::Field(field) = node else {
-            return Err(Error::InvalidGraph);
+        let key = match node {
+            // SAFETY: object iterators carry initialized fields.
+            Node::Field(field) => unsafe { (*field).key },
+            Node::NativeSlot(slot) if !slot.key.is_null() => slot.key,
+            _ => return Err(Error::InvalidGraph),
         };
         // SAFETY: object members hold live string keys.
-        Ok(unsafe { string::text((*field).key) })
+        Ok(unsafe { string::text(key) })
     }
 }
 
@@ -270,6 +338,7 @@ pub unsafe extern "C" fn perry_json_get(value: *mut u8, key: *mut u8) -> *mut u8
     // SAFETY: guaranteed by the caller; fields and array storage belong to the same task.
     unsafe {
         match *value.cast::<Json>() {
+            Json::Native { reference, ty } => native::get(reference, &*ty, string::text(key)),
             Json::Null => failure(exception::TYPE_ERROR, "cannot read a property of null"),
             Json::Object { fields, length } => find_field(fields, length, string::text(key))
                 .map_or(ptr::null_mut(), |field| (*field).value),
@@ -302,6 +371,7 @@ pub unsafe extern "C" fn perry_json_index(value: *mut u8, index: f64) -> *mut u8
     // SAFETY: guaranteed by the caller; reads only initialized in-range slots.
     unsafe {
         match *value.cast::<Json>() {
+            Json::Native { reference, ty } => native::index(reference, &*ty, index),
             Json::Null => failure(exception::TYPE_ERROR, "cannot index null"),
             Json::Object { fields, length } => {
                 let mut buffer = ryu_js::Buffer::new();
@@ -372,7 +442,7 @@ pub unsafe extern "C" fn perry_json_typeof(value: *mut u8) -> *mut u8 {
     } else {
         // SAFETY: the non-null pointer is live.
         match unsafe { *value.cast::<Json>() } {
-            Json::Null | Json::Array(_) | Json::Object { .. } => "object",
+            Json::Null | Json::Array(_) | Json::Object { .. } | Json::Native { .. } => "object",
             Json::Boolean(_) => "boolean",
             Json::Number(_) => "number",
             Json::String(_) => "string",
@@ -397,6 +467,9 @@ pub unsafe extern "C" fn perry_json_equal(a: *mut u8, b: *mut u8) -> u32 {
             (Json::String(a), Json::String(b)) => string::perry_string_equal(a, b),
             (Json::Array(a), Json::Array(b)) => (a == b) as u32,
             (Json::Object { fields: a, .. }, Json::Object { fields: b, .. }) => (a == b) as u32,
+            (Json::Native { reference: a, .. }, Json::Native { reference: b, .. }) => {
+                (a == b) as u32
+            }
             _ => 0,
         }
     }
@@ -407,7 +480,17 @@ pub unsafe extern "C" fn perry_json_equal(a: *mut u8, b: *mut u8) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_is_array(value: *mut u8) -> u32 {
     // SAFETY: non-null pointers are live.
-    (!value.is_null() && matches!(unsafe { *value.cast::<Json>() }, Json::Array(_))) as u32
+    if value.is_null() {
+        return 0;
+    }
+    // SAFETY: a live JSON value's native descriptor is static.
+    unsafe {
+        match *value.cast::<Json>() {
+            Json::Array(_) => 1,
+            Json::Native { ty, .. } => ((*ty).kind == NativeKind::Array) as u32,
+            _ => 0,
+        }
+    }
 }
 /// # Safety
 /// All arguments are live JSON/string references in this task.
@@ -415,6 +498,10 @@ pub unsafe extern "C" fn perry_json_is_array(value: *mut u8) -> u32 {
 pub unsafe extern "C" fn perry_json_set(value: *mut u8, key: *mut u8, replacement: *mut u8) {
     // SAFETY: references are live; only an existing object field is changed.
     unsafe {
+        if let Json::Native { reference, ty } = *value.cast::<Json>() {
+            native::set_key(reference, &*ty, string::text(key), replacement);
+            return;
+        }
         if matches!(*value.cast::<Json>(), Json::Array(_))
             && let Some(index) = canonical_index(string::text(key))
         {
@@ -439,6 +526,15 @@ pub unsafe extern "C" fn perry_json_set(value: *mut u8, key: *mut u8, replacemen
 pub unsafe extern "C" fn perry_json_set_index(value: *mut u8, index: f64, replacement: *mut u8) {
     // SAFETY: references are live; dense bounds are validated before mutation.
     unsafe {
+        if let Json::Native { reference, ty } = *value.cast::<Json>() {
+            if (*ty).kind == NativeKind::Array {
+                native::set_index(reference, &*ty, index, replacement);
+            } else {
+                let mut buffer = ryu_js::Buffer::new();
+                native::set_key(reference, &*ty, buffer.format(index), replacement);
+            }
+            return;
+        }
         if let Json::Object { fields, length } = *value.cast::<Json>() {
             let mut buffer = ryu_js::Buffer::new();
             if let Some(field) = find_field(fields, length, buffer.format(index)) {

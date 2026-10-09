@@ -60,8 +60,8 @@ pub struct BytesType;
 ///
 /// Records are nominal and uniqued by name, so shapes may be recursive: create the record
 /// without fields first and supply them on a later [RecordType::get].
-/// Field order is the source declaration order, which fixes evaluation and enumeration order;
-/// physical layout is decided by a later pass (P3.6), not by this type.
+/// The builder canonicalizes fields into sorted layout order. Each allocation separately
+/// records property creation order, so structurally equal records retain enumeration order.
 #[pliron_type(name = "perry.record")]
 #[derive(Debug)]
 pub struct RecordType {

@@ -13,6 +13,7 @@ pub trait Tree {
 
 /// Exactly one JSON variant; arrays and objects carry their child iterator.
 pub enum Value<'a, C> {
+    Undefined,
     Null,
     Boolean(bool),
     Number(f64),
@@ -57,7 +58,7 @@ fn write_tree<T: Tree>(
         return Err(Error::Depth(depth));
     }
     match tree.value(node)? {
-        Value::Null => append(output, b"null"),
+        Value::Undefined | Value::Null => append(output, b"null"),
         Value::Boolean(value) => append(output, if value { b"true" } else { b"false" }),
         Value::Number(value) => {
             if value.is_finite() {
@@ -137,6 +138,9 @@ fn member<T: Tree>(
     depth: usize,
     emitted: &mut bool,
 ) -> Result<(), Error> {
+    if matches!(tree.value(child)?, Value::Undefined) {
+        return Ok(());
+    }
     if *emitted {
         append(output, b",")?;
     }

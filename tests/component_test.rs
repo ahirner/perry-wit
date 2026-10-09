@@ -344,6 +344,7 @@ function scalar(value: JsonValue): number {
   if(typeof value !== 'number') throw new TypeError('expected number');
   return value;
 }
+
 function array(value: JsonValue): JsonValue[] {
   if(!Array.isArray(value)) throw new TypeError('expected array');
   return value;
@@ -381,6 +382,75 @@ export function run(input: string): string {
         (r#"[{"value":1}]"#, r#"[{"value":7},9]"#),
     ] {
         assert_eq!(run.call(&mut store, (input,))?.0, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn native_json_storage_preserves_order_aliases_and_types() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "native.wit",
+        r#"
+package test:native;
+world native {
+  record pair { second: f64, first: f64 }
+  export run: func(input: pair) -> string;
+}"#,
+    )?;
+    let world = resolve.select_world(&[package], Some("native"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+interface Pair { first: number; second: number }
+interface Cycle { value: number; children: Cycle[] }
+function flag(value: boolean): boolean { return value; }
+export function run(input: Pair): string {
+  const pair: Pair = {second:2,first:1};
+  const other: Pair = {first:11,second:12};
+  const values = [1,2];
+  const flags = [false,false];
+  const native = {title:'é🙂',pair:pair,values:values,flags:flags};
+  const json: JsonValue = native;
+  const captured = json.pair;
+  json.pair.second = 9;
+  pair.first = 7;
+  if(captured !== pair || json.pair.first !== 7) throw 1;
+  json.pair = other;
+  if(json.pair !== other || captured !== pair || native.pair !== other) throw 2;
+  values.push(3);
+  json.values[0] = 5;
+  json.values[3] = 6;
+  values.push(8);
+  json.flags[1] = true;
+  if(!Array.isArray(json.values) || json.values.length !== 5 || !flag(flags[1])) throw 3;
+  let checked = 0;
+  try { json.pair.first = 'wrong'; } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  try { json.values[0] = false; } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  try { json.flags[0] = 1; } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  if(checked !== 3 || other.first !== 11 || values[0] !== 5 || flag(flags[0])) throw 4;
+  const cycle: Cycle = {value:1,children:[]};
+  const children: Cycle[] = cycle.children;
+  children.push(cycle);
+  try { JSON.stringify(cycle); } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  if(checked !== 4) throw 5;
+  return JSON.stringify([input,pair,other,native]);
+}
+"#;
+    let compiled = compile_for_world(source, "native.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_func(&mut store, "run").unwrap();
+    let input = Val::Record(vec![
+        ("second".into(), Val::Float64(20.0)),
+        ("first".into(), Val::Float64(10.0)),
+    ]);
+    let mut output = [Val::String(String::new())];
+    for _ in 0..20 {
+        run.call(&mut store, std::slice::from_ref(&input), &mut output)?;
+        assert_eq!(output[0], Val::String(r#"[{"second":20,"first":10},{"second":9,"first":7},{"first":11,"second":12},{"title":"é🙂","pair":{"first":11,"second":12},"values":[5,2,3,6,8],"flags":[false,true]}]"#.into()));
     }
     Ok(())
 }
