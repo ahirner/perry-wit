@@ -54,7 +54,11 @@ export async function label(name: string): Promise<string> {
   return await setTimeout(2, prefix + "!");
 }
 export async function json(input: string): Promise<string> {
-  const value = JSON.parse(input);
+  let source = '';
+  const value = JSON.parse(input,(key,value,context)=>{
+    if(key==='count') source=context.source;
+    return value;
+  });
   const alias = value.item;
   const typed: {count: number} = alias;
   const count: number = typed.count;
@@ -73,6 +77,7 @@ export async function json(input: string): Promise<string> {
   await setTimeout(1);
   dictionary.count = native.count;
   if(JSON.parse(formatted).item.count !== count) throw new TypeError('lost serialization snapshot');
+  if(JSON.parse(source) !== count) throw new TypeError('lost reviver source snapshot');
   if(storedValues[0] !== typed || storedValues[0].count !== dictionary.count) throw new TypeError('lost dictionary value');
   if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');
   if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');

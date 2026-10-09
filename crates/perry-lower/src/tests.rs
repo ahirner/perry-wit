@@ -485,3 +485,39 @@ export function run(x: number): number {
         assert!(invalid.contains("string key"), "{invalid}");
     }
 }
+
+#[test]
+fn reviver_arrows_share_captures_and_keep_local_returns() {
+    let printed = lowered(
+        r#"
+export function run(input:string):string {
+  let count=0;
+  const value=JSON.parse(input,(key,value)=>{
+    try { if(key==='drop') return undefined;return value; }
+    finally { count=count+1; }
+  });
+  return JSON.stringify({value,count});
+}
+"#,
+    );
+    assert!(printed.contains("JsonReviverApply"), "{printed}");
+    assert!(
+        !printed.contains("perry.alloc"),
+        "callback must not allocate an environment: {printed}"
+    );
+    for source in [
+        "export function run():string { return JSON.stringify(JSON.parse('1',async (key,value)=>value)); }",
+        "export function run():string { return JSON.stringify(JSON.parse('1',(key,value,context,extra)=>value)); }",
+        "export function run():string { return JSON.stringify(JSON.parse('1',function(key,value){return value;})); }",
+    ] {
+        let error = rejected(source);
+        assert!(
+            error.contains("callback") || error.contains("subset rule R5"),
+            "{error}"
+        );
+    }
+    let error = rejected(
+        "export function run():number { JSON.parse('1',()=>later);let later=2;return later; }",
+    );
+    assert!(error.contains("before its declaration"), "{error}");
+}

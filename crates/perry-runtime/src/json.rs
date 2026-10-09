@@ -7,9 +7,11 @@ pub mod dictionary;
 mod native;
 mod object;
 mod properties;
+mod reviver;
 mod stringify;
 use object::{Field, Object};
 pub use properties::*;
+pub use reviver::*;
 pub use stringify::{perry_json_stringify, perry_json_stringify_options};
 pub mod view;
 pub use native::perry_json_pack;
@@ -99,8 +101,12 @@ pub unsafe extern "C" fn perry_json_object(keys: *mut u8, values: *mut u8) -> *m
     }
 }
 
-fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
-    Ok(match graph.value(node)? {
+fn from_graph(
+    graph: &Graph<'_>,
+    node: u32,
+    record: &mut impl FnMut(u32, *mut u8),
+) -> Result<*mut u8, Error> {
+    let value = match graph.value(node)? {
         Value::Undefined => return Err(Error::InvalidGraph),
         Value::Null => perry_json_null(),
         Value::Boolean(value) => perry_json_boolean(u32::from(value)),
@@ -117,7 +123,7 @@ fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
         Value::Array(children) => {
             let array = array::perry_array_new(children.clone().count() as u32);
             for (index, child) in children.enumerate() {
-                let value = from_graph(graph, child?)?;
+                let value = from_graph(graph, child?, record)?;
                 // SAFETY: appending one initialized JSON reference at a time.
                 unsafe {
                     array::set_slot(array, index, value as usize as u64);
@@ -131,7 +137,7 @@ fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
             for child in children {
                 let child = child?;
                 let key = graph.key(child)?;
-                let value = from_graph(graph, child)?;
+                let value = from_graph(graph, child, record)?;
                 // SAFETY: each field is fresh; graph key bytes remain live for the task.
                 unsafe {
                     let key = string::perry_string_adopt(key.as_ptr().cast_mut(), key.len() as u32);
@@ -140,7 +146,31 @@ fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
             }
             allocate(Json::Object(object))
         }
-    })
+    };
+    record(node, value);
+    Ok(value)
+}
+
+fn parse_failure(error: Error) -> *mut u8 {
+    match error {
+        Error::Depth(_) => failure(exception::RANGE_ERROR, "JSON nesting limit exceeded"),
+        Error::UnpairedSurrogate(_) => failure(
+            exception::TYPE_ERROR,
+            "JSON string contains an unpaired surrogate",
+        ),
+        Error::Capacity => failure(exception::RANGE_ERROR, "JSON document is too large"),
+        Error::Syntax(_) => failure(exception::SYNTAX_ERROR, "invalid JSON text"),
+        _ => unreachable!("measuring text does not inspect object storage"),
+    }
+}
+
+fn parse_graph(text: &str) -> Result<(Graph<'static>, u32), Error> {
+    let size = perry_json_codec::measure(text)?;
+    let bytes = perry_alloc(size.try_into().map_err(|_| Error::Capacity)?);
+    // SAFETY: freshly allocated task storage; graph references are used only within that task.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(bytes, size) };
+    let root = perry_json_codec::populate(text, bytes, 8).expect("measured JSON graph");
+    Ok((Graph { bytes, base: 8 }, root))
 }
 
 /// # Safety
@@ -149,30 +179,11 @@ fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
 pub unsafe extern "C" fn perry_json_parse(input: *mut u8) -> *mut u8 {
     // SAFETY: input is live and parsing does not mutate it.
     let text = unsafe { string::text(input) };
-    let size = match perry_json_codec::measure(text) {
-        Ok(size) => size,
-        Err(Error::Depth(_)) => {
-            return failure(exception::RANGE_ERROR, "JSON nesting limit exceeded");
-        }
-        Err(Error::UnpairedSurrogate(_)) => {
-            return failure(
-                exception::TYPE_ERROR,
-                "JSON string contains an unpaired surrogate",
-            );
-        }
-        Err(Error::Capacity) => {
-            return failure(exception::RANGE_ERROR, "JSON document is too large");
-        }
-        Err(Error::Syntax(_)) => return failure(exception::SYNTAX_ERROR, "invalid JSON text"),
-        Err(Error::InvalidGraph | Error::PrototypeLookup | Error::Cycle) => {
-            unreachable!("measuring text does not inspect object storage")
-        }
+    let (graph, root) = match parse_graph(text) {
+        Ok(parsed) => parsed,
+        Err(error) => return parse_failure(error),
     };
-    let bytes = perry_alloc(size.try_into().expect("JSON document too large"));
-    // SAFETY: fresh storage holds the measured graph; borrowed strings keep its task lifetime.
-    let bytes = unsafe { core::slice::from_raw_parts_mut(bytes, size) };
-    let root = perry_json_codec::populate(text, bytes, 8).expect("measured JSON graph");
-    from_graph(&Graph { bytes, base: 8 }, root).expect("validated JSON graph")
+    from_graph(&graph, root, &mut |_, _| {}).expect("validated JSON graph")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1,6 +1,8 @@
 //! Typed built-in capabilities. Signatures are verified here; native representations and
 //! task scheduling belong to codegen and the runtime.
-use crate::types::{ArrayType, BufferType, BytesType, JsonType, OptionalType, StringType};
+use crate::types::{
+    ArrayType, BufferType, BytesType, JsonReviverType, JsonType, OptionalType, StringType,
+};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     common_traits::Verify,
@@ -20,6 +22,13 @@ use thiserror::Error;
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
     JsonParse,
+    JsonReviverStart,
+    JsonReviverNext,
+    JsonReviverKey,
+    JsonReviverValue,
+    JsonReviverContext,
+    JsonReviverApply,
+    JsonReviverResult,
     JsonStringify,
     JsonStringifyOptions,
     JsonNull,
@@ -75,6 +84,7 @@ pub enum Intrinsic {
 
 #[derive(Clone, Copy)]
 enum ValueType {
+    JsonReviver,
     Json,
     OptionalJson,
     Jsons,
@@ -93,6 +103,7 @@ enum ValueType {
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
+            Self::JsonReviver => JsonReviverType::get(ctx).into(),
             Self::Json => JsonType::get(ctx).into(),
             Self::OptionalJson => {
                 let json = JsonType::get(ctx).into();
@@ -131,6 +142,7 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
+            Self::JsonReviver => ty.deref(ctx).is::<JsonReviverType>(),
             Self::Json => ty.deref(ctx).is::<JsonType>(),
             Self::OptionalJson => ty
                 .deref(ctx)
@@ -177,6 +189,12 @@ impl Intrinsic {
         use ValueType::*;
         match self {
             Self::JsonParse => (&[String], &[Json]),
+            Self::JsonReviverStart => (&[String], &[JsonReviver]),
+            Self::JsonReviverContext => (&[JsonReviver], &[Json]),
+            Self::JsonReviverNext => (&[JsonReviver], &[Boolean]),
+            Self::JsonReviverKey => (&[JsonReviver], &[String]),
+            Self::JsonReviverValue | Self::JsonReviverResult => (&[JsonReviver], &[OptionalJson]),
+            Self::JsonReviverApply => (&[JsonReviver, OptionalJson], &[]),
             Self::JsonStringify => (&[OptionalJson], &[OptionalString]),
             Self::JsonStringifyOptions => (
                 &[OptionalJson, OptionalJson, OptionalJson],
@@ -288,6 +306,9 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
             self.kind(ctx),
             Intrinsic::BytesFromArray
                 | Intrinsic::BytesSetArray
+                | Intrinsic::JsonReviverStart
+                | Intrinsic::JsonReviverNext
+                | Intrinsic::JsonReviverApply
                 | Intrinsic::JsonParse
                 | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
@@ -315,6 +336,9 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
             self.kind(ctx),
             Intrinsic::BytesFromArray
                 | Intrinsic::BytesSetArray
+                | Intrinsic::JsonReviverStart
+                | Intrinsic::JsonReviverNext
+                | Intrinsic::JsonReviverApply
                 | Intrinsic::JsonParse
                 | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify

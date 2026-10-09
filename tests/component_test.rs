@@ -964,3 +964,137 @@ export function check():number {
     }
     Ok(())
 }
+
+#[test]
+fn json_revivers_inline_captures_returns_and_finalizers() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("reviver.wit", "package test:reviver; world reviver { export revive: func(input: string) -> string; export check: func() -> u32; export count: func(input: string) -> u32; }")?;
+    let world = resolve.select_world(&[package], Some("reviver"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
+function identity(key:string,value:JsonValue|undefined):JsonValue|undefined { return value; }
+function twice(key:string,value:number):number { return value*2; }
+function discard(key:string,value:JsonValue|undefined):void {}
+export function revive(input:string):string {
+  let trace='';let calls=0;let outer=0;
+  let result:JsonValue|undefined=undefined;
+  try {
+    result=JSON.parse(input,(key:string,value:JsonValue|undefined):JsonValue|undefined=>{
+      trace=trace+key+':'+typeof value+';';
+      try {
+        if(key==='drop') return undefined;
+        if(typeof value==='number') { const number:number=value;return number+2; }
+        if(key==='replace') return {native:true};
+        return value;
+      } finally { calls=calls+1; }
+    });
+  } finally { outer=outer+1; }
+  if(outer!==1) throw 1;
+  return JSON.stringify({result,trace,calls});
+}
+export function count(input:string):number {
+  let count=0;
+  JSON.parse(input,(_key,value)=>{count=count+1;return value;});
+  return count;
+}
+export function check():number {
+  const restored=JSON.parse('{"__proto__":1,"a":2}',identity);
+  if(JSON.stringify(restored)!=='{"__proto__":1,"a":2}') return 2;
+  const absent=JSON.parse('1',()=>undefined);
+  if(typeof absent!=='undefined') return 3;
+  const ignored=JSON.parse('1',null);
+  if(ignored!==1) return 4;
+  const marker=new Error('reviver');let effects=0;
+  try {
+    JSON.parse('{"a":1,"b":2}',(key,value)=>{
+      try { if(key==='a') throw marker;return value; }
+      finally { effects=effects+1; }
+    });
+  } catch(e) { if(e!==marker) return 5;effects=effects+10; }
+  finally { effects=effects+100; }
+  if(effects!==111) return 6;
+  let nestedTrace='';
+  const nested=JSON.parse('{"x":1}',(key,value)=>{
+    if(key==='x') return JSON.parse('2',(_key,inner)=>{nestedTrace=nestedTrace+key;return inner;});
+    return value;
+  });
+  if(nestedTrace!=='x' || JSON.stringify(nested)!=='{"x":2}') return 7;
+  let dense=false;
+  try { JSON.parse('[1]',(key,value)=>{if(key==='0')return undefined;return value;}); }
+  catch(e) { dense=e instanceof RangeError; }
+  if(!dense) return 8;
+  let syntax=false;let called=0;
+  try { JSON.parse('{',(_key,value)=>{called=called+1;return value;}); }
+  catch(e) { syntax=e instanceof SyntaxError; }
+  if(!syntax || called!==0) return 9;
+  const replaced=JSON.parse('1',()=>JSON.parse('{"kept":3}'));
+  if(JSON.stringify(replaced)!=='{"kept":3}') return 10;
+  let sourceTrace='';const contexts:JsonValue[]=[];
+  JSON.parse(' {"x":1e2,"x":-0,"s":"\\u0061","b":true,"nil":null} ',(key,value,context)=>{
+    contexts.push(context);
+    if(context.source!==undefined) { const source:string=context.source;sourceTrace=sourceTrace+key+'='+source+';'; }
+    return value;
+  });
+  if(sourceTrace!=='x=-0;s="\\u0061";b=true;nil=null;') return 11;
+  if(contexts[0]===contexts[1] || Object.hasOwn(contexts[4],'source')) return 12;
+  let scalarSource='';
+  JSON.parse(' \n -0.00e+1\t',(_key,value,context)=>{scalarSource=context.source;return value;});
+  if(scalarSource!=='-0.00e+1') return 13;
+  const overridden=JSON.parse('1',(_key,value)=>{try{return value;}finally{return 5;}});
+  if(overridden!==5) return 14;
+  if(JSON.parse('2',twice)!==4) return 15;
+  const item={tag:1};
+  const native=JSON.parse('0',()=>item);
+  const alias:JsonValue=item;alias.tag=5;
+  if(native!==alias || JSON.stringify(native)!=='{"tag":5}') return 16;
+  if(typeof JSON.parse('0',discard)!=='undefined') return 17;
+  return effects;
+}
+"#;
+    let compiled = compile_for_world(source, "reviver.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let revive = instance.get_typed_func::<(&str,), (String,)>(&mut store, "revive")?;
+    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
+    let count = instance.get_typed_func::<(&str,), (u32,)>(&mut store, "count")?;
+    let input = r#"{"2":1,"a":{"drop":3,"b":4},"replace":[5,6],"a":{"drop":7,"b":8}}"#;
+    let expected = r#"{"result":{"2":3,"a":{"b":10},"replace":{"native":true}},"trace":"2:number;drop:number;b:number;a:object;0:number;1:number;replace:object;:object;","calls":8}"#;
+    let deep = format!("{}1{}", "[".repeat(127), "]".repeat(127));
+    let large = serde_json::json!({"text":"é🙂".repeat(8192),"array":[1,2,3]}).to_string();
+    for _ in 0..3 {
+        assert_eq!(check.call(&mut store, ()).context("reviver checks")?.0, 111);
+        assert_eq!(
+            revive
+                .call(&mut store, (input,))
+                .context("reviver order")?
+                .0,
+            expected
+        );
+        assert_eq!(
+            count.call(&mut store, (&deep,)).context("deep reviver")?.0,
+            128
+        );
+        revive.call(&mut store, (&large,))?;
+    }
+    let peak = store.data().0;
+    for _ in 0..20 {
+        assert_eq!(check.call(&mut store, ()).context("reviver checks")?.0, 111);
+        assert_eq!(
+            revive
+                .call(&mut store, (input,))
+                .context("reviver order")?
+                .0,
+            expected
+        );
+        assert_eq!(
+            count.call(&mut store, (&deep,)).context("deep reviver")?.0,
+            128
+        );
+        revive.call(&mut store, (&large,))?;
+        assert_eq!(store.data().0, peak, "reviver state leaked across tasks");
+    }
+    Ok(())
+}

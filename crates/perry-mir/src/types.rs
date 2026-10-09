@@ -37,6 +37,16 @@ pub struct ExceptionType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct JsonType;
 
+/// A task-owned post-order traversal paused around synchronous JSON reviver calls.
+#[pliron_type(
+    name = "perry.json_reviver",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct JsonReviverType;
+
 /// A fixed-size ArrayBuffer owned by a memory tier.
 #[pliron_type(
     name = "perry.buffer",

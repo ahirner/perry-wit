@@ -13,7 +13,7 @@ pub use serialize::{
     measure_tree_with_options, serialize, serialize_tree, serialize_tree_with_options,
 };
 
-const NODE_BYTES: usize = 32;
+const NODE_BYTES: usize = 40;
 const MAX_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

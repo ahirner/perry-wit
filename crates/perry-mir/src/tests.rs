@@ -598,6 +598,16 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
         serialized = perry.caught_status : builtin.integer i32;
         formatted = perry.intrinsic JsonStringifyOptions (optional, optional, optional) : perry.optional <perry.string>;
         formatted_status = perry.caught_status : builtin.integer i32;
+        reviver = perry.intrinsic JsonReviverStart (text) : perry.json_reviver;
+        reviver_started = perry.caught_status : builtin.integer i32;
+        ready = perry.intrinsic JsonReviverNext (reviver) : builtin.integer i1;
+        advanced = perry.caught_status : builtin.integer i32;
+        key = perry.intrinsic JsonReviverKey (reviver) : perry.string;
+        value = perry.intrinsic JsonReviverValue (reviver) : perry.optional <perry.json>;
+        context = perry.intrinsic JsonReviverContext (reviver) : perry.json;
+        perry.intrinsic JsonReviverApply (reviver, value) : ;
+        applied = perry.caught_status : builtin.integer i32;
+        revived = perry.intrinsic JsonReviverResult (reviver) : perry.optional <perry.json>;
     "#,
     );
     verify_text(&input).expect("explicit JSON operations verify");
@@ -611,6 +621,12 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
             .contains("incorrect operand or result types")
     );
     for invalid in [
+        input.replace("JsonReviverNext (reviver)", "JsonReviverNext (json)"),
+        input.replace("JsonReviverStart (text)", "JsonReviverStart (json)"),
+        input.replace(
+            "JsonReviverApply (reviver, value)",
+            "JsonReviverApply (reviver, text)",
+        ),
         input.replace(
             "JsonStringifyOptions (optional, optional, optional)",
             "JsonStringifyOptions (optional, text, optional)",

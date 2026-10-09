@@ -74,6 +74,7 @@ mod tests {
         byte_views_preserve_aliases_and_validate_before_writing();
         json_trees_share_array_storage_and_retain_unicode();
         json_dictionaries_grow_compact_and_keep_identity();
+        json::reviver_snapshot_mutations();
         native_json_optionals_use_contextual_undefined_semantics();
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();

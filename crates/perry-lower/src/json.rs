@@ -8,6 +8,56 @@ pub(super) fn is_json(ctx: &Context, value: Value) -> bool {
 }
 
 impl FunctionBuilder<'_> {
+    pub(super) fn revive_json(
+        &mut self,
+        ctx: &mut Context,
+        text: &Expr,
+        reviver: &Expr,
+    ) -> Result<Value> {
+        let text = self.expression(ctx, text)?;
+        let text = self.defined(ctx, text)?;
+        ensure!(
+            kind(ctx, text)? == Kind::String,
+            "JSON.parse input must be a string"
+        );
+        if !matches!(reviver, Expr::Closure { .. } | Expr::FuncRef(_)) {
+            self.effect(ctx, reviver)?;
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                .unwrap());
+        }
+        let state = self
+            .intrinsic(ctx, Intrinsic::JsonReviverStart, vec![text])
+            .unwrap();
+        let next = self.new_block(ctx, "reviver_next");
+        let callback = self.new_block(ctx, "reviver_callback");
+        let done = self.new_block(ctx, "reviver_done");
+        self.jump(ctx, next);
+        self.switch_to(next);
+        let ready = self
+            .intrinsic(ctx, Intrinsic::JsonReviverNext, vec![state])
+            .unwrap();
+        self.branch(ctx, ready, callback, done);
+        self.switch_to(callback);
+        let key = self
+            .intrinsic(ctx, Intrinsic::JsonReviverKey, vec![state])
+            .unwrap();
+        let value = self
+            .intrinsic(ctx, Intrinsic::JsonReviverValue, vec![state])
+            .unwrap();
+        let context = self
+            .intrinsic(ctx, Intrinsic::JsonReviverContext, vec![state])
+            .unwrap();
+        let replacement =
+            self.callback(ctx, reviver, &[key, value, context], value.get_type(ctx))?;
+        self.intrinsic(ctx, Intrinsic::JsonReviverApply, vec![state, replacement]);
+        self.jump(ctx, next);
+        self.switch_to(done);
+        Ok(self
+            .intrinsic(ctx, Intrinsic::JsonReviverResult, vec![state])
+            .unwrap())
+    }
+
     pub(super) fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         if is_json(ctx, value) {
             let value = self.optional(ctx, value);

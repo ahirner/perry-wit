@@ -37,8 +37,8 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, OptionalType,
-        PromiseType, RecordType, StringType,
+        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonReviverType, JsonType,
+        OptionalType, PromiseType, RecordType, StringType,
     },
 };
 use perry_runtime::array as layout;
@@ -246,6 +246,14 @@ enum Runtime {
     DictionaryKeys,
     DictionaryValues,
     JsonParse,
+    JsonReviverStart,
+    JsonReviverNext,
+    JsonReviverKey,
+    JsonReviverValue,
+    JsonReviverContext,
+    JsonReviverApply,
+    JsonReviverResult,
+
     JsonStringify,
     JsonStringifyOptions,
     JsonNull,
@@ -356,6 +364,14 @@ impl Runtime {
             Runtime::DictionaryKeys => "perry_dictionary_keys",
             Runtime::DictionaryValues => "perry_dictionary_values",
             Runtime::JsonParse => "perry_json_parse",
+            Runtime::JsonReviverStart => "perry_json_reviver_start",
+            Runtime::JsonReviverNext => "perry_json_reviver_next",
+            Runtime::JsonReviverKey => "perry_json_reviver_key",
+            Runtime::JsonReviverContext => "perry_json_reviver_context",
+            Runtime::JsonReviverValue => "perry_json_reviver_value",
+            Runtime::JsonReviverApply => "perry_json_reviver_apply",
+            Runtime::JsonReviverResult => "perry_json_reviver_result",
+
             Runtime::JsonStringify => "perry_json_stringify",
             Runtime::JsonStringifyOptions => "perry_json_stringify_options",
             Runtime::JsonNull => "perry_json_null",
@@ -470,6 +486,12 @@ impl Runtime {
             Runtime::JsonBoolean
             | Runtime::JsonString
             | Runtime::JsonArray
+            | Runtime::JsonReviverStart
+            | Runtime::JsonReviverNext
+            | Runtime::JsonReviverKey
+            | Runtime::JsonReviverValue
+            | Runtime::JsonReviverContext
+            | Runtime::JsonReviverResult
             | Runtime::JsonParse
             | Runtime::JsonStringify
             | Runtime::JsonKeys
@@ -492,6 +514,7 @@ impl Runtime {
             | Runtime::JsonDelete => (vec![i32, i32], vec![i32]),
             Runtime::JsonIndex => (vec![i32, f64], vec![i32]),
             Runtime::JsonAsNumber => (vec![i32], vec![f64]),
+            Runtime::JsonReviverApply => (vec![i32, i32], vec![]),
             Runtime::JsonSet => (vec![i32, i32, i32], vec![]),
             Runtime::JsonStringifyOptions => (vec![i32, i32, i32], vec![i32]),
             Runtime::JsonSetIndex => (vec![i32, f64, i32], vec![]),
@@ -587,6 +610,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
+        || deref.is::<JsonReviverType>()
         || deref.is::<JsonType>()
         || deref.is::<BytesType>()
         || deref.is::<BufferType>()
@@ -1902,6 +1926,14 @@ impl<'s> FunctionLowering<'s> {
             let kind = intrinsic.kind(ctx);
             let json_runtime = match kind {
                 Intrinsic::JsonParse => Some(Runtime::JsonParse),
+                Intrinsic::JsonReviverStart => Some(Runtime::JsonReviverStart),
+                Intrinsic::JsonReviverNext => Some(Runtime::JsonReviverNext),
+                Intrinsic::JsonReviverKey => Some(Runtime::JsonReviverKey),
+                Intrinsic::JsonReviverContext => Some(Runtime::JsonReviverContext),
+                Intrinsic::JsonReviverValue => Some(Runtime::JsonReviverValue),
+                Intrinsic::JsonReviverApply => Some(Runtime::JsonReviverApply),
+                Intrinsic::JsonReviverResult => Some(Runtime::JsonReviverResult),
+
                 Intrinsic::JsonStringify => Some(Runtime::JsonStringify),
                 Intrinsic::JsonStringifyOptions => Some(Runtime::JsonStringifyOptions),
                 Intrinsic::JsonNull => Some(Runtime::JsonNull),

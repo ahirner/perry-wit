@@ -379,6 +379,20 @@ impl<'a> Tree for Graph<'a> {
 }
 
 impl Graph<'_> {
+    /// Contiguous post-order value index; the root's index plus one is the value count.
+    pub fn node_index(&self, node: u32) -> Result<u32, Error> {
+        self.word(node, 28)
+    }
+
+    /// Original token bytes, checked against the input that produced this graph.
+    pub fn source<'a>(&self, node: u32, input: &'a str) -> Result<&'a str, Error> {
+        let start = self.word(node, 32)? as usize;
+        let end = start
+            .checked_add(self.word(node, 36)? as usize)
+            .ok_or(Error::InvalidGraph)?;
+        input.get(start..end).ok_or(Error::InvalidGraph)
+    }
+
     fn string(&self, node: u32) -> Result<&str, Error> {
         if self.word(node, 0)? != Kind::String as u32 {
             return Err(Error::InvalidGraph);

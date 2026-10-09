@@ -106,6 +106,33 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = vec![
         Contract {
+            id: "ecma.json.reviver",
+            description: "JSON revivers preserve post-order effects, source contexts and captured updates",
+            specification: "https://tc39.es/ecma262/#sec-json.parse",
+            domain: "Synchronous inline arrows and direct function references over UTF-8 JSON trees; primitive source tokens, numeric/duplicate property ordering, object deletion, root replacement, local finalizers and nested revivers; array-hole deletion remains an explicit dense-array RangeError outside the Node comparison",
+            witnesses: vec![
+                Witness {
+                    partition: "duplicate-source-and-order",
+                    case: json_reviver(
+                        r#"{"2":1e2,"a":{"drop":1,"x":-0},"2":2.00,"s":"\u0061"}"#.into(),
+                        3,
+                    ),
+                },
+                Witness {
+                    partition: "primitive-source",
+                    case: json_reviver(" \n -0.00e+1\t".into(), 0),
+                },
+                Witness {
+                    partition: "nested-arrays",
+                    case: json_reviver(r#"[{"x":1},[],null,true,"漢🙂"]"#.into(), -2),
+                },
+            ],
+            strategy: (json_strategy(), -8i16..=8)
+                .prop_map(|(text, amount)| json_reviver(text, amount))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "ecma.json.stringify_options",
             description: "JSON property-list selection and formatted serialization preserve order and effects",
             specification: "https://tc39.es/ecma262/#sec-json.stringify",
@@ -665,6 +692,41 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn json_reviver(text: String, amount: i16) -> Case {
+    let text = serde_json::to_string(&text).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {{[key:string]:JsonValue}};
+function identity(key:string,value:JsonValue|undefined):JsonValue|undefined {{return value;}}
+let calls=0;let outer=0;const trace:string[]=[];
+let result:JsonValue|undefined=undefined;
+try {{
+  result=JSON.parse({text},((key:string,value:JsonValue|undefined,context:JsonValue):JsonValue|undefined=>{{
+    trace.push(key);trace.push(typeof value);
+    const source=(context as {{[key:string]:JsonValue}}).source;
+    if(source!==undefined) {{const raw:string=source as string;trace.push(raw);}} else {{trace.push('<none>');}}
+    try {{
+      if(key==='drop') return undefined;
+      if(typeof value==='number') {{const number:number=value;return number+{amount};}}
+      return value;
+    }} finally {{calls=calls+1;}}
+  }}) as unknown as (key:string,value:unknown)=>unknown);
+}} finally {{outer=outer+1;}}
+if(outer!==1) throw 1;
+const plain=JSON.parse({text},identity);
+let nestedCount=0;
+const nested=JSON.parse('1',(_key,value)=>{{
+  return JSON.parse('2',(_inner,next)=>{{nestedCount=nestedCount+1;return next;}});
+}});
+const missing=JSON.parse('null',()=>undefined);
+console.log(JSON.stringify({{result,trace,calls,plain,nested,nestedCount,missing:typeof missing}}));
+"#
+        ),
+    }
 }
 
 fn json_options(text: String, keys: Vec<u8>, space: String) -> Case {

@@ -14,11 +14,13 @@
 //! string concatenation; field reads and writes; array literals, `push`, indexing and
 //! `.length`. Everything else is rejected with a diagnostic.
 mod bytes;
+mod callbacks;
 mod dictionaries;
 mod exceptions;
 mod json;
 mod shapes;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use callbacks::InlineReturn;
 use exceptions::{Cleanup, Handler};
 use perry_hir::{
     ir::{
@@ -339,6 +341,7 @@ struct FunctionBuilder<'s> {
     timers: &'s HashSet<String>,
     results: Vec<TypeHandle>,
     is_async: bool,
+    inline_return: Option<InlineReturn>,
     labels: usize,
 }
 
@@ -368,6 +371,7 @@ impl<'s> FunctionBuilder<'s> {
             timers,
             results: signature.results.clone(),
             is_async: signature.is_async,
+            inline_return: None,
             labels: 0,
         };
         for (index, param) in function.params.iter().enumerate() {
@@ -503,7 +507,7 @@ impl<'s> FunctionBuilder<'s> {
     fn local(&self, id: LocalId) -> Result<Value> {
         self.locals.get(&id).copied().ok_or_else(|| {
             anyhow!(
-                "unsupported reference to local {id} (globals and captures are not supported yet)"
+                "unsupported reference to local {id} (module state or a binding used before its declaration)"
             )
         })
     }
@@ -567,6 +571,14 @@ impl<'s> FunctionBuilder<'s> {
 
     fn statement(&mut self, ctx: &mut Context, statement: &Stmt) -> Result<()> {
         match statement {
+            Stmt::PreallocateTdzBoxes(ids) | Stmt::PreallocateBoxes(ids) => {
+                // Inline callbacks share slots only after declaration. HIR box hints must not
+                // expose a previous copy of a lexical binding (for example in a finalizer).
+                for id in ids {
+                    self.locals.remove(id);
+                }
+            }
+            Stmt::ReleaseBoxes(_) => {}
             Stmt::Let { id, ty, init, .. } => {
                 // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
                 // type. An explicit type the subset cannot represent is an error, not a fallback.
@@ -626,9 +638,17 @@ impl<'s> FunctionBuilder<'s> {
                     values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
                     "return value type differs from the declared result"
                 );
-                self.run_cleanups(ctx, 0)?;
+                self.run_cleanups(
+                    ctx,
+                    self.inline_return.map_or(0, |target| target.cleanup_depth),
+                )?;
                 if !self.terminated(ctx) {
-                    self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
+                    if let Some(target) = self.inline_return {
+                        self.store(ctx, target.result, values[0]);
+                        self.jump(ctx, target.join);
+                    } else {
+                        self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
+                    }
                 }
             }
             Stmt::If {
@@ -819,7 +839,12 @@ impl<'s> FunctionBuilder<'s> {
                 _ => {}
             }
         }
-        if expected.is_some_and(|ty| ty.deref(ctx).is::<JsonType>()) {
+        if expected.is_some_and(|ty| {
+            optional_value(ctx, ty)
+                .unwrap_or(ty)
+                .deref(ctx)
+                .is::<JsonType>()
+        }) {
             return self.json_value(ctx, expr);
         }
         Ok(match expr {
@@ -830,6 +855,8 @@ impl<'s> FunctionBuilder<'s> {
                 self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, inner))
             }
             Expr::Null => self.intrinsic(ctx, Intrinsic::JsonNull, vec![]).unwrap(),
+            Expr::JsonParseReviver { text, reviver }
+            | Expr::JsonParseWithReviver(text, reviver) => self.revive_json(ctx, text, reviver)?,
             Expr::JsonParse(text) | Expr::JsonParseTyped { text, .. } => {
                 let text = self.expression(ctx, text)?;
                 let text = self.defined(ctx, text)?;
@@ -1567,6 +1594,9 @@ impl<'s> FunctionBuilder<'s> {
             self.narrow_json(ctx, value, target)
         } else if target.deref(ctx).is::<JsonType>() {
             self.pack_json(ctx, value)
+        } else if optional_value(ctx, target).is_some_and(|ty| ty.deref(ctx).is::<JsonType>()) {
+            let value = self.json_input(ctx, value)?;
+            Ok(self.optional(ctx, value))
         } else if (target.deref(ctx).is::<DictionaryType>() || ty.deref(ctx).is::<DictionaryType>())
             && perry_mir::json::compatible(ctx, ty)
             && perry_mir::json::compatible(ctx, target)
@@ -1817,11 +1847,7 @@ impl<'s> FunctionBuilder<'s> {
             .signatures
             .get(id)
             .context("call to an unknown function")?;
-        let (name, params, results) = (
-            signature.name.clone(),
-            signature.params.clone(),
-            signature.results.clone(),
-        );
+        let (name, params) = (signature.name.clone(), signature.params.clone());
         ensure!(
             args.len() == params.len(),
             "call to {name} with {} arguments, expected {}",
@@ -1836,15 +1862,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.fit(ctx, value, *param)
             })
             .collect::<Result<Vec<_>>>()?;
-        if signature.is_async {
-            let value = results[0];
-            let promise = self.emit_value(ctx, |ctx| AsyncCallOp::new(ctx, name, values, value));
-            return Ok(Some(promise));
-        }
-        let op = CallOp::new(ctx, name, values, results);
-        self.append(ctx, &op);
-        let operation = op.get_operation().deref(ctx);
-        Ok((operation.get_num_results() == 1).then(|| operation.get_result(0)))
+        self.invoke(ctx, *id, values)
     }
 }
 

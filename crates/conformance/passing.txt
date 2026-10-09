@@ -17,3 +17,4 @@ ecma.json.dictionary
 ecma.object.dictionary
 ecma.json.stringify_options
 ecma.json.command
+ecma.json.reviver
