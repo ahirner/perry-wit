@@ -457,6 +457,10 @@ fn async_export(
                 b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
             }
         }
+        if b.state.uses_fetch {
+            // No request or response handle outlives the export call.
+            b.call(ctx, "web_fetch_close", &[], &[], vec![]);
+        }
         if b.state.uses_streams {
             // No stream end outlives the export call.
             b.call(ctx, "web_streams_close", &[], &[], vec![]);
@@ -520,6 +524,21 @@ fn async_export(
                 .call(
                     ctx,
                     "web_event",
+                    &[crate::W::I32; 3],
+                    &[crate::W::I32],
+                    vec![event, handle, subtask_state],
+                )
+                .expect("handled");
+            let unhandled = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
+            b.block = unhandled;
+        }
+        if b.state.uses_fetch {
+            // Fetches take their subtask, stream and future events.
+            let handled = b
+                .call(
+                    ctx,
+                    "web_fetch_event",
                     &[crate::W::I32; 3],
                     &[crate::W::I32],
                     vec![event, handle, subtask_state],

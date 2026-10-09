@@ -64,6 +64,8 @@ pub enum Ty {
     Reader,
     ReadResult,
     PromiseReadResult,
+    OptReadable,
+    PromiseResponse,
 }
 
 impl Ty {
@@ -98,6 +100,14 @@ impl Ty {
             Ty::PromiseReadResult => {
                 let result = ReadResultType::get(ctx).into();
                 PromiseType::get(ctx, result).into()
+            }
+            Ty::OptReadable => {
+                let stream = ReadableType::get(ctx).into();
+                OptionalType::get(ctx, stream).into()
+            }
+            Ty::PromiseResponse => {
+                let response = ResponseType::get(ctx).into();
+                PromiseType::get(ctx, response).into()
             }
             Ty::PromiseString => PromiseType::get(ctx, string).into(),
             Ty::PromiseBytes => {
@@ -163,6 +173,8 @@ impl Ty {
             Ty::Reader => deref.is::<ReaderType>(),
             Ty::ReadResult => deref.is::<ReadResultType>(),
             Ty::PromiseReadResult => promise_of(&|t| t.deref(ctx).is::<ReadResultType>()),
+            Ty::OptReadable => optional_of(&|t| t.deref(ctx).is::<ReadableType>()),
+            Ty::PromiseResponse => promise_of(&|t| t.deref(ctx).is::<ResponseType>()),
             Ty::PromiseString => promise_of(&string),
             Ty::PromiseBytes => promise_of(&|t| t.deref(ctx).is::<BytesType>()),
             Ty::PromiseStats => promise_of(&|t| t.deref(ctx).is::<StatsType>()),
@@ -321,6 +333,9 @@ intrinsics! {
     ReaderReleaseLock = "reader_release_lock" (Reader) -> ();
     ReadDone = "read_done" (ReadResult) -> (Bool), pure;
     ReadValue = "read_value" (ReadResult) -> (OptBytes), pure;
+    Fetch = "fetch" (String, String, Headers, OptBytes, Bool) -> (PromiseResponse);
+    ResponseBody = "response_body" (Response) -> (OptReadable);
+    RequestBody = "request_body" (Request) -> (OptReadable);
 }
 
 impl Intrinsic {

@@ -697,6 +697,8 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::Response, "ok", false) => (Intrinsic::ResponseOk, vec![receiver]),
             (Kind::Response, "headers", false) => (Intrinsic::ResponseHeaders, vec![receiver]),
+            (Kind::Response, "body", false) => (Intrinsic::ResponseBody, vec![receiver]),
+            (Kind::Request, "body", false) => (Intrinsic::RequestBody, vec![receiver]),
             (Kind::Response, "bodyUsed", false) => (Intrinsic::ResponseBodyUsed, vec![receiver]),
             (Kind::Response, "bytes", true) => (Intrinsic::ResponseBytes, vec![receiver]),
             (Kind::Response, "text", true) => (Intrinsic::ResponseText, vec![receiver]),
@@ -1894,6 +1896,41 @@ impl<'s> FunctionBuilder<'s> {
             {
                 self.web_new(ctx, class_name, args)?
             }
+            Expr::FetchWithOptions {
+                url,
+                method,
+                body,
+                headers,
+                headers_dynamic,
+                signal,
+                redirect,
+            } => {
+                ensure!(
+                    signal.is_none() && redirect.is_none(),
+                    "fetch signal and redirect options are not supported yet"
+                );
+                let url = self.typed_operand(ctx, url, Kind::String, "a URL string")?;
+                let method = self.typed_operand(ctx, method, Kind::String, "a method string")?;
+                let list = match headers_dynamic {
+                    Some(dynamic) => self.headers_init(ctx, Some(dynamic))?,
+                    None => {
+                        let list = self
+                            .intrinsic(ctx, Intrinsic::HeadersNew, vec![])
+                            .expect("headers");
+                        for (name, value) in headers {
+                            let name = self.string(ctx, name);
+                            let value =
+                                self.typed_operand(ctx, value, Kind::String, "a header value")?;
+                            self.intrinsic(ctx, Intrinsic::HeadersAppend, vec![list, name, value]);
+                        }
+                        list
+                    }
+                };
+                let (body, text) = self.body_init(ctx, Some(body))?;
+                let text = self.boolean(ctx, text);
+                self.intrinsic(ctx, Intrinsic::Fetch, vec![url, method, list, body, text])
+                    .expect("promise")
+            }
             Expr::NativeMethodCall {
                 module,
                 class_name: Some(class),
@@ -1930,6 +1967,7 @@ impl<'s> FunctionBuilder<'s> {
                             | "url"
                             | "method"
                             | "locked"
+                            | "body"
                     );
                 ensure!(
                     matches!(
@@ -1939,6 +1977,9 @@ impl<'s> FunctionBuilder<'s> {
                             | Kind::Request
                             | Kind::Writable
                             | Kind::Writer
+                            | Kind::Readable
+                            | Kind::Reader
+                            | Kind::ReadResult
                     ),
                     "{method} is not supported on this type yet"
                 );

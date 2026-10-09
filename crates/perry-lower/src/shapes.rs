@@ -145,6 +145,11 @@ impl<'h> Shapes<'h> {
                 "Headers" => return Ok(perry_mir::types::HeadersType::get(ctx).into()),
                 "Response" => return Ok(perry_mir::types::ResponseType::get(ctx).into()),
                 "Request" => return Ok(perry_mir::types::RequestType::get(ctx).into()),
+                // Byte streams: `ReadableStream<Uint8Array>` and its default reader.
+                "ReadableStream" => return Ok(perry_mir::types::ReadableType::get(ctx).into()),
+                "ReadableStreamDefaultReader" => {
+                    return Ok(perry_mir::types::ReaderType::get(ctx).into());
+                }
                 // A decoder is its `fatal` flag (UTF-8 only, BOM stripped).
                 "TextDecoder" => {
                     return Ok(pliron::builtin::types::IntegerType::get(

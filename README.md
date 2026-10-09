@@ -5,7 +5,7 @@
 Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
 [Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
 
-> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI with `setTimeout` from `node:timers/promises`, `throw`/`try`/`catch`/`finally`, CLI commands with top-level `await`, `console`, `process.env`, `process.exit` and the clocks, and the core standard library: `Math`, `Date`, string methods, `Uint8Array`, `TextEncoder`/`TextDecoder`, `JSON`, `Promise.all`/`race` and `crypto` random values. `fetch`, `node:fs`, streams, `Headers`, `Temporal` and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
+> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI with `setTimeout` from `node:timers/promises`, `throw`/`try`/`catch`/`finally`, CLI commands with top-level `await`, `console`, `process.env`, `process.exit` and the clocks, and the core standard library: `Math`, `Date`, string methods, `Uint8Array`, `TextEncoder`/`TextDecoder`, `JSON`, `Promise.all`/`race`/`allSettled` and `crypto` random values, plus `node:fs/promises`, `fetch` over `wasi:http/client`, `Headers`/`Response`/`Request`, and `ReadableStream`/`WritableStream` over `stream<u8>` and stdio. `AbortController`, `Temporal` and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
 
 - **WIT-first authoring**: Export typed functions matching a WIT world, or write a standalone CLI command with top-level `await`.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
@@ -44,7 +44,7 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
   --invoke 'run-task("hello world")' dist/merge_task.wasm
 ```
 
-[examples/merge_docs.ts](examples/merge_docs.ts) (`fetch`, `Promise.all`, JSON) is the target for the async and HTTP migration and does not compile yet.
+[examples/merge_docs.ts](examples/merge_docs.ts) (`fetch`, `Promise.all`, JSON) is the target for the async and HTTP migration. `fetch` and `Promise.all` compile; `Response.json()` and spreading untyped JSON values do not yet.
 
 You can also run the examples directly in Node.js without compilation:
 
@@ -177,7 +177,7 @@ All verified capability contracts are declared in [crates/conformance/src/regist
 - An unlisted contract that fails is reported as `pending` and does not fail the campaign.
 - An unlisted contract that passes fails the campaign until it is added, so the list only grows.
 
-[crates/conformance/deferred.txt](crates/conformance/deferred.txt) lists contracts outside the accepted domain, each with the deviation it records; they are not run. The accepted deviations are listed in [TODOs.md](TODOs.md) (P6.2). Status: 41 contracts pass, 4 are deferred and 5 are pending.
+[crates/conformance/deferred.txt](crates/conformance/deferred.txt) lists contracts outside the accepted domain, each with the deviation it records; they are not run. The accepted deviations are listed in [TODOs.md](TODOs.md) (P6.2). Status: 43 contracts pass, 4 are deferred and 3 are pending.
 
 Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling.rs](crates/conformance/src/scaling.rs)) bound guest fuel growth between inputs n and 4n.
 

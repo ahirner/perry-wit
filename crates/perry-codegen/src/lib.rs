@@ -572,6 +572,8 @@ struct ModuleState {
     uses_fs: bool,
     /// Whether the module reads `stream<u8>`s (callbacks pass them events; tasks close them).
     uses_streams: bool,
+    /// Whether the module calls `fetch` (callbacks pass it events; tasks close its handles).
+    uses_fetch: bool,
     /// Operations whose previous results are dead whenever they run again (`lease`).
     leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
@@ -610,6 +612,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         uses_io: false,
         uses_fs: false,
         uses_streams: false,
+        uses_fetch: false,
         json_serializers: HashMap::new(),
         leased: HashSet::new(),
     };
@@ -1515,6 +1518,23 @@ impl<'s> FunctionLowering<'s> {
                     &[W::I32],
                     vec![args[0], args[1], leased],
                 )
+            }
+            Intrinsic::Fetch => {
+                self.needs_import("wasi:http/client@0.3.0", "fetch")?;
+                self.needs_import("wasi:http/types@0.3.0", "fetch")?;
+                self.state.uses_fetch = true;
+                self.state.uses_streams = true;
+                self.call(
+                    ctx,
+                    "web_fetch",
+                    &[W::I32, W::I32, W::I32, W::I32, W::I32],
+                    &[W::I32],
+                    args,
+                )
+            }
+            Intrinsic::ResponseBody | Intrinsic::RequestBody => {
+                self.state.uses_streams = true;
+                self.call(ctx, "web_body_stream", &[W::I32], &[W::I32], args)
             }
             Intrinsic::ReaderRead => {
                 self.state.uses_streams = true;
