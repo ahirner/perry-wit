@@ -170,7 +170,7 @@ fn verifier_rejects_ill_typed_heap_ops() {
         ),
         (
             format!("p = perry.alloc Task [0, 0] (v, v) : {POINT};"),
-            "property order must contain every field index exactly once",
+            "property order must contain each required field",
         ),
         (
             "c = perry.compare Lt v, v : builtin.fp64;".to_string(),
@@ -691,6 +691,43 @@ fn native_json_views_verify_types_and_property_order() {
             .unwrap_err()
             .contains("JSON-compatible")
     );
+}
+
+#[test]
+fn record_optional_presence_and_operations_verify_and_round_trip() -> Result<()> {
+    let source = single_block(
+        r#"
+        absent = perry.undefined : perry.optional <builtin.fp64>;
+        record = perry.alloc Unassigned [1] (absent, v) : perry.record <Optional { maybe?: perry.optional <builtin.fp64>, value: builtin.fp64 }>;
+        key = perry.string_const "maybe" : perry.string;
+        keys = perry.record Keys (record) : perry.array <perry.string>;
+        has = perry.record Has (record, key) : builtin.integer i1;
+        deleted = perry.record Delete (record, key) : builtin.integer i1;
+        value = perry.field_get record.maybe : perry.optional <builtin.fp64>;
+    "#,
+    );
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &source);
+    verify_operation(module, ctx)?;
+    let printed = normalized(&print(ctx, module));
+    let next = &mut Context::new();
+    let module = parse(next, &printed);
+    verify_operation(module, next)?;
+    assert_eq!(printed, normalized(&print(next, module)));
+    for invalid in [
+        source.replace("Unassigned [1]", "Unassigned []"),
+        source.replace("Unassigned [1]", "Unassigned [1, 1]"),
+        source.replace("Unassigned [1]", "Unassigned [1, 2]"),
+        source.replace(
+            "maybe?: perry.optional <builtin.fp64>",
+            "maybe?: builtin.fp64",
+        ),
+        source.replace("Has (record, key)", "Has (record, v)"),
+        source.replace("Keys (record)", "Keys (v)"),
+    ] {
+        assert!(verify_text(&invalid).is_err(), "{invalid}");
+    }
+    Ok(())
 }
 
 #[test]

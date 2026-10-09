@@ -66,6 +66,10 @@ export async function json(input: string): Promise<string> {
   const dictionary:{[key:string]:number;count:number} = alias;
   const stored:Record<string,{count:number}> = {item:typed};
   const storedValues=Object.values(stored);
+  const optional:{count:number;label?:string}={count:count};
+  const optionalJson:JsonValue=optional;
+  const optionalKeys=Object.keys(optional);
+  optional.label='before';
   const reference: JsonValue = native;
   for(let i=0;i<24;i++) alias[i] = i;
   const keys = Object.keys(alias);
@@ -80,6 +84,12 @@ export async function json(input: string): Promise<string> {
   let missing=false;
   try {const absent:number=dictionary.count;throw 1;}catch(e){missing=e instanceof TypeError;}
   if(!missing)throw new TypeError('lost required dictionary field');
+  if(optional.label!=='before' || optionalKeys.length!==1)throw new TypeError('lost optional record state');
+  delete optionalJson.label;
+  await setTimeout(1);
+  if(Object.hasOwn(optional,'label') || optional.label!==undefined)throw new TypeError('lost optional record deletion');
+  optional.label='after';
+  if(optionalJson.label!=='after' || Object.keys(optional)[1]!=='label')throw new TypeError('lost optional record insertion');
   dictionary.count = native.count;
   if(JSON.parse(formatted).item.count !== count) throw new TypeError('lost serialization snapshot');
   if(JSON.parse(replaced).item.count !== count || visits < 3) throw new TypeError('lost replacer snapshot');

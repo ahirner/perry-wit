@@ -2,6 +2,51 @@
 use super::*;
 use perry_runtime::shape::{DICTIONARY_SHAPE_SIZE, FIELD_SIZE, Kind, TYPE_SIZE};
 
+impl FunctionLowering<'_> {
+    pub(super) fn allocate_record(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        order: Vec<usize>,
+    ) -> Result<Value> {
+        let (count, optional) = {
+            let ty = ty.deref(ctx);
+            let fields = ty
+                .downcast_ref::<RecordType>()
+                .expect("record allocation")
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?;
+            (fields.len(), fields.iter().any(|field| field.optional))
+        };
+        let shape = self.state.data.descriptor(ctx, ty)?;
+        let slots_end = 8 + 8 * count as u32;
+        let size = self.i32_const(
+            ctx,
+            (slots_end + if optional { 4 * count as u32 } else { 0 }) as i32,
+        );
+        let object = self
+            .runtime(ctx, Runtime::Alloc, vec![size])
+            .expect("record allocation");
+        let shape = self.i32_const(ctx, shape as i32);
+        self.store(ctx, MemKind::I32, object, 0, shape);
+        let order = if optional {
+            let offset = self.i32_const(ctx, slots_end as i32);
+            let address = self.num(ctx, NumOpcode::I32Add, vec![object, offset]);
+            for index in 0..count {
+                let field = order.get(index).map_or(-1, |&field| field as i32);
+                let field = self.i32_const(ctx, field);
+                self.store(ctx, MemKind::I32, address, 4 * index as u32, field);
+            }
+            address
+        } else {
+            let address = self.state.data.property_order(order);
+            self.i32_const(ctx, address as i32)
+        };
+        self.store(ctx, MemKind::I32, object, 4, order);
+        Ok(object)
+    }
+}
+
 impl Data {
     fn reserve(&mut self, size: usize) -> u32 {
         self.bytes.resize(self.bytes.len().next_multiple_of(8), 0);
@@ -70,10 +115,13 @@ impl Data {
                 .fields()
                 .map_err(|_| anyhow!("record without fields"))?;
             let detail = self.reserve(fields.len() * FIELD_SIZE as usize);
-            for (index, (name, ty)) in fields.iter().enumerate() {
-                let name = self.string(name.as_ref());
-                let field_type = self.descriptor(ctx, *ty)?;
-                self.words(detail + index as u32 * FIELD_SIZE, &[name, field_type, 0]);
+            for (index, field) in fields.iter().enumerate() {
+                let name = self.string(field.name.as_ref());
+                let field_type = self.descriptor(ctx, field.ty)?;
+                self.words(
+                    detail + index as u32 * FIELD_SIZE,
+                    &[name, field_type, u32::from(field.optional)],
+                );
             }
             (Kind::Record, detail, fields.len() as u32)
         } else {

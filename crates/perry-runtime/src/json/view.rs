@@ -160,6 +160,9 @@ unsafe fn matches(
                         (ty.element(), None)
                     } else {
                         let field = &ty.fields()[index];
+                        if !properties::has_own(value, string::text(field.name)) {
+                            return field.optional;
+                        }
                         (&*field.ty, Some(string::text(field.name)))
                     };
                     matches(child, member(value, index, key), seen, depth + 1)
@@ -236,6 +239,12 @@ pub unsafe extern "C" fn perry_view_get(reference: *mut u8, index: u32) -> u64 {
             (ty.element(), perry_json_index(view.source, index as f64))
         } else {
             let field = &ty.fields()[index as usize];
+            if !field.optional
+                && !properties::has_own(*view.source.cast::<Json>(), string::text(field.name))
+            {
+                failure(exception::TYPE_ERROR, "record is missing a required field");
+                return 0;
+            }
             (&*field.ty, perry_json_get(view.source, field.name))
         };
         perry_json_unpack(ty, value)

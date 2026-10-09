@@ -101,11 +101,13 @@ pub(super) unsafe fn field(reference: *mut u8, ty: &Type, key: &str) -> Option<S
             });
         }
         ty.fields().iter().enumerate().find_map(|(index, field)| {
-            (string::text(field.name) == key).then(|| Slot {
-                address: Record::slot(reference, index),
-                ty: field.ty,
-                key: field.name,
-            })
+            (string::text(field.name) == key && (*reference.cast::<Record>()).contains(index)).then(
+                || Slot {
+                    address: Record::slot(reference, index),
+                    ty: field.ty,
+                    key: field.name,
+                },
+            )
         })
     }
 }
@@ -173,8 +175,23 @@ pub(super) unsafe fn set_key(reference: *mut u8, ty: &Type, key: &str, replaceme
                 set_index(reference, ty, index as f64, replacement);
                 return;
             }
-        } else if let Some(slot) = field(reference, ty, key) {
-            set(slot, replacement);
+        } else if let Some((index, field)) = ty
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, field)| string::text(field.name) == key)
+        {
+            if let Some(bits) = view::convert(&*field.ty, replacement) {
+                (*field.ty).write(Record::slot(reference, index), bits);
+                if field.optional {
+                    (*reference.cast::<Record>()).include(index as u32);
+                }
+            } else {
+                failure(
+                    exception::TYPE_ERROR,
+                    "JSON assignment does not match native storage type",
+                );
+            }
             return;
         }
     }
@@ -182,22 +199,6 @@ pub(super) unsafe fn set_key(reference: *mut u8, ty: &Type, key: &str, replaceme
         exception::TYPE_ERROR,
         "JSON property assignment requires an existing object field",
     );
-}
-
-/// # Safety
-/// The slot and replacement belong to this live task, and the slot has its declared type.
-pub(super) unsafe fn set(slot: Slot, replacement: *mut u8) {
-    // SAFETY: conversion completes before native storage is changed.
-    unsafe {
-        if let Some(bits) = view::convert(&*slot.ty, replacement) {
-            (*slot.ty).write(slot.address, bits);
-        } else {
-            failure(
-                exception::TYPE_ERROR,
-                "JSON assignment does not match native storage type",
-            );
-        }
-    }
 }
 
 /// # Safety

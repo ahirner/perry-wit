@@ -7,6 +7,7 @@ pub mod dictionary;
 mod native;
 mod object;
 mod properties;
+mod record;
 mod replacer;
 mod reviver;
 mod stringify;
@@ -260,7 +261,11 @@ impl Iterator for Children {
                     if *next == (**ty).count as usize {
                         return None;
                     }
-                    let index = (*reference.cast::<Record>()).order.add(*next).read() as usize;
+                    let index = (*reference.cast::<Record>()).order.add(*next).read();
+                    if index == u32::MAX {
+                        return None;
+                    }
+                    let index = index as usize;
                     *next += 1;
                     let field = &(**ty).fields()[index];
                     Some(Ok(Node::NativeSlot(native::Slot {

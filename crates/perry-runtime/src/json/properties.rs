@@ -107,8 +107,10 @@ pub(super) unsafe fn keys(value: Json) -> *mut u8 {
             Json::Native { reference, ty } if (*ty).kind == NativeKind::Record => {
                 let record = &*reference.cast::<Record>();
                 keys.extend(
-                    (0..(*ty).count as usize)
-                        .map(|index| (*ty).fields()[*record.order.add(index) as usize].name),
+                    record
+                        .order()
+                        .iter()
+                        .map(|&index| (*ty).fields()[index as usize].name),
                 );
                 0
             }
@@ -152,6 +154,11 @@ pub unsafe extern "C" fn perry_json_delete(value: *mut u8, key: *mut u8) -> u32 
         {
             return dictionary::perry_dictionary_delete(reference, key);
         }
+        if let Json::Native { reference, ty } = value
+            && (*ty).kind == NativeKind::Record
+        {
+            return record::perry_record_delete(reference, key);
+        }
         let key = string::text(key);
         if let Json::Object(object) = value {
             (*object).delete(key);
@@ -159,9 +166,6 @@ pub unsafe extern "C" fn perry_json_delete(value: *mut u8, key: *mut u8) -> u32 
         }
         let error = match value {
             Json::Null => Some((exception::TYPE_ERROR, "cannot delete a property of null")),
-            Json::Native { ty, .. } if (*ty).kind == NativeKind::Record => {
-                Some((exception::TYPE_ERROR, "cannot delete from a closed record"))
-            }
             Json::Array(_) | Json::Native { .. } if key != "length" && has_own(value, key) => {
                 Some((
                     exception::RANGE_ERROR,

@@ -18,6 +18,7 @@ pub mod json;
 pub mod locals;
 pub mod optional;
 pub mod pipeline;
+pub mod records;
 pub mod scalar;
 pub mod types;
 

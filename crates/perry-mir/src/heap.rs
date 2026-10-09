@@ -42,7 +42,9 @@ pub enum HeapErr {
     NoField { record: String, field: String },
     #[error("perry.alloc tier {0:?} is not an allocation tier")]
     Tier(Tier),
-    #[error("perry.alloc property order must contain every field index exactly once")]
+    #[error(
+        "perry.alloc property order must contain each required field and no duplicate or invalid indices"
+    )]
     FieldOrder,
 }
 
@@ -126,16 +128,22 @@ impl Verify for AllocOp {
         }
         let mut order = self.order(ctx);
         order.sort_unstable();
-        if order != (0..fields.len()).collect::<Vec<_>>() {
+        if order.iter().any(|&index| index >= fields.len())
+            || order.windows(2).any(|pair| pair[0] == pair[1])
+            || fields
+                .iter()
+                .enumerate()
+                .any(|(index, field)| !field.optional && !order.contains(&index))
+        {
             verify_err!(loc.clone(), HeapErr::FieldOrder)?
         }
-        for ((field, ty), value) in fields.iter().zip(operands) {
-            if value.get_type(ctx) != *ty {
+        for (field, value) in fields.iter().zip(operands) {
+            if value.get_type(ctx) != field.ty {
                 verify_err!(
                     loc.clone(),
                     HeapErr::FieldType {
                         record: record.name().to_string(),
-                        field: field.to_string(),
+                        field: field.name.to_string(),
                     }
                 )?
             }

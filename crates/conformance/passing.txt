@@ -20,3 +20,4 @@ ecma.json.command
 ecma.json.reviver
 ecma.json.replacer
 ecma.object.constrained_dictionary
+ecma.object.optional_record

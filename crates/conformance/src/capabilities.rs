@@ -106,6 +106,35 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = vec![
         Contract {
+            id: "ecma.object.optional_record",
+            description: "Optional record fields preserve own presence, property order and parsed/native aliases",
+            specification: "https://www.typescriptlang.org/docs/handbook/2/objects.html#optional-properties",
+            domain: "Closed records with required and optional scalar/array/record/byte-view fields, recursive records, valid parsed views, insertion/deletion and key snapshots; native required-field protection and stale incompatible views use subset exception assertions separately",
+            witnesses: vec![
+                Witness {
+                    partition: "initially-absent",
+                    case: optional_record(0, false, String::new()),
+                },
+                Witness {
+                    partition: "initially-present",
+                    case: optional_record(-3, true, "é🙂".into()),
+                },
+            ],
+            strategy: (
+                -32i16..=32,
+                any::<bool>(),
+                prop::collection::vec(
+                    prop::sample::select(vec!['a', 'é', '🙂', '\0', '"', '\\']),
+                    0..16,
+                ),
+            )
+                .prop_map(|(number, present, text)| {
+                    optional_record(number, present, text.into_iter().collect())
+                })
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "ecma.object.constrained_dictionary",
             description: "Named dictionary fields preserve optional presence, native storage and alias identity",
             specification: "https://www.typescriptlang.org/docs/handbook/2/objects.html#index-signatures",
@@ -754,6 +783,34 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn optional_record(number: i16, present: bool, text: String) -> Case {
+    let text = serde_json::to_string(&text).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+interface RecordNode {{ value:number; next?:RecordNode }}
+interface Item {{ count:number; required:number|undefined; label?:string; maybe?:number; items?:number[]; child?:RecordNode }}
+const item:Item={{required:undefined,count:{number}}};
+if({present})item.label=undefined;
+const snapshot=Object.keys(item);
+item.maybe=-0;item.items=[{number},2];item.child={{value:3,next:{{value:4}}}};
+const child:RecordNode=item.child!;
+child.value={number}+1;
+item.label={text};delete item.maybe;delete item.label;item.label={text};
+item.maybe=undefined;
+const parsed:Item=JSON.parse('{{"count":2,"required":3,"extra":4}}');
+parsed.required=undefined;parsed.label={text};delete parsed.label;parsed.label=undefined;
+const bytes:{{bytes?:Uint8Array}}={{}};bytes.bytes=new Uint8Array([1,2]);
+const byte=bytes.bytes[1];delete bytes.bytes;
+const empty:{{n?:number}}={{}};
+const before=Object.hasOwn(empty,'n');empty.n=undefined;
+console.log(JSON.stringify({{item,snapshot,keys:Object.keys(item),parsed,parsedKeys:Object.keys(parsed),child:child===item.child,byte,bytes:Object.keys(bytes),before,after:Object.hasOwn(empty,'n'),emptyKeys:Object.keys(empty)}}));
+"#
+        ),
+    }
 }
 
 fn constrained_dictionary(count: i16, present: bool, entries: Vec<i16>) -> Case {

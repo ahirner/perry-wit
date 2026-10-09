@@ -1258,6 +1258,7 @@ interface Mixed {
   child?:Mixed;
   '2'?:number;
 }
+
 interface Bytes { [key:string]:Uint8Array|undefined; main:Uint8Array; extra?:Uint8Array }
 type Numbers={ [key:string]:number|undefined; count:number; maybe?:number; required:number|undefined };
 function set(d:Record<string,JsonValue|undefined>,key:string,value:JsonValue|undefined):void {d[key]=value;}
@@ -1385,6 +1386,148 @@ export function check():number {
                 store.data().0,
                 peak,
                 "dictionary schemas leaked across tasks"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn optional_record_fields_preserve_presence_order_and_checked_aliases() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("optional.wit", "package test:optional; world optional { record packet { value: u32, count: u32 } export boundary: func(input: packet) -> packet; export check: func() -> u32; export round: func(input: string) -> string; }")?;
+    let world = resolve.select_world(&[package], Some("optional"))?;
+    let source = r#"
+type JsonValue=null|boolean|number|string|JsonValue[]|{[key:string]:JsonValue};
+interface Node { value:number; next?:Node }
+interface RecordValue { count:number; required:number|undefined; label?:string; number?:number; flag?:boolean; items?:number[]; node?:Node }
+export function boundary(input:{value:number;count:number}):{value:number;count:number} {
+  const source:JsonValue=input;
+  const relaxed:{value?:number;count:number}=source;
+  let protectedField=false;
+  try{delete relaxed.value;}catch(e){protectedField=e instanceof TypeError;}
+  if(!protectedField || input.value!==relaxed.value)throw new TypeError('lost lifted field');
+  const output:{count:number;value?:number}={count:input.count};
+  output.value=input.value+input.count;
+  const result:JsonValue=output;
+  return result;
+}
+function mark(order:number[],n:number):number {order.push(n);return n;}
+export function check():number {
+  const record:RecordValue={count:1,required:undefined};
+  const other:RecordValue={label:'independent',required:undefined,count:2};
+  if(Object.hasOwn(record,'label') || !Object.hasOwn(record,'required') || record.label!==undefined)return 1;
+  const original=Object.keys(record);
+  record.label=undefined;
+  if(!Object.hasOwn(record,'label') || JSON.stringify(original)!=='["count","required"]')return 2;
+  record.number=-0;record.flag=false;record.items=[2,3];record.node={value:4,next:{value:5}};
+  if(1/record.number!==-Infinity || record.flag!==false || record.items[1]!==3 || record.node.next.value!==5)return 3;
+  record.label='first';delete record.label;record.label='last';
+  if(JSON.stringify(Object.keys(record))!=='["count","required","number","flag","items","node","label"]')return 4;
+  if(Object.keys(other)[0]!=='label' || other.label!=='independent')return 5;
+  const json:JsonValue=record;
+  delete json.number;json.number=7;
+  delete record.flag;
+  if(record.number!==7 || record.flag!==undefined || Object.hasOwn(json,'flag'))return 6;
+  let failures=0;
+  try{json.label=9;}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{delete json.required;}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{delete record.count;}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{json.unknown=1;}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  if(failures!==4 || record.count!==1 || record.label!=='last' || !Object.hasOwn(record,'required'))return 7;
+  const raw=JSON.parse('{"count":3,"extra":9}');raw.required=undefined;
+  const parsed:RecordValue=raw;
+  if(Object.hasOwn(parsed,'label') || parsed.label!==undefined || Object.keys(parsed).length!==3)return 8;
+  parsed.label='inserted';delete parsed.label;parsed.label=undefined;
+  if(!Object.hasOwn(raw,'label') || raw.label!==undefined || parsed!==raw)return 9;
+  raw.label=4;
+  let stale=false;
+  try{const unused:string|undefined=parsed.label;}catch(e){stale=e instanceof TypeError;}
+  if(!stale)return 10;
+  parsed.label='repaired';delete raw.required;
+  let missing=false;
+  try{const unused:number|undefined=parsed.required;}catch(e){missing=e instanceof TypeError;}
+  if(!missing)return 11;
+  let invalid=false;
+  try{const unused:RecordValue=raw;}catch(e){invalid=e instanceof TypeError;}
+  if(!invalid)return 12;
+  parsed.required=undefined;
+  const restored:RecordValue=raw;
+  if(restored!==parsed || !Object.hasOwn(raw,'required'))return 13;
+  const bytes:{main:Uint8Array;extra?:Uint8Array}={main:new Uint8Array([1,2])};
+  bytes.extra=new Uint8Array([3]);
+  if(Object.keys(bytes).length!==2 || bytes.extra[0]!==3)return 14;
+  delete bytes.extra;
+  if(Object.hasOwn(bytes,'extra') || bytes.extra!==undefined || bytes.main[1]!==2)return 15;
+  bytes.extra=undefined;
+  if(!Object.hasOwn(bytes,'extra'))return 16;
+  const recursive:Node={value:6};recursive.next=recursive;
+  const packed:JsonValue=recursive;
+  const view:{value?:number;next?:Node}=packed;
+  let protectedField=false;
+  try{delete view.value;}catch(e){protectedField=e instanceof TypeError;}
+  if(!protectedField || view!==recursive || recursive.next!==recursive)return 17;
+  delete recursive.next;
+  if(Object.keys(recursive).length!==1)return 18;
+  const order:number[]=[];
+  const ordered:{a?:number;b:number;c?:number}={c:mark(order,3),b:mark(order,2),a:mark(order,1)};
+  if(JSON.stringify(order)!=='[3,2,1]' || JSON.stringify(Object.keys(ordered))!=='["c","b","a"]')return 19;
+  delete ordered.a;ordered.a=5;
+  if(JSON.stringify(ordered)!=='{"c":3,"b":2,"a":5}')return 20;
+  const empty:{value?:number}={};
+  if(Object.keys(empty).length!==0 || empty.value!==undefined)return 21;
+  for(let i=0;i<100;i++){empty.value=i;delete empty.value;}
+  empty.value=undefined;
+  if(!Object.hasOwn(empty,'value') || Object.keys(empty).length!==1)return 22;
+  return 0;
+}
+export function round(input:string):string {
+  const raw=JSON.parse(input);
+  const value:{count:number;label?:string}=raw;
+  value.label='é🙂';
+  const keys=Object.keys(value);
+  delete value.label;value.label='later';
+  value.count=value.count+1;
+  return JSON.stringify({value,keys});
+}
+"#;
+    let compiled = compile_for_world(source, "optional.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let boundary = instance.get_func(&mut store, "boundary").unwrap();
+    for (value, count) in [(0, 0), (3, 0), (0, 7), (3, 9)] {
+        let input = record(&[("value", Val::U32(value)), ("count", Val::U32(count))]);
+        let mut output = [Val::Bool(false)];
+        boundary.call(&mut store, &[input], &mut output)?;
+        assert_eq!(
+            output[0],
+            record(&[
+                ("value", Val::U32(value + count)),
+                ("count", Val::U32(count))
+            ])
+        );
+    }
+    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
+    let round = instance.get_typed_func::<(&str,), (String,)>(&mut store, "round")?;
+    let large = serde_json::json!({"count":2,"text":"é🙂".repeat(8192)}).to_string();
+    let mut peak = 0;
+    for index in 0..23 {
+        assert_eq!(check.call(&mut store, ())?.0, 0);
+        assert_eq!(
+            round.call(&mut store, (r#"{"count":2,"z":true}"#,))?.0,
+            r#"{"value":{"count":3,"z":true,"label":"later"},"keys":["count","z","label"]}"#
+        );
+        round.call(&mut store, (&large,))?;
+        if index == 2 {
+            peak = store.data().0;
+        } else if index > 2 {
+            assert_eq!(
+                store.data().0,
+                peak,
+                "optional record storage leaked across tasks"
             );
         }
     }

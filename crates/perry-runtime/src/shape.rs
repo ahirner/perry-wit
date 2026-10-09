@@ -120,6 +120,65 @@ impl Type {
 }
 impl Record {
     /// # Safety
+    /// The record and its shape are live. Optional records own a writable order table;
+    /// unused entries contain `u32::MAX` after all present indices.
+    pub(crate) unsafe fn order(&self) -> &[u32] {
+        // SAFETY: the compiler allocates one order entry per declared field.
+        unsafe {
+            let count = (*self.shape).count as usize;
+            if count == 0 {
+                return &[];
+            }
+            let entries = core::slice::from_raw_parts(self.order, count);
+            &entries[..entries
+                .iter()
+                .position(|&index| index == u32::MAX)
+                .unwrap_or(count)]
+        }
+    }
+
+    /// # Safety
+    /// `index` names a declared field in this live record.
+    pub(crate) unsafe fn contains(&self, index: usize) -> bool {
+        // SAFETY: required fields are always present; optional presence comes from the order.
+        unsafe { !(*self.shape).fields()[index].optional || self.order().contains(&(index as u32)) }
+    }
+
+    /// # Safety
+    /// `index` names an optional field in a live record with writable order storage.
+    pub(crate) unsafe fn include(&mut self, index: u32) {
+        // SAFETY: a missing declared field guarantees free capacity in the order table.
+        unsafe {
+            let order = self.order();
+            if order.contains(&index) {
+                return;
+            }
+            self.order.cast_mut().add(order.len()).write(index);
+        }
+    }
+
+    /// # Safety
+    /// `index` names an optional field in a live record with writable order storage.
+    pub(crate) unsafe fn remove(&mut self, index: usize) {
+        // SAFETY: the order is a bounded initialized prefix and the slot has its declared type.
+        unsafe {
+            let order = self.order();
+            let Some(position) = order.iter().position(|&field| field as usize == index) else {
+                return;
+            };
+            let remaining = order.len() - position - 1;
+            let slot = self.order.cast_mut().add(position);
+            core::ptr::copy(slot.add(1), slot, remaining);
+            slot.add(remaining).write(u32::MAX);
+            let ty = &*(*self.shape).fields()[index].ty;
+            ty.write(
+                Self::slot((self as *mut Self).cast(), index),
+                ty.undefined(),
+            );
+        }
+    }
+
+    /// # Safety
     /// `record` has an initialized slot for `index` after its header.
     pub(crate) unsafe fn slot(record: *mut u8, index: usize) -> *mut u8 {
         // SAFETY: checked by the caller against the descriptor.

@@ -817,7 +817,8 @@ impl<'s> FunctionBuilder<'s> {
         expr: &Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        if let Some(dictionary) = expected.filter(|ty| ty.deref(ctx).is::<DictionaryType>()) {
+        let expected_value = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty));
+        if let Some(dictionary) = expected_value.filter(|ty| ty.deref(ctx).is::<DictionaryType>()) {
             match expr {
                 Expr::Object(fields) => {
                     return self.dictionary_literal(
@@ -1235,6 +1236,16 @@ impl<'s> FunctionBuilder<'s> {
                         perry_mir::dictionaries::Action::Values
                     };
                     self.dictionary_access(ctx, action, vec![value]).unwrap()
+                } else if inner.deref(ctx).is::<RecordType>() && matches!(expr, Expr::ObjectKeys(_))
+                {
+                    let value = self.defined(ctx, value)?;
+                    self.emit_value(ctx, |ctx| {
+                        perry_mir::records::AccessOp::new(
+                            ctx,
+                            perry_mir::records::Action::Keys,
+                            vec![value],
+                        )
+                    })
                 } else {
                     ensure!(
                         matches!(expr, Expr::ObjectKeys(_)),
@@ -1258,6 +1269,15 @@ impl<'s> FunctionBuilder<'s> {
                         vec![value, key],
                     )
                     .unwrap()
+                } else if inner.deref(ctx).is::<RecordType>() {
+                    let value = self.defined(ctx, value)?;
+                    self.emit_value(ctx, |ctx| {
+                        perry_mir::records::AccessOp::new(
+                            ctx,
+                            perry_mir::records::Action::Has,
+                            vec![value, key],
+                        )
+                    })
                 } else {
                     let value = self.json_input(ctx, value)?;
                     let value = self.optional(ctx, value);
@@ -1289,6 +1309,14 @@ impl<'s> FunctionBuilder<'s> {
                         vec![object, key],
                     )
                     .unwrap()
+                } else if kind(ctx, object)? == Kind::Record {
+                    self.emit_value(ctx, |ctx| {
+                        perry_mir::records::AccessOp::new(
+                            ctx,
+                            perry_mir::records::Action::Delete,
+                            vec![object, key],
+                        )
+                    })
                 } else {
                     ensure!(
                         json::is_json(ctx, object),
@@ -1393,7 +1421,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::Array(items) => {
                 let element =
-                    match expected.map(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx)) {
+                    match expected_value.map(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx)) {
                         Some(Ok(array)) => Some(array.deref(ctx).element()),
                         _ => None,
                     };
@@ -1700,19 +1728,28 @@ impl<'s> FunctionBuilder<'s> {
             !names.iter().any(|name| name == "__proto__"),
             "prototype setters are outside the closed-shape subset"
         );
-        let mut wanted: Vec<&str> = names.iter().map(String::as_str).collect();
-        wanted.sort_unstable();
         let expected = expected
-            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
-            .filter(|record| {
-                record.deref(ctx).fields().is_ok_and(|fields| {
-                    fields
-                        .iter()
-                        .map(|(n, _)| n.to_string())
-                        .collect::<Vec<_>>()
-                        == wanted
-                })
-            });
+            .map(|ty| optional_value(ctx, ty).unwrap_or(ty))
+            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok());
+        if let Some(record) = expected {
+            let record = record.deref(ctx);
+            let fields = record
+                .fields()
+                .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+            for field in fields {
+                ensure!(
+                    field.optional || names.iter().any(|name| name == field.name.as_ref()),
+                    "record literal is missing required field {}",
+                    field.name
+                );
+            }
+            ensure!(
+                names
+                    .iter()
+                    .all(|name| fields.iter().any(|field| field.name.as_ref() == name)),
+                "record literal has a field outside its declared shape (subset rule R1)"
+            );
+        }
         let mut values = Vec::with_capacity(args.len());
         for (name, arg) in names.iter().zip(args) {
             let field_type = match (expected, identifier(name)) {
@@ -1738,8 +1775,24 @@ impl<'s> FunctionBuilder<'s> {
                 self.shapes.mir_record(ctx, fields)?
             }
         };
-        values.sort_by(|a, b| a.0.cmp(&b.0));
-        let operands = values.into_iter().map(|(_, v)| v).collect();
+        let fields = record.deref(ctx).fields().expect("record schema").to_vec();
+        let mut operands = Vec::with_capacity(fields.len());
+        for field in &fields {
+            let value = if let Some(index) = values
+                .iter()
+                .position(|(name, _)| name == field.name.as_ref())
+            {
+                values.swap_remove(index).1
+            } else {
+                self.emit_value(ctx, |ctx| {
+                    UndefinedOp::new(
+                        ctx,
+                        optional_value(ctx, field.ty).expect("absent optional field"),
+                    )
+                })
+            };
+            operands.push(value);
+        }
         let order = names
             .iter()
             .map(|name| {

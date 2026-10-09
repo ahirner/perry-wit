@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
     ArrayType, BufferType, BytesType, DictionaryField, DictionarySchema, DictionaryType,
-    ExceptionType, JsonType, OptionalType, PromiseType, RecordType, StringType,
+    ExceptionType, JsonType, OptionalType, PromiseType, RecordField, RecordType, StringType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -190,16 +190,8 @@ impl<'h> Shapes<'h> {
             let fields = interface
                 .properties
                 .iter()
-                .map(|p| {
-                    ensure!(
-                        !p.optional,
-                        "optional field {}.{} is not supported yet",
-                        name,
-                        p.name
-                    );
-                    Ok((p.name.as_str(), &p.ty))
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .map(|p| (p.name.as_str(), &p.ty, p.optional))
+                .collect();
             return Ok(self.hir_record(ctx, Some(name), fields)?.into());
         }
         if let Some(alias) = self.hir.type_aliases.iter().find(|a| a.name == name) {
@@ -234,11 +226,8 @@ impl<'h> Shapes<'h> {
         let fields = object
             .properties
             .iter()
-            .map(|(name, info)| {
-                ensure!(!info.optional, "optional field {name} is not supported yet");
-                Ok((name.as_str(), &info.ty))
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|(name, info)| (name.as_str(), &info.ty, info.optional))
+            .collect();
         Ok(self.hir_record(ctx, name, fields)?.into())
     }
 
@@ -318,10 +307,10 @@ impl<'h> Shapes<'h> {
         &self,
         ctx: &mut Context,
         named: Option<&str>,
-        mut fields: Vec<(&str, &HirType)>,
+        mut fields: Vec<(&str, &HirType, bool)>,
     ) -> Result<TypedHandle<RecordType>> {
         fields.sort_by(|a, b| a.0.cmp(b.0));
-        let names: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
+        let names: Vec<&str> = fields.iter().map(|(name, _, _)| *name).collect();
         if let Some(named) = named {
             let reentry = self.pending.borrow().get(named).cloned();
             match reentry {
@@ -346,26 +335,26 @@ impl<'h> Shapes<'h> {
         }
         let typed = fields
             .iter()
-            .map(|(field, ty)| {
-                Ok((
-                    field.to_string(),
-                    self.value_type(ctx, ty)
-                        .with_context(|| format!("field {field}"))?,
-                ))
+            .map(|(field, ty, optional)| {
+                let mut ty = self
+                    .value_type(ctx, ty)
+                    .with_context(|| format!("field {field}"))?;
+                if *optional && !ty.deref(ctx).is::<OptionalType>() {
+                    ty = OptionalType::get(ctx, ty).into();
+                }
+                Ok(RecordField {
+                    name: identifier(field)?,
+                    ty,
+                    optional: *optional,
+                })
             })
             .collect::<Result<Vec<_>>>();
         let reserved = named.and_then(|named| self.pending.borrow_mut().remove(named).flatten());
         let typed = typed?;
         match reserved {
-            Some(name) => {
-                let fields = typed
-                    .into_iter()
-                    .map(|(field, ty)| Ok((identifier(&field)?, ty)))
-                    .collect::<Result<Vec<_>>>()?;
-                RecordType::get(ctx, identifier(&name)?, Some(fields))
-                    .map_err(|e| anyhow!("{}", e.disp(ctx)))
-            }
-            None => self.mir_record(ctx, typed),
+            Some(name) => RecordType::get(ctx, identifier(&name)?, Some(typed))
+                .map_err(|e| anyhow!("{}", e.disp(ctx))),
+            None => self.record_schema(ctx, typed),
         }
     }
 
@@ -373,15 +362,29 @@ impl<'h> Shapes<'h> {
     pub(crate) fn mir_record(
         &self,
         ctx: &mut Context,
-        mut fields: Vec<(String, TypeHandle)>,
+        fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        fields.sort_by(|a, b| a.0.cmp(&b.0));
-        let names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
-        let base = record_name(&names.iter().map(String::as_str).collect::<Vec<_>>());
         let fields = fields
             .into_iter()
-            .map(|(field, ty)| Ok((identifier(&field)?, ty)))
+            .map(|(name, ty)| {
+                Ok(RecordField {
+                    name: identifier(&name)?,
+                    ty,
+                    optional: false,
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
+        self.record_schema(ctx, fields)
+    }
+
+    fn record_schema(
+        &self,
+        ctx: &mut Context,
+        mut fields: Vec<RecordField>,
+    ) -> Result<TypedHandle<RecordType>> {
+        fields.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<_> = fields.iter().map(|field| field.name.to_string()).collect();
+        let base = record_name(&names.iter().map(String::as_str).collect::<Vec<_>>());
         // The first name whose definition matches, or which is still free.
         for suffix in 1.. {
             let name = if suffix == 1 {

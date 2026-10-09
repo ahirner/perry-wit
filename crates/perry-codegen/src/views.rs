@@ -112,6 +112,7 @@ impl FunctionLowering<'_> {
         offset: u32,
         value: Value,
         kind: MemKind,
+        optional: bool,
     ) -> Result<()> {
         self.aggregate_branch(
             ctx,
@@ -119,6 +120,10 @@ impl FunctionLowering<'_> {
             None,
             |b, ctx| {
                 b.store(ctx, kind, reference, offset, value);
+                if optional {
+                    let index = b.i32_const(ctx, ((offset - 8) / 8) as i32);
+                    b.runtime(ctx, Runtime::RecordInclude, vec![reference, index]);
+                }
                 Ok(None)
             },
             |b, ctx| {

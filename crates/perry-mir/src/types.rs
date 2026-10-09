@@ -87,7 +87,14 @@ pub struct BytesType;
 #[derive(Debug)]
 pub struct RecordType {
     name: Identifier,
-    fields: Option<Vec<(Identifier, TypeHandle)>>,
+    fields: Option<Vec<RecordField>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordField {
+    pub name: Identifier,
+    pub ty: TypeHandle,
+    pub optional: bool,
 }
 
 #[derive(Debug, Error)]
@@ -106,14 +113,14 @@ impl RecordType {
     pub fn get(
         ctx: &Context,
         name: Identifier,
-        fields: Option<Vec<(Identifier, TypeHandle)>>,
+        fields: Option<Vec<RecordField>>,
     ) -> Result<TypedHandle<Self>> {
         if let Some(fields) = &fields {
-            for (index, (field, _)) in fields.iter().enumerate() {
-                if fields[..index].iter().any(|(other, _)| other == field) {
+            for (index, field) in fields.iter().enumerate() {
+                if fields[..index].iter().any(|other| other.name == field.name) {
                     input_err_noloc!(RecordErr::DuplicateField(
                         name.to_string(),
-                        field.to_string()
+                        field.name.to_string()
                     ))?
                 }
             }
@@ -143,7 +150,7 @@ impl RecordType {
         &self.name
     }
 
-    pub fn fields(&self) -> Result<&[(Identifier, TypeHandle)]> {
+    pub fn fields(&self) -> Result<&[RecordField]> {
         match &self.fields {
             Some(fields) => Ok(fields),
             None => input_err_noloc!(RecordErr::Opaque(self.name.to_string())),
@@ -156,8 +163,8 @@ impl RecordType {
             .as_ref()?
             .iter()
             .enumerate()
-            .find(|(_, (name, _))| name == field)
-            .map(|(index, (_, ty))| (index, *ty))
+            .find(|(_, entry)| entry.name == *field)
+            .map(|(index, entry)| (index, entry.ty))
     }
 }
 
@@ -174,10 +181,21 @@ impl std::hash::Hash for RecordType {
 }
 
 impl Verify for RecordType {
-    fn verify(&self, _ctx: &Context) -> Result<()> {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        if let Some(fields) = &self.fields {
+            for field in fields {
+                if field.optional && !field.ty.deref(ctx).is::<OptionalType>() {
+                    input_err_noloc!(OptionalFieldType)?;
+                }
+            }
+        }
         Ok(())
     }
 }
+
+#[derive(Debug, Error)]
+#[error("an optional record field must have an optional value type")]
+struct OptionalFieldType;
 
 dict_key!(NAMED_TYPES_IN_PRINTING, "perry_named_types_in_printing");
 
@@ -220,11 +238,17 @@ impl Printable for RecordType {
             write!(f, "<{}", self.name)?;
             if let Some(fields) = &self.fields {
                 write!(f, " {{")?;
-                for (index, (name, ty)) in fields.iter().enumerate() {
+                for (index, field) in fields.iter().enumerate() {
                     if index > 0 {
                         write!(f, ",")?;
                     }
-                    write!(f, " {name}: {}", ty.print(ctx, state))?;
+                    write!(
+                        f,
+                        " {}{}: {}",
+                        field.name,
+                        if field.optional { "?" } else { "" },
+                        field.ty.print(ctx, state)
+                    )?;
                 }
                 write!(f, " }}")?;
             }
@@ -244,8 +268,14 @@ impl Parsable for RecordType {
         _arg: Self::Arg,
     ) -> ParseResult<'a, Self::Parsed> {
         let field = spaced(Identifier::parser(()))
+            .and(spaced(optional(token('?'))))
             .skip(spaced(token(':')))
-            .and(spaced(type_parser()));
+            .and(spaced(type_parser()))
+            .map(|((name, optional), ty)| RecordField {
+                name,
+                ty,
+                optional: optional.is_some(),
+            });
         let fields = delimited_list_parser('{', '}', ',', field);
         let mut parser = between(
             token('<'),

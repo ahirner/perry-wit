@@ -114,8 +114,8 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "value type differs",
         ),
         (
-            "interface P { x: number; y?: number } export function run(x: number): number { const p: P = { x }; return p.x; }",
-            "optional field",
+            "interface P { x: number; y: number|undefined } export function run(x: number): number { const p: P = { x }; return p.x; }",
+            "missing required field",
         ),
     ] {
         let error = rejected(source);
@@ -561,6 +561,20 @@ export function run(input:string):string {
             error.contains("callback") || error.contains("subset rule R5"),
             "{error}"
         );
+    }
+}
+
+#[test]
+fn optional_record_fields_retain_type_presence_and_creation_order() {
+    for declaration in [
+        "interface Item { value:number; next?:Item; label?:string }",
+        "type Item={value:number;next?:Item;label?:string};",
+    ] {
+        let printed = lowered(&format!(
+            "{declaration} export function run():number {{ const item:Item={{value:1}}; item.next={{value:2}}; item.label=undefined; delete item.label; return item.next.value; }}"
+        ));
+        assert!(printed.contains("label?: perry.optional"), "{printed}");
+        assert!(printed.contains("perry.record Delete"), "{printed}");
     }
 }
 

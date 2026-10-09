@@ -241,6 +241,10 @@ enum Runtime {
     DictionaryNew,
     DictionaryGet,
     DictionarySet,
+    RecordInclude,
+    RecordKeys,
+    RecordHas,
+    RecordDelete,
     DictionaryDelete,
     DictionaryHas,
     DictionaryKeys,
@@ -365,6 +369,10 @@ impl Runtime {
             Runtime::DictionaryNew => "perry_dictionary_new",
             Runtime::DictionaryGet => "perry_dictionary_get",
             Runtime::DictionarySet => "perry_dictionary_set",
+            Runtime::RecordInclude => "perry_record_include",
+            Runtime::RecordKeys => "perry_record_keys",
+            Runtime::RecordHas => "perry_record_has",
+            Runtime::RecordDelete => "perry_record_delete",
             Runtime::DictionaryDelete => "perry_dictionary_delete",
             Runtime::DictionaryHas => "perry_dictionary_has",
             Runtime::DictionaryKeys => "perry_dictionary_keys",
@@ -522,6 +530,9 @@ impl Runtime {
             }
             Runtime::DictionaryGet => (vec![i32, i32], vec![i64]),
             Runtime::DictionarySet => (vec![i32, i32, i64], vec![]),
+            Runtime::RecordInclude => (vec![i32, i32], vec![]),
+            Runtime::RecordKeys => (vec![i32], vec![i32]),
+            Runtime::RecordHas | Runtime::RecordDelete => (vec![i32, i32], vec![i32]),
             Runtime::DictionaryDelete | Runtime::DictionaryHas => (vec![i32, i32], vec![i32]),
             Runtime::JsonReplacerStart
             | Runtime::JsonObject
@@ -1726,33 +1737,39 @@ impl<'s> FunctionLowering<'s> {
             self.define(ctx, op, json);
             return Ok(());
         }
+        if let Some(access) = Operation::get_op::<perry_mir::records::AccessOp>(op, ctx) {
+            use perry_mir::records::Action;
+            let runtime = match access.action(ctx) {
+                Action::Keys => Runtime::RecordKeys,
+                Action::Has => Runtime::RecordHas,
+                Action::Delete => Runtime::RecordDelete,
+            };
+            let operands = self.operands(ctx, op)?;
+            let value = self
+                .runtime(ctx, runtime, operands)
+                .expect("record operation result");
+            self.check_pending(ctx);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
         if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let fields = {
-                let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
-                    .map_err(|_| anyhow!("expected a record"))?;
-                let record = record.deref(ctx);
-                let fields: Vec<_> = record
-                    .fields()
-                    .map_err(|_| anyhow!("record without fields"))?
-                    .iter()
-                    .map(|(_, ty)| *ty)
-                    .collect();
-                fields
-            };
-            let shape = self.state.data.descriptor(ctx, record_ty)?;
-            let order = self.state.data.property_order(allocation.order(ctx));
+            let fields = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
+                .map_err(|_| anyhow!("expected a record"))?
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .to_vec();
+            let order = allocation.order(ctx);
+            let object = self.allocate_record(ctx, record_ty, order.clone())?;
             let operands = self.operands(ctx, op)?;
-            let size = self.i32_const(ctx, 8 + 8 * fields.len() as i32);
-            let object = self
-                .runtime(ctx, Runtime::Alloc, vec![size])
-                .expect("address");
-            let shape = self.i32_const(ctx, shape as i32);
-            self.store(ctx, MemKind::I32, object, 0, shape);
-            let order = self.i32_const(ctx, order as i32);
-            self.store(ctx, MemKind::I32, object, 4, order);
-            for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
-                let kind = slot_kind(ctx, ty)?;
+            for (index, (field, value)) in fields.iter().zip(operands).enumerate() {
+                let kind = slot_kind(ctx, field.ty)?;
+                let value = if order.contains(&index) {
+                    value
+                } else {
+                    self.undefined(ctx, field.ty)?
+                };
                 self.store(ctx, kind, object, 8 + 8 * index as u32, value);
             }
             self.define(ctx, op, object);
@@ -1771,7 +1788,15 @@ impl<'s> FunctionLowering<'s> {
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
             let operands = self.operands(ctx, op)?;
-            self.write_field(ctx, operands[0], offset, operands[1], kind)?;
+            let optional = record
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<RecordType>()
+                .expect("record")
+                .fields()
+                .expect("fields")[((offset - 8) / 8) as usize]
+                .optional;
+            self.write_field(ctx, operands[0], offset, operands[1], kind, optional)?;
             return Ok(());
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {

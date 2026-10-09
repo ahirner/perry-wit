@@ -52,7 +52,7 @@ pub fn compatible(ctx: &Context, ty: TypeHandle) -> bool {
         if let Some(record) = ty.downcast_ref::<RecordType>() {
             return record
                 .fields()
-                .is_ok_and(|fields| fields.iter().all(|(_, ty)| visit(ctx, *ty, seen)));
+                .is_ok_and(|fields| fields.iter().all(|field| visit(ctx, field.ty, seen)));
         }
         false
     }
