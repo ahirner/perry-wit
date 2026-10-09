@@ -264,7 +264,10 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn exception(&self, ctx: &Context) -> crate::attrs::ErrorKind {
         if matches!(
             self.kind(ctx),
-            Intrinsic::JsonParse
+            Intrinsic::BytesFromArray
+                | Intrinsic::BytesSetArray
+                | Intrinsic::JsonParse
+                | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
@@ -283,7 +286,10 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn may_throw(&self, ctx: &Context) -> bool {
         matches!(
             self.kind(ctx),
-            Intrinsic::JsonParse
+            Intrinsic::BytesFromArray
+                | Intrinsic::BytesSetArray
+                | Intrinsic::JsonParse
+                | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
@@ -299,7 +305,6 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
                 | Intrinsic::BytesNew
                 | Intrinsic::BytesView
                 | Intrinsic::BytesSet
-                | Intrinsic::BytesSetArray
         )
     }
 }

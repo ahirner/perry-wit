@@ -106,6 +106,18 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = Vec::new();
     contracts.push(Contract {
+        id: "ecma.json.typed",
+        description: "Checked typed aliases of parsed JSON retain identity, mutations and property order",
+        specification: "https://tc39.es/ecma262/#sec-json.parse",
+        domain: "Parsed closed records and homogeneous arrays, repeated narrowing, native slot replacement, typed/JSON alias writes, array growth and recursive schemas; values stay within declared types",
+        witnesses: vec![
+            Witness { partition: "empty-array", case: typed_json(Vec::new(), 0) },
+            Witness { partition: "nested-aliases", case: typed_json(vec![-3, 0, 8], -7) },
+        ],
+        strategy: (prop::collection::vec(any::<i16>(), 0..12), any::<i16>()).prop_map(|(values, n)| typed_json(values, n)).boxed(),
+        check: check_equivalence,
+    });
+    contracts.push(Contract {
         id: "ecma.json.native",
         description: "Native aggregate serialization, creation order and shared typed/JSON storage",
         specification: "https://tc39.es/ecma262/#sec-json.stringify",
@@ -521,6 +533,50 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn typed_json(values: Vec<i16>, n: i16) -> Case {
+    let document = format!(
+        r#"{{"values":{},"name":"é🙂","extra":true}}"#,
+        serde_json::to_string(&values).unwrap()
+    );
+    let quoted = serde_json::to_string(&document).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {{[key:string]:JsonValue}};
+interface Item {{ name: string; values: number[] }}
+function item(value: JsonValue): Item {{ return value as unknown as Item; }}
+const parsed = JSON.parse({quoted});
+const typed = item(parsed);
+const again = item(parsed);
+const saved: number[] = typed.values;
+if(typed !== again || typed !== parsed || saved !== again.values) throw 1;
+saved.push({n});
+parsed.values[0] = {n}+1;
+typed.values[typed.values.length] = {n}+2;
+const replacement = JSON.parse('[7,8]');
+const holder = {{name:'native',values:[1,2]}};
+const json: JsonValue = holder;
+json.values = replacement;
+const numbers: number[] = holder.values;
+numbers[0] = {n}+3;
+if(holder.values !== replacement || replacement[0] !== {n}+3) throw 2;
+parsed.values = replacement;
+typed.name = 'changed';
+if(typed.values !== numbers || saved === numbers || again.name !== 'changed') throw 3;
+console.log(JSON.stringify([typed,parsed,holder,saved]));
+type Tree = {{ value:number; children:Tree[] }};
+function tree(value: JsonValue): Tree {{ return value as unknown as Tree; }}
+const recursive = JSON.parse('{{"value":1,"children":[]}}');
+recursive.children[0] = recursive;
+const cycle = tree(recursive);
+if(cycle.children[0] !== cycle) throw 4;
+console.log('shared');
+"#
+        ),
+    }
 }
 
 fn native_json(values: Vec<i16>, n: i16) -> Case {

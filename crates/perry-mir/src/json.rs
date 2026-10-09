@@ -100,3 +100,42 @@ impl SideEffects for PackOp {
         false
     }
 }
+
+/// Validate a JSON value and retain an alias of aggregate storage at the requested type.
+#[pliron_op(name = "perry.json_unpack", format = "$0 ` : ` type($0)", interfaces = [OneOpdInterface, OneResultInterface])]
+pub struct UnpackOp;
+impl UnpackOp {
+    pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![target],
+                vec![value],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+impl Verify for UnpackOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
+        let inner = optional_value(ctx, operand).unwrap_or(operand);
+        if !inner.deref(ctx).is::<JsonType>()
+            || !compatible(ctx, self.get_result(ctx).get_type(ctx))
+        {
+            verify_err!(self.loc(ctx), UnpackError)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, thiserror::Error)]
+#[error("perry.json_unpack requires JSON input and a JSON-compatible target")]
+struct UnpackError;
+#[op_interface_impl]
+impl crate::exceptions::MayThrowInterface for UnpackOp {
+    fn exception(&self, _ctx: &Context) -> crate::attrs::ErrorKind {
+        crate::attrs::ErrorKind::TypeError
+    }
+}

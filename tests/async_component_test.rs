@@ -45,7 +45,9 @@ export async function run(x: number): Promise<Observation> {
   const first = await pending;
   trace.push(first);
   trace.push(await pending);
-  return { value: first * 2, trace: trace };
+  const result = { value: first * 2, trace: trace };
+  if(value === 3.5) return JSON.parse(JSON.stringify(result));
+  return result;
 }
 export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
@@ -54,13 +56,15 @@ export async function label(name: string): Promise<string> {
 export async function json(input: string): Promise<string> {
   const value = JSON.parse(input);
   const alias = value.item;
-  const count: number = alias.count;
+  const typed: {count: number} = alias;
+  const count: number = typed.count;
   const native = {count:count};
   const reference: JsonValue = native;
   await setTimeout(1);
   reference.count = reference.count + 1;
-  alias.count = native.count;
+  typed.count = native.count;
   await setTimeout(1);
+  if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');
   return JSON.stringify(value);
 }
 export async function bytes(input: Uint8Array, tag: number): Promise<Uint8Array> {

@@ -4,6 +4,7 @@ use crate::{array, exception, region::perry_alloc, string};
 use core::ptr;
 use perry_json_codec::{Error, Graph, Tree, Value};
 mod native;
+pub mod view;
 pub use native::perry_json_pack;
 
 #[derive(Clone, Copy)]
@@ -65,7 +66,8 @@ pub unsafe extern "C" fn perry_json_string(value: *mut u8) -> *mut u8 {
 /// `value` is a live dense array of JSON references.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_array(value: *mut u8) -> *mut u8 {
-    allocate(Json::Array(value))
+    // SAFETY: the argument is a live native JSON array or a checked typed view.
+    unsafe { view::source(value).unwrap_or_else(|| allocate(Json::Array(value))) }
 }
 /// # Safety
 /// Keys are live strings and values live JSON references, in equally sized dense arrays.
@@ -73,19 +75,34 @@ pub unsafe extern "C" fn perry_json_array(value: *mut u8) -> *mut u8 {
 pub unsafe extern "C" fn perry_json_object(keys: *mut u8, values: *mut u8) -> *mut u8 {
     // SAFETY: the caller supplies matching typed arrays; each field is initialized below.
     unsafe {
-        let (keys, values) = (array::slots(keys), array::slots(values));
-        assert_eq!(keys.len(), values.len());
-        let fields = allocate_fields(keys.len());
-        for (index, (&key, &value)) in keys.iter().zip(values).enumerate() {
-            fields.add(index).write(Field {
-                key: key as usize as *mut u8,
-                value: value as usize as *mut u8,
-            });
+        let length = view::perry_view_length(keys) as usize;
+        assert_eq!(length, view::perry_view_length(values) as usize);
+        let fields = allocate_fields(length);
+        for index in 0..length {
+            let key = if view::source(keys).is_some() {
+                view::perry_view_get(keys, index as u32) as usize as *mut u8
+            } else {
+                array::slots(keys)
+                    .as_ptr()
+                    .add(index)
+                    .cast::<*mut u8>()
+                    .read()
+            };
+            let value = if view::source(values).is_some() {
+                view::perry_view_get(values, index as u32) as usize as *mut u8
+            } else {
+                array::slots(values)
+                    .as_ptr()
+                    .add(index)
+                    .cast::<*mut u8>()
+                    .read()
+            };
+            if exception::perry_exception_status() != 0 {
+                return ptr::null_mut();
+            }
+            fields.add(index).write(Field { key, value });
         }
-        allocate(Json::Object {
-            fields,
-            length: keys.len(),
-        })
+        allocate(Json::Object { fields, length })
     }
 }
 
@@ -570,11 +587,16 @@ pub unsafe extern "C" fn perry_json_set_index(value: *mut u8, index: f64, replac
 /// `value` is null (undefined) or a live JSON node. The returned array aliases its storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_as_array(value: *mut u8) -> *mut u8 {
-    // SAFETY: the pointer is checked before dereferencing and the variant before reading its payload.
-    if !value.is_null()
-        && let Json::Array(array) = unsafe { *value.cast::<Json>() }
-    {
-        return array;
-    }
-    failure(exception::TYPE_ERROR, "JSON value is not an array")
+    const JSON: Type = Type {
+        kind: NativeKind::Json,
+        detail: ptr::null(),
+        count: 0,
+    };
+    const ARRAY: Type = Type {
+        kind: NativeKind::Array,
+        detail: (&JSON as *const Type).cast(),
+        count: 0,
+    };
+    // SAFETY: the static descriptor matches JsonValue[]; conversion validates the source.
+    unsafe { view::perry_json_unpack(&ARRAY, value) as usize as *mut u8 }
 }

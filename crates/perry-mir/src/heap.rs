@@ -3,7 +3,8 @@
 //! Allocations carry a [Tier]; field reads and writes are typed against the record's shape.
 //! Escape analysis, SROA and tier classification (P3.3, P3.4, P3.7) rewrite these ops.
 use crate::{
-    attrs::{FieldOrder, Tier},
+    attrs::{ErrorKind, FieldOrder, Tier},
+    exceptions::MayThrowInterface,
     types::RecordType,
 };
 use pliron::{
@@ -222,13 +223,6 @@ impl Verify for FieldGetOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for FieldGetOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Write one field of a record.
 #[pliron_op(
     name = "perry.field_set",
@@ -278,5 +272,18 @@ impl Verify for FieldSetOp {
             )?
         }
         Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl MayThrowInterface for FieldGetOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
+    }
+}
+#[op_interface_impl]
+impl MayThrowInterface for FieldSetOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
     }
 }

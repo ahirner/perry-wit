@@ -80,6 +80,7 @@ mod async_split;
 pub mod boundary;
 mod exceptions;
 mod shapes;
+mod views;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -231,6 +232,11 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
     JsonPack,
+    JsonUnpack,
+    ViewGet,
+    ViewSet,
+    ViewLength,
+    ReferenceIdentity,
     ExceptionStatus,
     JsonParse,
     JsonStringify,
@@ -324,6 +330,11 @@ impl Runtime {
     fn name(self) -> &'static str {
         match self {
             Runtime::JsonPack => "perry_json_pack",
+            Runtime::JsonUnpack => "perry_json_unpack",
+            Runtime::ViewGet => "perry_view_get",
+            Runtime::ViewSet => "perry_view_set",
+            Runtime::ViewLength => "perry_view_length",
+            Runtime::ReferenceIdentity => "perry_reference_identity",
             Runtime::ExceptionStatus => "perry_exception_status",
             Runtime::JsonParse => "perry_json_parse",
             Runtime::JsonStringify => "perry_json_stringify",
@@ -426,6 +437,9 @@ impl Runtime {
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
             Runtime::JsonPack => (vec![i32, i64], vec![i32]),
+            Runtime::JsonUnpack | Runtime::ViewGet => (vec![i32, i32], vec![i64]),
+            Runtime::ViewSet => (vec![i32, i32, i64], vec![]),
+            Runtime::ViewLength | Runtime::ReferenceIdentity => (vec![i32], vec![i32]),
             Runtime::ExceptionStatus => (vec![], vec![i32]),
             Runtime::JsonNull => (vec![], vec![i32]),
             Runtime::JsonNumber => (vec![f64], vec![i32]),
@@ -578,6 +592,12 @@ fn module_functions(ctx: &Context, module: &ModuleOp) -> Vec<FuncOp> {
         .collect()
 }
 
+fn function_blocks(ctx: &Context, function: &FuncOp) -> Vec<Ptr<BasicBlock>> {
+    pliron::graph::traversals::region::DFSTraversal::new(ctx, &function.get_region(ctx))
+        .reverse_post_order()
+        .collect()
+}
+
 fn function_ops(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
     let mut ops = Vec::new();
     for block in function.get_region(ctx).deref(ctx).iter(ctx) {
@@ -667,6 +687,7 @@ struct ModuleState {
     /// Async functions in dispatch-kind order.
     async_functions: Vec<Identifier>,
     uses_process: bool,
+    uses_typed_views: bool,
     needs_task_cleanup: bool,
 }
 
@@ -691,6 +712,17 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         data: Data::default(),
         wasm: ModuleOp::new(ctx, name),
         throws: throwing_functions(ctx, &functions),
+        uses_typed_views: functions.iter().any(|function| {
+            function_ops(ctx, function).iter().any(|&op| {
+                Operation::get_op::<perry_mir::json::UnpackOp>(op, ctx).is_some()
+                    || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
+                        matches!(
+                            op.kind(ctx),
+                            Intrinsic::JsonSet | Intrinsic::JsonSetIndex | Intrinsic::JsonAsArray
+                        )
+                    })
+            })
+        }),
         runtime: BTreeSet::new(),
         host: BTreeSet::new(),
         imports: match exports {
@@ -959,7 +991,7 @@ impl<'s> FunctionLowering<'s> {
         mir: &FuncOp,
         entry: Option<Ptr<BasicBlock>>,
     ) -> Result<Ptr<BasicBlock>> {
-        let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
+        let mir_blocks = function_blocks(ctx, mir);
         for (index, &mir_block) in mir_blocks.iter().enumerate() {
             let block = match entry {
                 Some(entry) if index == 0 => entry,
@@ -988,9 +1020,10 @@ impl<'s> FunctionLowering<'s> {
     }
 
     /// Translate the ops of every block of `mir` (after [Self::map_blocks]). In a step
-    /// function, values kept in the frame are stored where they are defined.
+    /// function, values kept in the frame are stored where they are defined. Reverse postorder
+    /// visits dominators before their uses even when finalizers reorder the region's block list.
     fn translate(&mut self, ctx: &mut Context, mir: &FuncOp) -> Result<()> {
-        let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
+        let mir_blocks = function_blocks(ctx, mir);
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];
             let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
@@ -1302,7 +1335,7 @@ impl<'s> FunctionLowering<'s> {
     }
 
     /// Append `value` to `array`, growing it through the runtime when full.
-    fn push(&mut self, ctx: &mut Context, array: Value, value: Value, kind: MemKind) {
+    fn push_native(&mut self, ctx: &mut Context, array: Value, value: Value, kind: MemKind) {
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
@@ -1395,9 +1428,18 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(compare) = Operation::get_op::<MirCompareOp>(op, ctx) {
             let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
-            let operands = self.operands(ctx, op)?;
+            let mut operands = self.operands(ctx, op)?;
             let kind = compare.kind(ctx);
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
+            if self.state.uses_typed_views
+                && (inner.deref(ctx).is::<RecordType>() || inner.deref(ctx).is::<ArrayType>())
+            {
+                for operand in &mut operands {
+                    *operand = self
+                        .runtime(ctx, Runtime::ReferenceIdentity, vec![*operand])
+                        .expect("identity");
+                }
+            }
             let value =
                 if inner.deref(ctx).is::<StringType>() || inner.deref(ctx).is::<ExceptionType>() {
                     let function = if inner.deref(ctx).is::<StringType>() {
@@ -1524,6 +1566,19 @@ impl<'s> FunctionLowering<'s> {
             }
             return Ok(());
         }
+        if Operation::get_op::<perry_mir::json::UnpackOp>(op, ctx).is_some() {
+            let ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let address = self.state.data.descriptor(ctx, ty)?;
+            let descriptor = self.i32_const(ctx, address as i32);
+            let value = self.operand(ctx, op, 0)?;
+            let bits = self
+                .runtime(ctx, Runtime::JsonUnpack, vec![descriptor, value])
+                .expect("typed value");
+            self.check_pending(ctx);
+            let value = self.decode_slot_bits(ctx, bits, ty)?;
+            self.define(ctx, op, value);
+            return Ok(());
+        }
         if Operation::get_op::<perry_mir::json::PackOp>(op, ctx).is_some() {
             let ty = op.deref(ctx).get_operand(0).get_type(ctx);
             let address = self.state.data.descriptor(ctx, ty)?;
@@ -1571,9 +1626,8 @@ impl<'s> FunctionLowering<'s> {
         if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
             let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
-            let kind = slot_kind(ctx, ty)?;
             let object = self.mapped(ctx, record)?;
-            let value = self.load(ctx, kind, object, offset);
+            let value = self.read_field(ctx, object, offset, ty)?;
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -1582,7 +1636,7 @@ impl<'s> FunctionLowering<'s> {
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
             let operands = self.operands(ctx, op)?;
-            self.store(ctx, kind, operands[0], offset, operands[1]);
+            self.write_field(ctx, operands[0], offset, operands[1], kind)?;
             return Ok(());
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
@@ -1606,7 +1660,7 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
             let array = self.operands(ctx, op)?[0];
-            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
+            let len = self.array_length(ctx, array)?;
             self.define(ctx, op, len);
             return Ok(());
         }
@@ -1614,24 +1668,36 @@ impl<'s> FunctionLowering<'s> {
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
             let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
-            self.push(ctx, operands[0], operands[1], kind);
+            self.push(ctx, operands[0], operands[1], kind)?;
             return Ok(());
         }
         if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
-            // Branch-free: read slot 0 when out of range (capacity is never 0), then select.
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
-            let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
             let (array, index) = (operands[0], operands[1]);
-            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
+            let len = self.array_length(ctx, array)?;
             let (i, ok, _) = self.element_index(ctx, index, len)?;
-            let zero = self.i32_const(ctx, 0);
-            let slot = self.select(ctx, ok, i, zero);
-            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-            let address = self.slot_address(ctx, data, slot);
-            let loaded = self.load(ctx, kind, address, 0);
-            let undefined = self.undefined(ctx, element)?;
-            let value = self.select(ctx, ok, loaded, undefined);
+            let value = if !self.state.uses_typed_views {
+                let zero = self.i32_const(ctx, 0);
+                let slot = self.select(ctx, ok, i, zero);
+                let loaded = self.read_element(ctx, array, slot, element)?;
+                let undefined = self.undefined(ctx, element)?;
+                self.select(ctx, ok, loaded, undefined)
+            } else {
+                let read = self.new_block(ctx, vec![]);
+                let missing = self.new_block(ctx, vec![]);
+                let result = wasm_type(ctx, element)?;
+                let done = self.new_block(ctx, vec![result]);
+                self.cond_br(ctx, ok, (read, vec![]), (missing, vec![]));
+                self.block = read;
+                let value = self.read_element(ctx, array, i, element)?;
+                self.br(ctx, done, vec![value]);
+                self.block = missing;
+                let undefined = self.undefined(ctx, element)?;
+                self.br(ctx, done, vec![undefined]);
+                self.block = done;
+                done.deref(ctx).get_argument(0)
+            };
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -1640,16 +1706,14 @@ impl<'s> FunctionLowering<'s> {
             let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
             let (array, index, value) = (operands[0], operands[1], operands[2]);
-            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
+            let len = self.array_length(ctx, array)?;
             let (i, ok, integral) = self.element_index(ctx, index, len)?;
             let write = self.new_block(ctx, vec![]);
             let outside = self.new_block(ctx, vec![]);
             let done = self.new_block(ctx, vec![]);
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
-            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-            let address = self.slot_address(ctx, data, i);
-            self.store(ctx, kind, address, 0, value);
+            self.write_element(ctx, array, i, value, kind)?;
             self.br(ctx, done, vec![]);
             // Writing at `length` appends; any other index would make a hole.
             self.block = outside;
@@ -1660,7 +1724,7 @@ impl<'s> FunctionLowering<'s> {
             };
             let hole = self.num(ctx, NumOpcode::I32Eqz, vec![append]);
             self.throw_if(ctx, hole, ErrorKind::RangeError);
-            self.push(ctx, array, value, kind);
+            self.push(ctx, array, value, kind)?;
             self.br(ctx, done, vec![]);
             self.block = done;
             return Ok(());
@@ -1812,6 +1876,10 @@ impl<'s> FunctionLowering<'s> {
                         let status =
                             self.i32_const(ctx, perry_runtime::exception::RANGE_ERROR as i32);
                         self.throw_status_if(ctx, failed, status);
+                        self.define(ctx, op, result);
+                    }
+                    Intrinsic::BytesFromArray => {
+                        self.check_pending(ctx);
                         self.define(ctx, op, result);
                     }
                     Intrinsic::BytesSet | Intrinsic::BytesSetArray => {

@@ -435,6 +435,7 @@ export function run(input: Pair): string {
   if(checked !== 4) throw 5;
   return JSON.stringify([input,pair,other,native]);
 }
+
 "#;
     let compiled = compile_for_world(source, "native.ts", &resolve, world, true)?;
     let engine = Engine::default();
@@ -452,5 +453,128 @@ export function run(input: Pair): string {
         run.call(&mut store, std::slice::from_ref(&input), &mut output)?;
         assert_eq!(output[0], Val::String(r#"[{"second":20,"first":10},{"second":9,"first":7},{"first":11,"second":12},{"title":"é🙂","pair":{"first":11,"second":12},"values":[5,2,3,6,8],"flags":[false,true]}]"#.into()));
     }
+    Ok(())
+}
+
+#[test]
+fn parsed_json_typed_views_check_mutations_and_cross_wit() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "views.wit",
+        r#"
+package test:views;
+world views {
+  record item { name: string, values: list<f64> }
+  export run: func(input: string) -> item;
+  export invalid: func(input: string) -> bool;
+  export invalid-result: func() -> item;
+}"#,
+    )?;
+    let world = resolve.select_world(&[package], Some("views"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+interface Item { name: string; values: number[] }
+interface Tree { value: number; children: Tree[] }
+function item(value: JsonValue): Item { return value as unknown as Item; }
+function numbers(value: JsonValue): number[] { return value as unknown as number[]; }
+function jsonArray(value: JsonValue): JsonValue[] { return value as unknown as JsonValue[]; }
+function tree(value: JsonValue): Tree { return value as unknown as Tree; }
+export function invalidResult(): Item {
+  const parsed = JSON.parse('{"name":"x","values":[1]}');
+  const typed = item(parsed);
+  parsed.name = 0;
+  return typed;
+}
+export function invalid(input: string): boolean {
+  try { item(JSON.parse(input)); } catch(e) { return e instanceof TypeError; }
+  return false;
+}
+export function run(input: string): Item {
+  const parsed = JSON.parse(input);
+  const typed = item(parsed);
+  const again = item(parsed);
+  if(typed !== again || typed !== parsed || typed.values !== again.values) throw 1;
+  const old = typed.values;
+  old.push(3);
+  typed.values[0] = 7;
+  if(parsed.values[2] !== 3 || parsed.values[0] !== 7) throw 2;
+  parsed.values[1] = 9;
+  if(typed.values[1] !== 9) throw 3;
+  if(typed.values[99] !== undefined || typed.values[-1] !== undefined) throw 4;
+  const empty = numbers(JSON.parse('[]'));
+  if(empty[0] !== undefined) throw 5;
+  empty.push(1);
+  empty[1] = 2;
+  if(empty.length !== 2) throw 6;
+  let checked = 0;
+  parsed.values[0] = 'wrong';
+  try { old[0]; } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  try { new Uint8Array(old); } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  parsed.values[0] = 7;
+  const bytes = new Uint8Array(old);
+  if(bytes[0] !== 7 || bytes[1] !== 9 || bytes[2] !== 3) throw 7;
+  parsed.name = false;
+  try { typed.name; } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  typed.name = 'restored';
+  try { old[10] = 1; } catch(e) { if(e instanceof RangeError) checked = checked + 1; }
+  const native = {name:'native',values:[4,5]};
+  const container = {item:native};
+  const holder: JsonValue = container;
+  holder.item = parsed;
+  if(container.item !== typed) throw 8;
+  const shared = jsonArray(holder.item.values);
+  shared.push(11);
+  if(old.length !== 4) throw 9;
+  const nativeJson: JsonValue = native;
+  const nativeView = jsonArray(nativeJson.values);
+  nativeView[0] = 8;
+  try { nativeView.push('wrong'); } catch(e) { if(e instanceof TypeError) checked = checked + 1; }
+  if(native.values[0] !== 8 || native.values.length !== 2) throw 10;
+  const recursive = JSON.parse('{"value":1,"children":[]}');
+  recursive.children[0] = recursive;
+  const cycle = tree(recursive);
+  if(cycle.children[0] !== cycle) throw 11;
+  const values: JsonValue = [21,22];
+  typed.values = numbers(values);
+  if(old.length !== 4 || typed.values.length !== 2 || parsed.values !== values) throw 12;
+  if(checked !== 5) throw 13;
+  if(JSON.stringify(typed) !== '{"values":[21,22],"extra":true,"name":"restored"}') throw 14;
+  return typed;
+}
+"#;
+    let compiled = compile_for_world(source, "views.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_func(&mut store, "run").unwrap();
+    let invalid = instance.get_typed_func::<(&str,), (bool,)>(&mut store, "invalid")?;
+    for input in ["null", "[]", "{}", r#"{"name":"x","values":[1,false]}"#] {
+        assert!(invalid.call(&mut store, (input,))?.0);
+    }
+    let mut output = [Val::Bool(false)];
+    let input = Val::String(r#"{"values":[1,2],"extra":true,"name":"parsed"}"#.into());
+    for _ in 0..20 {
+        run.call(&mut store, std::slice::from_ref(&input), &mut output)?;
+        assert_eq!(
+            output[0],
+            Val::Record(vec![
+                ("name".into(), Val::String("restored".into())),
+                (
+                    "values".into(),
+                    Val::List(vec![Val::Float64(21.0), Val::Float64(22.0)])
+                ),
+            ])
+        );
+    }
+    let invalid_result = instance.get_func(&mut store, "invalid-result").unwrap();
+    let failure = invalid_result
+        .call(&mut store, &[], &mut output)
+        .unwrap_err();
+    assert!(
+        format!("{failure:#}").contains("unreachable"),
+        "{failure:#}"
+    );
     Ok(())
 }

@@ -217,13 +217,6 @@ impl Verify for ArrayGetOp {
     }
 }
 
-#[op_interface_impl]
-impl SideEffects for ArrayGetOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
-    }
-}
-
 /// Write an element at an index in `[0, length]`; writing at `length` appends.
 /// Any other index throws a catchable `RangeError` instead of creating a hole (subset rule R8).
 #[pliron_op(
@@ -264,7 +257,7 @@ impl Verify for ArraySetOp {
 #[op_interface_impl]
 impl MayThrowInterface for ArraySetOp {
     fn exception(&self, _ctx: &Context) -> ErrorKind {
-        ErrorKind::RangeError
+        ErrorKind::Any
     }
 }
 
@@ -437,5 +430,18 @@ impl Verify for StringLenOp {
 impl SideEffects for StringLenOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
         false
+    }
+}
+
+#[op_interface_impl]
+impl MayThrowInterface for ArrayGetOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
+    }
+}
+#[op_interface_impl]
+impl MayThrowInterface for ArrayPushOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
     }
 }

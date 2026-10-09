@@ -527,3 +527,51 @@ export function run(x: number): number {
     );
     assert_eq!(program.number("run", 9.0), 2049.0);
 }
+
+#[test]
+fn native_aggregate_programs_do_not_link_json_view_code() {
+    let mut program = Program::new(
+        r#"
+export function run(x: number): number {
+  const point = {value:x};
+  const items = [point];
+  items.push(point);
+  return items[1].value;
+}
+"#,
+    );
+    assert_eq!(program.number("run", 7.0), 7.0);
+    let code_bytes: u64 = wasmparser::Parser::new(0)
+        .parse_all(&program.wasm)
+        .map(|payload| match payload.unwrap() {
+            wasmparser::Payload::CodeSectionEntry(body) => body.range().end - body.range().start,
+            _ => 0,
+        })
+        .sum();
+    assert!(
+        code_bytes < 6_000,
+        "native-only aggregate code grew to {code_bytes} bytes"
+    );
+}
+
+#[test]
+fn throwing_array_operations_in_loop_finalizers_keep_definitions_before_uses() {
+    let mut program = Program::new(
+        r#"
+export function run(limit: number): number {
+  const trace: number[] = [];
+  for(let i = 0; i < limit; i++) {
+    try {
+      if(i === 0) continue;
+      if(i === 2) break;
+      trace.push(i);
+    } finally { trace.push(10 + i); }
+  }
+  let result = 0;
+  for(let j = 0; j < trace.length; j++) result = result * 100 + trace[j];
+  return result;
+}
+"#,
+    );
+    assert_eq!(program.number("run", 4.0), 10011112.0);
+}

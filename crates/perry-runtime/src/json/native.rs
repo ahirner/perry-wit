@@ -14,6 +14,11 @@ pub(super) struct Slot {
 pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
     // SAFETY: descriptors and any referenced values are live for the task.
     unsafe {
+        if matches!(ty.kind, Kind::Array | Kind::Record)
+            && let Some(source) = view::source(bits as usize as *mut u8)
+        {
+            return Some(*source.cast::<Json>());
+        }
         Some(match ty.kind {
             Kind::Optional => {
                 let inner = ty.element();
@@ -47,7 +52,7 @@ pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
 
 /// # Safety
 /// `ty` is a static valid descriptor; every non-null JSON reference is live.
-unsafe fn convert(ty: &Type, value: *mut u8) -> Option<u64> {
+pub(super) unsafe fn scalar_or_native(ty: &Type, value: *mut u8) -> Option<u64> {
     // SAFETY: descriptor and variant checks precede payload reads.
     unsafe {
         if ty.kind == Kind::Optional {
@@ -59,7 +64,7 @@ unsafe fn convert(ty: &Type, value: *mut u8) -> Option<u64> {
                     _ => 0,
                 })
             } else {
-                convert(inner, value)
+                scalar_or_native(inner, value)
             };
         }
         if value.is_null() {
@@ -169,7 +174,7 @@ pub(super) unsafe fn set_key(reference: *mut u8, ty: &Type, key: &str, replaceme
 pub(super) unsafe fn set(slot: Slot, replacement: *mut u8) {
     // SAFETY: conversion completes before native storage is changed.
     unsafe {
-        if let Some(bits) = convert(&*slot.ty, replacement) {
+        if let Some(bits) = view::convert(&*slot.ty, replacement) {
             (*slot.ty).write(slot.address, bits);
         } else {
             failure(
@@ -191,7 +196,7 @@ pub(super) unsafe fn set_index(reference: *mut u8, ty: &Type, index: f64, replac
                 exception::RANGE_ERROR,
                 "JSON array write would leave a hole",
             );
-        } else if let Some(bits) = convert(ty.element(), replacement) {
+        } else if let Some(bits) = view::convert(ty.element(), replacement) {
             array::set_slot(reference, index as usize, bits);
         } else {
             failure(

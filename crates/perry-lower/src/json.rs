@@ -133,16 +133,14 @@ impl FunctionBuilder<'_> {
             .is_some_and(|ty| ty.width() == 1)
         {
             Intrinsic::JsonAsBoolean
-        } else if target
-            .deref(ctx)
-            .downcast_ref::<ArrayType>()
-            .is_some_and(|array| array.element().deref(ctx).is::<JsonType>())
-        {
-            Intrinsic::JsonAsArray
         } else {
-            bail!(
-                "JSON narrowing to aggregate types needs typed views, which are not implemented yet"
+            ensure!(
+                perry_mir::json::compatible(ctx, target),
+                "JSON target contains unsupported types"
             );
+            return Ok(self.emit_value(ctx, |ctx| {
+                perry_mir::json::UnpackOp::new(ctx, value, target)
+            }));
         };
         let value = self.optional(ctx, value);
         Ok(self.intrinsic(ctx, intrinsic, vec![value]).unwrap())

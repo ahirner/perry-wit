@@ -1278,14 +1278,7 @@ impl<'s> FunctionBuilder<'s> {
             } => {
                 let slot = self.local(*array_id)?;
                 let array = self.load(ctx, slot)?;
-                let element = self.array_element(ctx, array)?;
-                let value = self.expression_with(ctx, value, Some(element))?;
-                let value = self.fit(ctx, value, element)?;
-                self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
-                let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
-                self.emit_value(ctx, |ctx| {
-                    ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
-                })
+                self.push_array(ctx, array, std::iter::once(value.as_ref()))?
             }
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
@@ -1341,6 +1334,28 @@ impl<'s> FunctionBuilder<'s> {
                 .deref(ctx)
                 .value(),
         )
+    }
+
+    fn push_array<'e>(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        values: impl Iterator<Item = &'e Expr>,
+    ) -> Result<Value> {
+        let element = self.array_element(ctx, array)?;
+        let values = values
+            .map(|expression| {
+                let value = self.expression_with(ctx, expression, Some(element))?;
+                self.fit(ctx, value, element)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for value in values {
+            self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+        }
+        let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
+        Ok(self.emit_value(ctx, |ctx| {
+            ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+        }))
     }
 
     fn array_element(&self, ctx: &Context, array: Value) -> Result<TypeHandle> {
@@ -1646,6 +1661,9 @@ impl<'s> FunctionBuilder<'s> {
             let receiver = self.defined(ctx, receiver)?;
             if kind(ctx, receiver)? == Kind::Bytes {
                 return self.bytes_method(ctx, receiver, property, args);
+            }
+            if kind(ctx, receiver)? == Kind::Array && property == "push" {
+                return self.push_array(ctx, receiver, args.iter()).map(Some);
             }
         }
         let Expr::FuncRef(id) = callee else {

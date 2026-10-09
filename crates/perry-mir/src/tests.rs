@@ -226,7 +226,7 @@ builtin.module @m {
 }
 
 #[test]
-fn dce_removes_unused_allocation_and_reads() -> Result<()> {
+fn dce_preserves_checked_reads_even_when_the_result_is_unused() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(
         ctx,
@@ -238,8 +238,8 @@ fn dce_removes_unused_allocation_and_reads() -> Result<()> {
     verify_operation(module, ctx)?;
     let printed = print(ctx, module);
     assert!(
-        !printed.contains("perry.alloc")
-            && !printed.contains("perry.field_get")
+        printed.contains("perry.alloc")
+            && printed.contains("perry.field_get")
             && !printed.contains("perry.binary"),
         "{printed}"
     );
@@ -529,10 +529,12 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         throwing,
         [
             "perry.call Any",
+            "perry.array_push TypeError",
+            "perry.array_get TypeError",
             "perry.unwrap TypeError",
-            "perry.array_set RangeError"
+            "perry.array_set Any"
         ],
-        "array_get, to_number and the rest are pure reads"
+        "typed aggregate accesses can fail after JSON alias mutation"
     );
 }
 
@@ -614,6 +616,7 @@ fn native_json_views_verify_types_and_property_order() {
         r#"
         point = perry.alloc Task [1, 0] (v, v) : perry.record <NativePoint { a: builtin.fp64, z: builtin.fp64 }>;
         json = perry.json_pack point : perry.json;
+        typed = perry.json_unpack json : perry.record <NativePoint>;
         absent = perry.undefined : perry.optional <builtin.fp64>;
         optional = perry.json_pack absent : perry.optional <perry.json>;
     "#,

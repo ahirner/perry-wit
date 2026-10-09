@@ -412,7 +412,7 @@ export function run(text: string): number {
 "#,
     );
     for operation in [
-        "JsonAsArray",
+        "perry.json_unpack",
         "JsonAsNumber",
         "perry.array_push",
         "perry.binary Add",
