@@ -64,12 +64,19 @@ fn accepted_deviations_are_explicit_and_outside_the_ratchet() -> Result<()> {
         .iter()
         .filter(|c| c.catalog().accepted_deviation.is_some())
         .collect::<Vec<_>>();
-    assert_eq!(exempt.len(), 4);
+    assert_eq!(exempt.len(), 6);
     for contract in exempt {
         assert!(!perry_conformance::passing(contract.id), "{}", contract.id);
         assert!(!contract.catalog().accepted_deviation.unwrap().is_empty());
     }
     assert!(contracts.iter().any(|c| c.id == "ecma.subset.exclusions"));
+    for id in [
+        "wasi.streams.incoming_bytes",
+        "web.fetch.bounded_body",
+        "node.stream.writable_to_web",
+    ] {
+        assert!(perry_conformance::accepted_deviation(id).is_none(), "{id}");
+    }
     Ok(())
 }
 

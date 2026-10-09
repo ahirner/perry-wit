@@ -39,6 +39,7 @@ use perry_mir::{
     types::{
         ArrayType, BufferType, BytesType, ExceptionType, FsStatsType, JsonType, OptionalType,
         PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TextOrBytesType,
+        WritableType, WriterType,
     },
 };
 use perry_runtime::array as layout;
@@ -231,6 +232,13 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    WritableNew,
+    WritableLocked,
+    WritableGetWriter,
+    WriterWrite,
+    WriterClose,
+    WriterRelease,
+
     TextBytesLength,
     TextBytesTruthy,
     TextBytesEqual,
@@ -444,6 +452,12 @@ impl Runtime {
             Runtime::FsEvent => "perry_fs_event",
             Runtime::FsCancel => "perry_fs_cancel",
             Runtime::ImportRealloc => "perry_import_realloc",
+            Runtime::WritableNew => "perry_writable_new",
+            Runtime::WritableLocked => "perry_writable_locked",
+            Runtime::WritableGetWriter => "perry_writable_get_writer",
+            Runtime::WriterWrite => "perry_writer_write",
+            Runtime::WriterClose => "perry_writer_close",
+            Runtime::WriterRelease => "perry_writer_release",
             Runtime::TextEncoderNew => "perry_encoder_new",
             Runtime::TextEncode => "perry_text_encode",
             Runtime::TextDecoderNew => "perry_decoder_new",
@@ -590,6 +604,12 @@ impl Runtime {
             Runtime::FsEvent | Runtime::FsTransferEvent => (vec![i32; 3], vec![]),
             Runtime::FsCancel | Runtime::FsTransfersCancel => (vec![], vec![]),
             Runtime::ImportRealloc => (vec![i32; 4], vec![i32]),
+            Runtime::WritableNew
+            | Runtime::WritableLocked
+            | Runtime::WritableGetWriter
+            | Runtime::WriterClose => (vec![i32], vec![i32]),
+            Runtime::WriterWrite => (vec![i32, i32], vec![i32]),
+            Runtime::WriterRelease => (vec![i32], vec![]),
             Runtime::TextEncoderNew => (vec![], vec![i32]),
             Runtime::TextEncode | Runtime::TextDecoderIgnoreBom => (vec![i32], vec![i32]),
             Runtime::TextDecoderNew | Runtime::TextDecode => (vec![i32, i32, i32], vec![i32]),
@@ -634,6 +654,8 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<ExceptionType>()
         || deref.is::<JsonType>()
         || deref.is::<FsStatsType>()
+        || deref.is::<WritableType>()
+        || deref.is::<WriterType>()
         || deref.is::<TextEncoderType>()
         || deref.is::<TextDecoderType>()
         || deref.is::<BytesType>()
@@ -771,6 +793,10 @@ struct ModuleState {
 }
 
 impl ModuleState {
+    fn uses_output(&self, channel: Runtime) -> bool {
+        self.runtime.contains(&channel) || self.runtime.contains(&Runtime::WriterWrite)
+    }
+
     fn uses_filesystem_transfers(&self) -> bool {
         [
             Runtime::FsRead,
@@ -843,7 +869,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
             "filesystem operations require async WIT exports"
         );
         ensure!(
-            !state.runtime.contains(&Runtime::Stdout) && !state.runtime.contains(&Runtime::Stderr),
+            !state.uses_output(Runtime::Stdout) && !state.uses_output(Runtime::Stderr),
             "console output requires async WIT exports to drain P3 streams"
         );
     }
@@ -1915,6 +1941,33 @@ impl<'s> FunctionLowering<'s> {
                     self.select(ctx, valid, clipped, nan)
                 };
                 self.define(ctx, op, result);
+                return Ok(());
+            }
+            let writer_runtime = match kind {
+                Intrinsic::WritableNew => Some(Runtime::WritableNew),
+                Intrinsic::WritableLocked => Some(Runtime::WritableLocked),
+                Intrinsic::WritableGetWriter => Some(Runtime::WritableGetWriter),
+                Intrinsic::WriterWrite => Some(Runtime::WriterWrite),
+                Intrinsic::WriterClose => Some(Runtime::WriterClose),
+                Intrinsic::WriterRelease => Some(Runtime::WriterRelease),
+                _ => None,
+            };
+            if let Some(runtime) = writer_runtime {
+                if runtime == Runtime::WriterWrite {
+                    for interface in ["wasi:cli/stdout@0.3.0", "wasi:cli/stderr@0.3.0"] {
+                        ensure!(
+                            self.state.can_import(interface),
+                            "stdio writers require WIT import {interface}"
+                        );
+                    }
+                }
+                let args = self.operands(ctx, op)?;
+                if let Some(value) = self.runtime(ctx, runtime, args) {
+                    if runtime == Runtime::WritableGetWriter {
+                        self.check_pending(ctx);
+                    }
+                    self.define(ctx, op, value);
+                }
                 return Ok(());
             }
             let value_runtime = match kind {

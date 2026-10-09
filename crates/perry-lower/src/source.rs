@@ -9,6 +9,8 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 pub(super) const FS_STATS: &str = "__perry_internal_fs_stats";
 pub(super) const ENCODER: &str = "__perry_internal_text_encoder";
 pub(super) const DECODER: &str = "__perry_internal_text_decoder";
+pub(super) const WRITABLE: &str = "__perry_internal_writable";
+pub(super) const WRITER: &str = "__perry_internal_writer";
 
 fn underlying(mut expression: &ast::Expr) -> &ast::Expr {
     loop {
@@ -70,7 +72,10 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
     }
     impl Visit for Names {
         fn visit_ident(&mut self, name: &ast::Ident) {
-            self.reserved |= matches!(name.sym.as_ref(), ENCODER | DECODER | FS_STATS);
+            self.reserved |= matches!(
+                name.sym.as_ref(),
+                ENCODER | DECODER | FS_STATS | WRITABLE | WRITER
+            );
             self.codecs |= matches!(name.sym.as_ref(), "TextEncoder" | "TextDecoder");
         }
         fn visit_ident_name(&mut self, name: &ast::IdentName) {
@@ -84,7 +89,8 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
     module.visit_with(&mut names);
     ensure!(!names.reserved, "reserved compiler builtin name in source");
     let has_fs = module.body.iter().any(|item| matches!(item, ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) if matches!(import.src.value.as_str(), Some("fs" | "node:fs" | "fs/promises" | "node:fs/promises"))));
-    if !names.codecs && !has_fs {
+    let has_streams = module.body.iter().any(|item| matches!(item, ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) if matches!(import.src.value.as_str(), Some("stream" | "node:stream"))));
+    if !names.codecs && !has_fs && !has_streams {
         return Ok(());
     }
     if names.codecs {
@@ -94,16 +100,38 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
         )?;
         module.body.append(&mut declarations.body);
     }
+    if has_streams {
+        let mut declarations = perry_parser::parse_typescript(
+            &format!("declare class {WRITABLE} {{}} declare class {WRITER} {{}}"),
+            "stream-types.ts",
+        )?;
+        module.body.append(&mut declarations.body);
+    }
     GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         module.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let mut filesystem = HashMap::new();
         let mut stats = HashSet::new();
+        let mut writable = HashSet::new();
         for item in &module.body {
             let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) = item else {
                 continue;
             };
             match import.src.value.as_str() {
+                Some("stream" | "node:stream") => {
+                    for specifier in &import.specifiers {
+                        let ast::ImportSpecifier::Named(named) = specifier else {
+                            bail!("stream imports currently support only named Writable");
+                        };
+                        let name = match &named.imported {
+                            Some(ast::ModuleExportName::Ident(name)) => name.sym.as_ref(),
+                            None => named.local.sym.as_ref(),
+                            _ => "",
+                        };
+                        ensure!(name == "Writable", "unsupported stream import {name}");
+                        writable.insert(named.local.to_id());
+                    }
+                }
                 Some("fs/promises" | "node:fs/promises") => {
                     for specifier in &import.specifiers {
                         match specifier {
@@ -145,9 +173,11 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
                 _ => {}
             }
         }
+        module.body.retain(|item| !matches!(item, ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) if matches!(import.src.value.as_str(), Some("stream" | "node:stream"))));
         let mut rewrite = Builtins {
             filesystem,
             stats,
+            writable,
             unresolved: SyntaxContext::empty().apply_mark(unresolved),
             error: None,
         };
@@ -162,6 +192,7 @@ pub(super) fn prepare(module: &mut ast::Module) -> Result<()> {
 struct Builtins {
     filesystem: HashMap<ast::Id, Option<String>>,
     stats: HashSet<ast::Id>,
+    writable: HashSet<ast::Id>,
     unresolved: SyntaxContext,
     error: Option<anyhow::Error>,
 }
@@ -200,6 +231,73 @@ impl Builtins {
     }
 }
 impl VisitMut for Builtins {
+    fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
+        let result = (|| -> Result<()> {
+            let ast::Expr::Call(call) = expression else {
+                return Ok(());
+            };
+            let ast::Callee::Expr(callee) = &call.callee else {
+                return Ok(());
+            };
+            let ast::Expr::Member(member) = underlying(callee) else {
+                return Ok(());
+            };
+            if !matches!(underlying(&member.obj), ast::Expr::Ident(name) if self.writable.contains(&name.to_id()))
+            {
+                return Ok(());
+            }
+            ensure!(
+                property(&member.prop) == Some("toWeb")
+                    && call.args.len() == 1
+                    && call.type_args.is_none()
+                    && call.args[0].spread.is_none(),
+                "Writable supports toWeb(process.stdout) and toWeb(process.stderr)"
+            );
+            let ast::Expr::Member(channel) = underlying(&call.args[0].expr) else {
+                bail!("Writable.toWeb requires process.stdout or process.stderr");
+            };
+            ensure!(
+                matches!(underlying(&channel.obj), ast::Expr::Ident(name) if name.sym == "process" && name.ctxt == self.unresolved),
+                "Writable.toWeb requires process.stdout or process.stderr"
+            );
+            let stderr = match property(&channel.prop) {
+                Some("stdout") => false,
+                Some("stderr") => true,
+                _ => bail!("Writable.toWeb requires process.stdout or process.stderr"),
+            };
+            *expression = ast::Expr::New(ast::NewExpr {
+                span: call.span,
+                ctxt: call.ctxt,
+                callee: Box::new(ast::Expr::Ident(ast::Ident::new(
+                    WRITABLE.into(),
+                    call.span,
+                    self.unresolved,
+                ))),
+                args: Some(vec![ast::ExprOrSpread {
+                    spread: None,
+                    expr: Box::new(ast::Expr::Lit(ast::Lit::Bool(ast::Bool {
+                        span: call.span,
+                        value: stderr,
+                    }))),
+                }]),
+                type_args: None,
+            });
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.error.get_or_insert(error);
+        }
+        expression.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_ident(&mut self, name: &mut ast::Ident) {
+        if self.writable.contains(&name.to_id()) {
+            self.error.get_or_insert_with(|| {
+                anyhow::anyhow!("Writable is supported only in toWeb calls")
+            });
+        }
+    }
+
     fn visit_mut_new_expr(&mut self, expression: &mut ast::NewExpr) {
         if let Err(error) = self.constructor(expression) {
             self.error.get_or_insert(error);
@@ -216,6 +314,23 @@ impl VisitMut for Builtins {
             && name.ctxt == self.unresolved
         {
             match name.sym.as_ref() {
+                "WritableStream" | "WritableStreamDefaultWriter" => {
+                    if let Some(arguments) = &reference.type_params
+                        && (arguments.params.len() != 1
+                            || !matches!(&*arguments.params[0], ast::TsType::TsTypeRef(ty) if matches!(&ty.type_name, ast::TsEntityName::Ident(name) if name.sym == "Uint8Array") && ty.type_params.is_none()))
+                    {
+                        self.error.get_or_insert_with(|| {
+                            anyhow::anyhow!("writable streams require Uint8Array chunks")
+                        });
+                    }
+                    name.sym = if name.sym == "WritableStream" {
+                        WRITABLE
+                    } else {
+                        WRITER
+                    }
+                    .into();
+                    reference.type_params = None;
+                }
                 "TextEncoder" => name.sym = ENCODER.into(),
                 "TextDecoder" => name.sym = DECODER.into(),
                 _ => {}

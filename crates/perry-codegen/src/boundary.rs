@@ -271,7 +271,7 @@ pub(crate) fn export(
         "filesystem operations require async WIT exports"
     );
     ensure!(
-        !state.runtime.contains(&Runtime::Stdout) && !state.runtime.contains(&Runtime::Stderr),
+        !state.uses_output(Runtime::Stdout) && !state.uses_output(Runtime::Stderr),
         "console output requires async WIT exports to drain P3 streams"
     );
     let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
@@ -659,7 +659,7 @@ fn async_export(
             (Runtime::Stdout, Runtime::StdoutEvent),
             (Runtime::Stderr, Runtime::StderrEvent),
         ] {
-            if b.state.runtime.contains(&write) {
+            if b.state.uses_output(write) {
                 b.runtime(ctx, event_handler, vec![event, handle, subtask_state]);
             }
         }
@@ -710,8 +710,8 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
     }
     let native = state.uses_filesystem
         || state.host.contains(&crate::Host::WaitableSetNew)
-        || state.runtime.contains(&Runtime::Stdout)
-        || state.runtime.contains(&Runtime::Stderr);
+        || state.uses_output(Runtime::Stdout)
+        || state.uses_output(Runtime::Stderr);
     let void = FunctionType::get(ctx, vec![], vec![]);
     let release = FuncOp::new(ctx, identifier("release_task"), void);
     {
@@ -749,7 +749,7 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
             (Runtime::Stdout, Runtime::StdoutCancel),
             (Runtime::Stderr, Runtime::StderrCancel),
         ] {
-            if b.state.runtime.contains(&write) {
+            if b.state.uses_output(write) {
                 b.runtime(ctx, cancel, vec![]);
             }
         }

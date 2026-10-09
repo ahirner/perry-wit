@@ -144,6 +144,12 @@ runtime, total memory, component size and portability before changing representa
   handlers. Reuse native P3 transfer ownership. Verify two fetches can overlap and cancellation
   drops handles without freeing host-borrowed memory early. This takes priority over option
   generalization, stored options and dictionary features.
+  Stdio `Writable.toWeb` now uses the existing P3 output queue: exclusive locks, ordered
+  acknowledged byte writes, close, release and catchable failures. It requires both stdio
+  WIT imports. Default readers, cancellation APIs, backpressure signals and fetch remain open.
+  Per-write promises and queue nodes still live until task completion; P5 reclamation is
+  required before claiming bounded memory for a long-running stream. Legacy BYOB detachment
+  contracts are exempt; default-reader delivery and bounded-memory contracts remain required.
 - [ ] **P6.3 Remaining baseline APIs.** Promise combinators, URL/headers, bounded literal regex,
   remaining string/array methods, CLI formatting and filesystem AbortSignal where baseline
   consumers need them. Filesystem remains promise-only.

@@ -67,6 +67,33 @@ fn text_codec_options_reject_forms_the_frontend_cannot_preserve() {
 }
 
 #[test]
+fn writable_adapter_rejects_unsupported_sources_and_chunk_types() {
+    for (body, diagnostic) in [
+        (
+            "const w=Writable.toWeb(process.stdin);",
+            "process.stdout or process.stderr",
+        ),
+        (
+            "const w=Writable.toWeb(process.stdout);w.getWriter().write('text');",
+            "requires Uint8Array",
+        ),
+        (
+            "const w:WritableStream<string>=Writable.toWeb(process.stdout);",
+            "Uint8Array chunks",
+        ),
+        (
+            "const w=Writable.fromWeb(process.stdout);",
+            "Writable supports toWeb",
+        ),
+    ] {
+        let error = rejected(&format!(
+            "import {{Writable}} from 'node:stream';export function run():void{{{body}}}"
+        ));
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
 fn string_optional_results_remain_optional_in_inferred_records() {
     let printed = lowered(
         r#"

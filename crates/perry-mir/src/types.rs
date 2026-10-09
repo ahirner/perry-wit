@@ -96,6 +96,26 @@ pub struct TextEncoderType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct TextDecoderType;
 
+/// A task-owned Web writable byte stream.
+#[pliron_type(
+    name = "perry.writable",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct WritableType;
+
+/// An exclusive writer lock, retained after release to diagnose further operations.
+#[pliron_type(
+    name = "perry.writer",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct WriterType;
+
 /// A closed-shape record, referenced by value of this type (subset rule R1).
 ///
 /// Records are nominal and uniqued by name, so shapes may be recursive: create the record

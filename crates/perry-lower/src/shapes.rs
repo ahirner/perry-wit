@@ -13,6 +13,7 @@ use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
     ArrayType, BufferType, BytesType, ExceptionType, FsStatsType, JsonType, OptionalType,
     PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TextOrBytesType,
+    WritableType, WriterType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -172,6 +173,10 @@ impl<'h> Shapes<'h> {
                 let element = self.value_type(ctx, element)?;
                 ArrayType::get(ctx, element).into()
             }
+            HirType::Named(name) if name == super::source::WRITABLE => {
+                WritableType::get(ctx).into()
+            }
+            HirType::Named(name) if name == super::source::WRITER => WriterType::get(ctx).into(),
             HirType::Named(name) if name == super::source::FS_STATS => FsStatsType::get(ctx).into(),
             HirType::Named(name) if name == super::source::ENCODER => {
                 TextEncoderType::get(ctx).into()

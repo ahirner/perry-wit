@@ -463,6 +463,149 @@ async fn output_failure_finishes_the_command_without_leaking_handles() -> Result
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn web_writers_serialize_acknowledged_writes_and_share_catchable_errors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:writers; world command { include wasi:cli/command@0.3.0; }",
+    )?;
+    let (resolve, package) = resolve_wit(directory.path())?;
+    let world = resolve.select_world(&[package], Some("command"))?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    for (source, limit, expected_result, expected_stdout, expected_stderr) in [
+        (
+            r#"
+import {Writable as Output} from 'node:stream';
+function output(): WritableStream<Uint8Array> { return Output.toWeb(process.stdout); }
+function acquire(stream: WritableStream<Uint8Array>): WritableStreamDefaultWriter<Uint8Array> {
+  return stream.getWriter();
+}
+const stream=output();
+if(stream.locked)throw 1;
+const writer=acquire(stream);
+if(!stream.locked)throw 2;
+let locked=false;
+try { stream.getWriter(); } catch(e) { locked=e instanceof TypeError; }
+if(!locked)throw 3;
+const input=new Uint8Array([0,1,255]);
+const first=writer.write(input);
+writer.releaseLock();
+const next=acquire(stream);
+writer.releaseLock();
+if(!stream.locked)throw 4;
+let released=false;
+try { await writer.write(input); } catch(e) { released=e instanceof TypeError; }
+if(!released)throw 5;
+const second=next.write(input.subarray(1));
+const closed=next.close();
+console.log('end');
+let closing=false;
+try { await next.write(input); } catch(e) { closing=e instanceof TypeError; }
+if(!closing)throw 6;
+await closed;await first;await second;await closed;
+next.releaseLock();
+if(stream.locked)throw 7;
+const finished=stream.getWriter();
+let closedAgain=false;
+try { await finished.close(); } catch(e) { closedAgain=e instanceof TypeError; }
+if(!closedAgain)throw 8;
+finished.releaseLock();
+await Output.toWeb(process.stdout).getWriter().write(new Uint8Array([9]));
+const errors=Output.toWeb(process.stderr).getWriter();
+await errors.write(input);await errors.close();errors.releaseLock();
+const empty=output().getWriter();
+await empty.write(new Uint8Array(0));await empty.close();empty.releaseLock();
+"#,
+            1000,
+            Ok(()),
+            &[0, 1, 255, 1, 255, b'e', b'n', b'd', b'\n', 9][..],
+            &[0, 1, 255][..],
+        ),
+        (
+            r#"
+import {Writable} from 'node:stream';
+const stream=Writable.toWeb(process.stdout);
+const writer=stream.getWriter();
+const input=new Uint8Array(100000);
+const first=writer.write(input);
+const second=writer.write(input.subarray(1));
+const closed=writer.close();
+let failures=0;
+try { await first; } catch(error) {
+  if(!(error instanceof Error))throw 1;
+  failures++;
+  try { await second; } catch(e) { if(e!==error)throw 2;failures++; }
+  try { await closed; } catch(e) { if(e!==error)throw 3;failures++; }
+  try { await first; } catch(e) { if(e!==error)throw 4;failures++; }
+  writer.releaseLock();
+  const next=stream.getWriter();
+  try { await next.write(input); } catch(e) { if(e!==error)throw 5;failures++; }
+  try { await next.close(); } catch(e) { if(e!==error)throw 6;failures++; }
+  next.releaseLock();
+}
+if(failures!==6)throw 7;
+"#,
+            0,
+            Ok(()),
+            &[][..],
+            &[][..],
+        ),
+        (
+            "import {Writable} from 'node:stream'; Writable.toWeb(process.stdout).getWriter().write(new Uint8Array(100000));",
+            0,
+            Err(()),
+            &[][..],
+            &[][..],
+        ),
+    ] {
+        let compiled = compile_for_world(source, "writer.ts", &resolve, world, true)?;
+        let component = Component::new(&engine, compiled.stripped.unwrap())?;
+        let stdout = output_capture::MemoryOutput::new(limit);
+        let stderr = output_capture::MemoryOutput::new(1000);
+        let mut store = Store::new(
+            &engine,
+            Host {
+                ctx: WasiCtx::builder()
+                    .stdout(PartialOutput(stdout.clone()))
+                    .stderr(PartialOutput(stderr.clone()))
+                    .build(),
+                table: ResourceTable::new(),
+                peak: 0,
+            },
+        );
+        store.limiter(|host| host);
+        let command = wasmtime_wasi::p3::bindings::Command::instantiate_async(
+            &mut store, &component, &linker,
+        )
+        .await?;
+        let mut peak = 0;
+        for round in 1..=3 {
+            let result = store
+                .run_concurrent(async |accessor| command.wasi_cli_run().call_run(accessor).await)
+                .await??;
+            assert_eq!(result, expected_result, "{source}");
+            assert_eq!(stdout.contents().as_ref(), expected_stdout.repeat(round));
+            assert_eq!(stderr.contents().as_ref(), expected_stderr.repeat(round));
+            store.assert_concurrent_state_empty();
+            assert!(
+                store.data().table.is_empty(),
+                "writer leaked a host resource"
+            );
+            if round == 1 {
+                peak = store.data().peak;
+            } else {
+                assert_eq!(store.data().peak, peak, "writer task was not reclaimed");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn stderr_only_exports_keep_overlapping_task_output_separate() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::write(

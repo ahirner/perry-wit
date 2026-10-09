@@ -22,6 +22,7 @@ node.fs.writeFile.text
 node.fs.readFile.recovery
 ecma.error.control_flow
 web.console.routing
+node.stream.writable_to_web
 web.performance.monotonic
 node.process.environment
 node.process.exit_status

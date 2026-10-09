@@ -1,6 +1,6 @@
 //! Task-owned P3 output queues. Each channel drains in call order, including the host's
 //! completion future, before the command may release its region.
-use crate::{region::current, string};
+use crate::{region::current, string, writable::Stream};
 use core::ptr;
 
 #[link(wasm_import_module = "$root")]
@@ -41,6 +41,41 @@ struct Write {
     len: u32,
     completion: [u8; 2],
     phase: Phase,
+    destination: Destination,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Destination {
+    Console,
+    Writer {
+        stream: *mut Stream,
+        promise: *mut u8,
+    },
+}
+
+impl Destination {
+    unsafe fn failed(self) -> bool {
+        match self {
+            Self::Console => false,
+            // SAFETY: the queue retains the task-owned stream.
+            Self::Writer { stream, .. } => unsafe { (*stream).failed() },
+        }
+    }
+
+    unsafe fn fail(self) {
+        match self {
+            Self::Console => current().output_failed = true,
+            // SAFETY: the queue retains the task-owned stream.
+            Self::Writer { stream, .. } => unsafe { (*stream).fail() },
+        }
+    }
+
+    unsafe fn complete(self) {
+        if let Self::Writer { stream, promise } = self {
+            // SAFETY: the queue retains the task-owned stream and promise.
+            unsafe { (*stream).complete(promise) };
+        }
+    }
 }
 
 struct Queue {
@@ -50,7 +85,7 @@ struct Queue {
 
 macro_rules! channel {
     ($module:ident, $interface:literal, $index:expr, $write:ident, $event:ident, $cancel:ident) => {
-        mod $module {
+        pub(crate) mod $module {
             use super::*;
             #[link(wasm_import_module = $interface)]
             unsafe extern "C" {
@@ -76,9 +111,13 @@ macro_rules! channel {
             /// `text` is a task-owned string; its bytes stay live until output completes.
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $write(text: *mut u8) {
+                // SAFETY: text belongs to the current task.
+                unsafe { enqueue(string::bytes(text), Destination::Console) };
+            }
+
+            pub(crate) unsafe fn enqueue(bytes: &[u8], destination: Destination) {
                 // SAFETY: queue and nodes are exclusively owned by the current task.
                 unsafe {
-                    let bytes = string::bytes(text);
                     let task = current();
                     let mut queue = task.outputs[$index] as *mut Queue;
                     let idle = queue.is_null();
@@ -97,6 +136,7 @@ macro_rules! channel {
                         len: bytes.len() as u32,
                         completion: [0; 2],
                         phase: Phase::Queued,
+                        destination,
                     });
                     if (*queue).head.is_null() {
                         (*queue).head = node;
@@ -165,6 +205,11 @@ macro_rules! channel {
                         let node = &mut *(*queue).head;
                         match node.phase {
                             Phase::Queued => {
+                                if node.destination.failed() {
+                                    node.destination.complete();
+                                    (*queue).head = node.next;
+                                    continue;
+                                }
                                 let pair = stream_new();
                                 let future = start(pair as u32);
                                 node.phase = Phase::Writing {
@@ -196,7 +241,9 @@ macro_rules! channel {
                                 );
                                 let offset = offset + count;
                                 if result & 15 != 0 || offset == node.len {
-                                    current().output_failed |= result & 15 != 0;
+                                    if result & 15 != 0 {
+                                        node.destination.fail();
+                                    }
                                     stream_drop(writer);
                                     node.phase = Phase::Completion { future };
                                 } else {
@@ -216,8 +263,11 @@ macro_rules! channel {
                                     wait(future);
                                     return;
                                 }
-                                current().output_failed |= result != 0 || node.completion[0] != 0;
+                                if result != 0 || node.completion[0] != 0 {
+                                    node.destination.fail();
+                                }
                                 future_drop(future);
+                                node.destination.complete();
                                 (*queue).head = node.next;
                             }
                         }

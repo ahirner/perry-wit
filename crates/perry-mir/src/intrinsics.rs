@@ -2,7 +2,7 @@
 //! task scheduling belong to codegen and the runtime.
 use crate::types::{
     ArrayType, BufferType, BytesType, FsStatsType, JsonType, OptionalType, PromiseType, StringType,
-    TextDecoderType, TextEncoderType, TextOrBytesType,
+    TextDecoderType, TextEncoderType, TextOrBytesType, WritableType, WriterType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -22,6 +22,12 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    WritableNew,
+    WritableLocked,
+    WritableGetWriter,
+    WriterWrite,
+    WriterClose,
+    WriterRelease,
     MathFloor,
     MathCeil,
     MathTrunc,
@@ -123,6 +129,8 @@ pub enum Intrinsic {
 
 #[derive(Clone, Copy)]
 enum ValueType {
+    Writable,
+    Writer,
     TextBytes,
     OptionalTextBytes,
     PromiseTextBytes,
@@ -152,6 +160,8 @@ enum ValueType {
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
+            Self::Writable => WritableType::get(ctx).into(),
+            Self::Writer => WriterType::get(ctx).into(),
             Self::TextBytes => TextOrBytesType::get(ctx).into(),
             Self::OptionalTextBytes => {
                 OptionalType::get(ctx, TextOrBytesType::get(ctx).into()).into()
@@ -218,6 +228,8 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
+            Self::Writable => ty.deref(ctx).is::<WritableType>(),
+            Self::Writer => ty.deref(ctx).is::<WriterType>(),
             Self::TextBytes => ty.deref(ctx).is::<TextOrBytesType>(),
             Self::OptionalTextBytes => ty
                 .deref(ctx)
@@ -302,6 +314,12 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::WritableNew => (&[Boolean], &[Writable]),
+            Self::WritableLocked => (&[Writable], &[Boolean]),
+            Self::WritableGetWriter => (&[Writable], &[Writer]),
+            Self::WriterWrite => (&[Writer, Bytes], &[PromiseVoid]),
+            Self::WriterClose => (&[Writer], &[PromiseVoid]),
+            Self::WriterRelease => (&[Writer], &[]),
             Self::MathFloor
             | Self::MathCeil
             | Self::MathTrunc
@@ -460,7 +478,8 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn exception(&self, ctx: &Context) -> crate::attrs::ErrorKind {
         if matches!(
             self.kind(ctx),
-            Intrinsic::TextDecoderNew
+            Intrinsic::WritableGetWriter
+                | Intrinsic::TextDecoderNew
                 | Intrinsic::TextDecode
                 | Intrinsic::StringLower
                 | Intrinsic::StringUpper
@@ -485,7 +504,8 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn may_throw(&self, ctx: &Context) -> bool {
         matches!(
             self.kind(ctx),
-            Intrinsic::TextDecoderNew
+            Intrinsic::WritableGetWriter
+                | Intrinsic::TextDecoderNew
                 | Intrinsic::TextDecode
                 | Intrinsic::StringLower
                 | Intrinsic::StringUpper

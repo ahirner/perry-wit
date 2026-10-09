@@ -36,6 +36,9 @@ pub fn accepted_deviation(id: &str) -> Option<&'static str> {
         "ecma.json.replacer" | "ecma.json.stringify_options" => Some(
             "JSON.stringify replacers and formatting are deferred and diagnosed at compile time; serialization is compact and callback-free.",
         ),
+        "web.streams.byob_reader" | "web.fetch.bounded_byob_body" => Some(
+            "These legacy BYOB contracts require buffer detachment, which is outside the supported stream profile. Default-reader delivery, cancellation and bounded memory remain required.",
+        ),
         _ => None,
     }
 }

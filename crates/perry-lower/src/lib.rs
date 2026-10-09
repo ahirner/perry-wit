@@ -53,7 +53,8 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
         ArrayType, BufferType, BytesType, ExceptionType, FsStatsType, JsonType, PromiseType,
-        RecordType, StringType, TextDecoderType, TextEncoderType, TextOrBytesType,
+        RecordType, StringType, TextDecoderType, TextEncoderType, TextOrBytesType, WritableType,
+        WriterType,
     },
 };
 use pliron::printable::Printable as _;
@@ -380,6 +381,8 @@ fn hir_module_name(hir: &HirModule) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    Writable,
+    Writer,
     TextOrBytes,
     FsStats,
     TextEncoder,
@@ -400,6 +403,10 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = ty.deref(ctx);
     if ty.is::<TextOrBytesType>() {
         Ok(Kind::TextOrBytes)
+    } else if ty.is::<WritableType>() {
+        Ok(Kind::Writable)
+    } else if ty.is::<WriterType>() {
+        Ok(Kind::Writer)
     } else if ty.is::<JsonType>() {
         Ok(Kind::Json)
     } else if ty.is::<FP64Type>() {
@@ -1434,6 +1441,9 @@ impl<'s> FunctionBuilder<'s> {
                 // Property access on `undefined` throws TypeError, in ECMAScript and here.
                 let value = self.defined(ctx, value)?;
                 match (kind(ctx, value)?, property.as_str()) {
+                    (Kind::Writable, "locked") => self
+                        .intrinsic(ctx, Intrinsic::WritableLocked, vec![value])
+                        .unwrap(),
                     (Kind::Json, _) => {
                         let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, property));
                         self.intrinsic(ctx, Intrinsic::JsonGet, vec![value, key])
@@ -1510,6 +1520,17 @@ impl<'s> FunctionBuilder<'s> {
                 Expr::String(field) => self.set_field(ctx, target, field, value)?,
                 index => self.set_index(ctx, target, index, value)?,
             },
+            Expr::New {
+                class_name, args, ..
+            } if class_name == source::WRITABLE => {
+                ensure!(
+                    args.len() == 1,
+                    "internal writable constructor takes a channel"
+                );
+                let channel = self.expression(ctx, &args[0])?;
+                self.intrinsic(ctx, Intrinsic::WritableNew, vec![channel])
+                    .unwrap()
+            }
             Expr::New {
                 class_name, args, ..
             } if matches!(class_name.as_str(), source::ENCODER | source::DECODER) => {
@@ -1977,6 +1998,28 @@ impl<'s> FunctionBuilder<'s> {
             }
             if matches!(kind(ctx, receiver)?, Kind::TextEncoder | Kind::TextDecoder) {
                 return self.codec_method(ctx, receiver, property, args);
+            }
+            if matches!(kind(ctx, receiver)?, Kind::Writable | Kind::Writer) {
+                let intrinsic = match (kind(ctx, receiver)?, property.as_str()) {
+                    (Kind::Writable, "getWriter") => Intrinsic::WritableGetWriter,
+                    (Kind::Writer, "write") => Intrinsic::WriterWrite,
+                    (Kind::Writer, "close") => Intrinsic::WriterClose,
+                    (Kind::Writer, "releaseLock") => Intrinsic::WriterRelease,
+                    _ => bail!("unsupported writable stream method {property}"),
+                };
+                let count = usize::from(intrinsic == Intrinsic::WriterWrite);
+                ensure!(args.len() == count, "{property} takes {count} arguments");
+                let mut operands = vec![receiver];
+                if count == 1 {
+                    let bytes = self.expression(ctx, &args[0])?;
+                    let bytes = self.defined(ctx, bytes)?;
+                    ensure!(
+                        kind(ctx, bytes)? == Kind::Bytes,
+                        "writer.write requires Uint8Array"
+                    );
+                    operands.push(bytes);
+                }
+                return Ok(self.intrinsic(ctx, intrinsic, operands));
             }
             if kind(ctx, receiver)? == Kind::Bytes {
                 return self.bytes_method(ctx, receiver, property, args);

@@ -31,6 +31,8 @@ pub mod region;
 pub mod string;
 pub mod text;
 pub mod text_bytes;
+#[cfg(target_arch = "wasm32")]
+mod writable;
 
 /// Reserved representation of an absent optional number.
 pub const UNDEFINED_NUMBER: u64 = 0x7FF0_0000_0000_0001;
