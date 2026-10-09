@@ -70,6 +70,9 @@ pub struct Export {
     /// For an async export (lifted with the callback ABI): the import module and WIT function
     /// name of its `task.return`.
     pub task_return: Option<(String, String)>,
+    /// `wasi:cli/run`'s `run: async func() -> result`, implemented by the top-level
+    /// statements: the result is `err` after an uncaught exception or a non-zero exit code.
+    pub command: bool,
 }
 
 const MAX_FLAT_PARAMS: usize = 16;
@@ -323,7 +326,6 @@ pub(crate) fn export(
 const EXIT: i32 = 0;
 const WAIT: i32 = 2;
 const EVENT_SUBTASK: i32 = 1;
-const SUBTASK_RETURNED: i32 = 2;
 
 /// `[async-lift]<export>`, its callback and their shared `finish`.
 fn async_export(
@@ -352,11 +354,15 @@ fn async_export(
         "exports with more than {MAX_FLAT_PARAMS} flat parameters are not supported yet"
     );
     // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
-    let result_flat = export
-        .result
-        .as_ref()
-        .map(AbiType::flat)
-        .unwrap_or_default();
+    let result_flat = if export.command {
+        vec![Flat::I32]
+    } else {
+        export
+            .result
+            .as_ref()
+            .map(AbiType::flat)
+            .unwrap_or_default()
+    };
     let indirect = result_flat.len() > MAX_FLAT_PARAMS;
     let task_return = crate::Host::TaskReturn(
         module,
@@ -375,8 +381,12 @@ fn async_export(
     let finish = FuncOp::new(ctx, finish_name.clone(), finish_ty);
     {
         let mut b = FunctionLowering::glue(state, ctx, &finish);
+        let uses_io = b.state.uses_io;
         let drive = CallOp::new(ctx, crate::async_split::drive_name(), vec![], vec![]);
         b.insert(ctx, drive.get_operation());
+        if uses_io {
+            b.runtime(ctx, Runtime::IoPump, vec![]);
+        }
         let promise = b
             .runtime(ctx, Runtime::TaskResult, vec![])
             .expect("promise");
@@ -403,19 +413,36 @@ fn async_export(
         let ret = ReturnOp::new(ctx, vec![code]).get_operation();
         b.insert(ctx, ret);
 
-        // Settled: a rejection without a WIT error type traps; otherwise return the value.
+        // Settled: a rejection without a WIT error type traps (a command reports it and
+        // fails); otherwise return the value once the output reached the host.
         b.block = done;
-        let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
-        let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-        let trap = b.new_block(ctx, vec![]);
-        let fulfilled = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
-        b.block = trap;
-        let unreachable = UnreachableOp::new(ctx).get_operation();
-        b.insert(ctx, unreachable);
-        b.block = fulfilled;
+        let outcome = if export.command {
+            Some(
+                b.runtime(ctx, Runtime::CommandOutcome, vec![promise])
+                    .expect("outcome"),
+            )
+        } else {
+            let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
+            let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
+            let trap = b.new_block(ctx, vec![]);
+            let fulfilled = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
+            b.block = trap;
+            let unreachable = UnreachableOp::new(ctx).get_operation();
+            b.insert(ctx, unreachable);
+            b.block = fulfilled;
+            None
+        };
+        if uses_io {
+            let flushed = b.runtime(ctx, Runtime::IoClose, vec![]).expect("flushed");
+            let closed = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
+            b.block = closed;
+        }
         let mut flat = Vec::new();
-        if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
+        if let Some(outcome) = outcome {
+            flat.push(outcome);
+        } else if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
             let kind = crate::slot_kind(ctx, *mir_ty)?;
             let value = b.load(ctx, kind, promise, perry_runtime::promise::VALUE);
             if indirect {
@@ -428,14 +455,7 @@ fn async_export(
             }
         }
         b.host(ctx, task_return, flat);
-        let set = b.runtime(ctx, Runtime::TaskSet, vec![]).expect("set");
-        let drop_set = b.new_block(ctx, vec![]);
-        let free = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, set, (drop_set, vec![]), (free, vec![]));
-        b.block = drop_set;
-        b.host(ctx, crate::Host::WaitableSetDrop, vec![set]);
-        b.br(ctx, free, vec![]);
-        b.block = free;
+        b.runtime(ctx, Runtime::TaskCloseSet, vec![]);
         b.runtime(ctx, Runtime::TaskFree, vec![]);
         let exit = b.i32_const(ctx, EXIT);
         let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
@@ -488,15 +508,17 @@ fn async_export(
         b.runtime(ctx, Runtime::TaskResume, vec![task]);
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
-        let returned_state = b.i32_const(ctx, SUBTASK_RETURNED);
-        let returned = b.num(ctx, NumOpcode::I32Eq, vec![subtask_state, returned_state]);
-        let both = b.num(ctx, NumOpcode::I32And, vec![is_subtask, returned]);
         let settle = b.new_block(ctx, vec![]);
+        let other = b.new_block(ctx, vec![]);
         let next = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, both, (settle, vec![]), (next, vec![]));
+        b.cond_br(ctx, is_subtask, (settle, vec![]), (other, vec![]));
         b.block = settle;
-        b.runtime(ctx, Runtime::SubtaskDone, vec![handle]);
-        b.host(ctx, crate::Host::SubtaskDrop, vec![handle]);
+        b.runtime(ctx, Runtime::TaskSubtaskEvent, vec![handle, subtask_state]);
+        b.br(ctx, next, vec![]);
+        b.block = other;
+        if b.state.uses_io {
+            b.runtime(ctx, Runtime::IoEvent, vec![event, handle, subtask_state]);
+        }
         b.br(ctx, next, vec![]);
         b.block = next;
         let call = CallOp::new(ctx, finish_name, vec![], vec![i32]);

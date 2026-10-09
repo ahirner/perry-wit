@@ -68,9 +68,13 @@ There are no traps in the subset:
 
 - `undefined` at a typed use throws a catchable `TypeError`.
 - A write that would leave a hole throws a `RangeError`.
-- A function that may throw returns an extra `i32` status after its results. Callers branch on it, propagating to the nearest handler or to their own caller.
+- A function that may throw returns an extra `i32` status after its results (1 `TypeError`, 2 `RangeError`, 3 `Error`, 4 another thrown value, 5 `process.exit`). Callers branch on it, propagating to the nearest handler or to their own caller.
+- Inside a `try`, the builder follows each throwing op with `perry.caught` and a branch to the handler, so the MIR CFG has the handler edges. Codegen routes that op's exception to a landing block instead of out of the function.
+- `throw value` (`perry.raise`) makes an exception object pending in the task; `catch (e)` (`perry.catch`) takes it, or materializes an `Error` for failures raised without one. A rejected promise keeps the object for its awaiters. Catch bindings support `instanceof`, `.message`, identity and rethrow.
+- `finally` bodies are emitted once per way out: normal end, exception (then rethrow), and every `return`, `break` and `continue` that leaves them.
+- Status 5 (`process.exit`) passes through every handler.
 
-At a component export without an error type, an escaping exception traps.
+At a component export without an error type, an escaping exception traps; a command reports it on stderr and fails.
 
 ## Component boundary
 
@@ -97,9 +101,12 @@ Stackless state machines on the WASI P3 callback ABI. It uses no Component Model
 - **Timers.** `setTimeout(delay, value)` from `node:timers/promises` is an async-lowered `wasi:clocks/monotonic-clock.wait-for`. A pending call joins the task's waitable set, and its promise settles when the subtask returns.
 - **Exports.**
   - `[async-lift]<export>` enters the task, stores it with `context.set 0`, lifts the arguments, calls the ramp and finishes.
-  - `finish` drives ready frames. If the result promise is settled, it calls `task.return` with the lowered value, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
-  - `[callback][async-lift]<export>` resumes the task from `context.get 0`, settles a returned subtask, drops it and finishes again.
-  - Calls may overlap: every task has its own region, run queue and subtasks.
+  - `finish` drives ready frames and starts writing buffered console output. Once the result promise is settled and the outputs are closed, it calls `task.return` with the lowered value, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
+  - `[callback][async-lift]<export>` resumes the task from `context.get 0`, then lets the runtime handle the event (a returned subtask, a completed stream write or the output's completion future) and finishes again.
+  - Calls may overlap: every task has its own region, run queue, subtasks and output.
+- **Commands.** Top-level statements become the async function `perry_main`, bound to `wasi:cli/run.run`. Its result is `err` after an uncaught exception (reported on stderr) or with a non-zero `process.exitCode`.
+- **Host services.** Console output, `process.env`, the clocks and the async built-ins are called from `perry-runtime` (`host.rs`, `io.rs`); `src/link` forwards the imports of the runtime functions a program reaches. Codegen checks that the world imports each interface a service needs (`perry.intrinsic`).
+- **Console output.** Per-task buffers drain through one `wasi:cli/stdout` or `stderr` stream each, with async `stream.write`. Output produced while a write is blocked goes to a second buffer. Closing drops the writable end and waits for the host's completion future, so all output is written before the export returns.
 
 ## Verification
 
@@ -110,5 +117,6 @@ Stackless state machines on the WASI P3 callback ABI. It uses no Component Model
 - **End to end:**
   - `tests/mir_codegen_test.rs`: linked core modules with fuel metering;
   - `tests/component_test.rs`: WIT values through the component model;
+  - `tests/command_test.rs`: commands with console output, environment, exit codes and exceptions;
   - `tests/async_component_test.rs`: async exports with WASI P3 timers, including overlapping calls.
 - **Conformance:** `cargo run -p perry-conformance -- check`, against Node.js as the oracle, gated by the `passing.txt` ratchet.

@@ -2,3 +2,7 @@ wasi.execution.scaling.retained_records
 wasi.execution.scaling.number_push
 wasi.execution.scaling.temporary_records
 wasi.execution.scaling.string_append
+web.console.routing
+web.performance.monotonic
+node.process.exit_status
+node.process.environment

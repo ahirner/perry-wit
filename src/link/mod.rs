@@ -87,7 +87,11 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
                             if import.module == HELPER_MODULE {
                                 helper_imports.push((old_func_idx, import.name, type_idx));
                             } else {
-                                external_imports.push((import.module, import.name, type_idx));
+                                external_imports.push((
+                                    import.module.to_string(),
+                                    import.name.to_string(),
+                                    type_idx,
+                                ));
                             }
                         }
                         _ => {
@@ -141,10 +145,6 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
         }
     }
 
-    let num_new_imported_funcs = external_imports.len() as u32;
-    let num_core_defined_funcs = core_function_type_indices.len() as u32;
-    let helper_func_start_idx = num_new_imported_funcs + num_core_defined_funcs;
-
     // 3. Select and prepare helper libraries
     let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<&str>>::new();
     for (_, entry_name, _) in &helper_imports {
@@ -155,9 +155,79 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
             .insert(*entry_name);
     }
 
+    let mut new_types = TypeSection::new();
+    let mut roundtrip = reencode::RoundtripReencoder;
+    let mut push_type = |types: &mut TypeSection, ty: &wasmparser::FuncType| -> Result<()> {
+        let params = ty
+            .params()
+            .iter()
+            .map(|ty| roundtrip.val_type(*ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let results = ty
+            .results()
+            .iter()
+            .map(|ty| roundtrip.val_type(*ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        types.ty().function(params, results);
+        Ok(())
+    };
+    for ty in &core_types {
+        push_type(&mut new_types, ty)?;
+    }
+
+    struct PreparedLibrary<'e> {
+        lib: Library,
+        reachable: BTreeSet<u32>,
+        helper_defined_indices: BTreeMap<u32, u32>,
+        type_base: u32,
+        entries: BTreeSet<&'e str>,
+    }
+
+    let mut prepared_libs = Vec::new();
+    for (lib_id, entries) in requested_by_lib {
+        let lib = Library::parse(lib_id.bytes())?;
+        let reachable = lib.reachable(entries.iter().copied())?;
+        let type_base = new_types.len();
+        for ty in &lib.types {
+            push_type(&mut new_types, ty)?;
+        }
+        // Reachable imports of the library join the module's imports (shared by name).
+        let mut helper_defined_indices = BTreeMap::new();
+        for &orig in reachable
+            .iter()
+            .filter(|&&orig| orig < lib.imports.len() as u32)
+        {
+            let (module, name, ty) = &lib.imports[orig as usize];
+            let index = match external_imports
+                .iter()
+                .position(|(m, n, _)| m == module && n == name)
+            {
+                Some(index) => index,
+                None => {
+                    external_imports.push((module.clone(), name.clone(), type_base + ty));
+                    external_imports.len() - 1
+                }
+            };
+            helper_defined_indices.insert(orig, index as u32);
+        }
+        prepared_libs.push(PreparedLibrary {
+            lib,
+            reachable,
+            helper_defined_indices,
+            type_base,
+            entries,
+        });
+    }
+
+    let num_new_imported_funcs = external_imports.len() as u32;
+    let num_core_defined_funcs = core_function_type_indices.len() as u32;
+    let helper_func_start_idx = num_new_imported_funcs + num_core_defined_funcs;
+
     let mut old_to_new_func_index = BTreeMap::new();
 
-    // Map external imports
+    // Map external imports of the core module (they keep their order, first).
     let mut external_import_idx = 0u32;
     for old_idx in 0..next_import_func_idx {
         if !helper_imports.iter().any(|(h_idx, _, _)| *h_idx == old_idx) {
@@ -173,86 +243,32 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
         old_to_new_func_index.insert(old_func_idx, new_func_idx);
     }
 
-    // 4. Link helper functions
-    let mut new_types = TypeSection::new();
-    let mut roundtrip = reencode::RoundtripReencoder;
-    for ty in &core_types {
-        let params = ty
-            .params()
-            .iter()
-            .map(|ty| roundtrip.val_type(*ty))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let results = ty
-            .results()
-            .iter()
-            .map(|ty| roundtrip.val_type(*ty))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        new_types.ty().function(params, results);
-    }
-
-    struct PreparedLibrary {
-        lib: Library,
-        reachable: BTreeSet<u32>,
-        helper_defined_indices: BTreeMap<u32, u32>,
-        type_base: u32,
-    }
-
-    let mut prepared_libs = Vec::new();
+    // 4. Assign indices to the selected helper functions
     let mut current_helper_func_idx = helper_func_start_idx;
-
-    for (lib_id, entries) in requested_by_lib {
-        let lib = Library::parse(lib_id.bytes())?;
-        let reachable = lib.reachable(entries.iter().copied())?;
-
-        let type_base = new_types.len();
-        for ty in &lib.types {
-            let params = ty
-                .params()
-                .iter()
-                .map(|ty| roundtrip.val_type(*ty))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let results = ty
-                .results()
-                .iter()
-                .map(|ty| roundtrip.val_type(*ty))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            new_types.ty().function(params, results);
+    for prep in &mut prepared_libs {
+        let imported = prep.lib.imports.len() as u32;
+        for &orig in prep.reachable.iter().filter(|&&orig| orig >= imported) {
+            prep.helper_defined_indices
+                .insert(orig, current_helper_func_idx);
+            current_helper_func_idx += 1;
         }
-
-        let helper_defined_indices = reachable
-            .iter()
-            .filter(|&&orig| orig >= lib.imports.len() as u32)
-            .enumerate()
-            .map(|(offset, &orig)| (orig, current_helper_func_idx + offset as u32))
-            .collect::<BTreeMap<_, _>>();
-
-        current_helper_func_idx += helper_defined_indices.len() as u32;
-
-        // Map helper entry symbols to their assigned function index
-        for entry in &entries {
-            let orig_idx = lib.exports.get(*entry).context("missing helper export")?;
-            let new_idx = helper_defined_indices
+        for entry in &prep.entries {
+            let orig_idx = prep
+                .lib
+                .exports
+                .get(*entry)
+                .context("missing helper export")?;
+            let new_idx = prep
+                .helper_defined_indices
                 .get(orig_idx)
                 .copied()
                 .context("missing assigned index for helper entry")?;
-            // Map the old core import to this new helper function index!
             for (old_h_idx, h_name, _) in &helper_imports {
                 if h_name == entry {
                     old_to_new_func_index.insert(*old_h_idx, new_idx);
                 }
             }
         }
-
-        prepared_libs.push(PreparedLibrary {
-            lib,
-            reachable,
-            helper_defined_indices,
-            type_base,
-        });
     }
 
     let mut new_functions = FunctionSection::new();
@@ -406,8 +422,8 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     let mut new_imports = ImportSection::new();
     for (module_name, field_name, ty_idx) in external_imports {
         new_imports.import(
-            module_name,
-            field_name,
+            &module_name,
+            &field_name,
             wasm_encoder::EntityType::Function(ty_idx),
         );
     }

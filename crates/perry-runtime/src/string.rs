@@ -61,6 +61,26 @@ fn new(len: u32, utf16: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
     string as *mut u8
 }
 
+/// The UTF-8 bytes of a string.
+///
+/// # Safety
+/// `string` must be a string that outlives the returned slice's use.
+pub(crate) unsafe fn bytes(string: *mut u8) -> &'static [u8] {
+    let string = string as *mut Str;
+    // SAFETY: guaranteed by the caller.
+    unsafe { core::slice::from_raw_parts((*string).data, (*string).len as usize) }
+}
+
+/// A string over static text.
+pub(crate) fn from_static(text: &'static str) -> *mut u8 {
+    new(
+        text.len() as u32,
+        utf16_length(text.as_bytes()),
+        text.as_ptr() as *mut u8,
+        ptr::null_mut(),
+    )
+}
+
 /// A string over `len` bytes of valid UTF-8 at `data`, which must outlive the task.
 ///
 /// # Safety
@@ -110,5 +130,42 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
         ptr::copy_nonoverlapping((*a).data, bytes, (*a).len as usize);
         ptr::copy_nonoverlapping((*b).data, bytes.add((*a).len as usize), (*b).len as usize);
         new(len, utf16, bytes, buffer)
+    }
+}
+
+/// Compare two strings in UTF-16 code unit order, as ECMAScript relational comparison does:
+/// negative, zero or positive. Null (`undefined` in `string | undefined`) equals only null.
+///
+/// # Safety
+/// Both arguments must be strings or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_compare(a: *mut u8, b: *mut u8) -> i32 {
+    if a == b {
+        return 0;
+    }
+    if a.is_null() || b.is_null() {
+        return 1;
+    }
+    let (a, b) = (a as *mut Str, b as *mut Str);
+    // SAFETY: the caller passes live strings of valid UTF-8.
+    let (a, b) = unsafe {
+        (
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                (*a).data,
+                (*a).len as usize,
+            )),
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                (*b).data,
+                (*b).len as usize,
+            )),
+        )
+    };
+    if a.len() == b.len() && a.as_bytes() == b.as_bytes() {
+        return 0;
+    }
+    match a.encode_utf16().cmp(b.encode_utf16()) {
+        core::cmp::Ordering::Less => -1,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
     }
 }

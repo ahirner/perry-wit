@@ -30,12 +30,16 @@ use perry_mir::{
         StringLenOp,
     },
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
-    exceptions::MayThrowInterface,
+    exceptions::{
+        CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp,
+        MayThrowInterface, RaiseOp, RethrowOp,
+    },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
+    intrinsics::{Intrinsic, IntrinsicOp},
     locals::UndefOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
-    types::{ArrayType, OptionalType, PromiseType, RecordType, StringType},
+    types::{ArrayType, ExceptionType, OptionalType, PromiseType, RecordType, StringType},
 };
 use perry_runtime::array as layout;
 use pliron::{
@@ -100,10 +104,6 @@ pub const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
 /// Canonical built-ins and host functions the module may import.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Host {
-    WaitableSetNew,
-    WaitableSetDrop,
-    WaitableJoin,
-    SubtaskDrop,
     ContextGet0,
     ContextSet0,
     WaitFor,
@@ -114,10 +114,6 @@ enum Host {
 impl Host {
     fn symbol(&self) -> Identifier {
         let name = match self {
-            Host::WaitableSetNew => "host_waitable_set_new".to_string(),
-            Host::WaitableSetDrop => "host_waitable_set_drop".to_string(),
-            Host::WaitableJoin => "host_waitable_join".to_string(),
-            Host::SubtaskDrop => "host_subtask_drop".to_string(),
             Host::ContextGet0 => "host_context_get_0".to_string(),
             Host::ContextSet0 => "host_context_set_0".to_string(),
             Host::WaitFor => "host_wait_for".to_string(),
@@ -137,10 +133,6 @@ impl Host {
     fn path(&self) -> (String, String) {
         let root = |name: &str| ("$root".to_string(), name.to_string());
         match self {
-            Host::WaitableSetNew => root("[waitable-set-new]"),
-            Host::WaitableSetDrop => root("[waitable-set-drop]"),
-            Host::WaitableJoin => root("[waitable-join]"),
-            Host::SubtaskDrop => root("[subtask-drop]"),
             Host::ContextGet0 => root("[context-get-0]"),
             Host::ContextSet0 => root("[context-set-0]"),
             Host::WaitFor => (
@@ -157,9 +149,8 @@ impl Host {
         let i32 = i32_type(ctx);
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         match self {
-            Host::WaitableSetNew | Host::ContextGet0 => (vec![], vec![i32]),
-            Host::WaitableSetDrop | Host::SubtaskDrop | Host::ContextSet0 => (vec![i32], vec![]),
-            Host::WaitableJoin => (vec![i32, i32], vec![]),
+            Host::ContextGet0 => (vec![], vec![i32]),
+            Host::ContextSet0 => (vec![i32], vec![]),
             Host::WaitFor => (vec![i64], vec![i32]),
             Host::TaskReturn(_, _, flat) => (
                 flat.iter().map(|f| boundary::flat_type(ctx, *f)).collect(),
@@ -210,6 +201,8 @@ pub fn status_code(kind: ErrorKind) -> i32 {
         ErrorKind::Any => 3,
         ErrorKind::TypeError => 1,
         ErrorKind::RangeError => 2,
+        ErrorKind::Value => 4,
+        ErrorKind::Exit => 5,
     }
 }
 
@@ -223,20 +216,39 @@ enum Runtime {
     TaskResume,
     TaskSuspend,
     TaskFree,
-    TaskSet,
-    TaskSetSet,
+    TaskJoin,
+    TaskSubtaskEvent,
+    TaskCloseSet,
     TaskResult,
     TaskSetResult,
     ReadyPop,
     SubtaskRegister,
-    SubtaskDone,
     PromiseNew,
     PromiseResolve,
     PromiseReject,
     PromiseWait,
+    PromiseRethrow,
+    ExceptionNew,
+    ExceptionRaise,
+    ExceptionCatch,
+    ExceptionMessage,
+    Exit,
     CabiRealloc,
     StringAdopt,
     StringConcat,
+    StringCompare,
+    Print,
+    IoPump,
+    IoEvent,
+    IoClose,
+    ExitCodeSet,
+    CommandOutcome,
+    EnvGet,
+    EnvKeys,
+    PerformanceNow,
+    DateNow,
+    /// `number_format` of the number helper library.
+    NumberFormat,
 }
 
 impl Runtime {
@@ -250,25 +262,44 @@ impl Runtime {
             Runtime::TaskResume => "perry_task_resume",
             Runtime::TaskSuspend => "perry_task_suspend",
             Runtime::TaskFree => "perry_task_free",
-            Runtime::TaskSet => "perry_task_set",
-            Runtime::TaskSetSet => "perry_task_set_set",
+            Runtime::TaskJoin => "perry_task_join",
+            Runtime::TaskSubtaskEvent => "perry_task_subtask_event",
+            Runtime::TaskCloseSet => "perry_task_close_set",
             Runtime::TaskResult => "perry_task_result",
             Runtime::TaskSetResult => "perry_task_set_result",
             Runtime::ReadyPop => "perry_ready_pop",
             Runtime::SubtaskRegister => "perry_subtask_register",
-            Runtime::SubtaskDone => "perry_subtask_done",
             Runtime::PromiseNew => "perry_promise_new",
             Runtime::PromiseResolve => "perry_promise_resolve",
             Runtime::PromiseReject => "perry_promise_reject",
             Runtime::PromiseWait => "perry_promise_wait",
+            Runtime::PromiseRethrow => "perry_promise_rethrow",
+            Runtime::ExceptionNew => "perry_exception_new",
+            Runtime::ExceptionRaise => "perry_exception_raise",
+            Runtime::ExceptionCatch => "perry_exception_catch",
+            Runtime::ExceptionMessage => "perry_exception_message",
+            Runtime::Exit => "perry_exit",
             Runtime::CabiRealloc => "perry_cabi_realloc",
             Runtime::StringAdopt => "perry_string_adopt",
             Runtime::StringConcat => "perry_string_concat",
+            Runtime::StringCompare => "perry_string_compare",
+            Runtime::Print => "perry_print",
+            Runtime::IoPump => "perry_io_pump",
+            Runtime::IoEvent => "perry_io_event",
+            Runtime::IoClose => "perry_io_close",
+            Runtime::ExitCodeSet => "perry_exit_code_set",
+            Runtime::CommandOutcome => "perry_command_outcome",
+            Runtime::EnvGet => "perry_env_get",
+            Runtime::EnvKeys => "perry_env_keys",
+            Runtime::PerformanceNow => "perry_performance_now",
+            Runtime::DateNow => "perry_date_now",
+            Runtime::NumberFormat => "number_format",
         }
     }
 
     fn symbol(self) -> Identifier {
-        format!("rt_{}", &self.name()["perry_".len()..])
+        let name = self.name();
+        format!("rt_{}", name.strip_prefix("perry_").unwrap_or(name))
             .try_into()
             .expect("identifier")
     }
@@ -282,24 +313,43 @@ impl Runtime {
             Runtime::Alloc | Runtime::ArrayNew => (vec![i32], vec![i32]),
             Runtime::ArrayGrow => (vec![i32], vec![]),
             Runtime::F64Rem => (vec![f64, f64], vec![f64]),
-            Runtime::TaskFree => (vec![], vec![]),
+            Runtime::TaskFree | Runtime::TaskCloseSet | Runtime::IoPump => (vec![], vec![]),
             Runtime::TaskEnter
             | Runtime::TaskSuspend
-            | Runtime::TaskSet
+            | Runtime::IoClose
+            | Runtime::EnvKeys
             | Runtime::TaskResult
             | Runtime::ReadyPop
             | Runtime::PromiseNew => (vec![], vec![i32]),
-            Runtime::TaskResume | Runtime::TaskSetSet | Runtime::TaskSetResult => {
-                (vec![i32], vec![])
-            }
-            Runtime::SubtaskDone => (vec![i32], vec![i32]),
+            Runtime::TaskResume | Runtime::TaskJoin | Runtime::TaskSetResult => (vec![i32], vec![]),
+            Runtime::TaskSubtaskEvent => (vec![i32, i32], vec![]),
+            Runtime::Print => (vec![i32, i32, i32], vec![]),
+            Runtime::IoEvent => (vec![i32, i32, i32], vec![i32]),
+            Runtime::ExitCodeSet => (vec![f64], vec![]),
+            Runtime::CommandOutcome | Runtime::EnvGet => (vec![i32], vec![i32]),
+            Runtime::PerformanceNow | Runtime::DateNow => (vec![], vec![f64]),
+            Runtime::NumberFormat => (vec![f64, i32], vec![i32]),
+            Runtime::PromiseRethrow
+            | Runtime::ExceptionRaise
+            | Runtime::ExceptionCatch
+            | Runtime::ExceptionMessage => (vec![i32], vec![i32]),
+            Runtime::ExceptionNew => (vec![i32, i32, i64], vec![i32]),
+            Runtime::Exit => (vec![f64], vec![i32]),
             Runtime::SubtaskRegister => (vec![i32, i32, i64], vec![]),
             Runtime::PromiseResolve => (vec![i32, i64], vec![]),
             Runtime::PromiseReject | Runtime::PromiseWait => (vec![i32, i32], vec![]),
             Runtime::CabiRealloc => (vec![i32; 4], vec![i32]),
-            Runtime::StringAdopt | Runtime::StringConcat => (vec![i32, i32], vec![i32]),
+            Runtime::StringAdopt | Runtime::StringConcat | Runtime::StringCompare => {
+                (vec![i32, i32], vec![i32])
+            }
         }
     }
+}
+
+fn val_type_is_i64(ctx: &Context, ty: TypeHandle) -> bool {
+    ty.deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .is_some_and(|int| int.width() == 64)
 }
 
 fn i32_type(ctx: &mut Context) -> TypeHandle {
@@ -331,6 +381,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<ArrayType>()
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
+        || deref.is::<ExceptionType>()
     {
         return Ok(Repr::Ref);
     }
@@ -456,6 +507,8 @@ struct ModuleState {
     /// Async functions in dispatch-kind order.
     async_functions: Vec<Identifier>,
     shapes: HashMap<String, i32>,
+    /// Whether any function writes console output (finish and callbacks then drive it).
+    uses_io: bool,
 }
 
 impl ModuleState {
@@ -487,6 +540,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         },
         async_functions: async_functions.clone(),
         shapes: HashMap::new(),
+        uses_io: false,
     };
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);
@@ -511,6 +565,18 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         async_split::drive(ctx, &mut state, &async_functions);
     }
     if let Exports::Canonical { exports, .. } = exports {
+        if state.uses_io
+            && let Some(export) = exports.iter().find(|e| e.task_return.is_none())
+        {
+            bail!(
+                "console output needs async exports: WASI P3 output streams are asynchronous, but {} is a synchronous export",
+                export.core_name
+            );
+        }
+        // A command reports uncaught exceptions on stderr.
+        if exports.iter().any(|e| e.command) {
+            state.uses_io = true;
+        }
         let mir_functions: HashMap<String, FuncOp> = functions
             .iter()
             .map(|f| (f.get_symbol_name(ctx).to_string(), *f))
@@ -654,6 +720,10 @@ struct FunctionLowering<'s> {
     throws: bool,
     results: Vec<TypeHandle>,
     throw_block: Option<Ptr<BasicBlock>>,
+    /// While lowering an op followed by `perry.caught`: where its exception goes instead of
+    /// leaving the function. The block takes the status, then the op's results (zero on the
+    /// exceptional edge), so the results dominate the code after it.
+    landing: Option<(Ptr<BasicBlock>, Vec<TypeHandle>)>,
     /// The frame, when lowering the step function of an async function.
     frame: Option<async_split::Frame>,
 }
@@ -671,6 +741,7 @@ impl<'s> FunctionLowering<'s> {
             throws: false,
             results: vec![],
             throw_block: None,
+            landing: None,
             frame: None,
         }
     }
@@ -752,12 +823,52 @@ impl<'s> FunctionLowering<'s> {
             let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
             self.spill(ctx, &args);
             let ops: Vec<_> = mir_block.deref(ctx).iter(ctx).collect();
-            for op in ops {
-                self.op(ctx, op).with_context(|| {
+            let mut index = 0;
+            while index < ops.len() {
+                let op = ops[index];
+                // `op; status = perry.caught`: route the exception of `op` to `status`.
+                let caught = ops
+                    .get(index + 1)
+                    .copied()
+                    .filter(|next| Operation::get_op::<CaughtOp>(*next, ctx).is_some());
+                if caught.is_some() {
+                    let mut types = Vec::new();
+                    let mir_types: Vec<_> =
+                        op.deref(ctx).results().map(|r| r.get_type(ctx)).collect();
+                    for ty in mir_types {
+                        types.push(wasm_type(ctx, ty)?);
+                    }
+                    let mut args = vec![i32_type(ctx)];
+                    args.extend(types.iter().copied());
+                    self.landing = Some((self.new_block(ctx, args), types));
+                }
+                let lowered = self.op(ctx, op).with_context(|| {
                     format!("lowering {}", Operation::get_op_dyn(op, ctx).get_opid())
-                })?;
+                });
+                let landing = self.landing.take();
+                lowered?;
                 let results: Vec<_> = op.deref(ctx).results().collect();
                 self.spill(ctx, &results);
+                if let (Some(caught), Some((landing, _))) = (caught, landing) {
+                    let zero = self.i32_const(ctx, 0);
+                    let mut args = vec![zero];
+                    for result in &results {
+                        args.push(self.values[result]);
+                    }
+                    self.br(ctx, landing, args);
+                    self.block = landing;
+                    let status = landing.deref(ctx).get_argument(0);
+                    for (position, result) in results.iter().enumerate() {
+                        let arg = landing.deref(ctx).get_argument(position + 1);
+                        self.values.insert(*result, arg);
+                    }
+                    self.spill(ctx, &results);
+                    self.define(ctx, caught, status);
+                    let results: Vec<_> = caught.deref(ctx).results().collect();
+                    self.spill(ctx, &results);
+                    index += 1;
+                }
+                index += 1;
             }
         }
         Ok(())
@@ -947,6 +1058,27 @@ impl<'s> FunctionLowering<'s> {
         block
     }
 
+    /// Where an exception goes: the landing of an op followed by `perry.caught`, or out of the
+    /// function.
+    fn throw_target(&mut self, ctx: &mut Context, status: Value) -> (Ptr<BasicBlock>, Vec<Value>) {
+        match self.landing.clone() {
+            Some((landing, types)) => {
+                let mut args = vec![status];
+                for ty in types {
+                    args.push(if ty.deref(ctx).is::<FP64Type>() {
+                        self.f64_const(ctx, 0.0)
+                    } else if val_type_is_i64(ctx, ty) {
+                        self.i64_const(ctx, 0)
+                    } else {
+                        self.i32_const(ctx, 0)
+                    });
+                }
+                (landing, args)
+            }
+            None => (self.throw_block(ctx), vec![status]),
+        }
+    }
+
     /// Throw `status` if `failed` is non-zero; code after this runs on the normal path.
     fn throw_if(&mut self, ctx: &mut Context, failed: Value, kind: ErrorKind) {
         let status = self.i32_const(ctx, status_code(kind));
@@ -959,9 +1091,9 @@ impl<'s> FunctionLowering<'s> {
             self.throws,
             "throwing op in a function classified as non-throwing"
         );
-        let throw = self.throw_block(ctx);
+        let throw = self.throw_target(ctx, status);
         let next = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, failed, (throw, vec![status]), (next, vec![]));
+        self.cond_br(ctx, failed, throw, (next, vec![]));
         self.block = next;
     }
 
@@ -1064,6 +1196,84 @@ impl<'s> FunctionLowering<'s> {
         Ok((8 + 8 * index as u32, field_ty))
     }
 
+    // --- intrinsics ---------------------------------------------------------------------------
+
+    fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
+        ensure!(
+            self.state.can_import(interface),
+            "{what} needs the WIT world to import {interface}"
+        );
+        Ok(())
+    }
+
+    fn intrinsic(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        intrinsic: Intrinsic,
+    ) -> Result<()> {
+        let args = self.operands(ctx, op)?;
+        let value = match intrinsic {
+            Intrinsic::PrintOut | Intrinsic::PrintErr => {
+                let (interface, fd) = if intrinsic == Intrinsic::PrintOut {
+                    ("wasi:cli/stdout@0.3.0", 0)
+                } else {
+                    ("wasi:cli/stderr@0.3.0", 1)
+                };
+                self.needs_import(interface, "console output")?;
+                self.state.uses_io = true;
+                let fd = self.i32_const(ctx, fd);
+                let newline = self.i32_const(ctx, 1);
+                self.runtime(ctx, Runtime::Print, vec![fd, args[0], newline]);
+                None
+            }
+            Intrinsic::NumberToString => {
+                // A string header followed by up to 40 bytes of ryu-js output.
+                let size = self.i32_const(ctx, (perry_runtime::string::SIZE + 40) as i32);
+                let string = self
+                    .runtime(ctx, Runtime::Alloc, vec![size])
+                    .expect("string");
+                let header = self.i32_const(ctx, perry_runtime::string::SIZE as i32);
+                let data = self.num(ctx, NumOpcode::I32Add, vec![string, header]);
+                let len = self
+                    .runtime(ctx, Runtime::NumberFormat, vec![args[0], data])
+                    .expect("length");
+                use perry_runtime::string::{BUFFER, DATA, LEN, UTF16};
+                self.store(ctx, MemKind::I32, string, LEN, len);
+                self.store(ctx, MemKind::I32, string, UTF16, len);
+                self.store(ctx, MemKind::I32, string, DATA, data);
+                let zero = self.i32_const(ctx, 0);
+                self.store(ctx, MemKind::I32, string, BUFFER, zero);
+                Some(string)
+            }
+            Intrinsic::EnvGet | Intrinsic::EnvKeys => {
+                self.needs_import("wasi:cli/environment@0.3.0", "process.env")?;
+                let function = if intrinsic == Intrinsic::EnvGet {
+                    Runtime::EnvGet
+                } else {
+                    Runtime::EnvKeys
+                };
+                self.runtime(ctx, function, args)
+            }
+            Intrinsic::PerformanceNow => {
+                self.needs_import(MONOTONIC_CLOCK, "performance.now()")?;
+                self.runtime(ctx, Runtime::PerformanceNow, args)
+            }
+            Intrinsic::DateNow => {
+                self.needs_import("wasi:clocks/system-clock@0.3.0", "Date.now()")?;
+                self.runtime(ctx, Runtime::DateNow, args)
+            }
+            Intrinsic::ExitCodeSet => {
+                self.runtime(ctx, Runtime::ExitCodeSet, args);
+                None
+            }
+        };
+        if let Some(value) = value {
+            self.define(ctx, op, value);
+        }
+        Ok(())
+    }
+
     // --- ops ----------------------------------------------------------------------------------
 
     fn op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
@@ -1138,6 +1348,22 @@ impl<'s> FunctionLowering<'s> {
                     CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
                     other => bail!("ordered comparison {other:?} on number | undefined"),
                 }
+            } else if mir_ty.deref(ctx).is::<StringType>()
+                || optional_inner(ctx, mir_ty).is_some_and(|t| t.deref(ctx).is::<StringType>())
+            {
+                let order = self
+                    .runtime(ctx, Runtime::StringCompare, operands)
+                    .expect("order");
+                let zero = self.i32_const(ctx, 0);
+                let opcode = match kind {
+                    CompareKind::Lt => NumOpcode::I32LtS,
+                    CompareKind::Le => NumOpcode::I32LeS,
+                    CompareKind::Gt => NumOpcode::I32GtS,
+                    CompareKind::Ge => NumOpcode::I32GeS,
+                    CompareKind::Eq => NumOpcode::I32Eq,
+                    CompareKind::Ne => NumOpcode::I32Ne,
+                };
+                self.num(ctx, opcode, vec![order, zero])
             } else if operands[0].get_type(ctx).deref(ctx).is::<FP64Type>() {
                 let opcode = match kind {
                     CompareKind::Lt => NumOpcode::F64Lt,
@@ -1230,9 +1456,9 @@ impl<'s> FunctionLowering<'s> {
             }
             if callee_throws {
                 let status = *values.last().unwrap();
-                let throw = self.throw_block(ctx);
+                let throw = self.throw_target(ctx, status);
                 let next = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, status, (throw, vec![status]), (next, vec![]));
+                self.cond_br(ctx, status, throw, (next, vec![]));
                 self.block = next;
             }
             return Ok(());
@@ -1446,6 +1672,94 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<AwaitOp>(op, ctx).is_some() {
             return self.lower_await(ctx, op);
+        }
+        if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
+            return self.intrinsic(ctx, op, intrinsic.intrinsic(ctx).expect("verified"));
+        }
+        if let Some(error) = Operation::get_op::<ErrorNewOp>(op, ctx) {
+            let kind = self.i32_const(ctx, status_code(error.kind(ctx)));
+            let tag = self.i32_const(ctx, perry_runtime::exception::TAG_STRING as i32);
+            let message = self.operand(ctx, op, 0)?;
+            let message = self.num(ctx, NumOpcode::I64ExtendI32U, vec![message]);
+            let value = self
+                .runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, message])
+                .expect("exception");
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<RaiseOp>(op, ctx).is_some() {
+            let value = self.operand(ctx, op, 0)?;
+            let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let exception = if ty.deref(ctx).is::<ExceptionType>() {
+                value
+            } else {
+                use perry_runtime::exception::{TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
+                let tag = match repr(ctx, ty)? {
+                    Repr::F64 => TAG_NUMBER,
+                    Repr::Bool => TAG_BOOLEAN,
+                    _ if ty.deref(ctx).is::<StringType>() => TAG_STRING,
+                    _ => bail!("this value cannot be thrown yet"),
+                };
+                let kind = self.i32_const(ctx, status_code(ErrorKind::Value));
+                let tag = self.i32_const(ctx, tag as i32);
+                let bits = self.slot_bits(ctx, value);
+                self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, bits])
+                    .expect("exception")
+            };
+            let status = self
+                .runtime(ctx, Runtime::ExceptionRaise, vec![exception])
+                .expect("status");
+            self.define(ctx, op, status);
+            return Ok(());
+        }
+        if Operation::get_op::<ExitOp>(op, ctx).is_some() {
+            let code = self.operand(ctx, op, 0)?;
+            let status = self
+                .runtime(ctx, Runtime::Exit, vec![code])
+                .expect("status");
+            self.define(ctx, op, status);
+            return Ok(());
+        }
+        if Operation::get_op::<RethrowOp>(op, ctx).is_some() {
+            let status = self.operand(ctx, op, 0)?;
+            let throw = self.throw_block(ctx);
+            self.br(ctx, throw, vec![status]);
+            return Ok(());
+        }
+        if Operation::get_op::<CatchOp>(op, ctx).is_some() {
+            let status = self.operand(ctx, op, 0)?;
+            let value = self
+                .runtime(ctx, Runtime::ExceptionCatch, vec![status])
+                .expect("exception");
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<ExceptionMessageOp>(op, ctx).is_some() {
+            let exception = self.operand(ctx, op, 0)?;
+            let value = self
+                .runtime(ctx, Runtime::ExceptionMessage, vec![exception])
+                .expect("message");
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(is) = Operation::get_op::<ExceptionIsOp>(op, ctx) {
+            let exception = self.operand(ctx, op, 0)?;
+            let kind = self.load(ctx, MemKind::I32, exception, perry_runtime::exception::KIND);
+            let value = match is.kind(ctx) {
+                ErrorKind::Any => {
+                    // TypeError, RangeError and Error are 1..=3.
+                    let one = self.i32_const(ctx, 1);
+                    let offset = self.num(ctx, NumOpcode::I32Sub, vec![kind, one]);
+                    let three = self.i32_const(ctx, 3);
+                    self.num(ctx, NumOpcode::I32LtU, vec![offset, three])
+                }
+                other => {
+                    let code = self.i32_const(ctx, status_code(other));
+                    self.num(ctx, NumOpcode::I32Eq, vec![kind, code])
+                }
+            };
+            self.define(ctx, op, value);
+            return Ok(());
         }
         if Operation::get_op::<TimerOp>(op, ctx).is_some() {
             return self.lower_timer(ctx, op);

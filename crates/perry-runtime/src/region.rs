@@ -54,10 +54,18 @@ pub struct Task {
     ready_head: *mut Node,
     ready_tail: *mut Node,
     subtasks: *mut Subtask,
-    /// Waitable set of the pending subtasks, created on first use; 0 if none.
-    set: u32,
+    /// Waitable set of the pending subtasks and output streams, created on first use; 0 if
+    /// none.
+    pub(crate) set: u32,
     /// The promise an async export settles; read again by its callback.
     result: *mut u8,
+    /// The thrown exception object on its way to a handler (`crate::exception`); null when
+    /// the status alone describes it.
+    pub(crate) exception: *mut u8,
+    /// Console output (`crate::io`): stdout, stderr.
+    pub(crate) outputs: [crate::io::Output; 2],
+    /// A command's result once decided (`crate::io::perry_command_outcome`).
+    pub(crate) outcome: Option<u32>,
 }
 
 struct Runtime {
@@ -123,6 +131,9 @@ fn new_task() -> *mut Task {
             subtasks: ptr::null_mut(),
             set: 0,
             result: ptr::null_mut(),
+            exception: ptr::null_mut(),
+            outputs: [crate::io::Output::new(), crate::io::Output::new()],
+            outcome: None,
         })
     };
     task

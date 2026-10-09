@@ -61,10 +61,27 @@ pub(crate) fn exports(
             WorldItem::Type { .. } => continue,
         };
         for (implementation, core_name, function) in functions {
+            let found = exported.remove(&implementation).is_some();
+            // A command's `wasi:cli/run.run` may be the module's top-level statements.
+            let command = !found && is_cli_run(&core_name) && has_main(ctx, mir);
             ensure!(
-                exported.remove(&implementation).is_some(),
+                found || command,
                 "WIT export {core_name} needs an exported TypeScript function {implementation}"
             );
+            if command {
+                bound.push(Export {
+                    core_name,
+                    function: perry_lower::MAIN.to_string(),
+                    params: vec![],
+                    result: None,
+                    task_return: Some((
+                        format!("[export]{}", resolve.name_world_key(key)),
+                        function.name.clone(),
+                    )),
+                    command: true,
+                });
+                continue;
+            }
             let params = function
                 .params
                 .iter()
@@ -91,12 +108,40 @@ pub(crate) fn exports(
                 params,
                 result,
                 task_return,
+                command: false,
             });
         }
     }
     // Exported functions outside the world stay internal, so one module can serve several
     // worlds (`examples/merge_task.ts` implements both `task-runner` and `merge-task`).
     Ok(bound)
+}
+
+fn is_cli_run(core_name: &str) -> bool {
+    core_name.starts_with("wasi:cli/run@") && core_name.ends_with("#run")
+}
+
+fn has_main(ctx: &Context, mir: &ModuleOp) -> bool {
+    module_functions(ctx, mir)
+        .iter()
+        .any(|f| f.get_symbol_name(ctx).as_ref() == perry_lower::MAIN)
+}
+
+fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {
+    mir.get_body(ctx, 0)
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+        .collect()
+}
+
+/// Top-level statements only run as a command; elsewhere they are an error, not dead code.
+pub(crate) fn check_main(ctx: &Context, mir: &ModuleOp, exports: &[Export]) -> Result<()> {
+    ensure!(
+        !has_main(ctx, mir) || exports.iter().any(|e| e.command),
+        "top-level statements need a command world (one exporting wasi:cli/run)"
+    );
+    Ok(())
 }
 
 /// Names of the interfaces `world` imports.

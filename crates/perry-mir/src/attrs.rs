@@ -53,8 +53,13 @@ pub enum ConvertKind {
 #[pliron_attr(name = "perry.error_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum ErrorKind {
-    /// Any error: a call or await propagates whatever the callee threw.
+    /// Any error: a call or await propagates whatever the callee threw. Also the kind of a
+    /// plain `Error` object.
     Any,
     TypeError,
     RangeError,
+    /// A thrown value that is not an `Error` object (`throw 90`).
+    Value,
+    /// `process.exit`: unwinds to the export without running `catch` or `finally`.
+    Exit,
 }

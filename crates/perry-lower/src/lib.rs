@@ -23,20 +23,25 @@ use perry_hir::{
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_mir::{
-    attrs::{BinaryKind, CompareKind, ConvertKind},
+    attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, set_async},
     collections::{
         ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp, StringConstOp,
         StringLenOp,
     },
     control::{BrOp, CondBrOp, ReturnOp},
+    exceptions::{
+        CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp,
+        MayThrowInterface, RaiseOp, RethrowOp,
+    },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
+    intrinsics::{Intrinsic, IntrinsicOp},
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
         IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
-    types::{ArrayType, PromiseType, RecordType, StringType},
+    types::{ArrayType, ExceptionType, PromiseType, RecordType, StringType},
 };
 use pliron::printable::Printable as _;
 use pliron::{
@@ -54,7 +59,8 @@ use pliron::{
         listener::DummyListener,
     },
     linked_list::ContainsLinkedList,
-    op::Op,
+    op::{Op, op_cast},
+    operation::Operation,
     r#type::{TypeHandle, Typed, TypedHandle},
     utils::apint::{APInt, bw},
     value::Value,
@@ -79,7 +85,10 @@ struct Signature {
     results: Vec<TypeHandle>,
 }
 
-/// Build a MIR module from HIR functions. Module-level statements are not supported yet.
+/// The function holding a module's top-level statements, if it has any.
+pub const MAIN: &str = "perry_main";
+
+/// Build a MIR module from HIR functions and, as [MAIN], the top-level statements.
 pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
     let shapes = Shapes::new(hir);
@@ -162,7 +171,65 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
         }
         module.append_operation(ctx, func.get_operation(), 0);
     }
+    if !hir.init.is_empty() {
+        // Top-level statements (with top-level `await`) form the async main function of a
+        // command (`wasi:cli/run`), settling `undefined`.
+        let signature = Signature {
+            name: identifier(MAIN)?,
+            is_async: true,
+            params: vec![],
+            results: vec![shapes.settled_type(ctx, &HirType::Void)?],
+        };
+        let func = FunctionBuilder::lower_body(
+            ctx,
+            &signature,
+            &[],
+            &hir.init,
+            &signatures,
+            &shapes,
+            &timers,
+        )
+        .context("lowering top-level statements")?;
+        set_async(ctx, &func);
+        module.append_operation(ctx, func.get_operation(), 0);
+    }
     Ok(module)
+}
+
+/// Delete blocks no path from the entry reaches (code after `return`, handlers nothing throws
+/// to); they would break dominance of the values they use.
+fn remove_unreachable(ctx: &mut Context, region: Ptr<pliron::region::Region>) {
+    let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
+    let mut reached = HashSet::from([blocks[0]]);
+    let mut stack = vec![blocks[0]];
+    while let Some(block) = stack.pop() {
+        for succ in block.deref(ctx).succs(ctx) {
+            if reached.insert(succ) {
+                stack.push(succ);
+            }
+        }
+    }
+    let dead: Vec<_> = blocks
+        .into_iter()
+        .filter(|b| !reached.contains(b))
+        .collect();
+    for &block in &dead {
+        BasicBlock::drop_all_uses(block, ctx);
+    }
+    for block in dead {
+        let ops: Vec<_> = block.deref(ctx).iter(ctx).collect();
+        for op in ops.into_iter().rev() {
+            Operation::erase(op, ctx);
+        }
+    }
+    let dead: Vec<_> = region
+        .deref(ctx)
+        .iter(ctx)
+        .filter(|b| !reached.contains(b))
+        .collect();
+    for block in dead {
+        BasicBlock::erase(block, ctx);
+    }
 }
 
 fn hir_module_name(hir: &HirModule) -> String {
@@ -185,6 +252,7 @@ enum Kind {
     String,
     Record,
     Array,
+    Exception,
 }
 
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
@@ -198,6 +266,8 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Record)
     } else if ty.is::<ArrayType>() {
         Ok(Kind::Array)
+    } else if ty.is::<ExceptionType>() {
+        Ok(Kind::Exception)
     } else if ty
         .downcast_ref::<IntegerType>()
         .is_some_and(|int| int.width() == 1)
@@ -213,12 +283,34 @@ struct Loop {
     break_to: Ptr<BasicBlock>,
 }
 
+/// The innermost enclosing `catch` or exceptional `finally` path: throwing ops store their
+/// status in `status` and branch to `block`.
+#[derive(Clone, Copy)]
+struct Handler {
+    block: Ptr<BasicBlock>,
+    status: Value,
+}
+
+/// An enclosing `finally`, run inline before `return`, `break` and `continue` leave it.
+#[derive(Clone)]
+struct Finally {
+    body: Vec<Stmt>,
+    /// `handlers.len()` and `loops.len()` outside the `try`.
+    handlers: usize,
+    loops: usize,
+}
+
+/// Status of `process.exit` (`ErrorKind::Exit`): handlers pass it on.
+const EXIT_STATUS: u64 = 5;
+
 struct FunctionBuilder<'s> {
     region: Ptr<pliron::region::Region>,
     ins: IRInserter<DummyListener>,
     block: Ptr<BasicBlock>,
     locals: HashMap<LocalId, Value>,
     loops: Vec<Loop>,
+    handlers: Vec<Handler>,
+    finallies: Vec<Finally>,
     signatures: &'s HashMap<FuncId, Signature>,
     shapes: &'s Shapes<'s>,
     /// Local names bound to `setTimeout` from `node:timers/promises`.
@@ -237,6 +329,28 @@ impl<'s> FunctionBuilder<'s> {
         timers: &'s HashSet<String>,
     ) -> Result<FuncOp> {
         let signature = &signatures[&function.id];
+        let params: Vec<LocalId> = function.params.iter().map(|p| p.id).collect();
+        Self::lower_body(
+            ctx,
+            signature,
+            &params,
+            &function.body,
+            signatures,
+            shapes,
+            timers,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_body(
+        ctx: &mut Context,
+        signature: &Signature,
+        params: &[LocalId],
+        body: &[Stmt],
+        signatures: &'s HashMap<FuncId, Signature>,
+        shapes: &'s Shapes<'s>,
+        timers: &'s HashSet<String>,
+    ) -> Result<FuncOp> {
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
         let entry = func.get_entry_block(ctx);
@@ -247,6 +361,8 @@ impl<'s> FunctionBuilder<'s> {
             block: entry,
             locals: HashMap::new(),
             loops: Vec::new(),
+            handlers: Vec::new(),
+            finallies: Vec::new(),
             signatures,
             shapes,
             timers,
@@ -254,17 +370,18 @@ impl<'s> FunctionBuilder<'s> {
             is_async: signature.is_async,
             labels: 0,
         };
-        for (index, param) in function.params.iter().enumerate() {
+        for (index, param) in params.iter().enumerate() {
             let value = entry.deref(ctx).get_argument(index);
             let slot = builder.slot(ctx, value.get_type(ctx));
             builder.store(ctx, slot, value);
-            builder.locals.insert(param.id, slot);
+            builder.locals.insert(*param, slot);
         }
-        builder.statements(ctx, &function.body)?;
+        builder.statements(ctx, body)?;
         if !builder.terminated(ctx) {
             let values = builder.implicit_results(ctx);
             builder.emit(ctx, |ctx| ReturnOp::new(ctx, values));
         }
+        remove_unreachable(ctx, region);
         Ok(func)
     }
 
@@ -315,19 +432,201 @@ impl<'s> FunctionBuilder<'s> {
 
     // ── IR plumbing ────────────────────────────────────────────────────────
 
-    fn append(&mut self, ctx: &Context, op: &dyn Op) {
+    fn append(&mut self, ctx: &mut Context, op: &dyn Op) {
         self.ins.append_op(ctx, op);
+        self.guard(ctx, op.get_operation());
     }
 
-    fn append_value<T: Op + OneResultInterface>(&mut self, ctx: &Context, op: &T) -> Value {
+    fn append_value<T: Op + OneResultInterface>(&mut self, ctx: &mut Context, op: &T) -> Value {
         self.ins.append_op(ctx, op);
+        self.guard(ctx, op.get_operation());
         op.get_result(ctx)
     }
 
     fn emit<T: Op>(&mut self, ctx: &mut Context, make: impl FnOnce(&mut Context) -> T) -> T {
         let op = make(ctx);
         self.ins.append_op(ctx, &op);
+        self.guard(ctx, op.get_operation());
         op
+    }
+
+    /// Inside a `try`, route the exception of an op that may throw to the handler.
+    fn guard(&mut self, ctx: &mut Context, op: Ptr<Operation>) {
+        let Some(handler) = self.handlers.last().copied() else {
+            return;
+        };
+        let throws = op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref())
+            .is_some()
+            && Operation::get_op::<RethrowOp>(op, ctx).is_none();
+        if !throws {
+            return;
+        }
+        let caught = CaughtOp::new(ctx);
+        self.ins.append_op(ctx, &caught);
+        let status = caught.get_result(ctx);
+        let zero = self.i32(ctx, 0);
+        let failed = MirCompare::new(ctx, CompareKind::Ne, status, zero);
+        self.ins.append_op(ctx, &failed);
+        let failed = failed.get_result(ctx);
+        let land = self.new_block(ctx, "throw");
+        let next = self.new_block(ctx, "caught");
+        let branch = CondBrOp::new(ctx, failed, land, vec![], next, vec![]);
+        self.ins.append_op(ctx, &branch);
+        self.switch_to(land);
+        let store = StoreOp::new(ctx, handler.status, status);
+        self.ins.append_op(ctx, &store);
+        let br = BrOp::new(ctx, handler.block, vec![]);
+        self.ins.append_op(ctx, &br);
+        self.switch_to(next);
+    }
+
+    fn i32(&mut self, ctx: &mut Context, value: u64) -> Value {
+        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+        let attr = IntegerAttr::new(ty, APInt::from_u64(value, bw(32)));
+        let op = ConstantOp::new(ctx, Box::new(attr));
+        self.ins.append_op(ctx, &op);
+        op.get_result(ctx)
+    }
+
+    /// Leave with exception `status`: to the innermost handler, or out of the function. Ends
+    /// the current block.
+    fn propagate(&mut self, ctx: &mut Context, status: Value) {
+        match self.handlers.last().copied() {
+            Some(handler) => {
+                self.store(ctx, handler.status, status);
+                self.emit(ctx, |ctx| BrOp::new(ctx, handler.block, vec![]));
+            }
+            None => {
+                self.emit(ctx, |ctx| RethrowOp::new(ctx, status));
+            }
+        }
+    }
+
+    /// Run the bodies of the `finally` blocks that a jump out of them leaves, innermost first,
+    /// with only the handlers outside each `try` active.
+    fn run_finallies(
+        &mut self,
+        ctx: &mut Context,
+        leaving: impl Fn(&Finally) -> bool,
+    ) -> Result<()> {
+        let pending: Vec<(usize, Finally)> = self
+            .finallies
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, f)| leaving(f))
+            .collect();
+        for (index, finally) in pending.into_iter().rev() {
+            let handlers = self.handlers.split_off(finally.handlers);
+            let finallies = self.finallies.split_off(index);
+            let lowered = self.statements(ctx, &finally.body);
+            self.handlers.extend(handlers);
+            self.finallies.extend(finallies);
+            lowered?;
+            if self.terminated(ctx) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// `try { body } catch (param) { handler } finally { cleanup }`.
+    fn try_(
+        &mut self,
+        ctx: &mut Context,
+        body: &[Stmt],
+        catch: Option<&perry_hir::ir::CatchClause>,
+        finally: Option<&[Stmt]>,
+    ) -> Result<()> {
+        let i32 = IntegerType::get(ctx, 32, Signedness::Signless).into();
+        let status = self.entry_slot(ctx, i32);
+        let join = self.new_block(ctx, "join");
+        let outer = Finally {
+            body: finally.map(<[Stmt]>::to_vec).unwrap_or_default(),
+            handlers: self.handlers.len(),
+            loops: self.loops.len(),
+        };
+        // The exceptional path of `finally`: run it, then throw the exception again.
+        let rethrow_block = finally.map(|_| self.new_block(ctx, "finally"));
+        let catch_block = catch.map(|_| self.new_block(ctx, "catch"));
+        let first = catch_block
+            .or(rethrow_block)
+            .context("try without catch or finally")?;
+
+        if finally.is_some() {
+            self.finallies.push(outer.clone());
+        }
+        self.handlers.push(Handler {
+            block: first,
+            status,
+        });
+        let lowered = self.statements(ctx, body);
+        self.handlers.pop();
+        if finally.is_some() {
+            self.finallies.pop();
+        }
+        lowered?;
+        if !self.terminated(ctx) {
+            self.statements(ctx, &outer.body)?;
+            self.jump(ctx, join);
+        }
+
+        if let (Some(clause), Some(block)) = (catch, catch_block) {
+            self.switch_to(block);
+            let caught = self.load(ctx, status)?;
+            self.pass_exit(ctx, caught);
+            let exception = self.emit_value(ctx, |ctx| CatchOp::new(ctx, caught));
+            if let Some((id, _)) = &clause.param {
+                let ty = exception.get_type(ctx);
+                let slot = self.entry_slot(ctx, ty);
+                self.store(ctx, slot, exception);
+                self.locals.insert(*id, slot);
+            }
+            if let Some(rethrow) = rethrow_block {
+                self.finallies.push(outer.clone());
+                self.handlers.push(Handler {
+                    block: rethrow,
+                    status,
+                });
+            }
+            let lowered = self.statements(ctx, &clause.body);
+            if rethrow_block.is_some() {
+                self.handlers.pop();
+                self.finallies.pop();
+            }
+            lowered?;
+            if !self.terminated(ctx) {
+                self.statements(ctx, &outer.body)?;
+                self.jump(ctx, join);
+            }
+        }
+
+        if let Some(block) = rethrow_block {
+            self.switch_to(block);
+            let caught = self.load(ctx, status)?;
+            self.pass_exit(ctx, caught);
+            // Hold the exception across the cleanup, which may throw and catch its own.
+            let exception = self.emit_value(ctx, |ctx| CatchOp::new(ctx, caught));
+            self.statements(ctx, &outer.body)?;
+            if !self.terminated(ctx) {
+                let again = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, exception));
+                self.propagate(ctx, again);
+            }
+        }
+        self.switch_to(join);
+        Ok(())
+    }
+
+    /// `process.exit` unwinds through handlers without running them.
+    fn pass_exit(&mut self, ctx: &mut Context, status: Value) {
+        let exit = self.i32(ctx, EXIT_STATUS);
+        let exiting = self.compare(ctx, CompareKind::Eq, status, exit);
+        let leave = self.new_block(ctx, "exit");
+        let stay = self.new_block(ctx, "handle");
+        self.branch(ctx, exiting, leave, stay);
+        self.switch_to(leave);
+        self.propagate(ctx, status);
+        self.switch_to(stay);
     }
 
     fn emit_value<T: Op + OneResultInterface>(
@@ -492,6 +791,11 @@ impl<'s> FunctionBuilder<'s> {
                     values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
                     "return value type differs from the declared result"
                 );
+                self.run_finallies(ctx, |_| true)?;
+                if self.terminated(ctx) {
+                    self.after_terminator(ctx);
+                    return Ok(());
+                }
                 self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
                 self.after_terminator(ctx);
             }
@@ -550,9 +854,30 @@ impl<'s> FunctionBuilder<'s> {
                         }
                     })
                     .context("break/continue outside a loop")?;
-                self.emit(ctx, |ctx| BrOp::new(ctx, target, vec![]));
+                let depth = self.loops.len();
+                self.run_finallies(ctx, |f| f.loops >= depth)?;
+                self.jump(ctx, target);
                 self.after_terminator(ctx);
             }
+            Stmt::Throw(value) => {
+                let value = self.expression(ctx, value)?;
+                let value = self.defined(ctx, value)?;
+                ensure!(
+                    matches!(
+                        kind(ctx, value)?,
+                        Kind::Exception | Kind::Number | Kind::Boolean | Kind::String
+                    ),
+                    "only Error objects, numbers, booleans and strings can be thrown yet"
+                );
+                let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, value));
+                self.propagate(ctx, status);
+                self.after_terminator(ctx);
+            }
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
             other => bail!(
                 "MIR backend does not support statement {} yet",
                 statement_name(other)
@@ -612,6 +937,22 @@ impl<'s> FunctionBuilder<'s> {
     fn effect(&mut self, ctx: &mut Context, expr: &Expr) -> Result<()> {
         if let Expr::Call { callee, args, .. } = expr {
             self.call(ctx, callee, args)?;
+        } else if let Expr::ProcessExit(code) = expr {
+            let code = match code {
+                Some(code) => {
+                    let code = self.expression(ctx, code)?;
+                    let code = self.arithmetic(ctx, code);
+                    ensure!(
+                        kind(ctx, code)? == Kind::Number,
+                        "process.exit takes a number"
+                    );
+                    code
+                }
+                None => self.number(ctx, 0.0),
+            };
+            let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
+            self.propagate(ctx, status);
+            self.after_terminator(ctx);
         } else {
             self.expression(ctx, expr)?;
         }
@@ -675,6 +1016,11 @@ impl<'s> FunctionBuilder<'s> {
                 let rhs = self.arithmetic(ctx, rhs);
                 match (op, kind(ctx, lhs)?, kind(ctx, rhs)?) {
                     (BinaryOp::Add, Kind::String, Kind::String) => {
+                        self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, lhs, rhs))
+                    }
+                    (BinaryOp::Add, Kind::String, _) | (BinaryOp::Add, _, Kind::String) => {
+                        let lhs = self.display(ctx, lhs)?;
+                        let rhs = self.display(ctx, rhs)?;
                         self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, lhs, rhs))
                     }
                     (op, Kind::Number, Kind::Number) => {
@@ -753,12 +1099,9 @@ impl<'s> FunctionBuilder<'s> {
                     }
                 };
                 ensure!(
-                    left_kind != Kind::String,
-                    "string comparison is not supported in the MIR backend yet"
-                );
-                ensure!(
-                    left_kind == Kind::Number || matches!(kind, CompareKind::Eq | CompareKind::Ne),
-                    "ordered comparison of booleans is not supported"
+                    matches!(left_kind, Kind::Number | Kind::String)
+                        || matches!(kind, CompareKind::Eq | CompareKind::Ne),
+                    "ordered comparison is only supported on numbers and strings"
                 );
                 self.compare(ctx, kind, lhs, rhs)
             }
@@ -829,6 +1172,61 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Call { callee, args, .. } => self
                 .call(ctx, callee, args)?
                 .context("a void call has no value")?,
+            Expr::EnvGet(name) => {
+                let name = self.string(ctx, name);
+                self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
+                    .expect("value")
+            }
+            Expr::ObjectKeys(object) if matches!(**object, Expr::ProcessEnv) => self
+                .intrinsic(ctx, Intrinsic::EnvKeys, vec![])
+                .expect("keys"),
+            Expr::PerformanceNow => self
+                .intrinsic(ctx, Intrinsic::PerformanceNow, vec![])
+                .expect("time"),
+            Expr::DateNow => self
+                .intrinsic(ctx, Intrinsic::DateNow, vec![])
+                .expect("time"),
+            Expr::ErrorNew(message) => {
+                let message = match message {
+                    Some(message) => self.string_operand(ctx, message)?,
+                    None => self.string(ctx, ""),
+                };
+                self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::Any, message))
+            }
+            Expr::TypeErrorNew(message) | Expr::RangeErrorNew(message) => {
+                let kind = if matches!(expr, Expr::TypeErrorNew(_)) {
+                    ErrorKind::TypeError
+                } else {
+                    ErrorKind::RangeError
+                };
+                let message = self.string_operand(ctx, message)?;
+                self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message))
+            }
+            Expr::ErrorMessage(error) => {
+                let error = self.expression(ctx, error)?;
+                ensure!(
+                    kind(ctx, error)? == Kind::Exception,
+                    ".message is only supported on caught exceptions and Error objects"
+                );
+                self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, error))
+            }
+            Expr::InstanceOf {
+                expr: value, ty, ..
+            } => {
+                let value = self.expression(ctx, value)?;
+                let error = match ty.as_str() {
+                    "Error" => ErrorKind::Any,
+                    "TypeError" => ErrorKind::TypeError,
+                    "RangeError" => ErrorKind::RangeError,
+                    other => bail!("instanceof {other} is not supported yet"),
+                };
+                match kind(ctx, value)? {
+                    Kind::Exception => {
+                        self.emit_value(ctx, |ctx| ExceptionIsOp::new(ctx, error, value))
+                    }
+                    _ => self.boolean(ctx, false),
+                }
+            }
             Expr::Await(promise) => {
                 ensure!(self.is_async, "await is only valid in async functions");
                 let promise = self.expression(ctx, promise)?;
@@ -857,6 +1255,9 @@ impl<'s> FunctionBuilder<'s> {
                         self.emit_value(ctx, |ctx| {
                             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
                         })
+                    }
+                    (Kind::Exception, "message") => {
+                        self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
                     }
                     (Kind::Record, field) => {
                         let field = identifier(field)?;
@@ -955,6 +1356,22 @@ impl<'s> FunctionBuilder<'s> {
                 expression_name(other)
             ),
         })
+    }
+
+    fn string(&mut self, ctx: &mut Context, text: &str) -> Value {
+        let op = StringConstOp::new(ctx, text);
+        self.append_value(ctx, &op)
+    }
+
+    /// An expression that must be a string (`undefined` throws `TypeError`).
+    fn string_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+        let value = self.expression(ctx, expr)?;
+        let value = self.defined(ctx, value)?;
+        ensure!(
+            kind(ctx, value)? == Kind::String,
+            "a string is required here"
+        );
+        Ok(value)
     }
 
     /// A slot inserted at the start of the entry block, dominating every use.
@@ -1148,7 +1565,125 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
     }
 
+    fn intrinsic(
+        &mut self,
+        ctx: &mut Context,
+        intrinsic: Intrinsic,
+        args: Vec<Value>,
+    ) -> Option<Value> {
+        let op = self.emit(ctx, |ctx| IntrinsicOp::new(ctx, intrinsic, args));
+        let operation = op.get_operation().deref(ctx);
+        (operation.get_num_results() == 1).then(|| operation.get_result(0))
+    }
+
+    /// Pick `then` or `otherwise` (strings) by `condition`, through a slot.
+    fn choose_string(
+        &mut self,
+        ctx: &mut Context,
+        condition: Value,
+        then: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+        otherwise: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+    ) -> Result<Value> {
+        let ty = StringType::get(ctx).into();
+        let slot = self.entry_slot(ctx, ty);
+        let then_block = self.new_block(ctx, "then");
+        let else_block = self.new_block(ctx, "else");
+        let join = self.new_block(ctx, "join");
+        self.branch(ctx, condition, then_block, else_block);
+        self.switch_to(then_block);
+        let value = then(self, ctx)?;
+        self.store(ctx, slot, value);
+        self.jump(ctx, join);
+        self.switch_to(else_block);
+        let value = otherwise(self, ctx)?;
+        self.store(ctx, slot, value);
+        self.jump(ctx, join);
+        self.switch_to(join);
+        self.load(ctx, slot)
+    }
+
+    /// ECMAScript `ToString` of a primitive, as `console.log` and `+` display it.
+    fn display(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if let Some(inner) = optional_value(ctx, value.get_type(ctx)) {
+            if inner.deref(ctx).is::<StringType>() {
+                return Ok(self.emit_value(ctx, |ctx| ToStringOp::new(ctx, value)));
+            }
+            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            return self.choose_string(
+                ctx,
+                undefined,
+                |b, ctx| Ok(b.string(ctx, "undefined")),
+                |b, ctx| {
+                    let op = UnwrapOp::new(ctx, value)?;
+                    let defined = b.append_value(ctx, &op);
+                    b.display(ctx, defined)
+                },
+            );
+        }
+        Ok(match kind(ctx, value)? {
+            Kind::String => value,
+            Kind::Number => self
+                .intrinsic(ctx, Intrinsic::NumberToString, vec![value])
+                .expect("string"),
+            Kind::Boolean => self.choose_string(
+                ctx,
+                value,
+                |b, ctx| Ok(b.string(ctx, "true")),
+                |b, ctx| Ok(b.string(ctx, "false")),
+            )?,
+            _ => bail!("only strings, numbers and booleans can be converted to strings yet"),
+        })
+    }
+
+    /// `console.log(a, b, …)`: the arguments' strings joined by spaces.
+    fn console_line(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+        let mut line: Option<Value> = None;
+        for arg in args {
+            let value = self.expression(ctx, arg)?;
+            let text = self.display(ctx, value)?;
+            line = Some(match line {
+                None => text,
+                Some(line) => {
+                    let space = self.string(ctx, " ");
+                    let spaced = self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, line, space));
+                    self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, spaced, text))
+                }
+            });
+        }
+        Ok(match line {
+            Some(line) => line,
+            None => self.string(ctx, ""),
+        })
+    }
+
     fn call(&mut self, ctx: &mut Context, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+            && matches!(**object, Expr::GlobalGet(_))
+        {
+            let intrinsic = match property.as_str() {
+                "log" | "info" | "debug" => Intrinsic::PrintOut,
+                "error" | "warn" => Intrinsic::PrintErr,
+                other => bail!("console.{other} is not supported yet"),
+            };
+            let line = self.console_line(ctx, args)?;
+            self.intrinsic(ctx, intrinsic, vec![line]);
+            return Ok(None);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && name == "js_process_exit_code_set"
+        {
+            ensure!(args.len() == 1, "process.exitCode takes one value");
+            let code = self.expression(ctx, &args[0])?;
+            let code = self.arithmetic(ctx, code);
+            ensure!(
+                kind(ctx, code)? == Kind::Number,
+                "process.exitCode must be a number"
+            );
+            self.intrinsic(ctx, Intrinsic::ExitCodeSet, vec![code]);
+            return Ok(None);
+        }
         if let Expr::ExternFuncRef { name, .. } = callee
             && self.timers.contains(name)
         {

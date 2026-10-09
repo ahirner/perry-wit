@@ -66,6 +66,7 @@ pub fn compile_for_world(
     let ctx = &mut Context::new();
     let mir = lower(ctx, source, file_name)?;
     let exports = bind::exports(ctx, &mir, resolve, world)?;
+    bind::check_main(ctx, &mir, &exports)?;
     let imports = bind::imports(resolve, world);
     let core = perry_codegen::compile(ctx, &mir, &Exports::Canonical { exports, imports })?;
     let core = finish(core)?;

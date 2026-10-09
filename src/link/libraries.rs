@@ -146,7 +146,9 @@ pub(crate) struct Library {
     pub(crate) data: Vec<(u32, &'static [u8])>,
     pub(crate) data_size: u32,
     pub(crate) data_alignment: u32,
-    pub(crate) imports: Vec<(String, u32)>,
+    /// Imported functions `(module, name, type)`: canonical built-ins and WASI functions the
+    /// runtime calls, forwarded to the linked module's imports when reachable.
+    pub(crate) imports: Vec<(String, String, u32)>,
     pub(crate) elements: Vec<(u32, u32)>,
     pub(crate) table_size: u32,
     pub(crate) table_alignment: u32,
@@ -159,9 +161,8 @@ impl Library {
     /// the conservative reservation. The allocator and linker use this same bound.
     fn fixed_stack_bound(&self) -> Option<u32> {
         use wasmparser::Operator as Op;
-        if !self.imports.is_empty() {
-            return None;
-        }
+        // Imported functions are leaves: host code does not use the shadow stack.
+        let imported = self.imports.len();
         let stack = self
             .globals
             .iter()
@@ -182,7 +183,8 @@ impl Library {
             let mut calls = Vec::new();
             for (index, op) in ops.iter().enumerate() {
                 match op {
-                    Op::Call { function_index } => calls.push(*function_index as usize),
+                    Op::Call { function_index } if (*function_index as usize) < imported => {}
+                    Op::Call { function_index } => calls.push(*function_index as usize - imported),
                     Op::CallIndirect { .. }
                     | Op::CallRef { .. }
                     | Op::ReturnCall { .. }
@@ -344,6 +346,9 @@ impl Library {
                                     "__table_base" if !global.mutable => Global::TableBase,
                                     _ => bail!("unsupported internal helper global {name}"),
                                 });
+                            }
+                            (module, name, TypeRef::Func(ty)) if module != "env" => {
+                                library.imports.push((module.into(), name.into(), ty));
                             }
                             _ => bail!(
                                 "unsupported helper import {}.{}",
@@ -551,7 +556,7 @@ impl Library {
                         table_index: 0,
                     } => {
                         for &(_, target) in &self.elements {
-                            let ty = if let Some(&(_, ty)) = self.imports.get(target as usize) {
+                            let ty = if let Some(&(_, _, ty)) = self.imports.get(target as usize) {
                                 ty
                             } else {
                                 self.function_types[target as usize - self.imports.len()]

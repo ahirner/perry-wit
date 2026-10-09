@@ -241,6 +241,17 @@ impl ArrayType {
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct StringType;
 
+/// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value. Lives in the
+/// task like every other value (R3, R4).
+#[pliron_type(
+    name = "perry.exception",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ExceptionType;
+
 /// The eventual value of an async call; lives no longer than its export task (subset rule R3).
 #[pliron_type(
     name = "perry.promise",

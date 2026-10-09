@@ -289,6 +289,8 @@ fn dump_hir() {
     let ast = perry_parser::parse_typescript(&source, "case.ts").unwrap();
     let hir = perry_hir::lower_module(&ast, "main", "case.ts").unwrap();
     println!("{:#?}", hir.functions);
+    println!("INIT {:#?}", hir.init);
+    println!("GLOBALS {:#?}", hir.globals);
     println!("IMPORTS {:#?}", hir.imports);
 }
 
@@ -321,5 +323,19 @@ export async function run(x: number): Promise<number> {
         "perry_async",
     ] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
+    }
+}
+
+#[test]
+#[ignore]
+fn dump_mir() {
+    let path = std::env::var("PERRY_MIR").expect("PERRY_MIR=<file.ts>");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let ctx = &mut Context::new();
+    let module = lower_source(ctx, &source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
+    let op = module.get_operation();
+    println!("{}", Operation::get_op_dyn(op, ctx).disp(ctx));
+    if let Err(e) = pliron::operation::verify_operation(op, ctx) {
+        println!("VERIFY: {}", e.disp(ctx));
     }
 }

@@ -321,8 +321,17 @@ impl FunctionLowering<'_> {
         let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
         let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
         let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-        let status = self.load(ctx, MemKind::I32, promise, promises::STATUS);
-        self.throw_status_if(ctx, rejected, status);
+        // A rejection makes its exception object pending again and throws its status.
+        let rethrow = self.new_block(ctx, vec![]);
+        let fulfilled = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
+        self.block = rethrow;
+        let status = self
+            .runtime(ctx, Runtime::PromiseRethrow, vec![promise])
+            .expect("status");
+        let (throw, args) = self.throw_target(ctx, status);
+        self.br(ctx, throw, args);
+        self.block = fulfilled;
         let ty = op.deref(ctx).get_result(0).get_type(ctx);
         let value = self.load(ctx, slot_kind(ctx, ty)?, promise, promises::VALUE);
         self.define(ctx, op, value);
@@ -396,29 +405,10 @@ impl FunctionLowering<'_> {
         let four = self.i32_const(ctx, 4);
         let handle = self.num(ctx, NumOpcode::I32ShrU, vec![status, four]);
         self.runtime(ctx, Runtime::SubtaskRegister, vec![handle, promise, bits]);
-        let set = self.waitable_set(ctx);
-        self.host(ctx, crate::Host::WaitableJoin, vec![handle, set]);
+        self.runtime(ctx, Runtime::TaskJoin, vec![handle]);
         self.br(ctx, joined, vec![]);
         self.block = joined;
         self.define(ctx, op, promise);
         Ok(())
-    }
-
-    /// The current task's waitable set, created on first use.
-    pub(crate) fn waitable_set(&mut self, ctx: &mut Context) -> Value {
-        let i32 = i32_type(ctx);
-        let existing = self.runtime(ctx, Runtime::TaskSet, vec![]).expect("set");
-        let missing = self.num(ctx, NumOpcode::I32Eqz, vec![existing]);
-        let create = self.new_block(ctx, vec![]);
-        let have = self.new_block(ctx, vec![i32]);
-        self.cond_br(ctx, missing, (create, vec![]), (have, vec![existing]));
-        self.block = create;
-        let set = self
-            .host(ctx, crate::Host::WaitableSetNew, vec![])
-            .expect("set");
-        self.runtime(ctx, Runtime::TaskSetSet, vec![set]);
-        self.br(ctx, have, vec![set]);
-        self.block = have;
-        have.deref(ctx).get_argument(0)
     }
 }

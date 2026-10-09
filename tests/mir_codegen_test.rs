@@ -235,6 +235,95 @@ export async function fails(n: number): Promise<number> {
     );
 }
 
+/// `throw`, `try`/`catch`/`finally` and exception objects, in sync and async functions.
+#[test]
+fn exceptions_are_thrown_caught_and_cleaned_up() {
+    let mut program = Program::new(
+        r#"
+function check(x: number): number {
+  if (x < 0) { throw new RangeError("negative"); }
+  if (x > 100) { throw x; }
+  return x;
+}
+function classify(x: number): number {
+  try {
+    check(x);
+    const xs: number[] = [1];
+    return xs[x] as number;
+  } catch (e) {
+    if (e instanceof RangeError) { return e.message.length * 1000; }
+    if (e instanceof TypeError) { return -1; }
+    if (e instanceof Error) { return -2; }
+    return -3;
+  }
+}
+function cleanup(x: number): number {
+  let log = 0;
+  for (let i = 0; i < 3; i++) {
+    try {
+      if (i === 1) { continue; }
+      if (x === i) { throw new Error("stop"); }
+      log = log * 10 + 1;
+    } catch {
+      log = log * 10 + 2;
+      break;
+    } finally {
+      log = log * 10 + 3;
+    }
+  }
+  return log;
+}
+function rethrows(x: number): number {
+  try {
+    try { throw new TypeError("inner"); } finally { x = x + 1; }
+  } catch (e) {
+    if (e instanceof TypeError && e.message === e.message) { return x; }
+  }
+  return 0;
+}
+async function failing(x: number): Promise<number> {
+  if (x > 1) { throw new TypeError("async"); }
+  return x;
+}
+async function awaits(x: number): Promise<number> {
+  try {
+    return await failing(x);
+  } catch (e) {
+    if (e instanceof TypeError) { return 70; }
+    return 71;
+  } finally {
+    x = 0;
+  }
+}
+export function runClassify(x: number): number { return classify(x); }
+export function runCleanup(x: number): number { return cleanup(x); }
+export function runRethrows(x: number): number { return rethrows(x); }
+export function uncaught(x: number): number { return check(x); }
+export async function runAwaits(x: number): Promise<number> { return await awaits(x); }
+"#,
+    );
+    assert_eq!(program.number("runClassify", 0.0), 1.0);
+    assert_eq!(program.number("runClassify", 1.0), -1.0);
+    assert_eq!(program.number("runClassify", -5.0), 8000.0);
+    assert_eq!(program.number("runClassify", 500.0), -3.0);
+    // Digits: 1 normal end, 2 catch, 3 finally; `continue` and `break` run `finally` too.
+    assert_eq!(program.number("runCleanup", 9.0), 13313.0);
+    assert_eq!(program.number("runCleanup", 2.0), 13323.0);
+    assert_eq!(program.number("runCleanup", 0.0), 23.0);
+    assert_eq!(program.number("runRethrows", 4.0), 5.0);
+    assert_eq!(program.throwing("uncaught", 7.0), (7.0, 0));
+    assert_eq!(
+        program.throwing("uncaught", -1.0).1,
+        status_code(ErrorKind::RangeError)
+    );
+    assert_eq!(
+        program.throwing("uncaught", 101.0).1,
+        status_code(ErrorKind::Value)
+    );
+    assert_eq!(program.throwing("runAwaits", 1.0), (1.0, 0));
+    assert_eq!(program.throwing("runAwaits", 5.0), (70.0, 0));
+}
+
 #[test]
 fn scaling_contracts_are_linear() {
     let workloads = [

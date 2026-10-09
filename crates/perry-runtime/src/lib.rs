@@ -15,6 +15,9 @@
 extern crate alloc;
 
 pub mod array;
+pub mod exception;
+pub mod host;
+pub mod io;
 pub mod promise;
 pub mod region;
 pub mod string;
@@ -53,6 +56,38 @@ mod tests {
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
         promises_queue_waiters_and_tasks_interleave();
+        output_drains_through_blocked_writes_and_closes();
+    }
+
+    fn output_drains_through_blocked_writes_and_closes() {
+        use host::mock::{WRITTEN, complete_pending};
+        use io::*;
+        region::perry_task_enter();
+        let mut hello = String::from("hello world");
+        let hello = unsafe { string::perry_string_adopt(hello.as_mut_ptr(), 11) };
+        let mut bang = String::from("!");
+        let bang = unsafe { string::perry_string_adopt(bang.as_mut_ptr(), 1) };
+        unsafe { perry_print(0, hello, 1) };
+        perry_io_pump();
+        // Output produced while a write is blocked waits in the second buffer.
+        unsafe { perry_print(0, bang, 1) };
+        unsafe { perry_print(1, bang, 0) };
+        let mut rounds = 0;
+        while perry_io_close() == 0 {
+            let (handle, code) = complete_pending().expect("a blocked write");
+            assert_eq!(perry_io_event(host::EVENT_STREAM_WRITE, handle, code), 1);
+            rounds += 1;
+            assert!(rounds < 20);
+        }
+        WRITTEN.with(|w| {
+            let w = w.borrow();
+            assert_eq!(&w[0][..], b"hello world\n!\n");
+            assert_eq!(&w[1][..], b"!");
+        });
+        // A closed task drops further output instead of reopening its streams.
+        unsafe { perry_print(0, bang, 1) };
+        assert_eq!(perry_io_close(), 1);
+        region::perry_task_free();
     }
 
     fn promises_queue_waiters_and_tasks_interleave() {

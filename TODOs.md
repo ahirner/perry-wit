@@ -298,7 +298,8 @@ The phases run in order. Items within a phase can run in parallel unless they ar
     - Everything else is rejected with a diagnostic.
     - Since added: records (interfaces and literals unify by sorted field names), arrays, `push`, index and property reads and writes, R8 optionals with ECMAScript coercions and `=== undefined`. Eight tests pass.
     - Since added: async functions, `await`, and `setTimeout` from `timers/promises` / `node:timers/promises` (`perry.timer`).
-    - Next: globals and module state, truthiness, string comparison, labeled control flow, try/throw.
+    - Since added: `throw`, `try`/`catch`/`finally` (exception values, `instanceof`, `.message`), string comparison, `String + number|boolean`, the standard services of `perry.intrinsic` (console, `process.env`, `process.exitCode`/`exit`, `performance.now`, `Date.now`), and top-level statements as the async `perry_main` of a command.
+    - Next: globals and module state, truthiness, labeled control flow, method calls on builtins (`charAt`, `Promise.all`, `JSON.*`).
 - [ ] **P2.3 MIR snapshot tests** replace the 10 `waffle_ir` references in the test suite.
 
 ### P3. Pass pipeline
@@ -317,6 +318,8 @@ Owned (each with unit tests on MIR snippets):
   - Where `0 <= i < length` is proven, rewrite `perry.array_get` to an unchecked read, drop `perry.optional` and fold the `perry.unwrap`/`perry.to_number` uses (R8).
   - Use `perry.is_undefined` guards as range facts on the defined branch.
 - [ ] **P3.5b Throw edges.** Ops implementing `MayThrowInterface` (`perry.call`, `perry.await`, `perry.unwrap`, `perry.array_set`) get explicit exception successors to the nearest handler or the function's exceptional exit. Runs before codegen, after P3.5 has removed provably safe checks.
+  - *Status:* the builder already makes handler edges explicit inside `try`: a throwing op is followed by `perry.caught` (its status) and a branch to the handler, so mem2reg, DCE and the verifiers see the real CFG. Outside a `try`, ops still leave the function implicitly. Exceptions are values: `perry.raise` makes a thrown value pending in the task, `perry.catch` takes it (or materializes an `Error` for runtime failures), and promise rejections carry it (`perry_runtime::exception`). `process.exit` unwinds with status 5, which handlers pass on without running. `finally` bodies are duplicated per exit (normal, exceptional, `return`/`break`/`continue`).
+  - Open: catch bindings support `instanceof Error|TypeError|RangeError`, `.message`, `===` and rethrow; `cause`, `name`, `stack` and `ErrorNewWithOptions` are not modeled yet (`ecma.error.values`).
 - [ ] **P3.6 Shapes and interface views.**
   - Exact layouts for closed types: references 4 bytes, f64/i64 8-aligned, packed booleans, optional-presence bits.
   - Per-(shape, interface) field-offset tables.
@@ -383,7 +386,9 @@ Owned (each with unit tests on MIR snippets):
   - A cycle-collection contract passes.
   - Allocator entries are 0 per iteration for the temporary-record loop.
 - [ ] **P5.4 Scheduler.**
-  - *Status:* `perry_runtime::region::Task` holds the run queue, the pending host subtasks (handle → promise and value) and the waitable set; `perry_runtime::promise` queues waiters in order. `[async-lift]<export>` sets `context.set 0` to the task, and `finish` drives ready frames, then returns `EXIT` after `task.return` or `WAIT` on the task's set. The callback settles returned subtasks. YIELD is never returned.
+  - *Status:* `perry_runtime::region::Task` holds the run queue, the pending host subtasks (handle → promise and value), the waitable set and the console outputs; `perry_runtime::promise` queues waiters in order. `[async-lift]<export>` sets `context.set 0` to the task, and `finish` drives ready frames and pumps output, then returns `EXIT` after the outputs are closed and `task.return` is called, or `WAIT` on the task's set. The callback settles returned subtasks (`perry_task_subtask_event`) and stream/future events (`perry_io_event`). YIELD is never returned.
+  - The runtime calls canonical built-ins and WASI functions itself (`perry_runtime::host`); `src/link` forwards the imports of reachable runtime functions, so a component imports only what it uses.
+  - Console output (`perry_runtime::io`): per-task buffers drained through one `wasi:cli/stdout`/`stderr` stream each with async `stream.write`; a second buffer takes output while a write is blocked; closing drops the writable end and waits for the completion future. Console output in a synchronous export is rejected, since nothing can wait for the stream.
   - Open:
     - Cancellation (below).
     - Results of async imports are lowered through `cabi_realloc` while no task is current. `wait-for` has none; the first import with a result needs the callback to resume the task first or a pre-allocated result area.
@@ -420,6 +425,7 @@ Owned (each with unit tests on MIR snippets):
     - remove a `perry.unwrap` dominated by another unwrap of the same value (P3.5b). `point.x; point.y` currently checks twice;
     - inline `fmod` for proven integers (P3.5). `perry_f64_rem` is the largest per-iteration cost in the scaling loops.
 - [ ] **P6.2 Migrate in registry order.** Each group is done when its conformance contracts and the matching `tests/*` suites pass on MIR:
+  - *Status (2026-10-09):* 8 of 50 contracts pass: the four scaling contracts, `web.console.routing`, `web.performance.monotonic`, `node.process.exit_status` and `node.process.environment`. CLI commands work (`tests/command_test.rs`): top-level statements with top-level `await` implement `wasi:cli/run`; an uncaught exception prints `Uncaught …` to stderr and fails the command. The timer contracts pass their witnesses but generate `JSON.parse`. Remaining blockers by count: `JSON.parse`/`stringify` (10), `Uint8Array` (10), method calls on builtins (10: `charAt`, `Promise.all`, `crypto.*`, `fs`), `Date` objects, `Math.*`, `Response`/streams, `AbortController`, HTTP handlers.
   1. `ecma.number`, `ecma.math`, `ecma.string`
   2. `ecma.object`, `ecma.array`
   3. `ecma.json`, `ecma.date`
@@ -431,6 +437,7 @@ Owned (each with unit tests on MIR snippets):
   9. Fetch, then the HTTP handler
   10. CLI command
 - [x] **P6.3 Strip thread flags everywhere.** The legacy tests, fixtures and scripts are gone, and README and conformance no longer pass the flags. Async (P3.8) must keep it that way. *Done when:* `rg -n 'thread-|stackful|threading|more-async-builtins'` returns nothing outside history and this file.
+- [ ] **P6.5 Command polish.** Exit codes other than 0/1 need `exit-with-code` (unstable in WASI 0.3.0); `process.exit` lets frames already queued run before the export returns; `console.log` formats only primitives (no `util.inspect` of objects and arrays, and `-0` prints as `0`).
 - [ ] **P6.4 Portability check.** Emitted components validate with wasmparser **default** features, so no 🧵, 🚟 or 🚝. Optionally smoke-run `merge_task` and a CLI example in jco.
 
 ### P7. Cutover and deletion
@@ -460,6 +467,19 @@ Owned (each with unit tests on MIR snippets):
 
   Record the decision in ARCHITECTURE.md.
 
+### P9. Generative and metamorphic testing (breadth and depth)
+
+The repository once had a generative suite (`tests/generative`, removed in 7457587): seeded generation of well-typed programs at API levels 0–6, four metamorphic forms of each expression tree, differential execution against Node.js across boundary inputs, reduction to `minimal.ts`, replay and campaign tallies. Conformance kept the per-contract proptest strategies and the four expression forms (`program::Form`), but lost whole-program generation and every check that needs no oracle. The MIR pipeline makes those checks cheap and more valuable: it has many more internal invariants than the legacy backend, and most of its bugs (dominance after the async split, catch landings, reducibility, frame slots) only show on specific CFG shapes that hand-written tests do not enumerate.
+
+- [ ] **P9.1 Program generator over the supported subset.** Typed generation of whole programs: functions and calls, records and arrays, strings, control flow with `break`/`continue`, exceptions with `try`/`catch`/`finally`, async functions with `await` and timers, top-level statements. The feature set is derived from what the subset accepts (and grows with P6.2), not from fixed API levels. Source: `crates/conformance/src/strategies.rs` and the old `tests/generative/model.rs`.
+- [ ] **P9.2 Metamorphic relations.** Each holds on the component alone, so it needs no oracle, and is checked differentially against Node.js where the subset has one:
+  - semantic rewrites: extract or inline a function, wrap in `async` + `await`, wrap in `try { … } catch (e) { throw e; }`, add a no-op `finally`, unroll or peel a loop, permute record fields and independent bindings, insert dead code, re-associate string concatenation;
+  - pipeline variants: with and without `canonicalize`, with a forced guard block (`pliron_wasm::reducible` on an artificially irreducible CFG), raw exports versus the component;
+  - resource relations: results, fuel ratio (n vs 4n, as in P0.1) and peak memory stay stable across repeated calls on one instance.
+- [ ] **P9.3 Internal oracles.** Every generated program is verified after each pass, its Wasm validated with wasmparser default features plus component-model-async only, and the emitter is fuzzed separately: random CFGs (reducible and irreducible) in the `wasm` dialect against a reference interpreter of the dialect.
+- [ ] **P9.4 Campaigns.** Seeded and replayable, shrinking with proptest, failures saved as regression cases under `crates/conformance/cases`, and a tally per feature to measure breadth. A smoke budget (under a minute) runs in `cargo test` and `nix flake check`; a long campaign runs nightly.
+  - *Done when:* the smoke campaign runs in CI with all relations of P9.2, and the first bugs it finds land as regression cases.
+
 ## Global acceptance
 
 - No `waffle` dependency (bonus goal), and no `[thread-*]` imports in any emitted component.
@@ -469,7 +489,7 @@ Owned (each with unit tests on MIR snippets):
 
 ## Open questions
 
-- **Exceptions (decided for now):** the status convention. A function that may throw returns an extra `i32` status after its results, callers branch on it, and the codes are `perry_codegen::status_code`. Wasm exception handling stays a later lowering swap; the MIR's throwing ops are marked, so either lowering works.
+- **Exceptions (decided for now):** the status convention, plus a pending exception object in the task for `throw` (P3.5b). A function that may throw returns an extra `i32` status after its results, callers branch on it, and the codes are `perry_codegen::status_code`. Wasm exception handling stays a later lowering swap; the MIR's throwing ops are marked, so either lowering works.
 - **pliron is pre-1.0:** pin it, and budget for upstream contributions (the inliner, SROA). The Wasm dialect and emitter live in `crates/pliron-wasm`, which is free of perry code and can be published.
 - **Strings (decided 2026-10-09):** UTF-8 with a cached UTF-16 length and an in-place append buffer. Open: WTF-8 for lone surrogates, and an index cache for non-ASCII `charAt`/`slice` (P6.2 group 1).
 - **R5 scope:** which array and promise builtins accept inlined arrows in the first release.

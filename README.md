@@ -5,9 +5,9 @@
 Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
 [Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
 
-> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI, with `setTimeout` from `node:timers/promises`. `fetch`, `node:fs`, streams, JSON, Date, CLI commands and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
+> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI with `setTimeout` from `node:timers/promises`, `throw`/`try`/`catch`/`finally`, and CLI commands with top-level `await`, `console`, `process.env`, `process.exit` and the clocks. `fetch`, `node:fs`, streams, JSON, `Date` objects and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
 
-- **WIT-first authoring**: Export typed functions matching a WIT world. Standalone CLI commands with top-level `await` return with the async migration.
+- **WIT-first authoring**: Export typed functions matching a WIT world, or write a standalone CLI command with top-level `await`.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
 - **Hermetic toolchain**: Fully reproducible builds, type generation, and component testing via Nix flakes.
 
@@ -119,7 +119,18 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("t
 
 ### CLI Scripts
 
-Command components (worlds exporting `wasi:cli/run@0.3.0`, top-level `await`, `process.exit`) return with the async migration (TODOs.md P3.8, P6.2).
+A module with top-level statements compiles against a world that exports `wasi:cli/run@0.3.0` (the `command` world in [wit/world.wit](wit/world.wit)); its statements, including top-level `await`, become `run`.
+
+```sh
+perry-wit --world command -o hello.wasm hello.ts
+wasmtime run -S p3=y -W component-model-async=y hello.wasm
+```
+
+- `console.log`/`info`/`debug` write to stdout and `console.error`/`warn` to stderr, one line per call with primitive arguments.
+- `process.exitCode = 1` or `process.exit(1)` fails the command; `process.exit` returns without running `catch` or `finally`.
+- An uncaught exception prints `Uncaught <error>` to stderr and fails the command.
+- `process.env.NAME`, `Object.keys(process.env)`, `performance.now()` and `Date.now()` read the WASI environment and clocks.
+- Console output needs async exports: it drains through WASI P3 streams, which a synchronous export cannot wait for.
 
 ### Project Setup
 

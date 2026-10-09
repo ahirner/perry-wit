@@ -2,7 +2,7 @@
 //!
 //! Layout, read inline by compiled code: `state: u32` at 0 ([PENDING], [FULFILLED],
 //! [REJECTED]), `status: i32` at 4 (the exception code of a rejection), the settled value's
-//! 8-byte slot at 8 (`f64` bits or a 32-bit reference). Compiled code checks `state` before
+//! 8-byte slot at 8 (`f64` bits or a 32-bit reference; a rejection's exception object). Compiled code checks `state` before
 //! suspending, so awaiting a settled promise continues inline; otherwise the awaiting frame
 //! becomes a waiter and is queued on the task's ready list when the promise settles.
 use crate::region::{Node, current};
@@ -66,10 +66,23 @@ pub extern "C" fn perry_promise_resolve(promise: *mut u8, value: u64) {
     settle(promise, FULFILLED, 0, value);
 }
 
-/// Reject `promise` with exception code `status` and queue its waiters.
+/// Reject `promise` with exception code `status`, taking the pending exception object into
+/// its value slot, and queue its waiters.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_promise_reject(promise: *mut u8, status: i32) {
-    settle(promise, REJECTED, status, 0);
+    let exception = core::mem::replace(&mut current().exception, ptr::null_mut());
+    settle(promise, REJECTED, status, exception as usize as u64);
+}
+
+/// `await` of the rejected `promise`: make its exception pending again; returns its status.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
+    let promise = promise as *mut Promise;
+    // SAFETY: compiled code passes a live, rejected promise.
+    unsafe {
+        current().exception = (*promise).value as usize as *mut u8;
+        (*promise).status
+    }
 }
 
 /// Queue `frame` when the pending `promise` settles.
