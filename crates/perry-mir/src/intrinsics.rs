@@ -22,6 +22,13 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    MathFloor,
+    MathCeil,
+    MathTrunc,
+    MathAbs,
+    MathSqrt,
+    MathRound,
+    DateClip,
     TextBytesLength,
     TextBytesTruthy,
     TextBytesEqual,
@@ -78,15 +85,12 @@ pub enum Intrinsic {
     JsonAsBoolean,
     JsonAsString,
     JsonAsArray,
+    JsonAsObject,
     JsonTypeof,
     JsonEqual,
     JsonIsArray,
     JsonSet,
     JsonSetIndex,
-    JsonKeys,
-    JsonHasOwn,
-    JsonDelete,
-    JsonKey,
 
     Stdout,
     Stderr,
@@ -134,7 +138,6 @@ enum ValueType {
     Json,
     OptionalJson,
     Jsons,
-    OptionalJsons,
     Boolean,
     String,
     OptionalString,
@@ -188,10 +191,6 @@ impl ValueType {
             }
             Self::Jsons => {
                 let json = JsonType::get(ctx).into();
-                ArrayType::get(ctx, json).into()
-            }
-            Self::OptionalJsons => {
-                let json = Self::OptionalJson.get(ctx);
                 ArrayType::get(ctx, json).into()
             }
             Self::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
@@ -264,14 +263,13 @@ impl ValueType {
                 .deref(ctx)
                 .downcast_ref::<OptionalType>()
                 .is_some_and(|ty| ty.value().deref(ctx).is::<JsonType>()),
-            Self::Jsons => ty
-                .deref(ctx)
-                .downcast_ref::<ArrayType>()
-                .is_some_and(|ty| ty.element().deref(ctx).is::<JsonType>()),
-            Self::OptionalJsons => ty
-                .deref(ctx)
-                .downcast_ref::<ArrayType>()
-                .is_some_and(|ty| Self::OptionalJson.matches(ctx, ty.element())),
+            Self::Jsons => ty.deref(ctx).downcast_ref::<ArrayType>().is_some_and(|ty| {
+                let element = ty.element();
+                crate::optional::optional_value(ctx, element)
+                    .unwrap_or(element)
+                    .deref(ctx)
+                    .is::<JsonType>()
+            }),
             Self::Boolean => ty
                 .deref(ctx)
                 .downcast_ref::<IntegerType>()
@@ -304,6 +302,13 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::MathFloor
+            | Self::MathCeil
+            | Self::MathTrunc
+            | Self::MathAbs
+            | Self::MathSqrt
+            | Self::MathRound
+            | Self::DateClip => (&[Number], &[Number]),
             Self::TextBytesLength => (&[TextBytes], &[Number]),
             Self::TextBytesTruthy | Self::TextBytesIsText => (&[TextBytes], &[Boolean]),
             Self::TextBytesEqual => (&[OptionalTextBytes, OptionalTextBytes], &[Boolean]),
@@ -349,11 +354,12 @@ impl Intrinsic {
             Self::JsonNumber => (&[Number], &[Json]),
             Self::JsonBoolean => (&[Boolean], &[Json]),
             Self::JsonString => (&[String], &[Json]),
-            Self::JsonArray => (&[OptionalJsons], &[Json]),
-            Self::JsonObject => (&[Strings, OptionalJsons], &[Json]),
+            Self::JsonArray => (&[Jsons], &[Json]),
+            Self::JsonObject => (&[Strings, Jsons], &[Json]),
             Self::JsonGet => (&[Json, String], &[OptionalJson]),
             Self::JsonIndex => (&[Json, Number], &[OptionalJson]),
             Self::JsonAsArray => (&[OptionalJson], &[Jsons]),
+            Self::JsonAsObject => (&[OptionalJson], &[Json]),
             Self::JsonAsNumber => (&[OptionalJson], &[Number]),
             Self::JsonAsBoolean => (&[OptionalJson], &[Boolean]),
             Self::JsonAsString | Self::JsonTypeof => (&[OptionalJson], &[String]),
@@ -361,10 +367,6 @@ impl Intrinsic {
             Self::JsonEqual => (&[OptionalJson, OptionalJson], &[Boolean]),
             Self::JsonSet => (&[Json, String, OptionalJson], &[]),
             Self::JsonSetIndex => (&[Json, Number, OptionalJson], &[]),
-            Self::JsonKeys => (&[OptionalJson], &[Strings]),
-            Self::JsonHasOwn => (&[OptionalJson, String], &[Boolean]),
-            Self::JsonDelete => (&[Json, String], &[Boolean]),
-            Self::JsonKey => (&[OptionalJson], &[String]),
             Self::BufferNew => (&[Number], &[Buffer]),
             Self::BufferLength => (&[Buffer], &[Number]),
             Self::BytesNew => (&[Number], &[Bytes]),
@@ -439,8 +441,17 @@ impl Verify for IntrinsicOp {
 
 #[op_interface_impl]
 impl SideEffects for IntrinsicOp {
-    fn has_side_effects(&self, _ctx: &Context) -> bool {
-        true
+    fn has_side_effects(&self, ctx: &Context) -> bool {
+        !matches!(
+            self.kind(ctx),
+            Intrinsic::MathFloor
+                | Intrinsic::MathCeil
+                | Intrinsic::MathTrunc
+                | Intrinsic::MathAbs
+                | Intrinsic::MathSqrt
+                | Intrinsic::MathRound
+                | Intrinsic::DateClip
+        )
     }
 }
 
@@ -454,23 +465,17 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
                 | Intrinsic::StringLower
                 | Intrinsic::StringUpper
                 | Intrinsic::StringRepeat
-                | Intrinsic::BytesFromArray
-                | Intrinsic::BytesSetArray
                 | Intrinsic::JsonParse
-                | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
                 | Intrinsic::JsonAsNumber
                 | Intrinsic::JsonAsBoolean
                 | Intrinsic::JsonAsArray
+                | Intrinsic::JsonAsObject
                 | Intrinsic::JsonAsString
                 | Intrinsic::JsonSet
                 | Intrinsic::JsonSetIndex
-                | Intrinsic::JsonKeys
-                | Intrinsic::JsonHasOwn
-                | Intrinsic::JsonDelete
-                | Intrinsic::JsonKey
         ) {
             crate::attrs::ErrorKind::Any
         } else {
@@ -485,23 +490,18 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
                 | Intrinsic::StringLower
                 | Intrinsic::StringUpper
                 | Intrinsic::StringRepeat
-                | Intrinsic::BytesFromArray
                 | Intrinsic::BytesSetArray
                 | Intrinsic::JsonParse
-                | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
                 | Intrinsic::JsonAsNumber
                 | Intrinsic::JsonAsBoolean
                 | Intrinsic::JsonAsArray
+                | Intrinsic::JsonAsObject
                 | Intrinsic::JsonAsString
                 | Intrinsic::JsonSet
                 | Intrinsic::JsonSetIndex
-                | Intrinsic::JsonKeys
-                | Intrinsic::JsonHasOwn
-                | Intrinsic::JsonDelete
-                | Intrinsic::JsonKey
                 | Intrinsic::ExitCodeSet
                 | Intrinsic::ProcessExit
                 | Intrinsic::BufferNew

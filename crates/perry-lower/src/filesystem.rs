@@ -195,6 +195,7 @@ impl FunctionBuilder<'_> {
             self.switch_to(join);
             allowed = self.load(ctx, result)?;
         }
+        let data = data.map(|value| self.defined(ctx, value)).transpose()?;
         let (intrinsic, mode) = match (operation, data.map(|value| kind(ctx, value)).transpose()?) {
             ("readFile", _) if text_read == Some(true) => (Intrinsic::FsReadText, 1.0),
             ("readFile", _) if text_read.is_none() => (Intrinsic::FsReadValue, 5.0),

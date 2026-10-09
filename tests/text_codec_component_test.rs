@@ -25,7 +25,7 @@ impl ResourceLimiter for Peak {
 
 const SOURCE: &str = r#"
 type Decoder = TextDecoder;
-interface Holder { decoder: Decoder; encoder?: TextEncoder; }
+interface Holder { decoder: Decoder; encoder: TextEncoder | undefined; }
 function encoder():TextEncoder {return new globalThis.TextEncoder();}
 function read(decoder:Decoder,input:Uint8Array):string {return decoder.decode(input,{stream:true});}
 function mark(trace:number[],n:number,value:boolean):boolean {trace.push(n);return value;}

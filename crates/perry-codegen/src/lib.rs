@@ -12,8 +12,8 @@
 //!   address for references and `2` for booleans. Wasm arithmetic only produces quiet NaNs, so
 //!   no computed number can be mistaken for `undefined`; `perry.to_number` canonicalizes
 //!   before arithmetic.
-//! - Records carry a static shape descriptor and property-order table before 8-byte slots;
-//!   arrays use the layout in [perry_runtime::array]. Packed layouts remain P3.6.
+//! - Records are an `i32` shape id followed by 8-byte field slots in declaration order; arrays
+//!   use the layout in [perry_runtime::array]. Exact layouts are P3.6.
 //! - Every allocation is `task` tier: the builder cannot express module state yet (R4), so no
 //!   value outlives its export call. Each export call is one task (see `perry_runtime::region`).
 //! - Strings are UTF-8 with a cached Unicode scalar length (layout in [perry_runtime::string]);
@@ -37,9 +37,8 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, FsStatsType, JsonType,
-        OptionalType, PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType,
-        TextOrBytesType, TupleType,
+        ArrayType, BufferType, BytesType, ExceptionType, FsStatsType, JsonType, OptionalType,
+        PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TextOrBytesType,
     },
 };
 use perry_runtime::array as layout;
@@ -56,6 +55,7 @@ use pliron::{
         types::{FP32Type, FP64Type, FunctionType, IntegerType, Signedness},
     },
     context::{Context, Ptr},
+    graph::traversals::region::DFSTraversal,
     identifier::Identifier,
     linked_list::ContainsLinkedList,
     op::{Op, op_cast},
@@ -80,9 +80,7 @@ use std::{
 mod async_split;
 pub mod boundary;
 mod exceptions;
-mod shapes;
 mod unions;
-mod views;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -256,25 +254,7 @@ enum Runtime {
     TextDecoderNew,
     TextDecode,
     TextDecoderIgnoreBom,
-    JsonPack,
-    JsonUnpack,
-    ViewGet,
-    ViewSet,
-    ViewLength,
-    ReferenceIdentity,
     ExceptionStatus,
-    Enumerate,
-    DictionaryNew,
-    DictionaryGet,
-    DictionarySet,
-    RecordInclude,
-    RecordKeys,
-    RecordHas,
-    RecordDelete,
-    DictionaryDelete,
-    DictionaryHas,
-    DictionaryKeys,
-    DictionaryValues,
     JsonParse,
 
     JsonStringify,
@@ -290,15 +270,12 @@ enum Runtime {
     JsonAsBoolean,
     JsonAsString,
     JsonAsArray,
+    JsonAsObject,
     JsonTypeof,
     JsonEqual,
     JsonIsArray,
     JsonSet,
     JsonSetIndex,
-    JsonKeys,
-    JsonHasOwn,
-    JsonDelete,
-    JsonKey,
 
     BufferNew,
     BufferLength,
@@ -379,25 +356,7 @@ enum Runtime {
 impl Runtime {
     fn name(self) -> &'static str {
         match self {
-            Runtime::JsonPack => "perry_json_pack",
-            Runtime::JsonUnpack => "perry_json_unpack",
-            Runtime::ViewGet => "perry_view_get",
-            Runtime::ViewSet => "perry_view_set",
-            Runtime::ViewLength => "perry_view_length",
-            Runtime::ReferenceIdentity => "perry_reference_identity",
             Runtime::ExceptionStatus => "perry_exception_status",
-            Runtime::Enumerate => "perry_enumerate",
-            Runtime::DictionaryNew => "perry_dictionary_new",
-            Runtime::DictionaryGet => "perry_dictionary_get",
-            Runtime::DictionarySet => "perry_dictionary_set",
-            Runtime::RecordInclude => "perry_record_include",
-            Runtime::RecordKeys => "perry_record_keys",
-            Runtime::RecordHas => "perry_record_has",
-            Runtime::RecordDelete => "perry_record_delete",
-            Runtime::DictionaryDelete => "perry_dictionary_delete",
-            Runtime::DictionaryHas => "perry_dictionary_has",
-            Runtime::DictionaryKeys => "perry_dictionary_keys",
-            Runtime::DictionaryValues => "perry_dictionary_values",
             Runtime::JsonParse => "perry_json_parse",
 
             Runtime::JsonStringify => "perry_json_stringify",
@@ -407,15 +366,12 @@ impl Runtime {
             Runtime::JsonString => "perry_json_string",
             Runtime::JsonArray => "perry_json_array",
             Runtime::JsonObject => "perry_json_object",
-            Runtime::JsonKeys => "perry_json_keys",
-            Runtime::JsonHasOwn => "perry_json_has_own",
-            Runtime::JsonDelete => "perry_json_delete",
-            Runtime::JsonKey => "perry_json_key",
             Runtime::JsonGet => "perry_json_get",
             Runtime::JsonIndex => "perry_json_index",
             Runtime::JsonAsNumber => "perry_json_as_number",
             Runtime::JsonAsBoolean => "perry_json_as_boolean",
             Runtime::JsonAsArray => "perry_json_as_array",
+            Runtime::JsonAsObject => "perry_json_as_object",
             Runtime::JsonAsString => "perry_json_as_string",
             Runtime::JsonTypeof => "perry_json_typeof",
             Runtime::JsonEqual => "perry_json_equal",
@@ -535,10 +491,6 @@ impl Runtime {
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
-            Runtime::JsonPack => (vec![i32, i64], vec![i32]),
-            Runtime::JsonUnpack | Runtime::ViewGet => (vec![i32, i32], vec![i64]),
-            Runtime::ViewSet => (vec![i32, i32, i64], vec![]),
-            Runtime::ViewLength | Runtime::ReferenceIdentity => (vec![i32], vec![i32]),
             Runtime::ExceptionStatus => (vec![], vec![i32]),
             Runtime::JsonNull => (vec![], vec![i32]),
             Runtime::JsonNumber => (vec![f64], vec![i32]),
@@ -547,28 +499,15 @@ impl Runtime {
             | Runtime::JsonArray
             | Runtime::JsonParse
             | Runtime::JsonStringify
-            | Runtime::JsonKeys
-            | Runtime::JsonKey
             | Runtime::JsonAsArray
+            | Runtime::JsonAsObject
             | Runtime::JsonAsString
             | Runtime::JsonAsBoolean
             | Runtime::JsonTypeof
             | Runtime::JsonIsArray => (vec![i32], vec![i32]),
-            Runtime::DictionaryNew | Runtime::DictionaryKeys | Runtime::DictionaryValues => {
-                (vec![i32], vec![i32])
+            Runtime::JsonObject | Runtime::JsonGet | Runtime::JsonEqual => {
+                (vec![i32, i32], vec![i32])
             }
-            Runtime::Enumerate => (vec![i32, i64, i32, i32], vec![i32]),
-            Runtime::DictionaryGet => (vec![i32, i32], vec![i64]),
-            Runtime::DictionarySet => (vec![i32, i32, i64], vec![]),
-            Runtime::RecordInclude => (vec![i32, i32], vec![]),
-            Runtime::RecordKeys => (vec![i32], vec![i32]),
-            Runtime::RecordHas | Runtime::RecordDelete => (vec![i32, i32], vec![i32]),
-            Runtime::DictionaryDelete | Runtime::DictionaryHas => (vec![i32, i32], vec![i32]),
-            Runtime::JsonObject
-            | Runtime::JsonGet
-            | Runtime::JsonEqual
-            | Runtime::JsonHasOwn
-            | Runtime::JsonDelete => (vec![i32, i32], vec![i32]),
             Runtime::JsonIndex => (vec![i32, f64], vec![i32]),
             Runtime::JsonAsNumber => (vec![i32], vec![f64]),
             Runtime::JsonSet => (vec![i32, i32, i32], vec![]),
@@ -690,8 +629,6 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     }
     if deref.is::<RecordType>()
         || deref.is::<ArrayType>()
-        || deref.is::<TupleType>()
-        || deref.is::<DictionaryType>()
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
@@ -738,12 +675,6 @@ fn module_functions(ctx: &Context, module: &ModuleOp) -> Vec<FuncOp> {
         .deref(ctx)
         .iter(ctx)
         .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .collect()
-}
-
-fn function_blocks(ctx: &Context, function: &FuncOp) -> Vec<Ptr<BasicBlock>> {
-    pliron::graph::traversals::region::DFSTraversal::new(ctx, &function.get_region(ctx))
-        .reverse_post_order()
         .collect()
 }
 
@@ -796,8 +727,6 @@ fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier
 struct Data {
     bytes: Vec<u8>,
     strings: HashMap<String, u32>,
-    types: HashMap<TypeHandle, u32>,
-    orders: HashMap<Vec<usize>, u32>,
 }
 
 impl Data {
@@ -835,8 +764,8 @@ struct ModuleState {
     imports: Option<HashSet<String>>,
     /// Async functions in dispatch-kind order.
     async_functions: Vec<Identifier>,
+    shapes: HashMap<String, i32>,
     uses_process: bool,
-    uses_typed_views: bool,
     needs_task_cleanup: bool,
     uses_filesystem: bool,
 }
@@ -873,17 +802,6 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         data: Data::default(),
         wasm: ModuleOp::new(ctx, name),
         throws: throwing_functions(ctx, &functions),
-        uses_typed_views: functions.iter().any(|function| {
-            function_ops(ctx, function).iter().any(|&op| {
-                Operation::get_op::<perry_mir::json::UnpackOp>(op, ctx).is_some()
-                    || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
-                        matches!(
-                            op.kind(ctx),
-                            Intrinsic::JsonSet | Intrinsic::JsonSetIndex | Intrinsic::JsonAsArray
-                        )
-                    })
-            })
-        }),
         runtime: BTreeSet::new(),
         host: BTreeSet::new(),
         imports: match exports {
@@ -891,6 +809,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
             Exports::Canonical { imports, .. } => Some(imports.iter().cloned().collect()),
         },
         async_functions: async_functions.clone(),
+        shapes: HashMap::new(),
         uses_process: false,
         needs_task_cleanup: false,
         uses_filesystem: false,
@@ -1153,7 +1072,7 @@ impl<'s> FunctionLowering<'s> {
         mir: &FuncOp,
         entry: Option<Ptr<BasicBlock>>,
     ) -> Result<Ptr<BasicBlock>> {
-        let mir_blocks = function_blocks(ctx, mir);
+        let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
         for (index, &mir_block) in mir_blocks.iter().enumerate() {
             let block = match entry {
                 Some(entry) if index == 0 => entry,
@@ -1182,10 +1101,12 @@ impl<'s> FunctionLowering<'s> {
     }
 
     /// Translate the ops of every block of `mir` (after [Self::map_blocks]). In a step
-    /// function, values kept in the frame are stored where they are defined. Reverse postorder
-    /// visits dominators before their uses even when finalizers reorder the region's block list.
+    /// function, values kept in the frame are stored where they are defined.
     fn translate(&mut self, ctx: &mut Context, mir: &FuncOp) -> Result<()> {
-        let mir_blocks = function_blocks(ctx, mir);
+        let region = mir.get_region(ctx);
+        let mir_blocks: Vec<_> = DFSTraversal::new(ctx, &region)
+            .reverse_post_order()
+            .collect();
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];
             let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
@@ -1523,7 +1444,7 @@ impl<'s> FunctionLowering<'s> {
     }
 
     /// Append `value` to `array`, growing it through the runtime when full.
-    fn push_native(&mut self, ctx: &mut Context, array: Value, value: Value, kind: MemKind) {
+    fn push(&mut self, ctx: &mut Context, array: Value, value: Value, kind: MemKind) {
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
@@ -1617,21 +1538,9 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(compare) = Operation::get_op::<MirCompareOp>(op, ctx) {
             let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
-            let mut operands = self.operands(ctx, op)?;
+            let operands = self.operands(ctx, op)?;
             let kind = compare.kind(ctx);
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
-            if self.state.uses_typed_views
-                && (inner.deref(ctx).is::<RecordType>()
-                    || inner.deref(ctx).is::<ArrayType>()
-                    || inner.deref(ctx).is::<TupleType>()
-                    || inner.deref(ctx).is::<DictionaryType>())
-            {
-                for operand in &mut operands {
-                    *operand = self
-                        .runtime(ctx, Runtime::ReferenceIdentity, vec![*operand])
-                        .expect("identity");
-                }
-            }
             let value =
                 if inner.deref(ctx).is::<StringType>() || inner.deref(ctx).is::<ExceptionType>() {
                     let function = if inner.deref(ctx).is::<StringType>() {
@@ -1758,133 +1667,31 @@ impl<'s> FunctionLowering<'s> {
             }
             return Ok(());
         }
-        if let Some(enumerate) = Operation::get_op::<perry_mir::enumeration::EnumerateOp>(op, ctx) {
-            use perry_mir::enumeration::Action;
-            let source = op.deref(ctx).get_operand(0).get_type(ctx);
-            let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
-            let source = self.state.data.descriptor(ctx, source)?;
-            let element = self.state.data.descriptor(ctx, element)?;
-            let source = self.i32_const(ctx, source as i32);
-            let element = self.i32_const(ctx, element as i32);
-            let operand = self.operand(ctx, op, 0)?;
-            let bits = self.slot_bits(ctx, operand);
-            let action = self.i32_const(
-                ctx,
-                match enumerate.action(ctx) {
-                    Action::Keys => 0,
-                    Action::Values => 1,
-                    Action::Entries => 2,
-                },
-            );
-            let value = self
-                .runtime(ctx, Runtime::Enumerate, vec![source, bits, element, action])
-                .expect("enumeration snapshot");
-            self.check_pending(ctx);
-            self.define(ctx, op, value);
-            return Ok(());
-        }
-        if let Some(new) = Operation::get_op::<perry_mir::dictionaries::NewOp>(op, ctx) {
-            let ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let address = self.state.data.descriptor(ctx, ty)?;
-            let descriptor = self.i32_const(ctx, address as i32);
-            let value = self
-                .runtime(ctx, Runtime::DictionaryNew, vec![descriptor])
-                .expect("dictionary");
-            for (index, name) in new.fields(ctx).into_iter().enumerate() {
-                let key = self.state.data.string(&name);
-                let key = self.i32_const(ctx, key as i32);
-                let entry = self.operand(ctx, op, index)?;
-                let bits = self.slot_bits(ctx, entry);
-                self.runtime(ctx, Runtime::DictionarySet, vec![value, key, bits]);
-                self.check_pending(ctx);
-            }
-            self.define(ctx, op, value);
-            return Ok(());
-        }
-        if let Some(access) = Operation::get_op::<perry_mir::dictionaries::AccessOp>(op, ctx) {
-            use perry_mir::dictionaries::Action;
-            let action = access.action(ctx);
-            let runtime = match action {
-                Action::Get => Runtime::DictionaryGet,
-                Action::Set => Runtime::DictionarySet,
-                Action::Delete => Runtime::DictionaryDelete,
-                Action::Has => Runtime::DictionaryHas,
-                Action::Keys => Runtime::DictionaryKeys,
-                Action::Values => Runtime::DictionaryValues,
-            };
-            let mut operands = self.operands(ctx, op)?;
-            if action == Action::Set {
-                operands[2] = self.slot_bits(ctx, operands[2]);
-            }
-            let result = self.runtime(ctx, runtime, operands);
-            self.check_pending(ctx);
-            if let Some(mut value) = result {
-                if action == Action::Get {
-                    let ty = op.deref(ctx).get_result(0).get_type(ctx);
-                    value = self.decode_slot_bits(ctx, value, ty)?;
-                }
-                self.define(ctx, op, value);
-            }
-            return Ok(());
-        }
-        if Operation::get_op::<perry_mir::json::UnpackOp>(op, ctx).is_some() {
-            let ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let address = self.state.data.descriptor(ctx, ty)?;
-            let descriptor = self.i32_const(ctx, address as i32);
-            let value = self.operand(ctx, op, 0)?;
-            let bits = self
-                .runtime(ctx, Runtime::JsonUnpack, vec![descriptor, value])
-                .expect("typed value");
-            self.check_pending(ctx);
-            let value = self.decode_slot_bits(ctx, bits, ty)?;
-            self.define(ctx, op, value);
-            return Ok(());
-        }
-        if Operation::get_op::<perry_mir::json::PackOp>(op, ctx).is_some() {
-            let ty = op.deref(ctx).get_operand(0).get_type(ctx);
-            let address = self.state.data.descriptor(ctx, ty)?;
-            let descriptor = self.i32_const(ctx, address as i32);
-            let value = self.operand(ctx, op, 0)?;
-            let bits = self.slot_bits(ctx, value);
-            let json = self
-                .runtime(ctx, Runtime::JsonPack, vec![descriptor, bits])
-                .expect("JSON value");
-            self.define(ctx, op, json);
-            return Ok(());
-        }
-        if let Some(access) = Operation::get_op::<perry_mir::records::AccessOp>(op, ctx) {
-            use perry_mir::records::Action;
-            let runtime = match access.action(ctx) {
-                Action::Keys => Runtime::RecordKeys,
-                Action::Has => Runtime::RecordHas,
-                Action::Delete => Runtime::RecordDelete,
-            };
-            let operands = self.operands(ctx, op)?;
-            let value = self
-                .runtime(ctx, runtime, operands)
-                .expect("record operation result");
-            self.check_pending(ctx);
-            self.define(ctx, op, value);
-            return Ok(());
-        }
-        if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
+        if Operation::get_op::<AllocOp>(op, ctx).is_some() {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let fields = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
-                .map_err(|_| anyhow!("expected a record"))?
-                .deref(ctx)
-                .fields()
-                .map_err(|_| anyhow!("record without fields"))?
-                .to_vec();
-            let order = allocation.order(ctx);
-            let object = self.allocate_record(ctx, record_ty, order.clone())?;
+            let (name, fields) = {
+                let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
+                    .map_err(|_| anyhow!("expected a record"))?;
+                let record = record.deref(ctx);
+                let fields: Vec<_> = record
+                    .fields()
+                    .map_err(|_| anyhow!("record without fields"))?
+                    .iter()
+                    .map(|(_, ty)| *ty)
+                    .collect();
+                (record.name().to_string(), fields)
+            };
+            let next_shape = self.state.shapes.len() as i32 + 1;
+            let shape = *self.state.shapes.entry(name).or_insert(next_shape);
             let operands = self.operands(ctx, op)?;
-            for (index, (field, value)) in fields.iter().zip(operands).enumerate() {
-                let kind = slot_kind(ctx, field.ty)?;
-                let value = if order.contains(&index) {
-                    value
-                } else {
-                    self.undefined(ctx, field.ty)?
-                };
+            let size = self.i32_const(ctx, 8 + 8 * fields.len() as i32);
+            let object = self
+                .runtime(ctx, Runtime::Alloc, vec![size])
+                .expect("address");
+            let shape = self.i32_const(ctx, shape);
+            self.store(ctx, MemKind::I32, object, 0, shape);
+            for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
+                let kind = slot_kind(ctx, ty)?;
                 self.store(ctx, kind, object, 8 + 8 * index as u32, value);
             }
             self.define(ctx, op, object);
@@ -1893,8 +1700,9 @@ impl<'s> FunctionLowering<'s> {
         if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
             let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
+            let kind = slot_kind(ctx, ty)?;
             let object = self.mapped(ctx, record)?;
-            let value = self.read_field(ctx, object, offset, ty)?;
+            let value = self.load(ctx, kind, object, offset);
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -1903,57 +1711,7 @@ impl<'s> FunctionLowering<'s> {
             let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
             let operands = self.operands(ctx, op)?;
-            let optional = record
-                .get_type(ctx)
-                .deref(ctx)
-                .downcast_ref::<RecordType>()
-                .expect("record")
-                .fields()
-                .expect("fields")[((offset - 8) / 8) as usize]
-                .optional;
-            self.write_field(ctx, operands[0], offset, operands[1], kind, optional)?;
-            return Ok(());
-        }
-        if Operation::get_op::<perry_mir::tuples::NewOp>(op, ctx).is_some() {
-            let tuple_ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let elements = tuple_ty
-                .deref(ctx)
-                .downcast_ref::<TupleType>()
-                .expect("tuple")
-                .elements()
-                .to_vec();
-            let operands = self.operands(ctx, op)?;
-            let capacity = self.i32_const(ctx, operands.len() as i32);
-            let tuple = self
-                .runtime(ctx, Runtime::ArrayNew, vec![capacity])
-                .expect("tuple array");
-            let data = self.load(ctx, MemKind::I32, tuple, layout::DATA);
-            for (index, (&ty, value)) in elements.iter().zip(operands).enumerate() {
-                self.store(
-                    ctx,
-                    slot_kind(ctx, ty)?,
-                    data,
-                    layout::SLOT * index as u32,
-                    value,
-                );
-            }
-            self.store(ctx, MemKind::I32, tuple, layout::LEN, capacity);
-            self.define(ctx, op, tuple);
-            return Ok(());
-        }
-        if let Some(get) = Operation::get_op::<perry_mir::tuples::GetOp>(op, ctx) {
-            let tuple = self.operand(ctx, op, 0)?;
-            let index = self.i32_const(ctx, get.index(ctx) as i32);
-            let ty = op.deref(ctx).get_result(0).get_type(ctx);
-            let value = self.read_element(ctx, tuple, index, ty)?;
-            self.define(ctx, op, value);
-            return Ok(());
-        }
-        if let Some(set) = Operation::get_op::<perry_mir::tuples::SetOp>(op, ctx) {
-            let operands = self.operands(ctx, op)?;
-            let index = self.i32_const(ctx, set.index(ctx) as i32);
-            let ty = op.deref(ctx).get_operand(1).get_type(ctx);
-            self.write_element(ctx, operands[0], index, operands[1], slot_kind(ctx, ty)?)?;
+            self.store(ctx, kind, operands[0], offset, operands[1]);
             return Ok(());
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {
@@ -1977,7 +1735,7 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<ArrayLenOp>(op, ctx).is_some() {
             let array = self.operands(ctx, op)?[0];
-            let len = self.array_length(ctx, array)?;
+            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             self.define(ctx, op, len);
             return Ok(());
         }
@@ -1985,38 +1743,25 @@ impl<'s> FunctionLowering<'s> {
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
             let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
-            self.push(ctx, operands[0], operands[1], kind)?;
+            self.push(ctx, operands[0], operands[1], kind);
             return Ok(());
         }
         if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+            // Branch-free: read slot 0 when out of range (capacity is never 0), then select.
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
             let (array, index) = (operands[0], operands[1]);
-            let len = self.array_length(ctx, array)?;
+            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             let (i, ok, _) = self.element_index(ctx, index, len)?;
-            let value = if !self.state.uses_typed_views {
-                let zero = self.i32_const(ctx, 0);
-                let slot = self.select(ctx, ok, i, zero);
-                let loaded = self.read_element(ctx, array, slot, element)?;
-                let loaded = self.wrap_defined(ctx, loaded, element);
-                let undefined = self.undefined(ctx, element)?;
-                self.select(ctx, ok, loaded, undefined)
-            } else {
-                let read = self.new_block(ctx, vec![]);
-                let missing = self.new_block(ctx, vec![]);
-                let result = wasm_type(ctx, element)?;
-                let done = self.new_block(ctx, vec![result]);
-                self.cond_br(ctx, ok, (read, vec![]), (missing, vec![]));
-                self.block = read;
-                let value = self.read_element(ctx, array, i, element)?;
-                let value = self.wrap_defined(ctx, value, element);
-                self.br(ctx, done, vec![value]);
-                self.block = missing;
-                let undefined = self.undefined(ctx, element)?;
-                self.br(ctx, done, vec![undefined]);
-                self.block = done;
-                done.deref(ctx).get_argument(0)
-            };
+            let zero = self.i32_const(ctx, 0);
+            let slot = self.select(ctx, ok, i, zero);
+            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+            let address = self.slot_address(ctx, data, slot);
+            let loaded = self.load(ctx, kind, address, 0);
+            let loaded = self.wrap_defined(ctx, loaded, element);
+            let undefined = self.undefined(ctx, optional_inner(ctx, element).unwrap_or(element))?;
+            let value = self.select(ctx, ok, loaded, undefined);
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -2025,14 +1770,16 @@ impl<'s> FunctionLowering<'s> {
             let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
             let (array, index, value) = (operands[0], operands[1], operands[2]);
-            let len = self.array_length(ctx, array)?;
+            let len = self.load(ctx, MemKind::I32, array, layout::LEN);
             let (i, ok, integral) = self.element_index(ctx, index, len)?;
             let write = self.new_block(ctx, vec![]);
             let outside = self.new_block(ctx, vec![]);
             let done = self.new_block(ctx, vec![]);
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
-            self.write_element(ctx, array, i, value, kind)?;
+            let data = self.load(ctx, MemKind::I32, array, layout::DATA);
+            let address = self.slot_address(ctx, data, i);
+            self.store(ctx, kind, address, 0, value);
             self.br(ctx, done, vec![]);
             // Writing at `length` appends; any other index would make a hole.
             self.block = outside;
@@ -2043,7 +1790,7 @@ impl<'s> FunctionLowering<'s> {
             };
             let hole = self.num(ctx, NumOpcode::I32Eqz, vec![append]);
             self.throw_if(ctx, hole, ErrorKind::RangeError);
-            self.push(ctx, array, value, kind)?;
+            self.push(ctx, array, value, kind);
             self.br(ctx, done, vec![]);
             self.block = done;
             return Ok(());
@@ -2056,8 +1803,8 @@ impl<'s> FunctionLowering<'s> {
             return Ok(());
         }
         if Operation::get_op::<WrapOp>(op, ctx).is_some() {
-            let inner = op.deref(ctx).get_operand(0).get_type(ctx);
             let value = self.operands(ctx, op)?[0];
+            let inner = op.deref(ctx).get_operand(0).get_type(ctx);
             let value = self.wrap_defined(ctx, value, inner);
             self.define(ctx, op, value);
             return Ok(());
@@ -2132,6 +1879,44 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             let kind = intrinsic.kind(ctx);
+            let numeric = match kind {
+                Intrinsic::MathFloor => Some(NumOpcode::F64Floor),
+                Intrinsic::MathCeil => Some(NumOpcode::F64Ceil),
+                Intrinsic::MathTrunc => Some(NumOpcode::F64Trunc),
+                Intrinsic::MathAbs => Some(NumOpcode::F64Abs),
+                Intrinsic::MathSqrt => Some(NumOpcode::F64Sqrt),
+                _ => None,
+            };
+            if let Some(opcode) = numeric {
+                let args = self.operands(ctx, op)?;
+                let result = self.num(ctx, opcode, args);
+                self.define(ctx, op, result);
+                return Ok(());
+            }
+            if matches!(kind, Intrinsic::MathRound | Intrinsic::DateClip) {
+                let value = self.operands(ctx, op)?[0];
+                let result = if kind == Intrinsic::MathRound {
+                    let floor = self.num(ctx, NumOpcode::F64Floor, vec![value]);
+                    let fraction = self.num(ctx, NumOpcode::F64Sub, vec![value, floor]);
+                    let half = self.f64_const(ctx, 0.5);
+                    let up = self.num(ctx, NumOpcode::F64Ge, vec![fraction, half]);
+                    let one = self.f64_const(ctx, 1.0);
+                    let ceil = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
+                    let rounded = self.select(ctx, up, ceil, floor);
+                    self.num(ctx, NumOpcode::F64Copysign, vec![rounded, value])
+                } else {
+                    let magnitude = self.num(ctx, NumOpcode::F64Abs, vec![value]);
+                    let limit = self.f64_const(ctx, 8_640_000_000_000_000.0);
+                    let valid = self.num(ctx, NumOpcode::F64Le, vec![magnitude, limit]);
+                    let truncated = self.num(ctx, NumOpcode::F64Trunc, vec![value]);
+                    let zero = self.f64_const(ctx, 0.0);
+                    let clipped = self.num(ctx, NumOpcode::F64Add, vec![truncated, zero]);
+                    let nan = self.f64_const(ctx, f64::NAN);
+                    self.select(ctx, valid, clipped, nan)
+                };
+                self.define(ctx, op, result);
+                return Ok(());
+            }
             let value_runtime = match kind {
                 Intrinsic::FsOptions => Some((Runtime::FsOptions, None)),
                 Intrinsic::TextBytesLength => Some((Runtime::TextBytesLength, None)),
@@ -2180,7 +1965,6 @@ impl<'s> FunctionLowering<'s> {
             }
             let json_runtime = match kind {
                 Intrinsic::JsonParse => Some(Runtime::JsonParse),
-
                 Intrinsic::JsonStringify => Some(Runtime::JsonStringify),
                 Intrinsic::JsonNull => Some(Runtime::JsonNull),
                 Intrinsic::JsonNumber => Some(Runtime::JsonNumber),
@@ -2188,15 +1972,12 @@ impl<'s> FunctionLowering<'s> {
                 Intrinsic::JsonString => Some(Runtime::JsonString),
                 Intrinsic::JsonArray => Some(Runtime::JsonArray),
                 Intrinsic::JsonObject => Some(Runtime::JsonObject),
-                Intrinsic::JsonKeys => Some(Runtime::JsonKeys),
-                Intrinsic::JsonHasOwn => Some(Runtime::JsonHasOwn),
-                Intrinsic::JsonDelete => Some(Runtime::JsonDelete),
-                Intrinsic::JsonKey => Some(Runtime::JsonKey),
                 Intrinsic::JsonGet => Some(Runtime::JsonGet),
                 Intrinsic::JsonIndex => Some(Runtime::JsonIndex),
                 Intrinsic::JsonAsNumber => Some(Runtime::JsonAsNumber),
                 Intrinsic::JsonAsBoolean => Some(Runtime::JsonAsBoolean),
                 Intrinsic::JsonAsArray => Some(Runtime::JsonAsArray),
+                Intrinsic::JsonAsObject => Some(Runtime::JsonAsObject),
                 Intrinsic::JsonAsString => Some(Runtime::JsonAsString),
                 Intrinsic::JsonTypeof => Some(Runtime::JsonTypeof),
                 Intrinsic::JsonEqual => Some(Runtime::JsonEqual),
@@ -2209,10 +1990,7 @@ impl<'s> FunctionLowering<'s> {
                 let operands = self.operands(ctx, op)?;
                 let result = self.runtime(ctx, runtime, operands);
                 if intrinsic.may_throw(ctx) {
-                    let status = self
-                        .runtime(ctx, Runtime::ExceptionStatus, vec![])
-                        .expect("exception status");
-                    self.throw_status_if(ctx, status, status);
+                    self.check_pending(ctx);
                 }
                 if let Some(result) = result {
                     self.define(ctx, op, result);
@@ -2248,10 +2026,6 @@ impl<'s> FunctionLowering<'s> {
                         let status =
                             self.i32_const(ctx, perry_runtime::exception::RANGE_ERROR as i32);
                         self.throw_status_if(ctx, failed, status);
-                        self.define(ctx, op, result);
-                    }
-                    Intrinsic::BytesFromArray => {
-                        self.check_pending(ctx);
                         self.define(ctx, op, result);
                     }
                     Intrinsic::BytesSet | Intrinsic::BytesSetArray => {

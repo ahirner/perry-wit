@@ -1,20 +1,7 @@
 //! Task-owned JSON variant trees. Arrays and objects retain identity through every lookup.
-use crate::shape::{Kind as NativeKind, Record, Type};
 use crate::{array, exception, region::perry_alloc, string};
 use core::ptr;
 use perry_json_codec::{Error, Graph, Tree, Value};
-pub mod dictionary;
-mod enumeration;
-mod native;
-mod object;
-mod properties;
-mod record;
-mod stringify;
-use object::{Field, Object};
-pub use properties::*;
-pub use stringify::perry_json_stringify;
-pub mod view;
-pub use native::perry_json_pack;
 
 #[derive(Clone, Copy)]
 enum Json {
@@ -23,9 +10,22 @@ enum Json {
     Number(f64),
     String(*mut u8),
     Array(*mut u8),
-    Object(*mut Object),
-    Native { reference: *mut u8, ty: *const Type },
+    Object { fields: *mut Field, length: usize },
 }
+#[derive(Clone, Copy)]
+struct Field {
+    key: *mut u8,
+    value: *mut u8,
+}
+
+fn allocate_fields(length: usize) -> *mut Field {
+    let bytes = length
+        .checked_mul(size_of::<Field>())
+        .and_then(|size| u32::try_from(size).ok())
+        .expect("JSON object too large");
+    perry_alloc(bytes).cast()
+}
+
 fn allocate(value: Json) -> *mut u8 {
     let result = perry_alloc(size_of::<Json>() as u32).cast::<Json>();
     // SAFETY: fresh task storage has the size and alignment of Json.
@@ -61,8 +61,7 @@ pub unsafe extern "C" fn perry_json_string(value: *mut u8) -> *mut u8 {
 /// `value` is a live dense array of optional JSON references.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_array(value: *mut u8) -> *mut u8 {
-    // SAFETY: the argument is a live native JSON array or a checked typed view.
-    unsafe { view::source(value).unwrap_or_else(|| allocate(Json::Array(value))) }
+    allocate(Json::Array(value))
 }
 /// # Safety
 /// Keys are live strings and values optional JSON references, in equally sized dense arrays.
@@ -70,39 +69,24 @@ pub unsafe extern "C" fn perry_json_array(value: *mut u8) -> *mut u8 {
 pub unsafe extern "C" fn perry_json_object(keys: *mut u8, values: *mut u8) -> *mut u8 {
     // SAFETY: the caller supplies matching typed arrays; each field is initialized below.
     unsafe {
-        let length = view::perry_view_length(keys) as usize;
-        assert_eq!(length, view::perry_view_length(values) as usize);
-        let object = Object::new(length);
-        for index in 0..length {
-            let key = if view::source(keys).is_some() {
-                view::perry_view_get(keys, index as u32) as usize as *mut u8
-            } else {
-                array::slots(keys)
-                    .as_ptr()
-                    .add(index)
-                    .cast::<*mut u8>()
-                    .read()
-            };
-            let value = if view::source(values).is_some() {
-                view::perry_view_get(values, index as u32) as usize as *mut u8
-            } else {
-                array::slots(values)
-                    .as_ptr()
-                    .add(index)
-                    .cast::<*mut u8>()
-                    .read()
-            };
-            if exception::perry_exception_status() != 0 {
-                return ptr::null_mut();
-            }
-            (*object).set(key, value as usize as u64);
+        let (keys, values) = (array::slots(keys), array::slots(values));
+        assert_eq!(keys.len(), values.len());
+        let fields = allocate_fields(keys.len());
+        for (index, (&key, &value)) in keys.iter().zip(values).enumerate() {
+            fields.add(index).write(Field {
+                key: key as usize as *mut u8,
+                value: value as usize as *mut u8,
+            });
         }
-        allocate(Json::Object(object))
+        allocate(Json::Object {
+            fields,
+            length: keys.len(),
+        })
     }
 }
 
 fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
-    let value = match graph.value(node)? {
+    Ok(match graph.value(node)? {
         Value::Undefined => return Err(Error::InvalidGraph),
         Value::Null => perry_json_null(),
         Value::Boolean(value) => perry_json_boolean(u32::from(value)),
@@ -129,43 +113,20 @@ fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
         }
         Value::Object(children) => {
             let length = children.clone().count();
-            let object = Object::new(length);
-            for child in children {
+            let fields = allocate_fields(length);
+            for (index, child) in children.enumerate() {
                 let child = child?;
                 let key = graph.key(child)?;
                 let value = from_graph(graph, child)?;
                 // SAFETY: each field is fresh; graph key bytes remain live for the task.
                 unsafe {
                     let key = string::perry_string_adopt(key.as_ptr().cast_mut(), key.len() as u32);
-                    (*object).set(key, value as usize as u64);
+                    fields.add(index).write(Field { key, value });
                 }
             }
-            allocate(Json::Object(object))
+            allocate(Json::Object { fields, length })
         }
-    };
-    Ok(value)
-}
-
-fn parse_failure(error: Error) -> *mut u8 {
-    match error {
-        Error::Depth(_) => failure(exception::RANGE_ERROR, "JSON nesting limit exceeded"),
-        Error::UnpairedSurrogate(_) => failure(
-            exception::TYPE_ERROR,
-            "JSON string contains an unpaired surrogate",
-        ),
-        Error::Capacity => failure(exception::RANGE_ERROR, "JSON document is too large"),
-        Error::Syntax(_) => failure(exception::SYNTAX_ERROR, "invalid JSON text"),
-        _ => unreachable!("measuring text does not inspect object storage"),
-    }
-}
-
-fn parse_graph(text: &str) -> Result<(Graph<'static>, u32), Error> {
-    let size = perry_json_codec::measure(text)?;
-    let bytes = perry_alloc(size.try_into().map_err(|_| Error::Capacity)?);
-    // SAFETY: freshly allocated task storage; graph references are used only within that task.
-    let bytes = unsafe { core::slice::from_raw_parts_mut(bytes, size) };
-    let root = perry_json_codec::populate(text, bytes, 8).expect("measured JSON graph");
-    Ok((Graph { bytes, base: 8 }, root))
+    })
 }
 
 /// # Safety
@@ -174,42 +135,41 @@ fn parse_graph(text: &str) -> Result<(Graph<'static>, u32), Error> {
 pub unsafe extern "C" fn perry_json_parse(input: *mut u8) -> *mut u8 {
     // SAFETY: input is live and parsing does not mutate it.
     let text = unsafe { string::text(input) };
-    let (graph, root) = match parse_graph(text) {
-        Ok(parsed) => parsed,
-        Err(error) => return parse_failure(error),
+    let size = match perry_json_codec::measure(text) {
+        Ok(size) => size,
+        Err(Error::Depth(_)) => {
+            return failure(exception::RANGE_ERROR, "JSON nesting limit exceeded");
+        }
+        Err(Error::UnpairedSurrogate(_)) => {
+            return failure(
+                exception::TYPE_ERROR,
+                "JSON string contains an unpaired surrogate",
+            );
+        }
+        Err(Error::Capacity) => {
+            return failure(exception::RANGE_ERROR, "JSON document is too large");
+        }
+        Err(Error::Syntax(_)) => return failure(exception::SYNTAX_ERROR, "invalid JSON text"),
+        Err(Error::InvalidGraph | Error::Cycle) => {
+            unreachable!("measuring text does not read a graph")
+        }
     };
-    from_graph(&graph, root).expect("validated JSON graph")
+    let bytes = perry_alloc(size.try_into().expect("JSON document too large"));
+    // SAFETY: fresh storage holds the measured graph; borrowed strings keep its task lifetime.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(bytes, size) };
+    let root = perry_json_codec::populate(text, bytes, 8).expect("measured JSON graph");
+    from_graph(&Graph { bytes, base: 8 }, root).expect("validated JSON graph")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Node {
     Value(*mut u8),
     Field(*const Field),
-    NativeSlot(native::Slot),
 }
 #[derive(Clone)]
 enum Children {
     Array(core::slice::Iter<'static, u64>),
     Object(core::slice::Iter<'static, Field>),
-    NativeDictionary {
-        fields: core::slice::Iter<'static, Field>,
-        ty: *const Type,
-    },
-    NativeArray {
-        next: *const u8,
-        remaining: usize,
-        ty: *const Type,
-    },
-    NativeTuple {
-        reference: *mut u8,
-        next: usize,
-        ty: *const Type,
-    },
-    NativeObject {
-        reference: *mut u8,
-        next: usize,
-        ty: *const Type,
-    },
 }
 impl Iterator for Children {
     type Item = Result<Node, Error>;
@@ -218,140 +178,89 @@ impl Iterator for Children {
             Self::Array(values) => values
                 .next()
                 .map(|&value| Ok(Node::Value(value as usize as *mut u8))),
-            Self::Object(fields) => fields
-                .find(|field| !field.key.is_null())
-                .map(|field| Ok(Node::Field(field))),
-            Self::NativeDictionary { fields, ty } => {
-                fields.find(|field| !field.key.is_null()).map(|field| {
-                    Ok(Node::NativeSlot(native::Slot {
-                        address: (&raw const field.value).cast_mut().cast(),
-                        ty: *ty,
-                        key: field.key,
-                    }))
-                })
-            }
-            Self::NativeArray {
-                next,
-                remaining,
-                ty,
-            } => {
-                if *remaining == 0 {
-                    return None;
-                }
-                let slot = native::Slot {
-                    address: next.cast_mut(),
-                    ty: *ty,
-                    key: ptr::null_mut(),
-                };
-                // SAFETY: this iterator was created over an immutable initialized array span.
-                *next = unsafe { next.add(8) };
-                *remaining -= 1;
-                Some(Ok(Node::NativeSlot(slot)))
-            }
-            Self::NativeTuple {
-                reference,
-                next,
-                ty,
-            } => {
-                // SAFETY: native tuple slots and their compiler descriptors have matching lengths.
-                unsafe {
-                    let slot = array::slots(*reference).get(*next)?;
-                    let element = (**ty).indexed_element(*next).expect("tuple element");
-                    *next += 1;
-                    Some(Ok(Node::NativeSlot(native::Slot {
-                        address: (slot as *const u64).cast_mut().cast(),
-                        ty: element,
-                        key: ptr::null_mut(),
-                    })))
-                }
-            }
-            Self::NativeObject {
-                reference,
-                next,
-                ty,
-            } => {
-                // SAFETY: the descriptor, property order and record remain live and unchanged.
-                unsafe {
-                    if *next == (**ty).count as usize {
-                        return None;
-                    }
-                    let index = (*reference.cast::<Record>()).order.add(*next).read();
-                    if index == u32::MAX {
-                        return None;
-                    }
-                    let index = index as usize;
-                    *next += 1;
-                    let field = &(**ty).fields()[index];
-                    Some(Ok(Node::NativeSlot(native::Slot {
-                        address: Record::slot(*reference, index),
-                        ty: field.ty,
-                        key: field.name,
-                    })))
-                }
-            }
+            Self::Object(fields) => fields.next().map(|field| Ok(Node::Field(field))),
         }
     }
 }
-unsafe fn node_value(node: Node) -> Option<Json> {
-    // SAFETY: each node carries a live task reference or a correctly described native slot.
-    unsafe {
-        match node {
-            Node::Value(value) => (!value.is_null()).then(|| *value.cast::<Json>()),
-            Node::Field(field) => {
-                ((*field).value != 0).then(|| *((*field).value as usize as *const Json))
-            }
-            Node::NativeSlot(slot) => native::read(&*slot.ty, (*slot.ty).read(slot.address)),
-        }
-    }
-}
-
 struct RuntimeTree;
 impl Tree for RuntimeTree {
     type Node = Node;
     type Identity = *mut u8;
     type Children = Children;
-    fn identity(&self, node: Node) -> Result<*mut u8, Error> {
-        // SAFETY: serialization requests identity only for live arrays and objects.
-        unsafe {
-            node_value(node)
-                .map(view::identity)
-                .ok_or(Error::InvalidGraph)
-        }
+    fn identity(&self, node: Node) -> Result<Self::Identity, Error> {
+        // SAFETY: fields refer to live task JSON nodes for this read-only traversal.
+        Ok(match node {
+            Node::Value(value) => value,
+            Node::Field(field) => unsafe { (*field).value },
+        })
     }
     fn value(&self, node: Node) -> Result<Value<'_, Children>, Error> {
         // SAFETY: this private adapter is only used with live task JSON nodes; serialization is read-only.
         unsafe {
-            let value = node_value(node);
-            let Some(value) = value else {
-                return Ok(Value::Undefined);
+            let value = match node {
+                Node::Value(value) => value,
+                Node::Field(field) => (*field).value,
             };
-            Ok(match value {
+            if value.is_null() {
+                return Ok(Value::Undefined);
+            }
+            Ok(match *value.cast::<Json>() {
                 Json::Null => Value::Null,
                 Json::Boolean(value) => Value::Boolean(value),
                 Json::Number(value) => Value::Number(value),
                 Json::String(value) => Value::String(string::text(value)),
                 Json::Array(value) => Value::Array(Children::Array(array::slots(value).iter())),
-                Json::Object(object) => Value::Object(Children::Object((*object).fields().iter())),
-                Json::Native { reference, ty } => {
-                    let children = native::children(reference, &*ty);
-                    if matches!((*ty).kind, NativeKind::Array | NativeKind::Tuple) {
-                        Value::Array(children)
-                    } else {
-                        Value::Object(children)
-                    }
-                }
+                Json::Object { fields, length } => Value::Object(Children::Object(
+                    core::slice::from_raw_parts(fields, length).iter(),
+                )),
             })
         }
     }
     fn key(&self, node: Node) -> Result<&str, Error> {
-        let key = match node {
-            // SAFETY: object iterators carry initialized fields.
-            Node::Field(field) => unsafe { (*field).key },
-            Node::NativeSlot(slot) if !slot.key.is_null() => slot.key,
-            _ => return Err(Error::InvalidGraph),
+        let Node::Field(field) = node else {
+            return Err(Error::InvalidGraph);
         };
         // SAFETY: object members hold live string keys.
-        Ok(unsafe { string::text(key) })
+        Ok(unsafe { string::text((*field).key) })
+    }
+}
+
+/// # Safety
+/// `value` is a live JSON tree, which remains unchanged during serialization.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_json_stringify(value: *mut u8) -> *mut u8 {
+    if value.is_null() {
+        return ptr::null_mut();
+    }
+    let node = Node::Value(value);
+    let size = match perry_json_codec::measure_tree(&RuntimeTree, node) {
+        Ok(size) => size,
+        Err(_) => {
+            return failure(
+                exception::TYPE_ERROR,
+                "JSON value is cyclic or too deeply nested",
+            );
+        }
+    };
+    let data = perry_alloc(size.try_into().expect("JSON text too large"));
+    // SAFETY: measured output is fresh and disjoint from the read-only JSON tree.
+    unsafe {
+        let output = core::slice::from_raw_parts_mut(data, size);
+        perry_json_codec::serialize_tree(&RuntimeTree, node, output)
+            .expect("measured JSON serialization");
+        string::perry_string_adopt(data, size as u32)
+    }
+}
+
+/// # Safety
+/// The field span contains initialized task-owned keys and values.
+unsafe fn find_field(fields: *mut Field, length: usize, key: &str) -> Option<*mut Field> {
+    // SAFETY: callers provide a live span; the last duplicate key supplies its value.
+    unsafe {
+        core::slice::from_raw_parts(fields, length)
+            .iter()
+            .rposition(|field| string::text(field.key) == key)
+            .map(|index| fields.add(index))
     }
 }
 
@@ -365,38 +274,16 @@ fn canonical_index(key: &str) -> Option<usize> {
     key.parse().ok()
 }
 
-unsafe fn string_index(text: *mut u8, index: f64) -> *mut u8 {
-    // SAFETY: the checked character operation returns a live string or undefined/failure.
-    unsafe {
-        let value = string::perry_string_unit(text, index, 2);
-        if value.is_null() {
-            ptr::null_mut()
-        } else {
-            perry_json_string(value)
-        }
-    }
-}
-
 /// # Safety
 /// `value` is a live JSON node; `key` is a live runtime string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_get(value: *mut u8, key: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller; fields and array storage belong to the same task.
     unsafe {
-        if string::text(key) == "__proto__"
-            && !properties::has_own(*value.cast::<Json>(), "__proto__")
-        {
-            return failure(
-                exception::TYPE_ERROR,
-                "prototype lookup is outside the closed-shape subset",
-            );
-        }
         match *value.cast::<Json>() {
-            Json::Native { reference, ty } => native::get(reference, &*ty, string::text(key)),
             Json::Null => failure(exception::TYPE_ERROR, "cannot read a property of null"),
-            Json::Object(object) => (*object)
-                .find(string::text(key))
-                .map_or(ptr::null_mut(), |field| (*field).value as usize as *mut u8),
+            Json::Object { fields, length } => find_field(fields, length, string::text(key))
+                .map_or(ptr::null_mut(), |field| (*field).value),
             Json::Array(array) if string::text(key) == "length" => {
                 perry_json_number(array::slots(array).len() as f64)
             }
@@ -410,8 +297,9 @@ pub unsafe extern "C" fn perry_json_get(value: *mut u8, key: *mut u8) -> *mut u8
             Json::String(text) if string::text(key) == "length" => {
                 perry_json_number((*text.cast::<string::Str>()).scalars as f64)
             }
-            Json::String(text) => canonical_index(string::text(key))
-                .map_or(ptr::null_mut(), |index| string_index(text, index as f64)),
+            Json::String(_) if canonical_index(string::text(key)).is_some() => {
+                perry_json_index(value, canonical_index(string::text(key)).unwrap() as f64)
+            }
             _ => ptr::null_mut(),
         }
     }
@@ -424,13 +312,11 @@ pub unsafe extern "C" fn perry_json_index(value: *mut u8, index: f64) -> *mut u8
     // SAFETY: guaranteed by the caller; reads only initialized in-range slots.
     unsafe {
         match *value.cast::<Json>() {
-            Json::Native { reference, ty } => native::index(reference, &*ty, index),
             Json::Null => failure(exception::TYPE_ERROR, "cannot index null"),
-            Json::Object(object) => {
+            Json::Object { fields, length } => {
                 let mut buffer = ryu_js::Buffer::new();
-                (*object)
-                    .find(buffer.format(index))
-                    .map_or(ptr::null_mut(), |field| (*field).value as usize as *mut u8)
+                find_field(fields, length, buffer.format(index))
+                    .map_or(ptr::null_mut(), |field| (*field).value)
             }
             Json::Array(array) => {
                 let slots = array::slots(array);
@@ -440,7 +326,14 @@ pub unsafe extern "C" fn perry_json_index(value: *mut u8, index: f64) -> *mut u8
                     ptr::null_mut()
                 }
             }
-            Json::String(text) => string_index(text, index),
+            Json::String(text) => {
+                let unit = string::perry_string_unit(text, index, 2);
+                if unit.is_null() {
+                    ptr::null_mut()
+                } else {
+                    perry_json_string(unit)
+                }
+            }
             Json::Boolean(_) | Json::Number(_) => ptr::null_mut(),
         }
     }
@@ -493,7 +386,7 @@ pub unsafe extern "C" fn perry_json_typeof(value: *mut u8) -> *mut u8 {
     } else {
         // SAFETY: the non-null pointer is live.
         match unsafe { *value.cast::<Json>() } {
-            Json::Null | Json::Array(_) | Json::Object(_) | Json::Native { .. } => "object",
+            Json::Null | Json::Array(_) | Json::Object { .. } => "object",
             Json::Boolean(_) => "boolean",
             Json::Number(_) => "number",
             Json::String(_) => "string",
@@ -517,10 +410,7 @@ pub unsafe extern "C" fn perry_json_equal(a: *mut u8, b: *mut u8) -> u32 {
             (Json::Number(a), Json::Number(b)) => (a == b) as u32,
             (Json::String(a), Json::String(b)) => string::perry_string_equal(a, b),
             (Json::Array(a), Json::Array(b)) => (a == b) as u32,
-            (Json::Object(a), Json::Object(b)) => (a == b) as u32,
-            (Json::Native { reference: a, .. }, Json::Native { reference: b, .. }) => {
-                (a == b) as u32
-            }
+            (Json::Object { fields: a, .. }, Json::Object { fields: b, .. }) => (a == b) as u32,
             _ => 0,
         }
     }
@@ -531,76 +421,47 @@ pub unsafe extern "C" fn perry_json_equal(a: *mut u8, b: *mut u8) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_is_array(value: *mut u8) -> u32 {
     // SAFETY: non-null pointers are live.
-    if value.is_null() {
-        return 0;
-    }
-    // SAFETY: a live JSON value's native descriptor is static.
-    unsafe {
-        match *value.cast::<Json>() {
-            Json::Array(_) => 1,
-            Json::Native { ty, .. } => {
-                (matches!((*ty).kind, NativeKind::Array | NativeKind::Tuple)) as u32
-            }
-            _ => 0,
-        }
-    }
+    (!value.is_null() && matches!(unsafe { *value.cast::<Json>() }, Json::Array(_))) as u32
 }
 /// # Safety
-/// Value and key are live JSON/string references; replacement is undefined or a live JSON value.
+/// All arguments are live JSON/string references in this task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_set(value: *mut u8, key: *mut u8, replacement: *mut u8) {
-    // SAFETY: references are live; object headers retain identity across growth.
+    // SAFETY: references are live; only an existing object field is changed.
     unsafe {
-        if let Json::Native { reference, ty } = *value.cast::<Json>() {
-            native::set_key(reference, &*ty, string::text(key), replacement);
-            return;
-        }
         if matches!(*value.cast::<Json>(), Json::Array(_))
             && let Some(index) = canonical_index(string::text(key))
         {
             perry_json_set_index(value, index as f64, replacement);
             return;
         }
-        if let Json::Object(object) = *value.cast::<Json>() {
-            if string::text(key) == "__proto__" && (*object).find("__proto__").is_none() {
-                failure(
-                    exception::TYPE_ERROR,
-                    "prototype setters are outside the closed-shape subset",
-                );
-                return;
-            }
-            (*object).set(key, replacement as usize as u64);
+        if let Json::Object { fields, length } = *value.cast::<Json>()
+            && let Some(field) = find_field(fields, length, string::text(key))
+        {
+            (*field).value = replacement;
             return;
         }
     }
     failure(
         exception::TYPE_ERROR,
-        "JSON property assignment requires an object or dense array index",
+        "JSON property assignment requires an existing object field",
     );
 }
 /// # Safety
-/// Value is a live JSON value; replacement is undefined or a live JSON value in this task.
+/// Both references are live JSON values in this task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_set_index(value: *mut u8, index: f64, replacement: *mut u8) {
     // SAFETY: references are live; dense bounds are validated before mutation.
     unsafe {
-        if let Json::Native { reference, ty } = *value.cast::<Json>() {
-            if matches!((*ty).kind, NativeKind::Array | NativeKind::Tuple) {
-                native::set_index(reference, &*ty, index, replacement);
-            } else {
-                let mut buffer = ryu_js::Buffer::new();
-                native::set_key(reference, &*ty, buffer.format(index), replacement);
-            }
-            return;
-        }
-        if let Json::Object(object) = *value.cast::<Json>() {
+        if let Json::Object { fields, length } = *value.cast::<Json>() {
             let mut buffer = ryu_js::Buffer::new();
-            let text = buffer.format(index);
-            if let Some(field) = (*object).find(text) {
-                (*field).value = replacement as usize as u64;
+            if let Some(field) = find_field(fields, length, buffer.format(index)) {
+                (*field).value = replacement;
             } else {
-                let key = string::copy(text);
-                (*object).set(key, replacement as usize as u64);
+                failure(
+                    exception::TYPE_ERROR,
+                    "JSON property assignment requires an existing object field",
+                );
             }
             return;
         }
@@ -627,16 +488,22 @@ pub unsafe extern "C" fn perry_json_set_index(value: *mut u8, index: f64, replac
 /// `value` is null (undefined) or a live JSON node. The returned array aliases its storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_json_as_array(value: *mut u8) -> *mut u8 {
-    const JSON: Type = Type {
-        kind: NativeKind::Json,
-        detail: ptr::null(),
-        count: 0,
-    };
-    const ARRAY: Type = Type {
-        kind: NativeKind::Array,
-        detail: (&JSON as *const Type).cast(),
-        count: 0,
-    };
-    // SAFETY: the static descriptor matches JsonValue[]; conversion validates the source.
-    unsafe { view::perry_json_unpack(&ARRAY, value) as usize as *mut u8 }
+    // SAFETY: the pointer is checked before dereferencing and the variant before reading its payload.
+    if !value.is_null()
+        && let Json::Array(array) = unsafe { *value.cast::<Json>() }
+    {
+        return array;
+    }
+    failure(exception::TYPE_ERROR, "JSON value is not an array")
+}
+
+/// # Safety
+/// `value` is null (undefined) or a live JSON node.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_json_as_object(value: *mut u8) -> *mut u8 {
+    // SAFETY: the pointer is checked before reading the variant.
+    if !value.is_null() && matches!(unsafe { *value.cast::<Json>() }, Json::Object { .. }) {
+        return value;
+    }
+    failure(exception::TYPE_ERROR, "JSON value is not an object")
 }

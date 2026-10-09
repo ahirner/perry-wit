@@ -1153,11 +1153,14 @@ impl FunctionLowering<'_> {
             "the WIT record has {} fields but the TypeScript type {name} has {field_count}",
             values.len()
         );
-        let order = values
-            .iter()
-            .map(|(field, _)| record_field(ctx, record, field).map(|(index, _)| index))
-            .collect::<Result<Vec<_>>>()?;
-        let object = self.allocate_record(ctx, mir_ty, order)?;
+        let next_shape = self.state.shapes.len() as i32 + 1;
+        let shape = *self.state.shapes.entry(name).or_insert(next_shape);
+        let size = self.i32_const(ctx, 8 + 8 * field_count as i32);
+        let object = self
+            .runtime(ctx, Runtime::Alloc, vec![size])
+            .expect("record");
+        let shape = self.i32_const(ctx, shape);
+        self.store(ctx, MemKind::I32, object, 0, shape);
         for (field, value) in values {
             let (index, field_mir) = record_field(ctx, record, &field)?;
             let kind = crate::slot_kind(ctx, field_mir)?;
@@ -1233,7 +1236,8 @@ impl FunctionLowering<'_> {
                 let record = self.record_type(ctx, mir_ty)?;
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
                     let (index, field_mir) = record_field(ctx, record, name)?;
-                    let field = self.read_field(ctx, value, 8 + 8 * index as u32, field_mir)?;
+                    let kind = crate::slot_kind(ctx, field_mir)?;
+                    let field = self.load(ctx, kind, value, 8 + 8 * index as u32);
                     self.lower_store(ctx, field_ty, field_mir, field, address, offset + at)?;
                 }
             }
@@ -1317,7 +1321,9 @@ impl FunctionLowering<'_> {
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
             .element();
-        let len = self.array_length(ctx, value)?;
+        let kind = crate::slot_kind(ctx, element_mir)?;
+        let len = self.load(ctx, MemKind::I32, value, layout::LEN);
+        let data = self.load(ctx, MemKind::I32, value, layout::DATA);
         let stride = self.i32_const(ctx, element.size() as i32);
         let bytes = self.num(ctx, NumOpcode::I32Mul, vec![len, stride]);
         let buffer = self
@@ -1325,7 +1331,8 @@ impl FunctionLowering<'_> {
             .expect("list");
         let size = element.size() as i32;
         self.counted_loop(ctx, len, |b, ctx, i| {
-            let item = b.read_element(ctx, value, i, element_mir)?;
+            let slot = b.slot_address(ctx, data, i);
+            let item = b.load(ctx, kind, slot, 0);
             let stride = b.i32_const(ctx, size);
             let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
@@ -1366,7 +1373,8 @@ impl FunctionLowering<'_> {
                 let record = self.record_type(ctx, mir_ty)?;
                 for (name, field_ty) in fields {
                     let (index, field_mir) = record_field(ctx, record, name)?;
-                    let field = self.read_field(ctx, value, 8 + 8 * index as u32, field_mir)?;
+                    let kind = crate::slot_kind(ctx, field_mir)?;
+                    let field = self.load(ctx, kind, value, 8 + 8 * index as u32);
                     self.lower_flat_values(ctx, field_ty, field_mir, field, out)?;
                 }
             }

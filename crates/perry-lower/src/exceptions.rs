@@ -73,7 +73,15 @@ impl FunctionBuilder<'_> {
                         .deref(ctx)
                         .is::<JsonType>();
                 let value = if json_completion {
-                    self.object_operand(ctx, expr)?
+                    match expr {
+                        Expr::Array(_) | Expr::Object(_) => self.json_value(ctx, expr)?,
+                        Expr::New { class_name, .. }
+                            if self.shapes.literal_fields(class_name).is_some() =>
+                        {
+                            self.json_value(ctx, expr)?
+                        }
+                        _ => self.expression(ctx, expr)?,
+                    }
                 } else {
                     self.expression_with(ctx, expr, Some(result))?
                 };

@@ -24,7 +24,7 @@ fn rejected(source: &str) -> String {
         "{:#}",
         lower_source(ctx, source, "case.ts", crate::EntryPoint::Exports)
             .err()
-            .unwrap_or_else(|| panic!("expected rejection: {source}"))
+            .expect("rejection")
     )
 }
 
@@ -88,7 +88,6 @@ export function run(input: string, index: number): string {
         printed.contains("value: perry.optional <perry.string"),
         "{printed}"
     );
-    assert_eq!(printed.matches("perry.unwrap").count(), 1, "{printed}");
 }
 
 #[test]
@@ -173,12 +172,12 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "conditions must be boolean",
         ),
         (
-            "export function run(x: number): number { const d: Record<string, number> = { bad: true }; return x; }",
-            "value type differs",
+            "export function run(x: number): number { const d: Record<string, number> = {}; return x; }",
+            "MIR backend does not support",
         ),
         (
-            "interface P { x: number; y: number|undefined } export function run(x: number): number { const p: P = { x }; return p.x; }",
-            "missing required field",
+            "interface P { x: number; y?: number } export function run(x: number): number { const p: P = { x }; return p.x; }",
+            "optional property presence",
         ),
     ] {
         let error = rejected(source);
@@ -325,12 +324,10 @@ export function run(n: number): number {
 }
 
 #[test]
-fn recursive_records_get_a_reserved_name() {
-    for declaration in [
-        "interface Node { value: number; next: Node[] }",
-        "type Node = { value: number; next: Node[] };",
-    ] {
-        let body = r#"
+fn recursive_interfaces_get_a_reserved_name() {
+    let printed = lowered(
+        r#"
+interface Node { value: number; next: Node[] }
 function total(node: Node): number {
   let sum = node.value;
   for (let i = 0; i < node.next.length; i++) {
@@ -342,10 +339,9 @@ export function run(n: number): number {
   const leaf: Node = { value: n, next: [] };
   return total({ value: 1, next: [leaf, leaf] });
 }
-"#;
-        let printed = lowered(&format!("{declaration}\n{body}"));
-        assert!(printed.contains("shape_next_value_rec1"), "{printed}");
-    }
+"#,
+    );
+    assert!(printed.contains("shape_next_value_rec1"), "{printed}");
 }
 
 #[test]
@@ -562,7 +558,7 @@ export function run(text: string): number {
 "#,
     );
     for operation in [
-        "perry.json_unpack",
+        "JsonAsArray",
         "JsonAsNumber",
         "perry.array_push",
         "perry.binary Add",
@@ -580,70 +576,6 @@ export function run(text: string): number {
         invalid.contains("prototype setters") || invalid.contains("only direct calls"),
         "{invalid}"
     );
-}
-
-#[test]
-fn dictionaries_keep_native_types_and_recursive_aliases() {
-    let printed = lowered(
-        r#"
-interface Numbers { [key: string]: number }
-type Tree = { [key: string]: Tree };
-function recursive(): Tree { const tree: Tree = {}; tree.self = tree; return tree; }
-export function run(x: number): number {
-  const values: Numbers = {first:x};
-  const alias: Record<string, number> = values;
-  alias.second = x + 1;
-  const snapshot = Object.values(values);
-  delete values.first;
-  if(Object.hasOwn(values, 'first')) throw 1;
-  const tree = recursive();
-  if(tree.self !== tree) throw 2;
-  return snapshot[0] + values.second;
-}
-"#,
-    );
-    for expected in [
-        "perry.dictionary_new",
-        "perry.dictionary Set",
-        "perry.dictionary Get",
-        "perry.enumerate Values",
-        "perry.dictionary Delete",
-        "perry.dictionary Has",
-        "perry.dictionary <builtin.fp64",
-        "<@dictionary_Tree",
-    ] {
-        assert!(printed.contains(expected), "missing {expected}: {printed}");
-    }
-    for declaration in [
-        "type Dictionary = { [key: string]: number; required: number };",
-        "type Dictionary = { required: number; [key: string]: number };",
-        "interface Dictionary { [key: string]: number; required: number }",
-    ] {
-        let source = format!(
-            "{declaration} export function run(): number {{ const d:Dictionary={{required:1,extra:2}};return d.required; }}"
-        );
-        assert!(lowered(&source).contains("perry.dictionary"));
-        let error = rejected(&format!(
-            "{declaration} export function run():number {{const d:Dictionary={{extra:1}};return d.required;}}"
-        ));
-        assert!(error.contains("missing required field"), "{error}");
-    }
-    let incompatible = rejected(
-        "type Dictionary={ [key:string]:number; label:string };export function run(value:Dictionary):void{}",
-    );
-    assert!(
-        incompatible.contains("incompatible with its index signature"),
-        "{incompatible}"
-    );
-    for declaration in [
-        "type Dictionary = { [key: number]: string };",
-        "interface Dictionary { [key: number]: string }",
-    ] {
-        let invalid = rejected(&format!(
-            "{declaration} export function run(): number {{ return 0; }}"
-        ));
-        assert!(invalid.contains("string key"), "{invalid}");
-    }
 }
 
 #[test]
@@ -668,6 +600,7 @@ fn accepted_subset_exclusions_have_compile_time_diagnostics() {
             "fromCharCode is a UTF-16 code-unit API",
         ),
         ("new RegExp('a+')", "dynamic RegExp"),
+        ("JSON.stringify(new Date(0))", "Date JSON serialization"),
         (
             "String.fromCharCode()",
             "fromCharCode is a UTF-16 code-unit API",
@@ -683,60 +616,13 @@ fn accepted_subset_exclusions_have_compile_time_diagnostics() {
 }
 
 #[test]
-fn optional_record_fields_retain_type_presence_and_creation_order() {
-    for declaration in [
-        "interface Item { value:number; next?:Item; label?:string }",
-        "type Item={value:number;next?:Item;label?:string};",
-    ] {
-        let printed = lowered(&format!(
-            "{declaration} export function run():number {{ const item:Item={{value:1}}; item.next={{value:2}}; item.label=undefined; delete item.label; return item.next.value; }}"
-        ));
-        assert!(printed.contains("label?: perry.optional"), "{printed}");
-        assert!(printed.contains("perry.record Delete"), "{printed}");
-    }
-}
-
-#[test]
-fn inline_dictionary_annotations_retain_index_and_named_constraints() {
+fn dictionary_constraints_are_rejected_before_hir_can_erase_them() {
     for source in [
-        "export function run():number {const d:{[key:string]:number;count:number}={count:1};d.extra=2;return d.count+d.extra;}",
-        "export function run(d:{[key:string]:number;count:number}):number {d.extra=2;return d.count+d.extra;}",
-        "type Nested={inner:{[key:string]:number;count:number}};export function run(d:Nested):number{return d.inner.count;}",
+        "interface D {[key:string]:number} export function run(d:D):number{return 0;}",
+        "type D={[key:string]:number;x:number};export function run(d:D):number{return d.x;}",
+        "export function run(d:{x:number;[key:string]:number}):number{return d.x;}",
     ] {
-        let printed = lowered(source);
-        let compact = printed.split_whitespace().collect::<String>();
-        assert!(
-            compact.contains("perry.dictionary<builtin.fp64{\"count\":builtin.fp64}>"),
-            "{printed}"
-        );
-    }
-}
-
-#[test]
-fn enumeration_retains_native_tuple_slots_and_inferred_values() {
-    for source in [
-        "export function run():number {const d:Record<string,number>={a:2};const entries=Object.entries(d);return entries[0][1]+3;}",
-        "export function run():number {const d:Record<string,Uint8Array>={a:new Uint8Array([2])};const entries=Object.entries(d);return entries[0][1][0];}",
-        "export function run():number {const d={a:2,b:3};const values=Object.values(d);return values[0]+values[1];}",
-        "export function run():number {const pair:[string,number]=['a',2];pair[1]=3;return pair[1];}",
-        "export function run():number {const entries:[string,number][]=Object.entries({a:2});return entries[0][1];}",
-    ] {
-        let printed = lowered(source);
-        assert!(
-            printed.contains("perry.enumerate") || printed.contains("perry.tuple_new"),
-            "{printed}"
-        );
-        assert!(
-            !printed.contains("perry.json_pack"),
-            "native enumeration boxed: {printed}"
-        );
-    }
-    for source in [
-        "type Recursive=[Recursive];export function run(input:Recursive):number{return 0;}",
-        "export function run():number {const pair:[string,number]=['a',2];pair[0]=3;return 0;}",
-        "export function run():number {const values=Object.values({bytes:new Uint8Array([2]),n:1});return values.length;}",
-    ] {
-        rejected(source);
+        assert!(rejected(source).contains("closed-record subset"));
     }
 }
 

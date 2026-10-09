@@ -62,7 +62,7 @@ export function check():number {
   if(prefix!=='é🙂' || suffix!=='🙂x' || extended!=='🙂x!' || source!=='é🙂x?')return 22;
   if('a'.concat('b','c')!=='abc' || !value.isWellFormed() || value.toWellFormed()!==value)return 23;
   const inferred={point:''.codePointAt(0),at:''.at(0),nested:{value:''[0]}};
-  if(JSON.stringify(inferred)!=='{"nested":{}}' || !Object.hasOwn(inferred,'point'))return 24;
+  if(JSON.stringify(inferred)!=='{"nested":{}}' || inferred.point!==undefined)return 24;
   let typed=0;
   try{const declared:{point:number}={point:''.codePointAt(0)};}catch(e){if(e instanceof TypeError)typed=typed+1;}
   try{const declared:{at:string}={at:''.at(0)};}catch(e){if(e instanceof TypeError)typed=typed+1;}
@@ -123,12 +123,13 @@ fn string_methods_preserve_utf8_spans_scalar_indices_and_task_lifetimes() -> Res
         .flat_map(|input| indices.iter().map(move |index| (*input, *index)))
         .zip(expected)
     {
+        let actual = round
+            .call(&mut store, (input, index))
+            .with_context(|| format!("round input={input:?}, index={index}"))?
+            .0;
         assert_eq!(
-            round
-                .call(&mut store, (input, index))
-                .with_context(|| format!("round input={input:?}, index={index}"))?
-                .0,
-            expected,
+            serde_json::from_str::<serde_json::Value>(&actual)?,
+            serde_json::from_str::<serde_json::Value>(&expected)?,
             "input={input:?}, index={index}"
         );
     }

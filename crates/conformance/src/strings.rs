@@ -84,6 +84,7 @@ pub fn contract() -> Contract {
     }
 }
 
+/// Sorted observation fields keep native serialization order outside the string contract.
 fn observations(text: &str, needle: &str, index: &str, end: &str, count: u8) -> Case {
     let cut = text.chars().count() / 2;
     let text = serde_json::to_string(text).unwrap();
@@ -102,15 +103,14 @@ const absentNumbers:number[]=[];const absentStrings:string[]=[];
 const wide=text+'界'+text;
 const parsed=JSON.parse(JSON.stringify(text));
 const result={{
-  unit:text.charAt({index}),at:text.at({index}),indexed:text[{index}],
-  point:wide.codePointAt({index}),
-  slice:text.slice({index},{end}),substring:text.substring({index},{end}),
-  index:wide.indexOf(needle,{index}),last:wide.lastIndexOf(needle,{index}),
-  includes:wide.includes(needle,{index}),starts:wide.startsWith(needle,{index}),ends:wide.endsWith(needle,{end}),
-  lower:wide.toLowerCase(),upper:wide.toUpperCase(),
-  trim:wide.trim(),start:wide.trimStart(),end:wide.trimEnd(),
-  split:text.split(needle,{index}),absent:text.split(absentStrings[0],{index}),repeat:text.repeat({count}),
-  parsed:parsed.toUpperCase(),scalar:wide.slice(text.length,text.length+1)
+  absent:text.split(absentStrings[0],{index}),at:text.at({index}),
+  end:wide.trimEnd(),ends:wide.endsWith(needle,{end}),
+  includes:wide.includes(needle,{index}),index:wide.indexOf(needle,{index}),indexed:text[{index}],
+  last:wide.lastIndexOf(needle,{index}),lower:wide.toLowerCase(),
+  parsed:parsed.toUpperCase(),point:wide.codePointAt({index}),repeat:text.repeat({count}),
+  scalar:wide.slice(text.length,text.length+1),slice:text.slice({index},{end}),split:text.split(needle,{index}),
+  start:wide.trimStart(),starts:wide.startsWith(needle,{index}),substring:text.substring({index},{end}),
+  trim:wide.trim(),unit:text.charAt({index}),upper:wide.toUpperCase()
 }};
 if(text.slice(0,{cut})+text.slice({cut})!==text)throw 90;
 if(wide.trim().trim()!==wide.trim() || wide.toLowerCase().toLowerCase()!==wide.toLowerCase())throw 91;

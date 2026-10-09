@@ -6,7 +6,7 @@
 use crate::{
     attrs::{ErrorKind, Tier},
     exceptions::MayThrowInterface,
-    types::{ArrayType, OptionalType, StringType, TupleType},
+    types::{ArrayType, OptionalType, StringType},
 };
 use pliron::{
     builtin::{
@@ -153,11 +153,11 @@ impl ArrayLenOp {
 
 impl Verify for ArrayLenOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        let ty = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
-        let ty = ty.deref(ctx);
-        if !ty.is::<ArrayType>() && !ty.is::<TupleType>() {
-            verify_err!(self.loc(ctx), CollectionErr::NotArray("perry.array_len"))?;
-        }
+        element(
+            ctx,
+            self.get_operation().deref(ctx).get_operand(0),
+            "perry.array_len",
+        )?;
         if !is_index(ctx, self.get_result(ctx)) {
             verify_err!(self.loc(ctx), CollectionErr::Index("perry.array_len"))?
         }
@@ -225,6 +225,13 @@ impl Verify for ArrayGetOp {
     }
 }
 
+#[op_interface_impl]
+impl SideEffects for ArrayGetOp {
+    fn has_side_effects(&self, _ctx: &Context) -> bool {
+        false
+    }
+}
+
 /// Write an element at an index in `[0, length]`; writing at `length` appends.
 /// Any other index throws a catchable `RangeError` instead of creating a hole (subset rule R8).
 #[pliron_op(
@@ -265,7 +272,7 @@ impl Verify for ArraySetOp {
 #[op_interface_impl]
 impl MayThrowInterface for ArraySetOp {
     fn exception(&self, _ctx: &Context) -> ErrorKind {
-        ErrorKind::Any
+        ErrorKind::RangeError
     }
 }
 
@@ -438,18 +445,5 @@ impl Verify for StringLenOp {
 impl SideEffects for StringLenOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
         false
-    }
-}
-
-#[op_interface_impl]
-impl MayThrowInterface for ArrayGetOp {
-    fn exception(&self, _ctx: &Context) -> ErrorKind {
-        ErrorKind::TypeError
-    }
-}
-#[op_interface_impl]
-impl MayThrowInterface for ArrayPushOp {
-    fn exception(&self, _ctx: &Context) -> ErrorKind {
-        ErrorKind::TypeError
     }
 }

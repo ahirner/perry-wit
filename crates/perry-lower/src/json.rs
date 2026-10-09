@@ -1,6 +1,5 @@
-//! Explicit JSON variants and checked conversion back to statically typed scalar values.
+//! Explicit JSON variants and schema-based conversion to and from native values.
 use super::*;
-use perry_mir::types::OptionalType;
 
 pub(super) fn is_json(ctx: &Context, value: Value) -> bool {
     let ty = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
@@ -68,8 +67,6 @@ impl FunctionBuilder<'_> {
                 "boolean"
             } else if ty.is::<RecordType>()
                 || ty.is::<ArrayType>()
-                || ty.is::<TupleType>()
-                || ty.is::<DictionaryType>()
                 || ty.is::<FsStatsType>()
                 || ty.is::<TextEncoderType>()
                 || ty.is::<TextDecoderType>()
@@ -116,14 +113,18 @@ impl FunctionBuilder<'_> {
 
     pub(super) fn json_value(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         match expr {
+            Expr::Undefined => {
+                let json = JsonType::get(ctx).into();
+                Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, json)))
+            }
             Expr::Array(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     let value = self.json_value(ctx, item)?;
                     values.push(self.optional(ctx, value));
                 }
-                let json = JsonType::get(ctx).into();
-                let json = OptionalType::get(ctx, json).into();
+                let json =
+                    perry_mir::types::OptionalType::get(ctx, JsonType::get(ctx).into()).into();
                 let array = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, json, values));
                 Ok(self
                     .intrinsic(ctx, Intrinsic::JsonArray, vec![array])
@@ -139,127 +140,11 @@ impl FunctionBuilder<'_> {
                 let names = self.shapes.literal_fields(class_name).unwrap();
                 self.json_object(ctx, names.iter().map(String::as_str).zip(args))
             }
-            Expr::Undefined => {
-                let json = JsonType::get(ctx).into();
-                Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, json)))
-            }
             _ => {
                 let value = self.expression(ctx, expr)?;
-                self.json_input(ctx, value)
+                self.pack_json(ctx, value)
             }
         }
-    }
-
-    pub(super) fn json_input(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
-        if is_json(ctx, value) {
-            return Ok(value);
-        }
-        ensure!(
-            perry_mir::json::compatible(ctx, value.get_type(ctx)),
-            "value is not JSON-compatible"
-        );
-        Ok(self.emit_value(ctx, |ctx| perry_mir::json::PackOp::new(ctx, value)))
-    }
-
-    pub(super) fn json_assignment(
-        &mut self,
-        ctx: &mut Context,
-        expr: &Expr,
-    ) -> Result<(Value, Value)> {
-        let value = self.object_operand(ctx, expr)?;
-        let json = self.json_input(ctx, value)?;
-        Ok((value, self.optional(ctx, json)))
-    }
-
-    pub(super) fn object_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
-        match expr {
-            Expr::Array(_) | Expr::Object(_) => self.json_value(ctx, expr),
-            Expr::New { class_name, .. } if self.shapes.literal_fields(class_name).is_some() => {
-                self.json_value(ctx, expr)
-            }
-            _ => self.expression(ctx, expr),
-        }
-    }
-
-    pub(super) fn enumeration_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
-        match expr {
-            Expr::Array(items) => {
-                let values = items
-                    .iter()
-                    .map(|item| self.enumeration_operand(ctx, item))
-                    .collect::<Result<Vec<_>>>()?;
-                let Some(element) = perry_mir::enumeration::common_type(
-                    ctx,
-                    values.iter().map(|value| value.get_type(ctx)),
-                ) else {
-                    return Ok(
-                        self.emit_value(ctx, |ctx| perry_mir::tuples::NewOp::new(ctx, values))
-                    );
-                };
-                let values = values
-                    .into_iter()
-                    .map(|value| self.fit(ctx, value, element))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
-            }
-            Expr::Object(fields) => {
-                let fields = fields
-                    .iter()
-                    .map(|(name, expr)| Ok((name.clone(), self.enumeration_operand(ctx, expr)?)))
-                    .collect::<Result<_>>()?;
-                self.enumeration_fields(ctx, fields)
-            }
-            Expr::New {
-                class_name, args, ..
-            } if self.shapes.literal_fields(class_name).is_some() => {
-                let names = self.shapes.literal_fields(class_name).unwrap();
-                let fields = names
-                    .iter()
-                    .zip(args)
-                    .map(|(name, expr)| Ok((name.clone(), self.enumeration_operand(ctx, expr)?)))
-                    .collect::<Result<_>>()?;
-                self.enumeration_fields(ctx, fields)
-            }
-            _ => self.expression(ctx, expr),
-        }
-    }
-
-    fn enumeration_fields(
-        &mut self,
-        ctx: &mut Context,
-        fields: Vec<(String, Value)>,
-    ) -> Result<Value> {
-        let mut names = std::collections::HashSet::new();
-        if fields
-            .iter()
-            .all(|(name, _)| identifier(name).is_ok() && names.insert(name))
-        {
-            return self.record_from_values(ctx, fields, None);
-        }
-        ensure!(
-            !fields.iter().any(|(name, _)| name == "__proto__"),
-            "prototype setters are outside the closed-shape subset"
-        );
-        let element = perry_mir::enumeration::common_type(ctx,fields.iter().map(|(_, value)| value.get_type(ctx)))
-            .context("enumerated literal fields with arbitrary keys must share a native type or be JSON-compatible")?;
-        let fields = fields
-            .into_iter()
-            .map(|(name, value)| Ok((name, self.fit(ctx, value, element)?)))
-            .collect::<Result<_>>()?;
-        let ty = DictionaryType::get(ctx, element).into();
-        Ok(self.emit_value(ctx, |ctx| {
-            perry_mir::dictionaries::NewOp::new(ctx, ty, fields)
-        }))
-    }
-
-    pub(super) fn property_key(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
-        let key = self.object_operand(ctx, expr)?;
-        if key.get_type(ctx).deref(ctx).is::<StringType>() {
-            return Ok(key);
-        }
-        let key = self.json_input(ctx, key)?;
-        let key = self.optional(ctx, key);
-        Ok(self.intrinsic(ctx, Intrinsic::JsonKey, vec![key]).unwrap())
     }
 
     fn json_object<'e>(
@@ -279,8 +164,7 @@ impl FunctionBuilder<'_> {
             values.push(self.optional(ctx, value));
         }
         let string = StringType::get(ctx).into();
-        let json = JsonType::get(ctx).into();
-        let json = OptionalType::get(ctx, json).into();
+        let json = perry_mir::types::OptionalType::get(ctx, JsonType::get(ctx).into()).into();
         let keys = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, string, keys));
         let values = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, json, values));
         Ok(self
@@ -289,20 +173,76 @@ impl FunctionBuilder<'_> {
     }
 
     pub(super) fn pack_json(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        self.encode_json(ctx, value, 0)
+    }
+
+    /// Schema conversion builds a JSON snapshot; native aggregates never become dynamic views.
+    fn encode_json(&mut self, ctx: &mut Context, value: Value, depth: usize) -> Result<Value> {
+        ensure!(
+            depth < 32,
+            "recursive or deeply nested native JSON schemas are unsupported"
+        );
+        if is_json(ctx, value) {
+            return Ok(value);
+        }
+        if optional_value(ctx, value.get_type(ctx)).is_some() {
+            let json = JsonType::get(ctx).into();
+            let absent = self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, json));
+            let slot = self.entry_slot(ctx, absent.get_type(ctx));
+            self.store(ctx, slot, absent);
+            let missing = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            let present = self.new_block(ctx, "json_present");
+            let done = self.new_block(ctx, "json_optional");
+            self.branch(ctx, missing, done, present);
+            self.switch_to(present);
+            let defined = self.defined(ctx, value)?;
+            let encoded = self.encode_json(ctx, defined, depth + 1)?;
+            let encoded = self.optional(ctx, encoded);
+            self.store(ctx, slot, encoded);
+            self.jump(ctx, done);
+            self.switch_to(done);
+            return self.load(ctx, slot);
+        }
         let value = self.defined(ctx, value)?;
-        let intrinsic = match kind(ctx, value)? {
+        if let Ok(record) = TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx) {
+            ensure!(
+                record.deref(ctx).name().as_ref() != "builtin_Date",
+                "Date JSON serialization is not supported yet"
+            );
+            let fields = record
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("opaque JSON schema"))?
+                .to_vec();
+            let mut keys = Vec::new();
+            let mut values = Vec::new();
+            for (name, _) in fields {
+                keys.push(self.emit_value(ctx, |ctx| StringConstOp::new(ctx, name.as_ref())));
+                let field = FieldGetOp::new(ctx, value, name)?;
+                let field = self.append_value(ctx, &field);
+                let encoded = self.encode_json(ctx, field, depth + 1)?;
+                values.push(self.optional(ctx, encoded));
+            }
+            let string = StringType::get(ctx).into();
+            let json = perry_mir::types::OptionalType::get(ctx, JsonType::get(ctx).into()).into();
+            let keys = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, string, keys));
+            let values = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, json, values));
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::JsonObject, vec![keys, values])
+                .unwrap());
+        }
+        if value.get_type(ctx).deref(ctx).is::<ArrayType>() {
+            let json = perry_mir::types::OptionalType::get(ctx, JsonType::get(ctx).into()).into();
+            let encoded = self.convert_json_array(ctx, value, json, depth + 1, true)?;
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::JsonArray, vec![encoded])
+                .unwrap());
+        }
+        let intrinsic = match kind(ctx, value).context("value is not JSON-compatible")? {
             Kind::Json => return Ok(value),
             Kind::Number => Intrinsic::JsonNumber,
             Kind::Boolean => Intrinsic::JsonBoolean,
             Kind::String => Intrinsic::JsonString,
-            Kind::Record | Kind::Array | Kind::Tuple | Kind::Dictionary => {
-                ensure!(
-                    perry_mir::json::compatible(ctx, value.get_type(ctx)),
-                    "aggregate contains values outside the JSON subset: {}",
-                    value.get_type(ctx).disp(ctx)
-                );
-                return Ok(self.emit_value(ctx, |ctx| perry_mir::json::PackOp::new(ctx, value)));
-            }
             _ => bail!("value is not JSON-compatible"),
         };
         Ok(self.intrinsic(ctx, intrinsic, vec![value]).unwrap())
@@ -314,6 +254,58 @@ impl FunctionBuilder<'_> {
         value: Value,
         target: TypeHandle,
     ) -> Result<Value> {
+        self.decode_json(ctx, value, target, 0)
+    }
+
+    fn decode_json(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        target: TypeHandle,
+        depth: usize,
+    ) -> Result<Value> {
+        ensure!(
+            depth < 32,
+            "recursive or deeply nested native JSON schemas are unsupported"
+        );
+        if target.deref(ctx).is::<JsonType>() {
+            return self.defined(ctx, value);
+        }
+        if let Ok(record) = TypedHandle::<RecordType>::from_handle(target, ctx) {
+            ensure!(
+                record.deref(ctx).name().as_ref() != "builtin_Date",
+                "Date JSON conversion is not supported"
+            );
+            let fields = record
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("opaque JSON schema"))?
+                .to_vec();
+            let mut values = Vec::new();
+            let value = self.optional(ctx, value);
+            let value = self
+                .intrinsic(ctx, Intrinsic::JsonAsObject, vec![value])
+                .unwrap();
+            for (name, ty) in fields {
+                let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, name.as_ref()));
+                let field = self
+                    .intrinsic(ctx, Intrinsic::JsonGet, vec![value, key])
+                    .unwrap();
+                values.push(self.decode_json(ctx, field, ty, depth + 1)?);
+            }
+            return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
+        }
+        if let Ok(array) = TypedHandle::<ArrayType>::from_handle(target, ctx) {
+            let element = array.deref(ctx).element();
+            let value = self.optional(ctx, value);
+            let source = self
+                .intrinsic(ctx, Intrinsic::JsonAsArray, vec![value])
+                .unwrap();
+            if element.deref(ctx).is::<JsonType>() {
+                return Ok(source);
+            }
+            return self.convert_json_array(ctx, source, element, depth + 1, false);
+        }
         let intrinsic = if target.deref(ctx).is::<FP64Type>() {
             Intrinsic::JsonAsNumber
         } else if target.deref(ctx).is::<StringType>() {
@@ -325,15 +317,52 @@ impl FunctionBuilder<'_> {
         {
             Intrinsic::JsonAsBoolean
         } else {
-            ensure!(
-                perry_mir::json::compatible(ctx, target),
-                "JSON target contains unsupported types"
-            );
-            return Ok(self.emit_value(ctx, |ctx| {
-                perry_mir::json::UnpackOp::new(ctx, value, target)
-            }));
+            bail!("JSON schema requires scalars, closed records or dense arrays");
         };
         let value = self.optional(ctx, value);
         Ok(self.intrinsic(ctx, intrinsic, vec![value]).unwrap())
+    }
+
+    fn convert_json_array(
+        &mut self,
+        ctx: &mut Context,
+        source: Value,
+        element: TypeHandle,
+        depth: usize,
+        encode: bool,
+    ) -> Result<Value> {
+        let output = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+        let number = FP64Type::get(ctx).into();
+        let index = self.entry_slot(ctx, number);
+        let zero = self.number(ctx, 0.0);
+        self.store(ctx, index, zero);
+        let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, source));
+        let length = self.emit_value(ctx, |ctx| {
+            ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+        });
+        let test = self.new_block(ctx, "json_array_test");
+        let body = self.new_block(ctx, "json_array_body");
+        let done = self.new_block(ctx, "json_array_done");
+        self.jump(ctx, test);
+        self.switch_to(test);
+        let i = self.load(ctx, index)?;
+        let more = self.compare(ctx, CompareKind::Lt, i, length);
+        self.branch(ctx, more, body, done);
+        self.switch_to(body);
+        let get = ArrayGetOp::new(ctx, source, i)?;
+        let value = self.append_value(ctx, &get);
+        let value = if encode {
+            let encoded = self.encode_json(ctx, value, depth)?;
+            self.optional(ctx, encoded)
+        } else {
+            self.decode_json(ctx, value, element, depth)?
+        };
+        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, output, value));
+        let one = self.number(ctx, 1.0);
+        let next = self.binary(ctx, BinaryKind::Add, i, one);
+        self.store(ctx, index, next);
+        self.jump(ctx, test);
+        self.switch_to(done);
+        Ok(output)
     }
 }

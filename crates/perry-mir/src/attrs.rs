@@ -38,15 +38,6 @@ pub enum Tier {
     Instance,
 }
 
-/// Record field indices in property creation order, independent of physical layout.
-#[pliron_attr(
-    name = "perry.field_order",
-    format = "`[` vec($0, CharSpace(`,`)) `]`",
-    verifier = "succ"
-)]
-#[derive(PartialEq, Eq, Clone, Debug, Hash)]
-pub struct FieldOrder(pub Vec<usize>);
-
 /// Numeric conversions between ECMAScript numbers and proven integer ranges.
 #[pliron_attr(name = "perry.convert_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
@@ -68,12 +59,3 @@ pub enum ErrorKind {
     RangeError,
     SyntaxError,
 }
-
-/// Literal dictionary keys in source evaluation order, including overwritten entries.
-#[pliron_attr(
-    name = "perry.field_names",
-    format = "`[` vec($0, CharSpace(`,`)) `]`",
-    verifier = "succ"
-)]
-#[derive(PartialEq, Eq, Clone, Debug, Hash)]
-pub struct FieldNames(pub Vec<String>);

@@ -181,7 +181,7 @@ if (total !== 6) throw new Error("top-level locals");
 mod output_capture;
 
 #[tokio::test(flavor = "current_thread")]
-async fn rejections_are_checked_after_microtasks_before_the_next_host_turn() -> Result<()> {
+async fn rejections_are_checked_after_ready_frames_before_the_next_host_turn() -> Result<()> {
     let directory = tempfile::tempdir()?;
     std::fs::write(
         directory.path().join("world.wit"),

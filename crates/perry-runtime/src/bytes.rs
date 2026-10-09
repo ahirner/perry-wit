@@ -280,27 +280,17 @@ pub unsafe extern "C" fn perry_bytes_set_array(
     // SAFETY: slots have the promised type; bounds are checked before writing.
     unsafe {
         let target = &*target.cast::<View>();
-        let length = crate::json::view::perry_view_length(source);
-        let Some(offset) = index(offset)
-            .filter(|offset| *offset <= target.length && length <= target.length - offset)
-        else {
+        let source = crate::array::slots(source);
+        let Some(offset) = index(offset).filter(|offset| {
+            *offset <= target.length && source.len() <= (target.length - offset) as usize
+        }) else {
             return range_error();
         };
-        for position in 0..length {
-            let bits = if crate::json::view::source(source).is_some() {
-                let bits = crate::json::view::perry_view_get(source, position);
-                let status = crate::exception::perry_exception_status();
-                if status != 0 {
-                    return status as i32;
-                }
-                bits
-            } else {
-                crate::array::slots(source)[position as usize]
-            };
+        for (position, bits) in source.iter().enumerate() {
             (*target.buffer)
                 .data
-                .add((target.offset + offset) as usize + position as usize)
-                .write(byte(f64::from_bits(bits)));
+                .add((target.offset + offset) as usize + position)
+                .write(byte(f64::from_bits(*bits)));
         }
     }
     0
@@ -312,7 +302,7 @@ pub unsafe extern "C" fn perry_bytes_set_array(
 pub unsafe extern "C" fn perry_bytes_from_array(array: *mut u8) -> *mut u8 {
     // SAFETY: the destination has room for every source element.
     unsafe {
-        let result = perry_bytes_new(crate::json::view::perry_view_length(array) as f64);
+        let result = perry_bytes_new(crate::array::slots(array).len() as f64);
         perry_bytes_set_array(result, array, 0.0);
         result
     }

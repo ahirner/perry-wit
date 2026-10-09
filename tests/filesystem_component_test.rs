@@ -1055,11 +1055,9 @@ export async function retained(n:number):Promise<number> {
 export async function saved(encoding:string):Promise<number> {
   const value=await load('/sandbox/input',encoding);
   const values:Data[]=[value];const record:{value:Data}={value};
-  const dictionary:Record<string,Data>={value};
-  const snapshot=Object.values(dictionary);
   await load('/sandbox/input','binary');
-  if(values[0]!==value||record.value!==value||dictionary.value!==value||snapshot[0]!==value)throw 94;
-  if(values[1]!==undefined||dictionary.missing!==undefined)throw 95;
+  if(values[0]!==value||record.value!==value)throw 94;
+  if(values[1]!==undefined)throw 95;
   const missing:Data=values[1];
   const numbers:number[]=[3];const flags:boolean[]=[false];
   if(missing!==numbers[1]||missing!==flags[1]||missing===numbers[0]||value===numbers[1])throw 99;
@@ -1068,7 +1066,7 @@ export async function saved(encoding:string):Promise<number> {
   const restored:Data=values[0];
   if(typeof restored==='string')return restored.length;
   restored[0]=72;
-  const alias:Data=snapshot[0];
+  const alias:Data=values[0];
   if(typeof alias==='string')throw 96;
   return alias[0];
 }

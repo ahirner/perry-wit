@@ -42,7 +42,6 @@ world timers {
 
 const SOURCE: &str = r#"
 import { setTimeout } from 'node:timers/promises';
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 interface Observation { value: number; trace: number[] }
 async function appendLater(trace:number[]):Promise<void>{
   await setTimeout(1);
@@ -126,18 +125,14 @@ export async function run(x: number): Promise<Observation> {
   const first = await pending;
   trace.push(first);
   trace.push(await pending);
-  const result = { value: first * 2, trace: trace };
-  if(value === 3.5) return JSON.parse(JSON.stringify(result));
-  return result;
+  return { value: first * 2, trace: trace };
 }
 export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
   return await setTimeout(2, prefix + "!");
 }
+type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
 async function retainJson(pending:Promise<JsonValue>):Promise<JsonValue>{
-  try{return pending;}finally{await setTimeout(1);}
-}
-async function retainNative(pending:Promise<{[key:string]:number;count:number}>):Promise<JsonValue>{
   try{return pending;}finally{await setTimeout(1);}
 }
 export async function json(input: string): Promise<string> {
@@ -153,44 +148,12 @@ export async function json(input: string): Promise<string> {
   original = original + '!';
   const value = await retainJson(setTimeout(1,JSON.parse(input)));
   const alias = value.item;
-  const typed: {count: number} = alias;
-  const count: number = typed.count;
-  const native:{[key:string]:number;count:number} = {count:count};
-  const dictionary:{[key:string]:number;count:number} = alias;
-  const stored:Record<string,{count:number}> = {item:typed};
-  const storedValues=Object.values(stored);
-  const storedEntries=Object.entries(stored);
-  const countEntries=Object.entries(native);
-  const jsonEntries=Object.entries(value);
-  const optional:{count:number;label?:string}={count:count};
-  const optionalJson:JsonValue=optional;
-  const optionalKeys=Object.keys(optional);
-  optional.label='before';
-  const reference: JsonValue = await retainNative(setTimeout(1,native));
-  for(let i=0;i<24;i++) alias[i] = i;
-  const keys = Object.keys(alias);
+  const count: number = alias.count;
   const snapshot = JSON.stringify(value);
   await setTimeout(1);
-  reference.count = reference.count + 1;
-  for(let i=0;i<24;i++) delete alias[i];
-  delete alias.count;
+  alias.count = count + 1;
   await setTimeout(1);
-  let missing=false;
-  try {const absent:number=dictionary.count;throw 1;}catch(e){missing=e instanceof TypeError;}
-  if(!missing)throw new TypeError('lost required dictionary field');
-  if(optional.label!=='before' || optionalKeys.length!==1)throw new TypeError('lost optional record state');
-  delete optionalJson.label;
-  await setTimeout(1);
-  if(Object.hasOwn(optional,'label') || optional.label!==undefined)throw new TypeError('lost optional record deletion');
-  optional.label='after';
-  if(optionalJson.label!=='after' || Object.keys(optional)[1]!=='label')throw new TypeError('lost optional record insertion');
-  dictionary.count = native.count;
   if(JSON.parse(snapshot).item.count !== count) throw new TypeError('lost serialization snapshot');
-  if(storedValues[0] !== typed || storedValues[0].count !== dictionary.count) throw new TypeError('lost dictionary value');
-  if(storedEntries[0][1] !== typed || storedEntries[0][1].count !== dictionary.count) throw new TypeError('lost entry alias');
-  if(countEntries[0][1] !== count || jsonEntries[0][1] !== alias) throw new TypeError('lost entry snapshot');
-  if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');
-  if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');
   if(suffix !== input || parts[1] !== input || head !== 'é' || !original.endsWith('!')) throw new TypeError('lost string span');
   if(codec.decoder!==decoder||codec.encoder!==encoder||codec.decoder.decode(encoded.subarray(2))!=='🙂'+input)throw new TypeError('lost codec state');
   return JSON.stringify(value);

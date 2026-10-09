@@ -60,38 +60,6 @@ impl Program {
 }
 
 #[test]
-fn number_payloads_do_not_become_missing_dictionary_entries() {
-    let mut program = Program::new(
-        r#"
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-export function run(value: number): number {
-  const dictionary: Record<string, number> = {value:value};
-  if (dictionary.value === undefined) return 1;
-  const optional: Record<string, number | undefined> = {value:value};
-  if (optional.value === undefined) return 2;
-  const array: number[] = [value];
-  if (array[0] === undefined) return 3;
-  const packed: JsonValue = dictionary;
-  const checked = packed as unknown as Record<string, number | undefined>;
-  if (checked.value === undefined) return 4;
-  if (value === 0 && 1 / dictionary.value !== 1 / value) return 5;
-  if (value === 0 && 1 / array[0] !== 1 / value) return 6;
-  return 0;
-}
-"#,
-    );
-    for value in [
-        -0.0,
-        0.0,
-        f64::NAN,
-        f64::from_bits(perry_codegen::UNDEFINED_BITS),
-        f64::from_bits(0xfff0_0000_0000_0001),
-    ] {
-        assert_eq!(program.number("run", value), 0.0, "{:x}", value.to_bits());
-    }
-}
-
-#[test]
 fn scalar_loops_calls_and_remainder() {
     let mut program = Program::new(
         r#"
@@ -378,9 +346,9 @@ export async function run(x:number):Promise<number>{
   const value:Box={count:x};
   const packed=await liftRecord(value);
   const alias:Box=packed;
-  if(alias!==value || alias.count!==x+1)throw new Error('lost native alias');
+  if(alias===value || alias.count!==x+1)throw new Error('invalid native snapshot');
   alias.count=alias.count+1;
-  if(packed.count!==x+2)throw new Error('copied native payload');
+  if(packed.count!==x+1 || value.count!==x+1)throw new Error('shared native payload');
   const parsedValue:Box=await liftParsed();
   if(parsedValue.count!==3)throw new Error('lost parsed payload');
   if(JSON.stringify(await choose(false))!=='[1,"é",null]')throw new Error('lost contextual literal');
@@ -727,52 +695,4 @@ export function run(x: number): number {
 "#,
     );
     assert_eq!(program.number("run", 9.0), 2048.0);
-}
-
-#[test]
-fn native_aggregate_programs_do_not_link_json_view_code() {
-    let mut program = Program::new(
-        r#"
-export function run(x: number): number {
-  const point = {value:x};
-  const items = [point];
-  items.push(point);
-  return items[1].value;
-}
-"#,
-    );
-    assert_eq!(program.number("run", 7.0), 7.0);
-    let code_bytes: u64 = wasmparser::Parser::new(0)
-        .parse_all(&program.wasm)
-        .map(|payload| match payload.unwrap() {
-            wasmparser::Payload::CodeSectionEntry(body) => body.range().end - body.range().start,
-            _ => 0,
-        })
-        .sum();
-    assert!(
-        code_bytes < 6_000,
-        "native-only aggregate code grew to {code_bytes} bytes"
-    );
-}
-
-#[test]
-fn throwing_array_operations_in_loop_finalizers_keep_definitions_before_uses() {
-    let mut program = Program::new(
-        r#"
-export function run(limit: number): number {
-  const trace: number[] = [];
-  for(let i = 0; i < limit; i++) {
-    try {
-      if(i === 0) continue;
-      if(i === 2) break;
-      trace.push(i);
-    } finally { trace.push(10 + i); }
-  }
-  let result = 0;
-  for(let j = 0; j < trace.length; j++) result = result * 100 + trace[j];
-  return result;
-}
-"#,
-    );
-    assert_eq!(program.number("run", 4.0), 10011112.0);
 }

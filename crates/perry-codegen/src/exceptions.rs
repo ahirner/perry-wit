@@ -6,6 +6,13 @@ use perry_mir::exceptions::{
 use perry_runtime::exception as tags;
 
 impl FunctionLowering<'_> {
+    pub(super) fn check_pending(&mut self, ctx: &mut Context) {
+        let status = self
+            .runtime(ctx, Runtime::ExceptionStatus, vec![])
+            .expect("status");
+        self.throw_status_if(ctx, status, status);
+    }
+
     pub(super) fn exception_target(
         &mut self,
         ctx: &mut Context,

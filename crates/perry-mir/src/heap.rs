@@ -2,11 +2,7 @@
 //!
 //! Allocations carry a [Tier]; field reads and writes are typed against the record's shape.
 //! Escape analysis, SROA and tier classification (P3.3, P3.4, P3.7) rewrite these ops.
-use crate::{
-    attrs::{ErrorKind, FieldOrder, Tier},
-    exceptions::MayThrowInterface,
-    types::RecordType,
-};
+use crate::{attrs::Tier, types::RecordType};
 use pliron::{
     builtin::{
         attributes::IdentifierAttr,
@@ -42,10 +38,6 @@ pub enum HeapErr {
     NoField { record: String, field: String },
     #[error("perry.alloc tier {0:?} is not an allocation tier")]
     Tier(Tier),
-    #[error(
-        "perry.alloc property order must contain each required field and no duplicate or invalid indices"
-    )]
-    FieldOrder,
 }
 
 fn record<'a>(
@@ -62,15 +54,14 @@ fn record<'a>(
 /// Allocate a record whose fields are initialized from the operands in declaration order.
 #[pliron_op(
     name = "perry.alloc",
-    format = "attr($perry_tier, $Tier) ` ` attr($perry_field_order, $FieldOrder) ` (` operands(CharSpace(`,`)) `) : ` type($0)",
+    format = "attr($perry_tier, $Tier) ` (` operands(CharSpace(`,`)) `) : ` type($0)",
     interfaces = [OneResultInterface],
-    attributes = (perry_tier: Tier, perry_field_order: FieldOrder)
+    attributes = (perry_tier: Tier)
 )]
 pub struct AllocOp;
 
 impl AllocOp {
     pub fn new(ctx: &mut Context, record: TypedHandle<RecordType>, fields: Vec<Value>) -> Self {
-        let order = (0..fields.len()).collect();
         let op = AllocOp {
             op: Operation::new(
                 ctx,
@@ -82,7 +73,6 @@ impl AllocOp {
             ),
         };
         op.set_attr_perry_tier(ctx, Tier::Unassigned);
-        op.set_order(ctx, order);
         op
     }
 
@@ -92,17 +82,6 @@ impl AllocOp {
 
     pub fn set_tier(&self, ctx: &Context, tier: Tier) {
         self.set_attr_perry_tier(ctx, tier);
-    }
-
-    pub fn order(&self, ctx: &Context) -> Vec<usize> {
-        self.get_attr_perry_field_order(ctx)
-            .expect("property order")
-            .0
-            .clone()
-    }
-
-    pub fn set_order(&self, ctx: &Context, order: Vec<usize>) {
-        self.set_attr_perry_field_order(ctx, FieldOrder(order));
     }
 }
 
@@ -126,24 +105,13 @@ impl Verify for AllocOp {
                 }
             )?
         }
-        let mut order = self.order(ctx);
-        order.sort_unstable();
-        if order.iter().any(|&index| index >= fields.len())
-            || order.windows(2).any(|pair| pair[0] == pair[1])
-            || fields
-                .iter()
-                .enumerate()
-                .any(|(index, field)| !field.optional && !order.contains(&index))
-        {
-            verify_err!(loc.clone(), HeapErr::FieldOrder)?
-        }
-        for (field, value) in fields.iter().zip(operands) {
-            if value.get_type(ctx) != field.ty {
+        for ((field, ty), value) in fields.iter().zip(operands) {
+            if value.get_type(ctx) != *ty {
                 verify_err!(
                     loc.clone(),
                     HeapErr::FieldType {
                         record: record.name().to_string(),
-                        field: field.name.to_string(),
+                        field: field.to_string(),
                     }
                 )?
             }
@@ -231,6 +199,13 @@ impl Verify for FieldGetOp {
     }
 }
 
+#[op_interface_impl]
+impl SideEffects for FieldGetOp {
+    fn has_side_effects(&self, _ctx: &Context) -> bool {
+        false
+    }
+}
+
 /// Write one field of a record.
 #[pliron_op(
     name = "perry.field_set",
@@ -280,18 +255,5 @@ impl Verify for FieldSetOp {
             )?
         }
         Ok(())
-    }
-}
-
-#[op_interface_impl]
-impl MayThrowInterface for FieldGetOp {
-    fn exception(&self, _ctx: &Context) -> ErrorKind {
-        ErrorKind::TypeError
-    }
-}
-#[op_interface_impl]
-impl MayThrowInterface for FieldSetOp {
-    fn exception(&self, _ctx: &Context) -> ErrorKind {
-        ErrorKind::TypeError
     }
 }

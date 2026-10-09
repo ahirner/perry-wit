@@ -79,7 +79,10 @@ impl FunctionBuilder<'_> {
         );
         let values = args
             .iter()
-            .map(|arg| self.expression(ctx, arg))
+            .map(|arg| match arg {
+                Expr::Undefined => Ok(None),
+                _ => self.expression(ctx, arg).map(Some),
+            })
             .collect::<Result<Vec<_>>>()?;
         let receiver = if json::is_json(ctx, receiver) {
             let string = StringType::get(ctx).into();
@@ -91,8 +94,8 @@ impl FunctionBuilder<'_> {
             kind(ctx, receiver)? == Kind::String,
             "string method requires a string receiver"
         );
-        let first = values.first().copied();
-        let second = values.get(1).copied();
+        let first = values.first().copied().flatten();
+        let second = values.get(1).copied().flatten();
         let mut operands = vec![receiver];
         let op = match method {
             "charAt" | "at" | "codePointAt" => {
@@ -148,7 +151,7 @@ impl FunctionBuilder<'_> {
             "concat" => {
                 let mut result = receiver;
                 for value in values {
-                    let next = self.string_argument(ctx, Some(value))?;
+                    let next = self.string_argument(ctx, value)?;
                     result = self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, result, next));
                 }
                 return Ok(Some(result));
