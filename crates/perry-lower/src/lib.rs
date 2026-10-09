@@ -31,17 +31,22 @@ use perry_mir::{
     },
     control::{BrOp, CondBrOp, ReturnOp},
     exceptions::{
-        CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp,
-        MayThrowInterface, RaiseOp, RethrowOp,
+        CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp,
+        RethrowOp,
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
-    intrinsics::{Intrinsic, IntrinsicOp},
+    intrinsics::{
+        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, may_throw,
+    },
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
         IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
-    types::{ArrayType, ExceptionType, PromiseType, RecordType, StringType},
+    types::{
+        ArrayType, BytesType, DateType, ExceptionType, JsonType, PromiseType, RecordType,
+        StringType,
+    },
 };
 use pliron::printable::Printable as _;
 use pliron::{
@@ -59,7 +64,7 @@ use pliron::{
         listener::DummyListener,
     },
     linked_list::ContainsLinkedList,
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
     r#type::{TypeHandle, Typed, TypedHandle},
     utils::apint::{APInt, bw},
@@ -111,6 +116,19 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
             _ => None,
         })
         .collect();
+    for import in &hir.imports {
+        let source = import.source.as_str();
+        let supported = matches!(source, "timers/promises" | "node:timers/promises");
+        let builtin = source.starts_with("node:")
+            || matches!(
+                source,
+                "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
+            );
+        ensure!(
+            supported || !builtin,
+            "Unsupported capability import {source}: only node:timers/promises is supported so far"
+        );
+    }
     let mut signatures = HashMap::new();
     for function in &hir.functions {
         ensure!(
@@ -253,6 +271,9 @@ enum Kind {
     Record,
     Array,
     Exception,
+    Bytes,
+    Json,
+    Date,
 }
 
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
@@ -268,6 +289,12 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Array)
     } else if ty.is::<ExceptionType>() {
         Ok(Kind::Exception)
+    } else if ty.is::<BytesType>() {
+        Ok(Kind::Bytes)
+    } else if ty.is::<JsonType>() {
+        Ok(Kind::Json)
+    } else if ty.is::<DateType>() {
+        Ok(Kind::Date)
     } else if ty
         .downcast_ref::<IntegerType>()
         .is_some_and(|int| int.width() == 1)
@@ -455,9 +482,7 @@ impl<'s> FunctionBuilder<'s> {
         let Some(handler) = self.handlers.last().copied() else {
             return;
         };
-        let throws = op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref())
-            .is_some()
-            && Operation::get_op::<RethrowOp>(op, ctx).is_none();
+        let throws = may_throw(ctx, op) && Operation::get_op::<RethrowOp>(op, ctx).is_none();
         if !throws {
             return;
         }
@@ -1172,6 +1197,165 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Call { callee, args, .. } => self
                 .call(ctx, callee, args)?
                 .context("a void call has no value")?,
+            Expr::MathFloor(v)
+            | Expr::MathCeil(v)
+            | Expr::MathTrunc(v)
+            | Expr::MathAbs(v)
+            | Expr::MathRound(v)
+            | Expr::MathSqrt(v) => {
+                let intrinsic = match expr {
+                    Expr::MathFloor(_) => Intrinsic::MathFloor,
+                    Expr::MathCeil(_) => Intrinsic::MathCeil,
+                    Expr::MathTrunc(_) => Intrinsic::MathTrunc,
+                    Expr::MathAbs(_) => Intrinsic::MathAbs,
+                    Expr::MathRound(_) => Intrinsic::MathRound,
+                    _ => Intrinsic::MathSqrt,
+                };
+                let value = self.number_operand(ctx, v)?;
+                self.intrinsic(ctx, intrinsic, vec![value]).expect("number")
+            }
+            Expr::MathMin(values) | Expr::MathMax(values) => {
+                let (intrinsic, empty) = if matches!(expr, Expr::MathMin(_)) {
+                    (Intrinsic::MathMin, f64::INFINITY)
+                } else {
+                    (Intrinsic::MathMax, f64::NEG_INFINITY)
+                };
+                let mut result = self.number(ctx, empty);
+                for value in values {
+                    let value = self.number_operand(ctx, value)?;
+                    result = self
+                        .intrinsic(ctx, intrinsic, vec![result, value])
+                        .expect("number");
+                }
+                result
+            }
+            Expr::DateNew(args) => {
+                let time = match args.as_slice() {
+                    [] => self
+                        .intrinsic(ctx, Intrinsic::DateNow, vec![])
+                        .expect("time"),
+                    [time] => self.number_operand(ctx, time)?,
+                    _ => bail!("new Date(year, month, …) is not supported yet"),
+                };
+                self.intrinsic(ctx, Intrinsic::DateFromTime, vec![time])
+                    .expect("date")
+            }
+            Expr::DateGetTime(date) => {
+                let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
+                self.intrinsic(ctx, Intrinsic::DateTime, vec![date])
+                    .expect("time")
+            }
+            Expr::DateToISOString(date) => {
+                let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
+                self.intrinsic(ctx, Intrinsic::DateIso, vec![date])
+                    .expect("text")
+            }
+            Expr::Uint8ArrayNew(None) => {
+                let zero = self.number(ctx, 0.0);
+                self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
+                    .expect("bytes")
+            }
+            Expr::Uint8ArrayNew(Some(arg)) | Expr::Uint8ArrayFrom(arg) => {
+                let number = FP64Type::get(ctx).into();
+                let numbers = ArrayType::get(ctx, number).into();
+                let expected = matches!(&**arg, Expr::Array(_)).then_some(numbers);
+                let value = self.expression_with(ctx, arg, expected)?;
+                let value = self.defined(ctx, value)?;
+                let value = self.arithmetic(ctx, value);
+                match kind(ctx, value)? {
+                    Kind::Number if matches!(expr, Expr::Uint8ArrayNew(_)) => self
+                        .intrinsic(ctx, Intrinsic::BytesNew, vec![value])
+                        .expect("bytes"),
+                    Kind::Array => {
+                        ensure!(
+                            value.get_type(ctx) == numbers,
+                            "Uint8Array sources must be number arrays"
+                        );
+                        self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![value])
+                            .expect("bytes")
+                    }
+                    Kind::Bytes => self
+                        .intrinsic(ctx, Intrinsic::BytesCopy, vec![value])
+                        .expect("bytes"),
+                    _ => bail!("new Uint8Array takes a length, a number[] or a Uint8Array"),
+                }
+            }
+            Expr::Uint8ArrayGet { array, index } => {
+                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
+                let index = self.number_operand(ctx, index)?;
+                self.intrinsic(ctx, Intrinsic::BytesGet, vec![bytes, index])
+                    .expect("byte")
+            }
+            Expr::Uint8ArraySet {
+                array,
+                index,
+                value,
+            } => {
+                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
+                let index = self.number_operand(ctx, index)?;
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::BytesSet, vec![bytes, index, value]);
+                value
+            }
+            Expr::Uint8ArrayLength(array) => {
+                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
+                self.intrinsic(ctx, Intrinsic::BytesLength, vec![bytes])
+                    .expect("length")
+            }
+            Expr::TextEncoderEncode(text) => {
+                let text = self.string_operand(ctx, text)?;
+                self.intrinsic(ctx, Intrinsic::TextEncode, vec![text])
+                    .expect("bytes")
+            }
+            Expr::TextDecoderNew {
+                label,
+                fatal,
+                ignore_bom,
+            } => {
+                ensure!(
+                    matches!(&**label, Expr::Undefined)
+                        || matches!(&**label, Expr::String(l) if l.eq_ignore_ascii_case("utf-8") || l.eq_ignore_ascii_case("utf8")),
+                    "TextDecoder supports UTF-8 only"
+                );
+                ensure!(
+                    matches!(&**ignore_bom, Expr::Bool(false) | Expr::Undefined),
+                    "TextDecoder ignoreBOM is not supported yet"
+                );
+                match &**fatal {
+                    Expr::Undefined => self.boolean(ctx, false),
+                    fatal => self.condition(ctx, fatal)?,
+                }
+            }
+            Expr::TextDecoderDecode { decoder, input } => {
+                let fatal = self.condition(ctx, decoder)?;
+                let bytes = self.typed_operand(ctx, input, Kind::Bytes, "a Uint8Array")?;
+                self.intrinsic(ctx, Intrinsic::TextDecode, vec![bytes, fatal])
+                    .expect("text")
+            }
+            Expr::JsonParse(text) => {
+                let text = self.string_operand(ctx, text)?;
+                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                    .expect("json")
+            }
+            Expr::JsonStringify(value) => self.stringify(ctx, value)?,
+            Expr::JsonStringifyFull(value, replacer, space) => {
+                ensure!(
+                    matches!(&**replacer, Expr::Null | Expr::Undefined)
+                        && matches!(&**space, Expr::Null | Expr::Undefined),
+                    "JSON.stringify replacers and indentation are not supported yet"
+                );
+                self.stringify(ctx, value)?
+            }
+            Expr::MathRandom => self
+                .intrinsic(ctx, Intrinsic::MathRandom, vec![])
+                .expect("number"),
+            Expr::CryptoRandomUUID => self
+                .intrinsic(ctx, Intrinsic::RandomUuid, vec![])
+                .expect("uuid"),
+            Expr::TypeOf(value) => {
+                let value = self.expression(ctx, value)?;
+                self.type_of(ctx, value)?
+            }
             Expr::EnvGet(name) => {
                 let name = self.string(ctx, name);
                 self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
@@ -1256,6 +1440,17 @@ impl<'s> FunctionBuilder<'s> {
                             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
                         })
                     }
+                    (Kind::Bytes, "length" | "byteLength") => self
+                        .intrinsic(ctx, Intrinsic::BytesLength, vec![value])
+                        .expect("length"),
+                    (Kind::Json, "length") => self
+                        .intrinsic(ctx, Intrinsic::JsonLength, vec![value])
+                        .expect("length"),
+                    (Kind::Json, name) => {
+                        let name = self.string(ctx, name);
+                        self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, name])
+                            .expect("member")
+                    }
                     (Kind::Exception, "message") => {
                         self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
                     }
@@ -1338,6 +1533,21 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
                 let array = self.defined(ctx, array)?;
+                match kind(ctx, array)? {
+                    Kind::Bytes => {
+                        let index = self.number_operand(ctx, index)?;
+                        return Ok(self
+                            .intrinsic(ctx, Intrinsic::BytesGet, vec![array, index])
+                            .expect("byte"));
+                    }
+                    Kind::Json => {
+                        let index = self.number_operand(ctx, index)?;
+                        return Ok(self
+                            .intrinsic(ctx, Intrinsic::JsonIndex, vec![array, index])
+                            .expect("json"));
+                    }
+                    _ => {}
+                }
                 ensure!(
                     kind(ctx, array)? == Kind::Array,
                     "indexing is only supported on arrays so far"
@@ -1356,6 +1566,41 @@ impl<'s> FunctionBuilder<'s> {
                 expression_name(other)
             ),
         })
+    }
+
+    /// `typeof value`: static, except for `undefined` and JSON values.
+    fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if let Some(inner) = optional_value(ctx, value.get_type(ctx)) {
+            let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            return self.choose_string(
+                ctx,
+                undefined,
+                |b, ctx| Ok(b.string(ctx, "undefined")),
+                |b, ctx| {
+                    let ty = UndefOp::new(ctx, inner);
+                    let placeholder = b.append_value(ctx, &ty);
+                    b.type_of(ctx, placeholder)
+                },
+            );
+        }
+        let name = match kind(ctx, value)? {
+            Kind::Number => "number",
+            Kind::String => "string",
+            Kind::Boolean => "boolean",
+            Kind::Json => {
+                return Ok(self
+                    .intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value])
+                    .expect("type"));
+            }
+            _ => "object",
+        };
+        Ok(self.string(ctx, name))
+    }
+
+    /// `JSON.stringify(value)`.
+    fn stringify(&mut self, ctx: &mut Context, value: &Expr) -> Result<Value> {
+        let value = self.expression(ctx, value)?;
+        Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
     }
 
     fn string(&mut self, ctx: &mut Context, text: &str) -> Value {
@@ -1412,6 +1657,162 @@ impl<'s> FunctionBuilder<'s> {
         Ok(index)
     }
 
+    fn is_bool_type(&self, ctx: &Context, ty: TypeHandle) -> bool {
+        ty.deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|int| int.width() == 1)
+    }
+
+    /// An expression used as a number (`undefined` becomes `NaN`).
+    fn number_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+        let value = self.expression(ctx, expr)?;
+        let value = self.arithmetic(ctx, value);
+        ensure!(
+            kind(ctx, value)? == Kind::Number,
+            "a number is required here"
+        );
+        Ok(value)
+    }
+
+    /// An optional numeric argument, or `default`.
+    fn number_or(&mut self, ctx: &mut Context, expr: Option<&Expr>, default: f64) -> Result<Value> {
+        match expr {
+            Some(Expr::Undefined) | None => Ok(self.number(ctx, default)),
+            Some(expr) => self.number_operand(ctx, expr),
+        }
+    }
+
+    fn typed_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &Expr,
+        want: Kind,
+        what: &str,
+    ) -> Result<Value> {
+        let value = self.expression(ctx, expr)?;
+        let value = self.defined(ctx, value)?;
+        ensure!(kind(ctx, value)? == want, "{what} is required here");
+        Ok(value)
+    }
+
+    /// `object.method(args)` on built-in values.
+    fn method(
+        &mut self,
+        ctx: &mut Context,
+        object: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<Option<Value>> {
+        let receiver = self.expression(ctx, object)?;
+        let receiver = self.defined(ctx, receiver)?;
+        let arg = |index: usize| args.get(index);
+        let value = match (kind(ctx, receiver)?, method) {
+            (Kind::String, "charAt" | "charCodeAt" | "at") => {
+                let position = self.number_or(ctx, arg(0), 0.0)?;
+                let intrinsic = if method == "charCodeAt" {
+                    Intrinsic::StringCharCodeAt
+                } else {
+                    ensure!(method != "at", "String.prototype.at is not supported yet");
+                    Intrinsic::StringCharAt
+                };
+                self.intrinsic(ctx, intrinsic, vec![receiver, position])
+            }
+            (Kind::String, "slice" | "substring") => {
+                let start = self.number_or(ctx, arg(0), 0.0)?;
+                let end = self.number_or(ctx, arg(1), f64::INFINITY)?;
+                let intrinsic = if method == "slice" {
+                    Intrinsic::StringSlice
+                } else {
+                    Intrinsic::StringSubstring
+                };
+                self.intrinsic(ctx, intrinsic, vec![receiver, start, end])
+            }
+            (Kind::String, "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith") => {
+                let needle = arg(0).context("a search string is required")?;
+                let needle = self.typed_operand(ctx, needle, Kind::String, "a search string")?;
+                let default = if matches!(method, "lastIndexOf" | "endsWith") {
+                    f64::INFINITY
+                } else {
+                    0.0
+                };
+                let position = self.number_or(ctx, arg(1), default)?;
+                let args = vec![receiver, needle, position];
+                match method {
+                    "indexOf" => self.intrinsic(ctx, Intrinsic::StringIndexOf, args),
+                    "lastIndexOf" => self.intrinsic(ctx, Intrinsic::StringLastIndexOf, args),
+                    "startsWith" => self.intrinsic(ctx, Intrinsic::StringStartsWith, args),
+                    "endsWith" => self.intrinsic(ctx, Intrinsic::StringEndsWith, args),
+                    _ => {
+                        let found = self
+                            .intrinsic(ctx, Intrinsic::StringIndexOf, args)
+                            .expect("index");
+                        let missing = self.number(ctx, -1.0);
+                        Some(self.compare(ctx, CompareKind::Ne, found, missing))
+                    }
+                }
+            }
+            (
+                Kind::String,
+                "toLowerCase" | "toUpperCase" | "trim" | "toLocaleLowerCase" | "toLocaleUpperCase",
+            ) => {
+                let intrinsic = match method {
+                    "trim" => Intrinsic::StringTrim,
+                    "toLowerCase" | "toLocaleLowerCase" => Intrinsic::StringLower,
+                    _ => Intrinsic::StringUpper,
+                };
+                self.intrinsic(ctx, intrinsic, vec![receiver])
+            }
+            (Kind::String, "repeat") => {
+                let count = self.number_or(ctx, arg(0), 0.0)?;
+                self.intrinsic(ctx, Intrinsic::StringRepeat, vec![receiver, count])
+            }
+            (Kind::String, "toString") => Some(receiver),
+            (Kind::Bytes, "subarray" | "slice") => {
+                let start = self.number_or(ctx, arg(0), 0.0)?;
+                let end = self.number_or(ctx, arg(1), f64::INFINITY)?;
+                let intrinsic = if method == "subarray" {
+                    Intrinsic::BytesSubarray
+                } else {
+                    Intrinsic::BytesSlice
+                };
+                self.intrinsic(ctx, intrinsic, vec![receiver, start, end])
+            }
+            (Kind::Bytes, "set") => {
+                let source = arg(0).context("set needs a source")?;
+                let source = self.expression(ctx, source)?;
+                let source = self.defined(ctx, source)?;
+                let source = match kind(ctx, source)? {
+                    Kind::Bytes => source,
+                    Kind::Array => self
+                        .intrinsic(ctx, Intrinsic::BytesFromArray, vec![source])
+                        .expect("bytes"),
+                    _ => bail!("Uint8Array.set needs a Uint8Array or number[] source"),
+                };
+                let offset = self.number_or(ctx, arg(1), 0.0)?;
+                self.intrinsic(ctx, Intrinsic::BytesSetFrom, vec![receiver, source, offset]);
+                None
+            }
+            (Kind::Bytes, "fill") => {
+                let value = self.number_or(ctx, arg(0), 0.0)?;
+                let start = self.number_or(ctx, arg(1), 0.0)?;
+                let end = self.number_or(ctx, arg(2), f64::INFINITY)?;
+                self.intrinsic(ctx, Intrinsic::BytesFill, vec![receiver, value, start, end]);
+                Some(receiver)
+            }
+            (Kind::Bytes, "$$cryptoFillRandom") => {
+                self.intrinsic(ctx, Intrinsic::BytesFillRandom, vec![receiver])
+            }
+            (Kind::Date, "getTime" | "valueOf") => {
+                self.intrinsic(ctx, Intrinsic::DateTime, vec![receiver])
+            }
+            (Kind::Date, "toISOString" | "toJSON") => {
+                self.intrinsic(ctx, Intrinsic::DateIso, vec![receiver])
+            }
+            (_, method) => bail!("method {method} is not supported on this type yet"),
+        };
+        Ok(value)
+    }
+
     fn is_optional(&self, ctx: &Context, value: Value) -> bool {
         optional_value(ctx, value.get_type(ctx)).is_some()
     }
@@ -1419,6 +1820,11 @@ impl<'s> FunctionBuilder<'s> {
     /// ECMAScript coercion of `T | undefined` for arithmetic, ordering and concatenation:
     /// `undefined` becomes `NaN` or `"undefined"`. Other values pass through.
     fn arithmetic(&mut self, ctx: &mut Context, value: Value) -> Value {
+        if value.get_type(ctx).deref(ctx).is::<JsonType>() {
+            return self
+                .intrinsic(ctx, Intrinsic::JsonToNumber, vec![value])
+                .expect("number");
+        }
         let Some(inner) = optional_value(ctx, value.get_type(ctx)) else {
             return value;
         };
@@ -1453,6 +1859,22 @@ impl<'s> FunctionBuilder<'s> {
     /// (throwing `TypeError` on `undefined`) where `T` is required.
     fn fit(&mut self, ctx: &mut Context, value: Value, target: TypeHandle) -> Result<Value> {
         let ty = value.get_type(ctx);
+        if ty.deref(ctx).is::<JsonType>() && ty != target {
+            // A JSON value used at a typed boundary must have that type (R6); `undefined`
+            // and mismatches throw `TypeError`.
+            let inner = optional_value(ctx, target).unwrap_or(target);
+            let intrinsic = if inner.deref(ctx).is::<FP64Type>() {
+                Intrinsic::JsonToNumber
+            } else if inner.deref(ctx).is::<StringType>() {
+                Intrinsic::JsonToString
+            } else if kind(ctx, value).is_ok() && self.is_bool_type(ctx, inner) {
+                Intrinsic::JsonToBool
+            } else {
+                bail!("JSON values can only be used as numbers, strings and booleans yet")
+            };
+            let converted = self.intrinsic(ctx, intrinsic, vec![value]).expect("value");
+            return self.fit(ctx, converted, target);
+        }
         if ty == target {
             Ok(value)
         } else if optional_value(ctx, target) == Some(ty) {
@@ -1670,6 +2092,34 @@ impl<'s> FunctionBuilder<'s> {
             let line = self.console_line(ctx, args)?;
             self.intrinsic(ctx, intrinsic, vec![line]);
             return Ok(None);
+        }
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+        {
+            if let Expr::PropertyGet {
+                object: global,
+                property: class,
+                ..
+            } = &**object
+                && matches!(**global, Expr::GlobalGet(_))
+                && class == "Promise"
+            {
+                let combinator = match property.as_str() {
+                    "all" => Combinator::All,
+                    "race" => Combinator::Race,
+                    other => bail!("Promise.{other} is not supported yet"),
+                };
+                let [inputs] = args else {
+                    bail!("Promise.{property} takes one array");
+                };
+                let inputs = self.expression(ctx, inputs)?;
+                let op = PromiseCombinatorOp::new(ctx, combinator, inputs).context(
+                    "Promise.all and Promise.race take an array of promises of one type",
+                )?;
+                return Ok(Some(self.append_value(ctx, &op)));
+            }
+            return self.method(ctx, object, property, args);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
             && name == "js_process_exit_code_set"

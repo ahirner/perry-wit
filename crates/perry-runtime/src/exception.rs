@@ -83,3 +83,20 @@ pub unsafe extern "C" fn perry_exception_message(exception: *mut u8) -> *mut u8 
         crate::string::from_static("")
     }
 }
+
+/// Throw an `Error` of `kind` with the string `message` from a runtime service (the
+/// built-ins of `perry-std`): the exception becomes pending, and compiled code finds its
+/// status with [perry_status].
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_raise(kind: u32, message: *mut u8) {
+    let exception = perry_exception_new(kind, TAG_STRING, message as usize as u64);
+    let task = current();
+    task.exception = exception;
+    task.status = kind;
+}
+
+/// The status of the last runtime service call (0 if it did not throw), clearing it.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_status() -> u32 {
+    core::mem::replace(&mut current().status, 0)
+}

@@ -82,6 +82,17 @@ impl<'h> Shapes<'h> {
                     .collect::<Result<Vec<_>>>()?;
                 self.hir_record(ctx, None, fields)?.into()
             }
+            // `T | undefined` (R8).
+            HirType::Union(members)
+                if members.len() == 2 && members.iter().any(|m| matches!(m, HirType::Void)) =>
+            {
+                let defined = members
+                    .iter()
+                    .find(|m| !matches!(m, HirType::Void))
+                    .expect("two members");
+                let inner = self.value_type(ctx, defined)?;
+                OptionalType::get(ctx, inner).into()
+            }
             other => bail!("MIR backend does not support type {other:?} yet"),
         })
     }
@@ -110,6 +121,25 @@ impl<'h> Shapes<'h> {
     }
 
     fn resolve_named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
+        // Built-in classes the subset models (a user type of the same name takes precedence).
+        let user = self.hir.interfaces.iter().any(|i| i.name == name)
+            || self.hir.type_aliases.iter().any(|a| a.name == name);
+        if !user {
+            match name {
+                "Uint8Array" => return Ok(perry_mir::types::BytesType::get(ctx).into()),
+                "Date" => return Ok(perry_mir::types::DateType::get(ctx).into()),
+                // A decoder is its `fatal` flag (UTF-8 only, BOM stripped).
+                "TextDecoder" => {
+                    return Ok(pliron::builtin::types::IntegerType::get(
+                        ctx,
+                        1,
+                        pliron::builtin::types::Signedness::Signless,
+                    )
+                    .into());
+                }
+                _ => {}
+            }
+        }
         if let Some(interface) = self.hir.interfaces.iter().find(|i| i.name == name) {
             ensure!(
                 interface.type_params.is_empty()

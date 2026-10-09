@@ -31,15 +31,20 @@ use perry_mir::{
     },
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
     exceptions::{
-        CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp,
-        MayThrowInterface, RaiseOp, RethrowOp,
+        CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp,
+        RethrowOp,
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
-    intrinsics::{Intrinsic, IntrinsicOp},
+    intrinsics::{
+        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, may_throw,
+    },
     locals::UndefOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
-    types::{ArrayType, ExceptionType, OptionalType, PromiseType, RecordType, StringType},
+    types::{
+        ArrayType, BytesType, DateType, ExceptionType, JsonType, OptionalType, PromiseType,
+        RecordType, StringType,
+    },
 };
 use perry_runtime::array as layout;
 use pliron::{
@@ -57,7 +62,7 @@ use pliron::{
     context::{Context, Ptr},
     identifier::Identifier,
     linked_list::ContainsLinkedList,
-    op::{Op, op_cast},
+    op::Op,
     operation::{Operation, verify_operation},
     printable::Printable,
     region::Region,
@@ -160,6 +165,20 @@ impl Host {
     }
 }
 
+/// ECMAScript `QuoteJSONString` of a key known at compile time.
+fn quote_json(out: &mut Vec<u8>, text: &str) {
+    out.push(b'"');
+    for byte in text.bytes() {
+        match byte {
+            b'"' => out.extend_from_slice(br#"\""#),
+            b'\\' => out.extend_from_slice(br"\\"),
+            0..=0x1F => out.extend_from_slice(format!("\\u{byte:04x}").as_bytes()),
+            _ => out.push(byte),
+        }
+    }
+    out.push(b'"');
+}
+
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN.
 pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 /// `undefined` in a `boolean | undefined` slot.
@@ -222,6 +241,7 @@ enum Runtime {
     TaskResult,
     TaskSetResult,
     ReadyPop,
+    CombinatorStep,
     SubtaskRegister,
     PromiseNew,
     PromiseResolve,
@@ -249,6 +269,16 @@ enum Runtime {
     DateNow,
     /// `number_format` of the number helper library.
     NumberFormat,
+    /// Any other runtime or helper function: name, parameters, results.
+    Call(&'static str, &'static [W], &'static [W]),
+}
+
+/// Wasm value types of [Runtime::Call] signatures.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum W {
+    I32,
+    I64,
+    F64,
 }
 
 impl Runtime {
@@ -268,6 +298,7 @@ impl Runtime {
             Runtime::TaskResult => "perry_task_result",
             Runtime::TaskSetResult => "perry_task_set_result",
             Runtime::ReadyPop => "perry_ready_pop",
+            Runtime::CombinatorStep => "perry_combinator_step",
             Runtime::SubtaskRegister => "perry_subtask_register",
             Runtime::PromiseNew => "perry_promise_new",
             Runtime::PromiseResolve => "perry_promise_resolve",
@@ -294,6 +325,7 @@ impl Runtime {
             Runtime::PerformanceNow => "perry_performance_now",
             Runtime::DateNow => "perry_date_now",
             Runtime::NumberFormat => "number_format",
+            Runtime::Call(name, ..) => name,
         }
     }
 
@@ -321,7 +353,10 @@ impl Runtime {
             | Runtime::TaskResult
             | Runtime::ReadyPop
             | Runtime::PromiseNew => (vec![], vec![i32]),
-            Runtime::TaskResume | Runtime::TaskJoin | Runtime::TaskSetResult => (vec![i32], vec![]),
+            Runtime::TaskResume
+            | Runtime::TaskJoin
+            | Runtime::TaskSetResult
+            | Runtime::CombinatorStep => (vec![i32], vec![]),
             Runtime::TaskSubtaskEvent => (vec![i32, i32], vec![]),
             Runtime::Print => (vec![i32, i32, i32], vec![]),
             Runtime::IoEvent => (vec![i32, i32, i32], vec![i32]),
@@ -341,6 +376,17 @@ impl Runtime {
             Runtime::CabiRealloc => (vec![i32; 4], vec![i32]),
             Runtime::StringAdopt | Runtime::StringConcat | Runtime::StringCompare => {
                 (vec![i32, i32], vec![i32])
+            }
+            Runtime::Call(_, params, results) => {
+                let map = |w: &W| match w {
+                    W::I32 => i32,
+                    W::I64 => i64,
+                    W::F64 => f64,
+                };
+                (
+                    params.iter().map(map).collect(),
+                    results.iter().map(map).collect(),
+                )
             }
         }
     }
@@ -367,7 +413,7 @@ enum Repr {
 
 fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     let deref = ty.deref(ctx);
-    if deref.is::<FP64Type>() {
+    if deref.is::<FP64Type>() || deref.is::<DateType>() {
         return Ok(Repr::F64);
     }
     if let Some(int) = deref.downcast_ref::<IntegerType>() {
@@ -382,6 +428,8 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
+        || deref.is::<BytesType>()
+        || deref.is::<JsonType>()
     {
         return Ok(Repr::Ref);
     }
@@ -443,9 +491,7 @@ fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier
         for op in function_ops(ctx, function) {
             if let Some(call) = Operation::get_op::<MirCallOp>(op, ctx) {
                 callees.push(call.callee(ctx));
-            } else if op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref())
-                .is_some()
-            {
+            } else if may_throw(ctx, op) {
                 throws.insert(name.clone());
             }
         }
@@ -509,6 +555,8 @@ struct ModuleState {
     shapes: HashMap<String, i32>,
     /// Whether any function writes console output (finish and callbacks then drive it).
     uses_io: bool,
+    /// Generated `JSON.stringify` serializers by MIR type.
+    json_serializers: HashMap<TypeHandle, Identifier>,
 }
 
 impl ModuleState {
@@ -541,6 +589,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         async_functions: async_functions.clone(),
         shapes: HashMap::new(),
         uses_io: false,
+        json_serializers: HashMap::new(),
     };
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);
@@ -1267,11 +1316,548 @@ impl<'s> FunctionLowering<'s> {
                 self.runtime(ctx, Runtime::ExitCodeSet, args);
                 None
             }
+            Intrinsic::MathFloor => Some(self.num(ctx, NumOpcode::F64Floor, args)),
+            Intrinsic::MathCeil => Some(self.num(ctx, NumOpcode::F64Ceil, args)),
+            Intrinsic::MathTrunc => Some(self.num(ctx, NumOpcode::F64Trunc, args)),
+            Intrinsic::MathAbs => Some(self.num(ctx, NumOpcode::F64Abs, args)),
+            Intrinsic::MathSqrt => Some(self.num(ctx, NumOpcode::F64Sqrt, args)),
+            Intrinsic::MathMin => Some(self.num(ctx, NumOpcode::F64Min, args)),
+            Intrinsic::MathMax => Some(self.num(ctx, NumOpcode::F64Max, args)),
+            Intrinsic::MathRound => {
+                // floor(x), plus one when the fraction is at least ½; the result keeps the
+                // sign of x, so -0.4 rounds to -0 as in ECMAScript.
+                let x = args[0];
+                let floor = self.num(ctx, NumOpcode::F64Floor, vec![x]);
+                let fraction = self.num(ctx, NumOpcode::F64Sub, vec![x, floor]);
+                let half = self.f64_const(ctx, 0.5);
+                let up = self.num(ctx, NumOpcode::F64Ge, vec![fraction, half]);
+                let one = self.f64_const(ctx, 1.0);
+                let next = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
+                let rounded = self.select(ctx, up, next, floor);
+                Some(self.num(ctx, NumOpcode::F64Copysign, vec![rounded, x]))
+            }
+            Intrinsic::DateFromTime => {
+                // TimeClip: NaN beyond ±8.64e15 ms, else the integer part, without -0.
+                let t = args[0];
+                let magnitude = self.num(ctx, NumOpcode::F64Abs, vec![t]);
+                let limit = self.f64_const(ctx, 8.64e15);
+                let valid = self.num(ctx, NumOpcode::F64Le, vec![magnitude, limit]);
+                let truncated = self.num(ctx, NumOpcode::F64Trunc, vec![t]);
+                let zero = self.f64_const(ctx, 0.0);
+                let clipped = self.num(ctx, NumOpcode::F64Add, vec![truncated, zero]);
+                let nan = self.f64_const(ctx, f64::NAN);
+                Some(self.select(ctx, valid, clipped, nan))
+            }
+            Intrinsic::DateTime => Some(args[0]),
+            Intrinsic::DateIso => {
+                let size = self.i32_const(ctx, 32);
+                let out = self.runtime(ctx, Runtime::Alloc, vec![size]).expect("out");
+                let capacity = self.i32_const(ctx, 32);
+                let packed = self
+                    .call(
+                        ctx,
+                        "time_date_iso",
+                        &[W::F64, W::I32, W::I32],
+                        &[W::I64],
+                        vec![args[0], out, capacity],
+                    )
+                    .expect("result");
+                let thirty_two = self.i64_const(ctx, 32);
+                let error = self.num(ctx, NumOpcode::I64ShrU, vec![packed, thirty_two]);
+                let error = self.num(ctx, NumOpcode::I32WrapI64, vec![error]);
+                let failed = self.new_block(ctx, vec![]);
+                let formatted = self.new_block(ctx, vec![]);
+                self.cond_br(ctx, error, (failed, vec![]), (formatted, vec![]));
+                self.block = failed;
+                let status = self
+                    .call(ctx, "std_raise_invalid_date", &[], &[W::I32], vec![])
+                    .expect("status");
+                let (target, throw_args) = self.throw_target(ctx, status);
+                self.br(ctx, target, throw_args);
+                self.block = formatted;
+                let len = self.num(ctx, NumOpcode::I32WrapI64, vec![packed]);
+                self.runtime(ctx, Runtime::StringAdopt, vec![out, len])
+            }
+            Intrinsic::StringLower | Intrinsic::StringUpper => {
+                // The text helper measures, then converts (full Unicode case mappings).
+                use perry_runtime::string::{DATA, LEN};
+                let string = args[0];
+                let data = self.load(ctx, MemKind::I32, string, DATA);
+                let len = self.load(ctx, MemKind::I32, string, LEN);
+                let upper = self.i32_const(ctx, i32::from(intrinsic == Intrinsic::StringUpper));
+                let zero = self.i32_const(ctx, 0);
+                let sig: (&[W], &[W]) = (&[W::I32, W::I32, W::I32, W::I32], &[W::I64]);
+                let measured = self
+                    .call(
+                        ctx,
+                        "str_case_convert",
+                        sig.0,
+                        sig.1,
+                        vec![data, len, zero, upper],
+                    )
+                    .expect("size");
+                let bytes = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
+                let out = self.runtime(ctx, Runtime::Alloc, vec![bytes]).expect("out");
+                self.call(
+                    ctx,
+                    "str_case_convert",
+                    sig.0,
+                    sig.1,
+                    vec![data, len, out, upper],
+                );
+                self.runtime(ctx, Runtime::StringAdopt, vec![out, bytes])
+            }
+            Intrinsic::JsonParse => {
+                use perry_runtime::string::{DATA, LEN};
+                let string = args[0];
+                let data = self.load(ctx, MemKind::I32, string, DATA);
+                let len = self.load(ctx, MemKind::I32, string, LEN);
+                let measured = self
+                    .call(
+                        ctx,
+                        "json_measure",
+                        &[W::I32, W::I32],
+                        &[W::I64],
+                        vec![data, len],
+                    )
+                    .expect("size");
+                let thirty_two = self.i64_const(ctx, 32);
+                let error = self.num(ctx, NumOpcode::I64ShrU, vec![measured, thirty_two]);
+                let error = self.num(ctx, NumOpcode::I32WrapI64, vec![error]);
+                let failed = self.new_block(ctx, vec![]);
+                let valid = self.new_block(ctx, vec![]);
+                self.cond_br(ctx, error, (failed, vec![]), (valid, vec![]));
+                self.block = failed;
+                let status = self
+                    .call(ctx, "std_raise_syntax", &[], &[W::I32], vec![])
+                    .expect("status");
+                let (target, throw_args) = self.throw_target(ctx, status);
+                self.br(ctx, target, throw_args);
+                self.block = valid;
+                let size = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
+                let out = self.runtime(ctx, Runtime::Alloc, vec![size]).expect("out");
+                let populated = self
+                    .call(
+                        ctx,
+                        "json_populate",
+                        &[W::I32, W::I32, W::I32, W::I32],
+                        &[W::I64],
+                        vec![data, len, out, size],
+                    )
+                    .expect("root");
+                Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
+            }
+            Intrinsic::JsonIsUndefined => Some(self.num(ctx, NumOpcode::I32Eqz, args)),
+            Intrinsic::MathRandom => {
+                self.needs_import("wasi:random/insecure@0.3.0", "Math.random()")?;
+                self.call(ctx, "std_math_random", &[], &[W::F64], args)
+            }
+            Intrinsic::RandomUuid => {
+                self.needs_import("wasi:random/random@0.3.0", "crypto.randomUUID()")?;
+                self.call(ctx, "std_random_uuid", &[], &[W::I32], args)
+            }
+            Intrinsic::BytesFillRandom => {
+                self.needs_import("wasi:random/random@0.3.0", "crypto.getRandomValues()")?;
+                self.call(ctx, "std_bytes_fill_random", &[W::I32], &[W::I32], args)
+            }
+            Intrinsic::JsonSerialize => {
+                bail!("JSON.stringify of parsed JSON values is not supported yet")
+            }
+            other => {
+                let (name, params, results): (&'static str, &'static [W], &'static [W]) =
+                    match other {
+                        Intrinsic::StringCharAt => {
+                            ("std_string_char_at", &[W::I32, W::F64], &[W::I32])
+                        }
+                        Intrinsic::StringCharCodeAt => {
+                            ("std_string_char_code_at", &[W::I32, W::F64], &[W::F64])
+                        }
+                        Intrinsic::StringSlice => {
+                            ("std_string_slice", &[W::I32, W::F64, W::F64], &[W::I32])
+                        }
+                        Intrinsic::StringSubstring => {
+                            ("std_string_substring", &[W::I32, W::F64, W::F64], &[W::I32])
+                        }
+                        Intrinsic::StringIndexOf => {
+                            ("std_string_index_of", &[W::I32, W::I32, W::F64], &[W::F64])
+                        }
+                        Intrinsic::StringLastIndexOf => (
+                            "std_string_last_index_of",
+                            &[W::I32, W::I32, W::F64],
+                            &[W::F64],
+                        ),
+                        Intrinsic::StringStartsWith => (
+                            "std_string_starts_with",
+                            &[W::I32, W::I32, W::F64],
+                            &[W::I32],
+                        ),
+                        Intrinsic::StringEndsWith => {
+                            ("std_string_ends_with", &[W::I32, W::I32, W::F64], &[W::I32])
+                        }
+                        Intrinsic::StringTrim => ("std_string_trim", &[W::I32], &[W::I32]),
+                        Intrinsic::StringRepeat => {
+                            ("std_string_repeat", &[W::I32, W::F64], &[W::I32])
+                        }
+                        Intrinsic::BytesNew => ("std_bytes_new", &[W::F64], &[W::I32]),
+                        Intrinsic::BytesFromArray => ("std_bytes_from_array", &[W::I32], &[W::I32]),
+                        Intrinsic::BytesCopy => ("std_bytes_copy", &[W::I32], &[W::I32]),
+                        Intrinsic::BytesGet => ("std_bytes_get", &[W::I32, W::F64], &[W::I64]),
+                        Intrinsic::BytesSet => ("std_bytes_set", &[W::I32, W::F64, W::F64], &[]),
+                        Intrinsic::BytesLength => ("std_bytes_length", &[W::I32], &[W::F64]),
+                        Intrinsic::BytesSubarray => {
+                            ("std_bytes_subarray", &[W::I32, W::F64, W::F64], &[W::I32])
+                        }
+                        Intrinsic::BytesSlice => {
+                            ("std_bytes_slice", &[W::I32, W::F64, W::F64], &[W::I32])
+                        }
+                        Intrinsic::BytesSetFrom => {
+                            ("std_bytes_set_from", &[W::I32, W::I32, W::F64], &[])
+                        }
+                        Intrinsic::BytesFill => {
+                            ("std_bytes_fill", &[W::I32, W::F64, W::F64, W::F64], &[])
+                        }
+                        Intrinsic::TextEncode => ("std_text_encode", &[W::I32], &[W::I32]),
+                        Intrinsic::TextDecode => ("std_text_decode", &[W::I32, W::I32], &[W::I32]),
+                        Intrinsic::JsonMember => ("std_json_member", &[W::I32, W::I32], &[W::I32]),
+                        Intrinsic::JsonIndex => ("std_json_index", &[W::I32, W::F64], &[W::I32]),
+                        Intrinsic::JsonLength => ("std_json_length", &[W::I32], &[W::I64]),
+                        Intrinsic::JsonToNumber => ("std_json_to_number", &[W::I32], &[W::F64]),
+                        Intrinsic::JsonToString => ("std_json_to_string", &[W::I32], &[W::I32]),
+                        Intrinsic::JsonToBool => ("std_json_to_bool", &[W::I32], &[W::I32]),
+                        Intrinsic::JsonTypeOf => ("std_json_type_of", &[W::I32], &[W::I32]),
+                        _ => unreachable!("lowered above"),
+                    };
+                let result = self.call(ctx, name, params, results, args);
+                // Runtime results as `number | undefined` come as bits.
+                result.map(|value| {
+                    if results == [W::I64] {
+                        self.num(ctx, NumOpcode::F64ReinterpretI64, vec![value])
+                    } else {
+                        value
+                    }
+                })
+            }
         };
+        if intrinsic.throws() && !matches!(intrinsic, Intrinsic::JsonParse | Intrinsic::DateIso) {
+            let status = self
+                .call(ctx, "perry_status", &[], &[W::I32], vec![])
+                .expect("status");
+            self.throw_status_if(ctx, status, status);
+        }
         if let Some(value) = value {
             self.define(ctx, op, value);
         }
         Ok(())
+    }
+
+    /// Call a runtime or helper function by name.
+    fn call(
+        &mut self,
+        ctx: &mut Context,
+        name: &'static str,
+        params: &'static [W],
+        results: &'static [W],
+        args: Vec<Value>,
+    ) -> Option<Value> {
+        self.runtime(ctx, Runtime::Call(name, params, results), args)
+    }
+
+    // --- JSON.stringify -----------------------------------------------------------------------
+
+    /// The text and length of a static string, for raw writer output.
+    fn static_text(&mut self, ctx: &mut Context, text: &str) -> (Value, Value) {
+        let address = self.state.data.string(text) + perry_runtime::string::SIZE;
+        (
+            self.i32_const(ctx, address as i32),
+            self.i32_const(ctx, text.len() as i32),
+        )
+    }
+
+    fn json_raw(&mut self, ctx: &mut Context, writer: Value, text: &str) {
+        let (data, len) = self.static_text(ctx, text);
+        self.call(
+            ctx,
+            "std_json_raw",
+            &[W::I32, W::I32, W::I32],
+            &[],
+            vec![writer, data, len],
+        );
+    }
+
+    /// Write `value` of MIR type `ty` (defined) to the JSON writer.
+    fn json_value(
+        &mut self,
+        ctx: &mut Context,
+        writer: Value,
+        value: Value,
+        ty: TypeHandle,
+    ) -> Result<()> {
+        if let Some(inner) = optional_inner(ctx, ty) {
+            // Inside arrays, `undefined` is written as `null`.
+            let undefined = self.is_undefined(ctx, value, inner)?;
+            let null = self.new_block(ctx, vec![]);
+            let defined = self.new_block(ctx, vec![]);
+            let join = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, undefined, (null, vec![]), (defined, vec![]));
+            self.block = null;
+            self.json_raw(ctx, writer, "null");
+            self.br(ctx, join, vec![]);
+            self.block = defined;
+            self.json_value(ctx, writer, value, inner)?;
+            self.br(ctx, join, vec![]);
+            self.block = join;
+            return Ok(());
+        }
+        let deref = ty.deref(ctx);
+        if deref.is::<FP64Type>() {
+            drop(deref);
+            // Finite numbers in ECMAScript notation (ryu-js); NaN and infinities as null.
+            let size = self.i32_const(ctx, 40);
+            let scratch = self
+                .runtime(ctx, Runtime::Alloc, vec![size])
+                .expect("scratch");
+            let difference = self.num(ctx, NumOpcode::F64Sub, vec![value, value]);
+            let zero = self.f64_const(ctx, 0.0);
+            let finite = self.num(ctx, NumOpcode::F64Eq, vec![difference, zero]);
+            let number = self.new_block(ctx, vec![]);
+            let null = self.new_block(ctx, vec![]);
+            let join = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, finite, (number, vec![]), (null, vec![]));
+            self.block = number;
+            let len = self
+                .runtime(ctx, Runtime::NumberFormat, vec![value, scratch])
+                .expect("length");
+            self.call(
+                ctx,
+                "std_json_raw",
+                &[W::I32, W::I32, W::I32],
+                &[],
+                vec![writer, scratch, len],
+            );
+            self.br(ctx, join, vec![]);
+            self.block = null;
+            self.json_raw(ctx, writer, "null");
+            self.br(ctx, join, vec![]);
+            self.block = join;
+            return Ok(());
+        }
+        if deref.is::<StringType>() {
+            drop(deref);
+            self.call(
+                ctx,
+                "std_json_quote",
+                &[W::I32, W::I32],
+                &[],
+                vec![writer, value],
+            );
+            return Ok(());
+        }
+        if deref.is::<ExceptionType>() {
+            drop(deref);
+            self.json_raw(ctx, writer, "{}");
+            return Ok(());
+        }
+        if deref.is::<JsonType>() {
+            drop(deref);
+            self.call(
+                ctx,
+                "std_json_value",
+                &[W::I32, W::I32],
+                &[],
+                vec![writer, value],
+            );
+            return Ok(());
+        }
+        if deref
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|i| i.width() == 1)
+        {
+            drop(deref);
+            let (true_data, true_len) = self.static_text(ctx, "true");
+            let (false_data, false_len) = self.static_text(ctx, "false");
+            let data = self.select(ctx, value, true_data, false_data);
+            let len = self.select(ctx, value, true_len, false_len);
+            self.call(
+                ctx,
+                "std_json_raw",
+                &[W::I32, W::I32, W::I32],
+                &[],
+                vec![writer, data, len],
+            );
+            return Ok(());
+        }
+        let container = deref.is::<RecordType>() || deref.is::<ArrayType>();
+        drop(deref);
+        ensure!(
+            container,
+            "JSON.stringify of {} is not supported yet",
+            ty.disp(ctx)
+        );
+        let serializer = self.json_serializer(ctx, ty)?;
+        let call = CallOp::new(ctx, serializer, vec![writer, value], vec![]).get_operation();
+        self.insert(ctx, call);
+        Ok(())
+    }
+
+    /// The serializer function of a record or array type, generated on first use (recursive
+    /// types call themselves).
+    fn json_serializer(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Identifier> {
+        if let Some(name) = self.state.json_serializers.get(&ty) {
+            return Ok(name.clone());
+        }
+        let name: Identifier = format!("json_{}", self.state.json_serializers.len())
+            .try_into()
+            .expect("identifier");
+        self.state.json_serializers.insert(ty, name.clone());
+        let i32 = i32_type(ctx);
+        let value_ty = wasm_type(ctx, ty)?;
+        let fn_ty = FunctionType::get(ctx, vec![i32, value_ty], vec![]);
+        let function = FuncOp::new(ctx, name.clone(), fn_ty);
+        let entry = function.get_entry_block(ctx);
+        let writer = entry.deref(ctx).get_argument(0);
+        let value = entry.deref(ctx).get_argument(1);
+        let mut b = FunctionLowering::glue(self.state, ctx, &function);
+        let record = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
+        let (open, close) = if record.is_some() {
+            ('{', '}')
+        } else {
+            ('[', ']')
+        };
+        let bracket = b.i32_const(ctx, open as i32);
+        let opened = b
+            .call(
+                ctx,
+                "std_json_open",
+                &[W::I32, W::I32],
+                &[W::I32],
+                vec![writer, bracket],
+            )
+            .expect("opened");
+        let body = b.new_block(ctx, vec![]);
+        let done = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, opened, (body, vec![]), (done, vec![]));
+        b.block = body;
+        if let Some(record) = record {
+            let fields: Vec<(String, TypeHandle)> = record
+                .deref(ctx)
+                .fields()
+                .map_err(|_| anyhow!("record without fields"))?
+                .iter()
+                .map(|(n, t)| (n.to_string(), *t))
+                .collect();
+            for (index, (field, field_ty)) in fields.into_iter().enumerate() {
+                let kind = slot_kind(ctx, field_ty)?;
+                let slot = b.load(ctx, kind, value, 8 + 8 * index as u32);
+                let mut key = Vec::new();
+                quote_json(&mut key, &field);
+                key.push(b':');
+                let key = String::from_utf8(key).expect("UTF-8");
+                let key = b.state.data.string(&key);
+                // Members holding `undefined` are left out.
+                let (present, inner) = match optional_inner(ctx, field_ty) {
+                    Some(inner) => {
+                        let undefined = b.is_undefined(ctx, slot, inner)?;
+                        let present = b.num(ctx, NumOpcode::I32Eqz, vec![undefined]);
+                        (Some(present), inner)
+                    }
+                    None => (None, field_ty),
+                };
+                let member = b.new_block(ctx, vec![]);
+                let next = b.new_block(ctx, vec![]);
+                match present {
+                    Some(present) => b.cond_br(ctx, present, (member, vec![]), (next, vec![])),
+                    None => b.br(ctx, member, vec![]),
+                }
+                b.block = member;
+                let key = b.i32_const(ctx, key as i32);
+                b.call(
+                    ctx,
+                    "std_json_key",
+                    &[W::I32, W::I32],
+                    &[],
+                    vec![writer, key],
+                );
+                b.json_value(ctx, writer, slot, inner)?;
+                b.br(ctx, next, vec![]);
+                b.block = next;
+            }
+        } else {
+            let element = FunctionLowering::element_type(ctx, value).or_else(|_| {
+                TypedHandle::<ArrayType>::from_handle(ty, ctx)
+                    .map(|a| a.deref(ctx).element())
+                    .map_err(|_| anyhow!("array"))
+            })?;
+            let kind = slot_kind(ctx, element)?;
+            let len = b.load(ctx, MemKind::I32, value, layout::LEN);
+            let data = b.load(ctx, MemKind::I32, value, layout::DATA);
+            b.counted_loop(ctx, len, |b, ctx, i| {
+                b.call(ctx, "std_json_item", &[W::I32], &[], vec![writer]);
+                let slot = b.slot_address(ctx, data, i);
+                let item = b.load(ctx, kind, slot, 0);
+                b.json_value(ctx, writer, item, element)
+            })?;
+        }
+        let bracket = b.i32_const(ctx, close as i32);
+        b.call(
+            ctx,
+            "std_json_close",
+            &[W::I32, W::I32],
+            &[],
+            vec![writer, bracket],
+        );
+        b.br(ctx, done, vec![]);
+        b.block = done;
+        let ret = ReturnOp::new(ctx, vec![]).get_operation();
+        b.insert(ctx, ret);
+        b.state
+            .wasm
+            .append_operation(ctx, function.get_operation(), 0);
+        Ok(name)
+    }
+
+    fn json_stringify(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
+        let value = self.operand(ctx, op, 0)?;
+        let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+        let writer = self
+            .call(ctx, "std_json_writer", &[], &[W::I32], vec![])
+            .expect("writer");
+        let json = ty.deref(ctx).is::<JsonType>();
+        let text = if json || optional_inner(ctx, ty).is_some() {
+            let inner = optional_inner(ctx, ty).unwrap_or(ty);
+            // A top-level `undefined` stringifies to `undefined`.
+            let undefined = if json {
+                self.num(ctx, NumOpcode::I32Eqz, vec![value])
+            } else {
+                self.is_undefined(ctx, value, inner)?
+            };
+            let i32 = i32_type(ctx);
+            let write = self.new_block(ctx, vec![]);
+            let join = self.new_block(ctx, vec![i32]);
+            let null = self.i32_const(ctx, 0);
+            self.cond_br(ctx, undefined, (join, vec![null]), (write, vec![]));
+            self.block = write;
+            self.json_value(ctx, writer, value, inner)?;
+            let text = self.json_finish(ctx, writer);
+            self.br(ctx, join, vec![text]);
+            self.block = join;
+            join.deref(ctx).get_argument(0)
+        } else {
+            self.json_value(ctx, writer, value, ty)?;
+            self.json_finish(ctx, writer)
+        };
+        self.define(ctx, op, text);
+        Ok(())
+    }
+
+    fn json_finish(&mut self, ctx: &mut Context, writer: Value) -> Value {
+        let text = self
+            .call(ctx, "std_json_finish", &[W::I32], &[W::I32], vec![writer])
+            .expect("text");
+        let status = self
+            .call(ctx, "perry_status", &[], &[W::I32], vec![])
+            .expect("status");
+        self.throw_status_if(ctx, status, status);
+        text
     }
 
     // --- ops ----------------------------------------------------------------------------------
@@ -1672,6 +2258,21 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<AwaitOp>(op, ctx).is_some() {
             return self.lower_await(ctx, op);
+        }
+        if let Some(combinator) = Operation::get_op::<PromiseCombinatorOp>(op, ctx) {
+            let name = match combinator.combinator(ctx) {
+                Combinator::All => "perry_promise_all",
+                Combinator::Race => "perry_promise_race",
+            };
+            let inputs = self.operand(ctx, op, 0)?;
+            let promise = self
+                .call(ctx, name, &[W::I32], &[W::I32], vec![inputs])
+                .expect("promise");
+            self.define(ctx, op, promise);
+            return Ok(());
+        }
+        if Operation::get_op::<JsonStringifyOp>(op, ctx).is_some() {
+            return self.json_stringify(ctx, op);
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             return self.intrinsic(ctx, op, intrinsic.intrinsic(ctx).expect("verified"));

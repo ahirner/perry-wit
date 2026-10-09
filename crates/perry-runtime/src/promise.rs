@@ -103,3 +103,113 @@ pub extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
         *link = node;
     }
 }
+
+/// Frame kind of runtime combinators; `drive` passes such frames to [perry_combinator_step].
+pub const COMBINATOR_KIND: u32 = u32::MAX;
+
+const ALL: u32 = 0;
+const RACE: u32 = 1;
+
+/// A `Promise.all`/`Promise.race` in progress: a frame (kind first) that waits on every
+/// pending input at once and re-checks whenever one settles.
+#[repr(C)]
+struct Combinator {
+    kind: u32,
+    mode: u32,
+    result: *mut u8,
+    inputs: *mut u8,
+    registered: u32,
+}
+
+fn input(inputs: *mut u8, index: u32) -> *mut Promise {
+    // SAFETY: an array of promises (layout of crate::array).
+    unsafe {
+        let data = *(inputs.add(crate::array::DATA as usize) as *const *const u64);
+        *data.add(index as usize) as usize as *mut Promise
+    }
+}
+
+fn combine(mode: u32, inputs: *mut u8) -> *mut u8 {
+    let result = perry_promise_new();
+    let frame = current().allocate(core::mem::size_of::<Combinator>()) as *mut Combinator;
+    // SAFETY: freshly allocated.
+    unsafe {
+        frame.write(Combinator {
+            kind: COMBINATOR_KIND,
+            mode,
+            result,
+            inputs,
+            registered: 0,
+        })
+    };
+    perry_combinator_step(frame as *mut u8);
+    result
+}
+
+/// `Promise.all(inputs)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_promise_all(inputs: *mut u8) -> *mut u8 {
+    combine(ALL, inputs)
+}
+
+/// `Promise.race(inputs)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_promise_race(inputs: *mut u8) -> *mut u8 {
+    combine(RACE, inputs)
+}
+
+fn reject_with(result: *mut u8, input: *mut Promise) {
+    // SAFETY: a rejected input keeps its exception object in its value slot.
+    unsafe {
+        current().exception = (*input).value as usize as *mut u8;
+        perry_promise_reject(result, (*input).status);
+    }
+}
+
+/// Re-check a combinator after an input settled (or on creation).
+///
+/// # Safety
+/// `frame` must be a combinator frame.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_combinator_step(frame: *mut u8) {
+    let frame = frame as *mut Combinator;
+    // SAFETY: guaranteed by the caller; inputs are live promises of the task.
+    unsafe {
+        let combinator = &mut *frame;
+        if (*(combinator.result as *mut Promise)).state != PENDING {
+            return;
+        }
+        let count = *(combinator.inputs as *const u32);
+        let mut pending = false;
+        for index in 0..count {
+            let promise = input(combinator.inputs, index);
+            match ((*promise).state, combinator.mode) {
+                (REJECTED, _) => return reject_with(combinator.result, promise),
+                (FULFILLED, RACE) => {
+                    return perry_promise_resolve(combinator.result, (*promise).value);
+                }
+                (PENDING, _) => pending = true,
+                _ => {}
+            }
+        }
+        if !pending {
+            // `all`: every input fulfilled; collect the values in input order.
+            let values = crate::array::perry_array_new(count);
+            let data = *(values.add(crate::array::DATA as usize) as *const *mut u64);
+            for index in 0..count {
+                *data.add(index as usize) = (*input(combinator.inputs, index)).value;
+            }
+            *(values as *mut u32) = count;
+            return perry_promise_resolve(combinator.result, values as usize as u64);
+        }
+        if combinator.registered == 0 {
+            combinator.registered = 1;
+            for index in 0..count {
+                let promise = input(combinator.inputs, index);
+                if (*promise).state == PENDING {
+                    perry_promise_wait(promise as *mut u8, frame as *mut u8);
+                }
+            }
+        }
+    }
+}

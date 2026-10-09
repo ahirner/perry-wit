@@ -1484,6 +1484,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-std"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "perry-runtime",
+]
+
+[[package]]
 name = "perry-time-helper"
 version = "0.1.0"
 dependencies = [

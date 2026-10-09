@@ -241,6 +241,23 @@ impl ArrayType {
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct StringType;
 
+/// A `Uint8Array`: a view `{ length, data }` over bytes in the task region; `subarray`
+/// views share their bytes.
+#[pliron_type(name = "perry.bytes", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct BytesType;
+
+/// A parsed JSON value (`JSON.parse`): a node of the JSON helper's graph, or `undefined`.
+/// Untyped data is a JSON tree, never `any` (subset rule R6).
+#[pliron_type(name = "perry.json", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct JsonType;
+
+/// A `Date`: its time value (milliseconds since the epoch, or `NaN`), held by value.
+#[pliron_type(name = "perry.date", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct DateType;
+
 /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value. Lives in the
 /// task like every other value (R3, R4).
 #[pliron_type(

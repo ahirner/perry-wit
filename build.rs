@@ -23,13 +23,15 @@ fn main() {
             helper,
         );
     }
-    compile_cargo_helper(
-        &manifest_dir,
-        &out_dir,
-        "perry-runtime",
-        "crates/perry-runtime",
-        "runtime",
-    );
+    for (package, helper) in [("perry-runtime", "runtime"), ("perry-std", "std")] {
+        compile_cargo_helper(
+            &manifest_dir,
+            &out_dir,
+            package,
+            &format!("crates/{package}"),
+            helper,
+        );
+    }
 }
 
 fn compile_helper(manifest: &Path, output: &Path, helper: &str) {

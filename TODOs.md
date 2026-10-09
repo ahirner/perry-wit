@@ -174,7 +174,7 @@ MIR (pliron dialects: perry.core, perry.heap, perry.async, perry.canon, perry.in
    └─ passes: inline → SCCP/DCE/simplify_cfg → escape → SROA/mem2reg → int-range
               → shape/iface → tier → async-split → canon-lower → root-plan
 wasm dialect ─ stackifier + local alloc ─ wasm-encoder core module
-   └─ link.rs (reencode): perry-runtime.wasm + json/time/text/fetch/number/search helpers
+   └─ link.rs (reencode): perry-runtime.wasm + perry-std.wasm + json/time/text/fetch/number/search helpers
    └─ wit-component ComponentEncoder (unchanged)
 ```
 
@@ -298,7 +298,7 @@ The phases run in order. Items within a phase can run in parallel unless they ar
     - Everything else is rejected with a diagnostic.
     - Since added: records (interfaces and literals unify by sorted field names), arrays, `push`, index and property reads and writes, R8 optionals with ECMAScript coercions and `=== undefined`. Eight tests pass.
     - Since added: async functions, `await`, and `setTimeout` from `timers/promises` / `node:timers/promises` (`perry.timer`).
-    - Since added: `throw`, `try`/`catch`/`finally` (exception values, `instanceof`, `.message`), string comparison, `String + number|boolean`, the standard services of `perry.intrinsic` (console, `process.env`, `process.exitCode`/`exit`, `performance.now`, `Date.now`), and top-level statements as the async `perry_main` of a command.
+    - Since added: `throw`, `try`/`catch`/`finally` (exception values, `instanceof`, `.message`), string comparison, `String + number|boolean`, the standard services of `perry.intrinsic` (console, `process.env`, `process.exitCode`/`exit`, `performance.now`, `Date.now`), and top-level statements as the async `perry_main` of a command. Then the standard library of the conformance expression language and commands: `Math.*`, `Date` (`new Date(t)`, `getTime`, `toISOString`), string methods with UTF-16 indices (`charAt`, `charCodeAt`, `slice`, `substring`, `indexOf`, `lastIndexOf`, `includes`, `startsWith`, `endsWith`, `trim`, `repeat`, Unicode `toLowerCase`/`toUpperCase`), `Uint8Array` (`subarray`, `slice`, `set`, `fill`, indexing), `TextEncoder`/`TextDecoder`, `JSON.parse` (to `perry.json`, R6) and typed `JSON.stringify`, `Promise.all`/`race`, `typeof`, `Math.random` and `crypto.getRandomValues`/`randomUUID`.
     - Next: globals and module state, truthiness, labeled control flow, method calls on builtins (`charAt`, `Promise.all`, `JSON.*`).
 - [ ] **P2.3 MIR snapshot tests** replace the 10 `waffle_ir` references in the test suite.
 
@@ -361,7 +361,7 @@ Owned (each with unit tests on MIR snippets):
   - *Done when:* differential tests against the legacy output for scalar, control flow and exception fixtures pass, and the output is no larger than WAFFLE's on those fixtures.
   - *Status:* 8 tests validate with wasmparser and execute in wasmtime: diamonds, loops, nested loops with break/continue, parameter swaps, recursion, memory, imports, effect ordering, and rejection of irreducible CFGs. The differential comparison against WAFFLE waits for P6.1.
 - [x] **P4.3 Keep and generalize `link.rs`.** Now `src/link`.
-  - The root `build.rs` builds `perry-runtime` as one more PIC helper library (`runtime.wasm`).
+  - The root `build.rs` builds `perry-runtime` as one more PIC helper library (`runtime.wasm`), and `perry-std` (`std.wasm`) for the built-ins, linked only when called. Libraries import each other's functions through `__perry_helper`; the linker resolves them to a fixpoint.
   - Codegen imports `perry_*` functions from `__perry_helper`, and the linker places their data after the module's static data.
   - The linked module has no imports besides the WIT world's.
   - `wasm-opt -Oz` stays optional and is not wired in.
@@ -425,7 +425,14 @@ Owned (each with unit tests on MIR snippets):
     - remove a `perry.unwrap` dominated by another unwrap of the same value (P3.5b). `point.x; point.y` currently checks twice;
     - inline `fmod` for proven integers (P3.5). `perry_f64_rem` is the largest per-iteration cost in the scaling loops.
 - [ ] **P6.2 Migrate in registry order.** Each group is done when its conformance contracts and the matching `tests/*` suites pass on MIR:
-  - *Status (2026-10-09):* 8 of 50 contracts pass: the four scaling contracts, `web.console.routing`, `web.performance.monotonic`, `node.process.exit_status` and `node.process.environment`. CLI commands work (`tests/command_test.rs`): top-level statements with top-level `await` implement `wasi:cli/run`; an uncaught exception prints `Uncaught …` to stderr and fails the command. The timer contracts pass their witnesses but generate `JSON.parse`. Remaining blockers by count: `JSON.parse`/`stringify` (10), `Uint8Array` (10), method calls on builtins (10: `charAt`, `Promise.all`, `crypto.*`, `fs`), `Date` objects, `Math.*`, `Response`/streams, `AbortController`, HTTP handlers.
+  - *Status (2026-10-09):* 29 of 50 contracts pass: the scaling contracts, the expression-language contracts (`ecma.number.arithmetic`, `ecma.math.rounding`, `ecma.string.operations`, `ecma.array.dense`, `ecma.object.records`, `ecma.date.epoch`, `ecma.uint8array.conversion`, `web.textencoder.subviews`, `ecma.json.roundtrip`, both timer contracts and the three `wasi.execution.detect_*` harness checks), `ecma.uint8array.set`, `ecma.promise.race`, the commands `ecma.json.command`, `ecma.promise.all`, `ecma.date.clock`, `web.crypto.random`, `web.console.routing`, `web.performance.monotonic`, `node.process.exit_status`, `node.process.environment`, and the rejection `node.timers.callbacks.unsupported`. The 21 pending ones need `node:fs` (7), `Response`/`Request`/streams (6), `Headers`, `Temporal`, `AbortController`, `Promise.allSettled`, error `cause`, streaming `TextDecoder`, `Writable.toWeb` and the HTTP handler. CLI commands work (`tests/command_test.rs`): top-level statements with top-level `await` implement `wasi:cli/run`; an uncaught exception prints `Uncaught …` to stderr and fails the command. `tests/builtins_test.rs` checks the built-ins against values recorded from Node.js.
+  - Known gaps found on the way:
+    - `TextDecoder.decode(…, { stream: true })`: Perry HIR drops the options, so streaming decoding cannot be distinguished (`web.textdecoder.streaming`); needs an upstream HIR change or a source-level check.
+    - `JSON.stringify` writes record fields in sorted order (records are closed shapes keyed by sorted names, R1), while ECMAScript uses insertion order; equal for the contracts so far. Fix with a declaration-order field list on record types (P3.6).
+    - `JSON.parse` costs about 25 KB of data in a component: the JSON helper parses numbers with `core`'s `str::parse::<f64>`, whose tables dominate. A smaller exact decimal parser would fix it.
+    - Size: the built-ins first landed in the runtime and grew every component by their data (template 2886 → 4645 bytes), because the linker keeps a library's data segment whole. They now live in `crates/perry-std`, linked only when called (template 2895 bytes). Finer data GC would need per-symbol relocations from the helper builds.
+    - JSON values used as `number` follow `ToNumber` for numbers, `null`, booleans and `undefined`, and throw `TypeError` for strings, arrays and objects (R6: no implicit parsing of untyped data).
+    - `Promise.allSettled`, `Headers`, `Temporal`, `Response`/`Request`, streams, `node:fs` and `AbortController` are next (`ecma.error.values` also needs `cause` and `JSON.stringify` of errors).
   1. `ecma.number`, `ecma.math`, `ecma.string`
   2. `ecma.object`, `ecma.array`
   3. `ecma.json`, `ecma.date`

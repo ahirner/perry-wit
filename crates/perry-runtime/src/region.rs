@@ -66,6 +66,9 @@ pub struct Task {
     pub(crate) outputs: [crate::io::Output; 2],
     /// A command's result once decided (`crate::io::perry_command_outcome`).
     pub(crate) outcome: Option<u32>,
+    /// Status of the last runtime service that threw (`crate::exception::raise`), taken by
+    /// compiled code with `perry_status`.
+    pub(crate) status: u32,
 }
 
 struct Runtime {
@@ -134,6 +137,7 @@ fn new_task() -> *mut Task {
             exception: ptr::null_mut(),
             outputs: [crate::io::Output::new(), crate::io::Output::new()],
             outcome: None,
+            status: 0,
         })
     };
     task

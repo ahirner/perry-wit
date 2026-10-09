@@ -893,7 +893,7 @@ impl FunctionLowering<'_> {
     }
 
     /// `for (i = 0; i < count; i++) body(i)` as a CFG; code after it continues in the exit.
-    fn counted_loop(
+    pub(crate) fn counted_loop(
         &mut self,
         ctx: &mut Context,
         count: Value,

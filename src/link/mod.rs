@@ -146,13 +146,38 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     }
 
     // 3. Select and prepare helper libraries
-    let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<&str>>::new();
+    let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<String>>::new();
     for (_, entry_name, _) in &helper_imports {
         let lib_id = LibraryId::for_entry(entry_name)?;
         requested_by_lib
             .entry(lib_id)
             .or_default()
-            .insert(*entry_name);
+            .insert(entry_name.to_string());
+    }
+    // Libraries may call each other through `__perry_helper` imports (the runtime formats
+    // numbers with the number helper): request those entries too, to a fixpoint.
+    loop {
+        let mut added = Vec::new();
+        for (lib_id, entries) in &requested_by_lib {
+            let lib = Library::parse(lib_id.bytes())?;
+            let reachable = lib.reachable(entries.iter().map(String::as_str))?;
+            for &orig in reachable
+                .iter()
+                .filter(|&&orig| orig < lib.imports.len() as u32)
+            {
+                let (module, name, _) = &lib.imports[orig as usize];
+                if module == HELPER_MODULE {
+                    added.push((LibraryId::for_entry(name)?, name.clone()));
+                }
+            }
+        }
+        let mut changed = false;
+        for (lib_id, name) in added {
+            changed |= requested_by_lib.entry(lib_id).or_default().insert(name);
+        }
+        if !changed {
+            break;
+        }
     }
 
     let mut new_types = TypeSection::new();
@@ -177,18 +202,19 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
         push_type(&mut new_types, ty)?;
     }
 
-    struct PreparedLibrary<'e> {
+    struct PreparedLibrary {
+        id: LibraryId,
         lib: Library,
         reachable: BTreeSet<u32>,
         helper_defined_indices: BTreeMap<u32, u32>,
         type_base: u32,
-        entries: BTreeSet<&'e str>,
+        entries: BTreeSet<String>,
     }
 
     let mut prepared_libs = Vec::new();
     for (lib_id, entries) in requested_by_lib {
         let lib = Library::parse(lib_id.bytes())?;
-        let reachable = lib.reachable(entries.iter().copied())?;
+        let reachable = lib.reachable(entries.iter().map(String::as_str))?;
         let type_base = new_types.len();
         for ty in &lib.types {
             push_type(&mut new_types, ty)?;
@@ -200,6 +226,10 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
             .filter(|&&orig| orig < lib.imports.len() as u32)
         {
             let (module, name, ty) = &lib.imports[orig as usize];
+            if module == HELPER_MODULE {
+                // Resolved to the other library's function once indices are assigned.
+                continue;
+            }
             let index = match external_imports
                 .iter()
                 .position(|(m, n, _)| m == module && n == name)
@@ -213,6 +243,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
             helper_defined_indices.insert(orig, index as u32);
         }
         prepared_libs.push(PreparedLibrary {
+            id: lib_id,
             lib,
             reachable,
             helper_defined_indices,
@@ -245,6 +276,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
 
     // 4. Assign indices to the selected helper functions
     let mut current_helper_func_idx = helper_func_start_idx;
+    let mut entry_index = BTreeMap::<(LibraryId, String), u32>::new();
     for prep in &mut prepared_libs {
         let imported = prep.lib.imports.len() as u32;
         for &orig in prep.reachable.iter().filter(|&&orig| orig >= imported) {
@@ -256,17 +288,35 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
             let orig_idx = prep
                 .lib
                 .exports
-                .get(*entry)
+                .get(entry.as_str())
                 .context("missing helper export")?;
             let new_idx = prep
                 .helper_defined_indices
                 .get(orig_idx)
                 .copied()
                 .context("missing assigned index for helper entry")?;
+            entry_index.insert((prep.id, entry.clone()), new_idx);
             for (old_h_idx, h_name, _) in &helper_imports {
                 if h_name == entry {
                     old_to_new_func_index.insert(*old_h_idx, new_idx);
                 }
+            }
+        }
+    }
+    // Calls between libraries.
+    for prep in &mut prepared_libs {
+        for &orig in prep
+            .reachable
+            .iter()
+            .filter(|&&orig| orig < prep.lib.imports.len() as u32)
+        {
+            let (module, name, _) = &prep.lib.imports[orig as usize];
+            if module == HELPER_MODULE {
+                let target = entry_index
+                    .get(&(LibraryId::for_entry(name)?, name.clone()))
+                    .copied()
+                    .context("missing helper entry for a library import")?;
+                prep.helper_defined_indices.insert(orig, target);
             }
         }
     }

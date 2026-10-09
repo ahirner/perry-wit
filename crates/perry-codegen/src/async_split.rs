@@ -264,6 +264,21 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState, kinds: &[Identif
     b.insert(ctx, ret);
     b.block = run;
     let kind = b.load(ctx, MemKind::I32, frame, KIND);
+    // Runtime combinators (`Promise.all`, `Promise.race`) step in the runtime.
+    let combinator_kind = b.i32_const(ctx, perry_runtime::promise::COMBINATOR_KIND as i32);
+    let is_combinator = b.num(ctx, NumOpcode::I32Eq, vec![kind, combinator_kind]);
+    let step_combinator = b.new_block(ctx, vec![]);
+    let step_function = b.new_block(ctx, vec![]);
+    b.cond_br(
+        ctx,
+        is_combinator,
+        (step_combinator, vec![]),
+        (step_function, vec![]),
+    );
+    b.block = step_combinator;
+    b.runtime(ctx, Runtime::CombinatorStep, vec![frame]);
+    b.br(ctx, header, vec![]);
+    b.block = step_function;
     for (index, name) in kinds.iter().enumerate() {
         let expected = b.i32_const(ctx, index as i32);
         let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, expected]);

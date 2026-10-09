@@ -324,6 +324,52 @@ export async function runAwaits(x: number): Promise<number> { return await await
     assert_eq!(program.throwing("runAwaits", 5.0), (70.0, 0));
 }
 
+/// `Promise.all` and `Promise.race` over async functions, and `typeof`.
+#[test]
+fn promise_combinators_and_typeof() {
+    let mut program = Program::new(
+        r#"
+async function value(x: number): Promise<number> { return x; }
+async function fail(x: number): Promise<number> { throw new RangeError("no"); }
+export async function all(x: number): Promise<number> {
+  const values = await Promise.all([value(x), value(x + 1), value(2)]);
+  const empty: Promise<number>[] = [];
+  const none = await Promise.all(empty);
+  return (values[0] as number) * 100 + (values[1] as number) * 10 + (values[2] as number) + none.length;
+}
+export async function race(x: number): Promise<number> {
+  const first = value(x);
+  await first;
+  return await Promise.race([first, value(x + 5)]);
+}
+export async function rejects(x: number): Promise<number> {
+  try {
+    await Promise.all([value(x), fail(x)]);
+    return 0;
+  } catch (e) {
+    if (e instanceof RangeError) { return 1; }
+    return 2;
+  }
+}
+export function types(x: number): number {
+  const xs: number[] = [x];
+  const text = JSON.stringify(xs);
+  const maybe = xs[3];
+  let score = 0;
+  if (typeof x === "number") { score = score + 1; }
+  if (typeof text === "string") { score = score + 10; }
+  if (typeof maybe === "undefined") { score = score + 100; }
+  if (typeof JSON.parse("[1]") === "object") { score = score + 1000; }
+  return score;
+}
+"#,
+    );
+    assert_eq!(program.throwing("all", 3.0), (342.0, 0));
+    assert_eq!(program.throwing("race", 4.0), (4.0, 0));
+    assert_eq!(program.throwing("rejects", 1.0), (1.0, 0));
+    assert_eq!(program.number("types", 1.0), 1111.0);
+}
+
 #[test]
 fn scaling_contracts_are_linear() {
     let workloads = [

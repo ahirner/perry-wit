@@ -12,6 +12,7 @@ Perry-WIT compiles a static subset of TypeScript to WebAssembly components targe
 | `crates/perry-codegen` | perry MIR → `wasm` dialect, value representations, canonical-ABI export glue (`boundary.rs`) |
 | `crates/pliron-wasm` | The `wasm` dialect and the emitter to core Wasm; free of perry code so it can be published separately |
 | `crates/perry-runtime` | `no_std` runtime linked into every module: allocator, task regions, strings, arrays |
+| `crates/perry-std` | Built-ins on top of the runtime (string methods, `Uint8Array`, JSON, random), linked on demand |
 | `crates/*-helper`, `src/helpers` | Computation helpers (JSON, time, number formatting, text, search, URL), linked on demand |
 | `crates/conformance` | Contracts checked against Node.js as the oracle |
 
@@ -43,9 +44,15 @@ TypeScript ─ perry-parser ─ Perry HIR ─ perry-lower ─ perry MIR
 | `i1` (boolean) | `i32` | |
 | record, array, string | `i32` address | `0` is null |
 | `T \| undefined` | as `T` | numbers: signalling-NaN payload (`perry_codegen::UNDEFINED_BITS`); references: `0`; booleans: `2` |
+| `Uint8Array` (`perry.bytes`) | `i32` address | a view `{ len, data }`; `subarray` shares the bytes |
+| JSON value (`perry.json`) | `i32` address | a node of the JSON helper's graph; `0` is `undefined` |
+| `Date` (`perry.date`) | `f64` | the time value, held by value |
 
 - **Records.** An `i32` shape id followed by 8-byte field slots in sorted field order.
 - **Arrays.** `{ len, cap, data }`, with 8-byte element slots. Capacity is never 0, so a bounds-checked read is branch-free.
+- **Built-ins.** The builder maps the standard library to `perry.intrinsic` services with fixed signatures (`perry_mir::intrinsics`). Codegen lowers them to Wasm instructions (`Math`, `Date` TimeClip), `perry-std` functions (strings with UTF-16 indices, `Uint8Array`, JSON access, random values) or helper libraries (Unicode case mapping, JSON parsing, number and date formatting). Services that may throw leave their status in the task for compiled code to check (`perry_status`). `perry-std` is a library of its own because the linker keeps reachable functions but a library's data segment whole: programs that use none of the built-ins carry none of their messages and tables. It reaches the runtime through `__perry_helper` imports, which the linker resolves between libraries.
+- **JSON.** `JSON.parse` produces `perry.json` nodes; property and index reads stay JSON values, and a typed use converts them (R6). `JSON.stringify` of typed values is generated per type: one serializer function per record or array type writes structure and pre-formatted pieces to a runtime writer.
+- **Promise combinators.** `Promise.all` and `Promise.race` are runtime frames that wait on every pending input at once; `drive` steps them like async frames.
 - **Strings.** `{ len (UTF-8 bytes), utf16, data, buffer }`.
   - `utf16` caches the ECMAScript length.
   - Constants are static objects in the data segment.
@@ -118,5 +125,6 @@ Stackless state machines on the WASI P3 callback ABI. It uses no Component Model
   - `tests/mir_codegen_test.rs`: linked core modules with fuel metering;
   - `tests/component_test.rs`: WIT values through the component model;
   - `tests/command_test.rs`: commands with console output, environment, exit codes and exceptions;
+  - `tests/builtins_test.rs`: built-in services against values recorded from Node.js;
   - `tests/async_component_test.rs`: async exports with WASI P3 timers, including overlapping calls.
 - **Conformance:** `cargo run -p perry-conformance -- check`, against Node.js as the oracle, gated by the `passing.txt` ratchet.
