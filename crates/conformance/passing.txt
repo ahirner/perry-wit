@@ -7,3 +7,4 @@ web.console.routing
 web.performance.monotonic
 node.process.environment
 node.process.exit_status
+ecma.promise.await_ordering

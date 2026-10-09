@@ -160,6 +160,11 @@ mod tests {
         assert_eq!(perry_ready_pop(), f1);
         assert_eq!(perry_ready_pop(), f2);
         assert!(perry_ready_pop().is_null());
+        perry_promise_wait(p, f2);
+        perry_promise_wait(p, f1);
+        assert_eq!(perry_ready_pop(), f2);
+        assert_eq!(perry_ready_pop(), f1);
+        assert!(perry_ready_pop().is_null());
         // Settling twice is a no-op; rejection records the status.
         let q = perry_promise_new();
         perry_promise_reject(q, 2);
@@ -168,6 +173,17 @@ mod tests {
             unsafe { (*(q as *const u32), *(q.add(4) as *const i32)) },
             (REJECTED, 2)
         );
+        unsafe {
+            perry_promise_observe(q);
+        }
+        assert_eq!(perry_task_failed(), 0);
+        assert!(
+            current().rejections.is_null(),
+            "handled rejections were retained for rescanning"
+        );
+        let unhandled = perry_promise_new();
+        perry_promise_reject(unhandled, 2);
+        assert_eq!(perry_task_failed(), 1);
         perry_task_free();
     }
 

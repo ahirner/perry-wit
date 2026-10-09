@@ -404,6 +404,26 @@ fn async_export(
         let mut b = FunctionLowering::glue(state, ctx, &finish);
         let drive = CallOp::new(ctx, crate::async_split::drive_name(), vec![], vec![]);
         b.insert(ctx, drive.get_operation());
+        let failed = b
+            .runtime(ctx, Runtime::TaskFailed, vec![])
+            .expect("task failure");
+        let abort = b.new_block(ctx, vec![]);
+        let active = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, failed, (abort, vec![]), (active, vec![]));
+        b.block = abort;
+        let cleanup = CallOp::new(ctx, identifier("abort_task"), vec![], vec![]).get_operation();
+        b.insert(ctx, cleanup);
+        if command {
+            let error = b.i32_const(ctx, 1);
+            b.host(ctx, task_return.clone(), vec![error]);
+            let exit = b.i32_const(ctx, EXIT);
+            let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
+            b.insert(ctx, ret);
+        } else {
+            let unreachable = UnreachableOp::new(ctx).get_operation();
+            b.insert(ctx, unreachable);
+        }
+        b.block = active;
         let promise = b
             .runtime(ctx, Runtime::TaskResult, vec![])
             .expect("promise");
@@ -441,10 +461,6 @@ fn async_export(
         b.block = done;
         let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
         let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-        let unhandled = b
-            .runtime(ctx, Runtime::TaskFailed, vec![])
-            .expect("unhandled rejection");
-        let rejected = b.num(ctx, NumOpcode::I32Or, vec![rejected, unhandled]);
         let rejected = if command {
             ensure!(
                 mir_results.len() == 1 && crate::repr(ctx, mir_results[0])? == crate::Repr::Bool,

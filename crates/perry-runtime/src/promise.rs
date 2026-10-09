@@ -3,9 +3,8 @@
 //! Layout, read inline by compiled code: `state: u32` at 0 ([PENDING], [FULFILLED],
 //! [REJECTED]), `status: i32` at 4 (the exception code of a rejection), the settled value's
 //! 8-byte slot at 8 (`f64` bits or a 32-bit reference; an exception reference on rejection).
-//! Compiled code checks `state` before
-//! suspending, so awaiting a settled promise continues inline; otherwise the awaiting frame
-//! becomes a waiter and is queued on the task's ready list when the promise settles.
+//! Awaiting a settled promise queues the continuation on the task's ready list. Otherwise
+//! the awaiting frame becomes a waiter and is queued when the promise settles.
 use crate::region::{Node, current};
 use core::ptr;
 
@@ -98,14 +97,15 @@ pub unsafe extern "C" fn perry_promise_observe(promise: *mut u8) {
     unsafe { (*(promise as *mut Promise)).observed = true };
 }
 
-/// Whether any rejected promise has no await observing its rejection. Queried only after
-/// the task's ready frames and host work have drained, allowing later awaits to handle it.
+/// Check failures at the end of a job, after all ready continuations ran. An observed
+/// rejection never becomes unobserved, so discard checked entries to keep total work linear.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_task_failed() -> u32 {
     if current().output_failed {
         return 1;
     }
-    let mut promise = current().rejections as *const Promise;
+    let mut promise =
+        core::mem::replace(&mut current().rejections, ptr::null_mut()) as *const Promise;
     // SAFETY: the rejection list belongs to the current live task.
     unsafe {
         while !promise.is_null() {
@@ -131,10 +131,15 @@ pub unsafe extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     }
 }
 
-/// Queue `frame` when the pending `promise` settles.
+/// Queue `frame` after the current job if `promise` settled, or when it settles.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
     let promise = promise as *mut Promise;
+    // SAFETY: compiled code passes a live promise of the current task.
+    if unsafe { (*promise).state != PENDING } {
+        current().push_ready(frame);
+        return;
+    }
     let node = current().allocate(core::mem::size_of::<Node>()) as *mut Node;
     // SAFETY: `promise` is live; `node` is fresh. Waiters run in registration order.
     unsafe {

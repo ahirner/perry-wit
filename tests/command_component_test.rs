@@ -180,6 +180,106 @@ if (total !== 6) throw new Error("top-level locals");
 #[path = "support/output_capture.rs"]
 mod output_capture;
 
+#[tokio::test(flavor = "current_thread")]
+async fn rejections_are_checked_after_microtasks_before_the_next_host_turn() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:rejections; world command { include wasi:cli/command@0.3.0; }",
+    )?;
+    let (resolve, package) = resolve_wit(directory.path())?;
+    let world = resolve.select_world(&[package], Some("command"))?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    for (body, expected, output) in [
+        ("setTimeout(3600000); throw new Error('root');", Err(()), ""),
+        (
+            "fail(); await setTimeout(3600000); console.log('unreachable');",
+            Err(()),
+            "",
+        ),
+        (
+            "failLater(); await setTimeout(3600000); console.log('unreachable');",
+            Err(()),
+            "",
+        ),
+        (
+            "forward(); await setTimeout(3600000); console.log('unreachable');",
+            Err(()),
+            "",
+        ),
+        (
+            "const p=fail(); await setTimeout(1); try {await p;} catch(e) {console.log('too late');}",
+            Err(()),
+            "",
+        ),
+        (
+            "const p=fail(); await ready(); try {await p;} catch(e) {console.log('handled');}",
+            Ok(()),
+            "handled\n",
+        ),
+        (
+            "const p=failLater(); try {await p;} catch(e) {console.log('handled');}",
+            Ok(()),
+            "handled\n",
+        ),
+    ] {
+        let source = format!(
+            r#"
+import {{setTimeout}} from 'node:timers/promises';
+async function ready(): Promise<number> {{return 0;}}
+async function fail(): Promise<void> {{throw new Error("detached");}}
+async function failLater(): Promise<void> {{await setTimeout(1); throw new Error("detached");}}
+async function forward(): Promise<void> {{await fail();}}
+{body}
+"#
+        );
+        let compiled = compile_for_world(&source, "rejections.ts", &resolve, world, true)?;
+        let component = Component::new(&engine, compiled.stripped.unwrap())?;
+        let stdout = output_capture::MemoryOutput::new(1000);
+        let mut store = Store::new(
+            &engine,
+            Host {
+                ctx: WasiCtx::builder().stdout(stdout.clone()).build(),
+                table: ResourceTable::new(),
+                peak: 0,
+            },
+        );
+        store.limiter(|host| host);
+        let command = wasmtime_wasi::p3::bindings::Command::instantiate_async(
+            &mut store, &component, &linker,
+        )
+        .await?;
+        let mut peak = 0;
+        for round in 1..=3 {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                store.run_concurrent(async |accessor| {
+                    command.wasi_cli_run().call_run(accessor).await
+                }),
+            )
+            .await???;
+            assert_eq!(result, expected, "{body}");
+            assert_eq!(
+                stdout.contents().as_ref(),
+                output.repeat(round).as_bytes(),
+                "{body}"
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+            if round == 1 {
+                peak = store.data().peak;
+            } else {
+                assert_eq!(store.data().peak, peak, "rejected task memory was retained");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct PartialOutput(output_capture::MemoryOutput);
 impl wasmtime_wasi::cli::IsTerminal for PartialOutput {

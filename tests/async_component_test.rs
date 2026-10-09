@@ -3,6 +3,10 @@
 //! each other across host suspensions, and every call releases its task.
 use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use wasmtime::{
     Config, Engine, Store,
     component::{Component, ComponentType, Lift, Linker, ResourceTable},
@@ -18,6 +22,7 @@ world timers {
   export label: async func(name: string) -> string;
   export count: async func(n: u32) -> u32;
   export recover: async func(x: f64) -> f64;
+  export fail: async func();
 }
 "#;
 
@@ -71,6 +76,11 @@ export async function count(n: number): Promise<number> {
   }
   return total;
 }
+export async function fail(): Promise<void> {
+  setTimeout(3600000);
+  await setTimeout(1);
+  throw new Error("unhandled export rejection");
+}
 "#;
 
 #[derive(ComponentType, Lift, Debug, PartialEq)]
@@ -84,6 +94,13 @@ struct Host {
     ctx: WasiCtx,
     table: ResourceTable,
     peak: usize,
+}
+
+struct PendingTimer(Arc<AtomicUsize>);
+impl Drop for PendingTimer {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl WasiView for Host {
@@ -191,5 +208,47 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         .await??;
     assert_eq!((a, b), (35.0, 46.0));
     store.assert_concurrent_state_empty();
+    let active = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let active_timers = active.clone();
+    let started_timers = started.clone();
+    linker.allow_shadowing(true);
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
+            started_timers.fetch_add(1, Ordering::SeqCst);
+            active_timers.fetch_add(1, Ordering::SeqCst);
+            let pending = PendingTimer(active_timers.clone());
+            Box::pin(async move {
+                let _pending = pending;
+                tokio::time::sleep(std::time::Duration::from_nanos(duration)).await;
+                Ok(())
+            })
+        })?;
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let fail = instance.get_typed_func::<(), ()>(&mut store, "fail")?;
+    let rejected = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fail.call_async(&mut store, ()),
+    )
+    .await?;
+    let error = rejected.expect_err("an export without an error result must trap");
+    assert!(
+        matches!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(wasmtime::Trap::UnreachableCodeReached)
+        ),
+        "{error:#}"
+    );
+    assert_eq!(started.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        active.load(Ordering::SeqCst),
+        0,
+        "rejected export retained timer futures before store disposal"
+    );
+    assert!(
+        store.data().table.is_empty(),
+        "rejected export retained native operations"
+    );
     Ok(())
 }

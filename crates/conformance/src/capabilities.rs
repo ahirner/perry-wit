@@ -124,6 +124,20 @@ pub fn contracts() -> Vec<Contract> {
     contracts.extend(additional_contracts());
     contracts.extend(combinator_contracts());
     contracts.push(Contract {
+        id: "ecma.promise.await_ordering",
+        description: "Await continuations run in registration order after the current job",
+        specification: "https://tc39.es/ecma262/#await",
+        domain: "Two consumers of one settled or timer-backed promise; fulfillment or rejection, repeated awaits and awaited finalizers; exact effect trace over IEEE-754 input values",
+        witnesses: vec![
+            Witness { partition: "already-fulfilled", case: await_ordering(2, false, false) },
+            Witness { partition: "already-rejected", case: await_ordering(2, false, true) },
+            Witness { partition: "pending-fulfilled", case: await_ordering(2, true, false) },
+            Witness { partition: "pending-rejected", case: await_ordering(2, true, true) },
+        ],
+        strategy: (1u32..=5, any::<bool>(), any::<bool>()).prop_map(|(rounds, pending, rejected)| await_ordering(rounds, pending, rejected)).boxed(),
+        check: check_equivalence,
+    });
+    contracts.push(Contract {
         id: "ecma.error.values",
         description: "Error messages, causes and identity across promise rejection and rethrow",
         specification: "https://tc39.es/ecma262/#sec-error-objects",
@@ -169,6 +183,49 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }}
 "#,
             message = serde_json::to_string(&message).unwrap()
+        ),
+    }
+}
+
+fn await_ordering(rounds: u32, pending: bool, rejected: bool) -> Case {
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            r#"
+import {{setTimeout}} from 'node:timers/promises';
+async function ready(): Promise<number> {{ return 0; }}
+async function produce(value: number): Promise<number> {{
+  {delay}
+  {reject}
+  return value;
+}}
+async function consume(promise: Promise<number>, trace: number[], tag: number): Promise<void> {{
+  trace.push(tag);
+  for(let i=0; i<{rounds}; i++) {{
+    try {{ await promise; trace.push(tag+10); }}
+    catch(e) {{ if(!(e instanceof Error)||e.message!=="shared") throw e; trace.push(tag+30); }}
+    finally {{ await ready(); trace.push(tag+20); }}
+  }}
+}}
+export async function run(x: number): Promise<{{value:number,trace:number[]}}> {{
+  const trace: number[] = [];
+  const shared=produce(x);
+  const first=consume(shared,trace,1);
+  const second=consume(shared,trace,2);
+  trace.push(0);
+  await first;
+  trace.push(3);
+  await second;
+  trace.push(4);
+  return {{value:x,trace}};
+}}
+"#,
+            delay = if pending { "await setTimeout(1);" } else { "" },
+            reject = if rejected {
+                "throw new Error(\"shared\");"
+            } else {
+                ""
+            },
         ),
     }
 }

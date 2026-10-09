@@ -7,8 +7,8 @@
 //! - the **step** `step_f(frame)`: the function body. Its entry dispatches on the frame's
 //!   state: 0 starts the body, `k` resumes after the `k`-th `await`.
 //!
-//! An `await` of a settled promise continues inline. Otherwise the step stores its state,
-//! registers the frame as a waiter on the promise and returns; settling the promise queues the
+//! Every `await` stores its state, registers the frame as a waiter and returns. An already
+//! settled promise queues it immediately; settling a pending promise queues the
 //! frame, and the drive loop (`drive`, run at every entry from the host) dispatches queued
 //! frames by kind. Values live across an `await` (backward liveness over the MIR CFG) live in
 //! frame slots: they are stored where they are defined and loaded where they are used, so the
@@ -302,14 +302,9 @@ impl FunctionLowering<'_> {
         self.runtime(ctx, Runtime::PromiseObserve, vec![promise]);
         let i32 = i32_type(ctx);
         let take = self.new_block(ctx, vec![i32]);
-        let suspend = self.new_block(ctx, vec![]);
-        let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
-        self.cond_br(ctx, settled, (take, vec![promise]), (suspend, vec![]));
-
         let resumes = &mut self.frame.as_mut().unwrap().resumes;
         resumes.push(take);
         let state = resumes.len() as i32;
-        self.block = suspend;
         let state = self.i32_const(ctx, state);
         self.store(ctx, MemKind::I32, frame, STATE, state);
         self.store(ctx, MemKind::I32, frame, AWAITED, promise);

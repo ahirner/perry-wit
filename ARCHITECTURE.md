@@ -100,13 +100,14 @@ Stackless state machines on the WASI P3 callback ABI. It uses no Component Model
   - The ramp allocates a frame in the task region, stores the arguments, creates the result promise and runs the step.
   - The step dispatches on the frame's state: 0 starts the body, `k` resumes after the `k`-th `await`.
   - Values live across an `await` live in frame slots.
-  - `await` of a settled promise continues inline. Otherwise the frame waits on the promise and the step returns.
+  - Every `await` returns from the step. A settled promise queues the continuation immediately; a pending one queues it when settled. Continuations run in registration order after the current job, including for repeated awaits and awaited finalizers.
   - `return` fulfils the frame's promise; an exception rejects it.
 - **Runtime.** A promise is `{ state, status, value, waiters }` (`perry_runtime::promise`). Settling queues its waiters on the task's run queue. `drive` runs queued frames, dispatching on the frame's kind.
 - **Timers.** `setTimeout(delay, value)` from `node:timers/promises` is an async-lowered `wasi:clocks/monotonic-clock.wait-for`. A pending call joins the task's waitable set, and its promise settles when the subtask returns.
 - **Exports.**
   - `[async-lift]<export>` enters the task, stores it with `context.set 0`, lifts the arguments, calls the ramp and finishes.
-  - `finish` drives ready frames. It returns only after the result promise settles and all host subtasks and output queues drain, including work started without awaiting it. It checks unobserved rejections at task completion (per-turn rejection reporting remains a scheduler follow-up). Then it calls `task.return`, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
+  - `finish` drains ready frames, then checks unobserved rejections and output failures before another host turn. A failure cancels native operations and frees the task, returning a command error or trapping an export without an error result. A handler installed later in the same continuation queue can recover; one deferred until a later timer cannot. Checked rejection entries are discarded, keeping total scanning work linear.
+  - Successful completion waits for the result promise and all host subtasks and output queues, including work started without awaiting it. Then it calls `task.return`, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
   - `[callback][async-lift]<export>` resumes the task from `context.get 0`, settles a returned subtask or advances a pending output transfer, releases completed handles and finishes again.
   - Calls may overlap: every task has its own region, run queue and subtasks.
   - A cancellation event detaches pending waitables, synchronously cancels timers and active output writes/reads, drops their handles, frees the task region, and acknowledges `task.cancel`. Output cancellation covers both stream transfer and the host completion future; queued lines never start. Sync cancellation may run other tasks, so runtime cancellation restores the original task after each blocking host call. Guest continuations and finalizers are abandoned.
