@@ -72,6 +72,25 @@ pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 
     new(len, utf16_length(bytes), data, ptr::null_mut())
 }
 
+/// Strict equality, including optional strings represented by null.
+///
+/// # Safety
+/// Each non-null operand is a live string reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_equal(a: *mut u8, b: *mut u8) -> u32 {
+    if a.is_null() || b.is_null() {
+        return u32::from(a == b);
+    }
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let (a, b) = (&*(a as *const Str), &*(b as *const Str));
+        u32::from(
+            core::slice::from_raw_parts(a.data, a.len as usize)
+                == core::slice::from_raw_parts(b.data, b.len as usize),
+        )
+    }
+}
+
 /// `a + b`.
 ///
 /// # Safety

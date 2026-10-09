@@ -5,9 +5,9 @@
 Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
 [Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
 
-> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI, with `setTimeout` from `node:timers/promises`. `fetch`, `node:fs`, streams, JSON, Date, CLI commands and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
+> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with `try`/`catch`/`finally` and task-scoped memory. It also covers async functions on the WASI P3 callback ABI, with `setTimeout` from `node:timers/promises`, and CLI top-level execution with error results. `fetch`, `node:fs`, streams, JSON, Date, CLI console/process APIs and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
 
-- **WIT-first authoring**: Export typed functions matching a WIT world. Standalone CLI commands with top-level `await` return with the async migration.
+- **WIT-first authoring**: Export typed functions matching a WIT world, or execute top-level code and `await` through a `wasi:cli/run` command world.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
 - **Hermetic toolchain**: Fully reproducible builds, type generation, and component testing via Nix flakes.
 
@@ -202,7 +202,7 @@ Perry-WIT supports a predictable, strictly typed subset of TypeScript designed f
 - **Records**: interfaces, type literals and object literals with closed shapes. Structurally equal types are the same record, and recursive interfaces are supported.
 - **Arrays** are dense and homogeneous (R8). An out-of-range or non-integral read yields `undefined`. Writing at `length` appends; any other out-of-range write throws a `RangeError`.
 - **Strings** are UTF-8 with an O(1) UTF-16 `.length`. Concatenation in a loop is linear.
-- **Exceptions**: a `TypeError` from `undefined` at a typed use, or a `RangeError`, is catchable. Nothing in the subset traps, except an exception escaping an export that has no error type.
+- **Exceptions**: `try`/`catch`/`finally`, Error/TypeError/RangeError construction, `.message`, `instanceof`, and throwing numbers, booleans or strings. Rethrows and rejected promises preserve Error identity across suspension. Implicit TypeError/RangeError failures are catchable. An uncaught command exception returns `err`; an exception escaping an export without an error type traps.
 - **Control flow**: `if`, loops, `break`/`continue`, `&&`/`||`, `?:`, and direct calls, including recursion.
 
 ## Contributing

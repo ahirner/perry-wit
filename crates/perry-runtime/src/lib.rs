@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod array;
+pub mod exception;
 pub mod promise;
 pub mod region;
 pub mod string;
@@ -53,6 +54,38 @@ mod tests {
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
         promises_queue_waiters_and_tasks_interleave();
+        exceptions_are_owned_by_each_task_and_rejections_keep_identity();
+    }
+
+    fn exceptions_are_owned_by_each_task_and_rejections_keep_identity() {
+        use exception::*;
+        use promise::*;
+        use region::*;
+        let a = perry_task_enter();
+        let original = perry_exception_new(NUMBER, 42.0f64.to_bits());
+        let promise = perry_promise_new();
+        // SAFETY: all references belong to the currently running task.
+        unsafe {
+            let status = perry_exception_raise(original);
+            perry_promise_reject(promise, status);
+            assert!(current().exception.is_null());
+            let status = perry_promise_rethrow(promise);
+            assert_eq!(perry_exception_catch(status), original);
+            perry_exception_raise(original);
+            perry_task_suspend();
+            perry_task_enter();
+            assert!(current().exception.is_null());
+            let other = perry_exception_catch(TYPE_ERROR as i32);
+            assert_eq!(perry_exception_is(other, ERROR), 1);
+            assert_eq!(perry_exception_is(other, RANGE_ERROR), 0);
+            perry_task_free();
+            perry_task_resume(a);
+            assert_eq!(perry_exception_catch(NUMBER as i32), original);
+            let status = perry_promise_rethrow(promise);
+            assert_eq!(perry_exception_catch(status), original);
+            assert_eq!(perry_exception_is(original, ERROR), 0);
+        }
+        perry_task_free();
     }
 
     fn promises_queue_waiters_and_tasks_interleave() {

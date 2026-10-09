@@ -4,7 +4,7 @@ use crate::{
     sdk::codegen::to_camel_case,
 };
 use anyhow::{Result, bail, ensure};
-use perry_codegen::boundary::{AbiType, Export};
+use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_mir::calls::is_exported;
 use pliron::{
     builtin::{
@@ -17,6 +17,14 @@ use pliron::{
 };
 use std::collections::BTreeMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
+
+const CLI_RUN: &str = "wasi:cli/run@0.3.0";
+
+pub(crate) fn is_command(resolve: &Resolve, world: WorldId) -> bool {
+    resolve.worlds[world].exports.iter().any(|(key, item)| {
+        matches!(item, WorldItem::Interface { .. }) && resolve.name_world_key(key) == CLI_RUN
+    })
+}
 
 /// The component exports of `world`, each bound to the exported TypeScript function with the
 /// SDK's implementation name. Missing implementations are errors; extra exports are ignored.
@@ -61,6 +69,16 @@ pub(crate) fn exports(
             WorldItem::Type { .. } => continue,
         };
         for (implementation, core_name, function) in functions {
+            let command = resolve.name_world_key(key) == CLI_RUN && function.name == "run";
+            let implementation = if command {
+                ensure!(
+                    !exported.contains_key(&implementation),
+                    "explicit command implementation {implementation} is not supported yet; use top-level statements"
+                );
+                perry_lower::COMMAND_ENTRY.to_string()
+            } else {
+                implementation
+            };
             ensure!(
                 exported.remove(&implementation).is_some(),
                 "WIT export {core_name} needs an exported TypeScript function {implementation}"
@@ -70,27 +88,38 @@ pub(crate) fn exports(
                 .iter()
                 .map(|param| abi_type(resolve, &param.ty))
                 .collect::<Result<_>>()?;
-            let result = function
-                .result
-                .as_ref()
-                .map(|ty| abi_type(resolve, ty))
-                .transpose()?;
+            let result = if command {
+                None
+            } else {
+                function
+                    .result
+                    .as_ref()
+                    .map(|ty| abi_type(resolve, ty))
+                    .transpose()?
+            };
             // Async exports return through `task.return`, imported from `[export]<interface>`.
-            let task_return = function.kind.is_async().then(|| {
+            let kind = if function.kind.is_async() {
                 let module = match item {
                     WorldItem::Interface { .. } => {
                         format!("[export]{}", resolve.name_world_key(key))
                     }
                     _ => "[export]$root".to_string(),
                 };
-                (module, function.name.clone())
-            });
+                let function = function.name.clone();
+                if command {
+                    ExportKind::Command { module, function }
+                } else {
+                    ExportKind::Async { module, function }
+                }
+            } else {
+                ExportKind::Sync
+            };
             bound.push(Export {
                 core_name,
                 function: implementation,
                 params,
                 result,
-                task_return,
+                kind,
             });
         }
     }

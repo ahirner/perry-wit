@@ -2,7 +2,8 @@
 //!
 //! Layout, read inline by compiled code: `state: u32` at 0 ([PENDING], [FULFILLED],
 //! [REJECTED]), `status: i32` at 4 (the exception code of a rejection), the settled value's
-//! 8-byte slot at 8 (`f64` bits or a 32-bit reference). Compiled code checks `state` before
+//! 8-byte slot at 8 (`f64` bits or a 32-bit reference; an exception reference on rejection).
+//! Compiled code checks `state` before
 //! suspending, so awaiting a settled promise continues inline; otherwise the awaiting frame
 //! becomes a waiter and is queued on the task's ready list when the promise settles.
 use crate::region::{Node, current};
@@ -22,6 +23,8 @@ struct Promise {
     status: i32,
     value: u64,
     waiters: *mut Node,
+    observed: bool,
+    next_rejected: *mut Promise,
 }
 
 /// A pending promise in the current task.
@@ -35,6 +38,8 @@ pub extern "C" fn perry_promise_new() -> *mut u8 {
             status: 0,
             value: 0,
             waiters: ptr::null_mut(),
+            observed: false,
+            next_rejected: ptr::null_mut(),
         })
     };
     promise as *mut u8
@@ -66,10 +71,61 @@ pub extern "C" fn perry_promise_resolve(promise: *mut u8, value: u64) {
     settle(promise, FULFILLED, 0, value);
 }
 
-/// Reject `promise` with exception code `status` and queue its waiters.
+/// Consume the pending exception into `promise` and queue its waiters.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_promise_reject(promise: *mut u8, status: i32) {
-    settle(promise, REJECTED, status, 0);
+    let exception = crate::exception::perry_exception_catch(status);
+    // SAFETY: compiled code passes a live promise of the current task.
+    unsafe {
+        if (*(promise as *const Promise)).state != PENDING {
+            return;
+        }
+    }
+    settle(promise, REJECTED, status, exception as usize as u64);
+    let task = current();
+    // SAFETY: each promise is linked once, when it first rejects.
+    unsafe { (*(promise as *mut Promise)).next_rejected = task.rejections.cast() };
+    task.rejections = promise;
+}
+
+/// Register a rejection handler when an await starts, even if the promise already settled.
+///
+/// # Safety
+/// `promise` is a live promise of the current task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_promise_observe(promise: *mut u8) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { (*(promise as *mut Promise)).observed = true };
+}
+
+/// Whether any rejected promise has no await observing its rejection. Queried only after
+/// the task's ready frames and host work have drained, allowing later awaits to handle it.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_task_failed() -> u32 {
+    let mut promise = current().rejections as *const Promise;
+    // SAFETY: the rejection list belongs to the current live task.
+    unsafe {
+        while !promise.is_null() {
+            if !(*promise).observed {
+                return 1;
+            }
+            promise = (*promise).next_rejected;
+        }
+    }
+    0
+}
+
+/// Restore the original rejection, including its identity, for an `await`.
+///
+/// # Safety
+/// `promise` is a live rejected promise of the current task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
+    // SAFETY: guaranteed by the caller; rejected promises store an exception reference.
+    unsafe {
+        let promise = &*(promise as *const Promise);
+        crate::exception::perry_exception_raise(promise.value as usize as *mut u8)
+    }
 }
 
 /// Queue `frame` when the pending `promise` settles.

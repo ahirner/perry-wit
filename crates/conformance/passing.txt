@@ -2,3 +2,4 @@ wasi.execution.scaling.retained_records
 wasi.execution.scaling.number_push
 wasi.execution.scaling.temporary_records
 wasi.execution.scaling.string_append
+ecma.error.control_flow

@@ -508,6 +508,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     contracts.push(crate::fetch::contract());
     contracts.push(crate::fetch::byob_contract());
     contracts.extend(crate::capabilities::contracts());
+    contracts.push(crate::exceptions::contract());
     contracts.push(crate::handler::contract());
     contracts.extend(crate::scaling::contracts());
     let mut ids = std::collections::HashSet::new();

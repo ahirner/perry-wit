@@ -3,6 +3,7 @@
 Status: in progress. Plan from 2026-10-08; the baseline is `3dbf57a`.
 
 - **2026-10-09: the legacy WAFFLE backend is deleted.** There is no dual backend: the MIR pipeline is the only compiler, and features return through P6.2. That covers about 40k lines under `src/waffle_backend` and 20 test suites, which are kept in git history at `45e8788`.
+- **Current continuation: CLI worlds and exceptions**, following the handoff after `443d8bc`. Exception values and command entry/completion are the first checkpoint; CLI I/O, process/environment, clocks, and scheduler completion remain part of this work item. JSON and Uint8Array follow. This ordering takes precedence over the original registry order in P6.2.
 - The bonus goal, removing WAFFLE (P4.4), is done.
 - Coverage is tracked by `crates/conformance/passing.txt`.
 Background: `claude/compiler-critique-2026-10-08.md` and `claude/refactor-design-notes.md` in the perry-wit project.
@@ -298,7 +299,9 @@ The phases run in order. Items within a phase can run in parallel unless they ar
     - Everything else is rejected with a diagnostic.
     - Since added: records (interfaces and literals unify by sorted field names), arrays, `push`, index and property reads and writes, R8 optionals with ECMAScript coercions and `=== undefined`. Eight tests pass.
     - Since added: async functions, `await`, and `setTimeout` from `timers/promises` / `node:timers/promises` (`perry.timer`).
-    - Next: globals and module state, truthiness, string comparison, labeled control flow, try/throw.
+    - Since added: Error/TypeError/RangeError values, primitive throws (number, boolean, string), `try`/`catch`/`finally`, Error identity and `instanceof`, `.message`, and string strict equality. Finalizers preserve or override return, throw, break and continue, including across `await`.
+    - CLI worlds lower module statements to an async command entry; non-command worlds diagnose unsupported module initialization instead of silently dropping it.
+    - Next: globals and module state, truthiness, ordered string comparisons, labeled control flow, other Error subclasses/cause and remaining thrown-value types.
 - [ ] **P2.3 MIR snapshot tests** replace the 10 `waffle_ir` references in the test suite.
 
 ### P3. Pass pipeline
@@ -316,7 +319,10 @@ Owned (each with unit tests on MIR snippets):
 - [ ] **P3.5 Integer ranges.** Loop counters, indices and lengths become i32/i64 where proven. Otherwise use f64.
   - Where `0 <= i < length` is proven, rewrite `perry.array_get` to an unchecked read, drop `perry.optional` and fold the `perry.unwrap`/`perry.to_number` uses (R8).
   - Use `perry.is_undefined` guards as range facts on the defined branch.
-- [ ] **P3.5b Throw edges.** Ops implementing `MayThrowInterface` (`perry.call`, `perry.await`, `perry.unwrap`, `perry.array_set`) get explicit exception successors to the nearest handler or the function's exceptional exit. Runs before codegen, after P3.5 has removed provably safe checks.
+- [ ] **P3.5b Throw edges.** Ops implementing `MayThrowInterface` (`perry.call`, `perry.await`, `perry.unwrap`, `perry.array_set`) branch to the nearest handler or the function's exceptional exit.
+  - Implemented: the builder emits an adjacent `perry.caught_status` and explicit CFG branch inside handlers. The pair is verified and preserved by canonicalization; codegen joins normal results with the status at a landing. Unhandled failures use the status return convention. A pending exception belongs to the current task; catch consumes it and promise rejection retains the original value, so repeated awaits and rethrows preserve identity.
+  - Implemented: structured finalizer completion and removal of unreachable handlers before SSA construction. Regressions cover nested catches/finalizers, implicit runtime failures, primitive equality including NaN, repeated rejected awaits, host suspension and overlapping tasks. `ecma.error.control_flow` is ratcheted against Node, with directed completion witnesses and generated Unicode messages/repeated waits; the wider `ecma.error.values` contract remains pending on causes/combinators/codecs.
+  - Remaining: integrate check elimination with P3.5, describe the pair's effect/dependency in future scheduling passes, and remove redundant checks without changing exception order.
 - [ ] **P3.6 Shapes and interface views.**
   - Exact layouts for closed types: references 4 bytes, f64/i64 8-aligned, packed booleans, optional-presence bits.
   - Per-(shape, interface) field-offset tables.
@@ -327,7 +333,7 @@ Owned (each with unit tests on MIR snippets):
   - Frame fields are the values live across each `await`, by backward liveness over the MIR CFG. They are stored where defined and loaded where used, so resume entries need no SSA repair.
   - An already-settled `await` continues inline with no host turn.
   - Resuming inside a loop enters the loop at a second block; `pliron_wasm::reducible` inserts a guard block (LLVM `FixIrreducible`), so the emitter's structuring still applies.
-  - An exception in an async function rejects its promise; `await` of a rejected promise rethrows the status.
+  - An exception in an async function rejects its promise with the original exception value; `await` restores that value and routes its status through the local handler or exceptional exit.
   - Tests: `async_functions_await_each_other` (raw, no host) and `tests/async_component_test.rs` (WASI P3 timers, overlapping calls, no memory growth across tasks).
   - Open: combinators (`Promise.all` and friends) with one waiter node per operand.
 - [ ] **P3.9 → Root planning.**
@@ -384,8 +390,10 @@ Owned (each with unit tests on MIR snippets):
   - Allocator entries are 0 per iteration for the temporary-record loop.
 - [ ] **P5.4 Scheduler.**
   - *Status:* `perry_runtime::region::Task` holds the run queue, the pending host subtasks (handle → promise and value) and the waitable set; `perry_runtime::promise` queues waiters in order. `[async-lift]<export>` sets `context.set 0` to the task, and `finish` drives ready frames, then returns `EXIT` after `task.return` or `WAIT` on the task's set. The callback settles returned subtasks. YIELD is never returned.
+  - Async component completion now drains host subtasks even after the export promise settles. Awaits mark rejections observed; an unobserved rejection at task completion fails a command (or traps an export without an error result). This prevents returning/freeing a task while detached timer work still uses it.
   - Open:
     - Cancellation (below).
+    - Per-turn unhandled-rejection reporting and the full microtask ordering contract; current failure detection is at task completion.
     - Results of async imports are lowered through `cabi_realloc` while no task is current. `wait-for` has none; the first import with a result needs the callback to resume the task first or a pre-allocated result area.
     - Frames of an async function called, but not awaited, from a synchronous export never run.
   - Run queue of frames, using an intrusive list.
@@ -430,8 +438,20 @@ Owned (each with unit tests on MIR snippets):
   8. streams and BYOB
   9. Fetch, then the HTTP handler
   10. CLI command
+  - CLI/exception checkpoint: `wasi:cli/run` executes top-level statements and awaits; normal completion returns `ok`, uncaught throws return `err`. `tests/command_component_test.rs` covers both before and after suspension. This is not yet the complete CLI migration.
+  - Finish CLI: forward runtime host imports through the linker; implement console stdout/stderr over P3 streams and drain output before completion; process arguments/environment/exit; clocks; cancellation and per-turn rejection reporting; explicit SDK command exports/result adapters (currently diagnosed, never silently ignored); restore CLI conformance witnesses and an executable example. Do not mark group 10 complete until those contracts pass.
 - [x] **P6.3 Strip thread flags everywhere.** The legacy tests, fixtures and scripts are gone, and README and conformance no longer pass the flags. Async (P3.8) must keep it that way. *Done when:* `rg -n 'thread-|stackful|threading|more-async-builtins'` returns nothing outside history and this file.
 - [ ] **P6.4 Portability check.** Emitted components validate with wasmparser **default** features, so no 🧵, 🚟 or 🚝. Optionally smoke-run `merge_task` and a CLI example in jco.
+
+- [ ] **P6.5 Generated-program search and metamorphic correctness campaigns.** Restore the breadth/depth of the earlier tests/conformance generators in a form aligned with the typed MIR subset. This is a separate required work item, not satisfied by directed witnesses or random function arguments.
+  - Inventory the generators, shrinkers, saved failures and metamorphic relations in pre-refactor history. Reuse useful machinery with explicit supported-feature profiles; preserve directed regressions alongside it.
+  - Generate well-typed, bounded whole programs: declarations, calls, branches, loops, records/arrays and aliasing; then exceptions/finalizers, async dependencies/combinators, module state and host operations as each lands. Control expression depth, call depth, loop counts, allocation churn and interleavings independently. Unsupported capabilities must not stop exploration of supported combinations.
+  - Differentially execute the agreed semantic domain against Node and compare values, exception identity/class/message, observable effect order and completion. Use explicit oracles for intentional subset differences; do not normalize away NaN/-0, Unicode, dense-array or scheduling discrepancies silently.
+  - Apply semantics-preserving transformations with stated preconditions: alpha-renaming, pure let introduction, equivalent branch/loop forms, inlining eligible pure calls, aggregate scalarization, catch/rethrow and non-overriding finally insertion. Compare original/transformed programs and, when optimization controls exist, optimized/unoptimized compilation.
+  - Add async state-machine generation for already-settled and pending promises, multiple/repeated waiters, rejection through finalizers, overlapping exports and cancellation. Vary host completion order deterministically and verify task/resource reclamation. Add allocation/fuel growth checks separately from value equivalence.
+  - Persist seeds, generated source, feature profile, compiler revision, host trace and oracle output on every failure. Shrink syntax, values and schedules while preserving typing and the failure; provide one-command replay and retain minimal failures as regression fixtures.
+  - CI runs a reproducible bounded seed corpus plus a rotating seed, at several depths. A longer opt-in campaign explores deeper programs. Report executed programs/transformations, feature-pair coverage, depth and discarded cases, so a passing campaign cannot hide an empty or mostly-rejected search.
+  - *Done when:* CI catches deliberately seeded compiler/runtime mutations (exception-edge loss, aliasing, optional coercion, premature task release), shrinks and replays them; baseline and deeper campaigns pass; all discovered failures are retained or explicitly triaged.
 
 ### P7. Cutover and deletion
 

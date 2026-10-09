@@ -299,6 +299,7 @@ impl FunctionLowering<'_> {
             anyhow::bail!("await outside an async function");
         };
         let promise = self.operand(ctx, op, 0)?;
+        self.runtime(ctx, Runtime::PromiseObserve, vec![promise]);
         let i32 = i32_type(ctx);
         let take = self.new_block(ctx, vec![i32]);
         let suspend = self.new_block(ctx, vec![]);
@@ -321,8 +322,16 @@ impl FunctionLowering<'_> {
         let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
         let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
         let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-        let status = self.load(ctx, MemKind::I32, promise, promises::STATUS);
-        self.throw_status_if(ctx, rejected, status);
+        let rejection = self.new_block(ctx, vec![]);
+        let fulfilled = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, rejected, (rejection, vec![]), (fulfilled, vec![]));
+        self.block = rejection;
+        let status = self
+            .runtime(ctx, Runtime::PromiseRethrow, vec![promise])
+            .expect("status");
+        let (target, args) = self.exception_target(ctx, status);
+        self.br(ctx, target, args);
+        self.block = fulfilled;
         let ty = op.deref(ctx).get_result(0).get_type(ctx);
         let value = self.load(ctx, slot_kind(ctx, ty)?, promise, promises::VALUE);
         self.define(ctx, op, value);

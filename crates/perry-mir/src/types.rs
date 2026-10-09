@@ -16,6 +16,16 @@ use pliron::{
 };
 use thiserror::Error;
 
+/// A thrown value: an Error or a primitive, kept distinct from general dynamic values.
+#[pliron_type(
+    name = "perry.exception",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ExceptionType;
+
 /// A closed-shape record, referenced by value of this type (subset rule R1).
 ///
 /// Records are nominal and uniqued by name, so shapes may be recursive: create the record

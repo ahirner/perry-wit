@@ -17,6 +17,7 @@ world timers {
   export run: async func(x: f64) -> observation;
   export label: async func(name: string) -> string;
   export count: async func(n: u32) -> u32;
+  export recover: async func(x: f64) -> f64;
 }
 "#;
 
@@ -41,6 +42,27 @@ export async function run(x: number): Promise<Observation> {
 export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
   return await setTimeout(2, prefix + "!");
+}
+async function rejectLater(error: Error): Promise<number> {
+  await setTimeout(1);
+  throw error;
+}
+export async function recover(x: number): Promise<number> {
+  const original = new TypeError("original");
+  const pending = rejectLater(original);
+  let total = x;
+  for (let i = 0; i < 3; i++) {
+    try {
+      try { total = total + await pending; }
+      finally { await setTimeout(1); }
+    } catch (e) {
+      if (e === original && e.message === "original") total = total + 1;
+    } finally {
+      await setTimeout(1);
+      total = total + 10;
+    }
+  }
+  return total;
 }
 export async function count(n: number): Promise<number> {
   let total = 0;
@@ -121,7 +143,9 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let run = instance.get_typed_func::<(f64,), (Observation,)>(&mut store, "run")?;
     let label = instance.get_typed_func::<(&str,), (String,)>(&mut store, "label")?;
     let count = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "count")?;
+    let recover = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "recover")?;
     for round in 0..20 {
+        assert_eq!(recover.call_async(&mut store, (7.0,)).await?.0, 40.0);
         let (observation,) = run.call_async(&mut store, (3.5,)).await?;
         assert_eq!(
             observation,
@@ -156,6 +180,16 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         .await??;
     assert_eq!((a, c), (6, 15));
     assert_eq!(b.trace, vec![1.0, 2.0, 2.0]);
+    let (a, b) = store
+        .run_concurrent(async |accessor| -> wasmtime::Result<_> {
+            let (a, b) = tokio::join!(
+                recover.call_concurrent(accessor, (2.0,)),
+                recover.call_concurrent(accessor, (13.0,))
+            );
+            Ok((a?.0, b?.0))
+        })
+        .await??;
+    assert_eq!((a, b), (35.0, 46.0));
     store.assert_concurrent_state_empty();
     Ok(())
 }

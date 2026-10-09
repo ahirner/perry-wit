@@ -69,8 +69,11 @@ There are no traps in the subset:
 - `undefined` at a typed use throws a catchable `TypeError`.
 - A write that would leave a hole throws a `RangeError`.
 - A function that may throw returns an extra `i32` status after its results. Callers branch on it, propagating to the nearest handler or to their own caller.
+- Inside a handler, `perry.caught_status` immediately follows the throwing operation. Its status feeds an explicit CFG branch, keeping handler liveness visible to SSA construction and the async split. Canonicalization preserves and verifies the pair.
+- `perry.exception` holds Error/TypeError/RangeError objects or thrown numbers, booleans and strings. Error equality preserves identity; primitive equality preserves value semantics. A task-local pending reference carries the value alongside the status. Catch consumes it; rejected promises retain it for repeated awaits.
+- `finally` runs for normal completion, return, throw, break and continue. A saved completion survives nested catches and suspension; an abrupt finalizer replaces it.
 
-At a component export without an error type, an escaping exception traps.
+At a component export without an error type, an escaping exception traps. CLI commands return `err` instead.
 
 ## Component boundary
 
@@ -82,6 +85,8 @@ At a component export without an error type, an escaping exception traps.
 Supported WIT types are `bool`, integers, `f32`, `f64`, `string`, `list<T>` and records; the remaining types follow the plan.
 
 An `async func` export must be implemented by an async TypeScript function and uses the callback ABI (see Async).
+
+For a world exporting `wasi:cli/run@0.3.0`, the builder creates an async entry function from the module's top-level statements. The command returns `ok` on fulfilment and `err` on rejection, including after top-level `await`. Command locals belong to that invocation. Module initialization in other worlds is diagnosed until instance state is implemented. CLI console/process APIs remain migration items in `TODOs.md`.
 
 ## Async
 
@@ -97,7 +102,7 @@ Stackless state machines on the WASI P3 callback ABI. It uses no Component Model
 - **Timers.** `setTimeout(delay, value)` from `node:timers/promises` is an async-lowered `wasi:clocks/monotonic-clock.wait-for`. A pending call joins the task's waitable set, and its promise settles when the subtask returns.
 - **Exports.**
   - `[async-lift]<export>` enters the task, stores it with `context.set 0`, lifts the arguments, calls the ramp and finishes.
-  - `finish` drives ready frames. If the result promise is settled, it calls `task.return` with the lowered value, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
+  - `finish` drives ready frames. It returns only after the result promise settles and all host subtasks drain, including work started without awaiting it. It checks unobserved rejections at task completion (per-turn rejection reporting remains a scheduler follow-up). Then it calls `task.return`, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
   - `[callback][async-lift]<export>` resumes the task from `context.get 0`, settles a returned subtask, drops it and finishes again.
   - Calls may overlap: every task has its own region, run queue and subtasks.
 

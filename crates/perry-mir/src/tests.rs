@@ -501,3 +501,39 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         "array_get, to_number and the rest are pure reads"
     );
 }
+
+#[test]
+fn exception_ops_round_trip_and_keep_caught_pairs() {
+    let input = single_block(
+        r#"
+        value = perry.box_exception v : perry.exception;
+        status = perry.raise value : builtin.integer i32;
+        caught = perry.catch status : perry.exception;
+        message = perry.exception_message caught : perry.optional <perry.string>;
+        text = perry.unwrap message : perry.string;
+        failure = perry.caught_status : builtin.integer i32;
+        err = perry.error_new TypeError text : perry.exception;
+        matches = perry.exception_is Any err : builtin.integer i1;
+    "#,
+    );
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &input);
+    verify_operation(module, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    let printed = normalized(&print(ctx, module));
+    verify_text(&printed).expect("printed exception ops verify");
+    crate::pipeline::canonicalize(module, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    let canonical = print(ctx, module);
+    assert!(canonical.contains("perry.unwrap"));
+    assert!(canonical.contains("perry.caught_status"));
+    let unpaired = verify_text(&single_block(
+        "s = perry.caught_status : builtin.integer i32;",
+    ))
+    .expect_err("unpaired status");
+    assert!(
+        unpaired.contains("immediately follow a throwing operation"),
+        "{unpaired}"
+    );
+    let invalid = verify_text(&single_block("s = perry.raise v : builtin.integer i32;"))
+        .expect_err("invalid thrown type");
+    assert!(invalid.contains("raise needs an exception"), "{invalid}");
+}

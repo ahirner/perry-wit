@@ -10,7 +10,9 @@
 //! Widening a record to a narrower shape (subset rule R2) is not supported yet.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
-use perry_mir::types::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
+use perry_mir::types::{
+    ArrayType, ExceptionType, OptionalType, PromiseType, RecordType, StringType,
+};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::Context,
@@ -61,6 +63,11 @@ impl<'h> Shapes<'h> {
             HirType::Array(element) => {
                 let element = self.value_type(ctx, element)?;
                 ArrayType::get(ctx, element).into()
+            }
+            HirType::Named(name)
+                if matches!(name.as_str(), "Error" | "TypeError" | "RangeError") =>
+            {
+                ExceptionType::get(ctx).into()
             }
             HirType::Named(name) => self.named(ctx, name)?,
             HirType::Promise(inner) => {

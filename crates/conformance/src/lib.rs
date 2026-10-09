@@ -1,4 +1,5 @@
 //! Executable contracts for the compiler's declared static TypeScript domains.
+mod exceptions;
 pub mod execution;
 pub mod fetch;
 pub mod program;

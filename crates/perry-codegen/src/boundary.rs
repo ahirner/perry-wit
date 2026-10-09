@@ -67,9 +67,22 @@ pub struct Export {
     pub function: String,
     pub params: Vec<AbiType>,
     pub result: Option<AbiType>,
-    /// For an async export (lifted with the callback ABI): the import module and WIT function
-    /// name of its `task.return`.
-    pub task_return: Option<(String, String)>,
+    pub kind: ExportKind,
+}
+
+/// The completion protocol; async variants name the `task.return` import.
+#[derive(Clone, Debug)]
+pub enum ExportKind {
+    Sync,
+    Async {
+        module: String,
+        function: String,
+    },
+    /// Top-level execution: fulfilment is `ok`, an uncaught exception is `err`.
+    Command {
+        module: String,
+        function: String,
+    },
 }
 
 const MAX_FLAT_PARAMS: usize = 16;
@@ -199,11 +212,11 @@ pub(crate) fn export(
         .async_functions
         .contains(&function.get_symbol_name(ctx));
     ensure!(
-        is_async == export.task_return.is_some(),
+        is_async != matches!(export.kind, ExportKind::Sync),
         "{} is {}async but the WIT export is {}async",
         export.function,
         if is_async { "" } else { "not " },
-        if export.task_return.is_some() {
+        if !matches!(export.kind, ExportKind::Sync) {
             ""
         } else {
             "not "
@@ -332,7 +345,13 @@ fn async_export(
     function: &FuncOp,
     export: &Export,
 ) -> Result<()> {
-    let (module, wit_name) = export.task_return.clone().expect("async export");
+    let (module, wit_name) = match &export.kind {
+        ExportKind::Async { module, function } | ExportKind::Command { module, function } => {
+            (module.clone(), function.clone())
+        }
+        ExportKind::Sync => unreachable!("async export"),
+    };
+    let command = matches!(export.kind, ExportKind::Command { .. });
     let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
         .map_err(|_| anyhow!("function type"))?;
     let (mir_params, mir_results) = {
@@ -352,11 +371,15 @@ fn async_export(
         "exports with more than {MAX_FLAT_PARAMS} flat parameters are not supported yet"
     );
     // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
-    let result_flat = export
-        .result
-        .as_ref()
-        .map(AbiType::flat)
-        .unwrap_or_default();
+    let result_flat = if command {
+        vec![Flat::I32]
+    } else {
+        export
+            .result
+            .as_ref()
+            .map(AbiType::flat)
+            .unwrap_or_default()
+    };
     let indirect = result_flat.len() > MAX_FLAT_PARAMS;
     let task_return = crate::Host::TaskReturn(
         module,
@@ -381,9 +404,16 @@ fn async_export(
             .runtime(ctx, Runtime::TaskResult, vec![])
             .expect("promise");
         let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
+        let pending = b
+            .runtime(ctx, Runtime::TaskPending, vec![])
+            .expect("pending host work");
+        let drained = b.num(ctx, NumOpcode::I32Eqz, vec![pending]);
+        let ready = b.num(ctx, NumOpcode::I32Eqz, vec![settled]);
+        let ready = b.num(ctx, NumOpcode::I32Eqz, vec![ready]);
+        let complete = b.num(ctx, NumOpcode::I32And, vec![ready, drained]);
         let wait = b.new_block(ctx, vec![]);
         let done = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, settled, (done, vec![]), (wait, vec![]));
+        b.cond_br(ctx, complete, (done, vec![]), (wait, vec![]));
 
         // Pending: leave the task and wait on its subtasks (none would wait forever).
         b.block = wait;
@@ -407,14 +437,22 @@ fn async_export(
         b.block = done;
         let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
         let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-        let trap = b.new_block(ctx, vec![]);
-        let fulfilled = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
-        b.block = trap;
-        let unreachable = UnreachableOp::new(ctx).get_operation();
-        b.insert(ctx, unreachable);
-        b.block = fulfilled;
-        let mut flat = Vec::new();
+        let unhandled = b
+            .runtime(ctx, Runtime::TaskFailed, vec![])
+            .expect("unhandled rejection");
+        let rejected = b.num(ctx, NumOpcode::I32Or, vec![rejected, unhandled]);
+        let mut flat = if command {
+            vec![rejected]
+        } else {
+            let trap = b.new_block(ctx, vec![]);
+            let fulfilled = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
+            b.block = trap;
+            let unreachable = UnreachableOp::new(ctx).get_operation();
+            b.insert(ctx, unreachable);
+            b.block = fulfilled;
+            Vec::new()
+        };
         if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
             let kind = crate::slot_kind(ctx, *mir_ty)?;
             let value = b.load(ctx, kind, promise, perry_runtime::promise::VALUE);

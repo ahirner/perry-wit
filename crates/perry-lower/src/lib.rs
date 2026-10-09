@@ -13,8 +13,10 @@
 //! `if`, `while`, `do`/`while`, `for`, unlabeled `break`/`continue`, `return`; direct calls;
 //! string concatenation; field reads and writes; array literals, `push`, indexing and
 //! `.length`. Everything else is rejected with a diagnostic.
+mod exceptions;
 mod shapes;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use exceptions::{Cleanup, Handler};
 use perry_hir::{
     ir::{
         BinaryOp, CompareOp, Expr, Function, LogicalOp, Module as HirModule, Stmt, UnaryOp,
@@ -30,13 +32,17 @@ use perry_mir::{
         StringLenOp,
     },
     control::{BrOp, CondBrOp, ReturnOp},
+    exceptions::{
+        BoxExceptionOp, CatchOp, CaughtStatusOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp,
+        MayThrowInterface, RaiseOp, RethrowOp,
+    },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
         IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
-    types::{ArrayType, PromiseType, RecordType, StringType},
+    types::{ArrayType, ExceptionType, PromiseType, RecordType, StringType},
 };
 use pliron::printable::Printable as _;
 use pliron::{
@@ -54,7 +60,7 @@ use pliron::{
         listener::DummyListener,
     },
     linked_list::ContainsLinkedList,
-    op::Op,
+    op::{Op, op_cast},
     r#type::{TypeHandle, Typed, TypedHandle},
     utils::apint::{APInt, bw},
     value::Value,
@@ -62,12 +68,62 @@ use pliron::{
 use shapes::{Shapes, identifier};
 use std::collections::{HashMap, HashSet};
 
+/// How top-level statements enter the component.
+#[derive(Clone, Copy)]
+pub enum EntryPoint {
+    Exports,
+    Command,
+}
+
+pub const COMMAND_ENTRY: &str = "perry_command_main";
+
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module.
-pub fn lower_source(ctx: &mut Context, source: &str, file: &str) -> Result<ModuleOp> {
+pub fn lower_source(
+    ctx: &mut Context,
+    source: &str,
+    file: &str,
+    entry: EntryPoint,
+) -> Result<ModuleOp> {
     let ast = perry_parser::parse_typescript(source, file)
         .map_err(|error| anyhow!("failed to parse {file}: {error:?}"))?;
-    let hir = perry_hir::lower_module(&ast, "main", file)
+    let mut hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
+    match entry {
+        EntryPoint::Command => {
+            ensure!(
+                !hir.functions.iter().any(|f| f.name == COMMAND_ENTRY),
+                "{COMMAND_ENTRY} is reserved for the command entry point"
+            );
+            let id = hir
+                .functions
+                .iter()
+                .map(|f| f.id)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .context("too many functions")?;
+            hir.functions.push(Function {
+                id,
+                name: COMMAND_ENTRY.to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: HirType::Void,
+                body: std::mem::take(&mut hir.init),
+                is_async: true,
+                is_generator: false,
+                is_strict: hir.init_is_strict,
+                is_exported: true,
+                captures: vec![],
+                decorators: vec![],
+                was_plain_async: false,
+                was_unrolled: false,
+            });
+        }
+        EntryPoint::Exports => ensure!(
+            hir.init.is_empty(),
+            "top-level execution needs a wasi:cli/run command world; module initialization is not supported yet"
+        ),
+    }
     lower_module(ctx, &hir)
 }
 
@@ -79,7 +135,8 @@ struct Signature {
     results: Vec<TypeHandle>,
 }
 
-/// Build a MIR module from HIR functions. Module-level statements are not supported yet.
+/// Build a MIR module from prepared HIR functions. Command preparation moves module
+/// statements into the entry function before this step.
 pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
     let shapes = Shapes::new(hir);
@@ -185,6 +242,7 @@ enum Kind {
     String,
     Record,
     Array,
+    Exception,
 }
 
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
@@ -194,6 +252,8 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Number)
     } else if ty.is::<StringType>() {
         Ok(Kind::String)
+    } else if ty.is::<ExceptionType>() {
+        Ok(Kind::Exception)
     } else if ty.is::<RecordType>() {
         Ok(Kind::Record)
     } else if ty.is::<ArrayType>() {
@@ -208,7 +268,9 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Loop {
+    cleanup_depth: usize,
     continue_to: Ptr<BasicBlock>,
     break_to: Ptr<BasicBlock>,
 }
@@ -219,6 +281,8 @@ struct FunctionBuilder<'s> {
     block: Ptr<BasicBlock>,
     locals: HashMap<LocalId, Value>,
     loops: Vec<Loop>,
+    handlers: Vec<Handler>,
+    cleanups: Vec<Cleanup>,
     signatures: &'s HashMap<FuncId, Signature>,
     shapes: &'s Shapes<'s>,
     /// Local names bound to `setTimeout` from `node:timers/promises`.
@@ -247,6 +311,8 @@ impl<'s> FunctionBuilder<'s> {
             block: entry,
             locals: HashMap::new(),
             loops: Vec::new(),
+            handlers: Vec::new(),
+            cleanups: Vec::new(),
             signatures,
             shapes,
             timers,
@@ -265,6 +331,13 @@ impl<'s> FunctionBuilder<'s> {
             let values = builder.implicit_results(ctx);
             builder.emit(ctx, |ctx| ReturnOp::new(ctx, values));
         }
+        // A try without throwing operations, or an overriding finalizer, can leave a
+        // handler unreachable. Remove it before SSA construction examines its local uses.
+        pliron::opts::simplify_cfg::remove_blocks_inside_region(
+            region,
+            ctx,
+            &mut pliron::irbuild::rewriter::IRRewriter::<DummyListener>::default(),
+        );
         Ok(func)
     }
 
@@ -315,18 +388,19 @@ impl<'s> FunctionBuilder<'s> {
 
     // ── IR plumbing ────────────────────────────────────────────────────────
 
-    fn append(&mut self, ctx: &Context, op: &dyn Op) {
+    fn append(&mut self, ctx: &mut Context, op: &dyn Op) {
         self.ins.append_op(ctx, op);
+        self.guard_exception(ctx, op);
     }
 
-    fn append_value<T: Op + OneResultInterface>(&mut self, ctx: &Context, op: &T) -> Value {
-        self.ins.append_op(ctx, op);
+    fn append_value<T: Op + OneResultInterface>(&mut self, ctx: &mut Context, op: &T) -> Value {
+        self.append(ctx, op);
         op.get_result(ctx)
     }
 
     fn emit<T: Op>(&mut self, ctx: &mut Context, make: impl FnOnce(&mut Context) -> T) -> T {
         let op = make(ctx);
-        self.ins.append_op(ctx, &op);
+        self.append(ctx, &op);
         op
     }
 
@@ -361,12 +435,6 @@ impl<'s> FunctionBuilder<'s> {
         if !self.terminated(ctx) {
             self.emit(ctx, |ctx| BrOp::new(ctx, target, vec![]));
         }
-    }
-
-    /// After `return`/`break`/`continue`, keep lowering into an unreachable block.
-    fn after_terminator(&mut self, ctx: &mut Context) {
-        let dead = self.new_block(ctx, "unreachable");
-        self.switch_to(dead);
     }
 
     fn slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
@@ -435,6 +503,9 @@ impl<'s> FunctionBuilder<'s> {
 
     fn statements(&mut self, ctx: &mut Context, statements: &[Stmt]) -> Result<()> {
         for statement in statements {
+            if self.terminated(ctx) {
+                break;
+            }
             self.statement(ctx, statement)?;
         }
         Ok(())
@@ -492,8 +563,10 @@ impl<'s> FunctionBuilder<'s> {
                     values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
                     "return value type differs from the declared result"
                 );
-                self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
-                self.after_terminator(ctx);
+                self.run_cleanups(ctx, 0)?;
+                if !self.terminated(ctx) {
+                    self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
+                }
             }
             Stmt::If {
                 condition,
@@ -538,6 +611,19 @@ impl<'s> FunctionBuilder<'s> {
                 body,
                 false,
             )?,
+            Stmt::Throw(expr) => {
+                let value = self.expression(ctx, expr)?;
+                let value = self.box_exception(ctx, value)?;
+                let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, value));
+                self.propagate(ctx, status);
+            }
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
+                self.try_statement(ctx, body, catch.as_ref(), finally.as_deref())?;
+            }
             Stmt::Break | Stmt::Continue => {
                 let target = self
                     .loops
@@ -550,8 +636,9 @@ impl<'s> FunctionBuilder<'s> {
                         }
                     })
                     .context("break/continue outside a loop")?;
-                self.emit(ctx, |ctx| BrOp::new(ctx, target, vec![]));
-                self.after_terminator(ctx);
+                let depth = self.loops.last().unwrap().cleanup_depth;
+                self.run_cleanups(ctx, depth)?;
+                self.jump(ctx, target);
             }
             other => bail!(
                 "MIR backend does not support statement {} yet",
@@ -591,6 +678,7 @@ impl<'s> FunctionBuilder<'s> {
 
         self.switch_to(body_block);
         self.loops.push(Loop {
+            cleanup_depth: self.cleanups.len(),
             continue_to: latch,
             break_to: exit,
         });
@@ -639,6 +727,38 @@ impl<'s> FunctionBuilder<'s> {
             Expr::String(text) => {
                 let op = StringConstOp::new(ctx, text);
                 self.append_value(ctx, &op)
+            }
+            Expr::ErrorNew(message) => {
+                self.new_error(ctx, perry_mir::attrs::ErrorKind::Any, message.as_deref())?
+            }
+            Expr::TypeErrorNew(message) => {
+                self.new_error(ctx, perry_mir::attrs::ErrorKind::TypeError, Some(message))?
+            }
+            Expr::RangeErrorNew(message) => {
+                self.new_error(ctx, perry_mir::attrs::ErrorKind::RangeError, Some(message))?
+            }
+            Expr::ErrorMessage(value) => {
+                let value = self.expression(ctx, value)?;
+                ensure!(
+                    kind(ctx, value)? == Kind::Exception,
+                    "message access needs an Error"
+                );
+                self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
+            }
+            Expr::InstanceOf {
+                expr,
+                ty,
+                ty_expr: None,
+            } => {
+                let value = self.expression(ctx, expr)?;
+                let error = match ty.as_str() {
+                    "Error" => perry_mir::attrs::ErrorKind::Any,
+                    "TypeError" => perry_mir::attrs::ErrorKind::TypeError,
+                    "RangeError" => perry_mir::attrs::ErrorKind::RangeError,
+                    _ => bail!("instanceof {ty} is not supported yet"),
+                };
+                let value = self.box_exception(ctx, value)?;
+                self.emit_value(ctx, |ctx| ExceptionIsOp::new(ctx, error, value))
             }
             Expr::LocalGet(id) => {
                 let slot = self.local(*id)?;
@@ -718,6 +838,19 @@ impl<'s> FunctionBuilder<'s> {
                 let lhs = self.expression(ctx, left)?;
                 let rhs = self.expression(ctx, right)?;
                 if matches!(op, CompareOp::Eq | CompareOp::Ne)
+                    && (lhs.get_type(ctx).deref(ctx).is::<ExceptionType>()
+                        || rhs.get_type(ctx).deref(ctx).is::<ExceptionType>())
+                {
+                    let lhs = self.box_exception(ctx, lhs)?;
+                    let rhs = self.box_exception(ctx, rhs)?;
+                    let kind = if matches!(op, CompareOp::Eq) {
+                        CompareKind::Eq
+                    } else {
+                        CompareKind::Ne
+                    };
+                    return Ok(self.compare(ctx, kind, lhs, rhs));
+                }
+                if matches!(op, CompareOp::Eq | CompareOp::Ne)
                     && (self.is_optional(ctx, lhs) || self.is_optional(ctx, rhs))
                 {
                     // Strict equality with `undefined` in play: compare as `T | undefined`.
@@ -752,10 +885,6 @@ impl<'s> FunctionBuilder<'s> {
                         bail!("loose equality is not supported; use === or !==")
                     }
                 };
-                ensure!(
-                    left_kind != Kind::String,
-                    "string comparison is not supported in the MIR backend yet"
-                );
                 ensure!(
                     left_kind == Kind::Number || matches!(kind, CompareKind::Eq | CompareKind::Ne),
                     "ordered comparison of booleans is not supported"
@@ -857,6 +986,9 @@ impl<'s> FunctionBuilder<'s> {
                         self.emit_value(ctx, |ctx| {
                             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
                         })
+                    }
+                    (Kind::Exception, "message") => {
+                        self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
                     }
                     (Kind::Record, field) => {
                         let field = identifier(field)?;

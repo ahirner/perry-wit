@@ -58,6 +58,8 @@ pub struct Task {
     set: u32,
     /// The promise an async export settles; read again by its callback.
     result: *mut u8,
+    pub(crate) exception: *mut u8,
+    pub(crate) rejections: *mut u8,
 }
 
 struct Runtime {
@@ -123,6 +125,8 @@ fn new_task() -> *mut Task {
             subtasks: ptr::null_mut(),
             set: 0,
             result: ptr::null_mut(),
+            exception: ptr::null_mut(),
+            rejections: ptr::null_mut(),
         })
     };
     task
@@ -252,6 +256,12 @@ pub extern "C" fn perry_task_free() {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_task_set() -> u32 {
     current().set
+}
+
+/// Whether host work still owns task memory. Export completion must wait for it.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_task_pending() -> u32 {
+    u32::from(!current().subtasks.is_null())
 }
 
 /// Record the waitable set created for the current task.

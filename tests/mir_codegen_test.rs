@@ -320,3 +320,92 @@ fn dump() {
         wasmprinter::print_bytes(&wasm).unwrap()
     );
 }
+
+#[test]
+fn catches_preserve_values_identity_and_implicit_failures() {
+    let mut program = Program::new(
+        r#"
+function fail(value: Error): number { throw value; }
+export function run(x: number): number {
+  const original = new TypeError("bad " + "input");
+  let score = 0;
+  try { fail(original); } catch (e) {
+    if (e === original && e instanceof Error && e instanceof TypeError && e.message === "bad input") score = score + 1;
+    if (e !== new TypeError("bad input")) score = score + 2;
+  }
+  try { throw x; } catch (e) { if (e === x) score = score + 4; }
+  try { throw "ab" + "cd"; } catch (e) { if (e === "abcd") score = score + 8; }
+  try { throw true; } catch (e) { if (e === true) score = score + 16; }
+  const values: number[] = [];
+  try { values[2] = 5; } catch (e) { if (e instanceof RangeError) score = score + 32; }
+  const words: string[] = [];
+  try { score = score + words[0].length; } catch (e) { if (e instanceof TypeError) score = score + 64; }
+  return score;
+}
+"#,
+    );
+    assert_eq!(program.number("run", 42.0), 127.0);
+    assert_eq!(program.number("run", f64::NAN), 123.0);
+}
+
+#[test]
+fn finally_preserves_or_overrides_each_completion() {
+    let mut program = Program::new(
+        r#"
+function finish(x: number): number {
+  try {
+    if (x === 0) return 1;
+    if (x === 1) throw new Error("first");
+    return 3;
+  } finally {
+    if (x === 0) return 4;
+    if (x === 1) throw new RangeError("last");
+  }
+}
+export function run(x: number): number {
+  let score = 0;
+  try { score = finish(x); } catch (e) {
+    if (e instanceof RangeError && e.message === "last") score = 9;
+  }
+  const original = new Error("original");
+  try {
+    try { throw original; } finally {
+      try { throw new Error("temporary"); } catch (ignored) { score = score + 10; }
+    }
+  } catch (e) { if (e === original) score = score + 100; }
+  for (let i = 0; i < 5; i++) {
+    try {
+      if (i === 0) continue;
+      if (i === 2) break;
+      score = score + 1000;
+    } finally { score = score + 10000; }
+  }
+  return score;
+}
+"#,
+    );
+    for (x, result) in [(0.0, 31114.0), (1.0, 31119.0), (2.0, 31113.0)] {
+        assert_eq!(program.number("run", x), result, "x={x}");
+    }
+}
+
+#[test]
+fn rejected_promises_retain_identity_across_repeated_awaits() {
+    let mut program = Program::new(
+        r#"
+async function fail(error: Error): Promise<number> { throw error; }
+export async function run(x: number): Promise<number> {
+  const original = new Error("same");
+  const pending = fail(original);
+  let total = x;
+  for (let i = 0; i < 3; i++) {
+    try { total = total + await pending; } catch (e) {
+      if (e === original) total = total + 1;
+    } finally { total = total + 10; }
+  }
+  return total;
+}
+"#,
+    );
+    assert_eq!(program.throwing("run", 7.0), (40.0, 0));
+}

@@ -4,7 +4,8 @@ use pliron::{context::Context, op::Op, operation::Operation, printable::Printabl
 /// Lower, verify, promote slots, clean up, verify again; return the printed module.
 fn lowered(source: &str) -> String {
     let ctx = &mut Context::new();
-    let module = lower_source(ctx, source, "case.ts").unwrap_or_else(|e| panic!("{e:#}"));
+    let module = lower_source(ctx, source, "case.ts", crate::EntryPoint::Exports)
+        .unwrap_or_else(|e| panic!("{e:#}"));
     let op = module.get_operation();
     perry_mir::pipeline::canonicalize(op, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
     let printed = Operation::get_op_dyn(op, ctx).disp(ctx).to_string();
@@ -21,7 +22,7 @@ fn rejected(source: &str) -> String {
     let ctx = &mut Context::new();
     format!(
         "{:#}",
-        lower_source(ctx, source, "case.ts")
+        lower_source(ctx, source, "case.ts", crate::EntryPoint::Exports)
             .err()
             .expect("rejection")
     )
@@ -322,4 +323,40 @@ export async function run(x: number): Promise<number> {
     ] {
         assert!(printed.contains(op), "missing {op}:\n{printed}");
     }
+}
+
+#[test]
+fn finalizers_keep_exception_values_live_across_awaits() {
+    lowered(
+        r#"
+import { setTimeout } from 'node:timers/promises';
+async function fail(error: Error): Promise<number> {
+  await setTimeout(1);
+  throw error;
+}
+export async function run(x: number): Promise<number> {
+  const original = new Error("same");
+  const pending = fail(original);
+  let total = x;
+  for (let i = 0; i < 3; i++) {
+    try {
+      try { total = total + await pending; }
+      finally { await setTimeout(1); }
+    } catch (e) {
+      if (e === original) total = total + 1;
+    } finally { await setTimeout(1); total = total + 10; }
+  }
+  return total;
+}
+"#,
+    );
+}
+
+#[test]
+fn module_execution_requires_a_command_world() {
+    let message = rejected("throw new Error('must execute');");
+    assert!(
+        message.contains("top-level execution needs a wasi:cli/run command world"),
+        "{message}"
+    );
 }

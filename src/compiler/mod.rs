@@ -64,7 +64,12 @@ pub fn compile_for_world(
     audit::audit_no_llvm(include_str!("../../Cargo.lock"))
         .context("LLVM audit verification failed")?;
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, file_name)?;
+    let entry = if bind::is_command(resolve, world) {
+        perry_lower::EntryPoint::Command
+    } else {
+        perry_lower::EntryPoint::Exports
+    };
+    let mir = lower(ctx, source, file_name, entry)?;
     let exports = bind::exports(ctx, &mir, resolve, world)?;
     let imports = bind::imports(resolve, world);
     let core = perry_codegen::compile(ctx, &mir, &Exports::Canonical { exports, imports })?;
@@ -88,7 +93,7 @@ pub fn compile_for_world(
 /// functions that may throw). For tests and inspection; components use [compile_for_world].
 pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, file_name)?;
+    let mir = lower(ctx, source, file_name, perry_lower::EntryPoint::Exports)?;
     finish(perry_codegen::compile(ctx, &mir, &Exports::Raw)?)
 }
 
@@ -96,8 +101,9 @@ fn lower(
     ctx: &mut Context,
     source: &str,
     file_name: &str,
+    entry: perry_lower::EntryPoint,
 ) -> Result<pliron::builtin::ops::ModuleOp> {
-    let mir = perry_lower::lower_source(ctx, source, file_name)?;
+    let mir = perry_lower::lower_source(ctx, source, file_name, entry)?;
     perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")?;

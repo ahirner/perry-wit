@@ -30,12 +30,12 @@ use perry_mir::{
         StringLenOp,
     },
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
-    exceptions::MayThrowInterface,
+    exceptions::{CaughtStatusOp, MayThrowInterface},
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     locals::UndefOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
-    types::{ArrayType, OptionalType, PromiseType, RecordType, StringType},
+    types::{ArrayType, ExceptionType, OptionalType, PromiseType, RecordType, StringType},
 };
 use perry_runtime::array as layout;
 use pliron::{
@@ -74,6 +74,7 @@ use std::{
 
 mod async_split;
 pub mod boundary;
+mod exceptions;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -226,6 +227,8 @@ enum Runtime {
     TaskSet,
     TaskSetSet,
     TaskResult,
+    TaskPending,
+    TaskFailed,
     TaskSetResult,
     ReadyPop,
     SubtaskRegister,
@@ -234,6 +237,15 @@ enum Runtime {
     PromiseResolve,
     PromiseReject,
     PromiseWait,
+    PromiseRethrow,
+    PromiseObserve,
+    ExceptionNew,
+    ExceptionRaise,
+    ExceptionCatch,
+    ExceptionIs,
+    ExceptionMessage,
+    ExceptionEqual,
+    StringEqual,
     CabiRealloc,
     StringAdopt,
     StringConcat,
@@ -253,6 +265,8 @@ impl Runtime {
             Runtime::TaskSet => "perry_task_set",
             Runtime::TaskSetSet => "perry_task_set_set",
             Runtime::TaskResult => "perry_task_result",
+            Runtime::TaskPending => "perry_task_pending",
+            Runtime::TaskFailed => "perry_task_failed",
             Runtime::TaskSetResult => "perry_task_set_result",
             Runtime::ReadyPop => "perry_ready_pop",
             Runtime::SubtaskRegister => "perry_subtask_register",
@@ -261,6 +275,15 @@ impl Runtime {
             Runtime::PromiseResolve => "perry_promise_resolve",
             Runtime::PromiseReject => "perry_promise_reject",
             Runtime::PromiseWait => "perry_promise_wait",
+            Runtime::PromiseRethrow => "perry_promise_rethrow",
+            Runtime::PromiseObserve => "perry_promise_observe",
+            Runtime::ExceptionNew => "perry_exception_new",
+            Runtime::ExceptionRaise => "perry_exception_raise",
+            Runtime::ExceptionCatch => "perry_exception_catch",
+            Runtime::ExceptionIs => "perry_exception_is",
+            Runtime::ExceptionMessage => "perry_exception_message",
+            Runtime::ExceptionEqual => "perry_exception_equal",
+            Runtime::StringEqual => "perry_string_equal",
             Runtime::CabiRealloc => "perry_cabi_realloc",
             Runtime::StringAdopt => "perry_string_adopt",
             Runtime::StringConcat => "perry_string_concat",
@@ -279,6 +302,14 @@ impl Runtime {
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
+            Runtime::ExceptionNew => (vec![i32, i64], vec![i32]),
+            Runtime::ExceptionRaise
+            | Runtime::ExceptionCatch
+            | Runtime::ExceptionMessage
+            | Runtime::PromiseRethrow => (vec![i32], vec![i32]),
+            Runtime::ExceptionIs | Runtime::ExceptionEqual | Runtime::StringEqual => {
+                (vec![i32, i32], vec![i32])
+            }
             Runtime::Alloc | Runtime::ArrayNew => (vec![i32], vec![i32]),
             Runtime::ArrayGrow => (vec![i32], vec![]),
             Runtime::F64Rem => (vec![f64, f64], vec![f64]),
@@ -287,11 +318,14 @@ impl Runtime {
             | Runtime::TaskSuspend
             | Runtime::TaskSet
             | Runtime::TaskResult
+            | Runtime::TaskPending
+            | Runtime::TaskFailed
             | Runtime::ReadyPop
             | Runtime::PromiseNew => (vec![], vec![i32]),
-            Runtime::TaskResume | Runtime::TaskSetSet | Runtime::TaskSetResult => {
-                (vec![i32], vec![])
-            }
+            Runtime::TaskResume
+            | Runtime::TaskSetSet
+            | Runtime::TaskSetResult
+            | Runtime::PromiseObserve => (vec![i32], vec![]),
             Runtime::SubtaskDone => (vec![i32], vec![i32]),
             Runtime::SubtaskRegister => (vec![i32, i32, i64], vec![]),
             Runtime::PromiseResolve => (vec![i32, i64], vec![]),
@@ -331,6 +365,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<ArrayType>()
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
+        || deref.is::<ExceptionType>()
     {
         return Ok(Repr::Ref);
     }
@@ -639,6 +674,12 @@ fn async_export_wrapper(
         promise,
         perry_runtime::promise::VALUE,
     );
+    let zero = if value_wasm.deref(ctx).is::<FP64Type>() {
+        b.f64_const(ctx, 0.0)
+    } else {
+        b.i32_const(ctx, 0)
+    };
+    let value = b.select(ctx, fulfilled, value, zero);
     b.runtime(ctx, Runtime::TaskFree, vec![]);
     let ret = ReturnOp::new(ctx, vec![value, status]).get_operation();
     b.insert(ctx, ret);
@@ -654,6 +695,7 @@ struct FunctionLowering<'s> {
     throws: bool,
     results: Vec<TypeHandle>,
     throw_block: Option<Ptr<BasicBlock>>,
+    landing: Option<(Ptr<BasicBlock>, Vec<TypeHandle>)>,
     /// The frame, when lowering the step function of an async function.
     frame: Option<async_split::Frame>,
 }
@@ -671,6 +713,7 @@ impl<'s> FunctionLowering<'s> {
             throws: false,
             results: vec![],
             throw_block: None,
+            landing: None,
             frame: None,
         }
     }
@@ -752,11 +795,40 @@ impl<'s> FunctionLowering<'s> {
             let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
             self.spill(ctx, &args);
             let ops: Vec<_> = mir_block.deref(ctx).iter(ctx).collect();
-            for op in ops {
+            let mut ops = ops.into_iter().peekable();
+            while let Some(op) = ops.next() {
+                let caught = ops
+                    .peek()
+                    .copied()
+                    .filter(|next| Operation::get_op::<CaughtStatusOp>(*next, ctx).is_some());
+                let results: Vec<_> = op.deref(ctx).results().collect();
+                if caught.is_some() {
+                    let types = results
+                        .iter()
+                        .map(|v| wasm_type(ctx, v.get_type(ctx)))
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut args = vec![i32_type(ctx)];
+                    args.extend(&types);
+                    let landing = self.new_block(ctx, args);
+                    self.landing = Some((landing, types));
+                }
                 self.op(ctx, op).with_context(|| {
                     format!("lowering {}", Operation::get_op_dyn(op, ctx).get_opid())
                 })?;
-                let results: Vec<_> = op.deref(ctx).results().collect();
+                if let Some(caught) = caught {
+                    ops.next();
+                    let (landing, _) = self.landing.take().expect("caught operation");
+                    let mut args = vec![self.i32_const(ctx, 0)];
+                    args.extend(results.iter().map(|v| self.values[v]));
+                    self.br(ctx, landing, args);
+                    self.block = landing;
+                    let args: Vec<_> = landing.deref(ctx).arguments().collect();
+                    self.define(ctx, caught, args[0]);
+                    self.values
+                        .extend(results.iter().copied().zip(args.into_iter().skip(1)));
+                    let status = caught.deref(ctx).get_result(0);
+                    self.spill(ctx, &[status]);
+                }
                 self.spill(ctx, &results);
             }
         }
@@ -959,9 +1031,9 @@ impl<'s> FunctionLowering<'s> {
             self.throws,
             "throwing op in a function classified as non-throwing"
         );
-        let throw = self.throw_block(ctx);
+        let throw = self.exception_target(ctx, status);
         let next = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, failed, (throw, vec![status]), (next, vec![]));
+        self.cond_br(ctx, failed, throw, (next, vec![]));
         self.block = next;
     }
 
@@ -1067,6 +1139,9 @@ impl<'s> FunctionLowering<'s> {
     // --- ops ----------------------------------------------------------------------------------
 
     fn op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
+        if self.lower_exception_op(ctx, op)? {
+            return Ok(());
+        }
         if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
@@ -1121,44 +1196,58 @@ impl<'s> FunctionLowering<'s> {
             let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
             let operands = self.operands(ctx, op)?;
             let kind = compare.kind(ctx);
-            let value = if let Some(inner) = optional_inner(ctx, mir_ty)
-                && repr(ctx, inner)? == Repr::F64
-            {
-                // Strict equality on `number | undefined`: undefined equals only undefined.
-                let (a, b) = (operands[0], operands[1]);
-                let bits_a = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![a]);
-                let bits_b = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![b]);
-                let same = self.num(ctx, NumOpcode::I64Eq, vec![bits_a, bits_b]);
-                let undefined = self.is_undefined(ctx, a, inner)?;
-                let both = self.num(ctx, NumOpcode::I32And, vec![same, undefined]);
-                let equal = self.num(ctx, NumOpcode::F64Eq, vec![a, b]);
-                let eq = self.num(ctx, NumOpcode::I32Or, vec![both, equal]);
-                match kind {
-                    CompareKind::Eq => eq,
-                    CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
-                    other => bail!("ordered comparison {other:?} on number | undefined"),
-                }
-            } else if operands[0].get_type(ctx).deref(ctx).is::<FP64Type>() {
-                let opcode = match kind {
-                    CompareKind::Lt => NumOpcode::F64Lt,
-                    CompareKind::Le => NumOpcode::F64Le,
-                    CompareKind::Gt => NumOpcode::F64Gt,
-                    CompareKind::Ge => NumOpcode::F64Ge,
-                    CompareKind::Eq => NumOpcode::F64Eq,
-                    CompareKind::Ne => NumOpcode::F64Ne,
+            let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
+            let value =
+                if inner.deref(ctx).is::<StringType>() || inner.deref(ctx).is::<ExceptionType>() {
+                    let function = if inner.deref(ctx).is::<StringType>() {
+                        Runtime::StringEqual
+                    } else {
+                        Runtime::ExceptionEqual
+                    };
+                    let eq = self.runtime(ctx, function, operands).expect("equality");
+                    match kind {
+                        CompareKind::Eq => eq,
+                        CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
+                        _ => bail!("ordered comparison of strings or exceptions is not supported"),
+                    }
+                } else if let Some(inner) = optional_inner(ctx, mir_ty)
+                    && repr(ctx, inner)? == Repr::F64
+                {
+                    // Strict equality on `number | undefined`: undefined equals only undefined.
+                    let (a, b) = (operands[0], operands[1]);
+                    let bits_a = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![a]);
+                    let bits_b = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![b]);
+                    let same = self.num(ctx, NumOpcode::I64Eq, vec![bits_a, bits_b]);
+                    let undefined = self.is_undefined(ctx, a, inner)?;
+                    let both = self.num(ctx, NumOpcode::I32And, vec![same, undefined]);
+                    let equal = self.num(ctx, NumOpcode::F64Eq, vec![a, b]);
+                    let eq = self.num(ctx, NumOpcode::I32Or, vec![both, equal]);
+                    match kind {
+                        CompareKind::Eq => eq,
+                        CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
+                        other => bail!("ordered comparison {other:?} on number | undefined"),
+                    }
+                } else if operands[0].get_type(ctx).deref(ctx).is::<FP64Type>() {
+                    let opcode = match kind {
+                        CompareKind::Lt => NumOpcode::F64Lt,
+                        CompareKind::Le => NumOpcode::F64Le,
+                        CompareKind::Gt => NumOpcode::F64Gt,
+                        CompareKind::Ge => NumOpcode::F64Ge,
+                        CompareKind::Eq => NumOpcode::F64Eq,
+                        CompareKind::Ne => NumOpcode::F64Ne,
+                    };
+                    self.num(ctx, opcode, operands)
+                } else {
+                    let opcode = match kind {
+                        CompareKind::Lt => NumOpcode::I32LtS,
+                        CompareKind::Le => NumOpcode::I32LeS,
+                        CompareKind::Gt => NumOpcode::I32GtS,
+                        CompareKind::Ge => NumOpcode::I32GeS,
+                        CompareKind::Eq => NumOpcode::I32Eq,
+                        CompareKind::Ne => NumOpcode::I32Ne,
+                    };
+                    self.num(ctx, opcode, operands)
                 };
-                self.num(ctx, opcode, operands)
-            } else {
-                let opcode = match kind {
-                    CompareKind::Lt => NumOpcode::I32LtS,
-                    CompareKind::Le => NumOpcode::I32LeS,
-                    CompareKind::Gt => NumOpcode::I32GtS,
-                    CompareKind::Ge => NumOpcode::I32GeS,
-                    CompareKind::Eq => NumOpcode::I32Eq,
-                    CompareKind::Ne => NumOpcode::I32Ne,
-                };
-                self.num(ctx, opcode, operands)
-            };
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -1230,10 +1319,7 @@ impl<'s> FunctionLowering<'s> {
             }
             if callee_throws {
                 let status = *values.last().unwrap();
-                let throw = self.throw_block(ctx);
-                let next = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, status, (throw, vec![status]), (next, vec![]));
-                self.block = next;
+                self.throw_status_if(ctx, status, status);
             }
             return Ok(());
         }
