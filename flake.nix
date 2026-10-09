@@ -142,6 +142,24 @@
           '';
         };
 
+        exampleCli = pkgs.stdenv.mkDerivation {
+          pname = "example-cli";
+          version = "0.1.0";
+          inherit src;
+          nativeBuildInputs = [ perryWitBin pkgs.wasmtime ];
+          buildPhase = ''
+            export WASI_WIT_PATH="${wasiP3Wit}"
+            mkdir -p dist
+            perry-wit examples/cli.ts --wit wit --world command -o dist/cli.wasm
+            cli_output=$(wasmtime run -C cache=n -S p3=y -W component-model-async=y dist/cli.wasm)
+            test "$cli_output" = "$(printf 'Perry CLI: starting\nPerry CLI: finished')"
+          '';
+          installPhase = ''
+            mkdir -p "$out/lib"
+            cp dist/cli.wasm "$out/lib/"
+          '';
+        };
+
         # Consumer helper to build components declaratively
         buildComponent = {
           name ? "component",
@@ -228,6 +246,7 @@
           perry-wit = perryWitBin;
           core-helpers = coreHelpers;
           example-merge-task = exampleMergeTask;
+          example-cli = exampleCli;
           template-component = templateComponent;
           wasi-wit = wasiP3Wit;
         };
@@ -241,7 +260,7 @@
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
-          inherit coreHelpers exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
+          inherit coreHelpers exampleMergeTask exampleCli perryWitBin templateComponent checkTemplate sdkSyncCheck;
         };
 
         devShells.default = pkgs.mkShell {

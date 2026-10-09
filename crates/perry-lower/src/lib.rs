@@ -37,6 +37,7 @@ use perry_mir::{
         MayThrowInterface, RaiseOp, RethrowOp,
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
+    intrinsics::{Intrinsic, IntrinsicOp},
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
         IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
@@ -968,6 +969,18 @@ impl<'s> FunctionBuilder<'s> {
                 let op = AwaitOp::new(ctx, promise).map_err(|e| anyhow!("{}", e.disp(ctx)))?;
                 self.append_value(ctx, &op)
             }
+            Expr::PerformanceNow => self
+                .intrinsic(ctx, Intrinsic::MonotonicNow, vec![])
+                .unwrap(),
+            Expr::DateNow => self.intrinsic(ctx, Intrinsic::DateNow, vec![]).unwrap(),
+            Expr::EnvGet(name) => {
+                let name = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, name));
+                self.intrinsic(ctx, Intrinsic::EnvGet, vec![name]).unwrap()
+            }
+            Expr::ObjectKeys(object) if matches!(object.as_ref(), Expr::ProcessEnv) => {
+                self.intrinsic(ctx, Intrinsic::EnvKeys, vec![]).unwrap()
+            }
+            Expr::ProcessArgv => self.intrinsic(ctx, Intrinsic::Arguments, vec![]).unwrap(),
             Expr::PropertyGet {
                 object, property, ..
             } => {
@@ -1280,7 +1293,39 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
     }
 
+    fn intrinsic(&mut self, ctx: &mut Context, kind: Intrinsic, args: Vec<Value>) -> Option<Value> {
+        let op = IntrinsicOp::new(ctx, kind, args);
+        self.append(ctx, &op);
+        let op = op.get_operation().deref(ctx);
+        (op.get_num_results() == 1).then(|| op.get_result(0))
+    }
+
     fn call(&mut self, ctx: &mut Context, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+            && matches!(object.as_ref(), Expr::GlobalGet(0))
+            && matches!(property.as_str(), "log" | "error")
+        {
+            ensure!(
+                args.len() == 1,
+                "console.{property} currently requires one string argument"
+            );
+            let value = self.expression(ctx, &args[0])?;
+            let value = self.arithmetic(ctx, value);
+            ensure!(
+                kind(ctx, value)? == Kind::String,
+                "console.{property} currently requires a string"
+            );
+            let newline = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "\n"));
+            let text = self.emit_value(ctx, |ctx| StringConcatOp::new(ctx, value, newline));
+            let kind = if property == "log" {
+                Intrinsic::Stdout
+            } else {
+                Intrinsic::Stderr
+            };
+            return Ok(self.intrinsic(ctx, kind, vec![text]));
+        }
         if let Expr::ExternFuncRef { name, .. } = callee
             && self.timers.contains(name)
         {

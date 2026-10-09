@@ -55,11 +55,14 @@ pub struct Task {
     ready_tail: *mut Node,
     subtasks: *mut Subtask,
     /// Waitable set of the pending subtasks, created on first use; 0 if none.
-    set: u32,
+    pub(crate) set: u32,
     /// The promise an async export settles; read again by its callback.
     result: *mut u8,
     pub(crate) exception: *mut u8,
     pub(crate) rejections: *mut u8,
+    pub(crate) outputs: [*mut u8; 2],
+    pub(crate) output_failed: bool,
+    pub(crate) environment: *mut u8,
 }
 
 struct Runtime {
@@ -127,6 +130,9 @@ fn new_task() -> *mut Task {
             result: ptr::null_mut(),
             exception: ptr::null_mut(),
             rejections: ptr::null_mut(),
+            outputs: [ptr::null_mut(); 2],
+            output_failed: false,
+            environment: ptr::null_mut(),
         })
     };
     task
@@ -261,7 +267,8 @@ pub extern "C" fn perry_task_set() -> u32 {
 /// Whether host work still owns task memory. Export completion must wait for it.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_task_pending() -> u32 {
-    u32::from(!current().subtasks.is_null())
+    let task = current();
+    u32::from(!task.subtasks.is_null() || task.outputs.iter().any(|output| !output.is_null()))
 }
 
 /// Record the waitable set created for the current task.

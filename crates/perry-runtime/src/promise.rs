@@ -102,6 +102,9 @@ pub unsafe extern "C" fn perry_promise_observe(promise: *mut u8) {
 /// the task's ready frames and host work have drained, allowing later awaits to handle it.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_task_failed() -> u32 {
+    if current().output_failed {
+        return 1;
+    }
     let mut promise = current().rejections as *const Promise;
     // SAFETY: the rejection list belongs to the current live task.
     unsafe {

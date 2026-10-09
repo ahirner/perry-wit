@@ -225,6 +225,10 @@ pub(crate) fn export(
     if is_async {
         return async_export(ctx, state, function, export);
     }
+    ensure!(
+        !state.runtime.contains(&Runtime::Stdout) && !state.runtime.contains(&Runtime::Stderr),
+        "console output requires async WIT exports to drain P3 streams"
+    );
     let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
         .map_err(|_| anyhow!("function type"))?;
     let (mir_params, mir_results) = {
@@ -524,6 +528,14 @@ fn async_export(
         let mut b = FunctionLowering::glue(state, ctx, &callback);
         let task = b.host(ctx, crate::Host::ContextGet0, vec![]).expect("task");
         b.runtime(ctx, Runtime::TaskResume, vec![task]);
+        for (write, event_handler) in [
+            (Runtime::Stdout, Runtime::StdoutEvent),
+            (Runtime::Stderr, Runtime::StderrEvent),
+        ] {
+            if b.state.runtime.contains(&write) {
+                b.runtime(ctx, event_handler, vec![event, handle, subtask_state]);
+            }
+        }
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
         let returned_state = b.i32_const(ctx, SUBTASK_RETURNED);

@@ -15,7 +15,11 @@
 extern crate alloc;
 
 pub mod array;
+#[cfg(target_arch = "wasm32")]
+mod cli;
 pub mod exception;
+#[cfg(target_arch = "wasm32")]
+mod output;
 pub mod promise;
 pub mod region;
 pub mod string;

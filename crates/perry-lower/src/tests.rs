@@ -360,3 +360,31 @@ fn module_execution_requires_a_command_world() {
         "{message}"
     );
 }
+
+#[test]
+fn cli_intrinsics_keep_their_types_through_roundtrip() {
+    let printed = lowered(
+        r#"
+export function values(): string[] {
+  console.log("typed");
+  console.error("host effects");
+  const missing = process.env.PERRY_MISSING;
+  if (missing !== undefined) console.log(missing);
+  const now = performance.now();
+  if (Date.now() < now) throw new Error("clock");
+  return Object.keys(process.env);
+}
+"#,
+    );
+    use pliron::{irfmt::parsers::spaced, operation::verify_operation, parsable::parse_from_str};
+    let ctx = &mut Context::new();
+    let parsed = parse_from_str(spaced(Operation::top_level_parser()), ctx, &printed)
+        .unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    verify_operation(parsed, ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    let invalid = printed.replace("perry.intrinsic Stdout", "perry.intrinsic MonotonicNow");
+    assert_ne!(invalid, printed);
+    let ctx = &mut Context::new();
+    let parsed = parse_from_str(spaced(Operation::top_level_parser()), ctx, &invalid)
+        .unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    assert!(verify_operation(parsed, ctx).is_err());
+}

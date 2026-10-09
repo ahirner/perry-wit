@@ -86,7 +86,9 @@ Supported WIT types are `bool`, integers, `f32`, `f64`, `string`, `list<T>` and 
 
 An `async func` export must be implemented by an async TypeScript function and uses the callback ABI (see Async).
 
-For a world exporting `wasi:cli/run@0.3.0`, the builder creates an async entry function from the module's top-level statements. The command returns `ok` on fulfilment and `err` on rejection, including after top-level `await`. Command locals belong to that invocation. Module initialization in other worlds is diagnosed until instance state is implemented. CLI console/process APIs remain migration items in `TODOs.md`.
+For a world exporting `wasi:cli/run@0.3.0`, the builder creates an async entry function from the module's top-level statements. The command returns `ok` on fulfilment and `err` on rejection, including after top-level `await`. Command locals belong to that invocation. Module initialization in other worlds is diagnosed until instance state is implemented. Typed `perry.intrinsic` operations cover console output, environment lookup/keys, arguments and clocks. The helper linker forwards only reachable host function imports, shares identical imports with generated code and rejects signature conflicts. Process exit and explicit command result adapters remain migration items in `TODOs.md`.
+
+`perry_runtime::output` keeps one ordered write queue per task and channel. A queued line owns its UTF-8 bytes through all partial writes and the host completion future. The callback dispatches stream-write and future-read events to the queue. Only async WIT exports can use console output; raw and synchronous exports diagnose it until they have a draining protocol. An output failure marks the task failed after its handles are closed.
 
 ## Async
 
@@ -102,8 +104,8 @@ Stackless state machines on the WASI P3 callback ABI. It uses no Component Model
 - **Timers.** `setTimeout(delay, value)` from `node:timers/promises` is an async-lowered `wasi:clocks/monotonic-clock.wait-for`. A pending call joins the task's waitable set, and its promise settles when the subtask returns.
 - **Exports.**
   - `[async-lift]<export>` enters the task, stores it with `context.set 0`, lifts the arguments, calls the ramp and finishes.
-  - `finish` drives ready frames. It returns only after the result promise settles and all host subtasks drain, including work started without awaiting it. It checks unobserved rejections at task completion (per-turn rejection reporting remains a scheduler follow-up). Then it calls `task.return`, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
-  - `[callback][async-lift]<export>` resumes the task from `context.get 0`, settles a returned subtask, drops it and finishes again.
+  - `finish` drives ready frames. It returns only after the result promise settles and all host subtasks and output queues drain, including work started without awaiting it. It checks unobserved rejections at task completion (per-turn rejection reporting remains a scheduler follow-up). Then it calls `task.return`, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
+  - `[callback][async-lift]<export>` resumes the task from `context.get 0`, settles a returned subtask or advances a pending output transfer, releases completed handles and finishes again.
   - Calls may overlap: every task has its own region, run queue and subtasks.
 
 ## Verification

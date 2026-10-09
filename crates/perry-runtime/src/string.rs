@@ -68,7 +68,16 @@ fn new(len: u32, utf16: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
-    let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(data, len as usize) }
+    };
+    let data = if len == 0 {
+        ptr::NonNull::<u8>::dangling().as_ptr()
+    } else {
+        data
+    };
     new(len, utf16_length(bytes), data, ptr::null_mut())
 }
 
@@ -129,5 +138,20 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
         ptr::copy_nonoverlapping((*a).data, bytes, (*a).len as usize);
         ptr::copy_nonoverlapping((*b).data, bytes.add((*a).len as usize), (*b).len as usize);
         new(len, utf16, bytes, buffer)
+    }
+}
+
+/// # Safety
+/// `string` must be live for the entire returned borrow.
+#[cfg(target_arch = "wasm32")]
+pub(crate) unsafe fn bytes<'a>(string: *mut u8) -> &'a [u8] {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        let string = &*(string as *const Str);
+        if string.len == 0 {
+            &[]
+        } else {
+            core::slice::from_raw_parts(string.data, string.len as usize)
+        }
     }
 }

@@ -137,6 +137,12 @@ pub(crate) enum Global {
     Constant(i32),
 }
 
+pub(crate) struct FunctionImport {
+    pub(crate) module: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) ty: u32,
+}
+
 pub(crate) struct Library {
     pub(crate) types: Vec<wasmparser::FuncType>,
     pub(crate) function_types: Vec<u32>,
@@ -146,7 +152,7 @@ pub(crate) struct Library {
     pub(crate) data: Vec<(u32, &'static [u8])>,
     pub(crate) data_size: u32,
     pub(crate) data_alignment: u32,
-    pub(crate) imports: Vec<(String, u32)>,
+    pub(crate) imports: Vec<FunctionImport>,
     pub(crate) elements: Vec<(u32, u32)>,
     pub(crate) table_size: u32,
     pub(crate) table_alignment: u32,
@@ -319,6 +325,9 @@ impl Library {
                     for import in imports.into_imports() {
                         let import = import?;
                         match (import.module, import.name, import.ty) {
+                            (module, name, TypeRef::Func(ty)) => {
+                                library.imports.push(FunctionImport { module, name, ty });
+                            }
                             ("env", "memory", TypeRef::Memory(memory)) => {
                                 ensure!(
                                     !memory.memory64 && !memory.shared,
@@ -551,8 +560,8 @@ impl Library {
                         table_index: 0,
                     } => {
                         for &(_, target) in &self.elements {
-                            let ty = if let Some(&(_, ty)) = self.imports.get(target as usize) {
-                                ty
+                            let ty = if let Some(import) = self.imports.get(target as usize) {
+                                import.ty
                             } else {
                                 self.function_types[target as usize - self.imports.len()]
                             };

@@ -32,6 +32,7 @@ use perry_mir::{
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
     exceptions::{CaughtStatusOp, MayThrowInterface},
     heap::{AllocOp, FieldGetOp, FieldSetOp},
+    intrinsics::{Intrinsic, IntrinsicOp},
     locals::UndefOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
@@ -249,6 +250,15 @@ enum Runtime {
     CabiRealloc,
     StringAdopt,
     StringConcat,
+    Stdout,
+    Stderr,
+    StdoutEvent,
+    StderrEvent,
+    EnvGet,
+    EnvKeys,
+    Arguments,
+    MonotonicNow,
+    DateNow,
 }
 
 impl Runtime {
@@ -287,6 +297,15 @@ impl Runtime {
             Runtime::CabiRealloc => "perry_cabi_realloc",
             Runtime::StringAdopt => "perry_string_adopt",
             Runtime::StringConcat => "perry_string_concat",
+            Runtime::Stdout => "perry_stdout",
+            Runtime::Stderr => "perry_stderr",
+            Runtime::StdoutEvent => "perry_stdout_event",
+            Runtime::StderrEvent => "perry_stderr_event",
+            Runtime::EnvGet => "perry_env_get",
+            Runtime::EnvKeys => "perry_env_keys",
+            Runtime::Arguments => "perry_arguments",
+            Runtime::MonotonicNow => "perry_monotonic_now",
+            Runtime::DateNow => "perry_date_now",
         }
     }
 
@@ -302,6 +321,11 @@ impl Runtime {
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
+            Runtime::Stdout | Runtime::Stderr => (vec![i32], vec![]),
+            Runtime::StdoutEvent | Runtime::StderrEvent => (vec![i32; 3], vec![]),
+            Runtime::EnvGet => (vec![i32], vec![i32]),
+            Runtime::EnvKeys | Runtime::Arguments => (vec![], vec![i32]),
+            Runtime::MonotonicNow | Runtime::DateNow => (vec![], vec![f64]),
             Runtime::ExceptionNew => (vec![i32, i64], vec![i32]),
             Runtime::ExceptionRaise
             | Runtime::ExceptionCatch
@@ -541,6 +565,12 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
             let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
             state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
         }
+    }
+    if matches!(exports, Exports::Raw) {
+        ensure!(
+            !state.runtime.contains(&Runtime::Stdout) && !state.runtime.contains(&Runtime::Stderr),
+            "console output requires async WIT exports to drain P3 streams"
+        );
     }
     if !async_functions.is_empty() {
         async_split::drive(ctx, &mut state, &async_functions);
@@ -1528,6 +1558,29 @@ impl<'s> FunctionLowering<'s> {
             let text = self.i32_const(ctx, text as i32);
             let result = self.select(ctx, undefined, text, value);
             self.define(ctx, op, result);
+            return Ok(());
+        }
+        if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
+            let (runtime, interface) = match intrinsic.kind(ctx) {
+                Intrinsic::Stdout => (Runtime::Stdout, "wasi:cli/stdout@0.3.0"),
+                Intrinsic::Stderr => (Runtime::Stderr, "wasi:cli/stderr@0.3.0"),
+                Intrinsic::EnvGet => (Runtime::EnvGet, "wasi:cli/environment@0.3.0"),
+                Intrinsic::EnvKeys => (Runtime::EnvKeys, "wasi:cli/environment@0.3.0"),
+                Intrinsic::Arguments => (Runtime::Arguments, "wasi:cli/environment@0.3.0"),
+                Intrinsic::MonotonicNow => (Runtime::MonotonicNow, MONOTONIC_CLOCK),
+                Intrinsic::DateNow => (Runtime::DateNow, "wasi:clocks/system-clock@0.3.0"),
+            };
+            ensure!(
+                self.state.can_import(interface),
+                "WIT world must import {interface}"
+            );
+            let count = op.deref(ctx).get_num_operands();
+            let operands = (0..count)
+                .map(|i| self.operand(ctx, op, i))
+                .collect::<Result<Vec<_>>>()?;
+            if let Some(value) = self.runtime(ctx, runtime, operands) {
+                self.define(ctx, op, value);
+            }
             return Ok(());
         }
         if Operation::get_op::<AwaitOp>(op, ctx).is_some() {

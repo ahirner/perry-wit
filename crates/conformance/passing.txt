@@ -3,3 +3,6 @@ wasi.execution.scaling.number_push
 wasi.execution.scaling.temporary_records
 wasi.execution.scaling.string_append
 ecma.error.control_flow
+web.console.routing
+web.performance.monotonic
+node.process.environment

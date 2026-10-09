@@ -54,3 +54,17 @@ pub unsafe extern "C" fn perry_array_grow(array: *mut u8) {
         (*array).cap = cap;
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn from_refs(values: impl ExactSizeIterator<Item = *mut u8>) -> *mut u8 {
+    let len = values.len() as u32;
+    let array = perry_array_new(len) as *mut Array;
+    // SAFETY: the newly allocated array has room for each reference.
+    unsafe {
+        for (index, value) in values.enumerate() {
+            (*array).data.add(index).write(value as u64);
+        }
+        (*array).len = len;
+    }
+    array.cast()
+}

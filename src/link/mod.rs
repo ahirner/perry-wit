@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
@@ -36,6 +36,13 @@ impl Reencode for CoreRelocations<'_> {
 }
 
 pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
+    link_libraries(core_wasm, LibraryId::bytes)
+}
+
+fn link_libraries(
+    core_wasm: Vec<u8>,
+    library: impl Fn(LibraryId) -> &'static [u8],
+) -> Result<Vec<u8>> {
     // 1. First pass: check if any helper imports exist
     let mut has_helper_imports = false;
     for payload in Parser::new(0).parse_all(&core_wasm) {
@@ -141,9 +148,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
         }
     }
 
-    let num_new_imported_funcs = external_imports.len() as u32;
     let num_core_defined_funcs = core_function_type_indices.len() as u32;
-    let helper_func_start_idx = num_new_imported_funcs + num_core_defined_funcs;
 
     // 3. Select and prepare helper libraries
     let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<&str>>::new();
@@ -166,93 +171,88 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
         }
     }
 
-    // Map core defined functions
-    for i in 0..num_core_defined_funcs {
-        let old_func_idx = next_import_func_idx + i;
-        let new_func_idx = num_new_imported_funcs + i;
-        old_to_new_func_index.insert(old_func_idx, new_func_idx);
-    }
-
     // 4. Link helper functions
     let mut new_types = TypeSection::new();
     let mut roundtrip = reencode::RoundtripReencoder;
-    for ty in &core_types {
-        let params = ty
-            .params()
-            .iter()
-            .map(|ty| roundtrip.val_type(*ty))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let results = ty
-            .results()
-            .iter()
-            .map(|ty| roundtrip.val_type(*ty))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        new_types.ty().function(params, results);
-    }
+    append_types(&mut new_types, &core_types)?;
 
     struct PreparedLibrary {
         lib: Library,
         reachable: BTreeSet<u32>,
-        helper_defined_indices: BTreeMap<u32, u32>,
+        function_indices: BTreeMap<u32, u32>,
         type_base: u32,
     }
 
     let mut prepared_libs = Vec::new();
-    let mut current_helper_func_idx = helper_func_start_idx;
+    let mut signatures = core_types.clone();
 
     for (lib_id, entries) in requested_by_lib {
-        let lib = Library::parse(lib_id.bytes())?;
+        let lib = Library::parse(library(lib_id))?;
         let reachable = lib.reachable(entries.iter().copied())?;
 
         let type_base = new_types.len();
-        for ty in &lib.types {
-            let params = ty
-                .params()
+        append_types(&mut new_types, &lib.types)?;
+
+        signatures.extend(lib.types.iter().cloned());
+        let mut function_indices = BTreeMap::new();
+        for &index in &reachable {
+            let Some(import) = lib.imports.get(index as usize) else {
+                continue;
+            };
+            let ty = &lib.types[import.ty as usize];
+            let existing = external_imports
                 .iter()
-                .map(|ty| roundtrip.val_type(*ty))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let results = ty
-                .results()
-                .iter()
-                .map(|ty| roundtrip.val_type(*ty))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            new_types.ty().function(params, results);
+                .position(|(module, name, _)| *module == import.module && *name == import.name);
+            let assigned = if let Some(existing) = existing {
+                let (_, _, existing_ty) = external_imports[existing];
+                ensure!(
+                    signatures[existing_ty as usize] == *ty,
+                    "incompatible signatures for {}.{}",
+                    import.module,
+                    import.name
+                );
+                existing as u32
+            } else {
+                let assigned = external_imports.len() as u32;
+                external_imports.push((import.module, import.name, type_base + import.ty));
+                assigned
+            };
+            function_indices.insert(index, assigned);
         }
-
-        let helper_defined_indices = reachable
-            .iter()
-            .filter(|&&orig| orig >= lib.imports.len() as u32)
-            .enumerate()
-            .map(|(offset, &orig)| (orig, current_helper_func_idx + offset as u32))
-            .collect::<BTreeMap<_, _>>();
-
-        current_helper_func_idx += helper_defined_indices.len() as u32;
-
-        // Map helper entry symbols to their assigned function index
-        for entry in &entries {
-            let orig_idx = lib.exports.get(*entry).context("missing helper export")?;
-            let new_idx = helper_defined_indices
-                .get(orig_idx)
-                .copied()
-                .context("missing assigned index for helper entry")?;
-            // Map the old core import to this new helper function index!
-            for (old_h_idx, h_name, _) in &helper_imports {
-                if h_name == entry {
-                    old_to_new_func_index.insert(*old_h_idx, new_idx);
-                }
-            }
-        }
-
         prepared_libs.push(PreparedLibrary {
             lib,
             reachable,
-            helper_defined_indices,
+            function_indices,
             type_base,
         });
+    }
+
+    let num_new_imported_funcs = external_imports.len() as u32;
+    for i in 0..num_core_defined_funcs {
+        old_to_new_func_index.insert(next_import_func_idx + i, num_new_imported_funcs + i);
+    }
+    let mut current_helper_func_idx = num_new_imported_funcs + num_core_defined_funcs;
+    for prep in &mut prepared_libs {
+        for &index in &prep.reachable {
+            if index >= prep.lib.imports.len() as u32 {
+                prep.function_indices.insert(index, current_helper_func_idx);
+                current_helper_func_idx += 1;
+            }
+        }
+        for &(old_index, name, ty) in &helper_imports {
+            if let Some(&index) = prep.lib.exports.get(name) {
+                let helper_ty = if let Some(import) = prep.lib.imports.get(index as usize) {
+                    import.ty
+                } else {
+                    prep.lib.function_types[index as usize - prep.lib.imports.len()]
+                };
+                ensure!(
+                    core_types[ty as usize] == prep.lib.types[helper_ty as usize],
+                    "incompatible signature for helper {name}"
+                );
+                old_to_new_func_index.insert(old_index, prep.function_indices[&index]);
+            }
+        }
     }
 
     let mut new_functions = FunctionSection::new();
@@ -333,7 +333,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     // Emit helper functions
     for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
         let mut relocation = Relocations {
-            functions: &prep.helper_defined_indices,
+            functions: &prep.function_indices,
             globals: &prep.lib.globals,
             type_base: prep.type_base,
             memory_base: placement.memory_base,
@@ -367,7 +367,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     let mut helper_inits = Vec::new();
     for prep in &prepared_libs {
         for orig in prep.lib.initializers() {
-            if let Some(&new_idx) = prep.helper_defined_indices.get(&orig)
+            if let Some(&new_idx) = prep.function_indices.get(&orig)
                 && !helper_inits.contains(&new_idx)
             {
                 helper_inits.push(new_idx);
@@ -580,7 +580,7 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
     }
     for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
         for &(slot, orig_func) in &prep.lib.elements {
-            if let Some(&target) = prep.helper_defined_indices.get(&orig_func) {
+            if let Some(&target) = prep.function_indices.get(&orig_func) {
                 new_elems.active(
                     Some(0),
                     &ConstExpr::i32_const((placement.table_base + slot) as i32),
@@ -635,4 +635,98 @@ pub(crate) fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
         anyhow::bail!("Validating linked Wasm output: {e:?} (wrote /tmp/debug_linked.wasm)");
     }
     Ok(result)
+}
+
+fn append_types(section: &mut TypeSection, types: &[wasmparser::FuncType]) -> Result<()> {
+    let mut encoder = reencode::RoundtripReencoder;
+    for ty in types {
+        let params = ty
+            .params()
+            .iter()
+            .map(|ty| encoder.val_type(*ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let results = ty
+            .results()
+            .iter()
+            .map(|ty| encoder.val_type(*ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        section.ty().function(params, results);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwards_only_reachable_imports_and_relocates_both_callers() -> Result<()> {
+        let library = Box::leak(
+            wat::parse_str(
+                r#"(module
+            (import "host" "shared" (func $shared (param i32) (result i32)))
+            (import "host" "extra" (func $extra (param i32) (result i32)))
+            (import "host" "unused" (func (param i32) (result i32)))
+            (func (export "perry_test") (param i32) (result i32)
+                local.get 0 call $shared call $extra))"#,
+            )?
+            .into_boxed_slice(),
+        );
+        let core = wat::parse_str(
+            r#"(module
+            (import "__perry_helper" "perry_test" (func $helper (param i32) (result i32)))
+            (import "host" "shared" (func $shared (param i32) (result i32)))
+            (func (export "run") (param i32) (result i32)
+                local.get 0 call $helper call $shared))"#,
+        )?;
+        let linked = link_libraries(core, |_| library)?;
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, linked)?;
+        assert_eq!(
+            module
+                .imports()
+                .map(|i| (i.module(), i.name()))
+                .collect::<Vec<_>>(),
+            [("host", "shared"), ("host", "extra")]
+        );
+        let mut linker = wasmtime::Linker::new(&engine);
+        linker.func_wrap("host", "shared", |n: i32| n + 1)?;
+        linker.func_wrap("host", "extra", |n: i32| n * 3)?;
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = linker.instantiate(&mut store, &module)?;
+        assert_eq!(
+            instance
+                .get_typed_func::<i32, i32>(&mut store, "run")?
+                .call(&mut store, 4)?,
+            16
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_conflicting_host_signatures() -> Result<()> {
+        let library = Box::leak(
+            wat::parse_str(
+                r#"(module
+            (import "host" "same" (func $same (param f64) (result i32)))
+            (func (export "perry_test") (result i32) f64.const 1 call $same))"#,
+            )?
+            .into_boxed_slice(),
+        );
+        let core = wat::parse_str(
+            r#"(module
+            (import "host" "same" (func (param i32) (result i32)))
+            (import "__perry_helper" "perry_test" (func)))"#,
+        )?;
+        let error = link_libraries(core, |_| library).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("incompatible signatures for host.same"),
+            "{error}"
+        );
+        Ok(())
+    }
 }
