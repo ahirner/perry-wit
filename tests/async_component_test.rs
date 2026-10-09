@@ -54,6 +54,11 @@ export async function label(name: string): Promise<string> {
   return await setTimeout(2, prefix + "!");
 }
 export async function json(input: string): Promise<string> {
+  const encoder=new TextEncoder();
+  const encoded=encoder.encode('🙂'+input);
+  const decoder=new TextDecoder();
+  const codec={decoder:decoder,encoder:encoder};
+  if(decoder.decode(encoded.subarray(0,2),{stream:true})!=='')throw new Error('partial codec scalar');
   let original = 'é🙂\0' + input;
   const suffix = original.slice(3);
   const parts = original.split('\0');
@@ -100,6 +105,7 @@ export async function json(input: string): Promise<string> {
   if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');
   if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');
   if(suffix !== input || parts[1] !== input || head !== 'é' || !original.endsWith('!')) throw new TypeError('lost string span');
+  if(codec.decoder!==decoder||codec.encoder!==encoder||codec.decoder.decode(encoded.subarray(2))!=='🙂'+input)throw new TypeError('lost codec state');
   return JSON.stringify(value);
 }
 export async function bytes(input: Uint8Array, tag: number): Promise<Uint8Array> {
@@ -142,8 +148,11 @@ export async function count(n: number): Promise<number> {
   return total;
 }
 export async function fail(): Promise<void> {
+  const decoder=new TextDecoder();
+  decoder.decode(new Uint8Array([240,159]),{stream:true});
   setTimeout(3600000);
   await setTimeout(1);
+  if(decoder.decode(new Uint8Array([153,130]))!=='🙂')throw new Error('lost cancelled codec');
   throw new Error("unhandled export rejection");
 }
 "#;

@@ -32,6 +32,8 @@ impl FunctionBuilder<'_> {
                 || ty.is::<ArrayType>()
                 || ty.is::<TupleType>()
                 || ty.is::<DictionaryType>()
+                || ty.is::<TextEncoderType>()
+                || ty.is::<TextDecoderType>()
                 || ty.is::<BytesType>()
                 || ty.is::<BufferType>()
                 || ty.is::<PromiseType>()

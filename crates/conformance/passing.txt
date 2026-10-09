@@ -22,3 +22,5 @@ ecma.string.utf8
 ecma.string.operations
 ecma.json.roundtrip
 ecma.subset.exclusions
+web.textdecoder.streaming
+web.textencoder.values

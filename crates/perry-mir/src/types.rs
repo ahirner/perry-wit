@@ -57,6 +57,26 @@ pub struct BufferType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct BytesType;
 
+/// A stateless UTF-8 encoder with reference identity.
+#[pliron_type(
+    name = "perry.text_encoder",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct TextEncoderType;
+
+/// A strict UTF-8 decoder retaining its pending bytes and BOM state.
+#[pliron_type(
+    name = "perry.text_decoder",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct TextDecoderType;
+
 /// A closed-shape record, referenced by value of this type (subset rule R1).
 ///
 /// Records are nominal and uniqued by name, so shapes may be recursive: create the record

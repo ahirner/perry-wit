@@ -13,7 +13,7 @@ use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
     ArrayType, BufferType, BytesType, DictionaryField, DictionarySchema, DictionaryType,
     ExceptionType, JsonType, OptionalType, PromiseType, RecordField, RecordType, StringType,
-    TupleType,
+    TextDecoderType, TextEncoderType, TupleType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -172,6 +172,12 @@ impl<'h> Shapes<'h> {
             HirType::Array(element) => {
                 let element = self.value_type(ctx, element)?;
                 ArrayType::get(ctx, element).into()
+            }
+            HirType::Named(name) if name == super::text_source::ENCODER => {
+                TextEncoderType::get(ctx).into()
+            }
+            HirType::Named(name) if name == super::text_source::DECODER => {
+                TextDecoderType::get(ctx).into()
             }
             HirType::Named(name) if name == "Uint8Array" => BytesType::get(ctx).into(),
             HirType::Named(name) if name == "ArrayBuffer" => BufferType::get(ctx).into(),

@@ -19,6 +19,8 @@ mod exceptions;
 mod json;
 mod shapes;
 mod strings;
+mod text;
+mod text_source;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use exceptions::{Cleanup, Handler};
 use perry_hir::{
@@ -49,7 +51,7 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
         ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, PromiseType,
-        RecordType, StringType, TupleType,
+        RecordType, StringType, TextDecoderType, TextEncoderType, TupleType,
     },
 };
 use pliron::printable::Printable as _;
@@ -141,6 +143,7 @@ pub fn lower_source(
         bail!("{diagnostic}");
     }
     dictionaries::preserve_interface_indices(&mut ast)?;
+    text_source::prepare(&mut ast)?;
     let inferred_spans = shapes::inferred_binding_spans(&ast);
     let mut hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
@@ -361,6 +364,8 @@ fn literal_index(index: &Expr) -> Option<usize> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    TextEncoder,
+    TextDecoder,
     Number,
     Boolean,
     String,
@@ -381,6 +386,10 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Json)
     } else if ty.is::<FP64Type>() {
         Ok(Kind::Number)
+    } else if ty.is::<TextEncoderType>() {
+        Ok(Kind::TextEncoder)
+    } else if ty.is::<TextDecoderType>() {
+        Ok(Kind::TextDecoder)
     } else if ty.is::<BytesType>() {
         Ok(Kind::Bytes)
     } else if ty.is::<BufferType>() {
@@ -1435,6 +1444,13 @@ impl<'s> FunctionBuilder<'s> {
                         self.intrinsic(ctx, Intrinsic::JsonGet, vec![value, key])
                             .unwrap()
                     }
+                    (Kind::TextEncoder | Kind::TextDecoder, "encoding") => {
+                        self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "utf-8"))
+                    }
+                    (Kind::TextDecoder, "fatal") => self.boolean(ctx, true),
+                    (Kind::TextDecoder, "ignoreBOM") => self
+                        .intrinsic(ctx, Intrinsic::TextDecoderIgnoreBom, vec![value])
+                        .unwrap(),
                     (Kind::Bytes, "length" | "byteLength") => self
                         .intrinsic(ctx, Intrinsic::BytesLength, vec![value])
                         .unwrap(),
@@ -1485,6 +1501,15 @@ impl<'s> FunctionBuilder<'s> {
                 Expr::String(field) => self.set_field(ctx, target, field, value)?,
                 index => self.set_index(ctx, target, index, value)?,
             },
+            Expr::New {
+                class_name, args, ..
+            } if matches!(
+                class_name.as_str(),
+                text_source::ENCODER | text_source::DECODER
+            ) =>
+            {
+                self.codec_constructor(ctx, class_name == text_source::DECODER, args)?
+            }
             Expr::New {
                 class_name, args, ..
             } => {
@@ -2053,6 +2078,9 @@ impl<'s> FunctionBuilder<'s> {
                 || (json::is_json(ctx, receiver) && strings::is_string_method(property))
             {
                 return self.string_method(ctx, receiver, property, args);
+            }
+            if matches!(kind(ctx, receiver)?, Kind::TextEncoder | Kind::TextDecoder) {
+                return self.codec_method(ctx, receiver, property, args);
             }
             if kind(ctx, receiver)? == Kind::Bytes {
                 return self.bytes_method(ctx, receiver, property, args);

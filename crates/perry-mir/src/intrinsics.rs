@@ -1,6 +1,9 @@
 //! Typed built-in capabilities. Signatures are verified here; native representations and
 //! task scheduling belong to codegen and the runtime.
-use crate::types::{ArrayType, BufferType, BytesType, JsonType, OptionalType, StringType};
+use crate::types::{
+    ArrayType, BufferType, BytesType, JsonType, OptionalType, StringType, TextDecoderType,
+    TextEncoderType,
+};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     common_traits::Verify,
@@ -19,6 +22,11 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    TextEncoderNew,
+    TextEncode,
+    TextDecoderNew,
+    TextDecode,
+    TextDecoderIgnoreBom,
     StringCharAt,
     StringAt,
     StringIndex,
@@ -92,6 +100,9 @@ pub enum Intrinsic {
 
 #[derive(Clone, Copy)]
 enum ValueType {
+    TextEncoder,
+    TextDecoder,
+    OptionalBytes,
     Json,
     OptionalJson,
     Jsons,
@@ -110,6 +121,12 @@ enum ValueType {
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
+            Self::TextEncoder => TextEncoderType::get(ctx).into(),
+            Self::TextDecoder => TextDecoderType::get(ctx).into(),
+            Self::OptionalBytes => {
+                let bytes = BytesType::get(ctx).into();
+                OptionalType::get(ctx, bytes).into()
+            }
             Self::Json => JsonType::get(ctx).into(),
             Self::OptionalJson => {
                 let json = JsonType::get(ctx).into();
@@ -148,6 +165,12 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
+            Self::TextEncoder => ty.deref(ctx).is::<TextEncoderType>(),
+            Self::TextDecoder => ty.deref(ctx).is::<TextDecoderType>(),
+            Self::OptionalBytes => ty
+                .deref(ctx)
+                .downcast_ref::<OptionalType>()
+                .is_some_and(|optional| optional.value().deref(ctx).is::<BytesType>()),
             Self::Json => ty.deref(ctx).is::<JsonType>(),
             Self::OptionalJson => ty
                 .deref(ctx)
@@ -193,6 +216,11 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::TextEncoderNew => (&[], &[TextEncoder]),
+            Self::TextEncode => (&[OptionalString], &[Bytes]),
+            Self::TextDecoderNew => (&[OptionalString, Boolean, Boolean], &[TextDecoder]),
+            Self::TextDecode => (&[TextDecoder, OptionalBytes, Boolean], &[String]),
+            Self::TextDecoderIgnoreBom => (&[TextDecoder], &[Boolean]),
             Self::StringCharAt => (&[String, Number], &[String]),
             Self::StringAt | Self::StringIndex => (&[String, Number], &[OptionalString]),
             Self::StringCodePointAt => (&[String, Number], &[OptionalNumber]),
@@ -316,7 +344,9 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn exception(&self, ctx: &Context) -> crate::attrs::ErrorKind {
         if matches!(
             self.kind(ctx),
-            Intrinsic::StringLower
+            Intrinsic::TextDecoderNew
+                | Intrinsic::TextDecode
+                | Intrinsic::StringLower
                 | Intrinsic::StringUpper
                 | Intrinsic::StringRepeat
                 | Intrinsic::BytesFromArray
@@ -345,7 +375,9 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn may_throw(&self, ctx: &Context) -> bool {
         matches!(
             self.kind(ctx),
-            Intrinsic::StringLower
+            Intrinsic::TextDecoderNew
+                | Intrinsic::TextDecode
+                | Intrinsic::StringLower
                 | Intrinsic::StringUpper
                 | Intrinsic::StringRepeat
                 | Intrinsic::BytesFromArray

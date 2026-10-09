@@ -38,7 +38,7 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
         ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, OptionalType,
-        PromiseType, RecordType, StringType, TupleType,
+        PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TupleType,
     },
 };
 use perry_runtime::array as layout;
@@ -231,6 +231,11 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    TextEncoderNew,
+    TextEncode,
+    TextDecoderNew,
+    TextDecode,
+    TextDecoderIgnoreBom,
     JsonPack,
     JsonUnpack,
     ViewGet,
@@ -445,6 +450,11 @@ impl Runtime {
             Runtime::ExceptionEqual => "perry_exception_equal",
             Runtime::StringEqual => "perry_string_equal",
             Runtime::CabiRealloc => "perry_cabi_realloc",
+            Runtime::TextEncoderNew => "perry_encoder_new",
+            Runtime::TextEncode => "perry_text_encode",
+            Runtime::TextDecoderNew => "perry_decoder_new",
+            Runtime::TextDecode => "perry_text_decode",
+            Runtime::TextDecoderIgnoreBom => "perry_decoder_ignore_bom",
             Runtime::StringAdopt => "perry_string_adopt",
             Runtime::StringConcat => "perry_string_concat",
             Runtime::StringUnit => "perry_string_unit",
@@ -589,6 +599,9 @@ impl Runtime {
             Runtime::StringCase | Runtime::StringTrim => (vec![i32, i32], vec![i32]),
             Runtime::StringRepeat => (vec![i32, f64], vec![i32]),
             Runtime::StringSplit => (vec![i32, i32, f64], vec![i32]),
+            Runtime::TextEncoderNew => (vec![], vec![i32]),
+            Runtime::TextEncode | Runtime::TextDecoderIgnoreBom => (vec![i32], vec![i32]),
+            Runtime::TextDecoderNew | Runtime::TextDecode => (vec![i32, i32, i32], vec![i32]),
             Runtime::StringAdopt | Runtime::StringConcat => (vec![i32, i32], vec![i32]),
         }
     }
@@ -627,6 +640,8 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
         || deref.is::<JsonType>()
+        || deref.is::<TextEncoderType>()
+        || deref.is::<TextDecoderType>()
         || deref.is::<BytesType>()
         || deref.is::<BufferType>()
     {
@@ -2029,7 +2044,12 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             let kind = intrinsic.kind(ctx);
-            let string_runtime = match kind {
+            let text_runtime = match kind {
+                Intrinsic::TextEncoderNew => Some((Runtime::TextEncoderNew, None)),
+                Intrinsic::TextEncode => Some((Runtime::TextEncode, None)),
+                Intrinsic::TextDecoderNew => Some((Runtime::TextDecoderNew, None)),
+                Intrinsic::TextDecode => Some((Runtime::TextDecode, None)),
+                Intrinsic::TextDecoderIgnoreBom => Some((Runtime::TextDecoderIgnoreBom, None)),
                 Intrinsic::StringCharAt => Some((Runtime::StringUnit, Some(0))),
                 Intrinsic::StringAt => Some((Runtime::StringUnit, Some(1))),
                 Intrinsic::StringIndex => Some((Runtime::StringUnit, Some(2))),
@@ -2049,7 +2069,7 @@ impl<'s> FunctionLowering<'s> {
                 Intrinsic::StringSplit => Some((Runtime::StringSplit, None)),
                 _ => None,
             };
-            if let Some((runtime, mode)) = string_runtime {
+            if let Some((runtime, mode)) = text_runtime {
                 let mut operands = self.operands(ctx, op)?;
                 if let Some(mode) = mode {
                     operands.push(self.i32_const(ctx, mode));

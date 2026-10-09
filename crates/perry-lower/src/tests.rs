@@ -29,6 +29,44 @@ fn rejected(source: &str) -> String {
 }
 
 #[test]
+fn text_codecs_preserve_typed_receivers_and_stream_options() {
+    let printed = lowered(
+        r#"
+type Decoder = TextDecoder;
+function encoder(): TextEncoder { return new (globalThis.TextEncoder)(); }
+function decode(d: Decoder, input: Uint8Array): string { return d.decode(input,{stream:true}); }
+export function run(input: string): string {
+    const e=encoder();
+    const d:Decoder=new (TextDecoder as typeof TextDecoder)('UTF8',{fatal:true,ignoreBOM:false});
+    const bytes=e.encode(input);
+    return decode(d,bytes)+d.decode()+e.encoding+d.encoding;
+}
+"#,
+    );
+    for intrinsic in [
+        "TextEncoderNew",
+        "TextEncode",
+        "TextDecoderNew",
+        "TextDecode",
+    ] {
+        assert!(printed.contains(intrinsic), "{printed}");
+    }
+}
+
+#[test]
+fn text_codec_options_reject_forms_the_frontend_cannot_preserve() {
+    for source in [
+        "new TextDecoder('utf8',{get fatal(){return true;}})",
+        "new TextDecoder('utf8',{...{fatal:true}})",
+        "new TextDecoder('utf8',{['fatal']:true})",
+        "new TextDecoder().decode(new Uint8Array(0),{__proto__:null})",
+    ] {
+        let error = rejected(&format!("export function run():void{{{source};}}"));
+        assert!(error.contains("TextDecoder options"), "{error}");
+    }
+}
+
+#[test]
 fn string_optional_results_remain_optional_in_inferred_records() {
     let printed = lowered(
         r#"

@@ -27,6 +27,7 @@ pub mod promise;
 pub mod region;
 pub mod shape;
 pub mod string;
+pub mod text;
 
 /// Reserved representation of an absent optional number.
 pub const UNDEFINED_NUMBER: u64 = 0x7FF0_0000_0000_0001;

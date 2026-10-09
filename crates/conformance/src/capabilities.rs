@@ -605,6 +605,31 @@ try {
 const encoded=new TextEncoder().encode(text);
 for(let i=0;i<encoded.length;i++){const byte=encoded[i];if(byte===undefined)throw 90;trace.push(byte);}
 "#;
+fn encoder(text: String) -> Case {
+    bytes_function(
+        vec![],
+        &format!(
+            r#"
+const text={text};
+const encoder=new TextEncoder();
+const bytes=encoder.encode(text);
+trace.push(encoder.encoding==='utf-8'?1:0);
+trace.push(encoder===new TextEncoder()?1:0);
+trace.push(bytes.length);
+for(let i=0;i<bytes.length;i++)trace.push(bytes[i]);
+const view=bytes.subarray(x,-1);
+trace.push(view.length);
+for(let i=0;i<view.length;i++)trace.push(view[i]);
+if(bytes.length>0)bytes[0]=257;
+const fresh=encoder.encode(text);
+for(let i=0;i<fresh.length;i++)trace.push(fresh[i]);
+trace.push(encoder.encode().length);
+"#,
+            text = serde_json::to_string(&text).unwrap()
+        ),
+        false,
+    )
+}
 fn headers(text: String) -> Case {
     bytes_function(
         vec![],
@@ -684,10 +709,34 @@ fn additional_contracts() -> Vec<Contract> {
             check: check_equivalence,
         },
         Contract {
+            id: "web.textencoder.values",
+            description: "UTF-8 encoder bytes, identity and independent mutable storage",
+            specification: "https://encoding.spec.whatwg.org/#interface-textencoder",
+            domain: "Valid Unicode scalars including astral values; byte subviews over IEEE-754 boundaries; empty input, fresh encoding after mutation and encoder identity",
+            witnesses: vec![
+                Witness {
+                    partition: "empty",
+                    case: encoder(String::new()),
+                },
+                Witness {
+                    partition: "scalar-widths-and-nul",
+                    case: encoder("Aé水🙂\0".into()),
+                },
+                Witness {
+                    partition: "bom",
+                    case: encoder("\u{feff}".into()),
+                },
+            ],
+            strategy: prop::collection::vec(any::<char>(), 0..=32)
+                .prop_map(|scalars| encoder(scalars.into_iter().collect()))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "web.textdecoder.streaming",
             description: "Fatal UTF-8 decoding across byte boundaries",
             specification: "https://encoding.spec.whatwg.org/",
-            domain: "Fatal UTF-8, one-byte chunks, final flush; compare successful prefix bytes and normalized decoding failure",
+            domain: "Fatal UTF-8, one-byte chunks, final flush; arbitrary bytes and valid Unicode scalars; stop at first failure. Strict-by-default decoding and retained unread input after streaming errors use separate subset/spec tests",
             witnesses: vec![
                 Witness {
                     partition: "empty",
@@ -706,9 +755,13 @@ fn additional_contracts() -> Vec<Contract> {
                     case: decoder(vec![65, 0xf0, 0x9f]),
                 },
             ],
-            strategy: prop::collection::vec(any::<u8>(), 0..=32)
-                .prop_map(decoder)
-                .boxed(),
+            strategy: prop_oneof![
+                prop::collection::vec(any::<u8>(), 0..=32),
+                prop::collection::vec(any::<char>(), 0..=32)
+                    .prop_map(|scalars| scalars.into_iter().collect::<String>().into_bytes()),
+            ]
+            .prop_map(decoder)
+            .boxed(),
             check: check_equivalence,
         },
         Contract {
