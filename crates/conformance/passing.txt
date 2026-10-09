@@ -15,3 +15,5 @@ ecma.json.native
 ecma.json.typed
 ecma.json.dictionary
 ecma.object.dictionary
+ecma.json.stringify_options
+ecma.json.command

@@ -6,9 +6,42 @@ use super::{
 /// A read-only JSON tree. Child identities are stable within one serialization.
 pub trait Tree {
     type Node: Copy + Eq;
+    type Identity: Copy + Eq;
     type Children: Iterator<Item = Result<Self::Node, Error>> + Clone;
+    /// Storage identity of an array or object, shared by all aliases of that container.
+    fn identity(&self, node: Self::Node) -> Result<Self::Identity, Error>;
     fn value(&self, node: Self::Node) -> Result<Value<'_, Self::Children>, Error>;
     fn key(&self, node: Self::Node) -> Result<&str, Error>;
+
+    /// Find a property without visiting its value. Flat graphs may contain duplicate keys.
+    fn property(&self, node: Self::Node, key: &str) -> Result<Option<Self::Node>, Error> {
+        let Value::Object(children) = self.value(node)? else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for child in children {
+            let child = child?;
+            if self.key(child)? == key {
+                found = Some(child);
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// Prepared serialization controls. Property names are unique and retain replacer order.
+pub struct StringifyOptions<'a> {
+    /// A representation error matters only when indentation is actually emitted.
+    pub gap: Result<&'a str, Error>,
+    pub properties: Option<&'a [&'a str]>,
+}
+impl Default for StringifyOptions<'_> {
+    fn default() -> Self {
+        Self {
+            gap: Ok(""),
+            properties: None,
+        }
+    }
 }
 
 /// Exactly one JSON variant; arrays and objects carry their child iterator.
@@ -24,19 +57,36 @@ pub enum Value<'a, C> {
 
 /// Measure compact ECMAScript serialization without allocating.
 pub fn measure_tree<T: Tree>(tree: &T, root: T::Node) -> Result<usize, Error> {
+    measure_tree_with_options(tree, root, &StringifyOptions::default())
+}
+
+pub fn measure_tree_with_options<T: Tree>(
+    tree: &T,
+    root: T::Node,
+    options: &StringifyOptions<'_>,
+) -> Result<usize, Error> {
     let mut output = Measure { length: 0 };
-    write_tree(tree, root, &mut output, 0)?;
+    write_tree(tree, root, &mut output, options)?;
     Ok(output.length)
 }
 
 /// Write compact ECMAScript serialization into caller-owned storage.
 pub fn serialize_tree<T: Tree>(tree: &T, root: T::Node, bytes: &mut [u8]) -> Result<usize, Error> {
+    serialize_tree_with_options(tree, root, bytes, &StringifyOptions::default())
+}
+
+pub fn serialize_tree_with_options<T: Tree>(
+    tree: &T,
+    root: T::Node,
+    bytes: &mut [u8],
+    options: &StringifyOptions<'_>,
+) -> Result<usize, Error> {
     let mut output = Buffer {
         bytes,
         length: 0,
         base: 0,
     };
-    write_tree(tree, root, &mut output, 0)?;
+    write_tree(tree, root, &mut output, options)?;
     Ok(output.length)
 }
 
@@ -48,106 +98,200 @@ pub fn serialize(bytes: &[u8], base: u32, root: u32, output: &mut [u8]) -> Resul
     serialize_tree(&Graph { bytes, base }, root, output)
 }
 
-fn write_tree<T: Tree>(
-    tree: &T,
+enum Members<C> {
+    Array(C),
+    Object { all: C, order: ObjectOrder<C> },
+}
+
+enum ObjectOrder<C> {
+    Filter(usize),
+    Numeric(Option<u32>),
+    Named(C),
+}
+
+struct Frame<T: Tree> {
     node: T::Node,
-    output: &mut impl Output,
-    depth: usize,
-) -> Result<(), Error> {
-    if depth >= MAX_DEPTH {
-        return Err(Error::Depth(depth));
-    }
-    match tree.value(node)? {
-        Value::Undefined | Value::Null => append(output, b"null"),
-        Value::Boolean(value) => append(output, if value { b"true" } else { b"false" }),
-        Value::Number(value) => {
-            if value.is_finite() {
-                append(
-                    output,
-                    ryu_js::Buffer::new().format_finite(value).as_bytes(),
-                )
-            } else {
-                append(output, b"null")
-            }
-        }
-        Value::String(value) => quote(value, output),
-        Value::Array(children) => {
-            append(output, b"[")?;
-            for (index, child) in children.enumerate() {
-                if index != 0 {
-                    append(output, b",")?;
-                }
-                write_tree(tree, child?, output, depth + 1)?;
-            }
-            append(output, b"]")
-        }
-        Value::Object(children) => {
-            append(output, b"{")?;
-            let mut emitted = false;
-            let mut previous_index = None;
-            loop {
-                let mut candidate = None;
-                for child in children.clone() {
-                    let child = child?;
-                    if let Some(index) = index_key(tree.key(child)?)
-                        && previous_index.is_none_or(|previous| index > previous)
-                        && candidate.is_none_or(|(best, _)| index <= best)
-                    {
-                        candidate = Some((index, child));
+    identity: T::Identity,
+    members: Members<T::Children>,
+    emitted: bool,
+}
+
+impl<T: Tree> Frame<T> {
+    fn next(&mut self, tree: &T, properties: Option<&[&str]>) -> Result<Option<T::Node>, Error> {
+        let (all, order) = match &mut self.members {
+            Members::Array(children) => return children.next().transpose(),
+            Members::Object { all, order } => (all, order),
+        };
+        loop {
+            match order {
+                ObjectOrder::Filter(index) => {
+                    let Some(key) = properties.expect("filtered property order").get(*index) else {
+                        return Ok(None);
+                    };
+                    *index += 1;
+                    if let Some(child) = tree.property(self.node, key)? {
+                        return Ok(Some(child));
                     }
                 }
-                let Some((index, child)) = candidate else {
-                    break;
-                };
-                member(tree, child, output, depth, &mut emitted)?;
-                previous_index = Some(index);
-            }
-            for child in children.clone() {
-                let child = child?;
-                let key = tree.key(child)?;
-                if index_key(key).is_none() {
-                    let mut first_match = None;
-                    let mut last_match = None;
-                    for scan in children.clone() {
-                        let scan = scan?;
-                        if tree.key(scan)? == key {
-                            first_match.get_or_insert(scan);
-                            last_match = Some(scan);
+                ObjectOrder::Numeric(previous) => {
+                    let mut candidate = None;
+                    for child in all.clone() {
+                        let child = child?;
+                        if let Some(index) = index_key(tree.key(child)?)
+                            && previous.is_none_or(|previous| index > previous)
+                            && candidate.is_none_or(|(best, _)| index <= best)
+                        {
+                            candidate = Some((index, child));
                         }
                     }
-                    if first_match == Some(child) {
-                        member(
-                            tree,
-                            last_match.ok_or(Error::InvalidGraph)?,
-                            output,
-                            depth,
-                            &mut emitted,
-                        )?;
+                    if let Some((index, child)) = candidate {
+                        *previous = Some(index);
+                        return Ok(Some(child));
+                    }
+                    *order = ObjectOrder::Named(all.clone());
+                }
+                ObjectOrder::Named(children) => {
+                    let Some(child) = children.next() else {
+                        return Ok(None);
+                    };
+                    let child = child?;
+                    let key = tree.key(child)?;
+                    if index_key(key).is_some() {
+                        continue;
+                    }
+                    let mut first = None;
+                    let mut last = None;
+                    for scan in all.clone() {
+                        let scan = scan?;
+                        if tree.key(scan)? == key {
+                            first.get_or_insert(scan);
+                            last = Some(scan);
+                        }
+                    }
+                    if first == Some(child) {
+                        return Ok(last);
                     }
                 }
             }
-            append(output, b"}")
         }
     }
 }
 
-fn member<T: Tree>(
+fn write_tree<T: Tree>(
     tree: &T,
-    child: T::Node,
+    root: T::Node,
     output: &mut impl Output,
-    depth: usize,
-    emitted: &mut bool,
+    options: &StringifyOptions<'_>,
 ) -> Result<(), Error> {
-    if matches!(tree.value(child)?, Value::Undefined) {
-        return Ok(());
+    let mut frames: [Option<Frame<T>>; MAX_DEPTH] = [const { None }; MAX_DEPTH];
+    let mut depth = 0;
+    let mut pending = Some(root);
+    loop {
+        if let Some(node) = pending.take() {
+            if depth >= MAX_DEPTH {
+                return Err(Error::Depth(depth));
+            }
+            let container = match tree.value(node)? {
+                Value::Undefined | Value::Null => {
+                    append(output, b"null")?;
+                    None
+                }
+                Value::Boolean(value) => {
+                    append(output, if value { b"true" } else { b"false" })?;
+                    None
+                }
+                Value::Number(value) => {
+                    if value.is_finite() {
+                        append(
+                            output,
+                            ryu_js::Buffer::new().format_finite(value).as_bytes(),
+                        )?;
+                    } else {
+                        append(output, b"null")?;
+                    }
+                    None
+                }
+                Value::String(value) => {
+                    quote(value, output)?;
+                    None
+                }
+                Value::Array(children) => Some(Members::Array(children)),
+                Value::Object(all) => Some(Members::Object {
+                    all,
+                    order: if options.properties.is_some() {
+                        ObjectOrder::Filter(0)
+                    } else {
+                        ObjectOrder::Numeric(None)
+                    },
+                }),
+            };
+            if let Some(members) = container {
+                let identity = tree.identity(node)?;
+                if frames[..depth].iter().any(|frame| {
+                    frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.identity == identity)
+                }) {
+                    return Err(Error::Cycle);
+                }
+                append(
+                    output,
+                    if matches!(members, Members::Array(_)) {
+                        b"["
+                    } else {
+                        b"{"
+                    },
+                )?;
+                frames[depth] = Some(Frame {
+                    node,
+                    identity,
+                    members,
+                    emitted: false,
+                });
+                depth += 1;
+            }
+        }
+        while depth > 0 {
+            let frame = frames[depth - 1].as_mut().expect("live traversal frame");
+            let object = matches!(frame.members, Members::Object { .. });
+            if let Some(child) = frame.next(tree, options.properties)? {
+                if object && matches!(tree.value(child)?, Value::Undefined) {
+                    continue;
+                }
+                if frame.emitted {
+                    append(output, b",")?;
+                }
+                line(output, options.gap, depth)?;
+                if object {
+                    quote(tree.key(child)?, output)?;
+                    append(output, if options.gap?.is_empty() { b":" } else { b": " })?;
+                }
+                frame.emitted = true;
+                pending = Some(child);
+                break;
+            }
+            if frame.emitted {
+                line(output, options.gap, depth - 1)?;
+            }
+            append(output, if object { b"}" } else { b"]" })?;
+            frames[depth - 1] = None;
+            depth -= 1;
+        }
+        if pending.is_none() {
+            return Ok(());
+        }
     }
-    if *emitted {
-        append(output, b",")?;
+}
+
+fn line(output: &mut impl Output, gap: Result<&str, Error>, depth: usize) -> Result<(), Error> {
+    let gap = gap?;
+    if !gap.is_empty() {
+        append(output, b"\n")?;
+        for _ in 0..depth {
+            append(output, gap.as_bytes())?;
+        }
     }
-    *emitted = true;
-    quote(tree.key(child)?, output)?;
-    append(output, b":")?;
-    write_tree(tree, child, output, depth + 1)
+    Ok(())
 }
 
 fn index_key(key: &str) -> Option<u32> {
@@ -199,7 +343,11 @@ impl Iterator for Children<'_> {
 
 impl<'a> Tree for Graph<'a> {
     type Node = u32;
+    type Identity = u32;
     type Children = Children<'a>;
+    fn identity(&self, node: u32) -> Result<u32, Error> {
+        Ok(node)
+    }
     fn value(&self, node: u32) -> Result<Value<'_, Children<'a>>, Error> {
         Ok(match self.word(node, 0)? {
             1 => Value::Null,

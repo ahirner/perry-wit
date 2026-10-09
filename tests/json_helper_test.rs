@@ -242,7 +242,7 @@ fn guest_adapter_rejects_invalid_graphs_and_serialization_overlap_atomically() -
             &value.to_le_bytes(),
         )?;
         let result = guest.serialized_size(GRAPH, size, root)?;
-        assert!(matches!(result >> 32, 3 | 5));
+        assert_eq!(result >> 32, 5);
         assert_eq!(guest.serialize(GRAPH, size, root, OUTPUT, 128)?, result);
     }
     let mut unchanged = vec![0; 128];

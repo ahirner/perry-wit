@@ -21,6 +21,7 @@ use thiserror::Error;
 pub enum Intrinsic {
     JsonParse,
     JsonStringify,
+    JsonStringifyOptions,
     JsonNull,
     JsonNumber,
     JsonBoolean,
@@ -177,6 +178,10 @@ impl Intrinsic {
         match self {
             Self::JsonParse => (&[String], &[Json]),
             Self::JsonStringify => (&[OptionalJson], &[OptionalString]),
+            Self::JsonStringifyOptions => (
+                &[OptionalJson, OptionalJson, OptionalJson],
+                &[OptionalString],
+            ),
             Self::JsonNull => (&[], &[Json]),
             Self::JsonNumber => (&[Number], &[Json]),
             Self::JsonBoolean => (&[Boolean], &[Json]),
@@ -286,6 +291,7 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
                 | Intrinsic::JsonParse
                 | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
+                | Intrinsic::JsonStringifyOptions
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
                 | Intrinsic::JsonAsNumber
@@ -312,6 +318,7 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
                 | Intrinsic::JsonParse
                 | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
+                | Intrinsic::JsonStringifyOptions
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
                 | Intrinsic::JsonAsNumber

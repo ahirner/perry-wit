@@ -596,6 +596,8 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
         narrowed = perry.caught_status : builtin.integer i32;
         encoded = perry.intrinsic JsonStringify (optional) : perry.optional <perry.string>;
         serialized = perry.caught_status : builtin.integer i32;
+        formatted = perry.intrinsic JsonStringifyOptions (optional, optional, optional) : perry.optional <perry.string>;
+        formatted_status = perry.caught_status : builtin.integer i32;
     "#,
     );
     verify_text(&input).expect("explicit JSON operations verify");
@@ -608,6 +610,18 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
             .unwrap_err()
             .contains("incorrect operand or result types")
     );
+    for invalid in [
+        input.replace(
+            "JsonStringifyOptions (optional, optional, optional)",
+            "JsonStringifyOptions (optional, text, optional)",
+        ),
+        input.replace(
+            "JsonStringifyOptions (optional, optional, optional)",
+            "JsonStringifyOptions (optional, optional)",
+        ),
+    ] {
+        assert!(verify_text(&invalid).is_err());
+    }
 }
 
 #[test]

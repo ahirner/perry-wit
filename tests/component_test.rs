@@ -2,6 +2,8 @@
 //! wasmtime's component model, called with WIT values (canonical ABI lift and lower).
 use anyhow::Result;
 use perry_wit::compile_for_world;
+use std::process::Command;
+use wasmtime::error::Context as _;
 use wasmtime::{
     Engine, ResourceLimiter, Store,
     component::{Component, Linker, Val},
@@ -761,6 +763,7 @@ export function run(count:number, text:string):string {
   delete recursive.self;
   return JSON.stringify([native,strings,booleans,arrays,optional,checked,projected,recursive]);
 }
+
 "#;
     let compiled = compile_for_world(source, "typed-dictionary.ts", &resolve, world, true)?;
     let engine = Engine::default();
@@ -784,6 +787,179 @@ export function run(count:number, text:string):string {
             store.data().0,
             peak,
             "typed dictionary storage leaked across tasks"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn json_serialization_controls_preserve_order_effects_and_task_lifetimes() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("json-options.wit", "package test:json-options; world options { export format: func(input: string, replacer: string, space: string) -> string; export check: func() -> u32; }")?;
+    let world = resolve.select_world(&[package], Some("options"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
+type State = {trace:number};
+type Branch = {value:number,children:Branch[]};
+function value(state:State, input:JsonValue):JsonValue {state.trace=state.trace*10+1;return input;}
+function keys(state:State, input:JsonValue):string[] {state.trace=state.trace*10+2;input.a=9;return ['a'];}
+function spacing(state:State):number {state.trace=state.trace*10+3;return 2;}
+export function format(input:string, replacer:string, space:string):string {
+  return JSON.stringify(JSON.parse(input), JSON.parse(replacer), JSON.parse(space));
+}
+export function check():number {
+  const state={trace:0};
+  const native:Record<string,number>={b:2,a:1};
+  const result=JSON.stringify(value(state,native), keys(state,native), spacing(state));
+  if(state.trace!==123 || result!=='{\n  "a": 9\n}') throw 1;
+  const record={z:3,a:4};
+  if(JSON.stringify(record,['a','z'],1)!=='{\n "a": 4,\n "z": 3\n}') throw 2;
+  const optional:Record<string,number|undefined>={a:undefined,b:3};
+  if(JSON.stringify(optional,['a','b'],2)!=='{\n  "b": 3\n}') throw 3;
+  const list:JsonValue[]=['a','b'];
+  const parsed:JsonValue=JSON.parse('["b","a"]');
+  const typed:string[]=parsed;
+  if(JSON.stringify(native,typed)!=='{"b":2,"a":9}') throw 4;
+  if(JSON.stringify(native,list)!=='{"a":9,"b":2}') throw 5;
+  const missing=JSON.stringify(undefined,[],2);
+  if(typeof missing!=='undefined' || typeof result!=='string') throw 6;
+  const numbers:number[]=[];
+  if(typeof numbers[0]!=='undefined' || typeof 0!=='number' || typeof false!=='boolean') throw 7;
+  if(typeof native!=='object' || typeof new Uint8Array(1)!=='object') throw 8;
+  const cycle=JSON.parse('{"keep":1}');cycle.self=cycle;
+  if(JSON.stringify(cycle,['keep'],2)!=='{\n  "keep": 1\n}') throw 9;
+  let cyclic=false;try{JSON.stringify(cycle,['self']);}catch(e){cyclic=e instanceof TypeError;}
+  if(!cyclic) throw 10;
+  let prototype=false;try{JSON.stringify({},['__proto__']);}catch(e){prototype=e instanceof TypeError;}
+  if(!prototype) throw 11;
+  let surrogate=false;try{JSON.stringify({a:1},null,'123456789🙂');}catch(e){surrogate=e instanceof TypeError;}
+  if(!surrogate) throw 12;
+  if(JSON.stringify({a:1},[true,false,null,{},[]],2)!=='{}') throw 13;
+  if(JSON.stringify({a:1},null,0.9)!=='{"a":1}') throw 14;
+  if(JSON.stringify({a:1},null,0/0)!=='{"a":1}') throw 15;
+  if(JSON.stringify({},null,'123456789🙂')!=='{}') throw 16;
+  if(JSON.stringify({a:1},[], '123456789🙂')!=='{}') throw 17;
+  if(JSON.stringify(3,null,'123456789🙂')!=='3') throw 18;
+  if(JSON.stringify(undefined,null,'123456789🙂')!==undefined) throw 19;
+  if(JSON.stringify({a:1},null,'x\0y')!=='{\nx\0y"a": 1\n}') throw 20;
+  const leaf:Branch={value:1,children:[]};
+  const shared:Branch={value:0,children:[leaf,leaf]};
+  if(JSON.stringify(shared)!=='{"value":0,"children":[{"value":1,"children":[]},{"value":1,"children":[]}]}') throw 21;
+  const view:JsonValue=shared;
+  const children:JsonValue[]=view.children;
+  children.push(view);
+  let nativeCycle=false;try{JSON.stringify(shared);}catch(e){nativeCycle=e instanceof TypeError;}
+  if(!nativeCycle) throw 22;
+  return state.trace;
+}
+"#;
+    let compiled = compile_for_world(source, "json-options.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let format = instance.get_typed_func::<(&str, &str, &str), (String,)>(&mut store, "format")?;
+    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
+    assert_eq!(
+        check
+            .call(&mut store, ())
+            .context("initial serialization control checks")?
+            .0,
+        123
+    );
+    let input = r#"{"2":2,"a":1,"b":[{"a":3,"2":4},[],{}],"a":5,"__proto__":null}"#;
+    let replacer = r#"["b","a",2,2,"2",true,null,{},["a"],"missing"]"#;
+    let mut cases = Vec::new();
+    // Spec checks above cover Node 24.21 discrepancies: fractional spacing and NUL gaps.
+    for space in [
+        "null", "-1e400", "-0", "0", "2.9", "10", "1e400", "true", "{}", "[]",
+    ] {
+        cases.push((input.to_owned(), replacer.to_owned(), space.to_owned()));
+    }
+    for text in ["", "\t", "é🙂", "🙂🙂🙂🙂🙂🙂", "abcdefghij🙂", " \n"] {
+        cases.push((
+            input.to_owned(),
+            "null".into(),
+            serde_json::to_string(text)?,
+        ));
+    }
+    for (input, replacer) in [
+        ("[{},[],1]", "[]"),
+        ("[]", "[]"),
+        ("{}", "null"),
+        ("123", "[]"),
+        (r#"{"__proto__":null}"#, r#"["__proto__"]"#),
+    ] {
+        cases.push((input.into(), replacer.into(), "2".into()));
+    }
+    let large = serde_json::json!({"a": "é🙂".repeat(8_192), "b": [1,2,3]}).to_string();
+    cases.push((large, replacer.into(), "10".into()));
+    let mut deep = "0".to_owned();
+    for depth in 0..127 {
+        deep = if depth % 2 == 0 {
+            format!("[{deep}]")
+        } else {
+            format!("{{\"a\":{deep}}}")
+        };
+    }
+    cases.push((deep, "null".into(), "2".into()));
+    let oracle = Command::new("node").args([
+        "-e",
+        "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(([v,r,s])=>JSON.stringify(JSON.parse(v),JSON.parse(r),JSON.parse(s)))))",
+        &serde_json::to_string(&cases)?,
+    ]).output()?;
+    assert!(
+        oracle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let expected: Vec<String> = serde_json::from_slice(&oracle.stdout)?;
+    for _ in 0..3 {
+        for ((input, replacer, space), expected) in cases.iter().zip(&expected) {
+            let actual = format
+                .call(&mut store, (input, replacer, space))
+                .with_context(|| {
+                    format!(
+                        "space={space}, replacer={replacer}, input bytes={}",
+                        input.len()
+                    )
+                })?
+                .0;
+            assert_eq!(
+                actual, *expected,
+                "space={space}, replacer={replacer}, input={input}"
+            );
+        }
+    }
+    let peak = store.data().0;
+    for _ in 0..12 {
+        assert_eq!(
+            check
+                .call(&mut store, ())
+                .context("repeated serialization control checks")?
+                .0,
+            123
+        );
+        for ((input, replacer, space), expected) in cases.iter().zip(&expected) {
+            let actual = format
+                .call(&mut store, (input, replacer, space))
+                .with_context(|| {
+                    format!(
+                        "space={space}, replacer={replacer}, input bytes={}",
+                        input.len()
+                    )
+                })?
+                .0;
+            assert_eq!(
+                actual, *expected,
+                "space={space}, replacer={replacer}, input={input}"
+            );
+        }
+        assert_eq!(
+            store.data().0,
+            peak,
+            "serialization controls leaked task storage"
         );
     }
     Ok(())

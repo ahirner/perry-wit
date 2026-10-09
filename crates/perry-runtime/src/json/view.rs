@@ -20,7 +20,7 @@ pub(crate) unsafe fn source(reference: *mut u8) -> Option<*mut u8> {
     }
 }
 
-fn identity(value: Json) -> *mut u8 {
+pub(super) fn identity(value: Json) -> *mut u8 {
     match value {
         Json::Array(reference) | Json::Native { reference, .. } => reference,
         Json::Object(object) => object.cast(),

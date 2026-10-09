@@ -8,6 +8,59 @@ pub(super) fn is_json(ctx: &Context, value: Value) -> bool {
 }
 
 impl FunctionBuilder<'_> {
+    pub(super) fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if is_json(ctx, value) {
+            let value = self.optional(ctx, value);
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::JsonTypeof, vec![value])
+                .unwrap());
+        }
+        let optional = optional_value(ctx, value.get_type(ctx));
+        let ty = optional.unwrap_or(value.get_type(ctx));
+        let tag = {
+            let ty = ty.deref(ctx);
+            if ty.is::<FP64Type>() {
+                "number"
+            } else if ty.is::<StringType>() {
+                "string"
+            } else if ty
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|ty| ty.width() == 1)
+            {
+                "boolean"
+            } else if ty.is::<RecordType>()
+                || ty.is::<ArrayType>()
+                || ty.is::<DictionaryType>()
+                || ty.is::<BytesType>()
+                || ty.is::<BufferType>()
+                || ty.is::<PromiseType>()
+            {
+                "object"
+            } else {
+                bail!("typeof is not supported for this value type yet");
+            }
+        };
+        let present = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, tag));
+        if optional.is_none() {
+            return Ok(present);
+        }
+        let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+        let missing = self.new_block(ctx, "typeof_missing");
+        let defined = self.new_block(ctx, "typeof_defined");
+        let join = self.new_block(ctx, "typeof_join");
+        let result = self.entry_slot(ctx, present.get_type(ctx));
+        self.branch(ctx, absent, missing, defined);
+        self.switch_to(missing);
+        let undefined = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "undefined"));
+        self.store(ctx, result, undefined);
+        self.jump(ctx, join);
+        self.switch_to(defined);
+        self.store(ctx, result, present);
+        self.jump(ctx, join);
+        self.switch_to(join);
+        self.load(ctx, result)
+    }
+
     pub(super) fn json_key(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         let key = self.expression(ctx, expr)?;
         let key = self.arithmetic(ctx, key);
@@ -17,22 +70,28 @@ impl FunctionBuilder<'_> {
         );
         Ok(key)
     }
-    pub(super) fn stringify_json(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
-        let value = match expr {
-            Expr::Undefined => {
-                let json = JsonType::get(ctx).into();
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, json))
+    pub(super) fn stringify_json(
+        &mut self,
+        ctx: &mut Context,
+        expr: &Expr,
+        controls: Option<(&Expr, &Expr)>,
+    ) -> Result<Value> {
+        let value = self.json_value(ctx, expr)?;
+        let mut arguments = vec![self.optional(ctx, value)];
+        let intrinsic = if let Some((replacer, space)) = controls {
+            ensure!(
+                !matches!(replacer, Expr::Closure { .. } | Expr::FuncRef(_)),
+                "function JSON replacers need the non-escaping callback lowering, which is not implemented yet"
+            );
+            for control in [replacer, space] {
+                let value = self.json_value(ctx, control)?;
+                arguments.push(self.optional(ctx, value));
             }
-            Expr::Array(_) | Expr::Object(_) | Expr::New { .. } => self.json_value(ctx, expr)?,
-            _ => {
-                let value = self.expression(ctx, expr)?;
-                self.json_input(ctx, value)?
-            }
+            Intrinsic::JsonStringifyOptions
+        } else {
+            Intrinsic::JsonStringify
         };
-        let value = self.optional(ctx, value);
-        Ok(self
-            .intrinsic(ctx, Intrinsic::JsonStringify, vec![value])
-            .unwrap())
+        Ok(self.intrinsic(ctx, intrinsic, arguments).unwrap())
     }
     pub(super) fn json_value(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         match expr {

@@ -247,6 +247,7 @@ enum Runtime {
     DictionaryValues,
     JsonParse,
     JsonStringify,
+    JsonStringifyOptions,
     JsonNull,
     JsonNumber,
     JsonBoolean,
@@ -356,6 +357,7 @@ impl Runtime {
             Runtime::DictionaryValues => "perry_dictionary_values",
             Runtime::JsonParse => "perry_json_parse",
             Runtime::JsonStringify => "perry_json_stringify",
+            Runtime::JsonStringifyOptions => "perry_json_stringify_options",
             Runtime::JsonNull => "perry_json_null",
             Runtime::JsonNumber => "perry_json_number",
             Runtime::JsonBoolean => "perry_json_boolean",
@@ -491,6 +493,7 @@ impl Runtime {
             Runtime::JsonIndex => (vec![i32, f64], vec![i32]),
             Runtime::JsonAsNumber => (vec![i32], vec![f64]),
             Runtime::JsonSet => (vec![i32, i32, i32], vec![]),
+            Runtime::JsonStringifyOptions => (vec![i32, i32, i32], vec![i32]),
             Runtime::JsonSetIndex => (vec![i32, f64, i32], vec![]),
             Runtime::BufferNew | Runtime::BytesNew => (vec![f64], vec![i32]),
             Runtime::BufferLength | Runtime::BytesLength | Runtime::BytesOffset => {
@@ -1900,6 +1903,7 @@ impl<'s> FunctionLowering<'s> {
             let json_runtime = match kind {
                 Intrinsic::JsonParse => Some(Runtime::JsonParse),
                 Intrinsic::JsonStringify => Some(Runtime::JsonStringify),
+                Intrinsic::JsonStringifyOptions => Some(Runtime::JsonStringifyOptions),
                 Intrinsic::JsonNull => Some(Runtime::JsonNull),
                 Intrinsic::JsonNumber => Some(Runtime::JsonNumber),
                 Intrinsic::JsonBoolean => Some(Runtime::JsonBoolean),

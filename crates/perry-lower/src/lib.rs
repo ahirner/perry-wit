@@ -851,27 +851,22 @@ impl<'s> FunctionBuilder<'s> {
                     value
                 }
             }
-            Expr::JsonStringify(value) => self.stringify_json(ctx, value)?,
+            Expr::JsonStringify(value) => self.stringify_json(ctx, value, None)?,
             Expr::JsonStringifyFull(value, replacer, space) => {
-                ensure!(
-                    matches!(&**replacer, Expr::Undefined | Expr::Null),
-                    "JSON replacers are not implemented yet"
-                );
-                ensure!(
-                    matches!(&**space, Expr::Undefined | Expr::Null),
-                    "JSON indentation is not implemented yet"
-                );
-                self.stringify_json(ctx, value)?
+                self.stringify_json(ctx, value, Some((replacer, space)))?
             }
+            Expr::JsonStringifyPretty {
+                value,
+                replacer,
+                space,
+            } => self.stringify_json(
+                ctx,
+                value,
+                Some((replacer.as_deref().unwrap_or(&Expr::Undefined), space)),
+            )?,
             Expr::TypeOf(value) => {
                 let value = self.expression(ctx, value)?;
-                ensure!(
-                    json::is_json(ctx, value),
-                    "typeof currently requires a JsonValue"
-                );
-                let value = self.optional(ctx, value);
-                self.intrinsic(ctx, Intrinsic::JsonTypeof, vec![value])
-                    .unwrap()
+                self.type_of(ctx, value)?
             }
             Expr::ArrayIsArray(value) => {
                 let value = self.expression(ctx, value)?;

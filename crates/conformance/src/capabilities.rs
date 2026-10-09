@@ -106,6 +106,57 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = vec![
         Contract {
+            id: "ecma.json.stringify_options",
+            description: "JSON property-list selection and formatted serialization preserve order and effects",
+            specification: "https://tc39.es/ecma262/#sec-json.stringify",
+            domain: "Parsed and native UTF-8 values, recursive property lists, duplicate string/number keys, ignored non-string/number entries, numeric and string indentation, excluded cycles and left-to-right argument effects; inherited prototype lookup and surrogate-splitting gaps are outside the current subset; numeric gaps in (0,1) and gaps containing NUL use separate spec-based component regressions because Node 24.21 disagrees with the specification",
+            witnesses: vec![
+                Witness {
+                    partition: "order-and-duplicates",
+                    case: json_options(
+                        r#"{"2":2,"a":1,"b":[{"a":3,"2":4}],"a":5}"#.into(),
+                        vec![0, 1, 2, 0, 2],
+                        "2.9".into(),
+                    ),
+                },
+                Witness {
+                    partition: "empty",
+                    case: json_options("[{},[],null]".into(), vec![], "10".into()),
+                },
+                Witness {
+                    partition: "unicode-gap",
+                    case: json_options(
+                        r#"{"a":"漢🙂","b":true}"#.into(),
+                        vec![1, 0],
+                        serde_json::to_string("🙂🙂🙂🙂🙂🙂").unwrap(),
+                    ),
+                },
+            ],
+            strategy: (
+                json_strategy(),
+                prop::collection::vec(0u8..9, 0..18),
+                prop_oneof![
+                    (-4i16..15).prop_map(|n| n.to_string()),
+                    prop::sample::select(vec![
+                        "null",
+                        "true",
+                        "{}",
+                        "[]",
+                        "-1e400",
+                        "1e400",
+                        "2.9",
+                        "\"\\t\"",
+                        "\"é🙂\"",
+                        "\"abcdefghijk\""
+                    ])
+                    .prop_map(str::to_owned)
+                ],
+            )
+                .prop_map(|(text, keys, space)| json_options(text, keys, space))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "ecma.object.dictionary",
             description: "Typed dictionaries retain native values, aliases and ordered key/value snapshots",
             specification: "https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots",
@@ -614,6 +665,49 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn json_options(text: String, keys: Vec<u8>, space: String) -> Case {
+    let keys: Vec<&str> = keys
+        .into_iter()
+        .map(|index| ["b", "a", "2", "1", "child", "text", "keep", "x", "0"][index as usize])
+        .collect();
+    let keys = serde_json::to_string(&keys).unwrap();
+    let text = serde_json::to_string(&text).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {{[key:string]:JsonValue}};
+type State = {{trace:number}};
+function first(state:State,value:JsonValue):JsonValue {{state.trace=state.trace*10+1;return value;}}
+function second(state:State,value:Record<string,number>):string[] {{state.trace=state.trace*10+2;value.a=9;return ['a'];}}
+function third(state:State):number {{state.trace=state.trace*10+3;return 2;}}
+const input = JSON.parse({text});
+const filter:JsonValue[] = {keys};
+filter.push(2);filter.push(false);filter.push(null);filter.push({{}});
+const space:JsonValue = {space};
+const native={{b:[1,2],a:'é🙂'}};
+const nativeJson:JsonValue=native;
+const view:{{a:string,b:number[]}}=nativeJson as unknown as {{a:string,b:number[]}};
+const dictionary:Record<string,number>={{b:-0,a:3}};dictionary[1]=9;
+const state={{trace:0}};
+const effect=JSON.stringify(first(state,dictionary),second(state,dictionary),third(state));
+if(state.trace!==123) throw 1;
+const cycle=JSON.parse('{{"keep":1}}');cycle.self=cycle;
+const excluded=JSON.stringify(cycle,['keep'],space as unknown as string);
+const missing=JSON.stringify(undefined,filter as unknown as (string|number)[],space as unknown as string);
+if(typeof missing!=='undefined') throw 2;
+console.log(JSON.stringify([
+  JSON.stringify(input,filter as unknown as (string|number)[],space as unknown as string), JSON.stringify(input,null,space as unknown as string),
+  JSON.stringify(native,filter as unknown as (string|number)[],space as unknown as string), JSON.stringify(view,filter as unknown as (string|number)[],space as unknown as string),
+  JSON.stringify(dictionary,filter as unknown as (string|number)[],space as unknown as string), JSON.stringify(input,[],space as unknown as string),
+  JSON.stringify(input,false as unknown as null,space as unknown as string), JSON.stringify([undefined,-0,0/0,1/0],filter as unknown as (string|number)[],space as unknown as string),
+  effect, excluded, typeof missing
+]));
+"#
+        ),
+    }
 }
 
 fn typed_dictionary(values: Vec<i16>, n: i16) -> Case {

@@ -7,8 +7,10 @@ pub mod dictionary;
 mod native;
 mod object;
 mod properties;
+mod stringify;
 use object::{Field, Object};
 pub use properties::*;
+pub use stringify::{perry_json_stringify, perry_json_stringify_options};
 pub mod view;
 pub use native::perry_json_pack;
 
@@ -162,7 +164,9 @@ pub unsafe extern "C" fn perry_json_parse(input: *mut u8) -> *mut u8 {
             return failure(exception::RANGE_ERROR, "JSON document is too large");
         }
         Err(Error::Syntax(_)) => return failure(exception::SYNTAX_ERROR, "invalid JSON text"),
-        Err(Error::InvalidGraph) => unreachable!("measuring text does not read a graph"),
+        Err(Error::InvalidGraph | Error::PrototypeLookup | Error::Cycle) => {
+            unreachable!("measuring text does not inspect object storage")
+        }
     };
     let bytes = perry_alloc(size.try_into().expect("JSON document too large"));
     // SAFETY: fresh storage holds the measured graph; borrowed strings keep its task lifetime.
@@ -272,7 +276,16 @@ unsafe fn node_value(node: Node) -> Option<Json> {
 struct RuntimeTree;
 impl Tree for RuntimeTree {
     type Node = Node;
+    type Identity = *mut u8;
     type Children = Children;
+    fn identity(&self, node: Node) -> Result<*mut u8, Error> {
+        // SAFETY: serialization requests identity only for live arrays and objects.
+        unsafe {
+            node_value(node)
+                .map(view::identity)
+                .ok_or(Error::InvalidGraph)
+        }
+    }
     fn value(&self, node: Node) -> Result<Value<'_, Children>, Error> {
         // SAFETY: this private adapter is only used with live task JSON nodes; serialization is read-only.
         unsafe {
@@ -308,32 +321,23 @@ impl Tree for RuntimeTree {
         // SAFETY: object members hold live string keys.
         Ok(unsafe { string::text(key) })
     }
-}
-
-/// # Safety
-/// `value` is a live JSON tree, which remains unchanged during serialization.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_json_stringify(value: *mut u8) -> *mut u8 {
-    if value.is_null() {
-        return ptr::null_mut();
-    }
-    let node = Node::Value(value);
-    let size = match perry_json_codec::measure_tree(&RuntimeTree, node) {
-        Ok(size) => size,
-        Err(_) => {
-            return failure(
-                exception::TYPE_ERROR,
-                "JSON value is cyclic or too deeply nested",
-            );
+    fn property(&self, node: Node, key: &str) -> Result<Option<Node>, Error> {
+        // SAFETY: the read-only adapter keeps every node and its native descriptor live.
+        let found = unsafe {
+            match node_value(node) {
+                Some(Json::Object(object)) => (*object).find(key).map(|field| Node::Field(field)),
+                Some(Json::Native { reference, ty })
+                    if matches!((*ty).kind, NativeKind::Record | NativeKind::Dictionary) =>
+                {
+                    native::field(reference, &*ty, key).map(Node::NativeSlot)
+                }
+                _ => None,
+            }
+        };
+        if found.is_none() && key == "__proto__" {
+            return Err(Error::PrototypeLookup);
         }
-    };
-    let data = perry_alloc(size.try_into().expect("JSON text too large"));
-    // SAFETY: measured output is fresh and disjoint from the read-only JSON tree.
-    unsafe {
-        let output = core::slice::from_raw_parts_mut(data, size);
-        perry_json_codec::serialize_tree(&RuntimeTree, node, output)
-            .expect("measured JSON serialization");
-        string::perry_string_adopt(data, size as u32)
+        Ok(found)
     }
 }
 

@@ -137,7 +137,7 @@ fn codec_failure(error: Error) -> u64 {
         Error::UnpairedSurrogate(offset) => failure(2, offset),
         Error::Depth(offset) => failure(3, offset),
         Error::Capacity => failure(4, 0),
-        Error::InvalidGraph => failure(5, 0),
+        Error::InvalidGraph | Error::PrototypeLookup | Error::Cycle => failure(5, 0),
     }
 }
 
