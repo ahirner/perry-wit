@@ -9,9 +9,9 @@ use crate::{
     attrs::ErrorKind,
     exceptions::MayThrowInterface,
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, OptionalType,
-        PromiseType, ReadResultType, ReadableType, ReaderType, RequestType, ResponseType,
-        StatsType, StringType, WritableType, WriterType,
+        ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType, JsonType,
+        OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RequestType,
+        ResponseType, StatsType, StringType, WritableType, WriterType,
     },
 };
 use pliron::{
@@ -65,6 +65,7 @@ pub enum Ty {
     Reader,
     ReadResult,
     PromiseReadResult,
+    Incoming,
     OptReadable,
     PromiseResponse,
 }
@@ -98,6 +99,7 @@ impl Ty {
             Ty::Readable => ReadableType::get(ctx).into(),
             Ty::Reader => ReaderType::get(ctx).into(),
             Ty::ReadResult => ReadResultType::get(ctx).into(),
+            Ty::Incoming => IncomingType::get(ctx).into(),
             Ty::PromiseReadResult => {
                 let result = ReadResultType::get(ctx).into();
                 PromiseType::get(ctx, result).into()
@@ -177,6 +179,7 @@ impl Ty {
             Ty::Readable => deref.is::<ReadableType>(),
             Ty::Reader => deref.is::<ReaderType>(),
             Ty::ReadResult => deref.is::<ReadResultType>(),
+            Ty::Incoming => deref.is::<IncomingType>(),
             Ty::PromiseReadResult => promise_of(&|t| t.deref(ctx).is::<ReadResultType>()),
             Ty::OptReadable => optional_of(&|t| t.deref(ctx).is::<ReadableType>()),
             Ty::PromiseResponse => promise_of(&|t| t.deref(ctx).is::<ResponseType>()),
@@ -335,6 +338,22 @@ intrinsics! {
     RequestBytes = "request_bytes" (Request) -> (PromiseBytes);
     RequestText = "request_text" (Request) -> (PromiseString);
     RequestJson = "request_json" (Request) -> (PromiseJson);
+    // Serving `wasi:http/handler`: the request's parts (the handle is the `request`
+    // resource), its body, then the response's headers and the response.
+    ServeRequest = "serve_request" (Number) -> (Incoming);
+    ServeBody = "serve_body" (Incoming) -> (PromiseBytes);
+    ServeMethod = "serve_method" (Incoming) -> (String), pure;
+    ServeMethodOther = "serve_method_other" (Incoming) -> (OptString), pure;
+    ServeHasScheme = "serve_has_scheme" (Incoming) -> (Bool), pure;
+    ServeScheme = "serve_scheme" (Incoming) -> (String), pure;
+    ServeSchemeOther = "serve_scheme_other" (Incoming) -> (OptString), pure;
+    ServeAuthority = "serve_authority" (Incoming) -> (OptString), pure;
+    ServePath = "serve_path" (Incoming) -> (OptString), pure;
+    ServeHeaderCount = "serve_header_count" (Incoming) -> (Number), pure;
+    ServeHeaderName = "serve_header_name" (Incoming, Number) -> (String), pure;
+    ServeHeaderValue = "serve_header_value" (Incoming, Number) -> (Bytes), pure;
+    ServeAddHeader = "serve_add_header" (Incoming, String, Bytes) -> (), throws;
+    ServeRespond = "serve_respond" (Incoming, Number, Bytes) -> (Number), throws;
     WritableStdout = "writable_stdout" () -> (Writable);
     WritableStderr = "writable_stderr" () -> (Writable);
     WritableLocked = "writable_locked" (Writable) -> (Bool);

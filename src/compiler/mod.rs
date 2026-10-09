@@ -1,6 +1,8 @@
 //! TypeScript → MIR → core Wasm → WASI 0.3 component.
 
 mod bind;
+mod http;
+mod wit_types;
 
 use crate::{audit, component, link, strip};
 use anyhow::{Context as _, Result, anyhow};
@@ -63,8 +65,11 @@ pub fn compile_for_world(
 ) -> Result<Compiled> {
     audit::audit_no_llvm(include_str!("../../Cargo.lock"))
         .context("LLVM audit verification failed")?;
+    if http::is_handler_world(resolve, world) {
+        return http::compile(source, file_name, resolve, componentize);
+    }
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, file_name)?;
+    let mir = lower(ctx, source, file_name, &wit_types::foreign(resolve))?;
     let exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::check_main(ctx, &mir, &exports)?;
     let imports = bind::imports(resolve, world);
@@ -90,7 +95,7 @@ pub fn compile_for_world(
 /// functions that may throw). For tests and inspection; components use [compile_for_world].
 pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, file_name)?;
+    let mir = lower(ctx, source, file_name, &Default::default())?;
     finish(perry_codegen::compile(ctx, &mir, &Exports::Raw)?, None)
 }
 
@@ -98,8 +103,9 @@ fn lower(
     ctx: &mut Context,
     source: &str,
     file_name: &str,
+    foreign: &std::collections::HashMap<String, perry_lower::hir::Type>,
 ) -> Result<pliron::builtin::ops::ModuleOp> {
-    let mir = perry_lower::lower_source(ctx, source, file_name)?;
+    let mir = perry_lower::lower_source_with(ctx, source, file_name, foreign)?;
     perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")?;

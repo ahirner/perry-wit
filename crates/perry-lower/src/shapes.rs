@@ -8,6 +8,13 @@
 //! before its fields are known. Field order inside the record is the sorted order; evaluation
 //! order stays the source order.
 //! Widening a record to a narrower shape (subset rule R2) is not supported yet.
+//!
+//! WIT types come from the SDK's generated declarations, which the parser does not read: the
+//! compiler passes them as *foreign* HIR types under their SDK names (prefixed `wit:`), and imports of those
+//! names resolve to them. A WIT variant (`{ tag: "a" } | { tag: "b"; val: T }`) is the record
+//! `{ tag: string, val: T | undefined }`, an option (`T | null | undefined`) is `T | undefined`
+//! (`null` and `undefined` share the absent value), and a tuple `[A, B]` is the record
+//! `{ _0: A, _1: B }`.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
@@ -21,6 +28,9 @@ use std::{cell::RefCell, collections::HashMap};
 
 pub(crate) struct Shapes<'h> {
     hir: &'h HirModule,
+    /// WIT types by SDK name, and the local names they are imported under.
+    foreign: &'h HashMap<String, HirType>,
+    aliases: HashMap<String, String>,
     /// Named types whose fields are being computed, with the record name reserved when a
     /// field refers back to the type.
     pending: RefCell<HashMap<String, Option<String>>>,
@@ -43,9 +53,24 @@ fn record_name(fields: &[&str]) -> String {
 }
 
 impl<'h> Shapes<'h> {
-    pub(crate) fn new(hir: &'h HirModule) -> Self {
+    pub(crate) fn new(hir: &'h HirModule, foreign: &'h HashMap<String, HirType>) -> Self {
+        let aliases = hir
+            .imports
+            .iter()
+            .flat_map(|import| &import.specifiers)
+            .filter_map(|specifier| match specifier {
+                perry_hir::ir::ImportSpecifier::Named { imported, local }
+                    if foreign.contains_key(&format!("wit:{imported}")) =>
+                {
+                    Some((local.clone(), format!("wit:{imported}")))
+                }
+                _ => None,
+            })
+            .collect();
         Shapes {
             hir,
+            foreign,
+            aliases,
             pending: RefCell::new(HashMap::new()),
             reserved: RefCell::new(0),
             named: RefCell::new(HashMap::new()),
@@ -89,19 +114,68 @@ impl<'h> Shapes<'h> {
                     .collect::<Result<Vec<_>>>()?;
                 self.hir_record(ctx, None, fields)?.into()
             }
-            // `T | undefined` (R8).
-            HirType::Union(members)
-                if members.len() == 2 && members.iter().any(|m| matches!(m, HirType::Void)) =>
-            {
-                let defined = members
+            HirType::Union(members) => {
+                let defined: Vec<&HirType> = members
                     .iter()
-                    .find(|m| !matches!(m, HirType::Void))
-                    .expect("two members");
-                let inner = self.value_type(ctx, defined)?;
-                OptionalType::get(ctx, inner).into()
+                    .filter(|m| !matches!(m, HirType::Void | HirType::Null))
+                    .collect();
+                if defined.len() < members.len() {
+                    // `T | undefined` (R8), `T | null` and `T | null | undefined`.
+                    let [defined] = defined.as_slice() else {
+                        bail!("unions of several types are not supported yet")
+                    };
+                    let inner = self.value_type(ctx, defined)?;
+                    OptionalType::get(ctx, inner).into()
+                } else {
+                    self.variant(ctx, &defined)?
+                }
+            }
+            HirType::Tuple(elements) => {
+                let names: Vec<String> = (0..elements.len()).map(|i| format!("_{i}")).collect();
+                let fields = names.iter().map(String::as_str).zip(elements).collect();
+                self.hir_record(ctx, None, fields)?.into()
             }
             other => bail!("MIR backend does not support type {other:?} yet"),
         })
+    }
+
+    /// A tagged union of object types (a WIT variant): the record `{ tag: string }`, with
+    /// `val: T | undefined` when cases carry a payload, all of one type `T`.
+    fn variant(&self, ctx: &mut Context, members: &[&HirType]) -> Result<TypeHandle> {
+        let mut payload: Option<&HirType> = None;
+        for member in members {
+            let HirType::Object(object) = member else {
+                bail!("unions other than tagged object types are not supported yet")
+            };
+            ensure!(
+                matches!(
+                    object.properties.get("tag").map(|p| &p.ty),
+                    Some(HirType::StringLiteral(_))
+                ),
+                "union members need a literal `tag`"
+            );
+            ensure!(
+                object.properties.keys().all(|k| k == "tag" || k == "val"),
+                "union members have `tag` and `val` only"
+            );
+            if let Some(val) = object.properties.get("val") {
+                if let Some(other) = payload {
+                    let (a, b) = (self.value_type(ctx, other)?, self.value_type(ctx, &val.ty)?);
+                    ensure!(
+                        a == b,
+                        "variant payloads of different types are not supported yet"
+                    );
+                }
+                payload = Some(&val.ty);
+            }
+        }
+        let tag = HirType::String;
+        let val = payload.map(|ty| HirType::Union(vec![ty.clone(), HirType::Void]));
+        let mut fields = vec![("tag", &tag)];
+        if let Some(val) = &val {
+            fields.push(("val", val));
+        }
+        Ok(self.hir_record(ctx, None, fields)?.into())
     }
 
     /// The value a promise of `ty` settles with; `void` settles `undefined`.
@@ -139,6 +213,10 @@ impl<'h> Shapes<'h> {
         let user = self.hir.interfaces.iter().any(|i| i.name == name)
             || self.hir.type_aliases.iter().any(|a| a.name == name);
         if !user {
+            let key = self.aliases.get(name).map_or(name, String::as_str);
+            if let Some(foreign) = self.foreign.get(key) {
+                return self.value_type(ctx, foreign);
+            }
             match name {
                 "Uint8Array" => return Ok(perry_mir::types::BytesType::get(ctx).into()),
                 "Date" => return Ok(perry_mir::types::DateType::get(ctx).into()),

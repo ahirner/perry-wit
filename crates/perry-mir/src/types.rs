@@ -323,6 +323,17 @@ pub struct ReaderType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct ReadResultType;
 
+/// An HTTP request a handler serves (`wasi:http/handler`): its parts, its body and the
+/// response being built.
+#[pliron_type(
+    name = "perry.incoming",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct IncomingType;
+
 /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value. Lives in the
 /// task like every other value (R3, R4).
 #[pliron_type(

@@ -43,9 +43,9 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, OptionalType,
-        PromiseType, ReadResultType, ReadableType, ReaderType, RecordType, RequestType,
-        ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
+        ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType, JsonType,
+        OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordType,
+        RequestType, ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
 use perry_runtime::array as layout;
@@ -266,6 +266,7 @@ enum Runtime {
     IoClose,
     ExitCodeSet,
     CommandOutcome,
+    RejectionText,
     EnvGet,
     EnvKeys,
     PerformanceNow,
@@ -323,6 +324,7 @@ impl Runtime {
             Runtime::IoClose => "perry_io_close",
             Runtime::ExitCodeSet => "perry_exit_code_set",
             Runtime::CommandOutcome => "perry_command_outcome",
+            Runtime::RejectionText => "perry_rejection_text",
             Runtime::EnvGet => "perry_env_get",
             Runtime::EnvKeys => "perry_env_keys",
             Runtime::PerformanceNow => "perry_performance_now",
@@ -364,7 +366,9 @@ impl Runtime {
             Runtime::Print => (vec![i32, i32, i32], vec![]),
             Runtime::IoEvent => (vec![i32, i32, i32], vec![i32]),
             Runtime::ExitCodeSet => (vec![f64], vec![]),
-            Runtime::CommandOutcome | Runtime::EnvGet => (vec![i32], vec![i32]),
+            Runtime::CommandOutcome | Runtime::EnvGet | Runtime::RejectionText => {
+                (vec![i32], vec![i32])
+            }
             Runtime::PerformanceNow | Runtime::DateNow => (vec![], vec![f64]),
             Runtime::NumberFormat => (vec![f64, i32], vec![i32]),
             Runtime::PromiseRethrow
@@ -440,6 +444,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<ReadableType>()
         || deref.is::<ReaderType>()
         || deref.is::<ReadResultType>()
+        || deref.is::<IncomingType>()
         || deref.is::<ExceptionType>()
         || deref.is::<BytesType>()
         || deref.is::<JsonType>()
@@ -576,6 +581,9 @@ struct ModuleState {
     uses_fetch: bool,
     /// `json()` of a body: events also settle the bodies read to their end.
     uses_json_bodies: bool,
+    /// Serving `wasi:http/handler`: events advance the exchange, and the export keeps
+    /// running after `task.return` until the response body is written.
+    uses_http_server: bool,
     /// Operations whose previous results are dead whenever they run again (`lease`).
     leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
@@ -616,6 +624,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         uses_streams: false,
         uses_fetch: false,
         uses_json_bodies: false,
+        uses_http_server: false,
         json_serializers: HashMap::new(),
         leased: HashSet::new(),
     };
@@ -1553,6 +1562,12 @@ impl<'s> FunctionLowering<'s> {
                     args,
                 )
             }
+            Intrinsic::ServeRequest => {
+                self.needs_import("wasi:http/types@0.3.0", "an HTTP handler")?;
+                self.state.uses_http_server = true;
+                self.state.uses_streams = true;
+                self.call(ctx, "web_serve_request", &[W::F64], &[W::I32], args)
+            }
             Intrinsic::ResponseJson | Intrinsic::RequestJson => {
                 self.state.uses_json_bodies = true;
                 self.call(ctx, "web_body_json", &[W::I32], &[W::I32], args)
@@ -1698,6 +1713,33 @@ impl<'s> FunctionLowering<'s> {
                         }
                         Intrinsic::ResponseBytes | Intrinsic::RequestBytes => {
                             ("web_body_bytes", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ServeBody => ("web_serve_body", &[W::I32], &[W::I32]),
+                        Intrinsic::ServeMethod => ("web_serve_method", &[W::I32], &[W::I32]),
+                        Intrinsic::ServeMethodOther => {
+                            ("web_serve_method_other", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ServeHasScheme => ("web_serve_has_scheme", &[W::I32], &[W::I32]),
+                        Intrinsic::ServeScheme => ("web_serve_scheme", &[W::I32], &[W::I32]),
+                        Intrinsic::ServeSchemeOther => {
+                            ("web_serve_scheme_other", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ServeAuthority => ("web_serve_authority", &[W::I32], &[W::I32]),
+                        Intrinsic::ServePath => ("web_serve_path", &[W::I32], &[W::I32]),
+                        Intrinsic::ServeHeaderCount => {
+                            ("web_serve_header_count", &[W::I32], &[W::F64])
+                        }
+                        Intrinsic::ServeHeaderName => {
+                            ("web_serve_header_name", &[W::I32, W::F64], &[W::I32])
+                        }
+                        Intrinsic::ServeHeaderValue => {
+                            ("web_serve_header_value", &[W::I32, W::F64], &[W::I32])
+                        }
+                        Intrinsic::ServeAddHeader => {
+                            ("web_serve_add_header", &[W::I32, W::I32, W::I32], &[])
+                        }
+                        Intrinsic::ServeRespond => {
+                            ("web_serve_respond", &[W::I32, W::F64, W::I32], &[W::F64])
                         }
                         Intrinsic::ResponseText | Intrinsic::RequestText => {
                             ("web_body_text", &[W::I32], &[W::I32])

@@ -73,6 +73,7 @@ mod body;
 mod fetch;
 mod headers;
 mod readable;
+mod serve;
 mod writable;
 
 /// # Safety

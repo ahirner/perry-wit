@@ -45,9 +45,9 @@ use perry_mir::{
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, PromiseType,
-        ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType,
-        SettledType, StatsType, StringType, WritableType, WriterType,
+        ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType, JsonType,
+        PromiseType, ReadResultType, ReadableType, ReaderType, RecordType, RequestType,
+        ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
 use pliron::printable::Printable as _;
@@ -75,13 +75,29 @@ use pliron::{
 use shapes::{Shapes, identifier};
 use std::collections::{HashMap, HashSet};
 
+/// HIR types, for callers that describe foreign (WIT) types.
+pub mod hir {
+    pub use perry_hir::types::{ObjectType, PropertyInfo, Type};
+}
+
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module.
 pub fn lower_source(ctx: &mut Context, source: &str, file: &str) -> Result<ModuleOp> {
+    lower_source_with(ctx, source, file, &HashMap::new())
+}
+
+/// [lower_source] with `foreign` types by SDK name: WIT types the program imports from its
+/// generated declarations.
+pub fn lower_source_with(
+    ctx: &mut Context,
+    source: &str,
+    file: &str,
+    foreign: &HashMap<String, HirType>,
+) -> Result<ModuleOp> {
     let ast = perry_parser::parse_typescript(source, file)
         .map_err(|error| anyhow!("failed to parse {file}: {error:?}"))?;
     let hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
-    lower_module(ctx, &hir)
+    lower_module_with(ctx, &hir, foreign)
 }
 
 struct Signature {
@@ -97,8 +113,17 @@ pub const MAIN: &str = "perry_main";
 
 /// Build a MIR module from HIR functions and, as [MAIN], the top-level statements.
 pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
+    lower_module_with(ctx, hir, &HashMap::new())
+}
+
+/// [lower_module] with foreign types (see [lower_source_with]).
+pub fn lower_module_with(
+    ctx: &mut Context,
+    hir: &HirModule,
+    foreign: &HashMap<String, HirType>,
+) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
-    let shapes = Shapes::new(hir);
+    let shapes = Shapes::new(hir, foreign);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<String, Builtin> = HashMap::new();
@@ -108,6 +133,7 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
             "timers/promises" | "node:timers/promises" => Some(BuiltinModule::Timers),
             "fs/promises" | "node:fs/promises" => Some(BuiltinModule::Fs),
             "stream" | "node:stream" => Some(BuiltinModule::Stream),
+            "perry:http-server" => Some(BuiltinModule::HttpServer),
             _ => None,
         };
         let builtin = source.starts_with("node:")
@@ -300,6 +326,7 @@ enum Kind {
     Readable,
     Reader,
     ReadResult,
+    Incoming,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -307,6 +334,8 @@ enum BuiltinModule {
     Timers,
     Fs,
     Stream,
+    /// `perry:http-server`: the services the compiler's `wasi:http/handler` adapter uses.
+    HttpServer,
 }
 
 /// A function imported from a built-in module.
@@ -322,6 +351,8 @@ enum Builtin {
     Rmdir,
     /// The `Writable` class, for `Writable.toWeb`.
     Writable,
+    /// A service of `perry:http-server`.
+    Serve(Intrinsic),
 }
 
 impl Builtin {
@@ -336,6 +367,23 @@ impl Builtin {
             (BuiltinModule::Fs, "unlink") => Builtin::Unlink,
             (BuiltinModule::Fs, "rmdir") => Builtin::Rmdir,
             (BuiltinModule::Stream, "Writable") => Builtin::Writable,
+            (BuiltinModule::HttpServer, name) => Builtin::Serve(match name {
+                "request" => Intrinsic::ServeRequest,
+                "body" => Intrinsic::ServeBody,
+                "method" => Intrinsic::ServeMethod,
+                "methodOther" => Intrinsic::ServeMethodOther,
+                "hasScheme" => Intrinsic::ServeHasScheme,
+                "scheme" => Intrinsic::ServeScheme,
+                "schemeOther" => Intrinsic::ServeSchemeOther,
+                "authority" => Intrinsic::ServeAuthority,
+                "path" => Intrinsic::ServePath,
+                "headerCount" => Intrinsic::ServeHeaderCount,
+                "headerName" => Intrinsic::ServeHeaderName,
+                "headerValue" => Intrinsic::ServeHeaderValue,
+                "addHeader" => Intrinsic::ServeAddHeader,
+                "respond" => Intrinsic::ServeRespond,
+                _ => return None,
+            }),
             _ => return None,
         })
     }
@@ -378,6 +426,8 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Readable)
     } else if ty.is::<ReaderType>() {
         Ok(Kind::Reader)
+    } else if ty.is::<IncomingType>() {
+        Ok(Kind::Incoming)
     } else if ty.is::<ReadResultType>() {
         Ok(Kind::ReadResult)
     } else if ty
@@ -1470,6 +1520,11 @@ impl<'s> FunctionBuilder<'s> {
                 let slot = self.local(*id)?;
                 self.load(ctx, slot)?
             }
+            // `undefined` where `T | undefined` is expected.
+            Expr::Undefined if expected.is_some_and(|ty| optional_value(ctx, ty).is_some()) => {
+                let inner = optional_value(ctx, expected.expect("checked")).expect("checked");
+                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, inner))
+            }
             Expr::LocalSet(id, value) => {
                 let slot = self.local(*id)?;
                 let slot_type = self.slot_type(ctx, slot)?;
@@ -1634,14 +1689,19 @@ impl<'s> FunctionBuilder<'s> {
                 let join = self.new_block(ctx, "join");
                 self.branch(ctx, condition, then, otherwise);
                 self.switch_to(then);
-                let then_value = self.expression(ctx, then_expr)?;
+                // With an expected type both arms fit it (`cond ? value : undefined`).
+                let then_value = self.expression_with(ctx, then_expr, expected)?;
+                let then_value = match expected {
+                    Some(expected) => self.fit(ctx, then_value, expected)?,
+                    None => then_value,
+                };
                 let ty = then_value.get_type(ctx);
                 // The slot is created in the entry block so it dominates both arms.
                 let result = self.entry_slot(ctx, ty);
                 self.store(ctx, result, then_value);
                 self.jump(ctx, join);
                 self.switch_to(otherwise);
-                let else_value = self.expression(ctx, else_expr)?;
+                let else_value = self.expression_with(ctx, else_expr, Some(ty))?;
                 let else_value = self.fit(ctx, else_value, ty)?;
                 self.store(ctx, result, else_value);
                 self.jump(ctx, join);
@@ -2092,6 +2152,14 @@ impl<'s> FunctionBuilder<'s> {
                 );
                 self.record_literal(ctx, &names, args, expected)?
             }
+            // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
+            Expr::Array(items)
+                if expected
+                    .is_some_and(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).is_ok()) =>
+            {
+                let names: Vec<String> = (0..items.len()).map(|i| format!("_{i}")).collect();
+                self.record_literal(ctx, &names, items, expected)?
+            }
             Expr::Array(items) => {
                 let element =
                     match expected.map(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx)) {
@@ -2147,6 +2215,18 @@ impl<'s> FunctionBuilder<'s> {
                         return Ok(self
                             .intrinsic(ctx, Intrinsic::JsonIndex, vec![array, index])
                             .expect("json"));
+                    }
+                    // A tuple element (`pair[0]`): field `_0` of the tuple's record.
+                    Kind::Record => {
+                        let position = match &**index {
+                            Expr::Number(n) if n.fract() == 0.0 && *n >= 0.0 => *n as u64,
+                            Expr::Integer(n) if *n >= 0 => *n as u64,
+                            _ => bail!("tuples are indexed with literal positions"),
+                        };
+                        let field = identifier(&format!("_{position}"))?;
+                        let op = FieldGetOp::new(ctx, array, field)
+                            .map_err(|_| anyhow!("tuple position {position} is out of range"))?;
+                        return Ok(self.append_value(ctx, &op));
                     }
                     _ => {}
                 }
@@ -2647,7 +2727,11 @@ impl<'s> FunctionBuilder<'s> {
         } else if optional_value(ctx, ty) == Some(target) {
             self.defined(ctx, value)
         } else {
-            bail!("value type differs from the expected type")
+            bail!(
+                "value type {} differs from the expected type {}",
+                ty.disp(ctx),
+                target.disp(ctx)
+            )
         }
     }
 
@@ -2711,7 +2795,9 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let mut wanted: Vec<&str> = names.iter().map(String::as_str).collect();
         wanted.sort_unstable();
+        // A record where `T | undefined` is expected is a `T`.
         let expected = expected
+            .map(|ty| optional_value(ctx, ty).unwrap_or(ty))
             .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
             .filter(|record| {
                 record.deref(ctx).fields().is_ok_and(|fields| {
@@ -2933,6 +3019,20 @@ impl<'s> FunctionBuilder<'s> {
             return match builtin {
                 Builtin::SetTimeout => self.timer(ctx, args).map(Some),
                 Builtin::Writable => bail!("Writable is a class; only Writable.toWeb is supported"),
+                Builtin::Serve(intrinsic) => {
+                    let mut operands = Vec::with_capacity(args.len());
+                    for arg in args {
+                        let value = self.expression(ctx, arg)?;
+                        operands.push(self.defined(ctx, value)?);
+                    }
+                    Ok(Some(match self.intrinsic(ctx, *intrinsic, operands) {
+                        Some(value) => value,
+                        None => {
+                            let number = FP64Type::get(ctx).into();
+                            self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
+                        }
+                    }))
+                }
                 fs => self.fs(ctx, *fs, args).map(Some),
             };
         }

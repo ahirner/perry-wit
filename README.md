@@ -5,7 +5,7 @@
 Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
 [Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
 
-> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI with `setTimeout` from `node:timers/promises`, `throw`/`try`/`catch`/`finally`, CLI commands with top-level `await`, `console`, `process.env`, `process.exit` and the clocks, and the core standard library: `Math`, `Date`, string methods, `Uint8Array`, `TextEncoder`/`TextDecoder`, `JSON`, `Promise.all`/`race`/`allSettled` and `crypto` random values, plus `node:fs/promises`, `fetch` over `wasi:http/client`, `Headers`/`Response`/`Request` (with `json()`), object spreads of JSON values, array destructuring, and `ReadableStream`/`WritableStream` over `stream<u8>` and stdio. `AbortController`, `Temporal` and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
+> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI with `setTimeout` from `node:timers/promises`, `throw`/`try`/`catch`/`finally`, CLI commands with top-level `await`, `console`, `process.env`, `process.exit` and the clocks, and the core standard library: `Math`, `Date`, string methods, `Uint8Array`, `TextEncoder`/`TextDecoder`, `JSON`, `Promise.all`/`race`/`allSettled` and `crypto` random values, plus `node:fs/promises`, `fetch` over `wasi:http/client`, `Headers`/`Response`/`Request` (with `json()`), object spreads of JSON values, array destructuring, and `ReadableStream`/`WritableStream` over `stream<u8>` and stdio, and HTTP handlers (`wasi:http/handler`). `AbortController` and `Temporal` return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
 
 - **WIT-first authoring**: Export typed functions matching a WIT world, or write a standalone CLI command with top-level `await`.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
@@ -114,7 +114,7 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("t
 - **Exports**: Exported TypeScript functions not named by the world stay internal, so one source can implement several worlds.
 - **Tasks**: Every export call is one task. Everything it allocates, including its arguments and results, is released in bulk after the host has read the result.
 - **Async exports**: an `async func` export is implemented by an `async` TypeScript function returning `Promise<T>`.
-- **Not yet migrated**: module-level state and initialization, WIT imports other than `wasi:clocks/monotonic-clock` for timers, and `option`, `result`, `variant`, `enum`, `flags`, `tuple` and resource types.
+- **Not yet migrated**: module-level state and initialization, WIT imports other than `wasi:clocks/monotonic-clock` for timers, and `option`, `result`, `variant`, `enum`, `flags`, `tuple` and resource types at the export boundary. Programs can use the SDK's generated types for records, variants (`{ tag, val }`), options and tuples, as HTTP handlers do.
 - **Core Wasm Output**: Pass `--core-only` to emit the linked core module without component encoding.
 
 ### CLI Scripts
@@ -131,6 +131,29 @@ wasmtime run -S p3=y -W component-model-async=y hello.wasm
 - An uncaught exception prints `Uncaught <error>` to stderr and fails the command.
 - `process.env.NAME`, `Object.keys(process.env)`, `performance.now()` and `Date.now()` read the WASI environment and clocks.
 - Console output needs async exports: it drains through WASI P3 streams, which a synchronous export cannot wait for.
+
+### HTTP Handlers
+
+A program implementing the `handler` world of [wit/http-handler](wit/http-handler/world.wit) compiles to a component that exports `wasi:http/handler@0.3.0`. It receives the request as a plain record (method and scheme variants, authority, path, headers as `[name, bytes]` pairs, the whole body) and returns `{ status, headers, body }`; `handle` may be `async`.
+
+```sh
+perry-wit gen-types --wit wit/http-handler --world handler -o handler-types --no-tsconfig
+perry-wit --wit wit/http-handler --world handler -o handler.wasm handler.ts
+wasmtime serve -S p3=y -W component-model-async=y handler.wasm
+```
+
+```ts
+import type { PerryHttpHandlerTypesRequest as Request, PerryHttpHandlerTypesResponse as Response } from './handler-types/world';
+
+export function handle(request: Request): Response {
+  const body = new TextEncoder().encode('hello ' + request.pathWithQuery);
+  return { status: 200, headers: [['content-type', new TextEncoder().encode('text/plain')]], body };
+}
+```
+
+- One instance serves many requests; each is its own task, released when its response body was sent.
+- An exception (or an invalid response header) returns `internal-error` with the error's description (`TypeError: …`) instead of trapping, so the instance keeps serving.
+- Request and response bodies are read and written whole.
 
 ### Project Setup
 
@@ -177,7 +200,7 @@ All verified capability contracts are declared in [crates/conformance/src/regist
 - An unlisted contract that fails is reported as `pending` and does not fail the campaign.
 - An unlisted contract that passes fails the campaign until it is added, so the list only grows.
 
-[crates/conformance/deferred.txt](crates/conformance/deferred.txt) lists contracts outside the accepted domain, each with the deviation it records; they are not run. The accepted deviations are listed in [TODOs.md](TODOs.md) (P6.2). Status: 43 contracts pass, 4 are deferred and 3 are pending.
+[crates/conformance/deferred.txt](crates/conformance/deferred.txt) lists contracts outside the accepted domain, each with the deviation it records; they are not run. The accepted deviations are listed in [TODOs.md](TODOs.md) (P6.2). Status: 44 contracts pass, 4 are deferred and 2 are pending.
 
 Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling.rs](crates/conformance/src/scaling.rs)) bound guest fuel growth between inputs n and 4n.
 

@@ -1,0 +1,20 @@
+package perry:http-handler;
+
+interface types {
+  variant method { get, head, post, put, delete, connect, options, trace, patch, other(string) }
+  variant scheme { http, https, other(string) }
+  record request {
+    method: method,
+    scheme: option<scheme>,
+    authority: option<string>,
+    path-with-query: option<string>,
+    headers: list<tuple<string, list<u8>>>,
+    body: list<u8>,
+  }
+  record response { status: u16, headers: list<tuple<string, list<u8>>>, body: list<u8> }
+}
+
+world handler {
+  use types.{request, response};
+  export handle: func(request: request) -> response;
+}

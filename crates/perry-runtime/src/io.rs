@@ -450,6 +450,28 @@ pub unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
     outcome
 }
 
+/// The reason `promise` was rejected with, as text (`TypeError: message`): what an export
+/// reports as its WIT error.
+///
+/// # Safety
+/// `promise` must be a rejected promise of the current task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_rejection_text(promise: *mut u8) -> *mut u8 {
+    // SAFETY: guaranteed by the caller.
+    let (status, value) = unsafe {
+        (
+            *(promise.add(crate::promise::STATUS as usize) as *const i32) as u32,
+            *(promise.add(crate::promise::VALUE as usize) as *const u64),
+        )
+    };
+    let mut text = Bytes::new();
+    // SAFETY: a rejection's value is its exception object or null.
+    unsafe {
+        describe(&mut text, status, value as usize as *mut u8);
+        crate::string::perry_string_adopt(text.ptr, text.len as u32)
+    }
+}
+
 unsafe fn describe(text: &mut Bytes, status: u32, exception: *mut u8) {
     if exception.is_null() {
         text.push_str(match status {

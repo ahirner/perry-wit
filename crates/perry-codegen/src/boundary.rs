@@ -58,6 +58,14 @@ pub enum AbiType {
     Record(Vec<(String, AbiType)>),
     /// `stream<u8>`: the readable end's handle, a `ReadableStream<Uint8Array>` in TypeScript.
     ByteStream,
+    /// A result whose `ok` is a resource handle (a number in TypeScript), with the given flat
+    /// layout: `result<response, error-code>` of `wasi:http/handler`. A rejection returns
+    /// `err` with the case `error_case` of the error variant carrying `option<string>`
+    /// (`internal-error`), the rejection's description.
+    OkHandle {
+        flat: Vec<Flat>,
+        error_case: u32,
+    },
 }
 
 /// One component export bound to a TypeScript function.
@@ -80,7 +88,7 @@ pub struct Export {
 const MAX_FLAT_PARAMS: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub(crate) enum Flat {
+pub enum Flat {
     I32,
     I64,
     F32,
@@ -103,6 +111,7 @@ impl AbiType {
             AbiType::F64 => out.push(Flat::F64),
             AbiType::String | AbiType::List(_) => out.extend([Flat::I32, Flat::I32]),
             AbiType::Record(fields) => fields.iter().for_each(|(_, ty)| ty.flatten(out)),
+            AbiType::OkHandle { flat, .. } => out.extend(flat.iter().copied()),
         }
     }
 
@@ -120,6 +129,7 @@ impl AbiType {
             AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
             AbiType::String | AbiType::List(_) => 4,
             AbiType::Record(fields) => fields.iter().map(|(_, t)| t.alignment()).max().unwrap_or(1),
+            AbiType::OkHandle { .. } => 8,
         }
     }
 
@@ -130,6 +140,7 @@ impl AbiType {
             AbiType::S32 | AbiType::U32 | AbiType::F32 | AbiType::ByteStream => 4,
             AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
             AbiType::String | AbiType::List(_) => 8,
+            AbiType::OkHandle { flat, .. } => 8 * flat.len() as u32,
             AbiType::Record(_) => {
                 let end = self.field_offsets().last().copied().unwrap_or(0);
                 let last = match self {
@@ -431,8 +442,36 @@ fn async_export(
             let fulfilled = b.new_block(ctx, vec![]);
             b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
             b.block = trap;
-            let unreachable = UnreachableOp::new(ctx).get_operation();
-            b.insert(ctx, unreachable);
+            if let Some(AbiType::OkHandle { flat, error_case }) = &export.result {
+                // `err(error_case(some(description)))`, then end the task.
+                let text = b
+                    .runtime(ctx, Runtime::RejectionText, vec![promise])
+                    .expect("text");
+                let data = b.load(ctx, MemKind::I32, text, strings::DATA);
+                let len = b.load(ctx, MemKind::I32, text, strings::LEN);
+                let one = b.i32_const(ctx, 1);
+                let case = b.i32_const(ctx, *error_case as i32);
+                let mut values = Vec::new();
+                b.flat_i32s(ctx, flat, &[one, case, one, data, len], &mut values)?;
+                if b.state.uses_http_server {
+                    b.call(ctx, "web_serve_close", &[], &[], vec![]);
+                }
+                if b.state.uses_fetch {
+                    b.call(ctx, "web_fetch_close", &[], &[], vec![]);
+                }
+                if b.state.uses_streams {
+                    b.call(ctx, "web_streams_close", &[], &[], vec![]);
+                }
+                b.host(ctx, task_return.clone(), values);
+                b.runtime(ctx, Runtime::TaskCloseSet, vec![]);
+                b.runtime(ctx, Runtime::TaskFree, vec![]);
+                let exit = b.i32_const(ctx, EXIT);
+                let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
+                b.insert(ctx, ret);
+            } else {
+                let unreachable = UnreachableOp::new(ctx).get_operation();
+                b.insert(ctx, unreachable);
+            }
             b.block = fulfilled;
             None
         };
@@ -457,6 +496,28 @@ fn async_export(
                 b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
             }
         }
+        if b.state.uses_http_server {
+            // Return the response once, then keep running until its body is written: the
+            // host reads it only after the return.
+            let returned = b
+                .call(ctx, "web_serve_returned", &[], &[crate::W::I32], vec![])
+                .expect("returned");
+            let first = b.new_block(ctx, vec![]);
+            let after = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, returned, (after, vec![]), (first, vec![]));
+            b.block = first;
+            b.host(ctx, task_return.clone(), std::mem::take(&mut flat));
+            b.call(ctx, "web_serve_mark_returned", &[], &[], vec![]);
+            b.br(ctx, after, vec![]);
+            b.block = after;
+            let busy = b
+                .call(ctx, "web_serve_busy", &[], &[crate::W::I32], vec![])
+                .expect("busy");
+            let done = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, busy, (wait, vec![]), (done, vec![]));
+            b.block = done;
+            b.call(ctx, "web_serve_close", &[], &[], vec![]);
+        }
         if b.state.uses_fetch {
             // No request or response handle outlives the export call.
             b.call(ctx, "web_fetch_close", &[], &[], vec![]);
@@ -465,7 +526,9 @@ fn async_export(
             // No stream end outlives the export call.
             b.call(ctx, "web_streams_close", &[], &[], vec![]);
         }
-        b.host(ctx, task_return, flat);
+        if !b.state.uses_http_server {
+            b.host(ctx, task_return, flat);
+        }
         b.runtime(ctx, Runtime::TaskCloseSet, vec![]);
         b.runtime(ctx, Runtime::TaskFree, vec![]);
         let exit = b.i32_const(ctx, EXIT);
@@ -524,6 +587,21 @@ fn async_export(
                 .call(
                     ctx,
                     "web_event",
+                    &[crate::W::I32; 3],
+                    &[crate::W::I32],
+                    vec![event, handle, subtask_state],
+                )
+                .expect("handled");
+            let unhandled = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
+            b.block = unhandled;
+        }
+        if b.state.uses_http_server {
+            // The served exchange takes its stream and future events.
+            let handled = b
+                .call(
+                    ctx,
+                    "web_serve_event",
                     &[crate::W::I32; 3],
                     &[crate::W::I32],
                     vec![event, handle, subtask_state],
@@ -885,6 +963,7 @@ impl FunctionLowering<'_> {
     ) -> Result<()> {
         match ty {
             AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
+            AbiType::OkHandle { .. } => bail!("handle results are returned flat"),
             AbiType::String => {
                 ensure!(
                     mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
@@ -950,6 +1029,27 @@ impl FunctionLowering<'_> {
     }
 
     /// Lower a MIR value to its flat core values (appended to `out`).
+    /// `values` (`i32`s) in the leading slots of the flat layout `flat`, widened where a
+    /// slot is `i64`, and zeros in the others.
+    fn flat_i32s(
+        &mut self,
+        ctx: &mut Context,
+        flat: &[Flat],
+        values: &[Value],
+        out: &mut Vec<Value>,
+    ) -> Result<()> {
+        for (index, slot) in flat.iter().enumerate() {
+            out.push(match (slot, values.get(index)) {
+                (Flat::I32, Some(&value)) => value,
+                (Flat::I64, Some(&value)) => self.num(ctx, NumOpcode::I64ExtendI32U, vec![value]),
+                (Flat::I32, None) => self.i32_const(ctx, 0),
+                (Flat::I64, None) => self.i64_const(ctx, 0),
+                (Flat::F32 | Flat::F64, _) => bail!("float slots in a handle result"),
+            });
+        }
+        Ok(())
+    }
+
     fn lower_flat_values(
         &mut self,
         ctx: &mut Context,
@@ -960,6 +1060,13 @@ impl FunctionLowering<'_> {
     ) -> Result<()> {
         match ty {
             AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
+            AbiType::OkHandle { flat, .. } => {
+                // `ok` (0), the handle, and zeros for the rest of the error payload.
+                expect_number(ctx, mir_ty, ty)?;
+                let zero = self.i32_const(ctx, 0);
+                let handle = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![value]);
+                self.flat_i32s(ctx, flat, &[zero, handle], out)?;
+            }
             AbiType::String => {
                 ensure!(
                     mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),

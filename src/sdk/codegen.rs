@@ -57,7 +57,7 @@ fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
     id
 }
 
-fn type_name(resolve: &Resolve, id: TypeId) -> String {
+pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
     let id = declaration_id(resolve, id);
     let definition = &resolve.types[id];
     let name = to_pascal_case(definition.name.as_deref().unwrap());

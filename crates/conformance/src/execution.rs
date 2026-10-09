@@ -628,9 +628,14 @@ fn execute_function(
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
     let compilation = if matches!(case, Case::Handler(_)) {
-        Err(anyhow::anyhow!(
-            "HTTP handlers are not supported by the compiler yet (TODOs.md P6.2)"
-        ))
+        // A `perry:http-handler` program compiles to a `wasi:http/handler` component.
+        perry_wit::component::wit::resolve_wit(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
+        )
+        .and_then(|(resolve, package)| {
+            let world = resolve.select_world(&[package], Some("handler"))?;
+            compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
+        })
     } else {
         compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
     };
