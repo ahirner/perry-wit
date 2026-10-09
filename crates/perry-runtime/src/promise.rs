@@ -3,8 +3,8 @@
 //! Layout, read inline by compiled code: `state: u32` at 0 ([PENDING], [FULFILLED],
 //! [REJECTED]), `status: i32` at 4 (the exception code of a rejection), the settled value's
 //! 8-byte slot at 8 (`f64` bits or a 32-bit reference; an exception reference on rejection).
-//! Awaiting a settled promise queues the continuation on the task's ready list. Otherwise
-//! the awaiting frame becomes a waiter and is queued when the promise settles.
+//! Uncontended settled awaits continue inline. Pending promises retain waiters; ready
+//! competing work gets a turn through the task queue, without a synthetic microtask contract.
 use crate::region::{Node, current};
 use core::ptr;
 
@@ -131,14 +131,17 @@ pub unsafe extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     }
 }
 
-/// Queue `frame` after the current job if `promise` settled, or when it settles.
+/// Return zero for an uncontended settled await, otherwise queue/register `frame` and return one.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
+pub extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) -> u32 {
     let promise = promise as *mut Promise;
     // SAFETY: compiled code passes a live promise of the current task.
     if unsafe { (*promise).state != PENDING } {
+        if current().ready_head.is_null() {
+            return 0;
+        }
         current().push_ready(frame);
-        return;
+        return 1;
     }
     let node = current().allocate(core::mem::size_of::<Node>()) as *mut Node;
     // SAFETY: `promise` is live; `node` is fresh. Waiters run in registration order.
@@ -153,4 +156,5 @@ pub extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
         }
         *link = node;
     }
+    1
 }

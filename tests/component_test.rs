@@ -2,7 +2,6 @@
 //! wasmtime's component model, called with WIT values (canonical ABI lift and lower).
 use anyhow::Result;
 use perry_wit::compile_for_world;
-use std::process::Command;
 use wasmtime::error::Context as _;
 use wasmtime::{
     Engine, ResourceLimiter, Store,
@@ -163,7 +162,7 @@ fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
             ),
         ])
     );
-    // `.length` counts UTF-16 code units: "🙂" is 2, "é" is 1.
+    // `.length` counts Unicode scalars, including astral characters.
     assert_eq!(
         component.call(
             "count",
@@ -174,7 +173,7 @@ fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
                 Val::String(String::new()),
             ])]
         )?,
-        Val::U32(5)
+        Val::U32(4)
     );
     assert_eq!(
         component.call("greet", &[Val::String("wörld".into())])?,
@@ -229,7 +228,7 @@ fn repeated_calls_do_not_grow_memory() -> Result<()> {
 }
 
 #[test]
-fn synchronous_exports_drain_detached_continuations_before_lifting_results() -> Result<()> {
+fn synchronous_exports_complete_uncontended_async_calls_inline() -> Result<()> {
     let mut resolve = wit_parser::Resolve::default();
     let package = resolve.push_str(
         "sync-jobs.wit",
@@ -261,9 +260,8 @@ export function run(n: number): number[] {
     let run = instance.get_typed_func::<(u32,), (Vec<f64>,)>(&mut store, "run")?;
     let n = 1000;
     let expected: Vec<f64> = (0..n)
+        .flat_map(|tag| [tag, tag + 1000, tag + 2000])
         .chain(std::iter::once(-1))
-        .chain(1000..1000 + n)
-        .chain(2000..2000 + n)
         .map(f64::from)
         .collect();
     let mut peak = 0;
@@ -385,6 +383,8 @@ export function run(input: string): string {
     ] {
         assert_eq!(run.call(&mut store, (input,))?.0, expected);
     }
+    let deep = format!("{}0{}", "{\"value\":".repeat(127), "}".repeat(127));
+    assert_eq!(run.call(&mut store, (&deep,))?.0, deep);
     Ok(())
 }
 
@@ -640,7 +640,7 @@ export function run(count: number, text: string): string {
   let nullKeys = false;
   try { Object.keys(undefined); } catch(e) { nullKeys = e instanceof TypeError; }
   if(!nullKeys) throw 13;
-  if(Object.keys('é🙂').length !== 3 || !Object.hasOwn('🙂', 1)) throw 14;
+  if(Object.keys('é🙂').length !== 2 || Object.hasOwn('🙂', 1)) throw 14;
   if(Object.keys(native).length !== 1 || !Object.hasOwn(native, 'n')) throw 15;
   let prototype = false;
   try { root.__proto__ = 1; } catch(e) { prototype = e instanceof TypeError; }
@@ -788,457 +788,6 @@ export function run(count:number, text:string):string {
             peak,
             "typed dictionary storage leaked across tasks"
         );
-    }
-    Ok(())
-}
-
-#[test]
-fn json_serialization_controls_preserve_order_effects_and_task_lifetimes() -> Result<()> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("json-options.wit", "package test:json-options; world options { export format: func(input: string, replacer: string, space: string) -> string; export check: func() -> u32; }")?;
-    let world = resolve.select_world(&[package], Some("options"))?;
-    let source = r#"
-type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
-type State = {trace:number};
-type Branch = {value:number,children:Branch[]};
-function value(state:State, input:JsonValue):JsonValue {state.trace=state.trace*10+1;return input;}
-function keys(state:State, input:JsonValue):string[] {state.trace=state.trace*10+2;input.a=9;return ['a'];}
-function spacing(state:State):number {state.trace=state.trace*10+3;return 2;}
-export function format(input:string, replacer:string, space:string):string {
-  return JSON.stringify(JSON.parse(input), JSON.parse(replacer), JSON.parse(space));
-}
-export function check():number {
-  const state={trace:0};
-  const native:Record<string,number>={b:2,a:1};
-  const result=JSON.stringify(value(state,native), keys(state,native), spacing(state));
-  if(state.trace!==123 || result!=='{\n  "a": 9\n}') throw 1;
-  const record={z:3,a:4};
-  if(JSON.stringify(record,['a','z'],1)!=='{\n "a": 4,\n "z": 3\n}') throw 2;
-  const optional:Record<string,number|undefined>={a:undefined,b:3};
-  if(JSON.stringify(optional,['a','b'],2)!=='{\n  "b": 3\n}') throw 3;
-  const list:JsonValue[]=['a','b'];
-  const parsed:JsonValue=JSON.parse('["b","a"]');
-  const typed:string[]=parsed;
-  if(JSON.stringify(native,typed)!=='{"b":2,"a":9}') throw 4;
-  if(JSON.stringify(native,list)!=='{"a":9,"b":2}') throw 5;
-  const missing=JSON.stringify(undefined,[],2);
-  if(typeof missing!=='undefined' || typeof result!=='string') throw 6;
-  const numbers:number[]=[];
-  if(typeof numbers[0]!=='undefined' || typeof 0!=='number' || typeof false!=='boolean') throw 7;
-  if(typeof native!=='object' || typeof new Uint8Array(1)!=='object') throw 8;
-  const cycle=JSON.parse('{"keep":1}');cycle.self=cycle;
-  if(JSON.stringify(cycle,['keep'],2)!=='{\n  "keep": 1\n}') throw 9;
-  let cyclic=false;try{JSON.stringify(cycle,['self']);}catch(e){cyclic=e instanceof TypeError;}
-  if(!cyclic) throw 10;
-  let prototype=false;try{JSON.stringify({},['__proto__']);}catch(e){prototype=e instanceof TypeError;}
-  if(!prototype) throw 11;
-  let surrogate=false;try{JSON.stringify({a:1},null,'123456789🙂');}catch(e){surrogate=e instanceof TypeError;}
-  if(!surrogate) throw 12;
-  if(JSON.stringify({a:1},[true,false,null,{},[]],2)!=='{}') throw 13;
-  if(JSON.stringify({a:1},null,0.9)!=='{"a":1}') throw 14;
-  if(JSON.stringify({a:1},null,0/0)!=='{"a":1}') throw 15;
-  if(JSON.stringify({},null,'123456789🙂')!=='{}') throw 16;
-  if(JSON.stringify({a:1},[], '123456789🙂')!=='{}') throw 17;
-  if(JSON.stringify(3,null,'123456789🙂')!=='3') throw 18;
-  if(JSON.stringify(undefined,null,'123456789🙂')!==undefined) throw 19;
-  if(JSON.stringify({a:1},null,'x\0y')!=='{\nx\0y"a": 1\n}') throw 20;
-  const leaf:Branch={value:1,children:[]};
-  const shared:Branch={value:0,children:[leaf,leaf]};
-  if(JSON.stringify(shared)!=='{"value":0,"children":[{"value":1,"children":[]},{"value":1,"children":[]}]}') throw 21;
-  const view:JsonValue=shared;
-  const children:JsonValue[]=view.children;
-  children.push(view);
-  let nativeCycle=false;try{JSON.stringify(shared);}catch(e){nativeCycle=e instanceof TypeError;}
-  if(!nativeCycle) throw 22;
-  return state.trace;
-}
-"#;
-    let compiled = compile_for_world(source, "json-options.ts", &resolve, world, true)?;
-    let engine = Engine::default();
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
-    let mut store = Store::new(&engine, Peak::default());
-    store.limiter(|peak| peak);
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let format = instance.get_typed_func::<(&str, &str, &str), (String,)>(&mut store, "format")?;
-    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
-    assert_eq!(
-        check
-            .call(&mut store, ())
-            .context("initial serialization control checks")?
-            .0,
-        123
-    );
-    let input = r#"{"2":2,"a":1,"b":[{"a":3,"2":4},[],{}],"a":5,"__proto__":null}"#;
-    let replacer = r#"["b","a",2,2,"2",true,null,{},["a"],"missing"]"#;
-    let mut cases = Vec::new();
-    // Spec checks above cover Node 24.21 discrepancies: fractional spacing and NUL gaps.
-    for space in [
-        "null", "-1e400", "-0", "0", "2.9", "10", "1e400", "true", "{}", "[]",
-    ] {
-        cases.push((input.to_owned(), replacer.to_owned(), space.to_owned()));
-    }
-    for text in ["", "\t", "é🙂", "🙂🙂🙂🙂🙂🙂", "abcdefghij🙂", " \n"] {
-        cases.push((
-            input.to_owned(),
-            "null".into(),
-            serde_json::to_string(text)?,
-        ));
-    }
-    for (input, replacer) in [
-        ("[{},[],1]", "[]"),
-        ("[]", "[]"),
-        ("{}", "null"),
-        ("123", "[]"),
-        (r#"{"__proto__":null}"#, r#"["__proto__"]"#),
-    ] {
-        cases.push((input.into(), replacer.into(), "2".into()));
-    }
-    let large = serde_json::json!({"a": "é🙂".repeat(8_192), "b": [1,2,3]}).to_string();
-    cases.push((large, replacer.into(), "10".into()));
-    let mut deep = "0".to_owned();
-    for depth in 0..127 {
-        deep = if depth % 2 == 0 {
-            format!("[{deep}]")
-        } else {
-            format!("{{\"a\":{deep}}}")
-        };
-    }
-    cases.push((deep, "null".into(), "2".into()));
-    let oracle = Command::new("node").args([
-        "-e",
-        "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(([v,r,s])=>JSON.stringify(JSON.parse(v),JSON.parse(r),JSON.parse(s)))))",
-        &serde_json::to_string(&cases)?,
-    ]).output()?;
-    assert!(
-        oracle.status.success(),
-        "{}",
-        String::from_utf8_lossy(&oracle.stderr)
-    );
-    let expected: Vec<String> = serde_json::from_slice(&oracle.stdout)?;
-    for _ in 0..3 {
-        for ((input, replacer, space), expected) in cases.iter().zip(&expected) {
-            let actual = format
-                .call(&mut store, (input, replacer, space))
-                .with_context(|| {
-                    format!(
-                        "space={space}, replacer={replacer}, input bytes={}",
-                        input.len()
-                    )
-                })?
-                .0;
-            assert_eq!(
-                actual, *expected,
-                "space={space}, replacer={replacer}, input={input}"
-            );
-        }
-    }
-    let peak = store.data().0;
-    for _ in 0..12 {
-        assert_eq!(
-            check
-                .call(&mut store, ())
-                .context("repeated serialization control checks")?
-                .0,
-            123
-        );
-        for ((input, replacer, space), expected) in cases.iter().zip(&expected) {
-            let actual = format
-                .call(&mut store, (input, replacer, space))
-                .with_context(|| {
-                    format!(
-                        "space={space}, replacer={replacer}, input bytes={}",
-                        input.len()
-                    )
-                })?
-                .0;
-            assert_eq!(
-                actual, *expected,
-                "space={space}, replacer={replacer}, input={input}"
-            );
-        }
-        assert_eq!(
-            store.data().0,
-            peak,
-            "serialization controls leaked task storage"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn json_revivers_inline_captures_returns_and_finalizers() -> Result<()> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("reviver.wit", "package test:reviver; world reviver { export revive: func(input: string) -> string; export check: func() -> u32; export count: func(input: string) -> u32; }")?;
-    let world = resolve.select_world(&[package], Some("reviver"))?;
-    let source = r#"
-type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
-function identity(key:string,value:JsonValue|undefined):JsonValue|undefined { return value; }
-function twice(key:string,value:number):number { return value*2; }
-function discard(key:string,value:JsonValue|undefined):void {}
-export function revive(input:string):string {
-  let trace='';let calls=0;let outer=0;
-  let result:JsonValue|undefined=undefined;
-  try {
-    result=JSON.parse(input,(key:string,value:JsonValue|undefined):JsonValue|undefined=>{
-      trace=trace+key+':'+typeof value+';';
-      try {
-        if(key==='drop') return undefined;
-        if(typeof value==='number') { const number:number=value;return number+2; }
-        if(key==='replace') return {native:true};
-        return value;
-      } finally { calls=calls+1; }
-    });
-  } finally { outer=outer+1; }
-  if(outer!==1) throw 1;
-  return JSON.stringify({result,trace,calls});
-}
-export function count(input:string):number {
-  let count=0;
-  JSON.parse(input,(_key,value)=>{count=count+1;return value;});
-  return count;
-}
-export function check():number {
-  const restored=JSON.parse('{"__proto__":1,"a":2}',identity);
-  if(JSON.stringify(restored)!=='{"__proto__":1,"a":2}') return 2;
-  const absent=JSON.parse('1',()=>undefined);
-  if(typeof absent!=='undefined') return 3;
-  const ignored=JSON.parse('1',null);
-  if(ignored!==1) return 4;
-  const marker=new Error('reviver');let effects=0;
-  try {
-    JSON.parse('{"a":1,"b":2}',(key,value)=>{
-      try { if(key==='a') throw marker;return value; }
-      finally { effects=effects+1; }
-    });
-  } catch(e) { if(e!==marker) return 5;effects=effects+10; }
-  finally { effects=effects+100; }
-  if(effects!==111) return 6;
-  let nestedTrace='';
-  const nested=JSON.parse('{"x":1}',(key,value)=>{
-    if(key==='x') return JSON.parse('2',(_key,inner)=>{nestedTrace=nestedTrace+key;return inner;});
-    return value;
-  });
-  if(nestedTrace!=='x' || JSON.stringify(nested)!=='{"x":2}') return 7;
-  let dense=false;
-  try { JSON.parse('[1]',(key,value)=>{if(key==='0')return undefined;return value;}); }
-  catch(e) { dense=e instanceof RangeError; }
-  if(!dense) return 8;
-  let syntax=false;let called=0;
-  try { JSON.parse('{',(_key,value)=>{called=called+1;return value;}); }
-  catch(e) { syntax=e instanceof SyntaxError; }
-  if(!syntax || called!==0) return 9;
-  const replaced=JSON.parse('1',()=>JSON.parse('{"kept":3}'));
-  if(JSON.stringify(replaced)!=='{"kept":3}') return 10;
-  let sourceTrace='';const contexts:JsonValue[]=[];
-  JSON.parse(' {"x":1e2,"x":-0,"s":"\\u0061","b":true,"nil":null} ',(key,value,context)=>{
-    contexts.push(context);
-    if(context.source!==undefined) { const source:string=context.source;sourceTrace=sourceTrace+key+'='+source+';'; }
-    return value;
-  });
-  if(sourceTrace!=='x=-0;s="\\u0061";b=true;nil=null;') return 11;
-  if(contexts[0]===contexts[1] || Object.hasOwn(contexts[4],'source')) return 12;
-  let scalarSource='';
-  JSON.parse(' \n -0.00e+1\t',(_key,value,context)=>{scalarSource=context.source;return value;});
-  if(scalarSource!=='-0.00e+1') return 13;
-  const overridden=JSON.parse('1',(_key,value)=>{try{return value;}finally{return 5;}});
-  if(overridden!==5) return 14;
-  if(JSON.parse('2',twice)!==4) return 15;
-  const item={tag:1};
-  const native=JSON.parse('0',()=>item);
-  const alias:JsonValue=item;alias.tag=5;
-  if(native!==alias || JSON.stringify(native)!=='{"tag":5}') return 16;
-  if(typeof JSON.parse('0',discard)!=='undefined') return 17;
-  return effects;
-}
-"#;
-    let compiled = compile_for_world(source, "reviver.ts", &resolve, world, true)?;
-    let engine = Engine::default();
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
-    let mut store = Store::new(&engine, Peak::default());
-    store.limiter(|peak| peak);
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let revive = instance.get_typed_func::<(&str,), (String,)>(&mut store, "revive")?;
-    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
-    let count = instance.get_typed_func::<(&str,), (u32,)>(&mut store, "count")?;
-    let input = r#"{"2":1,"a":{"drop":3,"b":4},"replace":[5,6],"a":{"drop":7,"b":8}}"#;
-    let expected = r#"{"result":{"2":3,"a":{"b":10},"replace":{"native":true}},"trace":"2:number;drop:number;b:number;a:object;0:number;1:number;replace:object;:object;","calls":8}"#;
-    let deep = format!("{}1{}", "[".repeat(127), "]".repeat(127));
-    let large = serde_json::json!({"text":"é🙂".repeat(8192),"array":[1,2,3]}).to_string();
-    for _ in 0..3 {
-        assert_eq!(check.call(&mut store, ()).context("reviver checks")?.0, 111);
-        assert_eq!(
-            revive
-                .call(&mut store, (input,))
-                .context("reviver order")?
-                .0,
-            expected
-        );
-        assert_eq!(
-            count.call(&mut store, (&deep,)).context("deep reviver")?.0,
-            128
-        );
-        revive.call(&mut store, (&large,))?;
-    }
-    let peak = store.data().0;
-    for _ in 0..20 {
-        assert_eq!(check.call(&mut store, ()).context("reviver checks")?.0, 111);
-        assert_eq!(
-            revive
-                .call(&mut store, (input,))
-                .context("reviver order")?
-                .0,
-            expected
-        );
-        assert_eq!(
-            count.call(&mut store, (&deep,)).context("deep reviver")?.0,
-            128
-        );
-        revive.call(&mut store, (&large,))?;
-        assert_eq!(store.data().0, peak, "reviver state leaked across tasks");
-    }
-    Ok(())
-}
-
-#[test]
-fn json_replacers_observe_mutation_and_serialize_each_visit_once() -> Result<()> {
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("replacer.wit", "package test:replacer; world replacer { export encode: func(input: string, space: string) -> string; export check: func() -> u32; }")?;
-    let world = resolve.select_world(&[package], Some("replacer"))?;
-    let source = r#"
-type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
-function identity(key:string,value:JsonValue|undefined):JsonValue|undefined {return value;}
-function twice(key:string,value:number):number {return value*2;}
-function discard():void {}
-function gap(state:{amount:number}):number {state.amount=7;return 2;}
-export function encode(input:string,space:string):string {
-  return JSON.stringify(JSON.parse(input),identity,space);
-}
-export function check():number {
-  let trace='';let calls=0;let outer=0;
-  let result:string|undefined=undefined;
-  try {
-    result=JSON.stringify(JSON.parse('{"2":2,"a":{"drop":1,"x":3},"drop":4,"b":[5,6]}'),(key,value)=>{
-      trace=trace+key+':'+typeof value+';';
-      try {
-        if(key==='drop' || key==='0') return undefined;
-        if(typeof value==='number') {const n:number=value;return n+1;}
-        return value;
-      } finally {calls=calls+1;}
-    });
-  } finally {outer=outer+1;}
-  if(result!=='{"2":3,"a":{"x":4},"b":[null,7]}') return 1;
-  if(trace!==':object;2:number;a:object;drop:number;x:number;drop:number;b:object;0:number;1:number;' || calls!==9 || outer!==1) return 2;
-  if(typeof JSON.stringify({x:1},()=>undefined)!=='undefined') return 3;
-  if(JSON.stringify(undefined,()=>3)!=='3') return 4;
-  if(JSON.stringify(2,twice)!=='4' || typeof JSON.stringify(2,discard)!=='undefined') return 5;
-  const replacement=JSON.stringify(0,(key,value)=>{if(key==='') return {x:4};return value;});
-  if(replacement!=='{"x":4}') return 6;
-  const root=JSON.parse('{"a":1,"b":2,"c":3}');let observed='';
-  const mutated=JSON.stringify(root,(key,value)=>{
-    observed=observed+key+':'+typeof value+';';
-    if(key==='a') {root.b=9;delete root.c;root.d=4;}
-    if(key==='c') return 10;
-    return value;
-  });
-  if(mutated!=='{"a":1,"b":9,"c":10}' || observed!==':object;a:number;b:number;c:undefined;') return 7;
-  const shared={n:1};const aliases={a:shared,b:shared};
-  const saved=JSON.stringify(aliases,(key,value)=>{if(key==='b')shared.n=8;return value;});
-  if(saved!=='{"a":{"n":1},"b":{"n":8}}') return 8;
-  const array=[1,2];
-  if(JSON.stringify(array,(key,value)=>{if(key==='0'){array[1]=8;array.push(9);}return value;})!=='[1,8]') return 9;
-  const dictionary:Record<string,number>={first:1,last:2};
-  const grown=JSON.stringify(dictionary,(key,value)=>{
-    if(key==='first'){for(let i=0;i<40;i++)dictionary[i]=i;dictionary.last=7;}
-    return value;
-  });
-  if(grown!=='{"first":1,"last":7}') return 10;
-  const cycle=JSON.parse('{"x":1}');cycle.self=cycle;
-  if(JSON.stringify(cycle,(key,value)=>{if(key==='self')return undefined;return value;})!=='{"x":1}')return 11;
-  let cyclic=false;let cycleCalls=0;
-  try {JSON.stringify(cycle,(key,value)=>{cycleCalls=cycleCalls+1;return value;});}
-  catch(e){cyclic=e instanceof TypeError;}
-  if(!cyclic || cycleCalls!==3)return 12;
-  let introduced=false;let introducedCalls=0;
-  const parent={x:1,y:2};
-  try {JSON.stringify(parent,(key,value)=>{introducedCalls=introducedCalls+1;if(key==='x')return parent;return value;});}
-  catch(e){introduced=e instanceof TypeError;}
-  if(!introduced || introducedCalls!==2)return 13;
-  let nested=0;
-  const nestedResult=JSON.stringify({x:2},(key,value)=>{
-    if(key==='x')return JSON.stringify([value],(_inner,next)=>{nested=nested+1;return next;});
-    return value;
-  });
-  if(nestedResult!=='{"x":"[2]"}' || nested!==2)return 14;
-  const marker=new Error('replacer');let effects=0;
-  try {JSON.stringify({x:1},(key,value)=>{try{if(key==='x')throw marker;return value;}finally{effects=effects+1;}});}
-  catch(e){if(e!==marker)return 15;effects=effects+10;}
-  finally{effects=effects+100;}
-  if(effects!==112)return 16;
-  if(JSON.stringify(1,(_key,value)=>{try{return value;}finally{return 5;}})!=='5')return 17;
-  let loopEffects=0;
-  const looped=JSON.stringify(0,()=>{
-    for(let i=0;i<4;i++){try{if(i===0)continue;if(i===2)break;}finally{loopEffects=loopEffects+1;}}
-    return loopEffects;
-  });
-  if(looped!=='3' || loopEffects!==3)return 18;
-  const state={amount:0};
-  if(JSON.stringify({x:1},(key,value)=>{if(key==='x')return state.amount;return value;},gap(state))!=='{\n  "x": 7\n}')return 19;
-  if(JSON.stringify({x:1},identity,'\u0000')!=='{\n\u0000"x": 1\n}')return 20;
-  if(JSON.stringify({x:1},identity,0.9)!=='{"x":1}')return 21;
-  if(JSON.stringify({},identity,'123456789🙂')!=='{}')return 22;
-  let invalidGap=false;
-  try {JSON.stringify({x:1},identity,'123456789🙂');}catch(e){invalidGap=e instanceof TypeError;}
-  if(!invalidGap)return 23;
-  let tooDeep=false;let deepCalls=0;
-  try{JSON.stringify(0,()=>{deepCalls=deepCalls+1;return {child:0};});}
-  catch(e){tooDeep=e instanceof TypeError;}
-  if(!tooDeep || deepCalls!==129)return 24;
-  const proto=JSON.parse('{"first":1,"__proto__":2}');let inherited=false;let protoCalls=0;
-  if(JSON.stringify(proto,identity)!=='{"first":1,"__proto__":2}')return 25;
-  try{JSON.stringify(proto,(key,value)=>{protoCalls=protoCalls+1;if(key==='first')delete proto.__proto__;return value;});}
-  catch(e){inherited=e instanceof TypeError;}
-  if(!inherited || protoCalls!==2)return 26;
-  return 0;
-}
-"#;
-    let compiled = compile_for_world(source, "replacer.ts", &resolve, world, true)?;
-    let engine = Engine::default();
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
-    let mut store = Store::new(&engine, Peak::default());
-    store.limiter(|peak| peak);
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
-    let encode = instance.get_typed_func::<(&str, &str), (String,)>(&mut store, "encode")?;
-    let deep = format!("{}1{}", "[".repeat(127), "]".repeat(127));
-    let large =
-        serde_json::json!({"text":"é🙂\n\u{0000}".repeat(8192),"array":[1,2,3]}).to_string();
-    let mut peak = 0;
-    for round in 0..23 {
-        assert_eq!(
-            check.call(&mut store, ()).context("replacer semantics")?.0,
-            0
-        );
-        for input in [&deep, &large] {
-            assert_eq!(
-                encode
-                    .call(&mut store, (input, ""))
-                    .context("replacer size")?
-                    .0,
-                *input
-            );
-        }
-        assert_eq!(
-            encode
-                .call(&mut store, ("{\"x\":[1,true,null]}", "🙂"))
-                .context("replacer indentation")?
-                .0,
-            "{\n🙂\"x\": [\n🙂🙂1,\n🙂🙂true,\n🙂🙂null\n🙂]\n}"
-        );
-        if round == 2 {
-            peak = store.data().0;
-        } else if round > 2 {
-            assert_eq!(store.data().0, peak, "replacer state leaked across tasks");
-        }
     }
     Ok(())
 }
@@ -1614,8 +1163,7 @@ export function check():number {
   let rejected=0;
   try{Object.entries(null);}catch(e){if(e instanceof TypeError)rejected=rejected+1;}
   try{Object.values(undefined);}catch(e){if(e instanceof TypeError)rejected=rejected+1;}
-  try{Object.values('🙂');}catch(e){if(e instanceof TypeError)rejected=rejected+1;}
-  if(rejected!==3 || Object.keys('🙂').length!==2)return 24;
+  if(rejected!==2 || Object.keys('🙂').length!==1 || Object.values('🙂')[0]!=='🙂')return 24;
   const effects:number[]=[];
   const once=Object.entries(source(effects));
   if(effects.length!==1 || once[0][1]!==2)return 25;

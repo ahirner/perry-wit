@@ -7,7 +7,6 @@ web.console.routing
 web.performance.monotonic
 node.process.environment
 node.process.exit_status
-ecma.promise.await_ordering
 ecma.uint8array.set
 ecma.uint8array.views
 ecma.json.values
@@ -15,10 +14,11 @@ ecma.json.native
 ecma.json.typed
 ecma.json.dictionary
 ecma.object.dictionary
-ecma.json.stringify_options
 ecma.json.command
-ecma.json.reviver
-ecma.json.replacer
 ecma.object.constrained_dictionary
 ecma.object.optional_record
 ecma.object.enumeration
+ecma.string.utf8
+ecma.string.operations
+ecma.json.roundtrip
+ecma.subset.exclusions

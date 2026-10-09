@@ -51,7 +51,7 @@ pub struct Task {
     large: *mut Chunk,
     cursor: usize,
     end: usize,
-    ready_head: *mut Node,
+    pub(crate) ready_head: *mut Node,
     ready_tail: *mut Node,
     subtasks: *mut Subtask,
     /// Waitable set of the pending subtasks, created on first use; 0 if none.

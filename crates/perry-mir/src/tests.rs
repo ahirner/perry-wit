@@ -585,6 +585,55 @@ fn exception_ops_round_trip_and_keep_caught_pairs() {
 }
 
 #[test]
+fn string_intrinsics_preserve_optional_results_and_exception_edges() {
+    let input = single_block(
+        r#"
+        text = perry.string_const "é🙂" : perry.string;
+        end = perry.undefined : perry.optional <builtin.fp64>;
+        separator = perry.wrap text : perry.optional <perry.string>;
+        unit = perry.intrinsic StringAt (text, v) : perry.optional <perry.string>;
+        point = perry.intrinsic StringCodePointAt (text, v) : perry.optional <builtin.fp64>;
+        repeated = perry.intrinsic StringRepeat (text, v) : perry.string;
+        status = perry.caught_status : builtin.integer i32;
+        slice = perry.intrinsic StringSlice (text, v, end) : perry.string;
+        found = perry.intrinsic StringLastIndexOf (text, text, end) : builtin.fp64;
+        parts = perry.intrinsic StringSplit (text, separator, end) : perry.array <perry.string>;
+    "#,
+    );
+    verify_text(&input).expect("typed string operations verify");
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &input);
+    verify_text(&normalized(&print(ctx, module))).expect("string operations round trip");
+    for invalid in [
+        input.replace(
+            "StringAt (text, v) : perry.optional <perry.string>",
+            "StringAt (text, v) : perry.string",
+        ),
+        input.replace(
+            "StringCodePointAt (text, v) : perry.optional <builtin.fp64>",
+            "StringCodePointAt (text, v) : builtin.fp64",
+        ),
+        input.replace("StringSlice (text, v, end)", "StringSlice (text, v, v)"),
+        input.replace(
+            "StringSplit (text, separator, end)",
+            "StringSplit (text, text, end)",
+        ),
+    ] {
+        assert!(
+            verify_text(&invalid)
+                .unwrap_err()
+                .contains("incorrect operand or result types")
+        );
+    }
+    let infallible = input.replace("point = perry.intrinsic StringCodePointAt (text, v) : perry.optional <builtin.fp64>;", "point = perry.intrinsic StringCodePointAt (text, v) : perry.optional <builtin.fp64>; caught = perry.caught_status : builtin.integer i32;");
+    assert!(
+        verify_text(&infallible)
+            .unwrap_err()
+            .contains("immediately follow a throwing operation")
+    );
+}
+
+#[test]
 fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
     let input = single_block(
         r#"
@@ -596,26 +645,6 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
         narrowed = perry.caught_status : builtin.integer i32;
         encoded = perry.intrinsic JsonStringify (optional) : perry.optional <perry.string>;
         serialized = perry.caught_status : builtin.integer i32;
-        formatted = perry.intrinsic JsonStringifyOptions (optional, optional, optional) : perry.optional <perry.string>;
-        formatted_status = perry.caught_status : builtin.integer i32;
-        reviver = perry.intrinsic JsonReviverStart (text) : perry.json_reviver;
-        reviver_started = perry.caught_status : builtin.integer i32;
-        ready = perry.intrinsic JsonReviverNext (reviver) : builtin.integer i1;
-        advanced = perry.caught_status : builtin.integer i32;
-        key = perry.intrinsic JsonReviverKey (reviver) : perry.string;
-        value = perry.intrinsic JsonReviverValue (reviver) : perry.optional <perry.json>;
-        context = perry.intrinsic JsonReviverContext (reviver) : perry.json;
-        perry.intrinsic JsonReviverApply (reviver, value) : ;
-        applied = perry.caught_status : builtin.integer i32;
-        revived = perry.intrinsic JsonReviverResult (reviver) : perry.optional <perry.json>;
-        replacer = perry.intrinsic JsonReplacerStart (optional, optional) : perry.json_replacer;
-        replace_ready = perry.intrinsic JsonReplacerNext (replacer) : builtin.integer i1;
-        replace_advanced = perry.caught_status : builtin.integer i32;
-        replace_key = perry.intrinsic JsonReplacerKey (replacer) : perry.string;
-        replace_value = perry.intrinsic JsonReplacerValue (replacer) : perry.optional <perry.json>;
-        perry.intrinsic JsonReplacerApply (replacer, replace_value) : ;
-        replaced = perry.caught_status : builtin.integer i32;
-        replace_output = perry.intrinsic JsonReplacerResult (replacer) : perry.optional <perry.string>;
     "#,
     );
     verify_text(&input).expect("explicit JSON operations verify");
@@ -628,33 +657,6 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
             .unwrap_err()
             .contains("incorrect operand or result types")
     );
-    for invalid in [
-        input.replace("JsonReplacerNext (replacer)", "JsonReplacerNext (reviver)"),
-        input.replace(
-            "JsonReplacerApply (replacer, replace_value)",
-            "JsonReplacerApply (replacer, text)",
-        ),
-        input.replace(
-            "JsonReplacerStart (optional, optional)",
-            "JsonReplacerStart (optional, text)",
-        ),
-        input.replace("JsonReviverNext (reviver)", "JsonReviverNext (json)"),
-        input.replace("JsonReviverStart (text)", "JsonReviverStart (json)"),
-        input.replace(
-            "JsonReviverApply (reviver, value)",
-            "JsonReviverApply (reviver, text)",
-        ),
-        input.replace(
-            "JsonStringifyOptions (optional, optional, optional)",
-            "JsonStringifyOptions (optional, text, optional)",
-        ),
-        input.replace(
-            "JsonStringifyOptions (optional, optional, optional)",
-            "JsonStringifyOptions (optional, optional)",
-        ),
-    ] {
-        assert!(verify_text(&invalid).is_err());
-    }
 }
 
 #[test]

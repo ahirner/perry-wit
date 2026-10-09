@@ -3,7 +3,7 @@ extern crate std;
 use std::{string::String, vec};
 
 #[test]
-fn formatted_graphs_preserve_filter_order_and_duplicate_values() {
+fn compact_graphs_preserve_order_and_duplicate_values() {
     let text = r#"{"a":1,"2":2,"b":[{"a":3,"2":4},[],{}],"a":5}"#;
     let mut storage = vec![0; measure(text).unwrap()];
     let root = populate(text, &mut storage, 8).unwrap();
@@ -11,38 +11,17 @@ fn formatted_graphs_preserve_filter_order_and_duplicate_values() {
         bytes: &storage,
         base: 8,
     };
-    for (properties, gap, expected) in [
-        (
-            None,
-            "  ",
-            "{\n  \"2\": 2,\n  \"a\": 5,\n  \"b\": [\n    {\n      \"2\": 4,\n      \"a\": 3\n    },\n    [],\n    {}\n  ]\n}",
-        ),
-        (
-            Some(&["b", "a", "2"][..]),
-            "",
-            r#"{"b":[{"a":3,"2":4},[],{}],"a":5,"2":2}"#,
-        ),
-        (Some(&[][..]), "  ", "{}"),
-        (Some(&["missing", "a"][..]), "é", "{\né\"a\": 5\n}"),
-    ] {
-        let options = StringifyOptions {
-            properties,
-            gap: Ok(gap),
-        };
-        let size = measure_tree_with_options(&graph, root, &options).unwrap();
-        assert_eq!(size, expected.len());
-        let mut output = vec![0; size];
-        assert_eq!(
-            serialize_tree_with_options(&graph, root, &mut output, &options),
-            Ok(size)
-        );
-        assert_eq!(String::from_utf8(output).unwrap(), expected);
-        let mut short = vec![0; size - 1];
-        assert_eq!(
-            serialize_tree_with_options(&graph, root, &mut short, &options),
-            Err(Error::Capacity)
-        );
-    }
+    let expected = r#"{"2":2,"a":5,"b":[{"2":4,"a":3},[],{}]}"#;
+    let size = measure_tree(&graph, root).unwrap();
+    assert_eq!(size, expected.len());
+    let mut output = vec![0; size];
+    assert_eq!(serialize_tree(&graph, root, &mut output), Ok(size));
+    assert_eq!(String::from_utf8(output).unwrap(), expected);
+    assert_eq!(
+        serialize_tree(&graph, root, &mut vec![0; size - 1]),
+        Err(Error::Capacity)
+    );
+    assert_eq!(measure("[1,2,3]"), Ok(4 * 32));
 }
 
 #[test]

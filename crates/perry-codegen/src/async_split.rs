@@ -7,9 +7,9 @@
 //! - the **step** `step_f(frame)`: the function body. Its entry dispatches on the frame's
 //!   state: 0 starts the body, `k` resumes after the `k`-th `await`.
 //!
-//! Every `await` stores its state, registers the frame as a waiter and returns. An already
-//! settled promise queues it immediately; settling a pending promise queues the
-//! frame, and the drive loop (`drive`, run at every entry from the host) dispatches queued
+//! An uncontended settled await advances inline. Pending promises register the frame as a
+//! waiter; settling queues that frame. Ready competing work gets a turn through the
+//! drive loop (`drive`, run at every entry from the host), which dispatches queued
 //! frames by kind. Values live across an `await` (backward liveness over the MIR CFG) live in
 //! frame slots: they are stored where they are defined and loaded where they are used, so the
 //! resume entries need no SSA repair. `return v` fulfils the frame's promise, and an exception
@@ -308,7 +308,12 @@ impl FunctionLowering<'_> {
         let state = self.i32_const(ctx, state);
         self.store(ctx, MemKind::I32, frame, STATE, state);
         self.store(ctx, MemKind::I32, frame, AWAITED, promise);
-        self.runtime(ctx, Runtime::PromiseWait, vec![promise, frame]);
+        let queued = self
+            .runtime(ctx, Runtime::PromiseWait, vec![promise, frame])
+            .expect("await disposition");
+        let suspend = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, queued, (suspend, vec![]), (take, vec![promise]));
+        self.block = suspend;
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
 

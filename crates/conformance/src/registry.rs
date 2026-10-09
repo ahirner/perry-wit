@@ -132,6 +132,7 @@ pub struct CatalogEntry {
     pub description: &'static str,
     pub specification: &'static str,
     pub domain: &'static str,
+    pub accepted_deviation: Option<&'static str>,
     pub partitions: Vec<&'static str>,
     pub expected_outcomes: Vec<ExpectedOutcome>,
 }
@@ -149,6 +150,7 @@ impl Contract {
             description: self.description,
             specification: self.specification,
             domain: self.domain,
+            accepted_deviation: crate::accepted_deviation(self.id),
             partitions: self.witnesses.iter().map(|w| w.partition).collect(),
             expected_outcomes,
         }
@@ -508,6 +510,8 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     contracts.push(crate::fetch::contract());
     contracts.push(crate::fetch::byob_contract());
     contracts.extend(crate::capabilities::contracts());
+    contracts.push(crate::strings::contract());
+    contracts.push(crate::strings::exclusions());
     contracts.push(crate::exceptions::contract());
     contracts.push(crate::handler::contract());
     contracts.extend(crate::scaling::contracts());

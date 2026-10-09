@@ -14,13 +14,12 @@
 //! string concatenation; field reads and writes; array literals, `push`, indexing and
 //! `.length`. Everything else is rejected with a diagnostic.
 mod bytes;
-mod callbacks;
 mod dictionaries;
 mod exceptions;
 mod json;
 mod shapes;
+mod strings;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use callbacks::InlineReturn;
 use exceptions::{Cleanup, Handler};
 use perry_hir::{
     ir::{
@@ -95,7 +94,54 @@ pub fn lower_source(
 ) -> Result<ModuleOp> {
     let mut ast = perry_parser::parse_typescript(source, file)
         .map_err(|error| anyhow!("failed to parse {file}: {error:?}"))?;
+    use perry_parser::swc_ecma_ast as ast;
+    use swc_ecma_visit::{Visit, VisitWith};
+    #[derive(Default)]
+    struct SourceExclusion(Option<&'static str>);
+    impl Visit for SourceExclusion {
+        fn visit_new_expr(&mut self, expression: &ast::NewExpr) {
+            if matches!(&*expression.callee, ast::Expr::Ident(name) if name.sym == "RegExp") {
+                self.0 = Some(
+                    "dynamic RegExp is outside the supported subset; use a bounded literal regex",
+                );
+            }
+            expression.visit_children_with(self);
+        }
+        fn visit_call_expr(&mut self, expression: &ast::CallExpr) {
+            if matches!(&expression.callee, ast::Callee::Expr(callee) if matches!(&**callee, ast::Expr::Ident(name) if name.sym == "RegExp"))
+            {
+                self.0 = Some(
+                    "dynamic RegExp is outside the supported subset; use a bounded literal regex",
+                );
+            }
+            if let ast::Callee::Expr(callee) = &expression.callee
+                && let ast::Expr::Member(member) = &**callee
+                && matches!(&*member.obj, ast::Expr::Ident(name) if name.sym == "String")
+            {
+                let name = match &member.prop {
+                    ast::MemberProp::Ident(name) => Some(name.sym.as_ref()),
+                    ast::MemberProp::Computed(key) => match &*key.expr {
+                        ast::Expr::Lit(ast::Lit::Str(name)) => name.value.as_str(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if name == Some("fromCharCode") {
+                    self.0 = Some(
+                        "fromCharCode is a UTF-16 code-unit API outside the supported subset; use fromCodePoint",
+                    );
+                }
+            }
+            expression.visit_children_with(self);
+        }
+    }
+    let mut exclusion = SourceExclusion::default();
+    ast.visit_with(&mut exclusion);
+    if let Some(diagnostic) = exclusion.0 {
+        bail!("{diagnostic}");
+    }
     dictionaries::preserve_interface_indices(&mut ast)?;
+    let inferred_spans = shapes::inferred_binding_spans(&ast);
     let mut hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
     match entry {
@@ -164,7 +210,16 @@ pub fn lower_source(
             "top-level execution needs a wasi:cli/run command world; module initialization is not supported yet"
         ),
     }
-    lower_module(ctx, &hir)
+    let inferred_bindings = hir
+        .local_source_spans
+        .iter()
+        .filter_map(|(id, span)| {
+            inferred_spans
+                .contains(&(span.start, span.end))
+                .then_some(*id)
+        })
+        .collect();
+    build_module(ctx, &hir, inferred_bindings)
 }
 
 struct Signature {
@@ -178,8 +233,16 @@ struct Signature {
 /// Build a MIR module from prepared HIR functions. Command preparation moves module
 /// statements into the entry function before this step.
 pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
+    build_module(ctx, hir, HashSet::new())
+}
+
+fn build_module(
+    ctx: &mut Context,
+    hir: &HirModule,
+    inferred_bindings: HashSet<LocalId>,
+) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
-    let shapes = Shapes::new(hir);
+    let shapes = Shapes::new(hir, inferred_bindings);
     let timers: HashSet<String> = hir
         .imports
         .iter()
@@ -365,7 +428,6 @@ struct FunctionBuilder<'s> {
     timers: &'s HashSet<String>,
     results: Vec<TypeHandle>,
     is_async: bool,
-    inline_return: Option<InlineReturn>,
     labels: usize,
 }
 
@@ -395,7 +457,6 @@ impl<'s> FunctionBuilder<'s> {
             timers,
             results: signature.results.clone(),
             is_async: signature.is_async,
-            inline_return: None,
             labels: 0,
         };
         for (index, param) in function.params.iter().enumerate() {
@@ -604,9 +665,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             Stmt::ReleaseBoxes(_) => {}
             Stmt::Let { id, ty, init, .. } => {
-                // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
-                // type. An explicit type the subset cannot represent is an error, not a fallback.
+                // HIR builtin inference can omit undefined or retain Any in nested fields.
+                // Source provenance keeps those hints distinct from explicit type boundaries.
                 let declared = match ty {
+                    _ if self.shapes.inferred_bindings.contains(id) => None,
                     HirType::Any | HirType::Unknown => None,
                     ty if inferred_enumeration_type(ty)
                         && matches!(
@@ -665,17 +727,9 @@ impl<'s> FunctionBuilder<'s> {
                     values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
                     "return value type differs from the declared result"
                 );
-                self.run_cleanups(
-                    ctx,
-                    self.inline_return.map_or(0, |target| target.cleanup_depth),
-                )?;
+                self.run_cleanups(ctx, 0)?;
                 if !self.terminated(ctx) {
-                    if let Some(target) = self.inline_return {
-                        self.store(ctx, target.result, values[0]);
-                        self.jump(ctx, target.join);
-                    } else {
-                        self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
-                    }
+                    self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
                 }
             }
             Stmt::If {
@@ -883,8 +937,9 @@ impl<'s> FunctionBuilder<'s> {
                 self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, inner))
             }
             Expr::Null => self.intrinsic(ctx, Intrinsic::JsonNull, vec![]).unwrap(),
-            Expr::JsonParseReviver { text, reviver }
-            | Expr::JsonParseWithReviver(text, reviver) => self.revive_json(ctx, text, reviver)?,
+            Expr::JsonParseReviver { .. } | Expr::JsonParseWithReviver(..) => {
+                bail!("JSON.parse revivers are outside the supported subset")
+            }
             Expr::JsonParse(text) | Expr::JsonParseTyped { text, .. } => {
                 let text = self.expression(ctx, text)?;
                 let text = self.defined(ctx, text)?;
@@ -969,9 +1024,36 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Number(value) => self.number(ctx, *value),
             Expr::Integer(value) => self.number(ctx, *value as f64),
             Expr::Bool(value) => self.boolean(ctx, *value),
+            Expr::StringAt { string, index } | Expr::StringCodePointAt { string, index } => {
+                let receiver = self.expression(ctx, string)?;
+                let receiver = self.defined(ctx, receiver)?;
+                let method = if matches!(expr, Expr::StringAt { .. }) {
+                    "at"
+                } else {
+                    "codePointAt"
+                };
+                self.string_method(ctx, receiver, method, core::slice::from_ref(index.as_ref()))?
+                    .unwrap()
+            }
+            Expr::StringSplit(string, separator) => {
+                let receiver = self.expression(ctx, string)?;
+                let receiver = self.defined(ctx, receiver)?;
+                self.string_method(
+                    ctx,
+                    receiver,
+                    "split",
+                    core::slice::from_ref(separator.as_ref()),
+                )?
+                .unwrap()
+            }
             Expr::String(text) => {
                 let op = StringConstOp::new(ctx, text);
                 self.append_value(ctx, &op)
+            }
+            Expr::StringFromCharCode(_) | Expr::StringFromCharCodeSpread(_) => {
+                bail!(
+                    "fromCharCode is a UTF-16 code-unit API outside the supported subset; use fromCodePoint"
+                )
             }
             Expr::ErrorNew(message) => {
                 self.new_error(ctx, perry_mir::attrs::ErrorKind::Any, message.as_deref())?
@@ -1406,6 +1488,10 @@ impl<'s> FunctionBuilder<'s> {
             Expr::New {
                 class_name, args, ..
             } => {
+                ensure!(
+                    class_name != "RegExp",
+                    "dynamic RegExp is outside the supported subset; use a bounded literal regex"
+                );
                 if class_name == "Uint8Array" {
                     return self.bytes_constructor(ctx, &args.iter().collect::<Vec<_>>());
                 }
@@ -1485,6 +1571,13 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
                 let array = self.defined(ctx, array)?;
+                if kind(ctx, array)? == Kind::String {
+                    let index = self.index(ctx, index)?;
+                    return Ok(self
+                        .intrinsic(ctx, Intrinsic::StringIndex, vec![array, index])
+                        .unwrap());
+                }
+
                 if kind(ctx, array)? == Kind::Tuple {
                     if let Some(index) = literal_index(index)
                         && perry_mir::tuples::element(ctx, array.get_type(ctx), index).is_some()
@@ -1956,6 +2049,11 @@ impl<'s> FunctionBuilder<'s> {
         {
             let receiver = self.expression(ctx, object)?;
             let receiver = self.defined(ctx, receiver)?;
+            if kind(ctx, receiver)? == Kind::String
+                || (json::is_json(ctx, receiver) && strings::is_string_method(property))
+            {
+                return self.string_method(ctx, receiver, property, args);
+            }
             if kind(ctx, receiver)? == Kind::Bytes {
                 return self.bytes_method(ctx, receiver, property, args);
             }
@@ -1985,7 +2083,17 @@ impl<'s> FunctionBuilder<'s> {
                 self.fit(ctx, value, *param)
             })
             .collect::<Result<Vec<_>>>()?;
-        self.invoke(ctx, *id, values)
+        let signature = &self.signatures[id];
+        let results = signature.results.clone();
+        if signature.is_async {
+            return Ok(Some(self.emit_value(ctx, |ctx| {
+                AsyncCallOp::new(ctx, name, values, results[0])
+            })));
+        }
+        let op = CallOp::new(ctx, name, values, results);
+        self.append(ctx, &op);
+        let operation = op.get_operation().deref(ctx);
+        Ok((operation.get_num_results() == 1).then(|| operation.get_result(0)))
     }
 }
 

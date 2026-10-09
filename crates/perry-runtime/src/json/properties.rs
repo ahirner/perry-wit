@@ -41,7 +41,7 @@ pub(super) unsafe fn has_own(value: Json, key: &str) -> bool {
             | Json::Native {
                 reference: array, ..
             } => array::slots(array).len(),
-            Json::String(text) => (*text.cast::<string::Str>()).utf16 as usize,
+            Json::String(text) => (*text.cast::<string::Str>()).scalars as usize,
             _ => return false,
         };
         key == "length" || canonical_index(key).is_some_and(|index| index < length)
@@ -118,7 +118,7 @@ pub(super) unsafe fn keys(value: Json) -> *mut u8 {
             | Json::Native {
                 reference: array, ..
             } => array::slots(array).len(),
-            Json::String(text) => (*text.cast::<string::Str>()).utf16 as usize,
+            Json::String(text) => (*text.cast::<string::Str>()).scalars as usize,
             _ => 0,
         };
         let result = array::perry_array_new((keys.len() + length) as u32);

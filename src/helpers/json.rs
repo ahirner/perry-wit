@@ -9,11 +9,10 @@ mod storage;
 
 pub use parse::{measure, populate};
 pub use serialize::{
-    Graph, StringifyOptions, Tree, Value, measure_serialized, measure_tree,
-    measure_tree_with_options, serialize, serialize_tree, serialize_tree_with_options,
+    Graph, Tree, Value, measure_serialized, measure_tree, serialize, serialize_tree,
 };
 
-const NODE_BYTES: usize = 40;
+const NODE_BYTES: usize = 32;
 const MAX_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +32,5 @@ pub enum Error {
     Depth(usize),
     Capacity,
     InvalidGraph,
-    PrototypeLookup,
     Cycle,
 }

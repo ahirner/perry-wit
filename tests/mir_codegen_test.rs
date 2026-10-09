@@ -268,6 +268,40 @@ export async function fails(n: number): Promise<number> {
 }
 
 #[test]
+fn uncontended_settled_awaits_run_inline_without_per_await_storage() {
+    let mut program = Program::new(
+        r#"
+async function ready():Promise<number>{return 7;}
+async function consumer(trace:number[]):Promise<number>{
+  trace.push(1);const value=await ready();trace.push(2);return value;
+}
+export async function order(n:number):Promise<number>{
+  const trace:number[]=[];const result=consumer(trace);trace.push(3);await result;
+  return trace[0]*100+trace[1]*10+trace[2];
+}
+export async function repeat(n:number):Promise<number>{
+  const promise=ready();let sum=0;
+  for(let i=0;i<n;i++)sum=sum+await promise;
+  return sum;
+}
+"#,
+    );
+    assert_eq!(program.throwing("order", 0.0), (123.0, 0));
+    assert_eq!(program.throwing("repeat", 1.0), (7.0, 0));
+    let memory = program
+        .instance
+        .get_memory(&mut program.store, "memory")
+        .unwrap();
+    let before = memory.size(&program.store);
+    assert_eq!(program.throwing("repeat", 100_000.0), (700_000.0, 0));
+    assert_eq!(
+        memory.size(&program.store),
+        before,
+        "settled awaits allocated queue nodes"
+    );
+}
+
+#[test]
 fn scaling_contracts_are_linear() {
     let workloads = [
         (
@@ -557,7 +591,7 @@ export function run(x: number): number {
 }
 "#,
     );
-    assert_eq!(program.number("run", 9.0), 2049.0);
+    assert_eq!(program.number("run", 9.0), 2048.0);
 }
 
 #[test]

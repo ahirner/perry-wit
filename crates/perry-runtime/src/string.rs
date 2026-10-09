@@ -1,20 +1,27 @@
-//! Strings: UTF-8 bytes with their UTF-16 length cached (design decision, `TODOs.md` P6.1).
+//! Strings: UTF-8 bytes with their Unicode scalar length cached (design decision, `TODOs.md` P6.1).
 //!
 //! WIT strings are UTF-8, so arguments and results cross the component boundary without
-//! transcoding. ECMAScript lengths and indices count UTF-16 code units; the cached count makes
-//! `.length` O(1), and `utf16 == len` identifies ASCII strings, where every index is a byte
+//! transcoding. Lengths and indices count Unicode scalar values; the cached count makes
+//! `.length` O(1), and `scalars == len` identifies ASCII strings, where every index is a byte
 //! offset.
 //!
-//! Layout, read inline by compiled code: `len: u32` (bytes) at 0, `utf16: u32` at 4,
+//! Layout, read inline by compiled code: `len: u32` (bytes) at 0, `scalars: u32` at 4,
 //! `data: u32` at 8, `buffer: u32` at 12. Compiled constants are static objects with a null
 //! buffer. Concatenation writes into a growable buffer shared by successive results:
 //! `s = s + x` appends in place while `s` is still the buffer's most recent string, so append
 //! loops are linear, and every earlier string keeps its own length over the shared prefix.
+#[path = "../../../src/helpers/case_properties.rs"]
+mod case_properties;
+#[path = "../../../src/helpers/casing.rs"]
+mod casing;
+mod methods;
+pub use methods::*;
+
 use crate::region::perry_alloc;
 use core::ptr;
 
 pub const LEN: u32 = 0;
-pub const UTF16: u32 = 4;
+pub const SCALARS: u32 = 4;
 pub const DATA: u32 = 8;
 pub const BUFFER: u32 = 12;
 pub const SIZE: u32 = 16;
@@ -22,7 +29,7 @@ pub const SIZE: u32 = 16;
 #[repr(C)]
 pub(crate) struct Str {
     len: u32,
-    pub(crate) utf16: u32,
+    pub(crate) scalars: u32,
     data: *mut u8,
     buffer: *mut Buffer,
 }
@@ -62,21 +69,18 @@ pub(crate) fn copy(text: &str) -> *mut u8 {
 #[cfg(target_arch = "wasm32")]
 const _: () = assert!(core::mem::size_of::<Str>() == SIZE as usize);
 
-/// UTF-16 code units in valid UTF-8: one per scalar, two for scalars above U+FFFF.
-pub fn utf16_length(bytes: &[u8]) -> u32 {
-    bytes
-        .iter()
-        .map(|&b| u32::from(b & 0xC0 != 0x80) + u32::from(b >= 0xF0))
-        .sum()
+/// Unicode scalars in valid UTF-8: one for each leading byte.
+pub fn scalar_length(bytes: &[u8]) -> u32 {
+    bytes.iter().map(|&b| u32::from(b & 0xC0 != 0x80)).sum()
 }
 
-fn new(len: u32, utf16: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
+fn new(len: u32, scalars: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
     let string = perry_alloc(core::mem::size_of::<Str>() as u32) as *mut Str;
     // SAFETY: freshly allocated, 8-aligned and SIZE bytes long.
     unsafe {
         string.write(Str {
             len,
-            utf16,
+            scalars,
             data,
             buffer,
         })
@@ -101,7 +105,7 @@ pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 
     } else {
         data
     };
-    new(len, utf16_length(bytes), data, ptr::null_mut())
+    new(len, scalar_length(bytes), data, ptr::null_mut())
 }
 
 /// Strict equality, including optional strings represented by null.
@@ -139,7 +143,7 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
             return b as *mut u8;
         }
         let len = (*a).len.checked_add((*b).len).expect("string too long");
-        let utf16 = (*a).utf16 + (*b).utf16;
+        let scalars = (*a).scalars + (*b).scalars;
         let buffer = (*a).buffer;
         if !buffer.is_null() {
             let bytes = (buffer as *mut u8).add(8);
@@ -151,7 +155,7 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
                     (*b).len as usize,
                 );
                 (*buffer).used += (*b).len;
-                return new(len, utf16, (*a).data, buffer);
+                return new(len, scalars, (*a).data, buffer);
             }
         }
         let cap = len.saturating_mul(2).max(MIN_BUFFER);
@@ -160,7 +164,7 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
         let bytes = (buffer as *mut u8).add(8);
         ptr::copy_nonoverlapping((*a).data, bytes, (*a).len as usize);
         ptr::copy_nonoverlapping((*b).data, bytes.add((*a).len as usize), (*b).len as usize);
-        new(len, utf16, bytes, buffer)
+        new(len, scalars, bytes, buffer)
     }
 }
 

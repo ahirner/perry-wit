@@ -29,6 +29,31 @@ fn rejected(source: &str) -> String {
 }
 
 #[test]
+fn string_optional_results_remain_optional_in_inferred_records() {
+    let printed = lowered(
+        r#"
+export function run(input: string, index: number): string {
+    const result = { point: input.codePointAt(index), at: input.at(index), nested: { value: input[index] } };
+    return JSON.stringify(result);
+}
+"#,
+    );
+    assert!(
+        printed.contains("point: perry.optional <builtin.fp64"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("at: perry.optional <perry.string"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("value: perry.optional <perry.string"),
+        "{printed}"
+    );
+    assert_eq!(printed.matches("perry.unwrap").count(), 1, "{printed}");
+}
+
+#[test]
 fn scalar_loop_becomes_ssa() {
     let printed = lowered(
         r#"
@@ -497,70 +522,38 @@ export function run(x: number): number {
 }
 
 #[test]
-fn reviver_arrows_share_captures_and_keep_local_returns() {
-    let printed = lowered(
-        r#"
-export function run(input:string):string {
-  let count=0;
-  const value=JSON.parse(input,(key,value)=>{
-    try { if(key==='drop') return undefined;return value; }
-    finally { count=count+1; }
-  });
-  return JSON.stringify({value,count});
-}
-"#,
-    );
-    assert!(printed.contains("JsonReviverApply"), "{printed}");
-    assert!(
-        !printed.contains("perry.alloc"),
-        "callback must not allocate an environment: {printed}"
-    );
-    for source in [
-        "export function run():string { return JSON.stringify(JSON.parse('1',async (key,value)=>value)); }",
-        "export function run():string { return JSON.stringify(JSON.parse('1',(key,value,context,extra)=>value)); }",
-        "export function run():string { return JSON.stringify(JSON.parse('1',function(key,value){return value;})); }",
+fn accepted_subset_exclusions_have_compile_time_diagnostics() {
+    for (expression, diagnostic) in [
+        ("JSON.parse('1',(_key,value)=>value)", "JSON.parse revivers"),
+        (
+            "JSON.stringify({x:1},(_key,value)=>value)",
+            "JSON.stringify replacers and formatting",
+        ),
+        (
+            "JSON.stringify({x:1},['x'])",
+            "JSON.stringify replacers and formatting",
+        ),
+        (
+            "JSON.stringify({x:1},null,2)",
+            "JSON.stringify replacers and formatting",
+        ),
+        ("'a'.charCodeAt(0)", "charCodeAt is a UTF-16 code-unit API"),
+        (
+            "String.fromCharCode(65)",
+            "fromCharCode is a UTF-16 code-unit API",
+        ),
+        ("new RegExp('a+')", "dynamic RegExp"),
+        (
+            "String.fromCharCode()",
+            "fromCharCode is a UTF-16 code-unit API",
+        ),
+        (
+            "String['fromCharCode']()",
+            "fromCharCode is a UTF-16 code-unit API",
+        ),
     ] {
-        let error = rejected(source);
-        assert!(
-            error.contains("callback") || error.contains("subset rule R5"),
-            "{error}"
-        );
-    }
-    let error = rejected(
-        "export function run():number { JSON.parse('1',()=>later);let later=2;return later; }",
-    );
-    assert!(error.contains("before its declaration"), "{error}");
-}
-
-#[test]
-fn replacer_callbacks_share_lowering_and_reject_escaping_forms() {
-    let printed = lowered(
-        r#"
-export function run(input:string):string {
-    let count=0;
-    const result=JSON.stringify(JSON.parse(input),(key,value)=>{
-        try {if(key==='drop')return undefined;return value;}
-        finally {count=count+1;}
-    });
-    return JSON.stringify({result,count});
-}
-"#,
-    );
-    assert!(printed.contains("JsonReplacerApply"), "{printed}");
-    assert!(
-        !printed.contains("perry.alloc"),
-        "callback environment allocated: {printed}"
-    );
-    for source in [
-        "export function run():string {return JSON.stringify(1,async (_key,value)=>value);}",
-        "export function run():string {return JSON.stringify(1,(_key,value,extra)=>value);}",
-        "export function run():string {return JSON.stringify(1,function(_key,value){return value;});}",
-    ] {
-        let error = rejected(source);
-        assert!(
-            error.contains("callback") || error.contains("subset rule R5"),
-            "{error}"
-        );
+        let error = rejected(&format!("export function run():void {{ {expression}; }}"));
+        assert!(error.contains(diagnostic), "{expression}: {error}");
     }
 }
 

@@ -47,13 +47,6 @@ unsafe fn string_member(reference: *mut u8, byte_offset: &mut usize) -> Member {
             .chars()
             .next()
             .expect("string enumeration index");
-        if character.len_utf16() != 1 {
-            failure(
-                exception::TYPE_ERROR,
-                "string enumeration would require an unpaired surrogate",
-            );
-            return Member::String(ptr::null_mut());
-        }
         let start = *byte_offset;
         *byte_offset += character.len_utf8();
         Member::String(string::copy(&string::text(reference)[start..*byte_offset]))

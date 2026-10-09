@@ -16,7 +16,7 @@
 //!   arrays use the layout in [perry_runtime::array]. Packed layouts remain P3.6.
 //! - Every allocation is `task` tier: the builder cannot express module state yet (R4), so no
 //!   value outlives its export call. Each export call is one task (see `perry_runtime::region`).
-//! - Strings are UTF-8 with a cached UTF-16 length (layout in [perry_runtime::string]);
+//! - Strings are UTF-8 with a cached Unicode scalar length (layout in [perry_runtime::string]);
 //!   constants are static objects in the data segment.
 //! - Exceptions use the status convention: a function that may throw returns an extra `i32`
 //!   status after its results (0 = normal, otherwise an [ErrorKind] code), and callers branch on
@@ -37,8 +37,8 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonReplacerType,
-        JsonReviverType, JsonType, OptionalType, PromiseType, RecordType, StringType, TupleType,
+        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, OptionalType,
+        PromiseType, RecordType, StringType, TupleType,
     },
 };
 use perry_runtime::array as layout;
@@ -251,22 +251,8 @@ enum Runtime {
     DictionaryKeys,
     DictionaryValues,
     JsonParse,
-    JsonReplacerStart,
-    JsonReplacerNext,
-    JsonReplacerKey,
-    JsonReplacerValue,
-    JsonReplacerApply,
-    JsonReplacerResult,
-    JsonReviverStart,
-    JsonReviverNext,
-    JsonReviverKey,
-    JsonReviverValue,
-    JsonReviverContext,
-    JsonReviverApply,
-    JsonReviverResult,
 
     JsonStringify,
-    JsonStringifyOptions,
     JsonNull,
     JsonNumber,
     JsonBoolean,
@@ -339,6 +325,14 @@ enum Runtime {
     CabiRealloc,
     StringAdopt,
     StringConcat,
+    StringUnit,
+    StringCodePoint,
+    StringSlice,
+    StringSearch,
+    StringCase,
+    StringTrim,
+    StringRepeat,
+    StringSplit,
     Stdout,
     Stderr,
     StdoutEvent,
@@ -380,22 +374,8 @@ impl Runtime {
             Runtime::DictionaryKeys => "perry_dictionary_keys",
             Runtime::DictionaryValues => "perry_dictionary_values",
             Runtime::JsonParse => "perry_json_parse",
-            Runtime::JsonReviverStart => "perry_json_reviver_start",
-            Runtime::JsonReplacerStart => "perry_json_replacer_start",
-            Runtime::JsonReviverNext => "perry_json_reviver_next",
-            Runtime::JsonReplacerNext => "perry_json_replacer_next",
-            Runtime::JsonReviverKey => "perry_json_reviver_key",
-            Runtime::JsonReplacerKey => "perry_json_replacer_key",
-            Runtime::JsonReviverContext => "perry_json_reviver_context",
-            Runtime::JsonReviverValue => "perry_json_reviver_value",
-            Runtime::JsonReplacerValue => "perry_json_replacer_value",
-            Runtime::JsonReviverApply => "perry_json_reviver_apply",
-            Runtime::JsonReplacerApply => "perry_json_replacer_apply",
-            Runtime::JsonReviverResult => "perry_json_reviver_result",
-            Runtime::JsonReplacerResult => "perry_json_replacer_result",
 
             Runtime::JsonStringify => "perry_json_stringify",
-            Runtime::JsonStringifyOptions => "perry_json_stringify_options",
             Runtime::JsonNull => "perry_json_null",
             Runtime::JsonNumber => "perry_json_number",
             Runtime::JsonBoolean => "perry_json_boolean",
@@ -467,6 +447,15 @@ impl Runtime {
             Runtime::CabiRealloc => "perry_cabi_realloc",
             Runtime::StringAdopt => "perry_string_adopt",
             Runtime::StringConcat => "perry_string_concat",
+            Runtime::StringUnit => "perry_string_unit",
+            Runtime::StringCodePoint => "perry_string_code_point",
+            Runtime::StringSlice => "perry_string_slice",
+            Runtime::StringSearch => "perry_string_search",
+            Runtime::StringCase => "perry_string_case",
+            Runtime::StringTrim => "perry_string_trim",
+            Runtime::StringRepeat => "perry_string_repeat",
+            Runtime::StringSplit => "perry_string_split",
+
             Runtime::Stdout => "perry_stdout",
             Runtime::Stderr => "perry_stderr",
             Runtime::StdoutCancel => "perry_stdout_cancel",
@@ -508,16 +497,6 @@ impl Runtime {
             Runtime::JsonBoolean
             | Runtime::JsonString
             | Runtime::JsonArray
-            | Runtime::JsonReviverStart
-            | Runtime::JsonReplacerNext
-            | Runtime::JsonReplacerKey
-            | Runtime::JsonReplacerValue
-            | Runtime::JsonReplacerResult
-            | Runtime::JsonReviverNext
-            | Runtime::JsonReviverKey
-            | Runtime::JsonReviverValue
-            | Runtime::JsonReviverContext
-            | Runtime::JsonReviverResult
             | Runtime::JsonParse
             | Runtime::JsonStringify
             | Runtime::JsonKeys
@@ -537,17 +516,14 @@ impl Runtime {
             Runtime::RecordKeys => (vec![i32], vec![i32]),
             Runtime::RecordHas | Runtime::RecordDelete => (vec![i32, i32], vec![i32]),
             Runtime::DictionaryDelete | Runtime::DictionaryHas => (vec![i32, i32], vec![i32]),
-            Runtime::JsonReplacerStart
-            | Runtime::JsonObject
+            Runtime::JsonObject
             | Runtime::JsonGet
             | Runtime::JsonEqual
             | Runtime::JsonHasOwn
             | Runtime::JsonDelete => (vec![i32, i32], vec![i32]),
             Runtime::JsonIndex => (vec![i32, f64], vec![i32]),
             Runtime::JsonAsNumber => (vec![i32], vec![f64]),
-            Runtime::JsonReplacerApply | Runtime::JsonReviverApply => (vec![i32, i32], vec![]),
             Runtime::JsonSet => (vec![i32, i32, i32], vec![]),
-            Runtime::JsonStringifyOptions => (vec![i32, i32, i32], vec![i32]),
             Runtime::JsonSetIndex => (vec![i32, f64, i32], vec![]),
             Runtime::BufferNew | Runtime::BytesNew => (vec![f64], vec![i32]),
             Runtime::BufferLength | Runtime::BytesLength | Runtime::BytesOffset => {
@@ -603,8 +579,16 @@ impl Runtime {
             Runtime::SubtaskDone => (vec![i32], vec![i32]),
             Runtime::SubtaskRegister => (vec![i32, i32, i64], vec![]),
             Runtime::PromiseResolve => (vec![i32, i64], vec![]),
-            Runtime::PromiseReject | Runtime::PromiseWait => (vec![i32, i32], vec![]),
+            Runtime::PromiseReject => (vec![i32, i32], vec![]),
+            Runtime::PromiseWait => (vec![i32, i32], vec![i32]),
             Runtime::CabiRealloc => (vec![i32; 4], vec![i32]),
+            Runtime::StringUnit => (vec![i32, f64, i32], vec![i32]),
+            Runtime::StringCodePoint => (vec![i32, f64], vec![f64]),
+            Runtime::StringSlice => (vec![i32, f64, f64, i32], vec![i32]),
+            Runtime::StringSearch => (vec![i32, i32, f64, i32], vec![f64]),
+            Runtime::StringCase | Runtime::StringTrim => (vec![i32, i32], vec![i32]),
+            Runtime::StringRepeat => (vec![i32, f64], vec![i32]),
+            Runtime::StringSplit => (vec![i32, i32, f64], vec![i32]),
             Runtime::StringAdopt | Runtime::StringConcat => (vec![i32, i32], vec![i32]),
         }
     }
@@ -642,8 +626,6 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
-        || deref.is::<JsonReplacerType>()
-        || deref.is::<JsonReviverType>()
         || deref.is::<JsonType>()
         || deref.is::<BytesType>()
         || deref.is::<BufferType>()
@@ -754,10 +736,10 @@ impl Data {
             self.bytes.push(0);
         }
         let address = DATA_BASE + self.bytes.len() as u32;
-        let utf16 = text.encode_utf16().count() as u32;
+        let scalars = text.chars().count() as u32;
         for word in [
             text.len() as u32,
-            utf16,
+            scalars,
             address + perry_runtime::string::SIZE,
             0,
         ] {
@@ -2029,7 +2011,7 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<StringLenOp>(op, ctx).is_some() {
             let string = self.operands(ctx, op)?[0];
-            let value = self.load(ctx, MemKind::I32, string, perry_runtime::string::UTF16);
+            let value = self.load(ctx, MemKind::I32, string, perry_runtime::string::SCALARS);
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -2047,24 +2029,44 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             let kind = intrinsic.kind(ctx);
+            let string_runtime = match kind {
+                Intrinsic::StringCharAt => Some((Runtime::StringUnit, Some(0))),
+                Intrinsic::StringAt => Some((Runtime::StringUnit, Some(1))),
+                Intrinsic::StringIndex => Some((Runtime::StringUnit, Some(2))),
+                Intrinsic::StringCodePointAt => Some((Runtime::StringCodePoint, None)),
+                Intrinsic::StringSlice => Some((Runtime::StringSlice, Some(0))),
+                Intrinsic::StringSubstring => Some((Runtime::StringSlice, Some(1))),
+                Intrinsic::StringIndexOf => Some((Runtime::StringSearch, Some(0))),
+                Intrinsic::StringLastIndexOf => Some((Runtime::StringSearch, Some(1))),
+                Intrinsic::StringStartsWith => Some((Runtime::StringSearch, Some(2))),
+                Intrinsic::StringEndsWith => Some((Runtime::StringSearch, Some(3))),
+                Intrinsic::StringLower => Some((Runtime::StringCase, Some(0))),
+                Intrinsic::StringUpper => Some((Runtime::StringCase, Some(1))),
+                Intrinsic::StringTrim => Some((Runtime::StringTrim, Some(0))),
+                Intrinsic::StringTrimStart => Some((Runtime::StringTrim, Some(1))),
+                Intrinsic::StringTrimEnd => Some((Runtime::StringTrim, Some(2))),
+                Intrinsic::StringRepeat => Some((Runtime::StringRepeat, None)),
+                Intrinsic::StringSplit => Some((Runtime::StringSplit, None)),
+                _ => None,
+            };
+            if let Some((runtime, mode)) = string_runtime {
+                let mut operands = self.operands(ctx, op)?;
+                if let Some(mode) = mode {
+                    operands.push(self.i32_const(ctx, mode));
+                }
+                let result = self
+                    .runtime(ctx, runtime, operands)
+                    .expect("string operation result");
+                if intrinsic.may_throw(ctx) {
+                    self.check_pending(ctx);
+                }
+                self.define(ctx, op, result);
+                return Ok(());
+            }
             let json_runtime = match kind {
                 Intrinsic::JsonParse => Some(Runtime::JsonParse),
-                Intrinsic::JsonReviverStart => Some(Runtime::JsonReviverStart),
-                Intrinsic::JsonReplacerStart => Some(Runtime::JsonReplacerStart),
-                Intrinsic::JsonReviverNext => Some(Runtime::JsonReviverNext),
-                Intrinsic::JsonReplacerNext => Some(Runtime::JsonReplacerNext),
-                Intrinsic::JsonReviverKey => Some(Runtime::JsonReviverKey),
-                Intrinsic::JsonReplacerKey => Some(Runtime::JsonReplacerKey),
-                Intrinsic::JsonReviverContext => Some(Runtime::JsonReviverContext),
-                Intrinsic::JsonReviverValue => Some(Runtime::JsonReviverValue),
-                Intrinsic::JsonReplacerValue => Some(Runtime::JsonReplacerValue),
-                Intrinsic::JsonReviverApply => Some(Runtime::JsonReviverApply),
-                Intrinsic::JsonReplacerApply => Some(Runtime::JsonReplacerApply),
-                Intrinsic::JsonReviverResult => Some(Runtime::JsonReviverResult),
-                Intrinsic::JsonReplacerResult => Some(Runtime::JsonReplacerResult),
 
                 Intrinsic::JsonStringify => Some(Runtime::JsonStringify),
-                Intrinsic::JsonStringifyOptions => Some(Runtime::JsonStringifyOptions),
                 Intrinsic::JsonNull => Some(Runtime::JsonNull),
                 Intrinsic::JsonNumber => Some(Runtime::JsonNumber),
                 Intrinsic::JsonBoolean => Some(Runtime::JsonBoolean),

@@ -63,6 +63,8 @@ pub enum Status {
     /// Failed, and not listed in `passing.txt`: the compiler does not cover it yet
     /// (`TODOs.md` P6.2). Does not fail the campaign.
     Pending,
+    /// Deliberate documented deviation; never promoted into the supported-subset ratchet.
+    Exempt,
 }
 #[derive(Serialize)]
 pub struct PartitionResult {
@@ -75,6 +77,7 @@ pub struct ContractResult {
     pub description: &'static str,
     pub specification: &'static str,
     pub domain: &'static str,
+    pub accepted_deviation: Option<&'static str>,
     pub status: Status,
     pub partitions: Vec<PartitionResult>,
     pub expected_outcomes: Vec<ExpectedOutcome>,
@@ -250,6 +253,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
                 description: c.description,
                 specification: c.specification,
                 domain: c.domain,
+                accepted_deviation: crate::accepted_deviation(c.id),
                 expected_outcomes: c.catalog().expected_outcomes,
                 status: Status::NotRun,
                 partitions: c
@@ -271,6 +275,16 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
     for (index, contract) in contracts.iter().enumerate() {
         let result = &mut report.contracts[index];
         if !contract.id.starts_with(&settings.select) {
+            continue;
+        }
+        if let Some(reason) = result.accepted_deviation {
+            ensure!(
+                !crate::passing(contract.id),
+                "exempt contract {} must not be in passing.txt",
+                contract.id
+            );
+            result.status = Status::Exempt;
+            eprintln!("{}: exempt ({reason})", contract.id);
             continue;
         }
         result.status = Status::Running;

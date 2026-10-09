@@ -9,14 +9,10 @@ mod native;
 mod object;
 mod properties;
 mod record;
-mod replacer;
-mod reviver;
 mod stringify;
 use object::{Field, Object};
 pub use properties::*;
-pub use replacer::*;
-pub use reviver::*;
-pub use stringify::{perry_json_stringify, perry_json_stringify_options};
+pub use stringify::perry_json_stringify;
 pub mod view;
 pub use native::perry_json_pack;
 
@@ -105,11 +101,7 @@ pub unsafe extern "C" fn perry_json_object(keys: *mut u8, values: *mut u8) -> *m
     }
 }
 
-fn from_graph(
-    graph: &Graph<'_>,
-    node: u32,
-    record: &mut impl FnMut(u32, *mut u8),
-) -> Result<*mut u8, Error> {
+fn from_graph(graph: &Graph<'_>, node: u32) -> Result<*mut u8, Error> {
     let value = match graph.value(node)? {
         Value::Undefined => return Err(Error::InvalidGraph),
         Value::Null => perry_json_null(),
@@ -127,7 +119,7 @@ fn from_graph(
         Value::Array(children) => {
             let array = array::perry_array_new(children.clone().count() as u32);
             for (index, child) in children.enumerate() {
-                let value = from_graph(graph, child?, record)?;
+                let value = from_graph(graph, child?)?;
                 // SAFETY: appending one initialized JSON reference at a time.
                 unsafe {
                     array::set_slot(array, index, value as usize as u64);
@@ -141,7 +133,7 @@ fn from_graph(
             for child in children {
                 let child = child?;
                 let key = graph.key(child)?;
-                let value = from_graph(graph, child, record)?;
+                let value = from_graph(graph, child)?;
                 // SAFETY: each field is fresh; graph key bytes remain live for the task.
                 unsafe {
                     let key = string::perry_string_adopt(key.as_ptr().cast_mut(), key.len() as u32);
@@ -151,7 +143,6 @@ fn from_graph(
             allocate(Json::Object(object))
         }
     };
-    record(node, value);
     Ok(value)
 }
 
@@ -187,7 +178,7 @@ pub unsafe extern "C" fn perry_json_parse(input: *mut u8) -> *mut u8 {
         Ok(parsed) => parsed,
         Err(error) => return parse_failure(error),
     };
-    from_graph(&graph, root, &mut |_, _| {}).expect("validated JSON graph")
+    from_graph(&graph, root).expect("validated JSON graph")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -362,24 +353,6 @@ impl Tree for RuntimeTree {
         // SAFETY: object members hold live string keys.
         Ok(unsafe { string::text(key) })
     }
-    fn property(&self, node: Node, key: &str) -> Result<Option<Node>, Error> {
-        // SAFETY: the read-only adapter keeps every node and its native descriptor live.
-        let found = unsafe {
-            match node_value(node) {
-                Some(Json::Object(object)) => (*object).find(key).map(|field| Node::Field(field)),
-                Some(Json::Native { reference, ty })
-                    if matches!((*ty).kind, NativeKind::Record | NativeKind::Dictionary) =>
-                {
-                    native::field(reference, &*ty, key).map(Node::NativeSlot)
-                }
-                _ => None,
-            }
-        };
-        if found.is_none() && key == "__proto__" {
-            return Err(Error::PrototypeLookup);
-        }
-        Ok(found)
-    }
 }
 
 fn canonical_index(key: &str) -> Option<usize> {
@@ -390,6 +363,18 @@ fn canonical_index(key: &str) -> Option<usize> {
         return None;
     }
     key.parse().ok()
+}
+
+unsafe fn string_index(text: *mut u8, index: f64) -> *mut u8 {
+    // SAFETY: the checked character operation returns a live string or undefined/failure.
+    unsafe {
+        let value = string::perry_string_unit(text, index, 2);
+        if value.is_null() {
+            ptr::null_mut()
+        } else {
+            perry_json_string(value)
+        }
+    }
 }
 
 /// # Safety
@@ -423,12 +408,10 @@ pub unsafe extern "C" fn perry_json_get(value: *mut u8, key: *mut u8) -> *mut u8
                     .map_or(ptr::null_mut(), |&slot| slot as usize as *mut u8)
             }
             Json::String(text) if string::text(key) == "length" => {
-                perry_json_number((*text.cast::<string::Str>()).utf16 as f64)
+                perry_json_number((*text.cast::<string::Str>()).scalars as f64)
             }
-            Json::String(_) if canonical_index(string::text(key)).is_some() => failure(
-                exception::TYPE_ERROR,
-                "JSON string indexing is not implemented yet",
-            ),
+            Json::String(text) => canonical_index(string::text(key))
+                .map_or(ptr::null_mut(), |index| string_index(text, index as f64)),
             _ => ptr::null_mut(),
         }
     }
@@ -457,10 +440,7 @@ pub unsafe extern "C" fn perry_json_index(value: *mut u8, index: f64) -> *mut u8
                     ptr::null_mut()
                 }
             }
-            Json::String(_) => failure(
-                exception::TYPE_ERROR,
-                "JSON string indexing is not implemented yet",
-            ),
+            Json::String(text) => string_index(text, index),
             Json::Boolean(_) | Json::Number(_) => ptr::null_mut(),
         }
     }

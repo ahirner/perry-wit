@@ -2,88 +2,12 @@
 use super::*;
 use perry_mir::types::OptionalType;
 
-enum CallbackTraversal {
-    Reviver,
-    Replacer,
-}
-
 pub(super) fn is_json(ctx: &Context, value: Value) -> bool {
     let ty = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
     ty.deref(ctx).is::<JsonType>()
 }
 
 impl FunctionBuilder<'_> {
-    pub(super) fn revive_json(
-        &mut self,
-        ctx: &mut Context,
-        text: &Expr,
-        reviver: &Expr,
-    ) -> Result<Value> {
-        let text = self.expression(ctx, text)?;
-        let text = self.defined(ctx, text)?;
-        ensure!(
-            kind(ctx, text)? == Kind::String,
-            "JSON.parse input must be a string"
-        );
-        if !matches!(reviver, Expr::Closure { .. } | Expr::FuncRef(_)) {
-            self.effect(ctx, reviver)?;
-            return Ok(self
-                .intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-                .unwrap());
-        }
-        let state = self
-            .intrinsic(ctx, Intrinsic::JsonReviverStart, vec![text])
-            .unwrap();
-        self.json_callback(ctx, state, reviver, CallbackTraversal::Reviver)
-    }
-
-    fn json_callback(
-        &mut self,
-        ctx: &mut Context,
-        state: Value,
-        callback: &Expr,
-        traversal: CallbackTraversal,
-    ) -> Result<Value> {
-        let (advance, key, value, apply, result) = match traversal {
-            CallbackTraversal::Reviver => (
-                Intrinsic::JsonReviverNext,
-                Intrinsic::JsonReviverKey,
-                Intrinsic::JsonReviverValue,
-                Intrinsic::JsonReviverApply,
-                Intrinsic::JsonReviverResult,
-            ),
-            CallbackTraversal::Replacer => (
-                Intrinsic::JsonReplacerNext,
-                Intrinsic::JsonReplacerKey,
-                Intrinsic::JsonReplacerValue,
-                Intrinsic::JsonReplacerApply,
-                Intrinsic::JsonReplacerResult,
-            ),
-        };
-        let next = self.new_block(ctx, "json_callback_next");
-        let invoke = self.new_block(ctx, "json_callback_invoke");
-        let done = self.new_block(ctx, "json_callback_done");
-        self.jump(ctx, next);
-        self.switch_to(next);
-        let ready = self.intrinsic(ctx, advance, vec![state]).unwrap();
-        self.branch(ctx, ready, invoke, done);
-        self.switch_to(invoke);
-        let key = self.intrinsic(ctx, key, vec![state]).unwrap();
-        let value = self.intrinsic(ctx, value, vec![state]).unwrap();
-        let mut arguments = vec![key, value];
-        if matches!(traversal, CallbackTraversal::Reviver) {
-            arguments.push(
-                self.intrinsic(ctx, Intrinsic::JsonReviverContext, vec![state])
-                    .unwrap(),
-            );
-        }
-        let replacement = self.callback(ctx, callback, &arguments, value.get_type(ctx))?;
-        self.intrinsic(ctx, apply, vec![state, replacement]);
-        self.jump(ctx, next);
-        self.switch_to(done);
-        Ok(self.intrinsic(ctx, result, vec![state]).unwrap())
-    }
-
     pub(super) fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         if is_json(ctx, value) {
             let value = self.optional(ctx, value);
@@ -153,27 +77,20 @@ impl FunctionBuilder<'_> {
         expr: &Expr,
         controls: Option<(&Expr, &Expr)>,
     ) -> Result<Value> {
+        if let Some((replacer, space)) = controls {
+            ensure!(
+                matches!(replacer, Expr::Null | Expr::Undefined)
+                    && matches!(space, Expr::Null | Expr::Undefined),
+                "JSON.stringify replacers and formatting are outside the supported subset"
+            );
+        }
         let value = self.json_value(ctx, expr)?;
-        let mut arguments = vec![self.optional(ctx, value)];
-        let intrinsic = if let Some((replacer, space)) = controls {
-            if matches!(replacer, Expr::Closure { .. } | Expr::FuncRef(_)) {
-                let space = self.json_value(ctx, space)?;
-                arguments.push(self.optional(ctx, space));
-                let state = self
-                    .intrinsic(ctx, Intrinsic::JsonReplacerStart, arguments)
-                    .unwrap();
-                return self.json_callback(ctx, state, replacer, CallbackTraversal::Replacer);
-            }
-            for control in [replacer, space] {
-                let value = self.json_value(ctx, control)?;
-                arguments.push(self.optional(ctx, value));
-            }
-            Intrinsic::JsonStringifyOptions
-        } else {
-            Intrinsic::JsonStringify
-        };
-        Ok(self.intrinsic(ctx, intrinsic, arguments).unwrap())
+        let value = self.optional(ctx, value);
+        Ok(self
+            .intrinsic(ctx, Intrinsic::JsonStringify, vec![value])
+            .unwrap())
     }
+
     pub(super) fn json_value(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         match expr {
             Expr::Array(items) => {

@@ -58,6 +58,22 @@ fn registry_owns_regressions_and_partition_witnesses() -> Result<()> {
 }
 
 #[test]
+fn accepted_deviations_are_explicit_and_outside_the_ratchet() -> Result<()> {
+    let contracts = registry::contracts(3)?;
+    let exempt = contracts
+        .iter()
+        .filter(|c| c.catalog().accepted_deviation.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(exempt.len(), 4);
+    for contract in exempt {
+        assert!(!perry_conformance::passing(contract.id), "{}", contract.id);
+        assert!(!contract.catalog().accepted_deviation.unwrap().is_empty());
+    }
+    assert!(contracts.iter().any(|c| c.id == "ecma.subset.exclusions"));
+    Ok(())
+}
+
+#[test]
 fn state_machine_shrinking_preserves_valid_serializable_traces() {
     let mut runner = TestRunner::new(Config {
         cases: 64,

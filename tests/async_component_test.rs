@@ -54,11 +54,12 @@ export async function label(name: string): Promise<string> {
   return await setTimeout(2, prefix + "!");
 }
 export async function json(input: string): Promise<string> {
-  let source = '';
-  const value = JSON.parse(input,(key,value,context)=>{
-    if(key==='count') source=context.source;
-    return value;
-  });
+  let original = 'é🙂\0' + input;
+  const suffix = original.slice(3);
+  const parts = original.split('\0');
+  const head = original.charAt(0);
+  original = original + '!';
+  const value = JSON.parse(input);
   const alias = value.item;
   const typed: {count: number} = alias;
   const count: number = typed.count;
@@ -76,9 +77,7 @@ export async function json(input: string): Promise<string> {
   const reference: JsonValue = native;
   for(let i=0;i<24;i++) alias[i] = i;
   const keys = Object.keys(alias);
-  const formatted = JSON.stringify(value, ['text','item','count'], 2);
-  let visits=0;
-  const replaced = JSON.stringify(value,(key,value)=>{visits=visits+1;return value;},2);
+  const snapshot = JSON.stringify(value);
   await setTimeout(1);
   reference.count = reference.count + 1;
   for(let i=0;i<24;i++) delete alias[i];
@@ -94,14 +93,13 @@ export async function json(input: string): Promise<string> {
   optional.label='after';
   if(optionalJson.label!=='after' || Object.keys(optional)[1]!=='label')throw new TypeError('lost optional record insertion');
   dictionary.count = native.count;
-  if(JSON.parse(formatted).item.count !== count) throw new TypeError('lost serialization snapshot');
-  if(JSON.parse(replaced).item.count !== count || visits < 3) throw new TypeError('lost replacer snapshot');
-  if(JSON.parse(source) !== count) throw new TypeError('lost reviver source snapshot');
+  if(JSON.parse(snapshot).item.count !== count) throw new TypeError('lost serialization snapshot');
   if(storedValues[0] !== typed || storedValues[0].count !== dictionary.count) throw new TypeError('lost dictionary value');
   if(storedEntries[0][1] !== typed || storedEntries[0][1].count !== dictionary.count) throw new TypeError('lost entry alias');
   if(countEntries[0][1] !== count || jsonEntries[0][1] !== alias) throw new TypeError('lost entry snapshot');
   if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');
   if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');
+  if(suffix !== input || parts[1] !== input || head !== 'é' || !original.endsWith('!')) throw new TypeError('lost string span');
   return JSON.stringify(value);
 }
 export async function bytes(input: Uint8Array, tag: number): Promise<Uint8Array> {

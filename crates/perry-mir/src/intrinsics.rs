@@ -1,9 +1,6 @@
 //! Typed built-in capabilities. Signatures are verified here; native representations and
 //! task scheduling belong to codegen and the runtime.
-use crate::types::{
-    ArrayType, BufferType, BytesType, JsonReplacerType, JsonReviverType, JsonType, OptionalType,
-    StringType,
-};
+use crate::types::{ArrayType, BufferType, BytesType, JsonType, OptionalType, StringType};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     common_traits::Verify,
@@ -22,22 +19,26 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    StringCharAt,
+    StringAt,
+    StringIndex,
+    StringCodePointAt,
+    StringSlice,
+    StringSubstring,
+    StringIndexOf,
+    StringLastIndexOf,
+    StringStartsWith,
+    StringEndsWith,
+    StringLower,
+    StringUpper,
+    StringTrim,
+    StringTrimStart,
+    StringTrimEnd,
+    StringRepeat,
+    StringSplit,
+
     JsonParse,
-    JsonReplacerStart,
-    JsonReplacerNext,
-    JsonReplacerKey,
-    JsonReplacerValue,
-    JsonReplacerApply,
-    JsonReplacerResult,
-    JsonReviverStart,
-    JsonReviverNext,
-    JsonReviverKey,
-    JsonReviverValue,
-    JsonReviverContext,
-    JsonReviverApply,
-    JsonReviverResult,
     JsonStringify,
-    JsonStringifyOptions,
     JsonNull,
     JsonNumber,
     JsonBoolean,
@@ -91,8 +92,6 @@ pub enum Intrinsic {
 
 #[derive(Clone, Copy)]
 enum ValueType {
-    JsonReplacer,
-    JsonReviver,
     Json,
     OptionalJson,
     Jsons,
@@ -111,8 +110,6 @@ enum ValueType {
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
-            Self::JsonReplacer => JsonReplacerType::get(ctx).into(),
-            Self::JsonReviver => JsonReviverType::get(ctx).into(),
             Self::Json => JsonType::get(ctx).into(),
             Self::OptionalJson => {
                 let json = JsonType::get(ctx).into();
@@ -151,8 +148,6 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
-            Self::JsonReplacer => ty.deref(ctx).is::<JsonReplacerType>(),
-            Self::JsonReviver => ty.deref(ctx).is::<JsonReviverType>(),
             Self::Json => ty.deref(ctx).is::<JsonType>(),
             Self::OptionalJson => ty
                 .deref(ctx)
@@ -198,24 +193,25 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::StringCharAt => (&[String, Number], &[String]),
+            Self::StringAt | Self::StringIndex => (&[String, Number], &[OptionalString]),
+            Self::StringCodePointAt => (&[String, Number], &[OptionalNumber]),
+            Self::StringSlice | Self::StringSubstring => {
+                (&[String, Number, OptionalNumber], &[String])
+            }
+            Self::StringIndexOf
+            | Self::StringLastIndexOf
+            | Self::StringStartsWith
+            | Self::StringEndsWith => (&[String, String, OptionalNumber], &[Number]),
+            Self::StringLower
+            | Self::StringUpper
+            | Self::StringTrim
+            | Self::StringTrimStart
+            | Self::StringTrimEnd => (&[String], &[String]),
+            Self::StringRepeat => (&[String, Number], &[String]),
+            Self::StringSplit => (&[String, OptionalString, OptionalNumber], &[Strings]),
             Self::JsonParse => (&[String], &[Json]),
-            Self::JsonReplacerStart => (&[OptionalJson, OptionalJson], &[JsonReplacer]),
-            Self::JsonReplacerNext => (&[JsonReplacer], &[Boolean]),
-            Self::JsonReplacerKey => (&[JsonReplacer], &[String]),
-            Self::JsonReplacerValue => (&[JsonReplacer], &[OptionalJson]),
-            Self::JsonReplacerApply => (&[JsonReplacer, OptionalJson], &[]),
-            Self::JsonReplacerResult => (&[JsonReplacer], &[OptionalString]),
-            Self::JsonReviverStart => (&[String], &[JsonReviver]),
-            Self::JsonReviverContext => (&[JsonReviver], &[Json]),
-            Self::JsonReviverNext => (&[JsonReviver], &[Boolean]),
-            Self::JsonReviverKey => (&[JsonReviver], &[String]),
-            Self::JsonReviverValue | Self::JsonReviverResult => (&[JsonReviver], &[OptionalJson]),
-            Self::JsonReviverApply => (&[JsonReviver, OptionalJson], &[]),
             Self::JsonStringify => (&[OptionalJson], &[OptionalString]),
-            Self::JsonStringifyOptions => (
-                &[OptionalJson, OptionalJson, OptionalJson],
-                &[OptionalString],
-            ),
             Self::JsonNull => (&[], &[Json]),
             Self::JsonNumber => (&[Number], &[Json]),
             Self::JsonBoolean => (&[Boolean], &[Json]),
@@ -320,17 +316,14 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn exception(&self, ctx: &Context) -> crate::attrs::ErrorKind {
         if matches!(
             self.kind(ctx),
-            Intrinsic::BytesFromArray
+            Intrinsic::StringLower
+                | Intrinsic::StringUpper
+                | Intrinsic::StringRepeat
+                | Intrinsic::BytesFromArray
                 | Intrinsic::BytesSetArray
-                | Intrinsic::JsonReplacerNext
-                | Intrinsic::JsonReplacerApply
-                | Intrinsic::JsonReviverStart
-                | Intrinsic::JsonReviverNext
-                | Intrinsic::JsonReviverApply
                 | Intrinsic::JsonParse
                 | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
-                | Intrinsic::JsonStringifyOptions
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
                 | Intrinsic::JsonAsNumber
@@ -352,17 +345,14 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn may_throw(&self, ctx: &Context) -> bool {
         matches!(
             self.kind(ctx),
-            Intrinsic::BytesFromArray
+            Intrinsic::StringLower
+                | Intrinsic::StringUpper
+                | Intrinsic::StringRepeat
+                | Intrinsic::BytesFromArray
                 | Intrinsic::BytesSetArray
-                | Intrinsic::JsonReplacerNext
-                | Intrinsic::JsonReplacerApply
-                | Intrinsic::JsonReviverStart
-                | Intrinsic::JsonReviverNext
-                | Intrinsic::JsonReviverApply
                 | Intrinsic::JsonParse
                 | Intrinsic::JsonObject
                 | Intrinsic::JsonStringify
-                | Intrinsic::JsonStringifyOptions
                 | Intrinsic::JsonGet
                 | Intrinsic::JsonIndex
                 | Intrinsic::JsonAsNumber

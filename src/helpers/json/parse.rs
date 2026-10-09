@@ -8,7 +8,6 @@ pub fn measure(input: &str) -> Result<usize, Error> {
     let mut parser = Parser {
         input,
         position: 0,
-        nodes: 0,
         output: Measure { length: 0 },
     };
     parser.document()?;
@@ -18,12 +17,10 @@ pub fn measure(input: &str) -> Result<usize, Error> {
 /// Writes a validated graph using absolute addresses relative to `base`.
 /// Nodes contain kind, next sibling, payload, first child, count, and member key.
 /// String payloads contain a data address and byte length; offset 16 is scalar length.
-/// Offset 28 is a post-order value index; offsets 32/36 are the original token's byte span.
 pub fn populate(input: &str, output: &mut [u8], base: u32) -> Result<u32, Error> {
     let mut parser = Parser {
         input,
         position: 0,
-        nodes: 0,
         output: Buffer {
             bytes: output,
             length: 0,
@@ -37,7 +34,6 @@ pub fn populate(input: &str, output: &mut [u8], base: u32) -> Result<u32, Error>
 struct Parser<'a, W> {
     input: &'a str,
     position: usize,
-    nodes: u32,
     output: W,
 }
 
@@ -57,8 +53,6 @@ impl<W: Output> Parser<'_, W> {
             return Err(Error::Depth(self.position));
         }
         let node = self.output.reserve(NODE_BYTES, 8)?;
-        let source_start = self.position;
-        self.pointer(node + 28, 0)?;
         match self.peek() {
             Some(b'n') => {
                 self.keyword(b"null")?;
@@ -141,18 +135,6 @@ impl<W: Output> Parser<'_, W> {
             }
             _ => return Err(Error::Syntax(self.position)),
         }
-        self.word(node + 28, self.nodes)?;
-        self.nodes = self.nodes.checked_add(1).ok_or(Error::Capacity)?;
-        self.word(
-            node + 32,
-            source_start.try_into().map_err(|_| Error::Capacity)?,
-        )?;
-        self.word(
-            node + 36,
-            (self.position - source_start)
-                .try_into()
-                .map_err(|_| Error::Capacity)?,
-        )?;
         Ok(node)
     }
 
@@ -225,7 +207,6 @@ impl<W: Output> Parser<'_, W> {
             scalar_length = scalar_length.checked_add(1).ok_or(Error::Capacity)?;
         }
         self.word(node, Kind::String as u32)?;
-        self.pointer(node + 28, 0)?;
         self.pointer(node + 8, start)?;
         self.word(node + 12, byte_length)?;
         self.word(node + 16, scalar_length)

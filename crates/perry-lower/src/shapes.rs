@@ -23,8 +23,33 @@ use pliron::{
 };
 use std::{cell::RefCell, collections::HashMap};
 
+/// Source spans distinguish inferred bindings from explicit typed boundaries after HIR lowering.
+pub(super) fn inferred_binding_spans(
+    module: &perry_parser::swc_ecma_ast::Module,
+) -> std::collections::HashSet<(u32, u32)> {
+    use perry_parser::swc_ecma_ast as ast;
+    use swc_ecma_visit::{Visit, VisitWith};
+    #[derive(Default)]
+    struct InferredBindings(std::collections::HashSet<(u32, u32)>);
+    impl Visit for InferredBindings {
+        fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
+            if let ast::Pat::Ident(binding) = &declaration.name
+                && binding.type_ann.is_none()
+                && declaration.init.is_some()
+            {
+                self.0.insert((binding.id.span.lo.0, binding.id.span.hi.0));
+            }
+            declaration.visit_children_with(self);
+        }
+    }
+    let mut bindings = InferredBindings::default();
+    module.visit_with(&mut bindings);
+    bindings.0
+}
+
 pub(crate) struct Shapes<'h> {
     hir: &'h HirModule,
+    pub(crate) inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
     /// Named types whose fields are being computed, with the record name reserved when a
     /// field refers back to the type.
     pending: RefCell<HashMap<String, Option<String>>>,
@@ -79,9 +104,13 @@ fn json_alias(name: &str, ty: &HirType) -> bool {
 }
 
 impl<'h> Shapes<'h> {
-    pub(crate) fn new(hir: &'h HirModule) -> Self {
+    pub(crate) fn new(
+        hir: &'h HirModule,
+        inferred_bindings: std::collections::HashSet<perry_hir::types::LocalId>,
+    ) -> Self {
         Shapes {
             hir,
+            inferred_bindings,
             pending: RefCell::new(HashMap::new()),
             reserved: RefCell::new(0),
             named: RefCell::new(HashMap::new()),

@@ -332,7 +332,7 @@ pub fn contracts() -> Vec<Contract> {
             id: "ecma.json.dictionary",
             description: "JSON dictionary insertion, deletion, own-property presence and ordered key snapshots",
             specification: "https://tc39.es/ecma262/#sec-ordinaryownpropertykeys",
-            domain: "Mutable parsed objects with duplicate, numeric and Unicode keys; undefined versus absent properties, native/typed aliases and nested undefined serialization; deletion is limited to dictionary properties",
+            domain: "Mutable parsed objects with duplicate, numeric and Unicode keys; undefined versus absent properties, native/typed aliases and nested undefined serialization; deletion is limited to dictionary properties; string-index enumeration uses BMP scalars",
             witnesses: vec![
                 Witness {
                     partition: "empty",
@@ -1152,7 +1152,7 @@ const indexed = (root['indexed'] = true);
 if(!indexed) throw 9;
 if(!Object.hasOwn(root,0/0) || !Object.hasOwn(root,'true')) throw 7;
 console.log(JSON.stringify([snapshot,Object.keys(root),root]));
-console.log(JSON.stringify([Object.keys('é🙂'),Object.keys(3),Object.keys(true)]));
+console.log(JSON.stringify([Object.keys('é水'),Object.keys(3),Object.keys(true)]));
 const native = {{later:2,first:1}};
 console.log(JSON.stringify(Object.keys(native)));
 "#

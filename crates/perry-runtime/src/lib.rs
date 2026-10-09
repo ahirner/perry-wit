@@ -74,7 +74,6 @@ mod tests {
         byte_views_preserve_aliases_and_validate_before_writing();
         json_trees_share_array_storage_and_retain_unicode();
         json_dictionaries_grow_compact_and_keep_identity();
-        json::reviver_snapshot_mutations();
         native_json_optionals_use_contextual_undefined_semantics();
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
@@ -412,10 +411,12 @@ mod tests {
         assert_eq!(perry_ready_pop(), f1);
         assert_eq!(perry_ready_pop(), f2);
         assert!(perry_ready_pop().is_null());
-        perry_promise_wait(p, f2);
-        perry_promise_wait(p, f1);
-        assert_eq!(perry_ready_pop(), f2);
+        assert_eq!(perry_promise_wait(p, f2), 0);
+        assert!(perry_ready_pop().is_null());
+        current().push_ready(f1);
+        assert_eq!(perry_promise_wait(p, f2), 1);
         assert_eq!(perry_ready_pop(), f1);
+        assert_eq!(perry_ready_pop(), f2);
         assert!(perry_ready_pop().is_null());
         // Settling twice is a no-op; rejection records the status.
         let q = perry_promise_new();
@@ -453,7 +454,7 @@ mod tests {
         let x = unsafe { string::perry_string_adopt(x.as_mut_ptr(), 1) };
         let mut emoji = String::from("é🙂");
         let emoji = unsafe { string::perry_string_adopt(emoji.as_mut_ptr(), 6) };
-        assert_eq!(unsafe { *(emoji.add(4) as *const u32) }, 3);
+        assert_eq!(unsafe { *(emoji.add(4) as *const u32) }, 2);
         let mut text_value = unsafe { string::perry_string_concat(x, x) };
         let first = text_value;
         for _ in 0..1000 {
@@ -465,7 +466,7 @@ mod tests {
         let branch = unsafe { string::perry_string_concat(first, emoji) };
         assert_eq!(text(branch), "xxé🙂");
         assert_eq!(&text(text_value)[..3], "xxx");
-        assert_eq!(unsafe { *(branch.add(4) as *const u32) }, 5);
+        assert_eq!(unsafe { *(branch.add(4) as *const u32) }, 4);
         let chunks_before = chunk_counts().0;
         for _ in 0..100_000 {
             text_value = unsafe { string::perry_string_concat(text_value, x) };

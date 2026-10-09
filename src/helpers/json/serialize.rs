@@ -12,36 +12,6 @@ pub trait Tree {
     fn identity(&self, node: Self::Node) -> Result<Self::Identity, Error>;
     fn value(&self, node: Self::Node) -> Result<Value<'_, Self::Children>, Error>;
     fn key(&self, node: Self::Node) -> Result<&str, Error>;
-
-    /// Find a property without visiting its value. Flat graphs may contain duplicate keys.
-    fn property(&self, node: Self::Node, key: &str) -> Result<Option<Self::Node>, Error> {
-        let Value::Object(children) = self.value(node)? else {
-            return Ok(None);
-        };
-        let mut found = None;
-        for child in children {
-            let child = child?;
-            if self.key(child)? == key {
-                found = Some(child);
-            }
-        }
-        Ok(found)
-    }
-}
-
-/// Prepared serialization controls. Property names are unique and retain replacer order.
-pub struct StringifyOptions<'a> {
-    /// A representation error matters only when indentation is actually emitted.
-    pub gap: Result<&'a str, Error>,
-    pub properties: Option<&'a [&'a str]>,
-}
-impl Default for StringifyOptions<'_> {
-    fn default() -> Self {
-        Self {
-            gap: Ok(""),
-            properties: None,
-        }
-    }
 }
 
 /// Exactly one JSON variant; arrays and objects carry their child iterator.
@@ -57,36 +27,19 @@ pub enum Value<'a, C> {
 
 /// Measure compact ECMAScript serialization without allocating.
 pub fn measure_tree<T: Tree>(tree: &T, root: T::Node) -> Result<usize, Error> {
-    measure_tree_with_options(tree, root, &StringifyOptions::default())
-}
-
-pub fn measure_tree_with_options<T: Tree>(
-    tree: &T,
-    root: T::Node,
-    options: &StringifyOptions<'_>,
-) -> Result<usize, Error> {
     let mut output = Measure { length: 0 };
-    write_tree(tree, root, &mut output, options)?;
+    write_tree(tree, root, &mut output)?;
     Ok(output.length)
 }
 
 /// Write compact ECMAScript serialization into caller-owned storage.
 pub fn serialize_tree<T: Tree>(tree: &T, root: T::Node, bytes: &mut [u8]) -> Result<usize, Error> {
-    serialize_tree_with_options(tree, root, bytes, &StringifyOptions::default())
-}
-
-pub fn serialize_tree_with_options<T: Tree>(
-    tree: &T,
-    root: T::Node,
-    bytes: &mut [u8],
-    options: &StringifyOptions<'_>,
-) -> Result<usize, Error> {
     let mut output = Buffer {
         bytes,
         length: 0,
         base: 0,
     };
-    write_tree(tree, root, &mut output, options)?;
+    write_tree(tree, root, &mut output)?;
     Ok(output.length)
 }
 
@@ -104,35 +57,24 @@ enum Members<C> {
 }
 
 enum ObjectOrder<C> {
-    Filter(usize),
     Numeric(Option<u32>),
     Named(C),
 }
 
 struct Frame<T: Tree> {
-    node: T::Node,
     identity: T::Identity,
     members: Members<T::Children>,
     emitted: bool,
 }
 
 impl<T: Tree> Frame<T> {
-    fn next(&mut self, tree: &T, properties: Option<&[&str]>) -> Result<Option<T::Node>, Error> {
+    fn next(&mut self, tree: &T) -> Result<Option<T::Node>, Error> {
         let (all, order) = match &mut self.members {
             Members::Array(children) => return children.next().transpose(),
             Members::Object { all, order } => (all, order),
         };
         loop {
             match order {
-                ObjectOrder::Filter(index) => {
-                    let Some(key) = properties.expect("filtered property order").get(*index) else {
-                        return Ok(None);
-                    };
-                    *index += 1;
-                    if let Some(child) = tree.property(self.node, key)? {
-                        return Ok(Some(child));
-                    }
-                }
                 ObjectOrder::Numeric(previous) => {
                     let mut candidate = None;
                     for child in all.clone() {
@@ -177,12 +119,7 @@ impl<T: Tree> Frame<T> {
     }
 }
 
-fn write_tree<T: Tree>(
-    tree: &T,
-    root: T::Node,
-    output: &mut impl Output,
-    options: &StringifyOptions<'_>,
-) -> Result<(), Error> {
+fn write_tree<T: Tree>(tree: &T, root: T::Node, output: &mut impl Output) -> Result<(), Error> {
     let mut frames: [Option<Frame<T>>; MAX_DEPTH] = [const { None }; MAX_DEPTH];
     let mut depth = 0;
     let mut pending = Some(root);
@@ -218,11 +155,7 @@ fn write_tree<T: Tree>(
                 Value::Array(children) => Some(Members::Array(children)),
                 Value::Object(all) => Some(Members::Object {
                     all,
-                    order: if options.properties.is_some() {
-                        ObjectOrder::Filter(0)
-                    } else {
-                        ObjectOrder::Numeric(None)
-                    },
+                    order: ObjectOrder::Numeric(None),
                 }),
             };
             if let Some(members) = container {
@@ -243,7 +176,6 @@ fn write_tree<T: Tree>(
                     },
                 )?;
                 frames[depth] = Some(Frame {
-                    node,
                     identity,
                     members,
                     emitted: false,
@@ -254,24 +186,20 @@ fn write_tree<T: Tree>(
         while depth > 0 {
             let frame = frames[depth - 1].as_mut().expect("live traversal frame");
             let object = matches!(frame.members, Members::Object { .. });
-            if let Some(child) = frame.next(tree, options.properties)? {
+            if let Some(child) = frame.next(tree)? {
                 if object && matches!(tree.value(child)?, Value::Undefined) {
                     continue;
                 }
                 if frame.emitted {
                     append(output, b",")?;
                 }
-                line(output, options.gap, depth)?;
                 if object {
                     quote(tree.key(child)?, output)?;
-                    append(output, if options.gap?.is_empty() { b":" } else { b": " })?;
+                    append(output, b":")?;
                 }
                 frame.emitted = true;
                 pending = Some(child);
                 break;
-            }
-            if frame.emitted {
-                line(output, options.gap, depth - 1)?;
             }
             append(output, if object { b"}" } else { b"]" })?;
             frames[depth - 1] = None;
@@ -281,17 +209,6 @@ fn write_tree<T: Tree>(
             return Ok(());
         }
     }
-}
-
-fn line(output: &mut impl Output, gap: Result<&str, Error>, depth: usize) -> Result<(), Error> {
-    let gap = gap?;
-    if !gap.is_empty() {
-        append(output, b"\n")?;
-        for _ in 0..depth {
-            append(output, gap.as_bytes())?;
-        }
-    }
-    Ok(())
 }
 
 fn index_key(key: &str) -> Option<u32> {
@@ -379,20 +296,6 @@ impl<'a> Tree for Graph<'a> {
 }
 
 impl Graph<'_> {
-    /// Contiguous post-order value index; the root's index plus one is the value count.
-    pub fn node_index(&self, node: u32) -> Result<u32, Error> {
-        self.word(node, 28)
-    }
-
-    /// Original token bytes, checked against the input that produced this graph.
-    pub fn source<'a>(&self, node: u32, input: &'a str) -> Result<&'a str, Error> {
-        let start = self.word(node, 32)? as usize;
-        let end = start
-            .checked_add(self.word(node, 36)? as usize)
-            .ok_or(Error::InvalidGraph)?;
-        input.get(start..end).ok_or(Error::InvalidGraph)
-    }
-
     fn string(&self, node: u32) -> Result<&str, Error> {
         if self.word(node, 0)? != Kind::String as u32 {
             return Err(Error::InvalidGraph);
