@@ -679,3 +679,26 @@ fn filesystem_value_apis_require_promises_modules() {
         }
     }
 }
+
+#[test]
+fn text_byte_union_consumers_require_current_guards() {
+    for body in [
+        "return value[0];",
+        "return value.byteLength;",
+        "return value.slice(0).length;",
+        "return value < value;",
+        "return value == '';",
+        "return value + 1;",
+        "if(typeof value==='string'){value=new Uint8Array(1);return value.charAt(0).length;}return 0;",
+        "if(typeof value==='object'){value='';return value[0];}return 0;",
+        "if(typeof value==='object'){while(true){value='';break;}return value.byteLength;}return 0;",
+        "if(typeof value==='string'){try{value=new Uint8Array(1);}finally{return value.charAt(0).length;}}return 0;",
+        "if(typeof value==='string'&&((value=new Uint8Array(1))===value)){return value.charAt(0).length;}return 0;",
+        "value=1;return 0;",
+        "let text='';text=value;return 0;",
+    ] {
+        rejected(&format!(
+            "export function run(value:string|Uint8Array):number{{{body}}}"
+        ));
+    }
+}

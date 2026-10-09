@@ -23,6 +23,7 @@ mod shapes;
 mod source;
 mod strings;
 mod text;
+mod unions;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use exceptions::{Cleanup, Handler};
 use perry_hir::{
@@ -53,7 +54,8 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
         ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, FsStatsType, JsonType,
-        PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TupleType,
+        PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType, TextOrBytesType,
+        TupleType,
     },
 };
 use pliron::printable::Printable as _;
@@ -368,6 +370,7 @@ fn literal_index(index: &Expr) -> Option<usize> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    TextOrBytes,
     FsStats,
     TextEncoder,
     TextDecoder,
@@ -387,7 +390,9 @@ enum Kind {
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = value.get_type(ctx);
     let ty = ty.deref(ctx);
-    if ty.is::<JsonType>() {
+    if ty.is::<TextOrBytesType>() {
+        Ok(Kind::TextOrBytes)
+    } else if ty.is::<JsonType>() {
         Ok(Kind::Json)
     } else if ty.is::<FP64Type>() {
         Ok(Kind::Number)
@@ -435,6 +440,7 @@ struct FunctionBuilder<'s> {
     ins: IRInserter<DummyListener>,
     block: Ptr<BasicBlock>,
     locals: HashMap<LocalId, Value>,
+    refinements: HashMap<LocalId, TypeHandle>,
     loops: Vec<Loop>,
     handlers: Vec<Handler>,
     cleanups: Vec<Cleanup>,
@@ -467,6 +473,7 @@ impl<'s> FunctionBuilder<'s> {
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
             locals: HashMap::new(),
+            refinements: HashMap::new(),
             loops: Vec::new(),
             handlers: Vec::new(),
             cleanups: Vec::new(),
@@ -642,6 +649,11 @@ impl<'s> FunctionBuilder<'s> {
             let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
             return self.narrow_json(ctx, value, boolean);
         }
+        if kind(ctx, value)? == Kind::TextOrBytes {
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::TextBytesTruthy, vec![value])
+                .unwrap());
+        }
         ensure!(
             kind(ctx, value)? == Kind::Boolean,
             "conditions must be boolean (implicit truthiness is not supported yet)"
@@ -680,10 +692,12 @@ impl<'s> FunctionBuilder<'s> {
                 // expose a previous copy of a lexical binding (for example in a finalizer).
                 for id in ids {
                     self.locals.remove(id);
+                    self.refinements.remove(id);
                 }
             }
             Stmt::ReleaseBoxes(_) => {}
             Stmt::Let { id, ty, init, .. } => {
+                self.refinements.remove(id);
                 // HIR builtin inference can omit undefined or retain Any in nested fields.
                 // Source provenance keeps those hints distinct from explicit type boundaries.
                 let declared = match ty {
@@ -756,23 +770,32 @@ impl<'s> FunctionBuilder<'s> {
                 then_branch,
                 else_branch,
             } => {
-                let condition = self.condition(ctx, condition)?;
+                let test = self.condition(ctx, condition)?;
+                let incoming = self.refinements.clone();
                 let then = self.new_block(ctx, "then");
+                let otherwise = self.new_block(ctx, "else");
                 let join = self.new_block(ctx, "join");
-                let otherwise = if else_branch.is_some() {
-                    self.new_block(ctx, "else")
-                } else {
-                    join
-                };
-                self.branch(ctx, condition, then, otherwise);
+                self.branch(ctx, test, then, otherwise);
                 self.switch_to(then);
+                self.refine_condition(ctx, condition, true)?;
                 self.statements(ctx, then_branch)?;
+                let then_alive = !self.terminated(ctx);
+                let then_facts = self.refinements.clone();
                 self.jump(ctx, join);
-                if let Some(else_branch) = else_branch {
-                    self.switch_to(otherwise);
-                    self.statements(ctx, else_branch)?;
-                    self.jump(ctx, join);
+                self.refinements = incoming;
+                self.switch_to(otherwise);
+                self.refine_condition(ctx, condition, false)?;
+                if let Some(body) = else_branch {
+                    self.statements(ctx, body)?;
                 }
+                let else_alive = !self.terminated(ctx);
+                self.jump(ctx, join);
+                self.refinements = match (then_alive, else_alive) {
+                    (true, true) => unions::merge_refinements(then_facts, &self.refinements),
+                    (true, false) => then_facts,
+                    (false, true) => std::mem::take(&mut self.refinements),
+                    (false, false) => HashMap::new(),
+                };
                 self.switch_to(join);
             }
             Stmt::While { condition, body } => {
@@ -844,6 +867,10 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(init) = init {
             self.statement(ctx, init)?;
         }
+        let expressions = condition.into_iter().chain(update).collect::<Vec<_>>();
+        let writes = unions::written_locals(body, &expressions);
+        self.refinements.retain(|id, _| !writes.contains(id));
+        let stable = self.refinements.clone();
         let header = self.new_block(ctx, "header");
         let body_block = self.new_block(ctx, "body");
         let latch = self.new_block(ctx, "latch");
@@ -860,6 +887,9 @@ impl<'s> FunctionBuilder<'s> {
         }
 
         self.switch_to(body_block);
+        if !body_first && let Some(condition) = condition {
+            self.refine_condition(ctx, condition, true)?;
+        }
         self.loops.push(Loop {
             cleanup_depth: self.cleanups.len(),
             continue_to: latch,
@@ -870,11 +900,13 @@ impl<'s> FunctionBuilder<'s> {
         lowered?;
         self.jump(ctx, latch);
 
+        self.refinements = stable.clone();
         self.switch_to(latch);
         if let Some(update) = update {
             self.effect(ctx, update)?;
         }
         self.jump(ctx, header);
+        self.refinements = stable;
         self.switch_to(exit);
         Ok(())
     }
@@ -1109,13 +1141,24 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::LocalGet(id) => {
                 let slot = self.local(*id)?;
-                self.load(ctx, slot)?
+                let value = self.load(ctx, slot)?;
+                if let Some(&ty) = self.refinements.get(id) {
+                    let value = if optional_value(ctx, ty).is_none() {
+                        self.defined(ctx, value)?
+                    } else {
+                        value
+                    };
+                    self.emit_value(ctx, |ctx| perry_mir::unions::ProjectOp::new(ctx, value, ty))
+                } else {
+                    value
+                }
             }
             Expr::LocalSet(id, value) => {
                 let slot = self.local(*id)?;
                 let slot_type = self.slot_type(ctx, slot)?;
                 let value = self.expression_with(ctx, value, Some(slot_type))?;
                 let value = self.fit(ctx, value, slot_type)?;
+                self.refinements.remove(id);
                 self.store(ctx, slot, value);
                 value
             }
@@ -1184,6 +1227,24 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let lhs = self.expression(ctx, left)?;
                 let rhs = self.expression(ctx, right)?;
+                if [lhs, rhs].iter().any(|v| {
+                    optional_value(ctx, v.get_type(ctx))
+                        .unwrap_or(v.get_type(ctx))
+                        .deref(ctx)
+                        .is::<TextOrBytesType>()
+                }) {
+                    ensure!(
+                        matches!(op, CompareOp::Eq | CompareOp::Ne),
+                        "text/byte unions require strict equality or a current type guard"
+                    );
+                    let equal = self.text_bytes_equal(ctx, lhs, rhs)?;
+                    return Ok(if matches!(op, CompareOp::Eq) {
+                        equal
+                    } else {
+                        let no = self.boolean(ctx, false);
+                        self.compare(ctx, CompareKind::Eq, equal, no)
+                    });
+                }
                 let aggregate = |value: Value| {
                     let ty =
                         optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
@@ -1283,10 +1344,13 @@ impl<'s> FunctionBuilder<'s> {
                     LogicalOp::And => self.branch(ctx, lhs, rhs_block, join),
                     _ => self.branch(ctx, lhs, join, rhs_block),
                 }
+                let incoming = self.refinements.clone();
                 self.switch_to(rhs_block);
+                self.refine_condition(ctx, left, matches!(op, LogicalOp::And))?;
                 let rhs = self.condition(ctx, right)?;
                 self.store(ctx, result, rhs);
                 self.jump(ctx, join);
+                self.refinements = unions::merge_refinements(incoming, &self.refinements);
                 self.switch_to(join);
                 self.load(ctx, result)?
             }
@@ -1295,25 +1359,46 @@ impl<'s> FunctionBuilder<'s> {
                 then_expr,
                 else_expr,
             } => {
-                let condition = self.condition(ctx, condition)?;
+                let test = self.condition(ctx, condition)?;
+                let incoming = self.refinements.clone();
                 let then = self.new_block(ctx, "then");
                 let otherwise = self.new_block(ctx, "else");
                 let join = self.new_block(ctx, "join");
-                self.branch(ctx, condition, then, otherwise);
+                self.branch(ctx, test, then, otherwise);
                 self.switch_to(then);
-                let then_value = self.expression(ctx, then_expr)?;
-                let ty = then_value.get_type(ctx);
-                // The slot is created in the entry block so it dominates both arms.
-                let result = self.entry_slot(ctx, ty);
-                self.store(ctx, result, then_value);
-                self.jump(ctx, join);
+                self.refine_condition(ctx, condition, true)?;
+                let first = self.expression_with(ctx, then_expr, expected)?;
+                let then_end = self.block;
+                let then_facts = self.refinements.clone();
+                self.refinements = incoming;
                 self.switch_to(otherwise);
-                let else_value = self.expression(ctx, else_expr)?;
-                let else_value = self.fit(ctx, else_value, ty)?;
-                self.store(ctx, result, else_value);
+                self.refine_condition(ctx, condition, false)?;
+                let second = self.expression_with(ctx, else_expr, expected)?;
+                let ty = expected.unwrap_or_else(|| {
+                    if first.get_type(ctx) != second.get_type(ctx)
+                        && [first, second].iter().all(|v| {
+                            matches!(
+                                kind(ctx, *v),
+                                Ok(Kind::String | Kind::Bytes | Kind::TextOrBytes)
+                            )
+                        })
+                    {
+                        TextOrBytesType::get(ctx).into()
+                    } else {
+                        first.get_type(ctx)
+                    }
+                });
+                let slot = self.entry_slot(ctx, ty);
+                let second = self.fit(ctx, second, ty)?;
+                self.store(ctx, slot, second);
                 self.jump(ctx, join);
+                self.switch_to(then_end);
+                let first = self.fit(ctx, first, ty)?;
+                self.store(ctx, slot, first);
+                self.jump(ctx, join);
+                self.refinements = unions::merge_refinements(then_facts, &self.refinements);
                 self.switch_to(join);
-                self.load(ctx, result)?
+                self.load(ctx, slot)?
             }
             Expr::Unary { op, operand } => {
                 let value = self.expression(ctx, operand)?;
@@ -1325,6 +1410,13 @@ impl<'s> FunctionBuilder<'s> {
                         self.binary(ctx, BinaryKind::Mul, minus_one, value)
                     }
                     (UnaryOp::Pos, Kind::Number) => value,
+                    (UnaryOp::Not, Kind::TextOrBytes) => {
+                        let truth = self
+                            .intrinsic(ctx, Intrinsic::TextBytesTruthy, vec![value])
+                            .unwrap();
+                        let no = self.boolean(ctx, false);
+                        self.compare(ctx, CompareKind::Eq, truth, no)
+                    }
                     (UnaryOp::Not, Kind::Boolean) => {
                         let no = self.boolean(ctx, false);
                         self.compare(ctx, CompareKind::Eq, value, no)
@@ -1471,6 +1563,9 @@ impl<'s> FunctionBuilder<'s> {
                     (Kind::TextDecoder, "fatal") => self.boolean(ctx, true),
                     (Kind::TextDecoder, "ignoreBOM") => self
                         .intrinsic(ctx, Intrinsic::TextDecoderIgnoreBom, vec![value])
+                        .unwrap(),
+                    (Kind::TextOrBytes, "length") => self
+                        .intrinsic(ctx, Intrinsic::TextBytesLength, vec![value])
                         .unwrap(),
                     (Kind::Bytes, "length" | "byteLength") => self
                         .intrinsic(ctx, Intrinsic::BytesLength, vec![value])
@@ -1788,6 +1883,19 @@ impl<'s> FunctionBuilder<'s> {
             Ok(self.optional(ctx, value))
         } else if optional_value(ctx, ty) == Some(target) {
             self.defined(ctx, value)
+        } else if target.deref(ctx).is::<TextOrBytesType>()
+            && (ty.deref(ctx).is::<StringType>() || ty.deref(ctx).is::<BytesType>())
+        {
+            Ok(self.emit_value(ctx, |ctx| perry_mir::unions::InjectOp::new(ctx, value)))
+        } else if optional_value(ctx, target)
+            .is_some_and(|inner| inner.deref(ctx).is::<TextOrBytesType>())
+            && {
+                let inner = optional_value(ctx, ty).unwrap_or(ty);
+                inner.deref(ctx).is::<StringType>() || inner.deref(ctx).is::<BytesType>()
+            }
+        {
+            let value = self.emit_value(ctx, |ctx| perry_mir::unions::InjectOp::new(ctx, value));
+            Ok(self.optional(ctx, value))
         } else if json::is_json(ctx, value) {
             self.narrow_json(ctx, value, target)
         } else if target.deref(ctx).is::<JsonType>() {

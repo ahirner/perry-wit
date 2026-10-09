@@ -114,6 +114,51 @@ builtin.module @m {{
 }
 
 #[test]
+fn text_byte_union_verifiers_preserve_tags_and_optionality() {
+    let input = single_block(
+        r#"
+        text = perry.string_const "value" : perry.string;
+        union = perry.text_bytes_inject text : perry.text_bytes;
+        projected = perry.text_bytes_project union : perry.string;
+        status = perry.caught_status : builtin.integer i32;
+        absent = perry.undefined : perry.optional <perry.bytes>;
+        optional = perry.text_bytes_inject absent : perry.optional <perry.text_bytes>;
+        maybe = perry.text_bytes_project optional : perry.optional <perry.bytes>;
+    "#,
+    );
+    verify_text(&input).expect("closed unions verify");
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &input);
+    verify_text(&normalized(&print(ctx, module))).expect("closed unions round trip");
+    for (before, after, message) in [
+        (
+            "text_bytes_inject text",
+            "text_bytes_inject v",
+            "injection requires",
+        ),
+        (
+            "text_bytes_inject absent : perry.optional <perry.text_bytes>",
+            "text_bytes_inject absent : perry.text_bytes",
+            "preserves optionality",
+        ),
+        (
+            "text_bytes_project union : perry.string",
+            "text_bytes_project union : builtin.fp64",
+            "projection requires",
+        ),
+        (
+            "text_bytes_project union",
+            "text_bytes_project text",
+            "projection requires",
+        ),
+    ] {
+        let error =
+            verify_text(&input.replace(before, after)).expect_err("invalid union operation");
+        assert!(error.contains(message), "{error}");
+    }
+}
+
+#[test]
 fn byte_intrinsics_verify_storage_kinds_and_exception_effects() {
     let body = r#"
         buffer = perry.intrinsic BufferNew (v) : perry.buffer;

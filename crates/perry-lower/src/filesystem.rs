@@ -138,19 +138,18 @@ impl FunctionBuilder<'_> {
         let mut recursive = None;
         let mut file_types = None;
         let mut valid = true;
-        let mut text_read = false;
+        let mut text_read = Some(false);
         for (name, expression) in fields {
             match name.as_str() {
                 "encoding" => {
                     if operation == "readFile" {
                         text_read = match expression {
-                            Expr::String(value) => {
-                                matches!(value.to_ascii_lowercase().as_str(), "utf8" | "utf-8")
-                            }
-                            Expr::Null | Expr::Undefined => false,
-                            _ => bail!(
-                                "dynamic readFile encodings require string | Uint8Array union migration"
-                            ),
+                            Expr::String(value) => Some(matches!(
+                                value.to_ascii_lowercase().as_str(),
+                                "utf8" | "utf-8"
+                            )),
+                            Expr::Null | Expr::Undefined => Some(false),
+                            _ => None,
                         };
                     }
                     encoding = if matches!(expression, Expr::Null) {
@@ -197,14 +196,38 @@ impl FunctionBuilder<'_> {
             allowed = self.load(ctx, result)?;
         }
         let (intrinsic, mode) = match (operation, data.map(|value| kind(ctx, value)).transpose()?) {
-            ("readFile", _) if text_read => (Intrinsic::FsReadText, 1.0),
+            ("readFile", _) if text_read == Some(true) => (Intrinsic::FsReadText, 1.0),
+            ("readFile", _) if text_read.is_none() => (Intrinsic::FsReadValue, 5.0),
             ("readFile", _) => (Intrinsic::FsReadBytes, 0.0),
             ("readdir", _) => (Intrinsic::FsReadDir, 4.0),
             ("writeFile", Some(Kind::String)) => (Intrinsic::FsWriteText, 2.0),
+            ("writeFile", Some(Kind::TextOrBytes)) => (Intrinsic::FsWriteValue, 0.0),
             ("writeFile", Some(Kind::Bytes)) => (Intrinsic::FsWriteBytes, 3.0),
             _ => bail!("writeFile data must be a string or Uint8Array"),
         };
-        let mode = self.number(ctx, mode);
+        let mode = if intrinsic == Intrinsic::FsWriteValue {
+            let text = self
+                .intrinsic(ctx, Intrinsic::TextBytesIsText, vec![data.unwrap()])
+                .unwrap();
+            let number = FP64Type::get(ctx).into();
+            let slot = self.entry_slot(ctx, number);
+            let then = self.new_block(ctx, "write_text_options");
+            let otherwise = self.new_block(ctx, "write_bytes_options");
+            let done = self.new_block(ctx, "write_options_done");
+            self.branch(ctx, text, then, otherwise);
+            self.switch_to(then);
+            let mode = self.number(ctx, 2.0);
+            self.store(ctx, slot, mode);
+            self.jump(ctx, done);
+            self.switch_to(otherwise);
+            let mode = self.number(ctx, 3.0);
+            self.store(ctx, slot, mode);
+            self.jump(ctx, done);
+            self.switch_to(done);
+            self.load(ctx, slot)?
+        } else {
+            self.number(ctx, mode)
+        };
         let valid = self
             .intrinsic(
                 ctx,
@@ -214,6 +237,9 @@ impl FunctionBuilder<'_> {
             .unwrap();
         let path = self.fit(ctx, path, string)?;
         let mut operands = vec![path];
+        if intrinsic == Intrinsic::FsReadValue {
+            operands.push(encoding);
+        }
         if let Some(data) = data {
             operands.push(data);
         }

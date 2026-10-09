@@ -632,6 +632,46 @@ try {{
         asynchronous: true,
     }
 }
+fn filesystem_dynamic(bytes: Vec<u8>, text: String) -> Case {
+    let operation = format!(
+        r#"
+const text={text};
+await writeFile('dynamic.bin',input);await writeFile('dynamic.txt',text);
+try {{
+  for(let i=0;i<2;i++) {{
+    const pending=load(i===0?'dynamic.txt':'dynamic.bin',i===0?'utf8':undefined);
+    const value=await pending;
+    const values:Data[]=[value];const record:{{value:Data}}={{value}};
+    const dictionary:Record<string,Data>={{value}};
+    const snapshot=Object.values(dictionary);
+    await load('dynamic.bin',undefined);
+    const repeated=await pending;
+    trace.push(value===repeated?1:0);trace.push(value===values[0]?1:0);
+    trace.push(value===record.value?1:0);trace.push(value===snapshot[0]?1:0);
+    trace.push(value.length);trace.push(value?1:0);
+    if(typeof value==='string') {{trace.push(value===text?1:0);trace.push(value.slice(1).length);}}
+    else {{if(value.length>0)value[0]=17;for(let j=0;j<value.length;j++)trace.push(value[j]);}}
+    await writeFile('dynamic-copy.bin',value);
+    const copy=await load('dynamic-copy.bin',i===0?'utf8':undefined);
+    trace.push(copy.length);
+    if(typeof copy==='object')for(let j=0;j<copy.length;j++)trace.push(copy[j]);
+    else trace.push(copy===text?1:0);
+  }}
+}} finally {{await unlink('dynamic.bin');await unlink('dynamic.txt');await unlink('dynamic-copy.bin');}}
+"#,
+        text = serde_json::to_string(&text).unwrap()
+    );
+    let Case::Function { source, .. } = bytes_function(bytes, &operation, true) else {
+        unreachable!()
+    };
+    Case::Function {
+        asynchronous: true,
+        source: format!(
+            "import {{readFile,writeFile,unlink}} from 'node:fs/promises';\ntype Data=string|Uint8Array;\nasync function load(path:string,encoding:string|undefined):Promise<Data>{{return await readFile(path,{{encoding,flag:'r'}});}}\n{source}"
+        ),
+    }
+}
+
 fn filesystem_metadata(depth: u8) -> Case {
     let mut operation = String::from(
         "const file=await stat('fixture.txt'); trace.push(file.size); trace.push(file.isFile()?1:0); trace.push(file.isDirectory()?1:0);\n",
@@ -795,6 +835,29 @@ fn additional_contracts() -> Vec<Contract> {
                 prop::collection::vec(prop::char::range('\0', '\u{ffff}'), 0..=32),
             )
                 .prop_map(|(bytes, chars)| filesystem_transfers(bytes, chars.into_iter().collect()))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "node.fs.dynamic_values",
+            description: "Dynamic promise reads retain closed string/byte values and native aliases",
+            specification: "https://nodejs.org/api/fs.html#promises-api",
+            domain: "0..256 bytes and 0..32 BMP scalars, runtime UTF-8/default encoding, repeated awaits, guarded mutation, array/record/dictionary snapshots across suspension and union writes; malformed UTF-8, binary encoding and numeric errors use separate component assertions. Fixed-program seeds for P6.5",
+            witnesses: vec![
+                Witness {
+                    partition: "empty",
+                    case: filesystem_dynamic(vec![], String::new()),
+                },
+                Witness {
+                    partition: "binary-bom-nul",
+                    case: filesystem_dynamic(vec![0, 255, 128, 42], "\u{feff}é水\0".into()),
+                },
+            ],
+            strategy: (
+                prop::collection::vec(any::<u8>(), 0..=256),
+                prop::collection::vec(prop::char::range('\0', '\u{ffff}'), 0..=32),
+            )
+                .prop_map(|(bytes, chars)| filesystem_dynamic(bytes, chars.into_iter().collect()))
                 .boxed(),
             check: check_equivalence,
         },

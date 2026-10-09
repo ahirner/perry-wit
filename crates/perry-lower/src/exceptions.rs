@@ -112,6 +112,13 @@ impl FunctionBuilder<'_> {
         catch: Option<&CatchClause>,
         finally: Option<&[Stmt]>,
     ) -> Result<()> {
+        let statements = body
+            .iter()
+            .chain(catch.iter().flat_map(|catch| &catch.body))
+            .chain(finally.into_iter().flatten());
+        let writes = unions::written_locals(statements, &[]);
+        let mut stable = self.refinements.clone();
+        stable.retain(|id, _| !writes.contains(id));
         let depth = self.cleanups.len();
         let outer_handlers = self.handlers.len();
         let join = self.new_block(ctx, "try_done");
@@ -141,6 +148,7 @@ impl FunctionBuilder<'_> {
         }
 
         if let (Some(catch), Some(handler)) = (catch, caught) {
+            self.refinements = stable.clone();
             self.switch_to(handler.block);
             let status = self.load(ctx, handler.status)?;
             let exception = self.emit_value(ctx, |ctx| CatchOp::new(ctx, status));
@@ -161,6 +169,7 @@ impl FunctionBuilder<'_> {
         }
 
         if let Some(handler) = cleanup_throw {
+            self.refinements = stable.clone();
             self.switch_to(handler.block);
             let status = self.load(ctx, handler.status)?;
             // Clear the pending exception while the finalizer runs, retaining its identity.
@@ -172,6 +181,7 @@ impl FunctionBuilder<'_> {
             }
         }
         self.cleanups.truncate(depth);
+        self.refinements = stable;
         self.switch_to(join);
         Ok(())
     }

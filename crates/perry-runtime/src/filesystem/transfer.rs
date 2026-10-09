@@ -75,8 +75,7 @@ unsafe extern "C" {
 
 #[derive(Clone, Copy)]
 enum Mode {
-    Bytes,
-    Text,
+    Read { text: bool, tagged: bool },
     Write,
     Directory,
 }
@@ -144,8 +143,18 @@ unsafe fn finish(operation: *mut Operation, transfer: *mut Transfer, mut error: 
         let mut value = crate::UNDEFINED_NUMBER;
         if error == 0 {
             value = match state.mode {
-                Mode::Bytes => bytes::perry_bytes_adopt(state.data, state.len) as u64,
-                Mode::Text => {
+                Mode::Read {
+                    text: false,
+                    tagged,
+                } => {
+                    bytes::perry_bytes_adopt(state.data, state.len) as u64
+                        | if tagged {
+                            crate::text_bytes::BYTES_TAG
+                        } else {
+                            0
+                        }
+                }
+                Mode::Read { text: true, .. } => {
                     let input = if state.len == 0 {
                         &[]
                     } else {
@@ -162,7 +171,7 @@ unsafe fn finish(operation: *mut Operation, transfer: *mut Transfer, mut error: 
                 Mode::Write => crate::UNDEFINED_NUMBER,
             };
         }
-        if error == 0 && matches!(state.mode, Mode::Bytes | Mode::Text) {
+        if error == 0 && matches!(state.mode, Mode::Read { .. }) {
             import_buffer::claim(state.data);
         } else {
             import_buffer::release(state.data);
@@ -202,7 +211,7 @@ pub(super) unsafe fn opened(operation: *mut Operation, transfer: *mut Transfer) 
                     offset: 0,
                 }
             }
-            Mode::Bytes | Mode::Text | Mode::Directory => {
+            Mode::Read { .. } | Mode::Directory => {
                 let mut result = Reader {
                     stream: 0,
                     future: 0,
@@ -548,11 +557,35 @@ pub unsafe extern "C" fn perry_fs_read(path: *mut u8, text: u32, valid: u32) -> 
             path,
             ptr::NonNull::<u8>::dangling().as_ptr(),
             0,
-            if text != 0 { Mode::Text } else { Mode::Bytes },
+            Mode::Read {
+                text: text != 0,
+                tagged: false,
+            },
             valid != 0,
         )
     }
 }
+/// # Safety
+/// `path` is a live string; `encoding` is null or a live string already checked by options.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_fs_read_value(
+    path: *mut u8,
+    encoding: *mut u8,
+    valid: u32,
+) -> *mut u8 {
+    // SAFETY: the typed caller retains the optional encoding throughout this synchronous selection.
+    unsafe {
+        let text = !encoding.is_null() && !string::text(encoding).eq_ignore_ascii_case("binary");
+        start(
+            path,
+            ptr::NonNull::<u8>::dangling().as_ptr(),
+            0,
+            Mode::Read { text, tagged: true },
+            valid != 0,
+        )
+    }
+}
+
 /// # Safety
 /// `path` and `data` are live strings or (when text is zero) a byte view.
 #[unsafe(no_mangle)]
@@ -614,7 +647,7 @@ pub unsafe extern "C" fn perry_fs_options(
             let binary = label.eq_ignore_ascii_case("binary");
             if mode == 0.0 {
                 binary
-            } else if mode == 3.0 {
+            } else if mode == 3.0 || mode == 5.0 {
                 binary || utf8
             } else {
                 utf8

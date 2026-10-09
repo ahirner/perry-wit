@@ -49,7 +49,9 @@ pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
                     ty: (*reference.cast::<dictionary::Dictionary>()).ty,
                 }
             }
-            Kind::Opaque | Kind::Bytes => unreachable!("non-JSON type reached JSON packing"),
+            Kind::Opaque | Kind::Bytes | Kind::TextOrBytes => {
+                unreachable!("non-JSON type reached JSON packing")
+            }
         })
     }
 }

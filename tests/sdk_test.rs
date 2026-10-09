@@ -25,6 +25,18 @@ fn command_contract_accepts_scripts_and_validates_explicit_run_exports() {
             true,
         ),
         (
+            "import {readFile,writeFile} from 'fs/promises'; export async function copy(encoding:string|undefined):Promise<void>{const value:string|Uint8Array=await readFile('input',encoding);await writeFile('output',value);}",
+            true,
+        ),
+        (
+            "import {readFile} from 'fs/promises'; export async function text(encoding:string):Promise<string>{return await readFile('input',encoding);}",
+            false,
+        ),
+        (
+            "import {readFileSync} from 'node:fs'; readFileSync('input');",
+            false,
+        ),
+        (
             "import {spawn} from 'node:child_process'; spawn('program');",
             false,
         ),

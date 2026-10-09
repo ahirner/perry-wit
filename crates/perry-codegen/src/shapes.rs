@@ -89,6 +89,8 @@ impl Data {
             (Kind::Boolean, 0, 0)
         } else if ty.is::<StringType>() {
             (Kind::String, 0, 0)
+        } else if ty.is::<TextOrBytesType>() {
+            (Kind::TextOrBytes, 0, 0)
         } else if ty.is::<BytesType>() {
             (Kind::Bytes, 0, 0)
         } else if ty.is::<JsonType>() {

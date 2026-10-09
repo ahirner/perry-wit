@@ -15,8 +15,46 @@ impl FunctionBuilder<'_> {
                 .intrinsic(ctx, Intrinsic::JsonTypeof, vec![value])
                 .unwrap());
         }
-        let optional = optional_value(ctx, value.get_type(ctx));
-        let ty = optional.unwrap_or(value.get_type(ctx));
+        if optional_value(ctx, value.get_type(ctx)).is_some() {
+            let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            let missing = self.new_block(ctx, "typeof_missing");
+            let defined = self.new_block(ctx, "typeof_defined");
+            let join = self.new_block(ctx, "typeof_join");
+            let result = self.entry_slot(ctx, StringType::get(ctx).into());
+            self.branch(ctx, absent, missing, defined);
+            self.switch_to(missing);
+            let undefined = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "undefined"));
+            self.store(ctx, result, undefined);
+            self.jump(ctx, join);
+            self.switch_to(defined);
+            let value = self.defined(ctx, value)?;
+            let tag = self.type_of(ctx, value)?;
+            self.store(ctx, result, tag);
+            self.jump(ctx, join);
+            self.switch_to(join);
+            return self.load(ctx, result);
+        }
+        if value.get_type(ctx).deref(ctx).is::<TextOrBytesType>() {
+            let text = self
+                .intrinsic(ctx, Intrinsic::TextBytesIsText, vec![value])
+                .unwrap();
+            let result = self.entry_slot(ctx, StringType::get(ctx).into());
+            let then = self.new_block(ctx, "typeof_text");
+            let other = self.new_block(ctx, "typeof_bytes");
+            let done = self.new_block(ctx, "typeof_done");
+            self.branch(ctx, text, then, other);
+            self.switch_to(then);
+            let tag = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "string"));
+            self.store(ctx, result, tag);
+            self.jump(ctx, done);
+            self.switch_to(other);
+            let tag = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "object"));
+            self.store(ctx, result, tag);
+            self.jump(ctx, done);
+            self.switch_to(done);
+            return self.load(ctx, result);
+        }
+        let ty = value.get_type(ctx);
         let tag = {
             let ty = ty.deref(ctx);
             if ty.is::<FP64Type>() {
@@ -44,25 +82,7 @@ impl FunctionBuilder<'_> {
                 bail!("typeof is not supported for this value type yet");
             }
         };
-        let present = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, tag));
-        if optional.is_none() {
-            return Ok(present);
-        }
-        let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-        let missing = self.new_block(ctx, "typeof_missing");
-        let defined = self.new_block(ctx, "typeof_defined");
-        let join = self.new_block(ctx, "typeof_join");
-        let result = self.entry_slot(ctx, present.get_type(ctx));
-        self.branch(ctx, absent, missing, defined);
-        self.switch_to(missing);
-        let undefined = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, "undefined"));
-        self.store(ctx, result, undefined);
-        self.jump(ctx, join);
-        self.switch_to(defined);
-        self.store(ctx, result, present);
-        self.jump(ctx, join);
-        self.switch_to(join);
-        self.load(ctx, result)
+        Ok(self.emit_value(ctx, |ctx| StringConstOp::new(ctx, tag)))
     }
 
     pub(super) fn json_key(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {

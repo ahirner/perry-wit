@@ -36,6 +36,9 @@ impl FunctionLowering<'_> {
         bits: Value,
         ty: TypeHandle,
     ) -> Result<Value> {
+        if repr(ctx, ty)? == Repr::I64 {
+            return Ok(bits);
+        }
         let opcode = if repr(ctx, ty)? == Repr::F64 {
             NumOpcode::F64ReinterpretI64
         } else {

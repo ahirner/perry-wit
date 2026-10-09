@@ -15,6 +15,7 @@ pub enum Kind {
     Dictionary,
     Tuple,
     Bytes,
+    TextOrBytes,
 }
 
 /// `detail` points to an element/optional type, record fields, or a dictionary shape.
@@ -111,7 +112,7 @@ impl Type {
         unsafe {
             match self.kind {
                 Kind::Optional => self.element().read(slot),
-                Kind::Number => slot.cast::<u64>().read(),
+                Kind::Number | Kind::TextOrBytes => slot.cast::<u64>().read(),
                 Kind::Boolean => slot.cast::<u32>().read() as u64,
                 _ => slot.cast::<usize>().read() as u64,
             }
@@ -124,7 +125,7 @@ impl Type {
         unsafe {
             match self.kind {
                 Kind::Optional => self.element().write(slot, bits),
-                Kind::Number => slot.cast::<u64>().write(bits),
+                Kind::Number | Kind::TextOrBytes => slot.cast::<u64>().write(bits),
                 Kind::Boolean => slot.cast::<u32>().write(bits as u32),
                 _ => slot.cast::<usize>().write(bits as usize),
             }

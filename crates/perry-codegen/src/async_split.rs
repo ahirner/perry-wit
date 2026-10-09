@@ -288,6 +288,13 @@ impl FunctionLowering<'_> {
     pub(crate) fn slot_bits(&mut self, ctx: &mut Context, value: Value) -> Value {
         if value.get_type(ctx).deref(ctx).is::<FP64Type>() {
             self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value])
+        } else if value
+            .get_type(ctx)
+            .deref(ctx)
+            .downcast_ref::<pliron::builtin::types::IntegerType>()
+            .is_some_and(|ty| ty.width() == 64)
+        {
+            value
         } else {
             self.num(ctx, NumOpcode::I64ExtendI32U, vec![value])
         }

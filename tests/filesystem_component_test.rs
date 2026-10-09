@@ -612,6 +612,7 @@ async fn transfer_cancellation_and_late_errors_release_every_native_owner() -> R
     let engine = Engine::new(&config)?;
     for (kind, call) in [
         (Kind::Read, "fs.readFile('/sandbox/input')"),
+        (Kind::Read, "fs.readFile('/sandbox/input',encoding())"),
         (
             Kind::Write,
             "fs.writeFile('/sandbox/output','partial é🙂 write')",
@@ -661,7 +662,7 @@ async fn transfer_cancellation_and_late_errors_release_every_native_owner() -> R
                 )
             };
             let source = format!(
-                "import fs from 'fs/promises';export async function run():Promise<{}>{{{body}}}",
+                "import fs from 'fs/promises';function encoding():string{{return 'binary';}}export async function run():Promise<{}>{{{body}}}",
                 if cancel { "void" } else { "number" }
             );
             let worker = compile(
@@ -889,5 +890,156 @@ fn metadata_only_components_exclude_file_transfer_builtins() -> Result<()> {
             "metadata linked transfer builtin {builtin}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_file_results_preserve_native_union_tags_and_aliases() -> Result<()> {
+    let source = r#"
+import {readFile,writeFile} from 'fs/promises';
+type Data=string|Uint8Array;
+async function load(path:string,encoding:string):Promise<Data> {return await readFile(path,{encoding,flag:'r'});}
+function inspect(value:Uint8Array|string):number {
+  const alias=value;
+  if(typeof value==='string') {if(value!=='é🙂\0')throw 90;return value.length;}
+  else {value[0]=71;if(value!==alias)throw 91;return value.subarray(0,2)[0]+value.length;}
+}
+export async function run(encoding:string,writeEncoding:string):Promise<number> {
+  try {
+    const pending=load('/sandbox/input',encoding);
+    const value=await pending;const repeated=await pending;
+    if(value!==repeated)throw 92;
+    const result=inspect(value);
+    await writeFile('/sandbox/output',value,{encoding:writeEncoding,flag:'w'});
+    return result;
+  }catch(e){if(e===12)return -12;if(e===9)return -9;throw e;}
+}
+function identity(value:Data):Data{return value;}
+function length(value:Data):number{return value.length;}
+export async function flow(binary:boolean):Promise<number> {
+  let value:Data='é🙂';
+  if(binary)value=new Uint8Array([4,5,6]);
+  const alias=identity(value);
+  for(let i=0;i<2000;i++) {
+    if(typeof value==='string')value=new Uint8Array([8,9]);else value='abc';
+  }
+  let result=length(alias)*100;
+  try {if(typeof value!=='object'){result=result+value.length;value=new Uint8Array([42]);throw 7;}value='z';}
+  catch(e){if(typeof value==='object')result=result+value[0];}
+  finally{if('string'===typeof value)result=result+value.length;else result=result+value[0];}
+  return result;
+}
+export async function truth():Promise<number> {
+  const text=identity('');const bytes=identity(new Uint8Array(0));
+  if(text)return -1;if(!bytes)return -2;
+  if(text!==''||bytes===''||bytes!==bytes||bytes===identity(new Uint8Array(0)))return -3;
+  if(text!==identity('')||bytes===0||text===false)return -4;
+  if(identity('é')!=='é'[0]||identity('é')==='é'[1])return -5;
+  return typeof text==='string'&&typeof bytes==='object'?3:0;
+}
+export async function retained(n:number):Promise<number> {
+  const bytes=new Uint8Array([7,8]);let value:Data='abc';
+  for(let i=0;i<n;i++)value=identity(i%2===0?bytes:'abc');
+  const record:{value:Data}={value};const values:Data[]=[record.value];
+  return length(values[0]);
+}
+export async function saved(encoding:string):Promise<number> {
+  const value=await load('/sandbox/input',encoding);
+  const values:Data[]=[value];const record:{value:Data}={value};
+  const dictionary:Record<string,Data>={value};
+  const snapshot=Object.values(dictionary);
+  await load('/sandbox/input','binary');
+  if(values[0]!==value||record.value!==value||dictionary.value!==value||snapshot[0]!==value)throw 94;
+  if(values[1]!==undefined||dictionary.missing!==undefined)throw 95;
+  const missing:Data=values[1];
+  const numbers:number[]=[3];const flags:boolean[]=[false];
+  if(missing!==numbers[1]||missing!==flags[1]||missing===numbers[0]||value===numbers[1])throw 99;
+  if(typeof missing==='string'||typeof missing==='object'||typeof missing!=='undefined')throw 97;
+  if(typeof missing!=='string'&&missing!==undefined)throw 98;
+  const restored:Data=values[0];
+  if(typeof restored==='string')return restored.length;
+  restored[0]=72;
+  const alias:Data=snapshot[0];
+  if(typeof alias==='string')throw 96;
+  return alias[0];
+}
+"#;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(
+        &engine,
+        compile(
+            source,
+            "export run: async func(encoding:string,write-encoding:string)->f64; export flow: async func(binary:bool)->f64; export truth: async func()->f64; export retained: async func(n:f64)->f64; export saved: async func(encoding:string)->f64;",
+        )?,
+    )?;
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("input"), "é🙂\0")?;
+    let ctx = WasiCtx::builder()
+        .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
+        .build();
+    let mut store = Store::new(
+        &engine,
+        Host {
+            ctx,
+            table: ResourceTable::new(),
+            peak: 0,
+        },
+    );
+    store.limiter(|host| host);
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, &str), (f64,)>(&mut store, "run")?;
+    for _ in 0..8 {
+        for (read, write, result) in [
+            ("utf8", "utf8", 3.0),
+            ("BiNaRy", "binary", 78.0),
+            ("utf8", "binary", -12.0),
+            ("hex", "utf8", -12.0),
+            ("utf8\0", "utf8", -12.0),
+        ] {
+            std::fs::write(root.path().join("output"), b"keep")?;
+            assert_eq!(
+                run.call_async(&mut store, (read, write)).await?.0,
+                result,
+                "{read} {write}"
+            );
+            let expected = if result < 0.0 {
+                b"keep".to_vec()
+            } else if result == 3.0 {
+                "é🙂\0".as_bytes().to_vec()
+            } else {
+                [b"G".as_slice(), &"é🙂\0".as_bytes()[1..]].concat()
+            };
+            assert_eq!(std::fs::read(root.path().join("output"))?, expected);
+            assert!(store.data().table.is_empty());
+            store.assert_concurrent_state_empty();
+        }
+    }
+    let flow = instance.get_typed_func::<(bool,), (f64,)>(&mut store, "flow")?;
+    assert_eq!(flow.call_async(&mut store, (false,)).await?.0, 287.0);
+    assert_eq!(flow.call_async(&mut store, (true,)).await?.0, 301.0);
+    let truth = instance.get_typed_func::<(), (f64,)>(&mut store, "truth")?;
+    assert_eq!(truth.call_async(&mut store, ()).await?.0, 3.0);
+    let retained = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "retained")?;
+    assert_eq!(retained.call_async(&mut store, (2.0,)).await?.0, 3.0);
+    let peak = store.data().peak;
+    assert_eq!(retained.call_async(&mut store, (100000.0,)).await?.0, 3.0);
+    assert_eq!(
+        store.data().peak,
+        peak,
+        "union injection allocated wrappers"
+    );
+    let saved = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "saved")?;
+    assert_eq!(saved.call_async(&mut store, ("utf8",)).await?.0, 3.0);
+    assert_eq!(saved.call_async(&mut store, ("binary",)).await?.0, 72.0);
+    std::fs::write(root.path().join("input"), [0xf0, 0x9f])?;
+    std::fs::write(root.path().join("output"), b"keep")?;
+    assert_eq!(run.call_async(&mut store, ("utf8", "utf8")).await?.0, -9.0);
+    assert_eq!(std::fs::read(root.path().join("output"))?, b"keep");
+    assert!(store.data().table.is_empty());
+    store.assert_concurrent_state_empty();
     Ok(())
 }

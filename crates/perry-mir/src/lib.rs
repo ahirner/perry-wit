@@ -23,6 +23,7 @@ pub mod records;
 pub mod scalar;
 pub mod tuples;
 pub mod types;
+pub mod unions;
 
 #[cfg(test)]
 mod tests;

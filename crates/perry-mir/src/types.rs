@@ -57,6 +57,16 @@ pub struct BufferType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct BytesType;
 
+/// A closed string-or-Uint8Array union; alternatives retain their native storage and identity.
+#[pliron_type(
+    name = "perry.text_bytes",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct TextOrBytesType;
+
 /// Immutable filesystem metadata returned by a native operation.
 #[pliron_type(
     name = "perry.fs_stats",

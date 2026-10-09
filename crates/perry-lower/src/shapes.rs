@@ -13,7 +13,7 @@ use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
     ArrayType, BufferType, BytesType, DictionaryField, DictionarySchema, DictionaryType,
     ExceptionType, FsStatsType, JsonType, OptionalType, PromiseType, RecordField, RecordType,
-    StringType, TextDecoderType, TextEncoderType, TupleType,
+    StringType, TextDecoderType, TextEncoderType, TextOrBytesType, TupleType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -138,17 +138,26 @@ impl<'h> Shapes<'h> {
                 let first = present
                     .next()
                     .context("undefined-only union has no value type")?;
-                let first = self.value_type(ctx, first)?;
+                let mut value = self.value_type(ctx, first)?;
                 for ty in present {
-                    ensure!(
-                        self.value_type(ctx, ty)? == first,
-                        "unions of different shapes are not supported yet"
-                    );
+                    let other = self.value_type(ctx, ty)?;
+                    if value != other {
+                        ensure!(
+                            [value, other].into_iter().all(|ty| {
+                                let ty = ty.deref(ctx);
+                                ty.is::<StringType>()
+                                    || ty.is::<BytesType>()
+                                    || ty.is::<TextOrBytesType>()
+                            }),
+                            "unions of these different shapes are not supported yet"
+                        );
+                        value = TextOrBytesType::get(ctx).into();
+                    }
                 }
                 if types.iter().any(|ty| matches!(ty, HirType::Void)) {
-                    OptionalType::get(ctx, first).into()
+                    OptionalType::get(ctx, value).into()
                 } else {
-                    first
+                    value
                 }
             }
             HirType::Number | HirType::Int32 => FP64Type::get(ctx).into(),

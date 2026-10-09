@@ -39,7 +39,7 @@ use perry_mir::{
     types::{
         ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, FsStatsType, JsonType,
         OptionalType, PromiseType, RecordType, StringType, TextDecoderType, TextEncoderType,
-        TupleType,
+        TextOrBytesType, TupleType,
     },
 };
 use perry_runtime::array as layout;
@@ -81,6 +81,7 @@ mod async_split;
 pub mod boundary;
 mod exceptions;
 mod shapes;
+mod unions;
 mod views;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
@@ -232,6 +233,10 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    TextBytesLength,
+    TextBytesTruthy,
+    TextBytesEqual,
+    FsReadValue,
     FsRead,
     FsWrite,
     FsReadDir,
@@ -465,6 +470,10 @@ impl Runtime {
             Runtime::ExceptionEqual => "perry_exception_equal",
             Runtime::StringEqual => "perry_string_equal",
             Runtime::CabiRealloc => "perry_cabi_realloc",
+            Runtime::FsReadValue => "perry_fs_read_value",
+            Runtime::TextBytesLength => "perry_text_bytes_length",
+            Runtime::TextBytesTruthy => "perry_text_bytes_truthy",
+            Runtime::TextBytesEqual => "perry_text_bytes_equal",
             Runtime::FsRead => "perry_fs_read",
             Runtime::FsWrite => "perry_fs_write",
             Runtime::FsReadDir => "perry_fs_readdir",
@@ -631,7 +640,10 @@ impl Runtime {
             Runtime::FsStat | Runtime::FsMkdir | Runtime::FsUnlink | Runtime::FsRmdir => {
                 (vec![i32, i32], vec![i32])
             }
-            Runtime::FsRead => (vec![i32; 3], vec![i32]),
+            Runtime::FsRead | Runtime::FsReadValue => (vec![i32; 3], vec![i32]),
+            Runtime::TextBytesLength => (vec![i64], vec![f64]),
+            Runtime::TextBytesTruthy => (vec![i64], vec![i32]),
+            Runtime::TextBytesEqual => (vec![i64, i64], vec![i32]),
             Runtime::FsWrite => (vec![i32; 4], vec![i32]),
             Runtime::FsReadDir => (vec![i32; 2], vec![i32]),
             Runtime::FsOptions => (vec![i32, i32, f64, i32], vec![i32]),
@@ -654,6 +666,7 @@ fn i32_type(ctx: &mut Context) -> TypeHandle {
 /// How a MIR type is represented in Wasm.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Repr {
+    I64,
     F64,
     Bool,
     I32,
@@ -662,6 +675,9 @@ enum Repr {
 
 fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     let deref = ty.deref(ctx);
+    if deref.is::<TextOrBytesType>() {
+        return Ok(Repr::I64);
+    }
     if deref.is::<FP64Type>() {
         return Ok(Repr::F64);
     }
@@ -699,6 +715,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
 fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
     Ok(match repr(ctx, ty)? {
         Repr::F64 => FP64Type::get(ctx).into(),
+        Repr::I64 => IntegerType::get(ctx, 64, Signedness::Signless).into(),
         _ => i32_type(ctx),
     })
 }
@@ -706,6 +723,7 @@ fn wasm_type(ctx: &mut Context, ty: TypeHandle) -> Result<TypeHandle> {
 fn slot_kind(ctx: &Context, ty: TypeHandle) -> Result<MemKind> {
     Ok(match repr(ctx, ty)? {
         Repr::F64 => MemKind::F64,
+        Repr::I64 => MemKind::I64,
         _ => MemKind::I32,
     })
 }
@@ -824,6 +842,17 @@ struct ModuleState {
 }
 
 impl ModuleState {
+    fn uses_filesystem_transfers(&self) -> bool {
+        [
+            Runtime::FsRead,
+            Runtime::FsReadValue,
+            Runtime::FsWrite,
+            Runtime::FsReadDir,
+        ]
+        .iter()
+        .any(|entry| self.runtime.contains(entry))
+    }
+
     fn can_import(&self, interface: &str) -> bool {
         self.imports
             .as_ref()
@@ -981,7 +1010,7 @@ fn export_wrapper(
     b.insert(ctx, ret);
     for param in params {
         ensure!(
-            repr(ctx, param)? != Repr::Ref,
+            !matches!(repr(ctx, param)?, Repr::Ref | Repr::I64),
             "export {name} takes a reference; reference arguments need the component boundary (P6.1)"
         );
     }
@@ -1044,11 +1073,7 @@ fn async_export_wrapper(
         promise,
         perry_runtime::promise::VALUE,
     );
-    let zero = if value_wasm.deref(ctx).is::<FP64Type>() {
-        b.f64_const(ctx, 0.0)
-    } else {
-        b.i32_const(ctx, 0)
-    };
+    let zero = b.zero(ctx, value_wasm);
     let value = b.select(ctx, fulfilled, value, zero);
     b.runtime(ctx, Runtime::TaskFree, vec![]);
     let ret = ReturnOp::new(ctx, vec![value, status]).get_operation();
@@ -1375,11 +1400,7 @@ impl<'s> FunctionLowering<'s> {
         let saved = std::mem::replace(&mut self.block, block);
         let mut values = Vec::new();
         for ty in self.results.clone() {
-            let zero = if ty.deref(ctx).is::<FP64Type>() {
-                self.f64_const(ctx, 0.0)
-            } else {
-                self.i32_const(ctx, 0)
-            };
+            let zero = self.zero(ctx, ty);
             values.push(zero);
         }
         values.push(block.deref(ctx).get_argument(0));
@@ -1421,6 +1442,20 @@ impl<'s> FunctionLowering<'s> {
         }
     }
 
+    fn zero(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
+        if ty.deref(ctx).is::<FP64Type>() {
+            self.f64_const(ctx, 0.0)
+        } else if ty
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|ty| ty.width() == 64)
+        {
+            self.i64_const(ctx, 0)
+        } else {
+            self.i32_const(ctx, 0)
+        }
+    }
+
     fn undefined(&mut self, ctx: &mut Context, inner: TypeHandle) -> Result<Value> {
         Ok(match repr(ctx, inner)? {
             Repr::F64 => {
@@ -1429,6 +1464,7 @@ impl<'s> FunctionLowering<'s> {
             }
             Repr::Bool => self.i32_const(ctx, UNDEFINED_BOOL),
             Repr::Ref => self.i32_const(ctx, 0),
+            Repr::I64 => self.i64_const(ctx, 0),
             Repr::I32 => bail!("i32 | undefined has no representation"),
         })
     }
@@ -1450,6 +1486,7 @@ impl<'s> FunctionLowering<'s> {
                 self.num(ctx, NumOpcode::I32Eq, vec![value, undefined])
             }
             Repr::Ref => self.num(ctx, NumOpcode::I32Eqz, vec![value]),
+            Repr::I64 => self.num(ctx, NumOpcode::I64Eqz, vec![value]),
             Repr::I32 => bail!("i32 | undefined has no representation"),
         })
     }
@@ -1521,7 +1558,7 @@ impl<'s> FunctionLowering<'s> {
     // --- ops ----------------------------------------------------------------------------------
 
     fn op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
-        if self.lower_exception_op(ctx, op)? {
+        if self.lower_exception_op(ctx, op)? || self.lower_union_op(ctx, op)? {
             return Ok(());
         }
         if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
@@ -1544,6 +1581,7 @@ impl<'s> FunctionLowering<'s> {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
             let value = match repr(ctx, ty)? {
                 Repr::F64 => self.f64_const(ctx, 0.0),
+                Repr::I64 => self.i64_const(ctx, 0),
                 _ => self.i32_const(ctx, 0),
             };
             self.define(ctx, op, value);
@@ -2093,6 +2131,9 @@ impl<'s> FunctionLowering<'s> {
             let kind = intrinsic.kind(ctx);
             let value_runtime = match kind {
                 Intrinsic::FsOptions => Some((Runtime::FsOptions, None)),
+                Intrinsic::TextBytesLength => Some((Runtime::TextBytesLength, None)),
+                Intrinsic::TextBytesTruthy => Some((Runtime::TextBytesTruthy, None)),
+                Intrinsic::TextBytesEqual => Some((Runtime::TextBytesEqual, None)),
                 Intrinsic::FsSize => Some((Runtime::FsStatsGet, Some(0))),
                 Intrinsic::FsMtime => Some((Runtime::FsStatsGet, Some(1))),
                 Intrinsic::FsKind => Some((Runtime::FsStatsGet, Some(2))),
@@ -2265,6 +2306,8 @@ impl<'s> FunctionLowering<'s> {
                     | Intrinsic::FsRmdir
                     | Intrinsic::FsReadText
                     | Intrinsic::FsReadBytes
+                    | Intrinsic::FsReadValue
+                    | Intrinsic::FsWriteValue
                     | Intrinsic::FsWriteText
                     | Intrinsic::FsWriteBytes
                     | Intrinsic::FsReadDir
@@ -2276,10 +2319,11 @@ impl<'s> FunctionLowering<'s> {
                 );
             }
             let (runtime, interface) = match intrinsic.kind(ctx) {
+                Intrinsic::FsReadValue => (Runtime::FsReadValue, "wasi:filesystem/types@0.3.0"),
                 Intrinsic::FsReadText | Intrinsic::FsReadBytes => {
                     (Runtime::FsRead, "wasi:filesystem/types@0.3.0")
                 }
-                Intrinsic::FsWriteText | Intrinsic::FsWriteBytes => {
+                Intrinsic::FsWriteText | Intrinsic::FsWriteBytes | Intrinsic::FsWriteValue => {
                     (Runtime::FsWrite, "wasi:filesystem/types@0.3.0")
                 }
                 Intrinsic::FsReadDir => (Runtime::FsReadDir, "wasi:filesystem/types@0.3.0"),
@@ -2319,6 +2363,12 @@ impl<'s> FunctionLowering<'s> {
                     )),
                 );
                 operands.insert(operands.len() - 1, text);
+            }
+            if kind == Intrinsic::FsWriteValue {
+                let value = operands[1];
+                operands[1] = self.num(ctx, NumOpcode::I32WrapI64, vec![value]);
+                let text = self.text_bytes_is_text(ctx, value);
+                operands.insert(2, text);
             }
             if let Some(value) = self.runtime(ctx, runtime, operands) {
                 self.define(ctx, op, value);

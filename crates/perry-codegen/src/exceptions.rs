@@ -14,11 +14,7 @@ impl FunctionLowering<'_> {
         if let Some((block, types)) = self.landing.clone() {
             let mut args = vec![status];
             for ty in types {
-                args.push(if ty.deref(ctx).is::<FP64Type>() {
-                    self.f64_const(ctx, 0.0)
-                } else {
-                    self.i32_const(ctx, 0)
-                });
+                args.push(self.zero(ctx, ty));
             }
             (block, args)
         } else {

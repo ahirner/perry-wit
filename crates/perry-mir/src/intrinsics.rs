@@ -2,7 +2,7 @@
 //! task scheduling belong to codegen and the runtime.
 use crate::types::{
     ArrayType, BufferType, BytesType, FsStatsType, JsonType, OptionalType, PromiseType, StringType,
-    TextDecoderType, TextEncoderType,
+    TextDecoderType, TextEncoderType, TextOrBytesType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -22,6 +22,12 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    TextBytesLength,
+    TextBytesTruthy,
+    TextBytesEqual,
+    TextBytesIsText,
+    FsReadValue,
+    FsWriteValue,
     FsReadText,
     FsReadBytes,
     FsWriteText,
@@ -113,6 +119,9 @@ pub enum Intrinsic {
 
 #[derive(Clone, Copy)]
 enum ValueType {
+    TextBytes,
+    OptionalTextBytes,
+    PromiseTextBytes,
     FsStats,
     PromiseStats,
     PromiseVoid,
@@ -140,6 +149,13 @@ enum ValueType {
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
+            Self::TextBytes => TextOrBytesType::get(ctx).into(),
+            Self::OptionalTextBytes => {
+                OptionalType::get(ctx, TextOrBytesType::get(ctx).into()).into()
+            }
+            Self::PromiseTextBytes => {
+                PromiseType::get(ctx, TextOrBytesType::get(ctx).into()).into()
+            }
             Self::FsStats => FsStatsType::get(ctx).into(),
             Self::PromiseString | Self::PromiseBytes | Self::PromiseStrings => {
                 let value = match self {
@@ -203,6 +219,15 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
+            Self::TextBytes => ty.deref(ctx).is::<TextOrBytesType>(),
+            Self::OptionalTextBytes => ty
+                .deref(ctx)
+                .downcast_ref::<OptionalType>()
+                .is_some_and(|ty| ty.value().deref(ctx).is::<TextOrBytesType>()),
+            Self::PromiseTextBytes => ty
+                .deref(ctx)
+                .downcast_ref::<PromiseType>()
+                .is_some_and(|ty| ty.value().deref(ctx).is::<TextOrBytesType>()),
             Self::FsStats => ty.deref(ctx).is::<FsStatsType>(),
             Self::PromiseString | Self::PromiseBytes | Self::PromiseStrings => ty
                 .deref(ctx)
@@ -279,6 +304,11 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::TextBytesLength => (&[TextBytes], &[Number]),
+            Self::TextBytesTruthy | Self::TextBytesIsText => (&[TextBytes], &[Boolean]),
+            Self::TextBytesEqual => (&[OptionalTextBytes, OptionalTextBytes], &[Boolean]),
+            Self::FsReadValue => (&[String, OptionalString, Boolean], &[PromiseTextBytes]),
+            Self::FsWriteValue => (&[String, TextBytes, Boolean], &[PromiseVoid]),
             Self::FsReadText => (&[String, Boolean], &[PromiseString]),
             Self::FsReadBytes => (&[String, Boolean], &[PromiseBytes]),
             Self::FsWriteText => (&[String, String, Boolean], &[PromiseVoid]),

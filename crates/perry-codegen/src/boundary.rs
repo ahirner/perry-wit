@@ -593,10 +593,7 @@ fn async_export(
         if b.state.uses_filesystem {
             b.runtime(ctx, Runtime::FsEvent, vec![event, handle, subtask_state]);
         }
-        if [Runtime::FsRead, Runtime::FsWrite, Runtime::FsReadDir]
-            .iter()
-            .any(|entry| b.state.runtime.contains(entry))
-        {
+        if b.state.uses_filesystem_transfers() {
             b.runtime(
                 ctx,
                 Runtime::FsTransferEvent,
@@ -666,10 +663,7 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
     let abort = FuncOp::new(ctx, identifier("abort_task"), void);
     {
         let mut b = FunctionLowering::glue(state, ctx, &abort);
-        if [Runtime::FsRead, Runtime::FsWrite, Runtime::FsReadDir]
-            .iter()
-            .any(|entry| b.state.runtime.contains(entry))
-        {
+        if b.state.uses_filesystem_transfers() {
             b.runtime(ctx, Runtime::FsTransfersCancel, vec![]);
         }
         if b.state.uses_filesystem {

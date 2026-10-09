@@ -34,6 +34,9 @@ unsafe fn keys(ty: &Type, bits: u64) -> *mut u8 {
                 }
                 keys
             }
+            Kind::TextOrBytes => {
+                unreachable!("union enumeration must dispatch to its native alternative")
+            }
             Kind::Number | Kind::Boolean | Kind::Opaque => array::perry_array_new(0),
             Kind::Optional => unreachable!("enumeration unwraps its source"),
         }
