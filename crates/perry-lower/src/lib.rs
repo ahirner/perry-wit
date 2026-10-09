@@ -15,6 +15,7 @@
 //! `.length`. Everything else is rejected with a diagnostic.
 mod bytes;
 mod exceptions;
+mod json;
 mod shapes;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use exceptions::{Cleanup, Handler};
@@ -44,7 +45,10 @@ use perry_mir::{
         IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
-    types::{ArrayType, BufferType, BytesType, ExceptionType, PromiseType, RecordType, StringType},
+    types::{
+        ArrayType, BufferType, BytesType, ExceptionType, JsonType, PromiseType, RecordType,
+        StringType,
+    },
 };
 use pliron::printable::Printable as _;
 use pliron::{
@@ -277,12 +281,15 @@ enum Kind {
     Exception,
     Bytes,
     Buffer,
+    Json,
 }
 
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = value.get_type(ctx);
     let ty = ty.deref(ctx);
-    if ty.is::<FP64Type>() {
+    if ty.is::<JsonType>() {
+        Ok(Kind::Json)
+    } else if ty.is::<FP64Type>() {
         Ok(Kind::Number)
     } else if ty.is::<BytesType>() {
         Ok(Kind::Bytes)
@@ -518,6 +525,10 @@ impl<'s> FunctionBuilder<'s> {
 
     fn condition(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
+        if json::is_json(ctx, value) {
+            let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
+            return self.narrow_json(ctx, value, boolean);
+        }
         ensure!(
             kind(ctx, value)? == Kind::Boolean,
             "conditions must be boolean (implicit truthiness is not supported yet)"
@@ -772,7 +783,74 @@ impl<'s> FunctionBuilder<'s> {
         expr: &Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if expected.is_some_and(|ty| ty.deref(ctx).is::<JsonType>()) {
+            return self.json_value(ctx, expr);
+        }
         Ok(match expr {
+            Expr::Null => self.intrinsic(ctx, Intrinsic::JsonNull, vec![]).unwrap(),
+            Expr::JsonParse(text) | Expr::JsonParseTyped { text, .. } => {
+                let text = self.expression(ctx, text)?;
+                let text = self.defined(ctx, text)?;
+                ensure!(
+                    kind(ctx, text)? == Kind::String,
+                    "JSON.parse input must be a string"
+                );
+                let value = self
+                    .intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                    .unwrap();
+                if let Expr::JsonParseTyped { ty, .. } = expr {
+                    if matches!(ty, HirType::Unknown) {
+                        value
+                    } else {
+                        let ty = self.shapes.value_type(ctx, ty)?;
+                        self.fit(ctx, value, ty)?
+                    }
+                } else {
+                    value
+                }
+            }
+            Expr::JsonStringify(value) => self.stringify_json(ctx, value)?,
+            Expr::JsonStringifyFull(value, replacer, space) => {
+                ensure!(
+                    matches!(&**replacer, Expr::Undefined | Expr::Null),
+                    "JSON replacers are not implemented yet"
+                );
+                ensure!(
+                    matches!(&**space, Expr::Undefined | Expr::Null),
+                    "JSON indentation is not implemented yet"
+                );
+                self.stringify_json(ctx, value)?
+            }
+            Expr::TypeOf(value) => {
+                let value = self.expression(ctx, value)?;
+                ensure!(
+                    json::is_json(ctx, value),
+                    "typeof currently requires a JsonValue"
+                );
+                let value = self.optional(ctx, value);
+                self.intrinsic(ctx, Intrinsic::JsonTypeof, vec![value])
+                    .unwrap()
+            }
+            Expr::ArrayIsArray(value) => {
+                let value = self.expression(ctx, value)?;
+                if json::is_json(ctx, value) {
+                    let value = self.optional(ctx, value);
+                    self.intrinsic(ctx, Intrinsic::JsonIsArray, vec![value])
+                        .unwrap()
+                } else {
+                    let ty =
+                        optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
+                    let array = ty.deref(ctx).is::<ArrayType>();
+                    if array && self.is_optional(ctx, value) {
+                        let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                        let no = self.boolean(ctx, false);
+                        self.compare(ctx, CompareKind::Eq, absent, no)
+                    } else {
+                        self.boolean(ctx, array)
+                    }
+                }
+            }
+
             Expr::Uint8ArrayNew(arg) => match arg.as_deref() {
                 Some(arg) => self.bytes_constructor(ctx, &[arg])?,
                 None => self.bytes_constructor(ctx, &[])?,
@@ -830,6 +908,7 @@ impl<'s> FunctionBuilder<'s> {
                     "Error" => perry_mir::attrs::ErrorKind::Any,
                     "TypeError" => perry_mir::attrs::ErrorKind::TypeError,
                     "RangeError" => perry_mir::attrs::ErrorKind::RangeError,
+                    "SyntaxError" => perry_mir::attrs::ErrorKind::SyntaxError,
                     _ => bail!("instanceof {ty} is not supported yet"),
                 };
                 let value = self.box_exception(ctx, value)?;
@@ -912,6 +991,31 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let lhs = self.expression(ctx, left)?;
                 let rhs = self.expression(ctx, right)?;
+                if matches!(op, CompareOp::Eq | CompareOp::Ne)
+                    && (json::is_json(ctx, lhs) || json::is_json(ctx, rhs))
+                {
+                    let lhs = if json::is_json(ctx, lhs) {
+                        lhs
+                    } else {
+                        self.pack_json(ctx, lhs)?
+                    };
+                    let rhs = if json::is_json(ctx, rhs) {
+                        rhs
+                    } else {
+                        self.pack_json(ctx, rhs)?
+                    };
+                    let lhs = self.optional(ctx, lhs);
+                    let rhs = self.optional(ctx, rhs);
+                    let equal = self
+                        .intrinsic(ctx, Intrinsic::JsonEqual, vec![lhs, rhs])
+                        .unwrap();
+                    return Ok(if matches!(op, CompareOp::Eq) {
+                        equal
+                    } else {
+                        let no = self.boolean(ctx, false);
+                        self.compare(ctx, CompareKind::Eq, equal, no)
+                    });
+                }
                 if matches!(op, CompareOp::Eq | CompareOp::Ne)
                     && (lhs.get_type(ctx).deref(ctx).is::<ExceptionType>()
                         || rhs.get_type(ctx).deref(ctx).is::<ExceptionType>())
@@ -1062,6 +1166,11 @@ impl<'s> FunctionBuilder<'s> {
                 // Property access on `undefined` throws TypeError, in ECMAScript and here.
                 let value = self.defined(ctx, value)?;
                 match (kind(ctx, value)?, property.as_str()) {
+                    (Kind::Json, _) => {
+                        let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, property));
+                        self.intrinsic(ctx, Intrinsic::JsonGet, vec![value, key])
+                            .unwrap()
+                    }
                     (Kind::Bytes, "length" | "byteLength") => self
                         .intrinsic(ctx, Intrinsic::BytesLength, vec![value])
                         .unwrap(),
@@ -1181,6 +1290,15 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
                 let array = self.defined(ctx, array)?;
+                if kind(ctx, array)? == Kind::Json {
+                    let index = self.json_key(ctx, index)?;
+                    let intrinsic = if kind(ctx, index)? == Kind::String {
+                        Intrinsic::JsonGet
+                    } else {
+                        Intrinsic::JsonIndex
+                    };
+                    return Ok(self.intrinsic(ctx, intrinsic, vec![array, index]).unwrap());
+                }
                 if kind(ctx, array)? == Kind::Bytes {
                     let index = self.index(ctx, index)?;
                     return Ok(self
@@ -1252,6 +1370,12 @@ impl<'s> FunctionBuilder<'s> {
     /// ECMAScript coercion of `T | undefined` for arithmetic, ordering and concatenation:
     /// `undefined` becomes `NaN` or `"undefined"`. Other values pass through.
     fn arithmetic(&mut self, ctx: &mut Context, value: Value) -> Value {
+        if json::is_json(ctx, value) {
+            let value = self.optional(ctx, value);
+            return self
+                .intrinsic(ctx, Intrinsic::JsonAsNumber, vec![value])
+                .unwrap();
+        }
         let Some(inner) = optional_value(ctx, value.get_type(ctx)) else {
             return value;
         };
@@ -1292,6 +1416,10 @@ impl<'s> FunctionBuilder<'s> {
             Ok(self.optional(ctx, value))
         } else if optional_value(ctx, ty) == Some(target) {
             self.defined(ctx, value)
+        } else if json::is_json(ctx, value) {
+            self.narrow_json(ctx, value, target)
+        } else if target.deref(ctx).is::<JsonType>() {
+            self.pack_json(ctx, value)
         } else {
             bail!("value type differs from the expected type")
         }
@@ -1307,6 +1435,18 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        if kind(ctx, array)? == Kind::Json {
+            let index = self.json_key(ctx, index)?;
+            let intrinsic = if kind(ctx, index)? == Kind::String {
+                Intrinsic::JsonSet
+            } else {
+                Intrinsic::JsonSetIndex
+            };
+            let value = self.expression(ctx, value)?;
+            let json = self.pack_json(ctx, value)?;
+            self.intrinsic(ctx, intrinsic, vec![array, index, json]);
+            return Ok(value);
+        }
         if kind(ctx, array)? == Kind::Bytes {
             let index = self.index(ctx, index)?;
             let value = if matches!(value, Expr::Undefined) {
@@ -1344,6 +1484,13 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
+        if kind(ctx, record)? == Kind::Json {
+            let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, field));
+            let value = self.expression(ctx, value)?;
+            let json = self.pack_json(ctx, value)?;
+            self.intrinsic(ctx, Intrinsic::JsonSet, vec![record, key, json]);
+            return Ok(value);
+        }
         ensure!(
             kind(ctx, record)? == Kind::Record,
             "property writes are only supported on records so far"

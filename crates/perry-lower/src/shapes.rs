@@ -11,8 +11,8 @@
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
-    ArrayType, BufferType, BytesType, ExceptionType, OptionalType, PromiseType, RecordType,
-    StringType,
+    ArrayType, BufferType, BytesType, ExceptionType, JsonType, OptionalType, PromiseType,
+    RecordType, StringType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -45,6 +45,31 @@ fn record_name(fields: &[&str]) -> String {
     }
 }
 
+fn json_alias(name: &str, ty: &HirType) -> bool {
+    let HirType::Union(types) = ty else {
+        return false;
+    };
+    let recursive = |ty: &HirType| matches!(ty, HirType::Named(reference) if reference == name);
+    let mut variants = 0u8;
+    for ty in types {
+        variants |= match ty {
+            HirType::Null => 1,
+            HirType::Boolean => 2,
+            HirType::Number => 4,
+            HirType::String => 8,
+            HirType::Array(element) if recursive(element) => 16,
+            HirType::Object(object)
+                if object.properties.is_empty()
+                    && object.index_signature.as_deref().is_some_and(recursive) =>
+            {
+                32
+            }
+            _ => return false,
+        };
+    }
+    variants == 63 && types.len() == 6
+}
+
 impl<'h> Shapes<'h> {
     pub(crate) fn new(hir: &'h HirModule) -> Self {
         Shapes {
@@ -57,6 +82,12 @@ impl<'h> Shapes<'h> {
 
     /// MIR type of a HIR value type, for the types supported so far.
     pub(crate) fn value_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
+        if self.hir.type_aliases.iter().any(|alias| {
+            (&alias.ty == ty || matches!(ty, HirType::Named(name) if name == &alias.name))
+                && json_alias(&alias.name, &alias.ty)
+        }) {
+            return Ok(JsonType::get(ctx).into());
+        }
         Ok(match ty {
             HirType::Union(types) => {
                 let (first, rest) = types.split_first().context("empty union type")?;
@@ -79,7 +110,10 @@ impl<'h> Shapes<'h> {
             HirType::Named(name) if name == "Uint8Array" => BytesType::get(ctx).into(),
             HirType::Named(name) if name == "ArrayBuffer" => BufferType::get(ctx).into(),
             HirType::Named(name)
-                if matches!(name.as_str(), "Error" | "TypeError" | "RangeError") =>
+                if matches!(
+                    name.as_str(),
+                    "Error" | "TypeError" | "RangeError" | "SyntaxError"
+                ) =>
             {
                 ExceptionType::get(ctx).into()
             }

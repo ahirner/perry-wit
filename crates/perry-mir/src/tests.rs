@@ -577,3 +577,29 @@ fn exception_ops_round_trip_and_keep_caught_pairs() {
         "{infallible}"
     );
 }
+
+#[test]
+fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
+    let input = single_block(
+        r#"
+        text = perry.string_const "null" : perry.string;
+        json = perry.intrinsic JsonParse (text) : perry.json;
+        parsed = perry.caught_status : builtin.integer i32;
+        optional = perry.wrap json : perry.optional <perry.json>;
+        number = perry.intrinsic JsonAsNumber (optional) : builtin.fp64;
+        narrowed = perry.caught_status : builtin.integer i32;
+        encoded = perry.intrinsic JsonStringify (optional) : perry.optional <perry.string>;
+        serialized = perry.caught_status : builtin.integer i32;
+    "#,
+    );
+    verify_text(&input).expect("explicit JSON operations verify");
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &input);
+    verify_text(&normalized(&print(ctx, module))).expect("JSON operations round trip");
+    let invalid = input.replace("JsonAsNumber (optional)", "JsonAsNumber (text)");
+    assert!(
+        verify_text(&invalid)
+            .unwrap_err()
+            .contains("incorrect operand or result types")
+    );
+}

@@ -19,6 +19,7 @@ pub mod bytes;
 #[cfg(target_arch = "wasm32")]
 mod cli;
 pub mod exception;
+pub mod json;
 #[cfg(target_arch = "wasm32")]
 mod output;
 pub mod process;
@@ -61,11 +62,51 @@ mod tests {
         regions_release_in_bulk_and_reuse_chunks();
         arrays_grow_and_keep_elements();
         byte_views_preserve_aliases_and_validate_before_writing();
+        json_trees_share_array_storage_and_retain_unicode();
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
         promises_queue_waiters_and_tasks_interleave();
         exceptions_are_owned_by_each_task_and_rejections_keep_identity();
         process_status_validates_before_replacing_instance_state();
+    }
+
+    fn json_trees_share_array_storage_and_retain_unicode() {
+        use json::*;
+        perry_task_begin();
+        // SAFETY: literal strings have static lifetime and every allocated value stays in this task.
+        unsafe {
+            let input = r#"{"list":[1,2],"text":"é🙂","null":null}"#;
+            let input = string::perry_string_adopt(input.as_ptr().cast_mut(), input.len() as u32);
+            let root = perry_json_parse(input);
+            assert_eq!(exception::perry_exception_status(), 0);
+            let key = string::perry_string_adopt(b"list".as_ptr().cast_mut(), 4);
+            let list = perry_json_get(root, key);
+            let storage = perry_json_as_array(list);
+            let value = perry_json_number(17.0);
+            array::set_slot(storage, 0, value as usize as u64);
+            assert_eq!(perry_json_get(root, key), list);
+            assert_eq!(perry_json_as_number(perry_json_index(list, 0.0)), 17.0);
+            assert_eq!(perry_json_equal(perry_json_array(storage), list), 1);
+            let keys = array::from_refs([key, key].into_iter());
+            let values = array::from_refs([list, list].into_iter());
+            let wrapper = perry_json_object(keys, values);
+            assert_eq!(
+                string::text(perry_json_stringify(wrapper)),
+                r#"{"list":[17,2]}"#
+            );
+            let output = perry_json_stringify(root);
+            assert_eq!(
+                string::text(output),
+                r#"{"list":[17,2],"text":"é🙂","null":null}"#
+            );
+            assert!(perry_json_stringify(core::ptr::null_mut()).is_null());
+            assert_eq!(exception::perry_exception_status(), 0);
+            perry_json_as_number(list);
+            assert_eq!(exception::perry_exception_status(), exception::TYPE_ERROR);
+            exception::perry_exception_catch(exception::TYPE_ERROR as i32);
+        }
+        perry_task_end();
+        assert_eq!(chunk_counts().0, 0);
     }
 
     fn process_status_validates_before_replacing_instance_state() {

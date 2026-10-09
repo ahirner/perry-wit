@@ -12,6 +12,7 @@ Perry-WIT compiles a static subset of TypeScript to WebAssembly components targe
 | `crates/perry-codegen` | perry MIR → `wasm` dialect, value representations, canonical-ABI export glue (`boundary.rs`) |
 | `crates/pliron-wasm` | The `wasm` dialect and the emitter to core Wasm; free of perry code so it can be published separately |
 | `crates/perry-runtime` | `no_std` runtime linked into every module: allocator, task regions, strings, arrays |
+| `crates/json-codec` | Pure `no_std` JSON parser and serializer, shared by the runtime and standalone JSON helper |
 | `crates/*-helper`, `src/helpers` | Computation helpers (JSON, time, number formatting, text, search, URL), linked on demand |
 | `crates/conformance` | Contracts checked against Node.js as the oracle |
 
@@ -42,11 +43,13 @@ TypeScript ─ perry-parser ─ Perry HIR ─ perry-lower ─ perry MIR
 | `f64` (number) | `f64` | ECMAScript arithmetic; `%` is `fmod` in the runtime |
 | `i1` (boolean) | `i32` | |
 | record, array, string | `i32` address | `0` is null |
+| `perry.json` | `i32` address | Explicit null/boolean/number/string/array/object variant; optional JSON uses `0` for `undefined` |
 | `T \| undefined` | as `T` | numbers: signalling-NaN payload (`perry_codegen::UNDEFINED_BITS`); references: `0`; booleans: `2` |
 
 - **Records.** An `i32` shape id followed by 8-byte field slots in sorted field order.
 - **Arrays.** `{ len, cap, data }`, with 8-byte element slots. Capacity is never 0, so a bounds-checked read is branch-free.
 - **Bytes.** `perry.buffer` owns an ArrayBuffer descriptor `{ length, data }`; `perry.bytes` is a Uint8Array view `{ buffer, offset, length }`. Subarrays share storage; construction from bytes and slicing copy it. Range validation precedes set, and overlapping sets use memmove semantics. Descriptors and storage belong to the task, including across suspension. WIT `list<u8>` inputs become views over the canonical input storage; results point at the selected view span until task completion, without copying each element.
+- **JSON.** A discriminated runtime enum carries six variants, without dynamic NaN boxing. Arrays use the native dense array layout containing JSON references; objects hold ordered key/value fields. The codec parses into a measured flat graph, then the runtime builds task-owned values whose decoded strings borrow that graph. Serialization shares a read-only tree adapter with the standalone helper. Lookups and checked `JsonValue[]` views retain storage identity; scalar conversion verifies the variant and returns an unboxed native value. Record and homogeneous-array views remain pending. Fresh JSON literals preserve evaluation and key creation order independently of the sorted native record layout.
 - **Strings.** `{ len (UTF-8 bytes), utf16, data, buffer }`.
   - `utf16` caches the ECMAScript length.
   - Constants are static objects in the data segment.
@@ -71,7 +74,7 @@ There are no traps in the subset:
 - A write that would leave a hole throws a `RangeError`.
 - A function that may throw returns an extra `i32` status after its results. Callers branch on it, propagating to the nearest handler or to their own caller.
 - Inside a handler, `perry.caught_status` immediately follows the throwing operation. Its status feeds an explicit CFG branch, keeping handler liveness visible to SSA construction and the async split. Canonicalization preserves and verifies the pair.
-- `perry.exception` holds Error/TypeError/RangeError objects or thrown numbers, booleans and strings. Error equality preserves identity; primitive equality preserves value semantics. A task-local pending reference carries the value alongside the status. Catch consumes it; rejected promises retain it for repeated awaits.
+- `perry.exception` holds Error/TypeError/RangeError/SyntaxError objects or thrown numbers, booleans and strings. Error equality preserves identity; primitive equality preserves value semantics. A task-local pending reference carries the value alongside the status. Catch consumes it; rejected promises retain it for repeated awaits. Checked JSON intrinsics read that status immediately after the runtime call, keeping their exception edges explicit in MIR.
 - `finally` runs for normal completion, return, throw, break and continue. A saved completion survives nested catches and suspension; an abrupt finalizer replaces it.
 
 At a component export without an error type, an escaping exception traps. CLI commands return `err` instead.

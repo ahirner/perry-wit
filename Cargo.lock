@@ -1427,10 +1427,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "perry-json-helper"
+name = "perry-json-codec"
 version = "0.1.0"
 dependencies = [
  "ryu-js",
+]
+
+[[package]]
+name = "perry-json-helper"
+version = "0.1.0"
+dependencies = [
+ "perry-json-codec",
 ]
 
 [[package]]
@@ -1480,6 +1487,8 @@ name = "perry-runtime"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "perry-json-codec",
+ "ryu-js",
  "talc",
 ]
 

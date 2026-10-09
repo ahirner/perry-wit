@@ -20,9 +20,9 @@ pub const BUFFER: u32 = 12;
 pub const SIZE: u32 = 16;
 
 #[repr(C)]
-struct Str {
+pub(crate) struct Str {
     len: u32,
-    utf16: u32,
+    pub(crate) utf16: u32,
     data: *mut u8,
     buffer: *mut Buffer,
 }
@@ -35,6 +35,19 @@ struct Buffer {
 }
 
 const MIN_BUFFER: u32 = 32;
+
+/// # Safety
+/// `string` is live and its bytes are not mutated or freed while borrowed.
+pub(crate) unsafe fn text<'a>(string: *mut u8) -> &'a str {
+    // SAFETY: runtime strings contain valid UTF-8 and their declared byte span is live.
+    unsafe {
+        let string = &*string.cast::<Str>();
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+            string.data,
+            string.len as usize,
+        ))
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 const _: () = assert!(core::mem::size_of::<Str>() == SIZE as usize);

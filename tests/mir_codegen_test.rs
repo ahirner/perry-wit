@@ -491,3 +491,39 @@ fn oversized_byte_storage_traps_before_allocation_size_can_wrap() {
         );
     }
 }
+
+#[test]
+fn json_failures_are_caught_and_narrowing_checks_real_variants() {
+    let mut program = Program::new(
+        r#"
+function number(value: number): number { return value + 1; }
+function text(value: string): number { return value.length; }
+export function run(x: number): number {
+  let score = 0;
+  try { JSON.parse('{bad'); } catch(e) {
+    if(e instanceof SyntaxError && e instanceof Error) score = score + 1;
+    const original = e;
+    try { throw e; } catch(second) { if(second === original) score = score + 2; }
+  }
+  const parsed = JSON.parse('{"number":2,"text":"é🙂","null":null,"list":[1,2]}');
+  score = score + number(parsed.number) + text(parsed.text);
+  try { number(parsed.text); } catch(e) { if(e instanceof TypeError) score = score + 8; }
+  try { text(parsed.number); } catch(e) { if(e instanceof TypeError) score = score + 16; }
+  try { number(parsed.missing); } catch(e) { if(e instanceof TypeError) score = score + 32; }
+  try { parsed.null.foo; } catch(e) { if(e instanceof TypeError) score = score + 64; }
+  if(parsed.missing === undefined && parsed.null === null) score = score + 128;
+  if(JSON.stringify(parsed.missing) !== undefined || JSON.stringify(undefined) !== undefined) throw 2;
+  const nested: number[][] = [[1]];
+  if(!Array.isArray(nested[0]) || Array.isArray(nested[1])) throw 3;
+  const array = parsed.list;
+  array[2] = x;
+  if(array.length === 3 && array[2] === x && array === parsed.list) score = score + 256;
+  try { array[4] = 8; } catch(e) { if(e instanceof RangeError) score = score + 512; }
+  array[0] = array;
+  try { JSON.stringify(array); } catch(e) { if(e instanceof TypeError) score = score + 1024; }
+  return score;
+}
+"#,
+    );
+    assert_eq!(program.number("run", 9.0), 2049.0);
+}

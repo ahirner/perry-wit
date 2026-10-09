@@ -118,7 +118,12 @@ fn compute_helpers_are_built_and_sources_are_watched() {
             |line| line == format!("cargo:rerun-if-changed={}", scratch.join(source).display())
         ));
     }
-    for source in ["crates/json-helper", "crates/time-helper", "Cargo.lock"] {
+    for source in [
+        "crates/json-codec",
+        "crates/json-helper",
+        "crates/time-helper",
+        "Cargo.lock",
+    ] {
         assert!(
             stdout
                 .lines()

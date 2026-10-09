@@ -388,3 +388,36 @@ export function values(): string[] {
         .unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
     assert!(verify_operation(parsed, ctx).is_err());
 }
+
+#[test]
+fn json_values_narrow_to_native_scalars_and_shared_array_storage() {
+    let printed = lowered(
+        r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+function array(value: JsonValue): JsonValue[] {
+  if(!Array.isArray(value)) throw new TypeError('array required');
+  return value;
+}
+export function run(text: string): number {
+  const value: JsonValue = JSON.parse(text);
+  const items = array(value);
+  items.push(8);
+  const item = items[0];
+  if(typeof item !== 'number') throw new TypeError('number required');
+  return item + 1;
+}
+"#,
+    );
+    for operation in [
+        "JsonAsArray",
+        "JsonAsNumber",
+        "perry.array_push",
+        "perry.binary Add",
+    ] {
+        assert!(printed.contains(operation), "{operation}: {printed}");
+    }
+    let invalid = rejected(
+        "type JsonValue = any; export function run(value: JsonValue): number { return 1; }",
+    );
+    assert!(invalid.contains("Any"), "{invalid}");
+}

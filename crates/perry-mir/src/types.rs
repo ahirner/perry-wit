@@ -26,6 +26,16 @@ use thiserror::Error;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct ExceptionType;
 
+/// An explicit JSON variant tree, distinct from arbitrary dynamic values.
+#[pliron_type(
+    name = "perry.json",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct JsonType;
+
 /// A fixed-size ArrayBuffer owned by a memory tier.
 #[pliron_type(
     name = "perry.buffer",

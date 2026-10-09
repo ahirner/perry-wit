@@ -1,9 +1,6 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
-#[path = "../../../src/helpers/json.rs"]
-mod implementation;
-
-pub use implementation::*;
+pub use perry_json_codec::*;
 
 #[cfg(target_arch = "wasm32")]
 mod guest;

@@ -105,6 +105,20 @@ await errors.write(input);await errors.close();errors.releaseLock();
 }
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = Vec::new();
+    contracts.push(Contract {
+        id: "ecma.json.values",
+        description: "JSON variants, exact serialization, property order, aliases and catchable syntax errors",
+        specification: "https://tc39.es/ecma262/#sec-json-object",
+        domain: "Bounded UTF-8 JSON trees with six variants, duplicate and numeric keys, escaped controls and supplementary Unicode; exact command output; own-property mutation and array aliases",
+        witnesses: vec![
+            Witness { partition: "scalar", case: json_values("null".into()) },
+            Witness { partition: "order-and-duplicates", case: json_values(r#"{"b":1,"2":2,"a":3,"b":4,"1":5,"__proto__":{"safe":true}}"#.into()) },
+            Witness { partition: "numeric-boundaries", case: json_values("[-0,1e400,5e-324,9007199254740993]".into()) },
+            Witness { partition: "nested", case: json_values(r#"[{"empty":{},"array":[],"text":"é🙂\n\u0000"},true,false,null]"#.into()) },
+        ],
+        strategy: json_strategy().prop_map(json_values).boxed(),
+        check: check_equivalence,
+    });
     for (id, description, specification, operation, asynchronous) in [
         (
             "ecma.uint8array.set",
@@ -495,4 +509,64 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn json_values(document: String) -> Case {
+    let quoted = serde_json::to_string(&document).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+const value=JSON.parse({quoted});
+console.log(JSON.stringify(value));
+console.log(JSON.stringify(JSON.parse(JSON.stringify(value))));
+const object=JSON.parse('{{"item":{{"value":3}},"list":[0],"0":1,"null":null,"text":"é🙂"}}');
+const alias=object.item;
+const key='value';
+alias[key]=4;
+if(alias!==object.item||object.item.value!==4)throw 90;
+const list=object.list;
+list['0']=8;
+list[list.length]=alias;
+if(list['0']!==8||list.length!==2)throw 91;
+object[0]=7;
+if(object['0']!==7||object.null!==null||object.missing!==undefined)throw 92;
+console.log(JSON.stringify(object));
+console.log(JSON.stringify(object.missing));
+console.log(JSON.stringify({{z:alias,a:[null,true,1,'é🙂'],b:alias}}));
+type JsonValue = null | boolean | number | string | JsonValue[] | {{[key:string]:JsonValue}};
+const literal: JsonValue = {{second:2,first:1}};
+console.log(JSON.stringify(literal));
+try{{JSON.parse('{{"broken":');throw 93;}}
+catch(e){{if(!(e instanceof SyntaxError)||!(e instanceof Error))throw 94;console.log('syntax');}}
+"#
+        ),
+    }
+}
+
+fn json_strategy() -> BoxedStrategy<String> {
+    use serde_json::Value;
+    let text = prop::collection::vec(
+        prop::sample::select(vec![
+            'a', 'z', '0', 'é', '🙂', '\0', '\n', '"', '\\', '\u{2028}',
+        ]),
+        0..20,
+    )
+    .prop_map(|text| text.into_iter().collect::<String>())
+    .boxed();
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        any::<i32>().prop_map(|n| Value::from(n as f64 / 8.0)),
+        text.clone().prop_map(Value::String)
+    ];
+    leaf.prop_recursive(4, 64, 6, move |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+            prop::collection::vec((text.clone(), inner), 0..6)
+                .prop_map(|entries| Value::Object(entries.into_iter().collect())),
+        ]
+    })
+    .prop_map(|value| value.to_string())
+    .boxed()
 }

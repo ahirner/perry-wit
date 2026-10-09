@@ -9,6 +9,18 @@ pub const ERROR: u32 = 3;
 pub const NUMBER: u32 = 4;
 pub const BOOLEAN: u32 = 5;
 pub const STRING: u32 = 6;
+pub const SYNTAX_ERROR: u32 = 7;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_exception_status() -> u32 {
+    let exception = current().exception;
+    if exception.is_null() {
+        0
+    } else {
+        // SAFETY: pending exceptions belong to the current live task.
+        unsafe { (*exception.cast::<Exception>()).kind }
+    }
+}
 
 pub(crate) fn raise_error(kind: u32, message: &'static str) -> i32 {
     // SAFETY: literal bytes have static lifetime; the exception is owned by this task.
@@ -62,7 +74,7 @@ pub extern "C" fn perry_exception_catch(status: i32) -> *mut u8 {
     perry_exception_new(status as u32, message as usize as u64)
 }
 
-/// `instanceof Error`, `TypeError` or `RangeError`.
+/// `instanceof Error`, `TypeError`, `RangeError` or `SyntaxError`.
 ///
 /// # Safety
 /// `exception` is a live exception value.
@@ -71,7 +83,7 @@ pub unsafe extern "C" fn perry_exception_is(exception: *mut u8, expected: u32) -
     // SAFETY: guaranteed by the caller.
     let kind = unsafe { (*(exception as *const Exception)).kind };
     u32::from(if expected == ERROR {
-        (TYPE_ERROR..=ERROR).contains(&kind)
+        (TYPE_ERROR..=ERROR).contains(&kind) || kind == SYNTAX_ERROR
     } else {
         kind == expected
     })
@@ -85,7 +97,7 @@ pub unsafe extern "C" fn perry_exception_is(exception: *mut u8, expected: u32) -
 pub unsafe extern "C" fn perry_exception_message(exception: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let exception = unsafe { &*(exception as *const Exception) };
-    if (TYPE_ERROR..=ERROR).contains(&exception.kind) {
+    if (TYPE_ERROR..=ERROR).contains(&exception.kind) || exception.kind == SYNTAX_ERROR {
         exception.value as usize as *mut u8
     } else {
         ptr::null_mut()

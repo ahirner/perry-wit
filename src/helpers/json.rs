@@ -8,7 +8,9 @@ mod serialize;
 mod storage;
 
 pub use parse::{measure, populate};
-pub use serialize::{measure_serialized, serialize};
+pub use serialize::{
+    Graph, Tree, Value, measure_serialized, measure_tree, serialize, serialize_tree,
+};
 
 const NODE_BYTES: usize = 32;
 const MAX_DEPTH: usize = 128;

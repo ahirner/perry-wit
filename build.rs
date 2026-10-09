@@ -11,6 +11,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/helpers").display()
     );
+    println!("cargo:rerun-if-changed=crates/json-codec");
     for helper in ["search", "text", "fetch"] {
         compile_helper(&manifest_dir, &out_dir, helper);
     }

@@ -1,8 +1,8 @@
 //! Typed built-in capabilities. Signatures are verified here; native representations and
 //! task scheduling belong to codegen and the runtime.
-use crate::types::{ArrayType, BufferType, BytesType, OptionalType, StringType};
+use crate::types::{ArrayType, BufferType, BytesType, JsonType, OptionalType, StringType};
 use pliron::{
-    builtin::types::FP64Type,
+    builtin::types::{FP64Type, IntegerType, Signedness},
     common_traits::Verify,
     context::Context,
     derive::{op_interface_impl, pliron_attr, pliron_op},
@@ -19,6 +19,26 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    JsonParse,
+    JsonStringify,
+    JsonNull,
+    JsonNumber,
+    JsonBoolean,
+    JsonString,
+    JsonArray,
+    JsonObject,
+    JsonGet,
+    JsonIndex,
+    JsonAsNumber,
+    JsonAsBoolean,
+    JsonAsString,
+    JsonAsArray,
+    JsonTypeof,
+    JsonEqual,
+    JsonIsArray,
+    JsonSet,
+    JsonSetIndex,
+
     Stdout,
     Stderr,
     EnvGet,
@@ -50,6 +70,10 @@ pub enum Intrinsic {
 
 #[derive(Clone, Copy)]
 enum ValueType {
+    Json,
+    OptionalJson,
+    Jsons,
+    Boolean,
     String,
     OptionalString,
     OptionalNumber,
@@ -63,6 +87,16 @@ enum ValueType {
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
+            Self::Json => JsonType::get(ctx).into(),
+            Self::OptionalJson => {
+                let json = JsonType::get(ctx).into();
+                OptionalType::get(ctx, json).into()
+            }
+            Self::Jsons => {
+                let json = JsonType::get(ctx).into();
+                ArrayType::get(ctx, json).into()
+            }
+            Self::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             Self::Bytes => BytesType::get(ctx).into(),
             Self::Buffer => BufferType::get(ctx).into(),
             Self::Numbers => {
@@ -87,6 +121,19 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
+            Self::Json => ty.deref(ctx).is::<JsonType>(),
+            Self::OptionalJson => ty
+                .deref(ctx)
+                .downcast_ref::<OptionalType>()
+                .is_some_and(|ty| ty.value().deref(ctx).is::<JsonType>()),
+            Self::Jsons => ty
+                .deref(ctx)
+                .downcast_ref::<ArrayType>()
+                .is_some_and(|ty| ty.element().deref(ctx).is::<JsonType>()),
+            Self::Boolean => ty
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|ty| ty.width() == 1),
             Self::Bytes => ty.deref(ctx).is::<BytesType>(),
             Self::Buffer => ty.deref(ctx).is::<BufferType>(),
             Self::Numbers => ty
@@ -115,6 +162,24 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::JsonParse => (&[String], &[Json]),
+            Self::JsonStringify => (&[OptionalJson], &[OptionalString]),
+            Self::JsonNull => (&[], &[Json]),
+            Self::JsonNumber => (&[Number], &[Json]),
+            Self::JsonBoolean => (&[Boolean], &[Json]),
+            Self::JsonString => (&[String], &[Json]),
+            Self::JsonArray => (&[Jsons], &[Json]),
+            Self::JsonObject => (&[Strings, Jsons], &[Json]),
+            Self::JsonGet => (&[Json, String], &[OptionalJson]),
+            Self::JsonIndex => (&[Json, Number], &[OptionalJson]),
+            Self::JsonAsArray => (&[OptionalJson], &[Jsons]),
+            Self::JsonAsNumber => (&[OptionalJson], &[Number]),
+            Self::JsonAsBoolean => (&[OptionalJson], &[Boolean]),
+            Self::JsonAsString | Self::JsonTypeof => (&[OptionalJson], &[String]),
+            Self::JsonIsArray => (&[OptionalJson], &[Boolean]),
+            Self::JsonEqual => (&[OptionalJson, OptionalJson], &[Boolean]),
+            Self::JsonSet => (&[Json, String, Json], &[]),
+            Self::JsonSetIndex => (&[Json, Number, Json], &[]),
             Self::BufferNew => (&[Number], &[Buffer]),
             Self::BufferLength => (&[Buffer], &[Number]),
             Self::BytesNew => (&[Number], &[Bytes]),
@@ -196,13 +261,39 @@ impl SideEffects for IntrinsicOp {
 
 #[op_interface_impl]
 impl crate::exceptions::MayThrowInterface for IntrinsicOp {
-    fn exception(&self, _ctx: &Context) -> crate::attrs::ErrorKind {
-        crate::attrs::ErrorKind::RangeError
+    fn exception(&self, ctx: &Context) -> crate::attrs::ErrorKind {
+        if matches!(
+            self.kind(ctx),
+            Intrinsic::JsonParse
+                | Intrinsic::JsonStringify
+                | Intrinsic::JsonGet
+                | Intrinsic::JsonIndex
+                | Intrinsic::JsonAsNumber
+                | Intrinsic::JsonAsBoolean
+                | Intrinsic::JsonAsArray
+                | Intrinsic::JsonAsString
+                | Intrinsic::JsonSet
+                | Intrinsic::JsonSetIndex
+        ) {
+            crate::attrs::ErrorKind::Any
+        } else {
+            crate::attrs::ErrorKind::RangeError
+        }
     }
     fn may_throw(&self, ctx: &Context) -> bool {
         matches!(
             self.kind(ctx),
-            Intrinsic::ExitCodeSet
+            Intrinsic::JsonParse
+                | Intrinsic::JsonStringify
+                | Intrinsic::JsonGet
+                | Intrinsic::JsonIndex
+                | Intrinsic::JsonAsNumber
+                | Intrinsic::JsonAsBoolean
+                | Intrinsic::JsonAsArray
+                | Intrinsic::JsonAsString
+                | Intrinsic::JsonSet
+                | Intrinsic::JsonSetIndex
+                | Intrinsic::ExitCodeSet
                 | Intrinsic::ProcessExit
                 | Intrinsic::BufferNew
                 | Intrinsic::BytesNew

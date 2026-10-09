@@ -11,3 +11,6 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 libm = "0.2"
 talc = { version = "5.1.1", default-features = false }
+
+perry-json-codec = { path = "../json-codec" }
+ryu-js = "1.0.3"

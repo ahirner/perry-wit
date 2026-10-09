@@ -23,6 +23,7 @@ world timers {
   export count: async func(n: u32) -> u32;
   export recover: async func(x: f64) -> f64;
   export bytes: async func(input: list<u8>, tag: u8) -> list<u8>;
+  export json: async func(input: string) -> string;
   export fail: async func();
 }
 "#;
@@ -48,6 +49,14 @@ export async function run(x: number): Promise<Observation> {
 export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
   return await setTimeout(2, prefix + "!");
+}
+export async function json(input: string): Promise<string> {
+  const value = JSON.parse(input);
+  const alias = value.item;
+  await setTimeout(1);
+  alias.count = alias.count + 1;
+  await setTimeout(1);
+  return JSON.stringify(value);
 }
 export async function bytes(input: Uint8Array, tag: number): Promise<Uint8Array> {
   const buffer = new ArrayBuffer(input.length + 2);
@@ -199,8 +208,18 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let recover = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "recover")?;
     let bytes = instance.get_typed_func::<(&[u8], u8), (Vec<u8>,)>(&mut store, "bytes")?;
     let byte_input = vec![123; 50_000];
+    let json = instance.get_typed_func::<(&str,), (String,)>(&mut store, "json")?;
+    let json_input = format!(
+        "{{\"item\":{{\"count\":1}},\"text\":\"{}\"}}",
+        "é🙂".repeat(8_000)
+    );
+    let json_expected = json_input.replacen("\"count\":1", "\"count\":2", 1);
     let byte_expected = [vec![7], byte_input.clone(), vec![8]].concat();
     for round in 0..20 {
+        assert_eq!(
+            json.call_async(&mut store, (&json_input,)).await?.0,
+            json_expected
+        );
         assert_eq!(
             bytes.call_async(&mut store, (&byte_input, 7)).await?.0,
             byte_expected
@@ -261,6 +280,17 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         .await??;
     assert_eq!(a, [3, 0, 255, 4]);
     assert_eq!(b, [9, 128, 1, 10]);
+    let (a, b) = store
+        .run_concurrent(async |accessor| -> wasmtime::Result<_> {
+            let (a, b) = tokio::join!(
+                json.call_concurrent(accessor, (r#"{"item":{"count":2}}"#,)),
+                json.call_concurrent(accessor, (r#"{"item":{"count":8}}"#,))
+            );
+            Ok((a?.0, b?.0))
+        })
+        .await??;
+    assert_eq!(a, r#"{"item":{"count":3}}"#);
+    assert_eq!(b, r#"{"item":{"count":9}}"#);
     store.assert_concurrent_state_empty();
     let activity = track_timers(&mut linker)?;
     let instance = linker.instantiate_async(&mut store, &component).await?;

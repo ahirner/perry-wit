@@ -329,3 +329,58 @@ export function run(input: Uint8Array): Uint8Array { return verify(input); }
     }
     Ok(())
 }
+
+#[test]
+fn parsed_json_keeps_variants_aliases_and_checked_scalar_boundaries() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "json.wit",
+        "package test:json; world json { export run: func(input: string) -> string; }",
+    )?;
+    let world = resolve.select_world(&[package], Some("json"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+function scalar(value: JsonValue): number {
+  if(typeof value !== 'number') throw new TypeError('expected number');
+  return value;
+}
+function array(value: JsonValue): JsonValue[] {
+  if(!Array.isArray(value)) throw new TypeError('expected array');
+  return value;
+}
+export function run(input: string): string {
+  const parsed = JSON.parse(input);
+  if(typeof parsed === 'number') return JSON.stringify(scalar(parsed) + 1);
+  if(Array.isArray(parsed)) {
+    const items = array(parsed);
+    const alias = parsed[0];
+    alias.value = 7;
+    if(alias !== parsed[0]) throw 1;
+    items.push(9);
+    return JSON.stringify(parsed);
+  }
+  return JSON.stringify(parsed);
+}
+"#;
+    let compiled = compile_for_world(source, "json.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    for (input, expected) in [
+        ("3", "4"),
+        ("null", "null"),
+        ("true", "true"),
+        ("\"é🙂\"", "\"é🙂\""),
+        (
+            r#"{"b":1,"2":2,"a":3,"b":4,"1":5}"#,
+            r#"{"1":5,"2":2,"b":4,"a":3}"#,
+        ),
+        (r#"[{"value":1}]"#, r#"[{"value":7},9]"#),
+    ] {
+        assert_eq!(run.call(&mut store, (input,))?.0, expected);
+    }
+    Ok(())
+}

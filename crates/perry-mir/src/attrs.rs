@@ -57,4 +57,5 @@ pub enum ErrorKind {
     Any,
     TypeError,
     RangeError,
+    SyntaxError,
 }

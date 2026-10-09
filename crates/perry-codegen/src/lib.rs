@@ -37,8 +37,8 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, ExceptionType, OptionalType, PromiseType, RecordType,
-        StringType,
+        ArrayType, BufferType, BytesType, ExceptionType, JsonType, OptionalType, PromiseType,
+        RecordType, StringType,
     },
 };
 use perry_runtime::array as layout;
@@ -223,11 +223,33 @@ pub fn status_code(kind: ErrorKind) -> i32 {
         ErrorKind::Any => 3,
         ErrorKind::TypeError => 1,
         ErrorKind::RangeError => 2,
+        ErrorKind::SyntaxError => 7,
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    ExceptionStatus,
+    JsonParse,
+    JsonStringify,
+    JsonNull,
+    JsonNumber,
+    JsonBoolean,
+    JsonString,
+    JsonArray,
+    JsonObject,
+    JsonGet,
+    JsonIndex,
+    JsonAsNumber,
+    JsonAsBoolean,
+    JsonAsString,
+    JsonAsArray,
+    JsonTypeof,
+    JsonEqual,
+    JsonIsArray,
+    JsonSet,
+    JsonSetIndex,
+
     BufferNew,
     BufferLength,
     BytesNew,
@@ -299,6 +321,26 @@ enum Runtime {
 impl Runtime {
     fn name(self) -> &'static str {
         match self {
+            Runtime::ExceptionStatus => "perry_exception_status",
+            Runtime::JsonParse => "perry_json_parse",
+            Runtime::JsonStringify => "perry_json_stringify",
+            Runtime::JsonNull => "perry_json_null",
+            Runtime::JsonNumber => "perry_json_number",
+            Runtime::JsonBoolean => "perry_json_boolean",
+            Runtime::JsonString => "perry_json_string",
+            Runtime::JsonArray => "perry_json_array",
+            Runtime::JsonObject => "perry_json_object",
+            Runtime::JsonGet => "perry_json_get",
+            Runtime::JsonIndex => "perry_json_index",
+            Runtime::JsonAsNumber => "perry_json_as_number",
+            Runtime::JsonAsBoolean => "perry_json_as_boolean",
+            Runtime::JsonAsArray => "perry_json_as_array",
+            Runtime::JsonAsString => "perry_json_as_string",
+            Runtime::JsonTypeof => "perry_json_typeof",
+            Runtime::JsonEqual => "perry_json_equal",
+            Runtime::JsonIsArray => "perry_json_is_array",
+            Runtime::JsonSet => "perry_json_set",
+            Runtime::JsonSetIndex => "perry_json_set_index",
             Runtime::BufferNew => "perry_buffer_new",
             Runtime::BufferLength => "perry_buffer_length",
             Runtime::BytesNew => "perry_bytes_new",
@@ -380,6 +422,26 @@ impl Runtime {
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
+            Runtime::ExceptionStatus => (vec![], vec![i32]),
+            Runtime::JsonNull => (vec![], vec![i32]),
+            Runtime::JsonNumber => (vec![f64], vec![i32]),
+            Runtime::JsonBoolean
+            | Runtime::JsonString
+            | Runtime::JsonArray
+            | Runtime::JsonParse
+            | Runtime::JsonStringify
+            | Runtime::JsonAsArray
+            | Runtime::JsonAsString
+            | Runtime::JsonAsBoolean
+            | Runtime::JsonTypeof
+            | Runtime::JsonIsArray => (vec![i32], vec![i32]),
+            Runtime::JsonObject | Runtime::JsonGet | Runtime::JsonEqual => {
+                (vec![i32, i32], vec![i32])
+            }
+            Runtime::JsonIndex => (vec![i32, f64], vec![i32]),
+            Runtime::JsonAsNumber => (vec![i32], vec![f64]),
+            Runtime::JsonSet => (vec![i32, i32, i32], vec![]),
+            Runtime::JsonSetIndex => (vec![i32, f64, i32], vec![]),
             Runtime::BufferNew | Runtime::BytesNew => (vec![f64], vec![i32]),
             Runtime::BufferLength | Runtime::BytesLength | Runtime::BytesOffset => {
                 (vec![i32], vec![f64])
@@ -471,6 +533,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
+        || deref.is::<JsonType>()
         || deref.is::<BytesType>()
         || deref.is::<BufferType>()
     {
@@ -1666,6 +1729,42 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             let kind = intrinsic.kind(ctx);
+            let json_runtime = match kind {
+                Intrinsic::JsonParse => Some(Runtime::JsonParse),
+                Intrinsic::JsonStringify => Some(Runtime::JsonStringify),
+                Intrinsic::JsonNull => Some(Runtime::JsonNull),
+                Intrinsic::JsonNumber => Some(Runtime::JsonNumber),
+                Intrinsic::JsonBoolean => Some(Runtime::JsonBoolean),
+                Intrinsic::JsonString => Some(Runtime::JsonString),
+                Intrinsic::JsonArray => Some(Runtime::JsonArray),
+                Intrinsic::JsonObject => Some(Runtime::JsonObject),
+                Intrinsic::JsonGet => Some(Runtime::JsonGet),
+                Intrinsic::JsonIndex => Some(Runtime::JsonIndex),
+                Intrinsic::JsonAsNumber => Some(Runtime::JsonAsNumber),
+                Intrinsic::JsonAsBoolean => Some(Runtime::JsonAsBoolean),
+                Intrinsic::JsonAsArray => Some(Runtime::JsonAsArray),
+                Intrinsic::JsonAsString => Some(Runtime::JsonAsString),
+                Intrinsic::JsonTypeof => Some(Runtime::JsonTypeof),
+                Intrinsic::JsonEqual => Some(Runtime::JsonEqual),
+                Intrinsic::JsonIsArray => Some(Runtime::JsonIsArray),
+                Intrinsic::JsonSet => Some(Runtime::JsonSet),
+                Intrinsic::JsonSetIndex => Some(Runtime::JsonSetIndex),
+                _ => None,
+            };
+            if let Some(runtime) = json_runtime {
+                let operands = self.operands(ctx, op)?;
+                let result = self.runtime(ctx, runtime, operands);
+                if intrinsic.may_throw(ctx) {
+                    let status = self
+                        .runtime(ctx, Runtime::ExceptionStatus, vec![])
+                        .expect("exception status");
+                    self.throw_status_if(ctx, status, status);
+                }
+                if let Some(result) = result {
+                    self.define(ctx, op, result);
+                }
+                return Ok(());
+            }
             let bytes_runtime = match kind {
                 Intrinsic::BufferNew => Some(Runtime::BufferNew),
                 Intrinsic::BufferLength => Some(Runtime::BufferLength),

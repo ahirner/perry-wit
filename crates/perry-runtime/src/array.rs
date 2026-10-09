@@ -65,7 +65,7 @@ pub unsafe extern "C" fn perry_array_grow(array: *mut u8) {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) fn from_refs(values: impl ExactSizeIterator<Item = *mut u8>) -> *mut u8 {
     let len = values.len() as u32;
     let array = perry_array_new(len) as *mut Array;
@@ -77,4 +77,20 @@ pub(crate) fn from_refs(values: impl ExactSizeIterator<Item = *mut u8>) -> *mut 
         (*array).len = len;
     }
     array.cast()
+}
+
+/// # Safety
+/// `array` is live, `index <= len`, and `value` has the array's slot type.
+pub(crate) unsafe fn set_slot(array: *mut u8, index: usize, value: u64) {
+    let array = array.cast::<Array>();
+    // SAFETY: callers enforce dense indexing and the element type.
+    unsafe {
+        if index == (*array).cap as usize {
+            perry_array_grow(array.cast());
+        }
+        (*array).data.add(index).write(value);
+        if index == (*array).len as usize {
+            (*array).len += 1;
+        }
+    }
 }
