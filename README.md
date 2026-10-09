@@ -177,6 +177,8 @@ All verified capability contracts are declared in [crates/conformance/src/regist
 - An unlisted contract that fails is reported as `pending` and does not fail the campaign.
 - An unlisted contract that passes fails the campaign until it is added, so the list only grows.
 
+[crates/conformance/deferred.txt](crates/conformance/deferred.txt) lists contracts outside the accepted domain, each with the deviation it records; they are not run. The accepted deviations are listed in [TODOs.md](TODOs.md) (P6.2). Status: 41 contracts pass, 4 are deferred and 5 are pending.
+
 Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling.rs](crates/conformance/src/scaling.rs)) bound guest fuel growth between inputs n and 4n.
 
 ## Performance
@@ -212,9 +214,11 @@ Perry-WIT supports a predictable, strictly typed subset of TypeScript designed f
 - **Numbers** are IEEE doubles with ECMAScript arithmetic, including `%`, `-0` and NaN. WIT integer and `f32` values convert at the boundary.
 - **Records**: interfaces, type literals and object literals with closed shapes. Structurally equal types are the same record, and recursive interfaces are supported.
 - **Arrays** are dense and homogeneous (R8). An out-of-range or non-integral read yields `undefined`. Writing at `length` appends; any other out-of-range write throws a `RangeError`.
-- **Strings** are UTF-8 with an O(1) UTF-16 `.length`. Concatenation in a loop is linear.
+- **Strings** are UTF-8 with an O(1) UTF-16 `.length`. Concatenation in a loop is linear. Index semantics match Node for BMP scalars, the conformance domain; there are no surrogate halves.
 - **Exceptions**: a `TypeError` from `undefined` at a typed use, or a `RangeError`, is catchable. Nothing in the subset traps, except an exception escaping an export that has no error type.
 - **Control flow**: `if`, loops, `break`/`continue`, `&&`/`||`, `?:`, and direct calls, including recursion.
+- **Async**: `async`/`await` on the WASI 0.3 callback ABI; an `await` of a settled promise continues inline, without a microtask queue. `Promise.all`, `race` and `allSettled`.
+- **Standard library**: `Math`, `Date` (UTC), string methods, `Uint8Array`, `TextEncoder`/`TextDecoder`, `JSON` (typed `stringify`; no revivers, replacers or indentation), `crypto` random values, `node:timers/promises`, `node:fs/promises` (`readFile`, `writeFile`, `stat`, `readdir`, `mkdir`, `unlink`, `rmdir`), `Headers`, constructed `Response`/`Request` with byte bodies, and `Writable.toWeb(process.stdout)`.
 
 ## Contributing
 

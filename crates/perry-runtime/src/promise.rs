@@ -109,8 +109,9 @@ pub const COMBINATOR_KIND: u32 = u32::MAX;
 
 const ALL: u32 = 0;
 const RACE: u32 = 1;
+const ALL_SETTLED: u32 = 2;
 
-/// A `Promise.all`/`Promise.race` in progress: a frame (kind first) that waits on every
+/// A `Promise.all`/`race`/`allSettled` in progress: a frame (kind first) that waits on every
 /// pending input at once and re-checks whenever one settles.
 #[repr(C)]
 struct Combinator {
@@ -158,6 +159,13 @@ pub extern "C" fn perry_promise_race(inputs: *mut u8) -> *mut u8 {
     combine(RACE, inputs)
 }
 
+/// `Promise.allSettled(inputs)`: fulfils with the settled inputs themselves, which compiled
+/// code reads as `{ status, value, reason }` (the promise layout above).
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_promise_all_settled(inputs: *mut u8) -> *mut u8 {
+    combine(ALL_SETTLED, inputs)
+}
+
 fn reject_with(result: *mut u8, input: *mut Promise) {
     // SAFETY: a rejected input keeps its exception object in its value slot.
     unsafe {
@@ -184,7 +192,7 @@ pub extern "C" fn perry_combinator_step(frame: *mut u8) {
         for index in 0..count {
             let promise = input(combinator.inputs, index);
             match ((*promise).state, combinator.mode) {
-                (REJECTED, _) => return reject_with(combinator.result, promise),
+                (REJECTED, ALL | RACE) => return reject_with(combinator.result, promise),
                 (FULFILLED, RACE) => {
                     return perry_promise_resolve(combinator.result, (*promise).value);
                 }
@@ -193,11 +201,17 @@ pub extern "C" fn perry_combinator_step(frame: *mut u8) {
             }
         }
         if !pending {
-            // `all`: every input fulfilled; collect the values in input order.
+            // `all`: every input fulfilled; collect the values in input order. `allSettled`:
+            // every input settled; collect the inputs.
             let values = crate::array::perry_array_new(count);
             let data = *(values.add(crate::array::DATA as usize) as *const *mut u64);
             for index in 0..count {
-                *data.add(index as usize) = (*input(combinator.inputs, index)).value;
+                let promise = input(combinator.inputs, index);
+                *data.add(index as usize) = if combinator.mode == ALL_SETTLED {
+                    promise as usize as u64
+                } else {
+                    (*promise).value
+                };
             }
             *(values as *mut u32) = count;
             return perry_promise_resolve(combinator.result, values as usize as u64);

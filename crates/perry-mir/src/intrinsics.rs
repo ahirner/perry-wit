@@ -8,7 +8,10 @@
 use crate::{
     attrs::ErrorKind,
     exceptions::MayThrowInterface,
-    types::{ArrayType, BytesType, DateType, JsonType, OptionalType, StringType},
+    types::{
+        ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, OptionalType,
+        PromiseType, RequestType, ResponseType, StatsType, StringType, WritableType, WriterType,
+    },
 };
 use pliron::{
     builtin::{
@@ -42,6 +45,20 @@ pub enum Ty {
     Bytes,
     Json,
     Date,
+    Exception,
+    Stats,
+    PromiseString,
+    PromiseBytes,
+    PromiseStats,
+    PromiseStringArray,
+    /// `Promise<void>`: settles `undefined`.
+    PromiseVoid,
+    OptBytes,
+    Headers,
+    Response,
+    Request,
+    Writable,
+    Writer,
 }
 
 impl Ty {
@@ -59,6 +76,34 @@ impl Ty {
             Ty::Bytes => BytesType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
+            Ty::Exception => ExceptionType::get(ctx).into(),
+            Ty::Stats => StatsType::get(ctx).into(),
+            Ty::OptBytes => {
+                let bytes = BytesType::get(ctx).into();
+                OptionalType::get(ctx, bytes).into()
+            }
+            Ty::Headers => HeadersType::get(ctx).into(),
+            Ty::Response => ResponseType::get(ctx).into(),
+            Ty::Request => RequestType::get(ctx).into(),
+            Ty::Writable => WritableType::get(ctx).into(),
+            Ty::Writer => WriterType::get(ctx).into(),
+            Ty::PromiseString => PromiseType::get(ctx, string).into(),
+            Ty::PromiseBytes => {
+                let bytes = BytesType::get(ctx).into();
+                PromiseType::get(ctx, bytes).into()
+            }
+            Ty::PromiseStats => {
+                let stats = StatsType::get(ctx).into();
+                PromiseType::get(ctx, stats).into()
+            }
+            Ty::PromiseStringArray => {
+                let array = ArrayType::get(ctx, string).into();
+                PromiseType::get(ctx, array).into()
+            }
+            Ty::PromiseVoid => {
+                let undefined = OptionalType::get(ctx, number).into();
+                PromiseType::get(ctx, undefined).into()
+            }
         }
     }
 
@@ -73,6 +118,11 @@ impl Ty {
             deref
                 .downcast_ref::<ArrayType>()
                 .is_some_and(|a| is(a.element()))
+        };
+        let promise_of = |is: &dyn Fn(TypeHandle) -> bool| {
+            deref
+                .downcast_ref::<PromiseType>()
+                .is_some_and(|p| is(p.value()))
         };
         let string = |t: TypeHandle| t.deref(ctx).is::<StringType>();
         let number = |t: TypeHandle| t.deref(ctx).is::<FP64Type>();
@@ -89,6 +139,27 @@ impl Ty {
             Ty::Bytes => deref.is::<BytesType>(),
             Ty::Json => deref.is::<JsonType>(),
             Ty::Date => deref.is::<DateType>(),
+            Ty::Exception => deref.is::<ExceptionType>(),
+            Ty::Stats => deref.is::<StatsType>(),
+            Ty::OptBytes => optional_of(&|t| t.deref(ctx).is::<BytesType>()),
+            Ty::Headers => deref.is::<HeadersType>(),
+            Ty::Response => deref.is::<ResponseType>(),
+            Ty::Request => deref.is::<RequestType>(),
+            Ty::Writable => deref.is::<WritableType>(),
+            Ty::Writer => deref.is::<WriterType>(),
+            Ty::PromiseString => promise_of(&string),
+            Ty::PromiseBytes => promise_of(&|t| t.deref(ctx).is::<BytesType>()),
+            Ty::PromiseStats => promise_of(&|t| t.deref(ctx).is::<StatsType>()),
+            Ty::PromiseStringArray => promise_of(&|t| {
+                t.deref(ctx)
+                    .downcast_ref::<ArrayType>()
+                    .is_some_and(|a| string(a.element()))
+            }),
+            Ty::PromiseVoid => promise_of(&|t| {
+                t.deref(ctx)
+                    .downcast_ref::<OptionalType>()
+                    .is_some_and(|o| number(o.value()))
+            }),
         }
     }
 }
@@ -183,6 +254,49 @@ intrinsics! {
     MathRandom = "math_random" () -> (Number);
     RandomUuid = "random_uuid" () -> (String);
     BytesFillRandom = "bytes_fill_random" (Bytes) -> (Bytes);
+    ExceptionToNumber = "exception_to_number" (Exception) -> (Number), throws;
+    ExceptionToString = "exception_to_string" (Exception) -> (String), throws;
+    FsReadText = "fs_read_text" (String) -> (PromiseString);
+    FsReadBytes = "fs_read_bytes" (String) -> (PromiseBytes);
+    FsWriteText = "fs_write_text" (String, String) -> (PromiseVoid);
+    FsWriteBytes = "fs_write_bytes" (String, Bytes) -> (PromiseVoid);
+    FsStat = "fs_stat" (String) -> (PromiseStats);
+    FsReaddir = "fs_readdir" (String) -> (PromiseStringArray);
+    FsMkdir = "fs_mkdir" (String) -> (PromiseVoid);
+    FsUnlink = "fs_unlink" (String) -> (PromiseVoid);
+    FsRmdir = "fs_rmdir" (String) -> (PromiseVoid);
+    StatsIsFile = "stats_is_file" (Stats) -> (Bool), pure;
+    StatsIsDirectory = "stats_is_directory" (Stats) -> (Bool), pure;
+    StatsSize = "stats_size" (Stats) -> (Number), pure;
+    HeadersNew = "headers_new" () -> (Headers);
+    HeadersCopy = "headers_copy" (Headers) -> (Headers);
+    HeadersAppend = "headers_append" (Headers, String, String) -> (), throws;
+    HeadersSet = "headers_set" (Headers, String, String) -> (), throws;
+    HeadersGet = "headers_get" (Headers, String) -> (OptString), throws;
+    HeadersHas = "headers_has" (Headers, String) -> (Bool), throws;
+    HeadersDelete = "headers_delete" (Headers, String) -> (), throws;
+    ResponseNew = "response_new" (OptBytes, Bool, Number, String, Headers) -> (Response), throws;
+    ResponseStatus = "response_status" (Response) -> (Number), pure;
+    ResponseStatusText = "response_status_text" (Response) -> (String), pure;
+    ResponseOk = "response_ok" (Response) -> (Bool), pure;
+    ResponseHeaders = "response_headers" (Response) -> (Headers), pure;
+    ResponseBodyUsed = "response_body_used" (Response) -> (Bool);
+    ResponseBytes = "response_bytes" (Response) -> (PromiseBytes);
+    ResponseText = "response_text" (Response) -> (PromiseString);
+    RequestNew = "request_new" (String, String, OptBytes, Bool, Headers) -> (Request), throws;
+    RequestMethod = "request_method" (Request) -> (String), pure;
+    RequestUrl = "request_url" (Request) -> (String), pure;
+    RequestHeaders = "request_headers" (Request) -> (Headers), pure;
+    RequestBodyUsed = "request_body_used" (Request) -> (Bool);
+    RequestBytes = "request_bytes" (Request) -> (PromiseBytes);
+    RequestText = "request_text" (Request) -> (PromiseString);
+    WritableStdout = "writable_stdout" () -> (Writable);
+    WritableStderr = "writable_stderr" () -> (Writable);
+    WritableLocked = "writable_locked" (Writable) -> (Bool);
+    WritableGetWriter = "writable_get_writer" (Writable) -> (Writer), throws;
+    WriterWrite = "writer_write" (Writer, Bytes) -> (PromiseVoid);
+    WriterClose = "writer_close" (Writer) -> (PromiseVoid);
+    WriterReleaseLock = "writer_release_lock" (Writer) -> ();
 }
 
 impl Intrinsic {
@@ -361,9 +475,11 @@ pub enum Combinator {
     All,
     /// `Promise.race`: the first settled input, in time and then input order.
     Race,
+    /// `Promise.allSettled`: every input once all have settled, as `perry.settled` views.
+    AllSettled,
 }
 
-/// `Promise.all(promises)` and `Promise.race(promises)` over `perry.array<perry.promise<T>>`.
+/// `Promise.all`, `Promise.race` and `Promise.allSettled` of `perry.array<perry.promise<T>>`.
 #[pliron_op(
     name = "perry.promise_combinator",
     format = "attr($perry_combinator, $Combinator) ` ` $0 ` : ` type($0)",
@@ -388,6 +504,10 @@ impl PromiseCombinatorOp {
         let settled = match combinator {
             Combinator::All => ArrayType::get(ctx, value).into(),
             Combinator::Race => value,
+            Combinator::AllSettled => {
+                let settled = crate::types::SettledType::get(ctx, value).into();
+                ArrayType::get(ctx, settled).into()
+            }
         };
         let result = PromiseType::get(ctx, settled).into();
         let op = PromiseCombinatorOp {
@@ -419,5 +539,84 @@ impl Verify for PromiseCombinatorOp {
             verify_err!(self.loc(ctx), CombinatorErr)?
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("perry.settled_field reads a perry.settled value")]
+pub struct SettledErr;
+
+/// A property of a `Promise.allSettled` result element.
+#[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum SettledField {
+    /// `"fulfilled"` or `"rejected"`.
+    Status,
+    /// The fulfillment value, or `undefined`.
+    Value,
+    /// The rejection (an exception), or `undefined`.
+    Reason,
+}
+
+/// `settled.status`, `settled.value` or `settled.reason`.
+#[pliron_op(
+    name = "perry.settled_field",
+    format = "attr($perry_settled_field, $SettledField) ` ` $0 ` : ` type($0)",
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface],
+    attributes = (perry_settled_field: SettledField)
+)]
+pub struct SettledFieldOp;
+
+impl SettledFieldOp {
+    /// `None` unless `settled` is a `perry.settled` value.
+    pub fn new(ctx: &mut Context, field: SettledField, settled: Value) -> Option<Self> {
+        use crate::types::SettledType;
+        let value =
+            pliron::r#type::TypedHandle::<SettledType>::from_handle(settled.get_type(ctx), ctx)
+                .ok()?
+                .deref(ctx)
+                .value();
+        let result = match field {
+            SettledField::Status => StringType::get(ctx).into(),
+            SettledField::Value if value.deref(ctx).is::<OptionalType>() => value,
+            SettledField::Value => OptionalType::get(ctx, value).into(),
+            SettledField::Reason => {
+                let exception = ExceptionType::get(ctx).into();
+                OptionalType::get(ctx, exception).into()
+            }
+        };
+        let op = SettledFieldOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![result],
+                vec![settled],
+                vec![],
+                0,
+            ),
+        };
+        op.set_attr_perry_settled_field(ctx, field);
+        Some(op)
+    }
+
+    pub fn field(&self, ctx: &Context) -> SettledField {
+        *self.get_attr_perry_settled_field(ctx).expect("field")
+    }
+}
+
+impl Verify for SettledFieldOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let operand = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
+        if !operand.deref(ctx).is::<crate::types::SettledType>() {
+            verify_err!(self.loc(ctx), SettledErr)?
+        }
+        Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl SideEffects for SettledFieldOp {
+    fn has_side_effects(&self, _ctx: &Context) -> bool {
+        false
     }
 }

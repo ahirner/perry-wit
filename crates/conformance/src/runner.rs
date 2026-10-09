@@ -63,6 +63,8 @@ pub enum Status {
     /// Failed, and not listed in `passing.txt`: the compiler does not cover it yet
     /// (`TODOs.md` P6.2). Does not fail the campaign.
     Pending,
+    /// Listed in `deferred.txt`: outside the accepted domain; not run.
+    Deferred,
 }
 #[derive(Serialize)]
 pub struct PartitionResult {
@@ -271,6 +273,12 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
     for (index, contract) in contracts.iter().enumerate() {
         let result = &mut report.contracts[index];
         if !contract.id.starts_with(&settings.select) {
+            continue;
+        }
+        if let Some(reason) = crate::deferred(contract.id) {
+            result.status = Status::Deferred;
+            result.error = Some(reason.to_string());
+            eprintln!("{}: deferred ({reason})", contract.id);
             continue;
         }
         result.status = Status::Running;

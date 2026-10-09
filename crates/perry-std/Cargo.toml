@@ -10,7 +10,4 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 libm = "0.2"
-
-# On the host, the runtime's own functions stand in for the imports of linked modules.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-perry-runtime = { path = "../perry-runtime" }
+perry-abi = { path = "../perry-abi" }

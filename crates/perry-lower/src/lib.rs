@@ -36,7 +36,8 @@ use perry_mir::{
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     intrinsics::{
-        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, may_throw,
+        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, SettledField,
+        SettledFieldOp, may_throw,
     },
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
@@ -44,8 +45,9 @@ use perry_mir::{
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, JsonType, PromiseType, RecordType,
-        StringType,
+        ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, PromiseType,
+        RecordType, RequestType, ResponseType, SettledType, StatsType, StringType, WritableType,
+        WriterType,
     },
 };
 use pliron::printable::Printable as _;
@@ -97,37 +99,35 @@ pub const MAIN: &str = "perry_main";
 pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
     let shapes = Shapes::new(hir);
-    let timers: HashSet<String> = hir
-        .imports
-        .iter()
-        .filter(|import| {
-            matches!(
-                import.source.as_str(),
-                "timers/promises" | "node:timers/promises"
-            )
-        })
-        .flat_map(|import| import.specifiers.iter())
-        .filter_map(|specifier| match specifier {
-            perry_hir::ir::ImportSpecifier::Named { imported, local }
-                if imported == "setTimeout" =>
-            {
-                Some(local.clone())
-            }
-            _ => None,
-        })
-        .collect();
+    // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
+    // functions of `node:fs/promises`.
+    let mut builtins: HashMap<String, Builtin> = HashMap::new();
     for import in &hir.imports {
         let source = import.source.as_str();
-        let supported = matches!(source, "timers/promises" | "node:timers/promises");
+        let module = match source {
+            "timers/promises" | "node:timers/promises" => Some(BuiltinModule::Timers),
+            "fs/promises" | "node:fs/promises" => Some(BuiltinModule::Fs),
+            "stream" | "node:stream" => Some(BuiltinModule::Stream),
+            _ => None,
+        };
         let builtin = source.starts_with("node:")
             || matches!(
                 source,
                 "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
             );
         ensure!(
-            supported || !builtin,
-            "Unsupported capability import {source}: only node:timers/promises is supported so far"
+            module.is_some() || !builtin,
+            "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
         );
+        let Some(module) = module else { continue };
+        for specifier in &import.specifiers {
+            let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
+                bail!("only named imports from {source} are supported yet");
+            };
+            let builtin = Builtin::from_import(module, imported)
+                .with_context(|| format!("{imported} from {source} is not supported yet"))?;
+            builtins.insert(local.clone(), builtin);
+        }
     }
     let mut signatures = HashMap::new();
     for function in &hir.functions {
@@ -179,7 +179,7 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
         );
     }
     for function in &hir.functions {
-        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &timers)
+        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)
             .with_context(|| format!("lowering function {}", function.name))?;
         if function.is_exported {
             perry_mir::calls::set_exported(ctx, &func);
@@ -205,7 +205,7 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
             &hir.init,
             &signatures,
             &shapes,
-            &timers,
+            &builtins,
         )
         .context("lowering top-level statements")?;
         set_async(ctx, &func);
@@ -274,6 +274,52 @@ enum Kind {
     Bytes,
     Json,
     Date,
+    Settled,
+    Stats,
+    Headers,
+    Response,
+    Request,
+    Writable,
+    Writer,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BuiltinModule {
+    Timers,
+    Fs,
+    Stream,
+}
+
+/// A function imported from a built-in module.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Builtin {
+    SetTimeout,
+    ReadFile,
+    WriteFile,
+    Stat,
+    Readdir,
+    Mkdir,
+    Unlink,
+    Rmdir,
+    /// The `Writable` class, for `Writable.toWeb`.
+    Writable,
+}
+
+impl Builtin {
+    fn from_import(module: BuiltinModule, name: &str) -> Option<Self> {
+        Some(match (module, name) {
+            (BuiltinModule::Timers, "setTimeout") => Builtin::SetTimeout,
+            (BuiltinModule::Fs, "readFile") => Builtin::ReadFile,
+            (BuiltinModule::Fs, "writeFile") => Builtin::WriteFile,
+            (BuiltinModule::Fs, "stat") => Builtin::Stat,
+            (BuiltinModule::Fs, "readdir") => Builtin::Readdir,
+            (BuiltinModule::Fs, "mkdir") => Builtin::Mkdir,
+            (BuiltinModule::Fs, "unlink") => Builtin::Unlink,
+            (BuiltinModule::Fs, "rmdir") => Builtin::Rmdir,
+            (BuiltinModule::Stream, "Writable") => Builtin::Writable,
+            _ => return None,
+        })
+    }
 }
 
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
@@ -295,6 +341,20 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Json)
     } else if ty.is::<DateType>() {
         Ok(Kind::Date)
+    } else if ty.is::<SettledType>() {
+        Ok(Kind::Settled)
+    } else if ty.is::<StatsType>() {
+        Ok(Kind::Stats)
+    } else if ty.is::<HeadersType>() {
+        Ok(Kind::Headers)
+    } else if ty.is::<ResponseType>() {
+        Ok(Kind::Response)
+    } else if ty.is::<RequestType>() {
+        Ok(Kind::Request)
+    } else if ty.is::<WritableType>() {
+        Ok(Kind::Writable)
+    } else if ty.is::<WriterType>() {
+        Ok(Kind::Writer)
     } else if ty
         .downcast_ref::<IntegerType>()
         .is_some_and(|int| int.width() == 1)
@@ -340,8 +400,8 @@ struct FunctionBuilder<'s> {
     finallies: Vec<Finally>,
     signatures: &'s HashMap<FuncId, Signature>,
     shapes: &'s Shapes<'s>,
-    /// Local names bound to `setTimeout` from `node:timers/promises`.
-    timers: &'s HashSet<String>,
+    /// Imported built-ins by local name.
+    builtins: &'s HashMap<String, Builtin>,
     results: Vec<TypeHandle>,
     is_async: bool,
     labels: usize,
@@ -353,7 +413,7 @@ impl<'s> FunctionBuilder<'s> {
         function: &Function,
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
-        timers: &'s HashSet<String>,
+        builtins: &'s HashMap<String, Builtin>,
     ) -> Result<FuncOp> {
         let signature = &signatures[&function.id];
         let params: Vec<LocalId> = function.params.iter().map(|p| p.id).collect();
@@ -364,7 +424,7 @@ impl<'s> FunctionBuilder<'s> {
             &function.body,
             signatures,
             shapes,
-            timers,
+            builtins,
         )
     }
 
@@ -376,7 +436,7 @@ impl<'s> FunctionBuilder<'s> {
         body: &[Stmt],
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
-        timers: &'s HashSet<String>,
+        builtins: &'s HashMap<String, Builtin>,
     ) -> Result<FuncOp> {
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
@@ -392,7 +452,7 @@ impl<'s> FunctionBuilder<'s> {
             finallies: Vec::new(),
             signatures,
             shapes,
-            timers,
+            builtins,
             results: signature.results.clone(),
             is_async: signature.is_async,
             labels: 0,
@@ -441,6 +501,268 @@ impl<'s> FunctionBuilder<'s> {
             }
         };
         Ok(self.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, value)))
+    }
+
+    /// `new Headers(init?)`, `new Response(body?, init?)`, `new Request(url, init?)`.
+    fn web_new(&mut self, ctx: &mut Context, class: &str, args: &[Expr]) -> Result<Value> {
+        if class == "Headers" {
+            ensure!(args.len() <= 1, "new Headers takes one init");
+            return self.headers_init(ctx, args.first());
+        }
+        let (first, init) = (args.first(), args.get(1));
+        ensure!(args.len() <= 2, "{class} takes two arguments");
+        let fields = self.init_fields(init)?;
+        let field = |name: &str| fields.iter().find(|(n, _)| n == name).map(|(_, e)| *e);
+        for (name, _) in &fields {
+            let known: &[&str] = if class == "Response" {
+                &["status", "statusText", "headers"]
+            } else {
+                &["method", "headers", "body"]
+            };
+            ensure!(
+                known.contains(&name.as_str()),
+                "{class} init field {name} is not supported yet"
+            );
+        }
+        let headers = self.headers_init(ctx, field("headers"))?;
+        let body = if class == "Response" {
+            first
+        } else {
+            field("body")
+        };
+        let (body, text) = self.body_init(ctx, body)?;
+        let text = self.boolean(ctx, text);
+        if class == "Response" {
+            let status = self.number_or(ctx, field("status"), 200.0)?;
+            let status_text = match field("statusText") {
+                Some(expr) => self.typed_operand(ctx, expr, Kind::String, "a status text")?,
+                None => self.string(ctx, ""),
+            };
+            let operands = vec![body, text, status, status_text, headers];
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::ResponseNew, operands)
+                .expect("response"));
+        }
+        let url = first.context("new Request needs a URL")?;
+        let url = self.typed_operand(ctx, url, Kind::String, "a URL string")?;
+        let method = match field("method") {
+            Some(expr) => self.typed_operand(ctx, expr, Kind::String, "a method string")?,
+            None => self.string(ctx, "GET"),
+        };
+        let operands = vec![url, method, body, text, headers];
+        Ok(self
+            .intrinsic(ctx, Intrinsic::RequestNew, operands)
+            .expect("request"))
+    }
+
+    /// The fields of an init object literal, by name.
+    fn init_fields<'e>(&self, init: Option<&'e Expr>) -> Result<Vec<(String, &'e Expr)>> {
+        match init {
+            None | Some(Expr::Undefined) => Ok(Vec::new()),
+            Some(Expr::New {
+                class_name, args, ..
+            }) if self.shapes.literal_fields(class_name).is_some() => {
+                let names = self.shapes.literal_fields(class_name).expect("literal");
+                Ok(names.into_iter().zip(args.iter()).collect())
+            }
+            Some(_) => bail!("init objects must be object literals yet"),
+        }
+    }
+
+    /// A header list from an init: absent, an object literal of string values, or `Headers`.
+    fn headers_init(&mut self, ctx: &mut Context, init: Option<&Expr>) -> Result<Value> {
+        if let Some(expr) = init
+            && !matches!(expr, Expr::Undefined | Expr::New { .. })
+        {
+            let value = self.expression(ctx, expr)?;
+            ensure!(
+                kind(ctx, value)? == Kind::Headers,
+                "headers init must be an object literal or Headers"
+            );
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::HeadersCopy, vec![value])
+                .expect("headers"));
+        }
+        let fields = self.init_fields(init)?;
+        let headers = self
+            .intrinsic(ctx, Intrinsic::HeadersNew, vec![])
+            .expect("headers");
+        for (name, expr) in fields {
+            let name = self.string(ctx, &name);
+            let value = self.typed_operand(ctx, expr, Kind::String, "a header value")?;
+            self.intrinsic(ctx, Intrinsic::HeadersAppend, vec![headers, name, value]);
+        }
+        Ok(headers)
+    }
+
+    /// A body init as `Uint8Array | undefined` and whether it was a string.
+    fn body_init(&mut self, ctx: &mut Context, body: Option<&Expr>) -> Result<(Value, bool)> {
+        let bytes: TypeHandle = BytesType::get(ctx).into();
+        let Some(body) = body.filter(|b| !matches!(b, Expr::Undefined | Expr::Null)) else {
+            return Ok((
+                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, bytes)),
+                false,
+            ));
+        };
+        let value = self.expression(ctx, body)?;
+        let value = self.defined(ctx, value)?;
+        let (value, text) = match kind(ctx, value)? {
+            Kind::Bytes => (value, false),
+            Kind::String => {
+                let encoded = self
+                    .intrinsic(ctx, Intrinsic::TextEncode, vec![value])
+                    .expect("bytes");
+                (encoded, true)
+            }
+            _ => bail!("bodies are strings and Uint8Arrays yet"),
+        };
+        Ok((self.optional(ctx, value), text))
+    }
+
+    /// A property (`args` is `None`) or method of `Headers`, `Response` or `Request`.
+    fn web_member(
+        &mut self,
+        ctx: &mut Context,
+        receiver: Value,
+        name: &str,
+        args: Option<&[Expr]>,
+    ) -> Result<Value> {
+        let receiver_kind = kind(ctx, receiver)?;
+        let strings = |builder: &mut Self, ctx: &mut Context, count: usize| -> Result<Vec<Value>> {
+            let args = args.unwrap_or(&[]);
+            ensure!(args.len() == count, "{name} takes {count} arguments");
+            args.iter()
+                .map(|arg| builder.typed_operand(ctx, arg, Kind::String, "a string"))
+                .collect()
+        };
+        let (intrinsic, operands) = match (receiver_kind, name, args.is_some()) {
+            (Kind::Headers, "append" | "set", true) => {
+                let mut operands = vec![receiver];
+                operands.extend(strings(self, ctx, 2)?);
+                let intrinsic = if name == "append" {
+                    Intrinsic::HeadersAppend
+                } else {
+                    Intrinsic::HeadersSet
+                };
+                self.intrinsic(ctx, intrinsic, operands);
+                // Both return `undefined`; statements discard it.
+                let number = FP64Type::get(ctx).into();
+                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
+            }
+            (Kind::Headers, "delete", true) => {
+                let mut operands = vec![receiver];
+                operands.extend(strings(self, ctx, 1)?);
+                self.intrinsic(ctx, Intrinsic::HeadersDelete, operands);
+                let number = FP64Type::get(ctx).into();
+                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
+            }
+            (Kind::Headers, "get" | "has", true) => {
+                let mut operands = vec![receiver];
+                operands.extend(strings(self, ctx, 1)?);
+                let intrinsic = if name == "get" {
+                    Intrinsic::HeadersGet
+                } else {
+                    Intrinsic::HeadersHas
+                };
+                (intrinsic, operands)
+            }
+            (Kind::Response, "status", false) => (Intrinsic::ResponseStatus, vec![receiver]),
+            (Kind::Response, "statusText", false) => {
+                (Intrinsic::ResponseStatusText, vec![receiver])
+            }
+            (Kind::Response, "ok", false) => (Intrinsic::ResponseOk, vec![receiver]),
+            (Kind::Response, "headers", false) => (Intrinsic::ResponseHeaders, vec![receiver]),
+            (Kind::Response, "bodyUsed", false) => (Intrinsic::ResponseBodyUsed, vec![receiver]),
+            (Kind::Response, "bytes", true) => (Intrinsic::ResponseBytes, vec![receiver]),
+            (Kind::Response, "text", true) => (Intrinsic::ResponseText, vec![receiver]),
+            (Kind::Request, "method", false) => (Intrinsic::RequestMethod, vec![receiver]),
+            (Kind::Request, "url", false) => (Intrinsic::RequestUrl, vec![receiver]),
+            (Kind::Request, "headers", false) => (Intrinsic::RequestHeaders, vec![receiver]),
+            (Kind::Request, "bodyUsed", false) => (Intrinsic::RequestBodyUsed, vec![receiver]),
+            (Kind::Request, "bytes", true) => (Intrinsic::RequestBytes, vec![receiver]),
+            (Kind::Request, "text", true) => (Intrinsic::RequestText, vec![receiver]),
+            (Kind::Writable, "locked", false) => (Intrinsic::WritableLocked, vec![receiver]),
+            (Kind::Writable, "getWriter", true) => (Intrinsic::WritableGetWriter, vec![receiver]),
+            (Kind::Writer, "write", true) => {
+                let [chunk] = args.unwrap_or(&[]) else {
+                    bail!("write takes one chunk");
+                };
+                let (chunk, _) = self.body_init(ctx, Some(chunk))?;
+                let chunk = self.defined(ctx, chunk)?;
+                return Ok(self
+                    .intrinsic(ctx, Intrinsic::WriterWrite, vec![receiver, chunk])
+                    .expect("promise"));
+            }
+            (Kind::Writer, "close", true) => (Intrinsic::WriterClose, vec![receiver]),
+            (Kind::Writer, "releaseLock", true) => {
+                self.intrinsic(ctx, Intrinsic::WriterReleaseLock, vec![receiver]);
+                let number = FP64Type::get(ctx).into();
+                return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
+            }
+            (_, name, _) => bail!("{name} is not supported on this type yet"),
+        };
+        if args.is_some_and(|args| !args.is_empty()) && !matches!(receiver_kind, Kind::Headers) {
+            bail!("{name} takes no arguments");
+        }
+        Ok(self.intrinsic(ctx, intrinsic, operands).expect("value"))
+    }
+
+    /// A `node:fs/promises` function: an operation whose promise settles from host events.
+    fn fs(&mut self, ctx: &mut Context, builtin: Builtin, args: &[Expr]) -> Result<Value> {
+        let path = args.first().context("a path is required")?;
+        let path = self.typed_operand(ctx, path, Kind::String, "a path string")?;
+        let (intrinsic, operands) = match builtin {
+            Builtin::ReadFile => {
+                let text = match args.get(1) {
+                    None => false,
+                    Some(Expr::String(encoding)) if is_utf8(encoding) => true,
+                    // `{ encoding: 'utf8' }`: an object literal of one field.
+                    Some(Expr::New {
+                        class_name, args, ..
+                    }) if matches!(args.as_slice(), [Expr::String(encoding)] if is_utf8(encoding))
+                        && self
+                            .shapes
+                            .literal_fields(class_name)
+                            .is_some_and(|names| names == ["encoding"]) =>
+                    {
+                        true
+                    }
+                    Some(_) => bail!("readFile supports no options but the 'utf8' encoding yet"),
+                };
+                let intrinsic = if text {
+                    Intrinsic::FsReadText
+                } else {
+                    Intrinsic::FsReadBytes
+                };
+                (intrinsic, vec![path])
+            }
+            Builtin::WriteFile => {
+                ensure!(args.len() == 2, "writeFile options are not supported yet");
+                let data = self.expression(ctx, &args[1])?;
+                let data = self.defined(ctx, data)?;
+                let intrinsic = match kind(ctx, data)? {
+                    Kind::String => Intrinsic::FsWriteText,
+                    Kind::Bytes => Intrinsic::FsWriteBytes,
+                    _ => bail!("writeFile writes strings and Uint8Arrays"),
+                };
+                (intrinsic, vec![path, data])
+            }
+            other => {
+                ensure!(
+                    args.len() == 1,
+                    "{other:?} options are not supported yet (recursive, withFileTypes)"
+                );
+                let intrinsic = match other {
+                    Builtin::Stat => Intrinsic::FsStat,
+                    Builtin::Readdir => Intrinsic::FsReaddir,
+                    Builtin::Mkdir => Intrinsic::FsMkdir,
+                    Builtin::Unlink => Intrinsic::FsUnlink,
+                    _ => Intrinsic::FsRmdir,
+                };
+                (intrinsic, vec![path])
+            }
+        };
+        Ok(self.intrinsic(ctx, intrinsic, operands).expect("promise"))
     }
 
     /// Results of falling off the end or `return;`: an async function settles `undefined`.
@@ -1068,7 +1390,11 @@ impl<'s> FunctionBuilder<'s> {
                 if let (CompareOp::Eq | CompareOp::Ne, Some(other)) = (
                     op,
                     match (&**left, &**right) {
-                        (Expr::Undefined, other) | (other, Expr::Undefined) => Some(other),
+                        // `null` and `undefined` share the absent representation: built-ins
+                        // that return `T | null` (Headers.get) produce optionals, and
+                        // TypeScript rejects comparing `T | undefined` with `null` (TS2367).
+                        (Expr::Undefined | Expr::Null, other)
+                        | (other, Expr::Undefined | Expr::Null) => Some(other),
                         _ => None,
                     },
                 ) {
@@ -1342,10 +1668,21 @@ impl<'s> FunctionBuilder<'s> {
                 ensure!(
                     matches!(&**replacer, Expr::Null | Expr::Undefined)
                         && matches!(&**space, Expr::Null | Expr::Undefined),
-                    "JSON.stringify replacers and indentation are not supported yet"
+                    "{JSON_CALLBACKS}"
                 );
                 self.stringify(ctx, value)?
             }
+            Expr::JsonParseWithReviver(text, reviver)
+            | Expr::JsonParseReviver { text, reviver } => {
+                ensure!(
+                    matches!(&**reviver, Expr::Null | Expr::Undefined),
+                    "{JSON_CALLBACKS}"
+                );
+                let text = self.string_operand(ctx, text)?;
+                self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
+                    .expect("json")
+            }
+            Expr::JsonStringifyPretty { .. } => bail!("{JSON_CALLBACKS}"),
             Expr::MathRandom => self
                 .intrinsic(ctx, Intrinsic::MathRandom, vec![])
                 .expect("number"),
@@ -1451,6 +1788,27 @@ impl<'s> FunctionBuilder<'s> {
                         self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, name])
                             .expect("member")
                     }
+                    (Kind::Settled, field) => {
+                        let field = match field {
+                            "status" => SettledField::Status,
+                            "value" => SettledField::Value,
+                            "reason" => SettledField::Reason,
+                            other => bail!("settled results have no property {other}"),
+                        };
+                        let op = SettledFieldOp::new(ctx, field, value).expect("settled");
+                        self.append_value(ctx, &op)
+                    }
+                    (
+                        Kind::Headers
+                        | Kind::Response
+                        | Kind::Request
+                        | Kind::Writable
+                        | Kind::Writer,
+                        name,
+                    ) => self.web_member(ctx, value, name, None)?,
+                    (Kind::Stats, "size") => self
+                        .intrinsic(ctx, Intrinsic::StatsSize, vec![value])
+                        .expect("size"),
                     (Kind::Exception, "message") => {
                         self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
                     }
@@ -1477,6 +1835,63 @@ impl<'s> FunctionBuilder<'s> {
                 Expr::String(field) => self.set_field(ctx, target, field, value)?,
                 index => self.set_index(ctx, target, index, value)?,
             },
+            Expr::New {
+                class_name, args, ..
+            } if matches!(class_name.as_str(), "Headers" | "Response" | "Request")
+                && !self.shapes.is_user_type(class_name) =>
+            {
+                self.web_new(ctx, class_name, args)?
+            }
+            Expr::NativeMethodCall {
+                module,
+                class_name: Some(class),
+                object: None,
+                method,
+                args,
+            } if matches!(module.as_str(), "stream" | "node:stream")
+                && class == "Writable"
+                && method == "toWeb" =>
+            {
+                let intrinsic = match args.as_slice() {
+                    [Expr::ProcessStdout] => Intrinsic::WritableStdout,
+                    [Expr::ProcessStderr] => Intrinsic::WritableStderr,
+                    _ => bail!("Writable.toWeb supports process.stdout and process.stderr"),
+                };
+                self.intrinsic(ctx, intrinsic, vec![]).expect("stream")
+            }
+            Expr::NativeMethodCall {
+                object: Some(object),
+                method,
+                args,
+                ..
+            } => {
+                let receiver = self.expression(ctx, object)?;
+                let receiver = self.defined(ctx, receiver)?;
+                let call = !args.is_empty()
+                    || !matches!(
+                        method.as_str(),
+                        "status"
+                            | "statusText"
+                            | "ok"
+                            | "headers"
+                            | "bodyUsed"
+                            | "url"
+                            | "method"
+                            | "locked"
+                    );
+                ensure!(
+                    matches!(
+                        kind(ctx, receiver)?,
+                        Kind::Headers
+                            | Kind::Response
+                            | Kind::Request
+                            | Kind::Writable
+                            | Kind::Writer
+                    ),
+                    "{method} is not supported on this type yet"
+                );
+                self.web_member(ctx, receiver, method, call.then_some(args.as_slice()))?
+            }
             Expr::New {
                 class_name, args, ..
             } => {
@@ -1707,6 +2122,17 @@ impl<'s> FunctionBuilder<'s> {
         let receiver = self.defined(ctx, receiver)?;
         let arg = |index: usize| args.get(index);
         let value = match (kind(ctx, receiver)?, method) {
+            (Kind::Headers | Kind::Response | Kind::Request | Kind::Writable | Kind::Writer, _) => {
+                return self.web_member(ctx, receiver, method, Some(args)).map(Some);
+            }
+            (Kind::Stats, "isFile" | "isDirectory") => {
+                let intrinsic = if method == "isFile" {
+                    Intrinsic::StatsIsFile
+                } else {
+                    Intrinsic::StatsIsDirectory
+                };
+                self.intrinsic(ctx, intrinsic, vec![receiver])
+            }
             (Kind::String, "charAt" | "charCodeAt" | "at") => {
                 let position = self.number_or(ctx, arg(0), 0.0)?;
                 let intrinsic = if method == "charCodeAt" {
@@ -1873,6 +2299,23 @@ impl<'s> FunctionBuilder<'s> {
                 bail!("JSON values can only be used as numbers, strings and booleans yet")
             };
             let converted = self.intrinsic(ctx, intrinsic, vec![value]).expect("value");
+            return self.fit(ctx, converted, target);
+        }
+        let thrown = optional_value(ctx, ty).unwrap_or(ty);
+        let wanted = optional_value(ctx, target).unwrap_or(target);
+        if thrown.deref(ctx).is::<ExceptionType>() && thrown != wanted {
+            // A thrown value (a rejection's `reason`) used as a number or string must be one.
+            let intrinsic = if wanted.deref(ctx).is::<FP64Type>() {
+                Intrinsic::ExceptionToNumber
+            } else if wanted.deref(ctx).is::<StringType>() {
+                Intrinsic::ExceptionToString
+            } else {
+                bail!("thrown values can only be used as numbers and strings yet")
+            };
+            let exception = self.defined(ctx, value)?;
+            let converted = self
+                .intrinsic(ctx, intrinsic, vec![exception])
+                .expect("value");
             return self.fit(ctx, converted, target);
         }
         if ty == target {
@@ -2108,15 +2551,15 @@ impl<'s> FunctionBuilder<'s> {
                 let combinator = match property.as_str() {
                     "all" => Combinator::All,
                     "race" => Combinator::Race,
+                    "allSettled" => Combinator::AllSettled,
                     other => bail!("Promise.{other} is not supported yet"),
                 };
                 let [inputs] = args else {
                     bail!("Promise.{property} takes one array");
                 };
                 let inputs = self.expression(ctx, inputs)?;
-                let op = PromiseCombinatorOp::new(ctx, combinator, inputs).context(
-                    "Promise.all and Promise.race take an array of promises of one type",
-                )?;
+                let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
+                    .context("Promise combinators take an array of promises of one type")?;
                 return Ok(Some(self.append_value(ctx, &op)));
             }
             return self.method(ctx, object, property, args);
@@ -2135,9 +2578,19 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(None);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
-            && self.timers.contains(name)
+            && name == "js_native_module_named_esm_export_value"
         {
-            return self.timer(ctx, args).map(Some);
+            // Module initialization of a named built-in import (`Writable`): nothing to run.
+            return Ok(None);
+        }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && let Some(builtin) = self.builtins.get(name)
+        {
+            return match builtin {
+                Builtin::SetTimeout => self.timer(ctx, args).map(Some),
+                Builtin::Writable => bail!("Writable is a class; only Writable.toWeb is supported"),
+                fs => self.fs(ctx, *fs, args).map(Some),
+            };
         }
         let Expr::FuncRef(id) = callee else {
             bail!("only direct calls to module functions are supported yet");
@@ -2175,6 +2628,13 @@ impl<'s> FunctionBuilder<'s> {
         let operation = op.get_operation().deref(ctx);
         Ok((operation.get_num_results() == 1).then(|| operation.get_result(0)))
     }
+}
+
+/// Accepted deviation: JSON revivers, replacers and indentation are diagnosed at compile time.
+const JSON_CALLBACKS: &str = "JSON revivers, replacers and indentation are not supported (accepted deviation, TODOs.md P6.2): parse into a typed shape and transform it in code";
+
+fn is_utf8(encoding: &str) -> bool {
+    matches!(encoding, "utf8" | "utf-8" | "UTF-8" | "UTF8")
 }
 
 fn statement_name(statement: &Stmt) -> String {

@@ -258,6 +258,46 @@ pub struct JsonType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct DateType;
 
+/// `fs.Stats` of `stat()`: the entry type and size, read through `perry.intrinsic`.
+#[pliron_type(name = "perry.stats", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct StatsType;
+
+/// A Fetch `Headers` list.
+#[pliron_type(name = "perry.headers", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct HeadersType;
+
+/// A Fetch `Response`.
+#[pliron_type(
+    name = "perry.response",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ResponseType;
+
+/// A Fetch `Request`.
+#[pliron_type(name = "perry.request", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct RequestType;
+
+/// A Web `WritableStream` over a console output (`Writable.toWeb(process.stdout)`).
+#[pliron_type(
+    name = "perry.writable",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct WritableType;
+
+/// A `WritableStreamDefaultWriter`.
+#[pliron_type(name = "perry.writer", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct WriterType;
+
 /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value. Lives in the
 /// task like every other value (R3, R4).
 #[pliron_type(
@@ -282,6 +322,25 @@ pub struct PromiseType {
 }
 
 impl PromiseType {
+    pub fn value(&self) -> TypeHandle {
+        self.value
+    }
+}
+
+/// An element of `Promise.allSettled`'s result: the settled input promise itself, read as
+/// `{ status, value, reason }` (`perry.settled_field`).
+#[pliron_type(
+    name = "perry.settled",
+    generate_get = true,
+    format = "`<` $value `>`",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct SettledType {
+    value: TypeHandle,
+}
+
+impl SettledType {
     pub fn value(&self) -> TypeHandle {
         self.value
     }

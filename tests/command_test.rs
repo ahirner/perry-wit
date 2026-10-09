@@ -7,7 +7,7 @@ use wasmtime::{
     Config, Engine, Store,
     component::{Component, Linker, ResourceTable},
 };
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView, p3::bindings::Command};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView, p3::bindings::Command};
 
 #[path = "support/output_capture.rs"]
 mod output_capture;
@@ -36,6 +36,11 @@ struct Run {
 }
 
 async fn execute(source: &str) -> Result<Run> {
+    execute_in(source, None).await
+}
+
+/// Run with `root` preopened as `/` when given.
+async fn execute_in(source: &str, root: Option<&std::path::Path>) -> Result<Run> {
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), WIT)?;
     let (resolve, package) = resolve_wit(directory.path())?;
@@ -48,11 +53,15 @@ async fn execute(source: &str) -> Result<Run> {
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let (stdout, stderr) = (MemoryOutput::new(1 << 20), MemoryOutput::new(1 << 20));
-    let ctx = WasiCtx::builder()
+    let mut builder = WasiCtx::builder();
+    builder
         .stdout(stdout.clone())
         .stderr(stderr.clone())
-        .env("GREETING", "grüezi")
-        .build();
+        .env("GREETING", "grüezi");
+    if let Some(root) = root {
+        builder.preopened_dir(root, "/", FsPerms::ReadWrite)?;
+    }
+    let ctx = builder.build();
     let mut store = Store::new(
         &engine,
         Host {
@@ -140,5 +149,88 @@ console.log("unreachable");
     let run = execute("throw 42;").await?;
     assert!(!run.ok);
     assert_eq!(run.stderr, "Uncaught 42\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn node_fs_reports_node_errors_and_resolves_paths_like_posix() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("fixture.txt"), "é\0abc")?;
+    let run = execute_in(
+        r#"
+import { readFile, writeFile, stat, readdir, mkdir, unlink, rmdir } from 'node:fs/promises';
+async function message(pending: Promise<number>): Promise<void> {
+  try { await pending; } catch (e) { if (e instanceof Error) console.log(e.message); }
+}
+async function text(path: string): Promise<number> { await readFile(path, 'utf8'); return 0; }
+async function made(path: string): Promise<number> { await mkdir(path); return 0; }
+async function removed(path: string): Promise<number> { await rmdir(path); return 0; }
+await message(text('missing.txt'));
+await message(made('.'));
+await message(removed('nope/deeper'));
+await message(text('sub/../fixture.txt'));
+await mkdir('sub');
+console.log(await readFile('./sub/../fixture.txt', { encoding: 'utf8' }) === "é\0abc");
+await writeFile('/sub/out.bin', new Uint8Array([104, 195, 169, 255]));
+console.log(await readFile('sub/out.bin', 'utf8'), (await readFile('sub/out.bin')).byteLength);
+const info = await stat('sub');
+console.log(info.isDirectory(), info.isFile(), (await readdir('/sub')).length);
+await unlink('sub/out.bin');
+await rmdir('sub');
+console.log((await readdir('.')).length);
+"#,
+        Some(root.path()),
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "ENOENT: no such file or directory, open 'missing.txt'\n\
+         EEXIST: file already exists, mkdir '.'\n\
+         ENOENT: no such file or directory, rmdir 'nope/deeper'\n\
+         ENOENT: no such file or directory, open 'sub/../fixture.txt'\n\
+         true\nhé\u{FFFD} 4\ntrue false 1\n1\n"
+    );
+    Ok(())
+}
+
+/// `Headers`, `Response` and `Request` against output recorded from Node 22.
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_values_match_node() -> Result<()> {
+    let run = execute(
+        r#"
+const h = new Headers({ 'X-A': ' one ' });
+h.append('x-a', 'twé');
+console.log(h.get('X-A'), h.has('x-b'), h.get('x-b') === null);
+try { h.append('bad name', 'v'); } catch (e) { if (e instanceof TypeError) console.log(e.message); }
+const r = new Response('hé', { status: 404, statusText: 'Nope', headers: h });
+console.log(r.status, r.ok, r.statusText, r.headers.get('content-type'), r.headers.get('x-a'));
+console.log(await r.text(), r.bodyUsed);
+try { await r.bytes(); } catch (e) { if (e instanceof TypeError) console.log(e.message); }
+try { new Response(null, { status: 99 }); } catch (e) { if (e instanceof RangeError) console.log(e.message); }
+const q = new Request('HTTPS://Example.TEST:443/a b?x#frag', { method: 'post', body: 'x' });
+console.log(q.method, q.url, q.headers.get('content-type'));
+const g = new Request('https://example.test', { method: 'patch' });
+console.log(g.method, g.url, (await g.bytes()).length, g.bodyUsed);
+try { new Request('https://example.test', { method: 'GET', body: 'x' }); } catch (e) { if (e instanceof TypeError) console.log(e.message); }
+try { new Request('nope'); } catch (e) { if (e instanceof TypeError) console.log(e.message); }
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        r#"one, twé false true
+Headers.append: "bad name" is an invalid header name.
+404 false Nope text/plain;charset=UTF-8 one, twé
+hé true
+Body is unusable: Body has already been read
+init["status"] must be in the range of 200 to 599, inclusive.
+POST https://example.test/a%20b?x#frag text/plain;charset=UTF-8
+patch https://example.test/ 0 false
+Request with GET/HEAD method cannot have body.
+Failed to parse URL from nope
+"#
+    );
     Ok(())
 }

@@ -174,7 +174,7 @@ MIR (pliron dialects: perry.core, perry.heap, perry.async, perry.canon, perry.in
    └─ passes: inline → SCCP/DCE/simplify_cfg → escape → SROA/mem2reg → int-range
               → shape/iface → tier → async-split → canon-lower → root-plan
 wasm dialect ─ stackifier + local alloc ─ wasm-encoder core module
-   └─ link.rs (reencode): perry-runtime.wasm + perry-std.wasm + json/time/text/fetch/number/search helpers
+   └─ link.rs (reencode): perry-runtime.wasm + perry-std/fs/web.wasm + json/time/text/fetch/number/search helpers
    └─ wit-component ComponentEncoder (unchanged)
 ```
 
@@ -361,7 +361,7 @@ Owned (each with unit tests on MIR snippets):
   - *Done when:* differential tests against the legacy output for scalar, control flow and exception fixtures pass, and the output is no larger than WAFFLE's on those fixtures.
   - *Status:* 8 tests validate with wasmparser and execute in wasmtime: diamonds, loops, nested loops with break/continue, parameter swaps, recursion, memory, imports, effect ordering, and rejection of irreducible CFGs. The differential comparison against WAFFLE waits for P6.1.
 - [x] **P4.3 Keep and generalize `link.rs`.** Now `src/link`.
-  - The root `build.rs` builds `perry-runtime` as one more PIC helper library (`runtime.wasm`), and `perry-std` (`std.wasm`) for the built-ins, linked only when called. Libraries import each other's functions through `__perry_helper`; the linker resolves them to a fixpoint.
+  - The root `build.rs` builds `perry-runtime` as one more PIC helper library (`runtime.wasm`), and the on-demand libraries `perry-std` (`std.wasm`), `perry-fs` (`fs.wasm`) and `perry-web` (`web.wasm`), linked only when called; they share `perry-abi` for runtime imports and layouts. Libraries import each other's functions through `__perry_helper`; the linker resolves them to a fixpoint.
   - Codegen imports `perry_*` functions from `__perry_helper`, and the linker places their data after the module's static data.
   - The linked module has no imports besides the WIT world's.
   - `wasm-opt -Oz` stays optional and is not wired in.
@@ -411,7 +411,7 @@ Owned (each with unit tests on MIR snippets):
   - Strings (decided): UTF-8 with a cached UTF-16 length, passed through the boundary without transcoding.
     - Constants are static data.
     - Concatenation appends in place to a shared buffer, so the `string_append` contract passes.
-    - Lone surrogates (WTF-8) are not representable yet.
+    - Scope (the conformance rule since the legacy registry): generated strings are BMP scalars, where one scalar is one UTF-16 code unit, so lengths, indices and slices agree with Node without surrogate emulation. Astral scalars still count two units in `.length`; a position inside a surrogate pair rounds down to the scalar boundary, so lone surrogates never arise. WTF-8 is not planned.
   - Conformance: `crates/conformance/passing.txt` is a ratchet. Listed contracts must pass. An unlisted contract that passes fails the campaign until it is added. Unlisted failures are `pending` and are not shrunk, so the campaign stays fast.
   - Tests:
     - `tests/component_test.rs` passes WIT values through wasmtime's component model, and checks that memory does not grow across calls.
@@ -425,14 +425,24 @@ Owned (each with unit tests on MIR snippets):
     - remove a `perry.unwrap` dominated by another unwrap of the same value (P3.5b). `point.x; point.y` currently checks twice;
     - inline `fmod` for proven integers (P3.5). `perry_f64_rem` is the largest per-iteration cost in the scaling loops.
 - [ ] **P6.2 Migrate in registry order.** Each group is done when its conformance contracts and the matching `tests/*` suites pass on MIR:
-  - *Status (2026-10-09):* 29 of 50 contracts pass: the scaling contracts, the expression-language contracts (`ecma.number.arithmetic`, `ecma.math.rounding`, `ecma.string.operations`, `ecma.array.dense`, `ecma.object.records`, `ecma.date.epoch`, `ecma.uint8array.conversion`, `web.textencoder.subviews`, `ecma.json.roundtrip`, both timer contracts and the three `wasi.execution.detect_*` harness checks), `ecma.uint8array.set`, `ecma.promise.race`, the commands `ecma.json.command`, `ecma.promise.all`, `ecma.date.clock`, `web.crypto.random`, `web.console.routing`, `web.performance.monotonic`, `node.process.exit_status`, `node.process.environment`, and the rejection `node.timers.callbacks.unsupported`. The 21 pending ones need `node:fs` (7), `Response`/`Request`/streams (6), `Headers`, `Temporal`, `AbortController`, `Promise.allSettled`, error `cause`, streaming `TextDecoder`, `Writable.toWeb` and the HTTP handler. CLI commands work (`tests/command_test.rs`): top-level statements with top-level `await` implement `wasi:cli/run`; an uncaught exception prints `Uncaught …` to stderr and fails the command. `tests/builtins_test.rs` checks the built-ins against values recorded from Node.js.
+  - *Status (2026-10-09):* 41 of 50 contracts pass, 4 are deferred (`crates/conformance/deferred.txt`) and 5 are pending.
+    - Passing: the scaling contracts; the expression-language contracts (`ecma.number.arithmetic`, `ecma.math.rounding`, `ecma.string.operations`, `ecma.array.dense`, `ecma.object.records`, `ecma.date.epoch`, `ecma.uint8array.conversion`, `web.textencoder.subviews`, `ecma.json.roundtrip`), `ecma.uint8array.set`; the timer value and observer contracts; `ecma.promise.all`, `race` and `all_settled`; the seven `node.fs.*` contracts; `web.headers.multimap`, `web.response.bytes`, `web.request.bytes`, `node.stream.writable_to_web`; the commands (`ecma.json.command`, `ecma.date.clock`, `web.crypto.random`, `web.console.routing`, `web.performance.monotonic`, `node.process.exit_status`, `node.process.environment`); the rejection `node.timers.callbacks.unsupported`; and the three `wasi.execution.detect_*` harness checks.
+    - Pending: `web.fetch.bounded_body` (fetch over `wasi:http/client` and `ReadableStream` readers), `wasi.streams.incoming_bytes` (needs bounded memory within a task: its 4 MiB stream runs in 64 KiB of guest memory, but task regions take 64 KiB chunks and keep every chunk buffer until the task ends), `node.timers.promises.lifecycle` (`AbortController`), `ecma.error.values` (`cause`, `JSON.stringify` and spread of errors) and `wasi.http.handler`.
+    - `tests/command_test.rs` checks `node:fs` errors and paths, and `Headers`/`Response`/`Request` against output recorded from Node; `tests/builtins_test.rs` checks the built-ins against values recorded from Node.
+  - Accepted deviations (documented, diagnosed at compile time where a program could observe them, and kept out of the conformance domain; as on `main`):
+    - Strings: the domain is BMP scalars, where one scalar is one UTF-16 code unit, so lengths, indices and slices agree with Node. No surrogate halves, no WTF-8.
+    - Scheduling: an `await` of a settled promise continues inline; there is no microtask queue, so continuations run in settlement order rather than microtask FIFO order. Continuations are scheduled by WASI 0.3 events.
+    - JSON: revivers, replacers and indentation are compile-time errors. `JSON.stringify` writes record fields in shape (sorted) order, not insertion order.
+    - `null` and `undefined` share the absent representation of optionals. Built-ins that return `T | null` (`Headers.get`) produce optionals; TypeScript rejects comparing `T | undefined` with `null` (TS2367), so typed programs cannot tell them apart.
+    - `node:fs`: paths resolve against the preopens with `/` as the working directory; errors carry Node's message (`ENOENT: no such file or directory, open 'x'`) but not `code`, `errno`, `syscall` or `path` properties; `readdir` returns names in host order; options other than the `utf8` encoding (`recursive`, `withFileTypes`, flags) are compile-time errors.
+    - `Request` accepts `http`/`https` URLs only (the fetch helper's normalization).
+    - `Writable.toWeb(process.stdout)`: a write is acknowledged when the output buffer accepts it; `close()` closes the Web stream but leaves the console output open, as Node does for stdio redirected to files.
+    - Deferred contracts: BYOB readers (`web.streams.byob_reader`, `web.fetch.bounded_byob_body`; no detachable `ArrayBuffer`), `ecma.temporal.iso` (Temporal is flagged in Node) and `web.textdecoder.streaming` (Perry HIR drops the `stream` option).
   - Known gaps found on the way:
-    - `TextDecoder.decode(…, { stream: true })`: Perry HIR drops the options, so streaming decoding cannot be distinguished (`web.textdecoder.streaming`); needs an upstream HIR change or a source-level check.
-    - `JSON.stringify` writes record fields in sorted order (records are closed shapes keyed by sorted names, R1), while ECMAScript uses insertion order; equal for the contracts so far. Fix with a declaration-order field list on record types (P3.6).
     - `JSON.parse` costs about 25 KB of data in a component: the JSON helper parses numbers with `core`'s `str::parse::<f64>`, whose tables dominate. A smaller exact decimal parser would fix it.
-    - Size: the built-ins first landed in the runtime and grew every component by their data (template 2886 → 4645 bytes), because the linker keeps a library's data segment whole. They now live in `crates/perry-std`, linked only when called (template 2895 bytes). Finer data GC would need per-symbol relocations from the helper builds.
+    - Size: the built-ins first landed in the runtime and grew every component by their data (template 2886 → 4645 bytes), because the linker keeps a library's data segment whole. They now live in libraries linked only when called (`perry-std`, `perry-fs`, `perry-web`; the template is 2895 bytes). Finer data GC would need per-symbol relocations from the helper builds.
+    - `perry-fs` advances every operation with one state machine, so any `node:fs` call links all of them (about 5 KB of code). Per-operation event entry points would split it.
     - JSON values used as `number` follow `ToNumber` for numbers, `null`, booleans and `undefined`, and throw `TypeError` for strings, arrays and objects (R6: no implicit parsing of untyped data).
-    - `Promise.allSettled`, `Headers`, `Temporal`, `Response`/`Request`, streams, `node:fs` and `AbortController` are next (`ecma.error.values` also needs `cause` and `JSON.stringify` of errors).
   1. `ecma.number`, `ecma.math`, `ecma.string`
   2. `ecma.object`, `ecma.array`
   3. `ecma.json`, `ecma.date`
@@ -498,5 +508,5 @@ The repository once had a generative suite (`tests/generative`, removed in 74575
 
 - **Exceptions (decided for now):** the status convention, plus a pending exception object in the task for `throw` (P3.5b). A function that may throw returns an extra `i32` status after its results, callers branch on it, and the codes are `perry_codegen::status_code`. Wasm exception handling stays a later lowering swap; the MIR's throwing ops are marked, so either lowering works.
 - **pliron is pre-1.0:** pin it, and budget for upstream contributions (the inliner, SROA). The Wasm dialect and emitter live in `crates/pliron-wasm`, which is free of perry code and can be published.
-- **Strings (decided 2026-10-09):** UTF-8 with a cached UTF-16 length and an in-place append buffer. Open: WTF-8 for lone surrogates, and an index cache for non-ASCII `charAt`/`slice` (P6.2 group 1).
+- **Strings (decided 2026-10-09):** UTF-8 with a cached UTF-16 length and an in-place append buffer, scoped to BMP-equivalent semantics (no surrogate halves, no WTF-8; the conformance domain generates BMP scalars only). Open: an index cache for non-ASCII `charAt`/`slice` (P6.2 group 1).
 - **R5 scope:** which array and promise builtins accept inlined arrows in the first release.

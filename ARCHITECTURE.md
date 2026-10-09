@@ -13,6 +13,9 @@ Perry-WIT compiles a static subset of TypeScript to WebAssembly components targe
 | `crates/pliron-wasm` | The `wasm` dialect and the emitter to core Wasm; free of perry code so it can be published separately |
 | `crates/perry-runtime` | `no_std` runtime linked into every module: allocator, task regions, strings, arrays |
 | `crates/perry-std` | Built-ins on top of the runtime (string methods, `Uint8Array`, JSON, random), linked on demand |
+| `crates/perry-fs` | `node:fs/promises` over `wasi:filesystem`, linked on demand |
+| `crates/perry-web` | `Headers`, constructed `Response`/`Request`, Web writers over stdout/stderr, linked on demand |
+| `crates/perry-abi` | Runtime services and layouts the on-demand libraries share (no exports of its own) |
 | `crates/*-helper`, `src/helpers` | Computation helpers (JSON, time, number formatting, text, search, URL), linked on demand |
 | `crates/conformance` | Contracts checked against Node.js as the oracle |
 

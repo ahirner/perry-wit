@@ -23,7 +23,12 @@ fn main() {
             helper,
         );
     }
-    for (package, helper) in [("perry-runtime", "runtime"), ("perry-std", "std")] {
+    for (package, helper) in [
+        ("perry-runtime", "runtime"),
+        ("perry-std", "std"),
+        ("perry-fs", "fs"),
+        ("perry-web", "web"),
+    ] {
         compile_cargo_helper(
             &manifest_dir,
             &out_dir,

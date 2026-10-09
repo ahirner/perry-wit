@@ -20,11 +20,15 @@ pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wa
 pub(crate) const NUMBER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/number.wasm"));
 pub(crate) const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.wasm"));
 pub(crate) const STD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/std.wasm"));
+pub(crate) const FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.wasm"));
+pub(crate) const WEB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/web.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {
     Runtime,
     Std,
+    Fs,
+    Web,
     Fetch,
     Search,
     Text,
@@ -38,6 +42,8 @@ impl LibraryId {
         Ok(match entry {
             entry if entry.starts_with("perry_") || entry == "cabi_realloc" => Self::Runtime,
             entry if entry.starts_with("std_") => Self::Std,
+            entry if entry.starts_with("fs_") => Self::Fs,
+            entry if entry.starts_with("web_") => Self::Web,
             "number_remainder" | "number_format" => Self::Number,
             "fetch_status_text" | "fetch_url" | "fetch_redirect" | "fetch_decode"
             | "fetch_method" | "fetch_header_value" | "fetch_header_size" | "fetch_header_get"
@@ -75,6 +81,8 @@ impl LibraryId {
         match self {
             Self::Runtime => RUNTIME,
             Self::Std => STD,
+            Self::Fs => FS,
+            Self::Web => WEB,
             Self::Fetch => FETCH,
             Self::Search => SEARCH,
             Self::Text => TEXT,

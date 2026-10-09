@@ -506,11 +506,26 @@ fn async_export(
         let mut b = FunctionLowering::glue(state, ctx, &callback);
         let task = b.host(ctx, crate::Host::ContextGet0, vec![]).expect("task");
         b.runtime(ctx, Runtime::TaskResume, vec![task]);
+        let next = b.new_block(ctx, vec![]);
+        if b.state.uses_fs {
+            // `node:fs` operations take their own subtask, stream and future events.
+            let handled = b
+                .call(
+                    ctx,
+                    "fs_event",
+                    &[crate::W::I32; 3],
+                    &[crate::W::I32],
+                    vec![event, handle, subtask_state],
+                )
+                .expect("handled");
+            let unhandled = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, handled, (next, vec![]), (unhandled, vec![]));
+            b.block = unhandled;
+        }
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
         let settle = b.new_block(ctx, vec![]);
         let other = b.new_block(ctx, vec![]);
-        let next = b.new_block(ctx, vec![]);
         b.cond_br(ctx, is_subtask, (settle, vec![]), (other, vec![]));
         b.block = settle;
         b.runtime(ctx, Runtime::TaskSubtaskEvent, vec![handle, subtask_state]);

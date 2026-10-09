@@ -540,5 +540,10 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
             "passing.txt names unknown contract {id}"
         );
     }
+    for (id, reason) in crate::deferrals() {
+        ensure!(ids.contains(id), "deferred.txt names unknown contract {id}");
+        ensure!(!reason.is_empty(), "deferred contract {id} needs a reason");
+        ensure!(!crate::passing(id), "{id} is both passing and deferred");
+    }
     Ok(contracts)
 }

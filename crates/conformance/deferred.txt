@@ -1,0 +1,6 @@
+# Contracts outside the compiler's accepted domain: not run, not pending. One id per line,
+# then `#` and the deviation it records (TODOs.md P6.2, "Accepted deviations").
+web.streams.byob_reader # BYOB reads transfer (detach) the caller's ArrayBuffer; Uint8Array views over task memory have no detachable buffer
+web.fetch.bounded_byob_body # BYOB reads transfer (detach) the caller's ArrayBuffer; Uint8Array views over task memory have no detachable buffer
+ecma.temporal.iso # Temporal is a proposal behind a Node flag; in scope once it ships unflagged
+web.textdecoder.streaming # Perry HIR drops the { stream: true } option of TextDecoder.decode; needs the option upstream

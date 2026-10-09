@@ -2,7 +2,8 @@
 //!
 //! Positions convert to byte offsets by scanning, with a direct path for ASCII strings
 //! (`utf16 == len`). A position inside a surrogate pair rounds to the scalar boundary before
-//! it: lone surrogates are not representable in UTF-8 (WTF-8 is open, `TODOs.md`).
+//! it, so no lone surrogate arises. The conformance domain is BMP scalars, where a scalar is
+//! one code unit and every result matches Node; surrogate halves (WTF-8) are out of scope.
 use crate::runtime::{bytes, from_bytes, from_static, utf16_length};
 
 /// ECMAScript `ToIntegerOrInfinity`, saturated to `i64`.

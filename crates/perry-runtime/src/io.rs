@@ -134,6 +134,21 @@ pub unsafe extern "C" fn perry_print(fd: u32, string: *mut u8, newline: u32) {
     print_bytes(fd as usize, bytes, newline != 0);
 }
 
+/// Append `len` bytes at `data` to output `fd` (0 stdout, 1 stderr) of the current task:
+/// writes of `Writable.toWeb(process.stdout)` writers.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_write(fd: u32, data: *const u8, len: u32) {
+    if len == 0 {
+        return;
+    }
+    // SAFETY: guaranteed by the caller.
+    let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
+    print_bytes(fd as usize, bytes, false);
+}
+
 fn print_bytes(fd: usize, bytes: &[u8], newline: bool) {
     let output = &mut current().outputs[fd.min(1)];
     if output.state != State::Open {

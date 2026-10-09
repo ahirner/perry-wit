@@ -27,3 +27,15 @@ wasi.execution.detect_resource_fault
 ecma.uint8array.set
 ecma.promise.race
 node.timers.callbacks.unsupported
+ecma.promise.all_settled
+node.fs.readFile.utf8
+node.fs.writeFile.text
+node.fs.metadata
+node.fs.readFile.bytes
+node.fs.writeFile.subviews
+node.fs.readFile.recovery
+node.fs.directories
+web.headers.multimap
+web.response.bytes
+web.request.bytes
+node.stream.writable_to_web

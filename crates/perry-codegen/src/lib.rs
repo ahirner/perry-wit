@@ -36,14 +36,16 @@ use perry_mir::{
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     intrinsics::{
-        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, may_throw,
+        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, SettledField,
+        SettledFieldOp, may_throw,
     },
     locals::UndefOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, JsonType, OptionalType, PromiseType,
-        RecordType, StringType,
+        ArrayType, BytesType, DateType, ExceptionType, HeadersType, JsonType, OptionalType,
+        PromiseType, RecordType, RequestType, ResponseType, SettledType, StatsType, StringType,
+        WritableType, WriterType,
     },
 };
 use perry_runtime::array as layout;
@@ -427,6 +429,13 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<ArrayType>()
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
+        || deref.is::<SettledType>()
+        || deref.is::<StatsType>()
+        || deref.is::<HeadersType>()
+        || deref.is::<ResponseType>()
+        || deref.is::<RequestType>()
+        || deref.is::<WritableType>()
+        || deref.is::<WriterType>()
         || deref.is::<ExceptionType>()
         || deref.is::<BytesType>()
         || deref.is::<JsonType>()
@@ -555,6 +564,8 @@ struct ModuleState {
     shapes: HashMap<String, i32>,
     /// Whether any function writes console output (finish and callbacks then drive it).
     uses_io: bool,
+    /// Whether any function starts a `node:fs` operation (callbacks pass it events).
+    uses_fs: bool,
     /// Generated `JSON.stringify` serializers by MIR type.
     json_serializers: HashMap<TypeHandle, Identifier>,
 }
@@ -589,6 +600,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         async_functions: async_functions.clone(),
         shapes: HashMap::new(),
         uses_io: false,
+        uses_fs: false,
         json_serializers: HashMap::new(),
     };
     for function in &functions {
@@ -1463,6 +1475,42 @@ impl<'s> FunctionLowering<'s> {
             Intrinsic::JsonSerialize => {
                 bail!("JSON.stringify of parsed JSON values is not supported yet")
             }
+            Intrinsic::WritableStdout | Intrinsic::WritableStderr => {
+                let (interface, fd) = if intrinsic == Intrinsic::WritableStdout {
+                    ("wasi:cli/stdout@0.3.0", 0)
+                } else {
+                    ("wasi:cli/stderr@0.3.0", 1)
+                };
+                self.needs_import(interface, "Writable.toWeb")?;
+                self.state.uses_io = true;
+                let fd = self.i32_const(ctx, fd);
+                self.call(ctx, "web_writable_new", &[W::I32], &[W::I32], vec![fd])
+            }
+            Intrinsic::FsReadText
+            | Intrinsic::FsReadBytes
+            | Intrinsic::FsWriteText
+            | Intrinsic::FsWriteBytes
+            | Intrinsic::FsStat
+            | Intrinsic::FsReaddir
+            | Intrinsic::FsMkdir
+            | Intrinsic::FsUnlink
+            | Intrinsic::FsRmdir => {
+                self.needs_import("wasi:filesystem/types@0.3.0", "node:fs")?;
+                self.needs_import("wasi:filesystem/preopens@0.3.0", "node:fs")?;
+                self.state.uses_fs = true;
+                let (name, params): (&'static str, &'static [W]) = match intrinsic {
+                    Intrinsic::FsReadText => ("fs_read_text", &[W::I32]),
+                    Intrinsic::FsReadBytes => ("fs_read_bytes", &[W::I32]),
+                    Intrinsic::FsWriteText => ("fs_write_text", &[W::I32, W::I32]),
+                    Intrinsic::FsWriteBytes => ("fs_write_bytes", &[W::I32, W::I32]),
+                    Intrinsic::FsStat => ("fs_stat", &[W::I32]),
+                    Intrinsic::FsReaddir => ("fs_readdir", &[W::I32]),
+                    Intrinsic::FsMkdir => ("fs_mkdir", &[W::I32]),
+                    Intrinsic::FsUnlink => ("fs_unlink", &[W::I32]),
+                    _ => ("fs_rmdir", &[W::I32]),
+                };
+                self.call(ctx, name, params, &[W::I32], args)
+            }
             other => {
                 let (name, params, results): (&'static str, &'static [W], &'static [W]) =
                     match other {
@@ -1525,6 +1573,67 @@ impl<'s> FunctionLowering<'s> {
                         Intrinsic::JsonToString => ("std_json_to_string", &[W::I32], &[W::I32]),
                         Intrinsic::JsonToBool => ("std_json_to_bool", &[W::I32], &[W::I32]),
                         Intrinsic::JsonTypeOf => ("std_json_type_of", &[W::I32], &[W::I32]),
+                        Intrinsic::StatsIsFile => ("fs_stats_is_file", &[W::I32], &[W::I32]),
+                        Intrinsic::StatsIsDirectory => {
+                            ("fs_stats_is_directory", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::StatsSize => ("fs_stats_size", &[W::I32], &[W::F64]),
+                        Intrinsic::HeadersNew => ("web_headers_new", &[], &[W::I32]),
+                        Intrinsic::HeadersCopy => ("web_headers_copy", &[W::I32], &[W::I32]),
+                        Intrinsic::HeadersAppend => {
+                            ("web_headers_append", &[W::I32, W::I32, W::I32], &[])
+                        }
+                        Intrinsic::HeadersSet => {
+                            ("web_headers_set", &[W::I32, W::I32, W::I32], &[])
+                        }
+                        Intrinsic::HeadersGet => ("web_headers_get", &[W::I32, W::I32], &[W::I32]),
+                        Intrinsic::HeadersHas => ("web_headers_has", &[W::I32, W::I32], &[W::I32]),
+                        Intrinsic::HeadersDelete => ("web_headers_delete", &[W::I32, W::I32], &[]),
+                        Intrinsic::ResponseNew => (
+                            "web_response_new",
+                            &[W::I32, W::I32, W::F64, W::I32, W::I32],
+                            &[W::I32],
+                        ),
+                        Intrinsic::ResponseStatus => ("web_response_status", &[W::I32], &[W::F64]),
+                        Intrinsic::ResponseStatusText => {
+                            ("web_response_status_text", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ResponseOk => ("web_response_ok", &[W::I32], &[W::I32]),
+                        Intrinsic::ResponseHeaders => {
+                            ("web_response_headers", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ResponseBodyUsed | Intrinsic::RequestBodyUsed => {
+                            ("web_body_used", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ResponseBytes | Intrinsic::RequestBytes => {
+                            ("web_body_bytes", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::ResponseText | Intrinsic::RequestText => {
+                            ("web_body_text", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::RequestNew => (
+                            "web_request_new",
+                            &[W::I32, W::I32, W::I32, W::I32, W::I32],
+                            &[W::I32],
+                        ),
+                        Intrinsic::RequestMethod => ("web_request_method", &[W::I32], &[W::I32]),
+                        Intrinsic::WritableLocked => ("web_writable_locked", &[W::I32], &[W::I32]),
+                        Intrinsic::WritableGetWriter => {
+                            ("web_writable_get_writer", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::WriterWrite => {
+                            ("web_writer_write", &[W::I32, W::I32], &[W::I32])
+                        }
+                        Intrinsic::WriterClose => ("web_writer_close", &[W::I32], &[W::I32]),
+                        Intrinsic::WriterReleaseLock => ("web_writer_release_lock", &[W::I32], &[]),
+                        Intrinsic::RequestUrl => ("web_request_url", &[W::I32], &[W::I32]),
+                        Intrinsic::RequestHeaders => ("web_request_headers", &[W::I32], &[W::I32]),
+                        Intrinsic::ExceptionToNumber => {
+                            ("std_exception_to_number", &[W::I32], &[W::F64])
+                        }
+                        Intrinsic::ExceptionToString => {
+                            ("std_exception_to_string", &[W::I32], &[W::I32])
+                        }
                         _ => unreachable!("lowered above"),
                     };
                 let result = self.call(ctx, name, params, results, args);
@@ -2263,12 +2372,43 @@ impl<'s> FunctionLowering<'s> {
             let name = match combinator.combinator(ctx) {
                 Combinator::All => "perry_promise_all",
                 Combinator::Race => "perry_promise_race",
+                Combinator::AllSettled => "perry_promise_all_settled",
             };
             let inputs = self.operand(ctx, op, 0)?;
             let promise = self
                 .call(ctx, name, &[W::I32], &[W::I32], vec![inputs])
                 .expect("promise");
             self.define(ctx, op, promise);
+            return Ok(());
+        }
+        if let Some(read) = Operation::get_op::<SettledFieldOp>(op, ctx) {
+            // A settled view is the input promise itself (`perry_promise_all_settled`).
+            use perry_runtime::promise::{FULFILLED, STATE, VALUE};
+            let promise = self.operand(ctx, op, 0)?;
+            let state = self.load(ctx, MemKind::I32, promise, STATE);
+            let fulfilled_state = self.i32_const(ctx, FULFILLED as i32);
+            let fulfilled = self.num(ctx, NumOpcode::I32Eq, vec![state, fulfilled_state]);
+            let value = match read.field(ctx) {
+                SettledField::Status => {
+                    let yes = self.state.data.string("fulfilled");
+                    let no = self.state.data.string("rejected");
+                    let yes = self.i32_const(ctx, yes as i32);
+                    let no = self.i32_const(ctx, no as i32);
+                    self.select(ctx, fulfilled, yes, no)
+                }
+                field => {
+                    let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                    let inner = optional_inner(ctx, ty).expect("optional result");
+                    let loaded = self.load(ctx, slot_kind(ctx, inner)?, promise, VALUE);
+                    let undefined = self.undefined(ctx, inner)?;
+                    if field == SettledField::Value {
+                        self.select(ctx, fulfilled, loaded, undefined)
+                    } else {
+                        self.select(ctx, fulfilled, undefined, loaded)
+                    }
+                }
+            };
+            self.define(ctx, op, value);
             return Ok(());
         }
         if Operation::get_op::<JsonStringifyOp>(op, ctx).is_some() {

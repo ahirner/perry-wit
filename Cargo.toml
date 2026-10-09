@@ -15,7 +15,10 @@ members = [
     "crates/perry-lower",
     "crates/pliron-wasm",
     "crates/perry-runtime",
+    "crates/perry-abi",
     "crates/perry-std",
+    "crates/perry-fs",
+    "crates/perry-web",
     "crates/perry-codegen",
 ]
 

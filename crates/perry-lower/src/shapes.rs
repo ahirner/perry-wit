@@ -108,6 +108,13 @@ impl<'h> Shapes<'h> {
         }
     }
 
+    /// Whether the program declares a type of this name (shadowing a built-in class).
+    pub(crate) fn is_user_type(&self, name: &str) -> bool {
+        self.hir.interfaces.iter().any(|i| i.name == name)
+            || self.hir.type_aliases.iter().any(|a| a.name == name)
+            || self.hir.classes.iter().any(|c| c.name == name)
+    }
+
     fn named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
         if let Some(ty) = self.named.borrow().get(name) {
             return Ok(*ty);
@@ -128,6 +135,9 @@ impl<'h> Shapes<'h> {
             match name {
                 "Uint8Array" => return Ok(perry_mir::types::BytesType::get(ctx).into()),
                 "Date" => return Ok(perry_mir::types::DateType::get(ctx).into()),
+                "Headers" => return Ok(perry_mir::types::HeadersType::get(ctx).into()),
+                "Response" => return Ok(perry_mir::types::ResponseType::get(ctx).into()),
+                "Request" => return Ok(perry_mir::types::RequestType::get(ctx).into()),
                 // A decoder is its `fatal` flag (UTF-8 only, BOM stripped).
                 "TextDecoder" => {
                     return Ok(pliron::builtin::types::IntegerType::get(

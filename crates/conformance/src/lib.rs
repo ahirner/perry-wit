@@ -21,3 +21,26 @@ pub const PASSING: &str = include_str!("../passing.txt");
 pub fn passing(id: &str) -> bool {
     PASSING.lines().any(|line| line.trim() == id)
 }
+
+/// Contracts outside the accepted domain, each with the deviation it records: not run, and
+/// neither passing nor pending.
+pub const DEFERRED: &str = include_str!("../deferred.txt");
+
+/// `(id, reason)` of each deferred contract.
+pub fn deferrals() -> impl Iterator<Item = (&'static str, &'static str)> {
+    DEFERRED
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| match line.split_once('#') {
+            Some((id, reason)) => (id.trim(), reason.trim()),
+            None => (line, ""),
+        })
+}
+
+/// The deviation a deferred contract records.
+pub fn deferred(id: &str) -> Option<&'static str> {
+    deferrals()
+        .find(|(deferred, _)| *deferred == id)
+        .map(|(_, reason)| reason)
+}

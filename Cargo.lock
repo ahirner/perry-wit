@@ -1355,6 +1355,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "perry-abi"
+version = "0.1.0"
+dependencies = [
+ "perry-runtime",
+]
+
+[[package]]
 name = "perry-api-manifest"
 version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry?rev=9e29f59d435ee08df161ef460ee6f204fb381d4f#9e29f59d435ee08df161ef460ee6f204fb381d4f"
@@ -1405,6 +1412,13 @@ dependencies = [
 name = "perry-dispatch"
 version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry?rev=9e29f59d435ee08df161ef460ee6f204fb381d4f#9e29f59d435ee08df161ef460ee6f204fb381d4f"
+
+[[package]]
+name = "perry-fs"
+version = "0.1.0"
+dependencies = [
+ "perry-abi",
+]
 
 [[package]]
 name = "perry-hir"
@@ -1488,7 +1502,7 @@ name = "perry-std"
 version = "0.1.0"
 dependencies = [
  "libm",
- "perry-runtime",
+ "perry-abi",
 ]
 
 [[package]]
@@ -1503,6 +1517,13 @@ dependencies = [
 name = "perry-ui-model"
 version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry?rev=9e29f59d435ee08df161ef460ee6f204fb381d4f#9e29f59d435ee08df161ef460ee6f204fb381d4f"
+
+[[package]]
+name = "perry-web"
+version = "0.1.0"
+dependencies = [
+ "perry-abi",
+]
 
 [[package]]
 name = "perry-wit"
