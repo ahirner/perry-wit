@@ -578,3 +578,105 @@ export function run(input: string): Item {
     );
     Ok(())
 }
+
+#[test]
+fn json_dictionary_mutations_preserve_views_and_missing_values() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "dictionary.wit",
+        "package test:dictionary; world dictionary { export run: func(count: u32, text: string) -> string; }",
+    )?;
+    let world = resolve.select_world(&[package], Some("dictionary"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+type Anchor = { anchor: number };
+function anchor(value: JsonValue): Anchor { return value as unknown as Anchor; }
+function json(value: JsonValue): JsonValue { return value; }
+function array(value: JsonValue): JsonValue[] { return value as unknown as JsonValue[]; }
+export function run(count: number, text: string): string {
+  const root = JSON.parse('{"anchor":1,"z":2,"z":3,"00":4,"4294967295":5}');
+  const first = anchor(root);
+  const second = anchor(root);
+  const holder = { item: first };
+  const packed = json(holder).item;
+  for(let i = 0; i < count; i++) root[i] = i;
+  if(first !== second || packed !== root || first.anchor !== 1) throw 1;
+  for(let i = 0; i < count; i++) {
+    if(root[i] !== i || !Object.hasOwn(root, i)) throw 2;
+    if(!delete root[i] || Object.hasOwn(root, i)) throw 3;
+  }
+  root.missing = undefined;
+  if(root.missing !== undefined || !Object.hasOwn(root, 'missing')) throw 4;
+  const snapshot = Object.keys(root);
+  if(!delete root.anchor) throw 5;
+  let stale = false;
+  try { first.anchor; } catch(e) { stale = e instanceof TypeError; }
+  if(!stale) throw 6;
+  first.anchor = 7;
+  root.text = text;
+  root.nested = { a: undefined, b: [undefined, null, { c: undefined, d: 9 }] };
+  if(packed !== root || second.anchor !== 7) throw 7;
+  const dense = JSON.parse('[]');
+  dense[0] = undefined;
+  if(!Object.hasOwn(dense, 0) || Object.keys(dense).length !== 1) throw 8;
+  let hole = false;
+  try { delete dense[0]; } catch(e) { hole = e instanceof RangeError; }
+  if(!hole || !delete dense[4]) throw 9;
+  let invalid = false;
+  try { array(dense); } catch(e) { invalid = e instanceof TypeError; }
+  if(!invalid) throw 10;
+  const typed: JsonValue[] = [null];
+  const view = json(typed);
+  let fixed = false;
+  try { view[0] = undefined; } catch(e) { fixed = e instanceof TypeError; }
+  if(!fixed || typed[0] !== null) throw 11;
+  const native = { n: 1 };
+  const nativeView = json(native);
+  let closed = false;
+  try { delete nativeView.n; } catch(e) { closed = e instanceof TypeError; }
+  if(!closed || native.n !== 1) throw 12;
+  let nullKeys = false;
+  try { Object.keys(undefined); } catch(e) { nullKeys = e instanceof TypeError; }
+  if(!nullKeys) throw 13;
+  if(Object.keys('é🙂').length !== 3 || !Object.hasOwn('🙂', 1)) throw 14;
+  if(Object.keys(native).length !== 1 || !Object.hasOwn(native, 'n')) throw 15;
+  let prototype = false;
+  try { root.__proto__ = 1; } catch(e) { prototype = e instanceof TypeError; }
+  if(!prototype || Object.hasOwn(root, '__proto__')) throw 16;
+  const assignment = (root.assignment = 'ok');
+  if(assignment + '!' !== 'ok!') throw 17;
+  const indexed = (root['indexed'] = true);
+  if(!indexed) throw 18;
+  delete root.assignment;
+  delete root.indexed;
+  root.snapshot = snapshot;
+  root.current = Object.keys(root);
+  return JSON.stringify(root);
+}
+"#;
+    let compiled = compile_for_world(source, "dictionary.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(u32, &str), (String,)>(&mut store, "run")?;
+    let text = "é🙂".repeat(8_192);
+    let expected = format!(
+        r#"{{"z":3,"00":4,"4294967295":5,"anchor":7,"text":{},"nested":{{"b":[null,null,{{"d":9}}]}},"snapshot":["anchor","z","00","4294967295","missing"],"current":["z","00","4294967295","missing","anchor","text","nested","snapshot"]}}"#,
+        serde_json::to_string(&text)?,
+    );
+    for _ in 0..3 {
+        assert_eq!(run.call(&mut store, (256, &text))?.0, expected);
+    }
+    let peak = store.data().0;
+    for _ in 0..20 {
+        assert_eq!(run.call(&mut store, (256, &text))?.0, expected);
+        assert_eq!(
+            store.data().0,
+            peak,
+            "dictionary storage must be released with its task"
+        );
+    }
+    Ok(())
+}

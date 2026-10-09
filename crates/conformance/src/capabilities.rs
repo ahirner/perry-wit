@@ -104,45 +104,102 @@ await errors.write(input);await errors.close();errors.releaseLock();
     }
 }
 pub fn contracts() -> Vec<Contract> {
-    let mut contracts = Vec::new();
-    contracts.push(Contract {
-        id: "ecma.json.typed",
-        description: "Checked typed aliases of parsed JSON retain identity, mutations and property order",
-        specification: "https://tc39.es/ecma262/#sec-json.parse",
-        domain: "Parsed closed records and homogeneous arrays, repeated narrowing, native slot replacement, typed/JSON alias writes, array growth and recursive schemas; values stay within declared types",
-        witnesses: vec![
-            Witness { partition: "empty-array", case: typed_json(Vec::new(), 0) },
-            Witness { partition: "nested-aliases", case: typed_json(vec![-3, 0, 8], -7) },
-        ],
-        strategy: (prop::collection::vec(any::<i16>(), 0..12), any::<i16>()).prop_map(|(values, n)| typed_json(values, n)).boxed(),
-        check: check_equivalence,
-    });
-    contracts.push(Contract {
-        id: "ecma.json.native",
-        description: "Native aggregate serialization, creation order and shared typed/JSON storage",
-        specification: "https://tc39.es/ecma262/#sec-json.stringify",
-        domain: "Native closed records and dense numeric/boolean arrays, bidirectional alias mutation, array growth, recursive shapes and cyclic serialization; writes respect native field types",
-        witnesses: vec![
-            Witness { partition: "empty-growth", case: native_json(Vec::new(), 0) },
-            Witness { partition: "shared-storage", case: native_json(vec![-2,0,7,3], -9) },
-        ],
-        strategy: (prop::collection::vec(any::<i16>(), 0..12), any::<i16>()).prop_map(|(values, n)| native_json(values, n)).boxed(),
-        check: check_equivalence,
-    });
-    contracts.push(Contract {
-        id: "ecma.json.values",
-        description: "JSON variants, exact serialization, property order, aliases and catchable syntax errors",
-        specification: "https://tc39.es/ecma262/#sec-json-object",
-        domain: "Bounded UTF-8 JSON trees with six variants, duplicate and numeric keys, escaped controls and supplementary Unicode; exact command output; own-property mutation and array aliases",
-        witnesses: vec![
-            Witness { partition: "scalar", case: json_values("null".into()) },
-            Witness { partition: "order-and-duplicates", case: json_values(r#"{"b":1,"2":2,"a":3,"b":4,"1":5,"__proto__":{"safe":true}}"#.into()) },
-            Witness { partition: "numeric-boundaries", case: json_values("[-0,1e400,5e-324,9007199254740993]".into()) },
-            Witness { partition: "nested", case: json_values(r#"[{"empty":{},"array":[],"text":"é🙂\n\u0000"},true,false,null]"#.into()) },
-        ],
-        strategy: json_strategy().prop_map(json_values).boxed(),
-        check: check_equivalence,
-    });
+    let mut contracts = vec![
+        Contract {
+            id: "ecma.json.dictionary",
+            description: "JSON dictionary insertion, deletion, own-property presence and ordered key snapshots",
+            specification: "https://tc39.es/ecma262/#sec-ordinaryownpropertykeys",
+            domain: "Mutable parsed objects with duplicate, numeric and Unicode keys; undefined versus absent properties, native/typed aliases and nested undefined serialization; deletion is limited to dictionary properties",
+            witnesses: vec![
+                Witness {
+                    partition: "empty",
+                    case: dictionary_json(Vec::new()),
+                },
+                Witness {
+                    partition: "growth-and-reinsertion",
+                    case: dictionary_json((0..40).collect()),
+                },
+                Witness {
+                    partition: "duplicate-and-negative",
+                    case: dictionary_json(vec![-7, 0, -7, 8, 0]),
+                },
+            ],
+            strategy: prop::collection::vec(any::<i16>(), 0..40)
+                .prop_map(dictionary_json)
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "ecma.json.typed",
+            description: "Checked typed aliases of parsed JSON retain identity, mutations and property order",
+            specification: "https://tc39.es/ecma262/#sec-json.parse",
+            domain: "Parsed closed records and homogeneous arrays, repeated narrowing, native slot replacement, typed/JSON alias writes, array growth and recursive schemas; values stay within declared types",
+            witnesses: vec![
+                Witness {
+                    partition: "empty-array",
+                    case: typed_json(Vec::new(), 0),
+                },
+                Witness {
+                    partition: "nested-aliases",
+                    case: typed_json(vec![-3, 0, 8], -7),
+                },
+            ],
+            strategy: (prop::collection::vec(any::<i16>(), 0..12), any::<i16>())
+                .prop_map(|(values, n)| typed_json(values, n))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "ecma.json.native",
+            description: "Native aggregate serialization, creation order and shared typed/JSON storage",
+            specification: "https://tc39.es/ecma262/#sec-json.stringify",
+            domain: "Native closed records and dense numeric/boolean arrays, bidirectional alias mutation, array growth, recursive shapes and cyclic serialization; writes respect native field types",
+            witnesses: vec![
+                Witness {
+                    partition: "empty-growth",
+                    case: native_json(Vec::new(), 0),
+                },
+                Witness {
+                    partition: "shared-storage",
+                    case: native_json(vec![-2, 0, 7, 3], -9),
+                },
+            ],
+            strategy: (prop::collection::vec(any::<i16>(), 0..12), any::<i16>())
+                .prop_map(|(values, n)| native_json(values, n))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "ecma.json.values",
+            description: "JSON variants, exact serialization, property order, aliases and catchable syntax errors",
+            specification: "https://tc39.es/ecma262/#sec-json-object",
+            domain: "Bounded UTF-8 JSON trees with six variants, duplicate and numeric keys, escaped controls and supplementary Unicode; exact command output; own-property mutation and array aliases",
+            witnesses: vec![
+                Witness {
+                    partition: "scalar",
+                    case: json_values("null".into()),
+                },
+                Witness {
+                    partition: "order-and-duplicates",
+                    case: json_values(
+                        r#"{"b":1,"2":2,"a":3,"b":4,"1":5,"__proto__":{"safe":true}}"#.into(),
+                    ),
+                },
+                Witness {
+                    partition: "numeric-boundaries",
+                    case: json_values("[-0,1e400,5e-324,9007199254740993]".into()),
+                },
+                Witness {
+                    partition: "nested",
+                    case: json_values(
+                        r#"[{"empty":{},"array":[],"text":"é🙂\n\u0000"},true,false,null]"#.into(),
+                    ),
+                },
+            ],
+            strategy: json_strategy().prop_map(json_values).boxed(),
+            check: check_equivalence,
+        },
+    ];
     for (id, description, specification, operation, asynchronous) in [
         (
             "ecma.uint8array.set",
@@ -533,6 +590,63 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn dictionary_json(values: Vec<i16>) -> Case {
+    let mut keys = vec![
+        "".to_owned(),
+        "é🙂".to_owned(),
+        "__proto__".to_owned(),
+        "constructor".to_owned(),
+        "00".to_owned(),
+        "4294967295".to_owned(),
+        "4294967294".to_owned(),
+    ];
+    keys.extend(values.iter().map(ToString::to_string));
+    let keys = serde_json::to_string(&keys).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {{[key:string]:JsonValue}};
+type Anchor = {{anchor:number}};
+function anchor(value: JsonValue): Anchor {{ return value as unknown as Anchor; }}
+const root = JSON.parse('{{"anchor":1,"z":2,"z":3,"__proto__":0}}');
+const typed = anchor(root);
+const again = anchor(root);
+const holder = {{item:typed}};
+const packed: JsonValue = holder;
+const keys: string[] = {keys};
+for(let i=0;i<keys.length;i++) root[keys[i]] = i;
+const snapshot = Object.keys(root);
+for(let i=0;i<keys.length;i++) {{
+  if(!Object.hasOwn(root, keys[i])) throw 1;
+  if(keys[i] !== '__proto__' && !delete root[keys[i]]) throw 2;
+  root[keys[i]] = i+7;
+}}
+root.missing = undefined;
+root.alsoMissing = root.absent;
+root.nested = {{gone:undefined,items:[undefined,null,{{present:4,gone:undefined}}]}};
+if(!Object.hasOwn(root,'missing') || Object.hasOwn(root,'absent')) throw 3;
+if(packed.item !== root || typed !== again) throw 4;
+if(!delete root.anchor || Object.hasOwn(root,'anchor')) throw 5;
+typed.anchor = 9;
+if(again.anchor !== 9) throw 6;
+root[0/0] = 1;
+root[-0] = 2;
+root.true = 3;
+const assigned = (root.assigned = 'text');
+if(assigned + '!' !== 'text!') throw 8;
+const indexed = (root['indexed'] = true);
+if(!indexed) throw 9;
+if(!Object.hasOwn(root,0/0) || !Object.hasOwn(root,'true')) throw 7;
+console.log(JSON.stringify([snapshot,Object.keys(root),root]));
+console.log(JSON.stringify([Object.keys('é🙂'),Object.keys(3),Object.keys(true)]));
+const native = {{later:2,first:1}};
+console.log(JSON.stringify(Object.keys(native)));
+"#
+        ),
+    }
 }
 
 fn typed_json(values: Vec<i16>, n: i16) -> Case {

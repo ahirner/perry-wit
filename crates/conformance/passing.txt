@@ -13,3 +13,4 @@ ecma.uint8array.views
 ecma.json.values
 ecma.json.native
 ecma.json.typed
+ecma.json.dictionary

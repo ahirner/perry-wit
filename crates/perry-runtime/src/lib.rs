@@ -64,6 +64,7 @@ mod tests {
         arrays_grow_and_keep_elements();
         byte_views_preserve_aliases_and_validate_before_writing();
         json_trees_share_array_storage_and_retain_unicode();
+        json_dictionaries_grow_compact_and_keep_identity();
         native_json_optionals_use_contextual_undefined_semantics();
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
@@ -85,7 +86,7 @@ mod tests {
             let list = perry_json_get(root, key);
             let storage = perry_json_as_array(list);
             let value = perry_json_number(17.0);
-            array::set_slot(storage, 0, value as usize as u64);
+            view::perry_view_set(storage, 0, value as usize as u64);
             assert_eq!(perry_json_get(root, key), list);
             assert_eq!(perry_json_as_number(perry_json_index(list, 0.0)), 17.0);
             assert_eq!(perry_json_equal(perry_json_array(storage), list), 1);
@@ -106,6 +107,62 @@ mod tests {
             perry_json_as_number(list);
             assert_eq!(exception::perry_exception_status(), exception::TYPE_ERROR);
             exception::perry_exception_catch(exception::TYPE_ERROR as i32);
+        }
+        perry_task_end();
+        assert_eq!(chunk_counts().0, 0);
+    }
+
+    fn json_dictionaries_grow_compact_and_keep_identity() {
+        use json::*;
+        perry_task_begin();
+        // SAFETY: all references belong to this task; temporary key text is copied into it.
+        unsafe {
+            let root = perry_json_parse(string::copy(r#"{"anchor":1,"a":2,"a":3}"#));
+            let anchor = string::copy("anchor");
+            let identity = root;
+            for index in 0..256 {
+                perry_json_set_index(root, index as f64, perry_json_number(index as f64));
+            }
+            for index in 0..256 {
+                assert_eq!(
+                    perry_json_as_number(perry_json_index(root, index as f64)),
+                    index as f64
+                );
+            }
+            for _ in 0..3 {
+                for index in 0..256 {
+                    let key = perry_json_key(perry_json_number(index as f64));
+                    assert_eq!(perry_json_delete(root, key), 1);
+                }
+                for index in 0..256 {
+                    perry_json_set_index(root, index as f64, perry_json_number(index as f64));
+                }
+            }
+            assert_eq!(root, identity);
+            assert_eq!(perry_json_as_number(perry_json_get(root, anchor)), 1.0);
+            let missing = string::copy("missing");
+            assert_eq!(perry_json_has_own(root, missing), 0);
+            perry_json_set(root, missing, core::ptr::null_mut());
+            assert_eq!(perry_json_has_own(root, missing), 1);
+            assert!(perry_json_get(root, missing).is_null());
+            let snapshot = perry_json_keys(root);
+            assert_eq!(array::slots(snapshot).len(), 259);
+            assert_eq!(
+                string::text(array::slots(snapshot)[256] as usize as *mut u8),
+                "anchor"
+            );
+            assert_eq!(perry_json_delete(root, anchor), 1);
+            perry_json_set(root, anchor, perry_json_number(7.0));
+            assert_eq!(
+                string::text(array::slots(snapshot)[256] as usize as *mut u8),
+                "anchor"
+            );
+            let keys = perry_json_keys(root);
+            assert_eq!(
+                string::text(array::slots(keys)[258] as usize as *mut u8),
+                "anchor"
+            );
+            assert_eq!(exception::perry_exception_status(), 0);
         }
         perry_task_end();
         assert_eq!(chunk_counts().0, 0);

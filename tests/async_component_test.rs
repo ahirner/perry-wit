@@ -60,10 +60,15 @@ export async function json(input: string): Promise<string> {
   const count: number = typed.count;
   const native = {count:count};
   const reference: JsonValue = native;
+  for(let i=0;i<24;i++) alias[i] = i;
+  const keys = Object.keys(alias);
   await setTimeout(1);
   reference.count = reference.count + 1;
-  typed.count = native.count;
+  for(let i=0;i<24;i++) delete alias[i];
+  delete alias.count;
   await setTimeout(1);
+  typed.count = native.count;
+  if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');
   if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');
   return JSON.stringify(value);
 }

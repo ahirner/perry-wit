@@ -567,6 +567,12 @@ impl<'s> FunctionBuilder<'s> {
                 // type. An explicit type the subset cannot represent is an error, not a fallback.
                 let declared = match ty {
                     HirType::Any | HirType::Unknown => None,
+                    HirType::Array(element)
+                        if matches!(element.as_ref(), HirType::Any)
+                            && matches!(init, Some(Expr::ObjectKeys(_))) =>
+                    {
+                        None
+                    }
                     ty => Some(self.shapes.value_type(ctx, ty)?),
                 };
                 let init = init
@@ -787,6 +793,12 @@ impl<'s> FunctionBuilder<'s> {
             return self.json_value(ctx, expr);
         }
         Ok(match expr {
+            Expr::Undefined => {
+                let inner = expected
+                    .map(|ty| optional_value(ctx, ty).unwrap_or(ty))
+                    .unwrap_or_else(|| JsonType::get(ctx).into());
+                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, inner))
+            }
             Expr::Null => self.intrinsic(ctx, Intrinsic::JsonNull, vec![]).unwrap(),
             Expr::JsonParse(text) | Expr::JsonParseTyped { text, .. } => {
                 let text = self.expression(ctx, text)?;
@@ -1158,6 +1170,43 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ObjectKeys(object) if matches!(object.as_ref(), Expr::ProcessEnv) => {
                 self.intrinsic(ctx, Intrinsic::EnvKeys, vec![]).unwrap()
             }
+            Expr::ObjectKeys(object) => {
+                let value = self.json_value(ctx, object)?;
+                let value = self.optional(ctx, value);
+                self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value])
+                    .unwrap()
+            }
+            Expr::ObjectHasOwn(object, key) => {
+                let value = self.json_value(ctx, object)?;
+                let value = self.optional(ctx, value);
+                let key = self.property_key(ctx, key)?;
+                self.intrinsic(ctx, Intrinsic::JsonHasOwn, vec![value, key])
+                    .unwrap()
+            }
+            Expr::Delete(target) => {
+                let (object, key) = match target.as_ref() {
+                    Expr::PropertyGet {
+                        object, property, ..
+                    } => {
+                        let object = self.expression(ctx, object)?;
+                        let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, property));
+                        (object, key)
+                    }
+                    Expr::IndexGet { object, index } => {
+                        let object = self.expression(ctx, object)?;
+                        let key = self.property_key(ctx, index)?;
+                        (object, key)
+                    }
+                    _ => bail!("delete requires a JSON dictionary property (subset rule R1)"),
+                };
+                ensure!(
+                    json::is_json(ctx, object),
+                    "delete requires a JSON dictionary; native records have closed shapes (subset rule R1)"
+                );
+                let object = self.defined(ctx, object)?;
+                self.intrinsic(ctx, Intrinsic::JsonDelete, vec![object, key])
+                    .unwrap()
+            }
             Expr::ProcessArgv => self.intrinsic(ctx, Intrinsic::Arguments, vec![]).unwrap(),
             Expr::PropertyGet {
                 object, property, ..
@@ -1457,8 +1506,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 Intrinsic::JsonSetIndex
             };
-            let value = self.expression(ctx, value)?;
-            let json = self.pack_json(ctx, value)?;
+            let (value, json) = self.json_assignment(ctx, value)?;
             self.intrinsic(ctx, intrinsic, vec![array, index, json]);
             return Ok(value);
         }
@@ -1501,8 +1549,7 @@ impl<'s> FunctionBuilder<'s> {
         let record = self.defined(ctx, record)?;
         if kind(ctx, record)? == Kind::Json {
             let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, field));
-            let value = self.expression(ctx, value)?;
-            let json = self.pack_json(ctx, value)?;
+            let (value, json) = self.json_assignment(ctx, value)?;
             self.intrinsic(ctx, Intrinsic::JsonSet, vec![record, key, json]);
             return Ok(value);
         }

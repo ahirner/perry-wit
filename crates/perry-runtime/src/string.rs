@@ -49,6 +49,16 @@ pub(crate) unsafe fn text<'a>(string: *mut u8) -> &'a str {
     }
 }
 
+pub(crate) fn copy(text: &str) -> *mut u8 {
+    let length = u32::try_from(text.len()).expect("string too large");
+    let data = perry_alloc(length);
+    // SAFETY: fresh task storage is disjoint from the source and holds all UTF-8 bytes.
+    unsafe {
+        ptr::copy_nonoverlapping(text.as_ptr(), data, text.len());
+        perry_string_adopt(data, length)
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 const _: () = assert!(core::mem::size_of::<Str>() == SIZE as usize);
 

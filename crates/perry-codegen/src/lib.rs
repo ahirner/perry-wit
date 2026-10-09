@@ -257,6 +257,10 @@ enum Runtime {
     JsonIsArray,
     JsonSet,
     JsonSetIndex,
+    JsonKeys,
+    JsonHasOwn,
+    JsonDelete,
+    JsonKey,
 
     BufferNew,
     BufferLength,
@@ -344,6 +348,10 @@ impl Runtime {
             Runtime::JsonString => "perry_json_string",
             Runtime::JsonArray => "perry_json_array",
             Runtime::JsonObject => "perry_json_object",
+            Runtime::JsonKeys => "perry_json_keys",
+            Runtime::JsonHasOwn => "perry_json_has_own",
+            Runtime::JsonDelete => "perry_json_delete",
+            Runtime::JsonKey => "perry_json_key",
             Runtime::JsonGet => "perry_json_get",
             Runtime::JsonIndex => "perry_json_index",
             Runtime::JsonAsNumber => "perry_json_as_number",
@@ -448,14 +456,18 @@ impl Runtime {
             | Runtime::JsonArray
             | Runtime::JsonParse
             | Runtime::JsonStringify
+            | Runtime::JsonKeys
+            | Runtime::JsonKey
             | Runtime::JsonAsArray
             | Runtime::JsonAsString
             | Runtime::JsonAsBoolean
             | Runtime::JsonTypeof
             | Runtime::JsonIsArray => (vec![i32], vec![i32]),
-            Runtime::JsonObject | Runtime::JsonGet | Runtime::JsonEqual => {
-                (vec![i32, i32], vec![i32])
-            }
+            Runtime::JsonObject
+            | Runtime::JsonGet
+            | Runtime::JsonEqual
+            | Runtime::JsonHasOwn
+            | Runtime::JsonDelete => (vec![i32, i32], vec![i32]),
             Runtime::JsonIndex => (vec![i32, f64], vec![i32]),
             Runtime::JsonAsNumber => (vec![i32], vec![f64]),
             Runtime::JsonSet => (vec![i32, i32, i32], vec![]),
@@ -1820,6 +1832,10 @@ impl<'s> FunctionLowering<'s> {
                 Intrinsic::JsonString => Some(Runtime::JsonString),
                 Intrinsic::JsonArray => Some(Runtime::JsonArray),
                 Intrinsic::JsonObject => Some(Runtime::JsonObject),
+                Intrinsic::JsonKeys => Some(Runtime::JsonKeys),
+                Intrinsic::JsonHasOwn => Some(Runtime::JsonHasOwn),
+                Intrinsic::JsonDelete => Some(Runtime::JsonDelete),
+                Intrinsic::JsonKey => Some(Runtime::JsonKey),
                 Intrinsic::JsonGet => Some(Runtime::JsonGet),
                 Intrinsic::JsonIndex => Some(Runtime::JsonIndex),
                 Intrinsic::JsonAsNumber => Some(Runtime::JsonAsNumber),

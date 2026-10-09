@@ -33,7 +33,6 @@ pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
             Kind::Boolean => Json::Boolean(bits != 0),
             Kind::String => Json::String(bits as usize as *mut u8),
             Kind::Json => return (bits != 0).then(|| *(bits as usize as *const Json)),
-            Kind::Array if ty.element().kind == Kind::Json => Json::Array(bits as usize as *mut u8),
             Kind::Array => Json::Native {
                 reference: bits as usize as *mut u8,
                 ty,
@@ -77,9 +76,6 @@ pub(super) unsafe fn scalar_or_native(ty: &Type, value: *mut u8) -> Option<u64> 
             (Kind::Number, Json::Number(value)) => Some(value.to_bits()),
             (Kind::Boolean, Json::Boolean(value)) => Some(value as u64),
             (Kind::String, Json::String(value)) => Some(value as usize as u64),
-            (Kind::Array, Json::Array(value)) if ty.element().kind == Kind::Json => {
-                Some(value as usize as u64)
-            }
             (
                 Kind::Array | Kind::Record,
                 Json::Native {

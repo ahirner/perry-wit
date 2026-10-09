@@ -23,7 +23,7 @@ pub(crate) unsafe fn source(reference: *mut u8) -> Option<*mut u8> {
 fn identity(value: Json) -> *mut u8 {
     match value {
         Json::Array(reference) | Json::Native { reference, .. } => reference,
-        Json::Object { fields, .. } => fields.cast(),
+        Json::Object(object) => object.cast(),
         _ => ptr::null_mut(),
     }
 }
@@ -41,7 +41,8 @@ unsafe fn member(value: Json, index: usize, key: Option<&str>) -> Option<Json> {
     // SAFETY: the variant identifies live storage and all indices are checked.
     unsafe {
         match value {
-            Json::Object { fields, length } => find_field(fields, length, key?)
+            Json::Object(object) => (*object)
+                .find(key?)
                 .and_then(|field| (*field).value.cast::<Json>().as_ref().copied()),
             Json::Array(array) => array::slots(array)
                 .get(index)
@@ -106,7 +107,7 @@ unsafe fn matches(
                     count
                 } else {
                     let object = match value {
-                        Json::Object { .. } => true,
+                        Json::Object(_) => true,
                         Json::Native { ty, .. } => (*ty).kind == Kind::Record,
                         _ => false,
                     };
