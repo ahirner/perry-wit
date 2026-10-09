@@ -28,11 +28,11 @@ panic = "abort"
 strip = true
 
 [dependencies]
+perry-codegen = { path = "crates/perry-codegen" }
+perry-lower = { path = "crates/perry-lower" }
+perry-mir = { path = "crates/perry-mir" }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
 perry-parser = { git = "https://github.com/PerryTS/perry", rev = "9e29f59d435ee08df161ef460ee6f204fb381d4f" }
-perry-hir = { git = "https://github.com/PerryTS/perry", rev = "9e29f59d435ee08df161ef460ee6f204fb381d4f" }
-swc_ecma_visit = "19.0"
-swc_common = "18.0"
-swc_ecma_transforms_base = "32.0"
 wasm-encoder = { version = "0.261", features = ["wasmparser"] }
 wasmparser = "0.261"
 wit-parser = { version = "0.261" }
@@ -41,9 +41,6 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 wat = "1.261.0"
-wasmprinter = "0.261.0"
-waffle = "0.3.2"
-regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search", "unicode"] }
 
 [build-dependencies]
 wasmparser = "0.261"
@@ -59,3 +56,4 @@ wasmtime-wasi-http = { version = "49.0.2", default-features = false, features = 
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
 tempfile = "3.27.0"
 perry-json-helper = { path = "crates/json-helper" }
+wasmprinter = "0.261.0"

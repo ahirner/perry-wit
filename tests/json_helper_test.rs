@@ -6,10 +6,11 @@ use wasmtime::{
     Val, ValType,
 };
 
-#[path = "../src/waffle_backend/libraries.rs"]
-mod libraries;
-#[path = "../src/waffle_backend/link.rs"]
+// The linker is compiled into this test crate; only its helper placement is exercised.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/link/mod.rs"]
 mod link;
+use link::libraries;
 
 const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
 const INPUT: u32 = 262_144;

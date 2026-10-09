@@ -15,8 +15,21 @@ fn main() {
         compile_helper(&manifest_dir, &out_dir, helper);
     }
     for helper in ["json", "time", "number"] {
-        compile_cargo_helper(&manifest_dir, &out_dir, helper);
+        compile_cargo_helper(
+            &manifest_dir,
+            &out_dir,
+            &format!("perry-{helper}-helper"),
+            &format!("crates/{helper}-helper"),
+            helper,
+        );
     }
+    compile_cargo_helper(
+        &manifest_dir,
+        &out_dir,
+        "perry-runtime",
+        "crates/perry-runtime",
+        "runtime",
+    );
 }
 
 fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
@@ -53,8 +66,14 @@ fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
         .expect("validate embedded helper module");
 }
 
-fn compile_cargo_helper(manifest: &Path, output: &Path, helper: &str) {
-    println!("cargo:rerun-if-changed=crates/{helper}-helper");
+fn compile_cargo_helper(
+    manifest: &Path,
+    output: &Path,
+    package: &str,
+    crate_dir: &str,
+    helper: &str,
+) {
+    println!("cargo:rerun-if-changed={crate_dir}");
     println!("cargo:rerun-if-changed=Cargo.lock");
     let target = output.join("cargo-helper-build");
     let status = Command::new(env::var_os("CARGO").expect("Cargo sets CARGO"))
@@ -66,7 +85,7 @@ fn compile_cargo_helper(manifest: &Path, output: &Path, helper: &str) {
             "--locked",
             "--offline",
             "--release",
-            &format!("--package=perry-{helper}-helper"),
+            &format!("--package={package}"),
             "--crate-type=cdylib",
             "--target=wasm32-unknown-unknown",
             "--target-dir",
@@ -84,7 +103,8 @@ fn compile_cargo_helper(manifest: &Path, output: &Path, helper: &str) {
         .expect("build embedded Cargo helper");
     assert!(status.success(), "compile embedded {helper} helper");
     let source = target.join(format!(
-        "wasm32-unknown-unknown/release/perry_{helper}_helper.wasm"
+        "wasm32-unknown-unknown/release/{}.wasm",
+        package.replace('-', "_")
     ));
     let module = output.join(format!("{helper}.wasm"));
     fs::copy(source, &module).expect("copy embedded Cargo helper");

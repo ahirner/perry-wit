@@ -91,7 +91,7 @@
           '';
         };
 
-        # Compiler with embedded allocation-free computation helpers
+        # Compiler with the embedded runtime and computation helpers
         perryWitBin = craneLib.buildPackage {
           inherit src cargoArtifacts;
           pname = "perry-wit";
@@ -101,7 +101,7 @@
           nativeBuildInputs = with pkgs; [ pkg-config ];
           postInstall = ''
             mkdir -p "$out/lib/perry-wit-helpers"
-            for f in search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
+            for f in runtime.wasm search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
               wasm_file=$(find target -name "$f" -print -quit)
               if [ -n "$wasm_file" ]; then
                 cp "$wasm_file" "$out/lib/perry-wit-helpers/"
@@ -118,26 +118,6 @@
           mkdir -p "$out/lib"
           cp ${perryWitBin}/lib/perry-wit-helpers/*.wasm "$out/lib/"
         '';
-
-        # Example WASIp3 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
-        exampleMergeDocs = pkgs.stdenv.mkDerivation {
-          pname = "example-merge-docs";
-          version = "0.1.0";
-          inherit src;
-          nativeBuildInputs = [ perryWitBin ];
-          buildPhase = ''
-            export WASI_WIT_PATH="${wasiP3Wit}"
-            mkdir -p dist
-            perry-wit examples/merge_docs.ts \
-              --wit wit \
-              --world merge-docs \
-              -o dist/perry_merge_docs.stripped.wasm
-          '';
-          installPhase = ''
-            mkdir -p "$out/lib"
-            cp dist/perry_merge_docs.stripped.wasm "$out/lib/"
-          '';
-        };
 
         # Example task component with canonical WIT exports
         exampleMergeTask = pkgs.stdenv.mkDerivation {
@@ -247,7 +227,6 @@
           default = perryWitBin;
           perry-wit = perryWitBin;
           core-helpers = coreHelpers;
-          example-merge-docs = exampleMergeDocs;
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
           wasi-wit = wasiP3Wit;
@@ -262,7 +241,7 @@
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
-          inherit coreHelpers exampleMergeDocs exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
+          inherit coreHelpers exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
         };
 
         devShells.default = pkgs.mkShell {

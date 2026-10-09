@@ -239,3 +239,44 @@ export function run(n: number): number {
     let two = printed.find("builtin.double 2>").expect("2");
     assert!(one < two, "{printed}");
 }
+
+#[test]
+fn same_field_names_with_other_types_are_distinct_records() {
+    let printed = lowered(
+        r#"
+interface Inner { v: number; c: Leaf }
+interface Leaf { v: number }
+interface Outer { v: number; c: Inner }
+function depth(o: Outer): number {
+  return o.c.c.v + o.c.v + o.v;
+}
+export function run(n: number): number {
+  return depth({ v: n, c: { v: 2, c: { v: 3 } } });
+}
+"#,
+    );
+    // Inner and Outer share field names but not field types.
+    assert!(printed.contains("shape_c_v {"), "{printed}");
+    assert!(printed.contains("shape_c_v_2 {"), "{printed}");
+}
+
+#[test]
+fn recursive_interfaces_get_a_reserved_name() {
+    let printed = lowered(
+        r#"
+interface Node { value: number; next: Node[] }
+function total(node: Node): number {
+  let sum = node.value;
+  for (let i = 0; i < node.next.length; i++) {
+    sum = sum + total(node.next[i]);
+  }
+  return sum;
+}
+export function run(n: number): number {
+  const leaf: Node = { value: n, next: [] };
+  return total({ value: 1, next: [leaf, leaf] });
+}
+"#,
+    );
+    assert!(printed.contains("shape_next_value_rec1"), "{printed}");
+}

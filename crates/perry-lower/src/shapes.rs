@@ -1,9 +1,12 @@
 //! HIR types to MIR types, with records identified by shape.
 //!
-//! TypeScript object types are structural, so a record is identified by its sorted field
-//! names: an interface `P { x; y }`, a type literal `{ y; x }`, and Perry's synthesized
+//! TypeScript object types are structural, so a record is identified by its sorted fields and
+//! their types: an interface `P { x; y }`, a type literal `{ y; x }`, and Perry's synthesized
 //! `__AnonShape_*` class for the literal `{ y: …, x: … }` all map to `perry.record <shape_x_y>`.
-//! Field order inside the record is the sorted order; evaluation order stays the source order.
+//! A different structure with the same field names gets the next free suffix (`shape_x_y_2`).
+//! Recursion is only possible through named types; a recursive interface gets a fresh name
+//! before its fields are known. Field order inside the record is the sorted order; evaluation
+//! order stays the source order.
 //! Widening a record to a narrower shape (subset rule R2) is not supported yet.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
@@ -14,12 +17,17 @@ use pliron::{
     identifier::Identifier,
     r#type::{TypeHandle, TypedHandle},
 };
-use std::{cell::RefCell, collections::HashSet};
+use std::{cell::RefCell, collections::HashMap};
 
 pub(crate) struct Shapes<'h> {
     hir: &'h HirModule,
-    /// Records whose field types are being computed; references to them stay opaque.
-    pending: RefCell<HashSet<String>>,
+    /// Named types whose fields are being computed, with the record name reserved when a
+    /// field refers back to the type.
+    pending: RefCell<HashMap<String, Option<String>>>,
+    /// Record names reserved for recursive types.
+    reserved: RefCell<usize>,
+    /// Resolved named types, so a recursive interface keeps its reserved name.
+    named: RefCell<HashMap<String, TypeHandle>>,
 }
 
 pub(crate) fn identifier(name: &str) -> Result<Identifier> {
@@ -38,7 +46,9 @@ impl<'h> Shapes<'h> {
     pub(crate) fn new(hir: &'h HirModule) -> Self {
         Shapes {
             hir,
-            pending: RefCell::new(HashSet::new()),
+            pending: RefCell::new(HashMap::new()),
+            reserved: RefCell::new(0),
+            named: RefCell::new(HashMap::new()),
         }
     }
 
@@ -66,13 +76,25 @@ impl<'h> Shapes<'h> {
                         Ok((name.as_str(), &info.ty))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                self.hir_record(ctx, fields)?.into()
+                self.hir_record(ctx, None, fields)?.into()
             }
             other => bail!("MIR backend does not support type {other:?} yet"),
         })
     }
 
     fn named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
+        if let Some(ty) = self.named.borrow().get(name) {
+            return Ok(*ty);
+        }
+        let ty = self.resolve_named(ctx, name)?;
+        // A re-entrant reference returns the opaque record; only the outermost call caches.
+        if !self.pending.borrow().contains_key(name) {
+            self.named.borrow_mut().insert(name.to_string(), ty);
+        }
+        Ok(ty)
+    }
+
+    fn resolve_named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {
         if let Some(interface) = self.hir.interfaces.iter().find(|i| i.name == name) {
             ensure!(
                 interface.type_params.is_empty()
@@ -93,7 +115,7 @@ impl<'h> Shapes<'h> {
                     Ok((p.name.as_str(), &p.ty))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            return Ok(self.hir_record(ctx, fields)?.into());
+            return Ok(self.hir_record(ctx, Some(name), fields)?.into());
         }
         if let Some(alias) = self.hir.type_aliases.iter().find(|a| a.name == name) {
             ensure!(
@@ -105,18 +127,36 @@ impl<'h> Shapes<'h> {
         bail!("type {name} is not supported by the MIR backend yet")
     }
 
-    /// A record from HIR field types. Recursive references resolve to the opaque record.
+    /// A record from HIR field types; `named` is the interface they come from, if any.
     fn hir_record(
         &self,
         ctx: &mut Context,
+        named: Option<&str>,
         mut fields: Vec<(&str, &HirType)>,
     ) -> Result<TypedHandle<RecordType>> {
         fields.sort_by(|a, b| a.0.cmp(b.0));
         let names: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
-        let name = record_name(&names);
-        if !self.pending.borrow_mut().insert(name.clone()) {
-            return RecordType::get(ctx, identifier(&name)?, None)
-                .map_err(|e| anyhow!("{}", e.disp(ctx)));
+        if let Some(named) = named {
+            let reentry = self.pending.borrow().get(named).cloned();
+            match reentry {
+                Some(Some(reserved)) => {
+                    return RecordType::get(ctx, identifier(&reserved)?, None)
+                        .map_err(|e| anyhow!("{}", e.disp(ctx)));
+                }
+                Some(None) => {
+                    let mut count = self.reserved.borrow_mut();
+                    *count += 1;
+                    let reserved = format!("{}_rec{}", record_name(&names), *count);
+                    self.pending
+                        .borrow_mut()
+                        .insert(named.to_string(), Some(reserved.clone()));
+                    return RecordType::get(ctx, identifier(&reserved)?, None)
+                        .map_err(|e| anyhow!("{}", e.disp(ctx)));
+                }
+                None => {
+                    self.pending.borrow_mut().insert(named.to_string(), None);
+                }
+            }
         }
         let typed = fields
             .iter()
@@ -128,8 +168,19 @@ impl<'h> Shapes<'h> {
                 ))
             })
             .collect::<Result<Vec<_>>>();
-        self.pending.borrow_mut().remove(&name);
-        self.mir_record(ctx, typed?)
+        let reserved = named.and_then(|named| self.pending.borrow_mut().remove(named).flatten());
+        let typed = typed?;
+        match reserved {
+            Some(name) => {
+                let fields = typed
+                    .into_iter()
+                    .map(|(field, ty)| Ok((identifier(&field)?, ty)))
+                    .collect::<Result<Vec<_>>>()?;
+                RecordType::get(ctx, identifier(&name)?, Some(fields))
+                    .map_err(|e| anyhow!("{}", e.disp(ctx)))
+            }
+            None => self.mir_record(ctx, typed),
+        }
     }
 
     /// A record from MIR field types, in any order.
@@ -140,14 +191,23 @@ impl<'h> Shapes<'h> {
     ) -> Result<TypedHandle<RecordType>> {
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         let names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
-        let name = record_name(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let base = record_name(&names.iter().map(String::as_str).collect::<Vec<_>>());
         let fields = fields
             .into_iter()
             .map(|(field, ty)| Ok((identifier(&field)?, ty)))
             .collect::<Result<Vec<_>>>()?;
-        RecordType::get(ctx, identifier(&name)?, Some(fields)).map_err(|_| {
-            anyhow!("shapes with fields {names:?} but different field types are not supported yet")
-        })
+        // The first name whose definition matches, or which is still free.
+        for suffix in 1.. {
+            let name = if suffix == 1 {
+                base.clone()
+            } else {
+                format!("{base}_{suffix}")
+            };
+            if let Ok(record) = RecordType::get(ctx, identifier(&name)?, Some(fields.clone())) {
+                return Ok(record);
+            }
+        }
+        unreachable!()
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.

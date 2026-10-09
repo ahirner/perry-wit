@@ -1,7 +1,7 @@
 //! TODOs.md P0.1: compile time must stay polynomial in expression nesting.
-//! Before the per-query type memo (P1.1), each extra `.c` multiplied compile time by about 8,
-//! so depth 6 took tens of seconds.
-use perry_wit::{WaffleCompileOptions, compile_typescript_waffle};
+//! The legacy backend's type inference multiplied compile time by about 8 per extra `.c`;
+//! the MIR builder types each expression once.
+use perry_wit::compile_core;
 use std::{
     sync::mpsc,
     thread,
@@ -36,16 +36,9 @@ fn compile_within(depth: usize, limit: Duration) -> Result<Duration, String> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let started = Instant::now();
-        let result = compile_typescript_waffle(
-            &property_chain(depth),
-            "chain.ts",
-            &WaffleCompileOptions {
-                componentize: false,
-                ..Default::default()
-            },
-        )
-        .map(|_| started.elapsed())
-        .map_err(|error| format!("{error:#}"));
+        let result = compile_core(&property_chain(depth), "chain.ts")
+            .map(|_| started.elapsed())
+            .map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
     receiver

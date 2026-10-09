@@ -2,7 +2,7 @@
 use pliron::derive::pliron_attr;
 use wasm_encoder::{Instruction, MemArg, ValType};
 
-use ValType::{F64, I32, I64};
+use ValType::{F32, F64, I32, I64};
 
 /// How an opcode may be moved by the emitter's stack scheduler.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -18,8 +18,8 @@ macro_rules! numeric {
     ($($name:ident: [$($operand:ident),*] -> $result:ident, $effect:ident;)*) => {
         /// A Wasm numeric instruction. The name is the instruction's mnemonic in CamelCase.
         ///
-        /// `f32` arithmetic is not modelled yet; the frontends this crate serves compute in
-        /// `f64`, `i32` and `i64`.
+        /// `f32` arithmetic is not modelled yet (only conversions); the frontends this crate
+        /// serves compute in `f64`, `i32` and `i64`.
         #[pliron_attr(name = "wasm.num_opcode", format, verifier = "succ")]
         #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
         pub enum NumOpcode {
@@ -139,6 +139,8 @@ numeric! {
     F64ConvertI64U: [I64] -> F64, Pure;
     I64ReinterpretF64: [F64] -> I64, Pure;
     F64ReinterpretI64: [I64] -> F64, Pure;
+    F64PromoteF32: [F32] -> F64, Pure;
+    F32DemoteF64: [F64] -> F32, Pure;
 }
 
 macro_rules! memory {
@@ -185,6 +187,7 @@ memory! {
     I32: I32, 4, I32Load, I32Store;
     I64: I64, 8, I64Load, I64Store;
     F64: F64, 8, F64Load, F64Store;
+    F32: F32, 4, F32Load, F32Store;
     I32U8: I32, 1, I32Load8U, I32Store8;
     I32S8: I32, 1, I32Load8S, I32Store8;
     I32U16: I32, 2, I32Load16U, I32Store16;

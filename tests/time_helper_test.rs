@@ -1,10 +1,11 @@
 use anyhow::Result;
 use wasmtime::{Engine, Instance, Memory, Module, Store};
 
-#[path = "../src/waffle_backend/libraries.rs"]
-mod libraries;
-#[path = "../src/waffle_backend/link.rs"]
+// The linker is compiled into this test crate; only its helper placement is exercised.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/link/mod.rs"]
 mod link;
+use link::libraries;
 
 const INPUT: u32 = 262_144;
 const VALUE: u32 = 327_680;

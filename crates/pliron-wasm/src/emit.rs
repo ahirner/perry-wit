@@ -44,9 +44,9 @@ use pliron::{
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use wasm_encoder::{
-    BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
-    ImportSection, IndirectNameMap, Instruction, MemArg, MemorySection, MemoryType, Module,
-    NameMap, NameSection, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, ImportSection, IndirectNameMap, Instruction, MemArg, MemorySection,
+    MemoryType, Module, NameMap, NameSection, TypeSection, ValType,
 };
 
 #[derive(Debug, Error)]
@@ -85,8 +85,17 @@ pub enum Memory {
 #[derive(Clone, Debug, Default)]
 pub struct EmitOptions {
     pub memory: Memory,
+    /// Active data segments of memory 0.
+    pub data: Vec<DataSegment>,
     /// Emit a `name` section with function and local names.
     pub names: bool,
+}
+
+/// Bytes placed at a fixed address of memory 0 at instantiation.
+#[derive(Clone, Debug, Default)]
+pub struct DataSegment {
+    pub offset: u32,
+    pub bytes: Vec<u8>,
 }
 
 fn signature(
@@ -218,6 +227,17 @@ pub fn emit_module(ctx: &Context, module: &ModuleOp, options: &EmitOptions) -> E
         wasm.section(&exports);
     }
     wasm.section(&code);
+    if !options.data.is_empty() {
+        let mut data = DataSection::new();
+        for segment in &options.data {
+            data.active(
+                0,
+                &ConstExpr::i32_const(segment.offset as i32),
+                segment.bytes.iter().copied(),
+            );
+        }
+        wasm.section(&data);
+    }
     if options.names {
         let mut name_section = NameSection::new();
         name_section.functions(&names);

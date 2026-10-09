@@ -1044,11 +1044,18 @@ impl<'s> FunctionBuilder<'s> {
             };
             values.push((name.clone(), value));
         }
-        let fields = values
-            .iter()
-            .map(|(n, v)| (n.clone(), v.get_type(ctx)))
-            .collect();
-        let record = self.shapes.mir_record(ctx, fields)?;
+        // With a matching expected type the fields were fitted to it; that includes recursive
+        // records, which no literal's own structure can name.
+        let record = match expected {
+            Some(record) => record,
+            None => {
+                let fields = values
+                    .iter()
+                    .map(|(n, v)| (n.clone(), v.get_type(ctx)))
+                    .collect();
+                self.shapes.mir_record(ctx, fields)?
+            }
+        };
         values.sort_by(|a, b| a.0.cmp(&b.0));
         let operands = values.into_iter().map(|(_, v)| v).collect();
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
