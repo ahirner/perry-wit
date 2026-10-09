@@ -36,8 +36,8 @@ use perry_mir::{
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     intrinsics::{
-        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, SettledField,
-        SettledFieldOp, may_throw,
+        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp,
+        PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp, may_throw,
     },
     locals::UndefOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
@@ -1047,6 +1047,28 @@ impl<'s> FunctionLowering<'s> {
         self.result(ctx, op)
     }
 
+    /// The exception object `op`'s operand throws: itself, or a thrown value boxed.
+    fn thrown(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<Value> {
+        let value = self.operand(ctx, op, 0)?;
+        let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+        if ty.deref(ctx).is::<ExceptionType>() {
+            return Ok(value);
+        }
+        use perry_runtime::exception::{TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
+        let tag = match repr(ctx, ty)? {
+            Repr::F64 => TAG_NUMBER,
+            Repr::Bool => TAG_BOOLEAN,
+            _ if ty.deref(ctx).is::<StringType>() => TAG_STRING,
+            _ => bail!("this value cannot be thrown yet"),
+        };
+        let kind = self.i32_const(ctx, status_code(ErrorKind::Value));
+        let tag = self.i32_const(ctx, tag as i32);
+        let bits = self.slot_bits(ctx, value);
+        Ok(self
+            .runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, bits])
+            .expect("exception"))
+    }
+
     fn store(
         &mut self,
         ctx: &mut Context,
@@ -1495,6 +1517,20 @@ impl<'s> FunctionLowering<'s> {
                 Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
             }
             Intrinsic::JsonIsUndefined => Some(self.num(ctx, NumOpcode::I32Eqz, args)),
+            Intrinsic::ExceptionSetCause => {
+                let (exception, cause) = (args[0], args[1]);
+                self.store(
+                    ctx,
+                    MemKind::I32,
+                    exception,
+                    perry_runtime::exception::CAUSE,
+                    cause,
+                );
+                None
+            }
+            Intrinsic::ExceptionCause => {
+                Some(self.load(ctx, MemKind::I32, args[0], perry_runtime::exception::CAUSE))
+            }
             // The null address is the JSON `undefined`.
             Intrinsic::JsonUndefined => Some(self.i32_const(ctx, 0)),
             Intrinsic::JsonFromBool | Intrinsic::JsonNull => {
@@ -1770,6 +1806,7 @@ impl<'s> FunctionLowering<'s> {
                         Intrinsic::ExceptionToNumber => {
                             ("std_exception_to_number", &[W::I32], &[W::F64])
                         }
+                        Intrinsic::ExceptionName => ("std_exception_name", &[W::I32], &[W::I32]),
                         Intrinsic::ExceptionToString => {
                             ("std_exception_to_string", &[W::I32], &[W::I32])
                         }
@@ -2520,6 +2557,16 @@ impl<'s> FunctionLowering<'s> {
             self.define(ctx, op, promise);
             return Ok(());
         }
+        if Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some() {
+            let value = self.operand(ctx, op, 0)?;
+            let bits = self.slot_bits(ctx, value);
+            let promise = self
+                .runtime(ctx, Runtime::PromiseNew, vec![])
+                .expect("promise");
+            self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
+            self.define(ctx, op, promise);
+            return Ok(());
+        }
         if let Some(read) = Operation::get_op::<SettledFieldOp>(op, ctx) {
             // A settled view is the input promise itself (`perry_promise_all_settled`).
             use perry_runtime::promise::{FULFILLED, STATE, VALUE};
@@ -2567,25 +2614,20 @@ impl<'s> FunctionLowering<'s> {
             self.define(ctx, op, value);
             return Ok(());
         }
+        if Operation::get_op::<PromiseRejectedOp>(op, ctx).is_some() {
+            let exception = self.thrown(ctx, op)?;
+            let status = self
+                .runtime(ctx, Runtime::ExceptionRaise, vec![exception])
+                .expect("status");
+            let promise = self
+                .runtime(ctx, Runtime::PromiseNew, vec![])
+                .expect("promise");
+            self.runtime(ctx, Runtime::PromiseReject, vec![promise, status]);
+            self.define(ctx, op, promise);
+            return Ok(());
+        }
         if Operation::get_op::<RaiseOp>(op, ctx).is_some() {
-            let value = self.operand(ctx, op, 0)?;
-            let ty = op.deref(ctx).get_operand(0).get_type(ctx);
-            let exception = if ty.deref(ctx).is::<ExceptionType>() {
-                value
-            } else {
-                use perry_runtime::exception::{TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
-                let tag = match repr(ctx, ty)? {
-                    Repr::F64 => TAG_NUMBER,
-                    Repr::Bool => TAG_BOOLEAN,
-                    _ if ty.deref(ctx).is::<StringType>() => TAG_STRING,
-                    _ => bail!("this value cannot be thrown yet"),
-                };
-                let kind = self.i32_const(ctx, status_code(ErrorKind::Value));
-                let tag = self.i32_const(ctx, tag as i32);
-                let bits = self.slot_bits(ctx, value);
-                self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, bits])
-                    .expect("exception")
-            };
+            let exception = self.thrown(ctx, op)?;
             let status = self
                 .runtime(ctx, Runtime::ExceptionRaise, vec![exception])
                 .expect("status");

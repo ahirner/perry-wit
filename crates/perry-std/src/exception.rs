@@ -39,3 +39,14 @@ pub extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 {
         }
     }
 }
+
+/// `error.name`: the constructor's name of an `Error` object (thrown values have none).
+#[unsafe(no_mangle)]
+pub extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
+    from_static(match parts(exception).0 {
+        TYPE_ERROR => "TypeError",
+        2 => "RangeError",
+        3 => "Error",
+        _ => "",
+    })
+}

@@ -219,6 +219,9 @@ impl<'h> Shapes<'h> {
             }
             match name {
                 "Uint8Array" => return Ok(perry_mir::types::BytesType::get(ctx).into()),
+                "Error" | "TypeError" | "RangeError" => {
+                    return Ok(perry_mir::types::ExceptionType::get(ctx).into());
+                }
                 "Date" => return Ok(perry_mir::types::DateType::get(ctx).into()),
                 "Headers" => return Ok(perry_mir::types::HeadersType::get(ctx).into()),
                 "Response" => return Ok(perry_mir::types::ResponseType::get(ctx).into()),

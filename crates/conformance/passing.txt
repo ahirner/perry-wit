@@ -42,3 +42,4 @@ node.stream.writable_to_web
 wasi.streams.incoming_bytes
 web.fetch.bounded_body
 wasi.http.handler
+ecma.error.values

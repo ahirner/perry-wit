@@ -273,3 +273,34 @@ rejected
     );
     Ok(())
 }
+
+/// `Error` names and string causes, `Promise.resolve`/`reject` and plain values among
+/// combinator inputs, and error spreads, against output recorded from Node 22.
+#[tokio::test(flavor = "current_thread")]
+async fn errors_and_settled_promises_match_node() -> Result<()> {
+    let run = execute(
+        r#"
+const plain = new Error('plain');
+const typed = new TypeError('bad', { cause: 'root' });
+const range = new RangeError('far', { cause: 'distance' });
+console.log(plain.name, plain.message, plain.cause === undefined, typed.name, typed.cause, range.name, range.cause);
+const values = await Promise.all([Promise.resolve(1), 2, 3]);
+console.log(values.length, values[0], values[1], values[2]);
+const first = await Promise.race([4, 5]);
+const settled = await Promise.allSettled([6, Promise.reject(typed)]);
+console.log(first, settled[0].status, settled[1].status, settled[1].reason === typed);
+try { throw typed; } catch (e) { console.log(e === typed, JSON.stringify({ ...typed, extra: 1 })); }
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        r#"Error plain true TypeError root RangeError distance
+3 1 2 3
+4 fulfilled rejected true
+true {"extra":1}
+"#
+    );
+    Ok(())
+}

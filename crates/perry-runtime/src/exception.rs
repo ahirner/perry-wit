@@ -6,14 +6,16 @@
 //! compiled code without an object (`perry.unwrap`, holes) get one materialized at the catch.
 //!
 //! Layout, read inline by compiled code: `kind: u32` at 0 (the status), `tag: u32` at 4,
-//! `value: u64` at 8. `Error` objects have tag [TAG_STRING] and their message in `value`;
-//! other thrown values keep their slot bits.
+//! `value: u64` at 8, `cause: u32` at 16. `Error` objects have tag [TAG_STRING] and their
+//! message in `value`, and a string `cause` or null; other thrown values keep their slot
+//! bits.
 use crate::region::current;
 use core::ptr;
 
 pub const KIND: u32 = 0;
 pub const TAG: u32 = 4;
 pub const VALUE: u32 = 8;
+pub const CAUSE: u32 = 16;
 
 pub const TYPE_ERROR: u32 = 1;
 pub const RANGE_ERROR: u32 = 2;
@@ -30,6 +32,7 @@ struct Exception {
     kind: u32,
     tag: u32,
     value: u64,
+    cause: *mut u8,
 }
 
 /// A new exception object in the current task.
@@ -37,7 +40,14 @@ struct Exception {
 pub extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8 {
     let exception = current().allocate(core::mem::size_of::<Exception>()) as *mut Exception;
     // SAFETY: freshly allocated.
-    unsafe { exception.write(Exception { kind, tag, value }) };
+    unsafe {
+        exception.write(Exception {
+            kind,
+            tag,
+            value,
+            cause: ptr::null_mut(),
+        })
+    };
     exception as *mut u8
 }
 

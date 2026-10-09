@@ -297,6 +297,10 @@ intrinsics! {
     JsonFromBool = "json_from_bool" (Bool) -> (Json), pure;
     JsonNull = "json_null" () -> (Json), pure;
     JsonUndefined = "json_undefined" () -> (Json), pure;
+    // `Error` objects: `cause` (strings only, set at construction) and `name`.
+    ExceptionSetCause = "exception_set_cause" (Exception, String) -> ();
+    ExceptionCause = "exception_cause" (Exception) -> (OptString);
+    ExceptionName = "exception_name" (Exception) -> (String), pure;
     MathRandom = "math_random" () -> (Number);
     RandomUuid = "random_uuid" () -> (String);
     BytesFillRandom = "bytes_fill_random" (Bytes) -> (Bytes);
@@ -613,6 +617,69 @@ impl Verify for PromiseCombinatorOp {
         if !ok {
             verify_err!(self.loc(ctx), CombinatorErr)?
         }
+        Ok(())
+    }
+}
+
+/// A promise fulfilled with its operand: a plain value among a combinator's inputs
+/// (`Promise.all([pending, 1])`).
+#[pliron_op(
+    name = "perry.promise_resolved",
+    format = "$0 ` : ` type($0)",
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface]
+)]
+pub struct PromiseResolvedOp;
+
+impl PromiseResolvedOp {
+    pub fn new(ctx: &mut Context, value: Value) -> Self {
+        let ty = value.get_type(ctx);
+        let result = crate::types::PromiseType::get(ctx, ty).into();
+        PromiseResolvedOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![result],
+                vec![value],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+/// A promise rejected with its operand (`Promise.reject(e)`), of `perry.promise<T>` for the
+/// settled type `T` its context expects.
+#[pliron_op(
+    name = "perry.promise_rejected",
+    format = "$0 ` : ` type($0)",
+    interfaces = [pliron::builtin::op_interfaces::OneOpdInterface, pliron::builtin::op_interfaces::OneResultInterface]
+)]
+pub struct PromiseRejectedOp;
+
+impl PromiseRejectedOp {
+    pub fn new(ctx: &mut Context, reason: Value, settled: pliron::r#type::TypeHandle) -> Self {
+        let result = crate::types::PromiseType::get(ctx, settled).into();
+        PromiseRejectedOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![result],
+                vec![reason],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for PromiseRejectedOp {
+    fn verify(&self, _ctx: &Context) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Verify for PromiseResolvedOp {
+    fn verify(&self, _ctx: &Context) -> Result<()> {
         Ok(())
     }
 }

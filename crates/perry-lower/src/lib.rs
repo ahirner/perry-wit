@@ -36,8 +36,8 @@ use perry_mir::{
     },
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     intrinsics::{
-        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp, SettledField,
-        SettledFieldOp, may_throw,
+        Combinator, Intrinsic, IntrinsicOp, JsonStringifyOp, PromiseCombinatorOp,
+        PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp, may_throw,
     },
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
@@ -1928,6 +1928,45 @@ impl<'s> FunctionBuilder<'s> {
                 let message = self.string_operand(ctx, message)?;
                 self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message))
             }
+            // `new Error(message, { cause })`: causes are strings (accepted deviation).
+            Expr::ErrorNewWithCause { message, cause } => {
+                let message = self.string_operand(ctx, message)?;
+                let error =
+                    self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::Any, message));
+                self.error_cause(ctx, error, cause)?;
+                error
+            }
+            Expr::ErrorNewWithOptions {
+                kind: error_kind,
+                message,
+                options,
+            } => {
+                let kind = match error_kind {
+                    0 => ErrorKind::Any,
+                    1 => ErrorKind::TypeError,
+                    2 => ErrorKind::RangeError,
+                    _ => bail!("only Error, TypeError and RangeError are supported yet"),
+                };
+                let cause = match &**options {
+                    Expr::New {
+                        class_name, args, ..
+                    } if self
+                        .shapes
+                        .literal_fields(class_name)
+                        .is_some_and(|names| names == ["cause"]) =>
+                    {
+                        &args[0]
+                    }
+                    Expr::Object(fields) if fields.len() == 1 && fields[0].0 == "cause" => {
+                        &fields[0].1
+                    }
+                    _ => bail!("error options must be a literal {{ cause }}"),
+                };
+                let message = self.string_operand(ctx, message)?;
+                let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message));
+                self.error_cause(ctx, error, cause)?;
+                error
+            }
             Expr::ErrorMessage(error) => {
                 let error = self.expression(ctx, error)?;
                 ensure!(
@@ -2017,6 +2056,12 @@ impl<'s> FunctionBuilder<'s> {
                     (Kind::Stats, "size") => self
                         .intrinsic(ctx, Intrinsic::StatsSize, vec![value])
                         .expect("size"),
+                    (Kind::Exception, "cause") => self
+                        .intrinsic(ctx, Intrinsic::ExceptionCause, vec![value])
+                        .expect("cause"),
+                    (Kind::Exception, "name") => self
+                        .intrinsic(ctx, Intrinsic::ExceptionName, vec![value])
+                        .expect("name"),
                     (Kind::Exception, "message") => {
                         self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
                     }
@@ -2278,6 +2323,95 @@ impl<'s> FunctionBuilder<'s> {
         Ok(true)
     }
 
+    /// The array literal given to a promise combinator: plain values among promises of `T`
+    /// become promises fulfilled with them, as `Promise.all` treats them.
+    fn combinator_inputs(&mut self, ctx: &mut Context, items: &[Expr]) -> Result<Value> {
+        // `Promise.reject(e)` takes its settled type from the other inputs: lower it last.
+        let mut lowered: Vec<Option<Value>> = Vec::with_capacity(items.len());
+        for item in items {
+            lowered.push(
+                if promise_call(item).is_some_and(|(name, _)| name == "reject") {
+                    None
+                } else {
+                    let value = self.expression(ctx, item)?;
+                    Some(self.defined(ctx, value)?)
+                },
+            );
+        }
+        let known: Vec<Value> = lowered.iter().flatten().copied().collect();
+        let promised = known.iter().find_map(|value| {
+            TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx)
+                .ok()
+                .map(|promise| promise.deref(ctx).value())
+        });
+        let settled = match promised {
+            Some(settled) => settled,
+            None => match known.first() {
+                Some(first) => first.get_type(ctx),
+                None => self.void_type(ctx),
+            },
+        };
+        let promise: TypeHandle = PromiseType::get(ctx, settled).into();
+        let mut values = Vec::with_capacity(items.len());
+        for (item, value) in items.iter().zip(lowered) {
+            values.push(match value {
+                Some(value) => value,
+                None => {
+                    let (name, reason) = promise_call(item).expect("checked");
+                    self.promise_settled(ctx, name, reason, Some(settled))?
+                }
+            });
+        }
+        let mut inputs = Vec::with_capacity(values.len());
+        for value in values {
+            let value = if value.get_type(ctx) == promise {
+                value
+            } else {
+                let value = self.fit(ctx, value, settled)?;
+                self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value))
+            };
+            inputs.push(value);
+        }
+        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, promise, inputs)))
+    }
+
+    /// `Promise.resolve(value)` (a promise passes through) or `Promise.reject(reason)`, a
+    /// promise of `settled` (`undefined` when nothing says).
+    fn promise_settled(
+        &mut self,
+        ctx: &mut Context,
+        name: &str,
+        value: &Expr,
+        settled: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let value = self.expression(ctx, value)?;
+        let value = self.defined(ctx, value)?;
+        if name == "resolve" {
+            if TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx).is_ok() {
+                return Ok(value);
+            }
+            return Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)));
+        }
+        let settled = match settled {
+            Some(settled) => settled,
+            None => self.void_type(ctx),
+        };
+        Ok(self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, value, settled)))
+    }
+
+    /// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
+    fn void_type(&self, ctx: &mut Context) -> TypeHandle {
+        let number = FP64Type::get(ctx).into();
+        perry_mir::types::OptionalType::get(ctx, number).into()
+    }
+
+    /// Set the `cause` of a new error: a string (accepted deviation, TODOs.md P6.2).
+    fn error_cause(&mut self, ctx: &mut Context, error: Value, cause: &Expr) -> Result<()> {
+        let cause = self.typed_operand(ctx, cause, Kind::String, "a string error cause")?;
+        self.intrinsic(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
+        Ok(())
+    }
+
     /// An object literal with spreads, which Perry HIR lowers to a source-ordered IIFE over
     /// `{}` (`__o`): `js_object_assign_one(__o, source)` per spread and `__o[key] = value`
     /// per static member. Over JSON values it builds a JSON object; typed records do not
@@ -2303,6 +2437,10 @@ impl<'s> FunctionBuilder<'s> {
                         && is_target(&args[0]) =>
                 {
                     let source = self.expression(ctx, &args[1])?;
+                    // An `Error` has no own enumerable properties: it adds nothing.
+                    if matches!(kind(ctx, source), Ok(Kind::Exception)) {
+                        continue;
+                    }
                     let Some(source) = self.json_operand(ctx, source)? else {
                         bail!("{UNSUPPORTED}");
                     };
@@ -2978,6 +3116,9 @@ impl<'s> FunctionBuilder<'s> {
                 && matches!(**global, Expr::GlobalGet(_))
                 && class == "Promise"
             {
+                if let ("resolve" | "reject", [value]) = (property.as_str(), args) {
+                    return self.promise_settled(ctx, property, value, None).map(Some);
+                }
                 let combinator = match property.as_str() {
                     "all" => Combinator::All,
                     "race" => Combinator::Race,
@@ -2987,7 +3128,10 @@ impl<'s> FunctionBuilder<'s> {
                 let [inputs] = args else {
                     bail!("Promise.{property} takes one array");
                 };
-                let inputs = self.expression(ctx, inputs)?;
+                let inputs = match inputs {
+                    Expr::Array(items) => self.combinator_inputs(ctx, items)?,
+                    inputs => self.expression(ctx, inputs)?,
+                };
                 let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
                     .context("Promise combinators take an array of promises of one type")?;
                 return Ok(Some(self.append_value(ctx, &op)));
@@ -3095,6 +3239,32 @@ fn expression_name(expr: &Expr) -> String {
         .next()
         .unwrap_or("?")
         .to_string()
+}
+
+/// `Promise.<name>(argument)`: the name and the argument.
+fn promise_call(expr: &Expr) -> Option<(&str, &Expr)> {
+    let Expr::Call { callee, args, .. } = expr else {
+        return None;
+    };
+    let Expr::PropertyGet {
+        object, property, ..
+    } = &**callee
+    else {
+        return None;
+    };
+    let Expr::PropertyGet {
+        object: global,
+        property: class,
+        ..
+    } = &**object
+    else {
+        return None;
+    };
+    let [argument] = args.as_slice() else {
+        return None;
+    };
+    (matches!(**global, Expr::GlobalGet(_)) && class == "Promise")
+        .then_some((property.as_str(), argument))
 }
 
 #[cfg(test)]
