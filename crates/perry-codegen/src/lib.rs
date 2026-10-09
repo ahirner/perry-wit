@@ -1657,13 +1657,21 @@ impl<'s> FunctionLowering<'s> {
             }
             return Ok(());
         }
-        if Operation::get_op::<perry_mir::dictionaries::NewOp>(op, ctx).is_some() {
+        if let Some(new) = Operation::get_op::<perry_mir::dictionaries::NewOp>(op, ctx) {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
             let address = self.state.data.descriptor(ctx, ty)?;
             let descriptor = self.i32_const(ctx, address as i32);
             let value = self
                 .runtime(ctx, Runtime::DictionaryNew, vec![descriptor])
                 .expect("dictionary");
+            for (index, name) in new.fields(ctx).into_iter().enumerate() {
+                let key = self.state.data.string(&name);
+                let key = self.i32_const(ctx, key as i32);
+                let entry = self.operand(ctx, op, index)?;
+                let bits = self.slot_bits(ctx, entry);
+                self.runtime(ctx, Runtime::DictionarySet, vec![value, key, bits]);
+                self.check_pending(ctx);
+            }
             self.define(ctx, op, value);
             return Ok(());
         }

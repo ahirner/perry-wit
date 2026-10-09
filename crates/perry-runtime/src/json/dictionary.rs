@@ -23,33 +23,99 @@ pub unsafe extern "C" fn perry_dictionary_new(ty: *const Type) -> *mut u8 {
     dictionary.cast()
 }
 
+unsafe fn descriptor(reference: *mut u8) -> &'static Type {
+    // SAFETY: aligned references are native headers; tagged references are checked views.
+    unsafe {
+        if reference as usize & 1 != 0 {
+            &*(*((reference as usize & !1) as *const view::View)).ty
+        } else {
+            &*(*reference.cast::<Dictionary>()).ty
+        }
+    }
+}
+
+unsafe fn field(ty: &Type, key: *mut u8) -> Option<&crate::shape::Field> {
+    // SAFETY: dictionary metadata and key strings remain live throughout the task.
+    unsafe {
+        ty.fields()
+            .iter()
+            .find(|field| string::text(field.name) == string::text(key))
+    }
+}
+
+unsafe fn accepts_bits(element: &Type, field: &Type, bits: u64) -> bool {
+    // SAFETY: the bits match the element type. Optional removal only tests its sentinel,
+    // including non-JSON references; remaining refinements have JSON-compatible types.
+    unsafe {
+        if core::ptr::eq(element, field) {
+            return true;
+        }
+        if element.kind == Kind::Optional && core::ptr::eq(element.element(), field) {
+            return bits != element.undefined();
+        }
+        view::accepts(field, native::read(element, bits))
+    }
+}
+
+unsafe fn accepts_field(ty: &Type, key: *mut u8, value: *mut u8) -> bool {
+    // SAFETY: fields constrain the dictionary's element type, which codegen has verified.
+    unsafe {
+        field(ty, key)
+            .is_none_or(|field| view::accepts(&*field.ty, value.cast::<Json>().as_ref().copied()))
+    }
+}
+
 /// # Safety
 /// `reference` is a live native dictionary or a checked dictionary view; key is a live string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_dictionary_get(reference: *mut u8, key: *mut u8) -> u64 {
-    // SAFETY: tagged references point to views; native references have a dictionary header.
+    // SAFETY: descriptor and source agree on the uniform element representation.
     unsafe {
-        if let Some(source) = view::source(reference) {
-            let view = &*((reference as usize & !1) as *const view::View);
-            let element = (*view.ty).element();
-            if !properties::has_own(*source.cast::<Json>(), string::text(key)) {
+        let ty = descriptor(reference);
+        let element = ty.element();
+        let source = view::source(reference);
+        let stored = if source.is_none() {
+            (*(*reference.cast::<Dictionary>()).fields).find(string::text(key))
+        } else {
+            None
+        };
+        let present = source.map_or(stored.is_some(), |source| {
+            properties::has_own(*source.cast::<Json>(), string::text(key))
+        });
+        let constraint = field(ty, key);
+        if !present {
+            if constraint.is_some_and(|field| !field.optional) {
+                failure(
+                    exception::TYPE_ERROR,
+                    "dictionary is missing a required field",
+                );
+            }
+            return element.undefined();
+        }
+        if let Some(source) = source {
+            let value = perry_json_get(source, key);
+            if !accepts_field(ty, key, value) {
+                failure(
+                    exception::TYPE_ERROR,
+                    "dictionary value does not match its named field",
+                );
                 return element.undefined();
             }
-            return view::perry_json_unpack(element, perry_json_get(source, key));
+            return view::perry_json_unpack(element, value);
         }
-        let dictionary = &*reference.cast::<Dictionary>();
-        let element = (*dictionary.ty).element();
-        (*dictionary.fields).find(string::text(key)).map_or_else(
-            || element.undefined(),
-            |field| {
-                let bits = (*field).value;
-                if element.kind == Kind::Number {
-                    crate::number_bits(f64::from_bits(bits))
-                } else {
-                    bits
-                }
-            },
-        )
+        let bits = (*stored.expect("present native entry")).value;
+        if constraint.is_some_and(|field| !accepts_bits(element, &*field.ty, bits)) {
+            failure(
+                exception::TYPE_ERROR,
+                "dictionary value does not match its named field",
+            );
+            return element.undefined();
+        }
+        if element.kind == Kind::Number {
+            crate::number_bits(f64::from_bits(bits))
+        } else {
+            bits
+        }
     }
 }
 
@@ -57,12 +123,26 @@ pub unsafe extern "C" fn perry_dictionary_get(reference: *mut u8, key: *mut u8) 
 /// `reference` is a live dictionary/view; bits matches its static element type and key is live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_dictionary_set(reference: *mut u8, key: *mut u8, bits: u64) {
-    // SAFETY: views pack with their target type and validate against source storage before writing.
+    // SAFETY: validation finishes before the source storage changes, including native aliases.
     unsafe {
+        let ty = descriptor(reference);
         if let Some(source) = view::source(reference) {
-            let view = &*((reference as usize & !1) as *const view::View);
-            let value = perry_json_pack((*view.ty).element(), bits);
+            let value = perry_json_pack(ty.element(), bits);
+            if !accepts_field(ty, key, value) {
+                failure(
+                    exception::TYPE_ERROR,
+                    "dictionary assignment does not match its named field",
+                );
+                return;
+            }
             perry_json_set(source, key, value);
+            return;
+        }
+        if field(ty, key).is_some_and(|field| !accepts_bits(ty.element(), &*field.ty, bits)) {
+            failure(
+                exception::TYPE_ERROR,
+                "dictionary assignment does not match its named field",
+            );
             return;
         }
         let dictionary = &*reference.cast::<Dictionary>();
@@ -83,6 +163,13 @@ pub unsafe extern "C" fn perry_dictionary_set(reference: *mut u8, key: *mut u8, 
 pub unsafe extern "C" fn perry_dictionary_delete(reference: *mut u8, key: *mut u8) -> u32 {
     // SAFETY: dictionary deletion leaves its stable header and every retained value untouched.
     unsafe {
+        if field(descriptor(reference), key).is_some_and(|field| !field.optional) {
+            failure(
+                exception::TYPE_ERROR,
+                "cannot delete a required dictionary field",
+            );
+            return 0;
+        }
         if let Some(source) = view::source(reference) {
             return perry_json_delete(source, key);
         }

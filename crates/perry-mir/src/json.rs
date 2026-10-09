@@ -44,9 +44,10 @@ pub fn compatible(ctx: &Context, ty: TypeHandle) -> bool {
             return visit(ctx, array.element(), seen);
         }
         if let Some(dictionary) = ty.downcast_ref::<DictionaryType>() {
-            return dictionary
-                .element()
-                .is_some_and(|element| visit(ctx, element, seen));
+            return dictionary.schema().is_some_and(|schema| {
+                visit(ctx, schema.element, seen)
+                    && schema.fields.iter().all(|field| visit(ctx, field.ty, seen))
+            });
         }
         if let Some(record) = ty.downcast_ref::<RecordType>() {
             return record

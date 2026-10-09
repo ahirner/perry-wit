@@ -697,7 +697,9 @@ fn native_json_views_verify_types_and_property_order() {
 fn dictionary_signatures_and_recursive_types_round_trip() -> Result<()> {
     let source = single_block(
         r#"
-      d = perry.dictionary_new Unassigned : perry.dictionary <builtin.fp64>;
+      d = perry.dictionary_new Unassigned [] () : perry.dictionary <builtin.fp64>;
+      constrained = perry.dictionary_new Unassigned ["required", "extra"] (v, v) : perry.dictionary <builtin.fp64 { "required": builtin.fp64 }>;
+      optional = perry.dictionary_new Unassigned [] () : perry.dictionary <perry.optional <builtin.fp64> { "maybe"?: perry.optional <builtin.fp64> }>;
       key = perry.string_const "key" : perry.string;
       perry.dictionary Set (d, key, v) : ;
       value = perry.dictionary Get (d, key) : perry.optional <builtin.fp64>;
@@ -705,9 +707,9 @@ fn dictionary_signatures_and_recursive_types_round_trip() -> Result<()> {
       values = perry.dictionary Values (d) : perry.array <builtin.fp64>;
       has = perry.dictionary Has (d, key) : builtin.integer i1;
       deleted = perry.dictionary Delete (d, key) : builtin.integer i1;
-      recursive = perry.dictionary_new Unassigned : perry.dictionary <@Tree: perry.dictionary <@Tree>>;
+      recursive = perry.dictionary_new Unassigned [] () : perry.dictionary <@Tree: perry.dictionary <@Tree>>;
       perry.dictionary Set (recursive, key, recursive) : ;
-      mixed = perry.dictionary_new Unassigned : perry.dictionary <@Shared: perry.record <Shared { next: perry.dictionary <@Shared> }>>;
+      mixed = perry.dictionary_new Unassigned [] () : perry.dictionary <@Shared: perry.record <Shared { next: perry.dictionary <@Shared> }>>;
     "#,
     );
     let ctx = &mut Context::new();
@@ -723,6 +725,12 @@ fn dictionary_signatures_and_recursive_types_round_trip() -> Result<()> {
     verify_operation(module, next)?;
     assert_eq!(printed, normalized(&print(next, module)));
     for invalid in [
+        source.replace(
+            "[\"required\", \"extra\"] (v, v)",
+            "[\"other\", \"extra\"] (v, v)",
+        ),
+        source.replace("[\"required\", \"extra\"] (v, v)", "[\"required\"] (v, v)"),
+        source.replace("\"required\": builtin.fp64", "\"required\": perry.string"),
         source.replace("Set (d, key, v)", "Set (d, key, key)"),
         source.replace(
             "Get (d, key) : perry.optional <builtin.fp64>",

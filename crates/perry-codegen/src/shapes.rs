@@ -1,6 +1,6 @@
 //! Static type graphs and per-allocation property order, shared with the runtime.
 use super::*;
-use perry_runtime::shape::{FIELD_SIZE, Kind, TYPE_SIZE};
+use perry_runtime::shape::{DICTIONARY_SHAPE_SIZE, FIELD_SIZE, Kind, TYPE_SIZE};
 
 impl Data {
     fn reserve(&mut self, size: usize) -> u32 {
@@ -51,11 +51,20 @@ impl Data {
         } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
             (Kind::Array, self.descriptor(ctx, array.element())?, 0)
         } else if let Some(dictionary) = ty.downcast_ref::<DictionaryType>() {
-            (
-                Kind::Dictionary,
-                self.descriptor(ctx, dictionary.element().context("opaque dictionary")?)?,
-                0,
-            )
+            let schema = dictionary.schema().context("opaque dictionary")?;
+            let element = self.descriptor(ctx, schema.element)?;
+            let fields = self.reserve(schema.fields.len() * FIELD_SIZE as usize);
+            for (index, field) in schema.fields.iter().enumerate() {
+                let name = self.string(&field.name);
+                let ty = self.descriptor(ctx, field.ty)?;
+                self.words(
+                    fields + index as u32 * FIELD_SIZE,
+                    &[name, ty, u32::from(field.optional)],
+                );
+            }
+            let detail = self.reserve(DICTIONARY_SHAPE_SIZE as usize);
+            self.words(detail, &[element, fields]);
+            (Kind::Dictionary, detail, schema.fields.len() as u32)
         } else if let Some(record) = ty.downcast_ref::<RecordType>() {
             let fields = record
                 .fields()
@@ -64,7 +73,7 @@ impl Data {
             for (index, (name, ty)) in fields.iter().enumerate() {
                 let name = self.string(name.as_ref());
                 let field_type = self.descriptor(ctx, *ty)?;
-                self.words(detail + index as u32 * FIELD_SIZE, &[name, field_type]);
+                self.words(detail + index as u32 * FIELD_SIZE, &[name, field_type, 0]);
             }
             (Kind::Record, detail, fields.len() as u32)
         } else {

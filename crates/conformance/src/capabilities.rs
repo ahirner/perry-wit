@@ -106,6 +106,32 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = vec![
         Contract {
+            id: "ecma.object.constrained_dictionary",
+            description: "Named dictionary fields preserve optional presence, native storage and alias identity",
+            specification: "https://www.typescriptlang.org/docs/handbook/2/objects.html#index-signatures",
+            domain: "Valid string index signatures mixed with required and optional named fields, optional scalar values, JSON-compatible refinements, recursive dictionaries, growth, key/value snapshots and parsed/native aliases; invalidation and forbidden required-field deletion use separate subset exception assertions",
+            witnesses: vec![
+                Witness {
+                    partition: "absent-optional",
+                    case: constrained_dictionary(0, false, vec![]),
+                },
+                Witness {
+                    partition: "present-undefined",
+                    case: constrained_dictionary(-3, true, vec![2, -1, 4]),
+                },
+            ],
+            strategy: (
+                -32i16..=32,
+                any::<bool>(),
+                prop::collection::vec(-20i16..=20, 0..24),
+            )
+                .prop_map(|(count, present, entries)| {
+                    constrained_dictionary(count, present, entries)
+                })
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "ecma.json.replacer",
             description: "JSON function replacers preserve pre-order callbacks, mutations and serialized snapshots",
             specification: "https://tc39.es/ecma262/#sec-json.stringify",
@@ -728,6 +754,39 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn constrained_dictionary(count: i16, present: bool, entries: Vec<i16>) -> Case {
+    let entries = serde_json::to_string(&entries).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {{[key:string]:JsonValue}};
+interface Bag {{ [key:string]:number|undefined; count:number; maybe?:number; required:number|undefined }}
+type Payload = {{ [key:string]:JsonValue; label:string; count:number; child:{{n:number}} }};
+type Tree = {{ [key:string]:Tree|undefined; next?:Tree }};
+const bag:Bag={{count:{count},required:undefined}};
+if({present})bag.maybe=undefined;
+const before=Object.keys(bag);
+const alias:Record<string,number|undefined>=bag;
+const entries:number[]={entries};
+for(let i=0;i<entries.length;i++)alias[i]=entries[i];
+const snapshot=Object.values(bag);
+alias.count=bag.count+1;
+delete bag.maybe;bag.maybe={count};
+const narrowed:Bag=alias as Bag;
+const parsed:Bag=JSON.parse('{{"count":2,"required":3}}');
+parsed.required=undefined;parsed.maybe=4;delete parsed.maybe;
+const payload:Payload={{label:'é🙂',count:{count},child:{{n:3}}}};
+const wide:Record<string,JsonValue>=payload;
+wide.count={count}+2;
+const child:{{n:number}}=payload.child;child.n=8;
+const leaf:Tree={{}};const tree:Tree={{next:leaf}};tree.extra=leaf;
+console.log(JSON.stringify({{bag,before,snapshot,parsed,payload,tree,identity:bag===alias && bag===narrowed,required:Object.hasOwn(bag,'required'),maybe:Object.hasOwn(bag,'maybe')}}));
+"#
+        ),
+    }
 }
 
 fn json_replacer(text: String, amount: i16, gap: String) -> Case {

@@ -1,6 +1,6 @@
 //! Typed ordered dictionaries, distinct from closed records and JSON variant trees.
 use crate::{
-    attrs::{ErrorKind, Tier},
+    attrs::{ErrorKind, FieldNames, Tier},
     exceptions::MayThrowInterface,
     types::{ArrayType, DictionaryType, OptionalType, StringType},
 };
@@ -31,34 +31,73 @@ pub fn element(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
         .and_then(DictionaryType::element)
 }
 
+/// Assignment between supported dictionary field and element representations.
+pub fn accepts(ctx: &Context, target: TypeHandle, source: TypeHandle) -> bool {
+    if target == source {
+        return true;
+    }
+    if let Some(target) = crate::optional::optional_value(ctx, target) {
+        return accepts(
+            ctx,
+            target,
+            crate::optional::optional_value(ctx, source).unwrap_or(source),
+        );
+    }
+    target.deref(ctx).is::<crate::types::JsonType>()
+        && crate::optional::optional_value(ctx, source).is_none()
+        && crate::json::compatible(ctx, source)
+}
+
 #[pliron_op(
     name = "perry.dictionary_new",
-    format = "attr($perry_dictionary_tier, $Tier) ` : ` type($0)",
+    format = "attr($perry_dictionary_tier, $Tier) ` ` attr($perry_dictionary_fields, $FieldNames) ` (` operands(CharSpace(`,`)) `) : ` type($0)",
     interfaces = [OneResultInterface],
-    attributes = (perry_dictionary_tier: Tier)
+    attributes = (perry_dictionary_tier: Tier, perry_dictionary_fields: FieldNames)
 )]
 pub struct NewOp;
 impl NewOp {
-    pub fn new(ctx: &mut Context, element: TypeHandle) -> Self {
-        let ty = DictionaryType::get(ctx, element).into();
+    pub fn new(ctx: &mut Context, ty: TypeHandle, fields: Vec<(String, Value)>) -> Self {
+        let (names, values) = fields.into_iter().unzip();
         let op = Self {
             op: Operation::new(
                 ctx,
                 Self::get_concrete_op_info(),
                 vec![ty],
-                vec![],
+                values,
                 vec![],
                 0,
             ),
         };
         op.set_attr_perry_dictionary_tier(ctx, Tier::Unassigned);
+        op.set_attr_perry_dictionary_fields(ctx, FieldNames(names));
         op
+    }
+    pub fn fields(&self, ctx: &Context) -> Vec<String> {
+        self.get_attr_perry_dictionary_fields(ctx)
+            .expect("dictionary fields")
+            .0
+            .clone()
     }
 }
 impl Verify for NewOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if element(ctx, self.get_result(ctx).get_type(ctx)).is_none()
-            || self.get_operation().deref(ctx).get_num_operands() != 0
+        let ty = self.get_result(ctx).get_type(ctx).deref(ctx);
+        let Some(schema) = ty
+            .downcast_ref::<DictionaryType>()
+            .and_then(DictionaryType::schema)
+        else {
+            return verify_err!(self.loc(ctx), SignatureError);
+        };
+        let names = self.fields(ctx);
+        let op = self.get_operation().deref(ctx);
+        if names.len() != op.get_num_operands()
+            || op
+                .operands()
+                .any(|value| value.get_type(ctx) != schema.element)
+            || schema
+                .fields
+                .iter()
+                .any(|field| !field.optional && !names.contains(&field.name))
         {
             verify_err!(self.loc(ctx), SignatureError)?;
         }
@@ -68,7 +107,13 @@ impl Verify for NewOp {
 #[op_interface_impl]
 impl SideEffects for NewOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
-        false
+        true
+    }
+}
+#[op_interface_impl]
+impl MayThrowInterface for NewOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
     }
 }
 

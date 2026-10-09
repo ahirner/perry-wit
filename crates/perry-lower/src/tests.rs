@@ -24,7 +24,7 @@ fn rejected(source: &str) -> String {
         "{:#}",
         lower_source(ctx, source, "case.ts", crate::EntryPoint::Exports)
             .err()
-            .expect("rejection")
+            .unwrap_or_else(|| panic!("expected rejection: {source}"))
     )
 }
 
@@ -468,13 +468,23 @@ export function run(x: number): number {
         "type Dictionary = { [key: string]: number; required: number };",
         "type Dictionary = { required: number; [key: string]: number };",
         "interface Dictionary { [key: string]: number; required: number }",
-        "type Dictionary = { nested: { [key: string]: number; required: number } };",
     ] {
-        let invalid = rejected(&format!(
-            "{declaration} export function run(): number {{ return 0; }}"
+        let source = format!(
+            "{declaration} export function run(): number {{ const d:Dictionary={{required:1,extra:2}};return d.required; }}"
+        );
+        assert!(lowered(&source).contains("perry.dictionary"));
+        let error = rejected(&format!(
+            "{declaration} export function run():number {{const d:Dictionary={{extra:1}};return d.required;}}"
         ));
-        assert!(invalid.contains("constrained dictionary"), "{invalid}");
+        assert!(error.contains("missing required field"), "{error}");
     }
+    let incompatible = rejected(
+        "type Dictionary={ [key:string]:number; label:string };export function run(value:Dictionary):void{}",
+    );
+    assert!(
+        incompatible.contains("incompatible with its index signature"),
+        "{incompatible}"
+    );
     for declaration in [
         "type Dictionary = { [key: number]: string };",
         "interface Dictionary { [key: number]: string }",
@@ -550,6 +560,22 @@ export function run(input:string):string {
         assert!(
             error.contains("callback") || error.contains("subset rule R5"),
             "{error}"
+        );
+    }
+}
+
+#[test]
+fn inline_dictionary_annotations_retain_index_and_named_constraints() {
+    for source in [
+        "export function run():number {const d:{[key:string]:number;count:number}={count:1};d.extra=2;return d.count+d.extra;}",
+        "export function run(d:{[key:string]:number;count:number}):number {d.extra=2;return d.count+d.extra;}",
+        "type Nested={inner:{[key:string]:number;count:number}};export function run(d:Nested):number{return d.inner.count;}",
+    ] {
+        let printed = lowered(source);
+        let compact = printed.split_whitespace().collect::<String>();
+        assert!(
+            compact.contains("perry.dictionary<builtin.fp64{\"count\":builtin.fp64}>"),
+            "{printed}"
         );
     }
 }

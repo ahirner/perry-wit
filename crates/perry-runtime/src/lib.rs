@@ -211,14 +211,17 @@ mod tests {
                 Field {
                     name: gone,
                     ty: &optional,
+                    optional: false,
                 },
                 Field {
                     name: kept,
                     ty: &number,
+                    optional: false,
                 },
                 Field {
                     name: list,
                     ty: &array_type,
+                    optional: false,
                 },
             ];
             let descriptor = Type {

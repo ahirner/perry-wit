@@ -7,7 +7,7 @@ use pliron::{
     dict_key,
     identifier::Identifier,
     input_err_noloc,
-    irfmt::parsers::{delimited_list_parser, location, spaced, type_parser},
+    irfmt::parsers::{delimited_list_parser, location, quoted_string_parser, spaced, type_parser},
     location::Located,
     parsable::{IntoParseResult, Parsable, ParseResult, StateStream},
     printable::{self, Printable},
@@ -298,27 +298,50 @@ impl ArrayType {
     }
 }
 
-/// An ordered, mutable string-keyed dictionary with one statically known value type (R1).
-/// Named declarations reserve identity before resolving a recursive element type.
+/// An ordered dictionary with a uniform element representation and named-field constraints.
+/// Named declarations reserve identity before resolving recursive schemas.
 #[pliron_type(name = "perry.dictionary")]
 #[derive(Debug)]
 pub struct DictionaryType {
     identity: DictionaryIdentity,
-    element: Option<TypeHandle>,
+    schema: Option<DictionarySchema>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct DictionaryField {
+    pub name: String,
+    pub ty: TypeHandle,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct DictionarySchema {
+    pub element: TypeHandle,
+    pub fields: Vec<DictionaryField>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 enum DictionaryIdentity {
-    Structural(TypeHandle),
+    Structural(DictionarySchema),
     Named(Identifier),
 }
 
 impl DictionaryType {
     pub fn get(ctx: &Context, element: TypeHandle) -> TypedHandle<Self> {
+        Self::constrained(
+            ctx,
+            DictionarySchema {
+                element,
+                fields: vec![],
+            },
+        )
+    }
+    pub fn constrained(ctx: &Context, mut schema: DictionarySchema) -> TypedHandle<Self> {
+        schema.fields.sort_by(|a, b| a.name.cmp(&b.name));
         Type::instantiate(
             Self {
-                identity: DictionaryIdentity::Structural(element),
-                element: Some(element),
+                identity: DictionaryIdentity::Structural(schema.clone()),
+                schema: Some(schema),
             },
             ctx,
         )
@@ -326,35 +349,50 @@ impl DictionaryType {
     pub fn named(
         ctx: &Context,
         name: Identifier,
-        element: Option<TypeHandle>,
+        schema: Option<DictionarySchema>,
     ) -> Result<TypedHandle<Self>> {
         let handle = Type::instantiate(
             Self {
                 identity: DictionaryIdentity::Named(name.clone()),
-                element: None,
+                schema: None,
             },
             ctx,
         );
-        if let Some(element) = element {
+        if let Some(mut schema) = schema {
+            schema.fields.sort_by(|a, b| a.name.cmp(&b.name));
             let mut ty = handle.to_handle().deref_mut(ctx);
             let dictionary = ty.downcast_mut::<Self>().unwrap();
             if dictionary
-                .element
-                .is_some_and(|existing| existing != element)
+                .schema
+                .as_ref()
+                .is_some_and(|existing| existing != &schema)
             {
                 input_err_noloc!(DictionaryMismatch(name.to_string()))?;
             }
-            dictionary.element = Some(element);
+            dictionary.schema = Some(schema);
         }
         Ok(handle)
     }
     pub fn element(&self) -> Option<TypeHandle> {
-        self.element
+        self.schema.as_ref().map(|schema| schema.element)
+    }
+    pub fn schema(&self) -> Option<&DictionarySchema> {
+        self.schema.as_ref()
+    }
+    pub fn field(&self, key: &str) -> Option<&DictionaryField> {
+        self.schema
+            .as_ref()?
+            .fields
+            .iter()
+            .find(|field| field.name == key)
     }
 }
 #[derive(Debug, Error)]
-#[error("dictionary {0} already exists with another element type")]
+#[error("dictionary {0} already exists with another schema")]
 struct DictionaryMismatch(String);
+#[derive(Debug, Error)]
+#[error("dictionary named fields must be unique and compatible with its index signature")]
+struct DictionaryFields;
 impl PartialEq for DictionaryType {
     fn eq(&self, other: &Self) -> bool {
         self.identity == other.identity
@@ -367,7 +405,16 @@ impl std::hash::Hash for DictionaryType {
     }
 }
 impl Verify for DictionaryType {
-    fn verify(&self, _ctx: &Context) -> Result<()> {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        if let Some(schema) = &self.schema {
+            let mut seen = std::collections::HashSet::new();
+            if schema.fields.iter().any(|field| {
+                !seen.insert(&field.name)
+                    || !crate::dictionaries::accepts(ctx, schema.element, field.ty)
+            }) {
+                input_err_noloc!(DictionaryFields)?;
+            }
+        }
         Ok(())
     }
 }
@@ -378,26 +425,45 @@ impl Printable for DictionaryType {
         state: &printable::State,
         f: &mut core::fmt::Formatter<'_>,
     ) -> core::fmt::Result {
-        let DictionaryIdentity::Named(name) = &self.identity else {
-            return write!(
-                f,
-                "<{}>",
-                self.element
-                    .expect("structural dictionary element")
-                    .print(ctx, state)
-            );
+        let name = match &self.identity {
+            DictionaryIdentity::Named(name) => Some(name),
+            _ => None,
         };
-        if start_printing::<Self>(state, name) {
-            return write!(f, "<@{name}>");
+        if name.is_some_and(|name| start_printing::<Self>(state, name)) {
+            return write!(f, "<@{}>", name.unwrap());
         }
         let result = (|| {
-            write!(f, "<@{name}")?;
-            if let Some(element) = self.element {
-                write!(f, ": {}", element.print(ctx, state))?;
+            write!(f, "<")?;
+            if let Some(name) = name {
+                write!(f, "@{name}")?;
+                if self.schema.is_some() {
+                    write!(f, ": ")?;
+                }
+            }
+            if let Some(schema) = &self.schema {
+                write!(f, "{}", schema.element.print(ctx, state))?;
+                if !schema.fields.is_empty() {
+                    write!(f, " {{")?;
+                    for (index, field) in schema.fields.iter().enumerate() {
+                        if index > 0 {
+                            write!(f, ",")?;
+                        }
+                        write!(
+                            f,
+                            " {}{}: {}",
+                            field.name.print(ctx, state),
+                            if field.optional { "?" } else { "" },
+                            field.ty.print(ctx, state)
+                        )?;
+                    }
+                    write!(f, " }}")?;
+                }
             }
             write!(f, ">")
         })();
-        done_printing(state);
+        if name.is_some() {
+            done_printing(state);
+        }
         result
     }
 }
@@ -406,22 +472,41 @@ impl Parsable for DictionaryType {
     type Parsed = TypedHandle<Self>;
     fn parse<'a>(stream: &mut StateStream<'a>, _arg: ()) -> ParseResult<'a, Self::Parsed> {
         enum Declaration {
-            Named(Identifier, Option<TypeHandle>),
-            Structural(TypeHandle),
+            Named(Identifier, Option<DictionarySchema>),
+            Structural(DictionarySchema),
         }
+        let schema = || {
+            let field = spaced(quoted_string_parser())
+                .and(optional(spaced(token('?'))))
+                .skip(spaced(token(':')))
+                .and(spaced(type_parser()))
+                .map(|((name, optional), ty)| DictionaryField {
+                    name,
+                    ty,
+                    optional: optional.is_some(),
+                });
+            spaced(type_parser())
+                .and(optional(spaced(delimited_list_parser(
+                    '{', '}', ',', field,
+                ))))
+                .map(|(element, fields)| DictionarySchema {
+                    element,
+                    fields: fields.unwrap_or_default(),
+                })
+        };
         let named = token('@')
             .with(Identifier::parser(()))
-            .and(optional(spaced(token(':')).with(spaced(type_parser()))))
-            .map(|(name, element)| Declaration::Named(name, element));
+            .and(optional(spaced(token(':')).with(schema())))
+            .map(|(name, schema)| Declaration::Named(name, schema));
         let mut parser = between(
             token('<'),
             token('>'),
-            spaced(named.or(type_parser().map(Declaration::Structural))),
+            spaced(named.or(schema().map(Declaration::Structural))),
         );
         let declaration = parser.parse_stream(stream).into_result()?.0;
         match declaration {
-            Declaration::Named(name, element) => Self::named(stream.state.ctx, name, element),
-            Declaration::Structural(element) => Ok(Self::get(stream.state.ctx, element)),
+            Declaration::Named(name, schema) => Self::named(stream.state.ctx, name, schema),
+            Declaration::Structural(schema) => Ok(Self::constrained(stream.state.ctx, schema)),
         }
         .into_parse_result()
     }

@@ -68,3 +68,12 @@ pub enum ErrorKind {
     RangeError,
     SyntaxError,
 }
+
+/// Literal dictionary keys in source evaluation order, including overwritten entries.
+#[pliron_attr(
+    name = "perry.field_names",
+    format = "`[` vec($0, CharSpace(`,`)) `]`",
+    verifier = "succ"
+)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
+pub struct FieldNames(pub Vec<String>);

@@ -15,7 +15,7 @@ pub enum Kind {
     Dictionary,
 }
 
-/// `detail` points to the element/optional type, or `count` record fields.
+/// `detail` points to an element/optional type, record fields, or a dictionary shape.
 #[repr(C)]
 pub struct Type {
     pub kind: Kind,
@@ -26,6 +26,12 @@ pub struct Type {
 pub struct Field {
     pub name: *mut u8,
     pub ty: *const Type,
+    pub optional: bool,
+}
+#[repr(C)]
+pub struct DictionaryShape {
+    pub element: *const Type,
+    pub fields: *const Field,
 }
 /// Header preceding native 8-byte field slots. Order entries index the descriptor's fields.
 #[repr(C)]
@@ -34,12 +40,14 @@ pub struct Record {
     pub order: *const u32,
 }
 pub const TYPE_SIZE: u32 = 12;
-pub const FIELD_SIZE: u32 = 8;
+pub const FIELD_SIZE: u32 = 12;
+pub const DICTIONARY_SHAPE_SIZE: u32 = 8;
 pub const RECORD_SIZE: u32 = 8;
 #[cfg(target_arch = "wasm32")]
 const _: () = {
     assert!(size_of::<Type>() == TYPE_SIZE as usize);
     assert!(size_of::<Field>() == FIELD_SIZE as usize);
+    assert!(size_of::<DictionaryShape>() == DICTIONARY_SHAPE_SIZE as usize);
     assert!(size_of::<Record>() == RECORD_SIZE as usize);
 };
 
@@ -48,13 +56,29 @@ impl Type {
     /// This is a valid compiler-emitted descriptor of an array, dictionary or optional type.
     pub(crate) unsafe fn element(&self) -> &Self {
         // SAFETY: guaranteed by the caller.
-        unsafe { &*self.detail.cast() }
+        unsafe {
+            if self.kind == Kind::Dictionary {
+                &*(*self.detail.cast::<DictionaryShape>()).element
+            } else {
+                &*self.detail.cast()
+            }
+        }
     }
     /// # Safety
-    /// This is a valid compiler-emitted record descriptor.
+    /// This is a valid compiler-emitted record or dictionary descriptor.
     pub(crate) unsafe fn fields(&self) -> &[Field] {
         // SAFETY: guaranteed by the caller.
-        unsafe { core::slice::from_raw_parts(self.detail.cast(), self.count as usize) }
+        unsafe {
+            if self.count == 0 {
+                return &[];
+            }
+            let fields = if self.kind == Kind::Dictionary {
+                (*self.detail.cast::<DictionaryShape>()).fields
+            } else {
+                self.detail.cast()
+            };
+            core::slice::from_raw_parts(fields, self.count as usize)
+        }
     }
     /// # Safety
     /// This descriptor and any optional element descriptors are valid.

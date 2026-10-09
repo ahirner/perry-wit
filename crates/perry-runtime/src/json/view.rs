@@ -117,7 +117,14 @@ unsafe fn matches(
                     return false;
                 }
                 seen.insert(pair);
-                children.into_iter().all(|node| {
+                ty.fields().iter().all(|field| {
+                    let key = string::text(field.name);
+                    let present = properties::has_own(value, key);
+                    if !present {
+                        return field.optional;
+                    }
+                    matches(&*field.ty, member(value, 0, Some(key)), seen, depth + 1)
+                }) && children.into_iter().all(|node| {
                     node.is_ok_and(|node| matches(ty.element(), node_value(node), seen, depth + 1))
                 })
             }
@@ -164,6 +171,13 @@ unsafe fn matches(
 }
 
 /// # Safety
+/// `ty` describes JSON-compatible storage and any references in `value` are task-live.
+pub(super) unsafe fn accepts(ty: &Type, value: Option<Json>) -> bool {
+    // SAFETY: matching only reads the live type graph and borrowed members.
+    unsafe { matches(ty, value, &mut alloc::collections::BTreeSet::new(), 0) }
+}
+
+/// # Safety
 /// `ty` and the optional JSON value are live. No native storage is changed on failure.
 pub(super) unsafe fn convert(ty: &Type, value: *mut u8) -> Option<u64> {
     // SAFETY: validation precedes construction; views retain the original JSON identity.
@@ -174,12 +188,7 @@ pub(super) unsafe fn convert(ty: &Type, value: *mut u8) -> Option<u64> {
         if ty.kind == Kind::Optional {
             return convert(ty.element(), value);
         }
-        if !matches(
-            ty,
-            value.cast::<Json>().as_ref().copied(),
-            &mut alloc::collections::BTreeSet::new(),
-            0,
-        ) {
+        if !accepts(ty, value.cast::<Json>().as_ref().copied()) {
             return None;
         }
         let view = perry_alloc(size_of::<View>() as u32).cast::<View>();

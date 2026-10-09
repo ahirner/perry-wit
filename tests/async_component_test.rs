@@ -62,8 +62,8 @@ export async function json(input: string): Promise<string> {
   const alias = value.item;
   const typed: {count: number} = alias;
   const count: number = typed.count;
-  const native:Record<string,number> = {count:count};
-  const dictionary:Record<string,number> = alias;
+  const native:{[key:string]:number;count:number} = {count:count};
+  const dictionary:{[key:string]:number;count:number} = alias;
   const stored:Record<string,{count:number}> = {item:typed};
   const storedValues=Object.values(stored);
   const reference: JsonValue = native;
@@ -77,6 +77,9 @@ export async function json(input: string): Promise<string> {
   for(let i=0;i<24;i++) delete alias[i];
   delete alias.count;
   await setTimeout(1);
+  let missing=false;
+  try {const absent:number=dictionary.count;throw 1;}catch(e){missing=e instanceof TypeError;}
+  if(!missing)throw new TypeError('lost required dictionary field');
   dictionary.count = native.count;
   if(JSON.parse(formatted).item.count !== count) throw new TypeError('lost serialization snapshot');
   if(JSON.parse(replaced).item.count !== count || visits < 3) throw new TypeError('lost replacer snapshot');

@@ -817,12 +817,12 @@ impl<'s> FunctionBuilder<'s> {
         expr: &Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        if let Some(element) = expected.and_then(|ty| perry_mir::dictionaries::element(ctx, ty)) {
+        if let Some(dictionary) = expected.filter(|ty| ty.deref(ctx).is::<DictionaryType>()) {
             match expr {
                 Expr::Object(fields) => {
                     return self.dictionary_literal(
                         ctx,
-                        element,
+                        dictionary,
                         fields.iter().map(|(name, value)| (name.as_str(), value)),
                     );
                 }
@@ -832,7 +832,7 @@ impl<'s> FunctionBuilder<'s> {
                     let names = self.shapes.literal_fields(class_name).unwrap();
                     return self.dictionary_literal(
                         ctx,
-                        element,
+                        dictionary,
                         names.iter().map(String::as_str).zip(args),
                     );
                 }
@@ -1308,12 +1308,7 @@ impl<'s> FunctionBuilder<'s> {
                 match (kind(ctx, value)?, property.as_str()) {
                     (Kind::Dictionary, _) => {
                         let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, property));
-                        self.dictionary_access(
-                            ctx,
-                            perry_mir::dictionaries::Action::Get,
-                            vec![value, key],
-                        )
-                        .unwrap()
+                        self.dictionary_get(ctx, value, key)?
                     }
                     (Kind::Json, _) => {
                         let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, property));
@@ -1434,13 +1429,7 @@ impl<'s> FunctionBuilder<'s> {
                 let array = self.defined(ctx, array)?;
                 if kind(ctx, array)? == Kind::Dictionary {
                     let key = self.property_key(ctx, index)?;
-                    return Ok(self
-                        .dictionary_access(
-                            ctx,
-                            perry_mir::dictionaries::Action::Get,
-                            vec![array, key],
-                        )
-                        .unwrap());
+                    return self.dictionary_get(ctx, array, key);
                 }
                 if kind(ctx, array)? == Kind::Json {
                     let index = self.json_key(ctx, index)?;

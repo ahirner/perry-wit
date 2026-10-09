@@ -11,8 +11,8 @@
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
-    ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, OptionalType,
-    PromiseType, RecordType, StringType,
+    ArrayType, BufferType, BytesType, DictionaryField, DictionarySchema, DictionaryType,
+    ExceptionType, JsonType, OptionalType, PromiseType, RecordType, StringType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -214,7 +214,7 @@ impl<'h> Shapes<'h> {
                         type_args.len() == 2 && matches!(type_args[0], HirType::String),
                         "Record dictionaries require string keys (subset rule R1)"
                     );
-                    self.dictionary(ctx, Some(name), &type_args[1])
+                    self.dictionary(ctx, Some(name), &type_args[1], &HashMap::new())
                 }
                 ty => self.value_type(ctx, ty),
             };
@@ -229,11 +229,7 @@ impl<'h> Shapes<'h> {
         object: &perry_hir::types::ObjectType,
     ) -> Result<TypeHandle> {
         if let Some(element) = &object.index_signature {
-            ensure!(
-                object.properties.is_empty(),
-                "mixed named fields and index signatures require a constrained dictionary type, which is not supported yet"
-            );
-            return self.dictionary(ctx, name, element);
+            return self.dictionary(ctx, name, element, &object.properties);
         }
         let fields = object
             .properties
@@ -251,6 +247,7 @@ impl<'h> Shapes<'h> {
         ctx: &mut Context,
         name: Option<&str>,
         element: &HirType,
+        properties: &HashMap<String, perry_hir::types::PropertyInfo>,
     ) -> Result<TypeHandle> {
         if let Some(name) = name {
             let pending = self.dictionaries.borrow().get(name).copied();
@@ -275,20 +272,45 @@ impl<'h> Shapes<'h> {
                 }
             }
         }
-        let element = self.value_type(ctx, element);
+        let schema = (|| -> Result<DictionarySchema> {
+            let element = self.value_type(ctx, element)?;
+            let mut fields = Vec::with_capacity(properties.len());
+            for (name, info) in properties {
+                let mut ty = self.value_type(ctx, &info.ty)?;
+                if info.optional && !ty.deref(ctx).is::<OptionalType>() {
+                    ty = OptionalType::get(ctx, ty).into();
+                }
+                fields.push(DictionaryField {
+                    name: name.clone(),
+                    ty,
+                    optional: info.optional,
+                });
+            }
+            fields.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(DictionarySchema { element, fields })
+        })();
         let pending = name.and_then(|name| self.dictionaries.borrow_mut().remove(name));
-        let element = element?;
-        if matches!(pending, Some(PendingDictionary::Reserved(_))) {
+        let schema = schema?;
+        let ty = if matches!(pending, Some(PendingDictionary::Reserved(_))) {
             DictionaryType::named(
                 ctx,
                 identifier(&format!("dictionary_{}", name.unwrap()))?,
-                Some(element),
+                Some(schema),
             )
-            .map(Into::into)
-            .map_err(|error| anyhow!("{}", error.disp(ctx)))
+            .map_err(|error| anyhow!("{}", error.disp(ctx)))?
         } else {
-            Ok(DictionaryType::get(ctx, element).into())
+            DictionaryType::constrained(ctx, schema)
+        };
+        let dictionary = ty.deref(ctx);
+        let schema = dictionary.schema().expect("resolved dictionary schema");
+        for field in &schema.fields {
+            ensure!(
+                perry_mir::dictionaries::accepts(ctx, schema.element, field.ty),
+                "dictionary field {} is incompatible with its index signature",
+                field.name
+            );
         }
+        Ok(ty.into())
     }
 
     /// A record from HIR field types; `named` is the interface they come from, if any.

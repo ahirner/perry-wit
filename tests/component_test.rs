@@ -1242,3 +1242,151 @@ export function check():number {
     }
     Ok(())
 }
+
+#[test]
+fn constrained_dictionaries_preserve_named_fields_and_aliases() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("constrained.wit", "package test:constrained; world constrained { export check: func() -> u32; export round: func(input: string) -> string; }")?;
+    let world = resolve.select_world(&[package], Some("constrained"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
+interface Mixed {
+  [key:string]:JsonValue|undefined;
+  count:number;
+  label?:string;
+  required:number|undefined;
+  child?:Mixed;
+  '2'?:number;
+}
+interface Bytes { [key:string]:Uint8Array|undefined; main:Uint8Array; extra?:Uint8Array }
+type Numbers={ [key:string]:number|undefined; count:number; maybe?:number; required:number|undefined };
+function set(d:Record<string,JsonValue|undefined>,key:string,value:JsonValue|undefined):void {d[key]=value;}
+function erase(d:Record<string,JsonValue|undefined>,key:string):void {delete d[key];}
+function setBytes(d:Bytes,key:string,value:Uint8Array|undefined):void {d[key]=value;}
+function mark(order:number[],value:number):number {order.push(value);return value;}
+export function round(input:string):string {
+  const source=JSON.parse(input);source.required=undefined;
+  const value:Mixed=source;
+  value.count=value.count+1;
+  value.label='é🙂';value[2]=7;
+  const keys=Object.keys(value);
+  delete value.label;value.label='later';
+  const alias:Record<string,JsonValue|undefined>=value;
+  for(let i=10;i<40;i++)alias[i]=i;
+  for(let i=10;i<40;i++)delete alias[i];
+  if(value!==source || value!==alias)throw 1;
+  return JSON.stringify({value,keys,hasRequired:Object.hasOwn(value,'required')});
+}
+export function check():number {
+  const value:Mixed={count:1,required:undefined};
+  if(!Object.hasOwn(value,'required') || Object.hasOwn(value,'label'))return 1;
+  value.label=undefined;
+  if(!Object.hasOwn(value,'label') || value.label!==undefined)return 2;
+  delete value.label;value.label='a';
+  const alias:Record<string,JsonValue|undefined>=value;
+  const json:JsonValue=value;
+  let failures=0;
+  try{set(alias,'count','bad');}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{erase(alias,'count');}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{json.count='bad';}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{delete json.required;}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{set(alias,'label',3);}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  if(failures!==5 || value.count!==1 || value.label!=='a' || !Object.hasOwn(value,'required'))return 3;
+  alias.extra=true;value.child=value;
+  const child:Mixed=value.child;
+  if(child!==value || child.count!==1)return 4;
+  delete value.child;
+  const narrowed:{count:number}=value;
+  narrowed.count=4;
+  if(value.count!==4 || narrowed!==value)return 5;
+  const raw=JSON.parse('{"count":2,"label":"original"}');raw.required=undefined;
+  const parsed:Mixed=raw;
+  delete raw.count;
+  let missing=false;
+  try{const n:number=parsed.count;throw 1;}catch(e){missing=e instanceof TypeError;}
+  if(!missing)return 6;
+  raw.count=3;raw.label=9;
+  let changed=false;
+  try{const label:string|undefined=parsed.label;throw 1;}catch(e){changed=e instanceof TypeError;}
+  if(!changed)return 7;
+  parsed.label='repaired';
+  if(raw.label!=='repaired' || parsed.count!==3)return 8;
+  delete raw.required;
+  let required=false;
+  try{const absent:Mixed=raw;throw 1;}catch(e){required=e instanceof TypeError;}
+  if(!required)return 9;
+  raw.required=undefined;
+  const restored:Mixed=raw;
+  if(restored!==parsed || restored!==raw)return 10;
+  const optional=JSON.parse('{"count":3}');optional.required=undefined;
+  const numbers:Numbers=optional;
+  if(numbers.maybe!==undefined || Object.hasOwn(numbers,'maybe'))return 11;
+  numbers.maybe=undefined;
+  if(!Object.hasOwn(numbers,'maybe'))return 12;
+  delete numbers.maybe;
+  const bytes:Bytes={main:new Uint8Array([1,2])};
+  bytes.extra=undefined;
+  let undefinedMain=false;
+  try{setBytes(bytes,'main',undefined);}catch(e){undefinedMain=e instanceof TypeError;}
+  if(!undefinedMain || bytes.main[0]!==1 || Object.values(bytes).length!==2)return 13;
+  delete bytes.extra;
+  if(Object.keys(bytes).length!==1)return 14;
+  const tree=JSON.parse('{"count":5,"child":{"count":6}}');tree.required=undefined;tree.child.required=undefined;
+  const recursive:Mixed=tree;
+  const branch:Mixed=recursive.child;
+  if(branch.count!==6)return 15;
+  tree.child.count='wrong';
+  let nested=false;
+  try{const broken:Mixed=recursive.child;throw 1;}catch(e){nested=e instanceof TypeError;}
+  if(!nested)return 16;
+  const indexed:Mixed={'2':2,count:1,required:undefined};
+  const numeric:number|undefined=indexed['2'];
+  if(numeric!==2 || Object.keys(indexed)[0]!=='2')return 17;
+  const same:Mixed={required:undefined,count:4};
+  if(same===value || JSON.stringify(same)!=='{"count":4}')return 18;
+  let rejected=false;
+  const wrong=JSON.parse('"not-number"');
+  try{const unused:Mixed={count:wrong,required:undefined};}catch(e){rejected=e instanceof TypeError;}
+  if(!rejected)return 19;
+  const finite:Numbers={count:-0,required:undefined};
+  if(1/finite.count!==-Infinity || finite.required!==undefined)return 20;
+  const order:number[]=[];
+  const ordered:Numbers={extra:mark(order,3),count:mark(order,1),required:mark(order,2)};
+  if(JSON.stringify(order)!=='[3,1,2]' || JSON.stringify(Object.keys(ordered))!=='["extra","count","required"]')return 21;
+  return 0;
+}
+"#;
+    let compiled = compile_for_world(source, "constrained.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
+    let round = instance.get_typed_func::<(&str,), (String,)>(&mut store, "round")?;
+    let input = r#"{"count":2,"z":true}"#;
+    let expected = r#"{"value":{"2":7,"count":3,"z":true,"label":"later"},"keys":["2","count","z","required","label"],"hasRequired":true}"#;
+    let large = serde_json::json!({"count":2,"text":"é🙂".repeat(8192)}).to_string();
+    let mut peak = 0;
+    for index in 0..23 {
+        assert_eq!(
+            check
+                .call(&mut store, ())
+                .context("constrained dictionary checks")?
+                .0,
+            0
+        );
+        assert_eq!(round.call(&mut store, (input,))?.0, expected);
+        round.call(&mut store, (&large,))?;
+        if index == 2 {
+            peak = store.data().0;
+        } else if index > 2 {
+            assert_eq!(
+                store.data().0,
+                peak,
+                "dictionary schemas leaked across tasks"
+            );
+        }
+    }
+    Ok(())
+}

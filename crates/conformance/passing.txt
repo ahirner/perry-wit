@@ -19,3 +19,4 @@ ecma.json.stringify_options
 ecma.json.command
 ecma.json.reviver
 ecma.json.replacer
+ecma.object.constrained_dictionary

@@ -146,16 +146,15 @@ pub(super) unsafe fn keys(value: Json) -> *mut u8 {
 pub unsafe extern "C" fn perry_json_delete(value: *mut u8, key: *mut u8) -> u32 {
     // SAFETY: variant checks precede mutation; dictionary deletion keeps its header stable.
     unsafe {
-        let key = string::text(key);
         let value = *value.cast::<Json>();
-        if let Json::Object(object) = value {
-            (*object).delete(key);
-            return 1;
-        }
         if let Json::Native { reference, ty } = value
             && (*ty).kind == NativeKind::Dictionary
         {
-            (*(*reference.cast::<dictionary::Dictionary>()).fields).delete(key);
+            return dictionary::perry_dictionary_delete(reference, key);
+        }
+        let key = string::text(key);
+        if let Json::Object(object) = value {
+            (*object).delete(key);
             return 1;
         }
         let error = match value {
