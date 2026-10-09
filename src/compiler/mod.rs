@@ -66,7 +66,8 @@ pub fn compile_for_world(
     let ctx = &mut Context::new();
     let mir = lower(ctx, source, file_name)?;
     let exports = bind::exports(ctx, &mir, resolve, world)?;
-    let core = perry_codegen::compile(ctx, &mir, &Exports::Canonical(exports))?;
+    let imports = bind::imports(resolve, world);
+    let core = perry_codegen::compile(ctx, &mir, &Exports::Canonical { exports, imports })?;
     let core = finish(core)?;
     let (component, stripped) = if componentize {
         let component = component::encode_resolved(&core, resolve, world)?;

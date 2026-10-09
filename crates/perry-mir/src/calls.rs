@@ -242,3 +242,71 @@ pub fn is_exported(ctx: &Context, function: &FuncOp) -> bool {
         .get::<pliron::builtin::attributes::BoolAttr>(&key)
         .is_some_and(|flag| bool::from(flag.clone()))
 }
+
+/// Function attribute marking an `async` function. Its body may `perry.await`; callers start it
+/// with `perry.async_call`, and codegen splits it into a ramp and a state machine (P3.8).
+pub const ASYNC_KEY: &str = "perry_async";
+
+pub fn set_async(ctx: &mut Context, function: &FuncOp) {
+    let key: Identifier = ASYNC_KEY.try_into().expect("identifier");
+    function
+        .get_operation()
+        .deref_mut(ctx)
+        .attributes
+        .set(key, pliron::builtin::attributes::BoolAttr::from(true));
+}
+
+pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
+    let key: Identifier = ASYNC_KEY.try_into().expect("identifier");
+    function
+        .get_operation()
+        .deref(ctx)
+        .attributes
+        .get::<pliron::builtin::attributes::BoolAttr>(&key)
+        .is_some_and(|flag| bool::from(flag.clone()))
+}
+
+#[derive(Debug, Error)]
+#[error("perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value")]
+pub struct TimerErr;
+
+/// `setTimeout(delay, value)` from `node:timers/promises`: a promise that settles with `value`
+/// once `delay` milliseconds (at least 1, as in Node) have passed on the host's monotonic clock.
+#[pliron_op(
+    name = "perry.timer",
+    format = "$0 `, ` $1 ` : ` type($0)",
+    interfaces = [OneResultInterface, pliron::builtin::op_interfaces::NOpdsInterface<2>]
+)]
+pub struct TimerOp;
+
+impl TimerOp {
+    pub fn new(ctx: &mut Context, delay: Value, value: Value) -> Self {
+        let promise = PromiseType::get(ctx, value.get_type(ctx)).into();
+        TimerOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![promise],
+                vec![delay, value],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for TimerOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let op = self.get_operation().deref(ctx);
+        let delay = op.get_operand(0).get_type(ctx);
+        let value = op.get_operand(1).get_type(ctx);
+        let promise =
+            TypedHandle::<PromiseType>::from_handle(self.get_result(ctx).get_type(ctx), ctx);
+        if !delay.deref(ctx).is::<pliron::builtin::types::FP64Type>()
+            || !promise.is_ok_and(|p| p.deref(ctx).value() == value)
+        {
+            verify_err!(self.loc(ctx), TimerErr)?
+        }
+        Ok(())
+    }
+}

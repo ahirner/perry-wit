@@ -192,6 +192,49 @@ export function hole(n: number): number {
 /// 4n must stay within 6× of fuel for n (warm-up n first, one instance, as in
 /// `crates/conformance/src/scaling.rs`). Values are returned directly; the `{ value, trace }`
 /// record needs the component boundary (P6.1).
+/// Async functions awaiting each other without a host: values live across awaits stay in the
+/// frame, loops run through awaits, and a rejection propagates as the export's status.
+#[test]
+fn async_functions_await_each_other() {
+    let mut program = Program::new(
+        r#"
+async function double(x: number): Promise<number> {
+  return x * 2;
+}
+async function check(x: number): Promise<number> {
+  const xs: number[] = [1];
+  return xs[x] as number;
+}
+async function sum(n: number): Promise<number> {
+  let total = 0;
+  const offset = n * 100;
+  for (let i = 0; i < n; i++) {
+    total = total + (await double(i));
+  }
+  return total + offset;
+}
+export async function run(n: number): Promise<number> {
+  const a = await sum(n);
+  const b = await double(a);
+  return a + b;
+}
+export async function fails(n: number): Promise<number> {
+  const before = n + 1;
+  const v = await check(n);
+  return before + v;
+}
+"#,
+    );
+    // sum(4) = 2 * (0 + 1 + 2 + 3) + 400 = 412; run = 412 + 824.
+    assert_eq!(program.throwing("run", 4.0), (1236.0, 0));
+    assert_eq!(program.throwing("run", 0.0), (0.0, 0));
+    assert_eq!(program.throwing("fails", 0.0), (2.0, 0));
+    assert_eq!(
+        program.throwing("fails", 3.0).1,
+        status_code(ErrorKind::TypeError)
+    );
+}
+
 #[test]
 fn scaling_contracts_are_linear() {
     let workloads = [

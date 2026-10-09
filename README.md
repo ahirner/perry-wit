@@ -5,7 +5,7 @@
 Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
 [Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
 
-> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers synchronous exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. Async exports, `fetch`, `node:fs`, streams, JSON, Date, CLI commands and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P3.8, P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
+> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI, with `setTimeout` from `node:timers/promises`. `fetch`, `node:fs`, streams, JSON, Date, CLI commands and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
 
 - **WIT-first authoring**: Export typed functions matching a WIT world. Standalone CLI commands with top-level `await` return with the async migration.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
@@ -113,7 +113,8 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("t
 
 - **Exports**: Exported TypeScript functions not named by the world stay internal, so one source can implement several worlds.
 - **Tasks**: Every export call is one task. Everything it allocates, including its arguments and results, is released in bulk after the host has read the result.
-- **Not yet migrated**: module-level state and initialization, async exports (`async func`), WIT imports, and `option`, `result`, `variant`, `enum`, `flags`, `tuple` and resource types.
+- **Async exports**: an `async func` export is implemented by an `async` TypeScript function returning `Promise<T>`.
+- **Not yet migrated**: module-level state and initialization, WIT imports other than `wasi:clocks/monotonic-clock` for timers, and `option`, `result`, `variant`, `enum`, `flags`, `tuple` and resource types.
 - **Core Wasm Output**: Pass `--core-only` to emit the linked core module without component encoding.
 
 ### CLI Scripts

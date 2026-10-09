@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod array;
+pub mod promise;
 pub mod region;
 pub mod string;
 
@@ -37,7 +38,10 @@ pub extern "C" fn perry_f64_rem(dividend: f64, divisor: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use region::{chunk_counts, perry_alloc, perry_task_begin, perry_task_end};
+    use region::{
+        chunk_counts, perry_alloc, perry_task_enter as perry_task_begin,
+        perry_task_free as perry_task_end,
+    };
     extern crate std;
     use std::string::String;
 
@@ -48,6 +52,43 @@ mod tests {
         arrays_grow_and_keep_elements();
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
+        promises_queue_waiters_and_tasks_interleave();
+    }
+
+    fn promises_queue_waiters_and_tasks_interleave() {
+        use promise::*;
+        use region::*;
+        let a = perry_task_enter();
+        let p = perry_promise_new();
+        let (f1, f2) = (perry_alloc(16), perry_alloc(16));
+        perry_promise_wait(p, f1);
+        perry_promise_wait(p, f2);
+        assert!(perry_ready_pop().is_null());
+        perry_subtask_register(7, p, 42);
+        perry_task_set_set(3);
+        assert_eq!(perry_task_suspend(), 3);
+        // Another task runs to completion while `a` waits on the host.
+        let b = perry_task_enter();
+        assert_ne!(a, b);
+        perry_alloc(100_000);
+        perry_task_free();
+        unsafe { perry_task_resume(a) };
+        assert_eq!(perry_subtask_done(9), 0);
+        assert_eq!(perry_subtask_done(7), 1);
+        assert_eq!(unsafe { *(p as *const u32) }, FULFILLED);
+        assert_eq!(unsafe { *(p.add(VALUE as usize) as *const u64) }, 42);
+        assert_eq!(perry_ready_pop(), f1);
+        assert_eq!(perry_ready_pop(), f2);
+        assert!(perry_ready_pop().is_null());
+        // Settling twice is a no-op; rejection records the status.
+        let q = perry_promise_new();
+        perry_promise_reject(q, 2);
+        perry_promise_resolve(q, 1);
+        assert_eq!(
+            unsafe { (*(q as *const u32), *(q.add(4) as *const i32)) },
+            (REJECTED, 2)
+        );
+        perry_task_free();
     }
 
     fn text(string: *mut u8) -> &'static str {
