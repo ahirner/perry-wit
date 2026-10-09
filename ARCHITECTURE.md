@@ -46,6 +46,7 @@ TypeScript ─ perry-parser ─ Perry HIR ─ perry-lower ─ perry MIR
 
 - **Records.** An `i32` shape id followed by 8-byte field slots in sorted field order.
 - **Arrays.** `{ len, cap, data }`, with 8-byte element slots. Capacity is never 0, so a bounds-checked read is branch-free.
+- **Bytes.** `perry.buffer` owns an ArrayBuffer descriptor `{ length, data }`; `perry.bytes` is a Uint8Array view `{ buffer, offset, length }`. Subarrays share storage; construction from bytes and slicing copy it. Range validation precedes set, and overlapping sets use memmove semantics. Descriptors and storage belong to the task, including across suspension. WIT `list<u8>` inputs become views over the canonical input storage; results point at the selected view span until task completion, without copying each element.
 - **Strings.** `{ len (UTF-8 bytes), utf16, data, buffer }`.
   - `utf16` caches the ECMAScript length.
   - Constants are static objects in the data segment.

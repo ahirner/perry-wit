@@ -26,6 +26,26 @@ use thiserror::Error;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct ExceptionType;
 
+/// A fixed-size ArrayBuffer owned by a memory tier.
+#[pliron_type(
+    name = "perry.buffer",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct BufferType;
+
+/// A Uint8Array view sharing the storage of an ArrayBuffer.
+#[pliron_type(
+    name = "perry.bytes",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct BytesType;
+
 /// A closed-shape record, referenced by value of this type (subset rule R1).
 ///
 /// Records are nominal and uniqued by name, so shapes may be recursive: create the record

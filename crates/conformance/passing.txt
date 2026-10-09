@@ -8,3 +8,5 @@ web.performance.monotonic
 node.process.environment
 node.process.exit_status
 ecma.promise.await_ordering
+ecma.uint8array.set
+ecma.uint8array.views

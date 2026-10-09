@@ -33,6 +33,33 @@ destination.set(input,2);
 try{destination.set(destination.subarray(1),x);trace.push(1);}catch{trace.push(2);}
 for(let i=0;i<destination.length;i++){const byte=destination[i];if(byte===undefined)throw 91;trace.push(byte);}
 "#;
+const BYTE_VIEWS: &str = r#"
+const view=input.subarray(x,-1);
+trace.push(view.length);trace.push(view.byteOffset);trace.push(view.buffer===input.buffer?1:0);
+const copy=input.slice(x,-1);
+trace.push(copy.length);trace.push(copy.byteOffset);trace.push(copy.buffer===input.buffer?1:0);
+const from=Uint8Array.from(input);
+const converted=new Uint8Array([x,x+1,-x]);
+trace.push(converted[0]);trace.push(converted[1]);trace.push(converted[2]);
+const absent=input[x];trace.push(absent===undefined?-1:absent);
+input[x]=x;
+if(view.length>0)view[0]=17;
+if(copy.length>0)copy[0]=29;
+try{const bounded=new Uint8Array(input.buffer,x,0);trace.push(bounded.byteOffset);}
+catch(e){trace.push(e instanceof RangeError?-2:-3);}
+try{const sized=new Uint8Array(input.buffer,0,x);trace.push(sized.length);}
+catch(e){trace.push(e instanceof RangeError?-2:-3);}
+try{input.set([x,x+1],x);trace.push(1);}
+catch(e){trace.push(e instanceof RangeError?-2:-3);}
+const missing:number[]=[];
+const empty=new Uint8Array(missing[0]);trace.push(empty.length);
+const assigned=(input[0]=missing[0]);trace.push(assigned===undefined?1:0);
+trace.push((input[0]=257.9));
+const tail=input.subarray(1,missing[0]);trace.push(tail.length);
+const nanEnd=input.subarray(1,0/0);trace.push(nanEnd.length);
+for(let i=0;i<input.length;i++){trace.push(input[i]);trace.push(from[i]);}
+for(let i=0;i<copy.length;i++)trace.push(copy[i]);
+"#;
 const RESPONSE: &str = r#"
 const response=new Response(input,{status:201,headers:{'x-test':'bytes'}});
 if(response.status!==201||response.headers.get('x-test')!=='bytes'||response.bodyUsed)throw 90;
@@ -84,6 +111,13 @@ pub fn contracts() -> Vec<Contract> {
             "Overlapping byte copies and atomic range rejection",
             "https://tc39.es/ecma262/#sec-%typedarray%.prototype.set",
             SET,
+            false,
+        ),
+        (
+            "ecma.uint8array.views",
+            "Shared byte views, independent copies, numeric conversion and index boundaries",
+            "https://tc39.es/ecma262/#sec-typedarray-objects",
+            BYTE_VIEWS,
             false,
         ),
         (

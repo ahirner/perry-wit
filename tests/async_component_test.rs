@@ -22,6 +22,7 @@ world timers {
   export label: async func(name: string) -> string;
   export count: async func(n: u32) -> u32;
   export recover: async func(x: f64) -> f64;
+  export bytes: async func(input: list<u8>, tag: u8) -> list<u8>;
   export fail: async func();
 }
 "#;
@@ -47,6 +48,17 @@ export async function run(x: number): Promise<Observation> {
 export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
   return await setTimeout(2, prefix + "!");
+}
+export async function bytes(input: Uint8Array, tag: number): Promise<Uint8Array> {
+  const buffer = new ArrayBuffer(input.length + 2);
+  const view = new Uint8Array(buffer, 1, input.length);
+  view.set(input);
+  await setTimeout(1);
+  const whole = new Uint8Array(buffer);
+  whole[0] = tag;
+  whole[whole.length - 1] = tag + 1;
+  await setTimeout(1);
+  return whole;
 }
 async function rejectLater(error: Error): Promise<number> {
   await setTimeout(1);
@@ -185,7 +197,14 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let label = instance.get_typed_func::<(&str,), (String,)>(&mut store, "label")?;
     let count = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "count")?;
     let recover = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "recover")?;
+    let bytes = instance.get_typed_func::<(&[u8], u8), (Vec<u8>,)>(&mut store, "bytes")?;
+    let byte_input = vec![123; 50_000];
+    let byte_expected = [vec![7], byte_input.clone(), vec![8]].concat();
     for round in 0..20 {
+        assert_eq!(
+            bytes.call_async(&mut store, (&byte_input, 7)).await?.0,
+            byte_expected
+        );
         assert_eq!(recover.call_async(&mut store, (7.0,)).await?.0, 40.0);
         let (observation,) = run.call_async(&mut store, (3.5,)).await?;
         assert_eq!(
@@ -231,6 +250,17 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         })
         .await??;
     assert_eq!((a, b), (35.0, 46.0));
+    let (a, b) = store
+        .run_concurrent(async |accessor| -> wasmtime::Result<_> {
+            let (a, b) = tokio::join!(
+                bytes.call_concurrent(accessor, (&[0, 255][..], 3)),
+                bytes.call_concurrent(accessor, (&[128, 1][..], 9))
+            );
+            Ok((a?.0, b?.0))
+        })
+        .await??;
+    assert_eq!(a, [3, 0, 255, 4]);
+    assert_eq!(b, [9, 128, 1, 10]);
     store.assert_concurrent_state_empty();
     let activity = track_timers(&mut linker)?;
     let instance = linker.instantiate_async(&mut store, &component).await?;

@@ -36,7 +36,10 @@ use perry_mir::{
     locals::UndefOp,
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
-    types::{ArrayType, ExceptionType, OptionalType, PromiseType, RecordType, StringType},
+    types::{
+        ArrayType, BufferType, BytesType, ExceptionType, OptionalType, PromiseType, RecordType,
+        StringType,
+    },
 };
 use perry_runtime::array as layout;
 use pliron::{
@@ -180,7 +183,7 @@ impl Host {
 }
 
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN.
-pub const UNDEFINED_BITS: u64 = perry_runtime::process::UNDEFINED_NUMBER;
+pub const UNDEFINED_BITS: u64 = perry_runtime::UNDEFINED_NUMBER;
 /// `undefined` in a `boolean | undefined` slot.
 const UNDEFINED_BOOL: i32 = 2;
 
@@ -225,6 +228,23 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    BufferNew,
+    BufferLength,
+    BytesNew,
+    BytesView,
+    BytesFromArray,
+    BytesCopy,
+    BytesLength,
+    BytesOffset,
+    BytesBuffer,
+    BytesGet,
+    BytesPut,
+    BytesSubarray,
+    BytesSlice,
+    BytesSet,
+    BytesSetArray,
+    BytesAdopt,
+    BytesData,
     Alloc,
     ArrayNew,
     ArrayGrow,
@@ -279,6 +299,23 @@ enum Runtime {
 impl Runtime {
     fn name(self) -> &'static str {
         match self {
+            Runtime::BufferNew => "perry_buffer_new",
+            Runtime::BufferLength => "perry_buffer_length",
+            Runtime::BytesNew => "perry_bytes_new",
+            Runtime::BytesView => "perry_bytes_view",
+            Runtime::BytesFromArray => "perry_bytes_from_array",
+            Runtime::BytesCopy => "perry_bytes_copy",
+            Runtime::BytesLength => "perry_bytes_length",
+            Runtime::BytesOffset => "perry_bytes_offset",
+            Runtime::BytesBuffer => "perry_bytes_buffer",
+            Runtime::BytesGet => "perry_bytes_get",
+            Runtime::BytesPut => "perry_bytes_put",
+            Runtime::BytesSubarray => "perry_bytes_subarray",
+            Runtime::BytesSlice => "perry_bytes_slice",
+            Runtime::BytesSet => "perry_bytes_set",
+            Runtime::BytesSetArray => "perry_bytes_set_array",
+            Runtime::BytesAdopt => "perry_bytes_adopt",
+            Runtime::BytesData => "perry_bytes_data",
             Runtime::Alloc => "perry_alloc",
             Runtime::ArrayNew => "perry_array_new",
             Runtime::ArrayGrow => "perry_array_grow",
@@ -343,6 +380,21 @@ impl Runtime {
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
+            Runtime::BufferNew | Runtime::BytesNew => (vec![f64], vec![i32]),
+            Runtime::BufferLength | Runtime::BytesLength | Runtime::BytesOffset => {
+                (vec![i32], vec![f64])
+            }
+            Runtime::BytesFromArray | Runtime::BytesCopy | Runtime::BytesBuffer => {
+                (vec![i32], vec![i32])
+            }
+            Runtime::BytesGet => (vec![i32, f64], vec![f64]),
+            Runtime::BytesPut => (vec![i32, f64, f64], vec![f64]),
+            Runtime::BytesView | Runtime::BytesSubarray | Runtime::BytesSlice => {
+                (vec![i32, f64, f64], vec![i32])
+            }
+            Runtime::BytesSet | Runtime::BytesSetArray => (vec![i32, i32, f64], vec![i32]),
+            Runtime::BytesAdopt => (vec![i32, i32], vec![i32]),
+            Runtime::BytesData => (vec![i32], vec![i32]),
             Runtime::ExitCodeGet => (vec![], vec![f64]),
             Runtime::ExitStatus => (vec![], vec![i32]),
             Runtime::ExitCodeSet => (vec![f64], vec![i32]),
@@ -419,6 +471,8 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
+        || deref.is::<BytesType>()
+        || deref.is::<BufferType>()
     {
         return Ok(Repr::Ref);
     }
@@ -1612,6 +1666,44 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             let kind = intrinsic.kind(ctx);
+            let bytes_runtime = match kind {
+                Intrinsic::BufferNew => Some(Runtime::BufferNew),
+                Intrinsic::BufferLength => Some(Runtime::BufferLength),
+                Intrinsic::BytesNew => Some(Runtime::BytesNew),
+                Intrinsic::BytesView => Some(Runtime::BytesView),
+                Intrinsic::BytesFromArray => Some(Runtime::BytesFromArray),
+                Intrinsic::BytesCopy => Some(Runtime::BytesCopy),
+                Intrinsic::BytesLength => Some(Runtime::BytesLength),
+                Intrinsic::BytesOffset => Some(Runtime::BytesOffset),
+                Intrinsic::BytesBuffer => Some(Runtime::BytesBuffer),
+                Intrinsic::BytesGet => Some(Runtime::BytesGet),
+                Intrinsic::BytesPut => Some(Runtime::BytesPut),
+                Intrinsic::BytesSubarray => Some(Runtime::BytesSubarray),
+                Intrinsic::BytesSlice => Some(Runtime::BytesSlice),
+                Intrinsic::BytesSet => Some(Runtime::BytesSet),
+                Intrinsic::BytesSetArray => Some(Runtime::BytesSetArray),
+                _ => None,
+            };
+            if let Some(runtime) = bytes_runtime {
+                let operands = self.operands(ctx, op)?;
+                let result = self
+                    .runtime(ctx, runtime, operands)
+                    .expect("byte operation result");
+                match kind {
+                    Intrinsic::BufferNew | Intrinsic::BytesNew | Intrinsic::BytesView => {
+                        let failed = self.num(ctx, NumOpcode::I32Eqz, vec![result]);
+                        let status =
+                            self.i32_const(ctx, perry_runtime::exception::RANGE_ERROR as i32);
+                        self.throw_status_if(ctx, failed, status);
+                        self.define(ctx, op, result);
+                    }
+                    Intrinsic::BytesSet | Intrinsic::BytesSetArray => {
+                        self.throw_status_if(ctx, result, result)
+                    }
+                    _ => self.define(ctx, op, result),
+                }
+                return Ok(());
+            }
             if matches!(
                 kind,
                 Intrinsic::ExitCodeGet
@@ -1660,7 +1752,7 @@ impl<'s> FunctionLowering<'s> {
                 Intrinsic::Arguments => (Runtime::Arguments, "wasi:cli/environment@0.3.0"),
                 Intrinsic::MonotonicNow => (Runtime::MonotonicNow, MONOTONIC_CLOCK),
                 Intrinsic::DateNow => (Runtime::DateNow, "wasi:clocks/system-clock@0.3.0"),
-                _ => unreachable!("process intrinsic handled above"),
+                _ => unreachable!("runtime intrinsic handled above"),
             };
             ensure!(
                 self.state.can_import(interface),

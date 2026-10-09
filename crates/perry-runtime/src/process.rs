@@ -2,7 +2,7 @@
 //! it cancels native work and releases the current task before invoking WASI exit.
 use core::cell::UnsafeCell;
 
-pub const UNDEFINED_NUMBER: u64 = 0x7FF0_0000_0000_0001;
+use crate::UNDEFINED_NUMBER;
 struct Process(UnsafeCell<Option<f64>>);
 // SAFETY: a component instance runs one thread; no borrow survives an import.
 unsafe impl Sync for Process {}
@@ -27,19 +27,10 @@ pub extern "C" fn perry_process_set_exit_code(value: f64) -> i32 {
         || libm::trunc(value) != value
         || libm::fabs(value) > 9_007_199_254_740_991.0
     {
-        let message = b"exit code must be a safe integer";
-        // SAFETY: literal bytes have static lifetime; the new exception is task-owned.
-        return unsafe {
-            let text = crate::string::perry_string_adopt(
-                message.as_ptr().cast_mut(),
-                message.len() as u32,
-            );
-            let error = crate::exception::perry_exception_new(
-                crate::exception::RANGE_ERROR,
-                text as usize as u64,
-            );
-            crate::exception::perry_exception_raise(error)
-        };
+        return crate::exception::raise_error(
+            crate::exception::RANGE_ERROR,
+            "exit code must be a safe integer",
+        );
     }
     // SAFETY: one thread accesses instance state.
     unsafe { *PROCESS.0.get() = Some(value) };

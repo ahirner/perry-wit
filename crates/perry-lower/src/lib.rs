@@ -13,6 +13,7 @@
 //! `if`, `while`, `do`/`while`, `for`, unlabeled `break`/`continue`, `return`; direct calls;
 //! string concatenation; field reads and writes; array literals, `push`, indexing and
 //! `.length`. Everything else is rejected with a diagnostic.
+mod bytes;
 mod exceptions;
 mod shapes;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
@@ -43,7 +44,7 @@ use perry_mir::{
         IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
-    types::{ArrayType, ExceptionType, PromiseType, RecordType, StringType},
+    types::{ArrayType, BufferType, BytesType, ExceptionType, PromiseType, RecordType, StringType},
 };
 use pliron::printable::Printable as _;
 use pliron::{
@@ -274,6 +275,8 @@ enum Kind {
     Record,
     Array,
     Exception,
+    Bytes,
+    Buffer,
 }
 
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
@@ -281,6 +284,10 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = ty.deref(ctx);
     if ty.is::<FP64Type>() {
         Ok(Kind::Number)
+    } else if ty.is::<BytesType>() {
+        Ok(Kind::Bytes)
+    } else if ty.is::<BufferType>() {
+        Ok(Kind::Buffer)
     } else if ty.is::<StringType>() {
         Ok(Kind::String)
     } else if ty.is::<ExceptionType>() {
@@ -766,6 +773,29 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         Ok(match expr {
+            Expr::Uint8ArrayNew(arg) => match arg.as_deref() {
+                Some(arg) => self.bytes_constructor(ctx, &[arg])?,
+                None => self.bytes_constructor(ctx, &[])?,
+            },
+            Expr::Uint8ArrayFrom(source) => self.bytes_from(ctx, source)?,
+            Expr::Uint8ArrayLength(array) => {
+                let array = self.expression(ctx, array)?;
+                let array = self.defined(ctx, array)?;
+                self.intrinsic(ctx, Intrinsic::BytesLength, vec![array])
+                    .unwrap()
+            }
+            Expr::Uint8ArrayGet { array, index } => {
+                let array = self.expression(ctx, array)?;
+                let array = self.defined(ctx, array)?;
+                let index = self.index(ctx, index)?;
+                self.intrinsic(ctx, Intrinsic::BytesGet, vec![array, index])
+                    .unwrap()
+            }
+            Expr::Uint8ArraySet {
+                array,
+                index,
+                value,
+            } => self.set_index(ctx, array, index, value)?,
             Expr::Number(value) => self.number(ctx, *value),
             Expr::Integer(value) => self.number(ctx, *value as f64),
             Expr::Bool(value) => self.boolean(ctx, *value),
@@ -1032,6 +1062,18 @@ impl<'s> FunctionBuilder<'s> {
                 // Property access on `undefined` throws TypeError, in ECMAScript and here.
                 let value = self.defined(ctx, value)?;
                 match (kind(ctx, value)?, property.as_str()) {
+                    (Kind::Bytes, "length" | "byteLength") => self
+                        .intrinsic(ctx, Intrinsic::BytesLength, vec![value])
+                        .unwrap(),
+                    (Kind::Bytes, "byteOffset") => self
+                        .intrinsic(ctx, Intrinsic::BytesOffset, vec![value])
+                        .unwrap(),
+                    (Kind::Bytes, "buffer") => self
+                        .intrinsic(ctx, Intrinsic::BytesBuffer, vec![value])
+                        .unwrap(),
+                    (Kind::Buffer, "byteLength") => self
+                        .intrinsic(ctx, Intrinsic::BufferLength, vec![value])
+                        .unwrap(),
                     (Kind::String, "length") => {
                         let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
                         self.emit_value(ctx, |ctx| {
@@ -1073,6 +1115,19 @@ impl<'s> FunctionBuilder<'s> {
             Expr::New {
                 class_name, args, ..
             } => {
+                if class_name == "Uint8Array" {
+                    return self.bytes_constructor(ctx, &args.iter().collect::<Vec<_>>());
+                }
+                if class_name == "ArrayBuffer" {
+                    ensure!(
+                        args.len() <= 1,
+                        "resizable ArrayBuffer is not supported yet"
+                    );
+                    let size = self.byte_number(ctx, args.first(), 0.0)?;
+                    return Ok(self
+                        .intrinsic(ctx, Intrinsic::BufferNew, vec![size])
+                        .unwrap());
+                }
                 let names = self
                     .shapes
                     .literal_fields(class_name)
@@ -1126,6 +1181,12 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
                 let array = self.defined(ctx, array)?;
+                if kind(ctx, array)? == Kind::Bytes {
+                    let index = self.index(ctx, index)?;
+                    return Ok(self
+                        .intrinsic(ctx, Intrinsic::BytesGet, vec![array, index])
+                        .unwrap());
+                }
                 ensure!(
                     kind(ctx, array)? == Kind::Array,
                     "indexing is only supported on arrays so far"
@@ -1246,6 +1307,22 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        if kind(ctx, array)? == Kind::Bytes {
+            let index = self.index(ctx, index)?;
+            let value = if matches!(value, Expr::Undefined) {
+                let number = FP64Type::get(ctx).into();
+                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
+            } else {
+                self.expression(ctx, value)?
+            };
+            let number = self.arithmetic(ctx, value);
+            ensure!(
+                kind(ctx, number)? == Kind::Number,
+                "byte values must be numbers or undefined"
+            );
+            self.intrinsic(ctx, Intrinsic::BytesPut, vec![array, index, number]);
+            return Ok(value);
+        }
         ensure!(
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"
@@ -1395,6 +1472,16 @@ impl<'s> FunctionBuilder<'s> {
             && self.timers.contains(name)
         {
             return self.timer(ctx, args).map(Some);
+        }
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+        {
+            let receiver = self.expression(ctx, object)?;
+            let receiver = self.defined(ctx, receiver)?;
+            if kind(ctx, receiver)? == Kind::Bytes {
+                return self.bytes_method(ctx, receiver, property, args);
+            }
         }
         let Expr::FuncRef(id) = callee else {
             bail!("only direct calls to module functions are supported yet");

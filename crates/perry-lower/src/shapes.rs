@@ -11,7 +11,8 @@
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
-    ArrayType, ExceptionType, OptionalType, PromiseType, RecordType, StringType,
+    ArrayType, BufferType, BytesType, ExceptionType, OptionalType, PromiseType, RecordType,
+    StringType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -75,6 +76,8 @@ impl<'h> Shapes<'h> {
                 let element = self.value_type(ctx, element)?;
                 ArrayType::get(ctx, element).into()
             }
+            HirType::Named(name) if name == "Uint8Array" => BytesType::get(ctx).into(),
+            HirType::Named(name) if name == "ArrayBuffer" => BufferType::get(ctx).into(),
             HirType::Named(name)
                 if matches!(name.as_str(), "Error" | "TypeError" | "RangeError") =>
             {

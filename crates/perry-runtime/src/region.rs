@@ -140,9 +140,13 @@ fn new_task() -> *mut Task {
 
 impl Task {
     pub(crate) fn allocate(&mut self, size: usize) -> *mut u8 {
-        let size = size.next_multiple_of(ALIGN).max(ALIGN);
+        let size = size
+            .checked_next_multiple_of(ALIGN)
+            .unwrap_or_else(|| out_of_memory())
+            .max(ALIGN);
         if size > LARGE {
-            let chunk = new_chunk(HEADER + size, self.large);
+            let allocation = HEADER.checked_add(size).unwrap_or_else(|| out_of_memory());
+            let chunk = new_chunk(allocation, self.large);
             self.large = chunk;
             return (chunk as usize + HEADER) as *mut u8;
         }

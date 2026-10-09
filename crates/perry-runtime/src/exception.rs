@@ -10,6 +10,15 @@ pub const NUMBER: u32 = 4;
 pub const BOOLEAN: u32 = 5;
 pub const STRING: u32 = 6;
 
+pub(crate) fn raise_error(kind: u32, message: &'static str) -> i32 {
+    // SAFETY: literal bytes have static lifetime; the exception is owned by this task.
+    unsafe {
+        let text = perry_string_adopt(message.as_ptr().cast_mut(), message.len() as u32);
+        let error = perry_exception_new(kind, text as usize as u64);
+        perry_exception_raise(error)
+    }
+}
+
 #[repr(C)]
 struct Exception {
     kind: u32,

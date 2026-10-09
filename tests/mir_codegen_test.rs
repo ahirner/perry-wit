@@ -432,3 +432,62 @@ export function run(x: number): number {fail(); return x;}
         Some(wasmtime::Trap::UnreachableCodeReached)
     ));
 }
+
+#[test]
+fn byte_constructor_lengths_coerce_and_range_errors_are_catchable() {
+    let mut program = Program::new(
+        r#"
+export function bytes(x: number): number {
+  try { return new Uint8Array(x).length; }
+  catch(e) { return e instanceof RangeError ? -1 : -2; }
+}
+export function buffer(x: number): number {
+  try { return new ArrayBuffer(x).byteLength; }
+  catch(e) { return e instanceof RangeError ? -1 : -2; }
+}
+"#,
+    );
+    for (input, expected) in [
+        (-1.0, -1.0),
+        (-0.5, 0.0),
+        (-0.0, 0.0),
+        (0.0, 0.0),
+        (1.9, 1.0),
+        (f64::NAN, 0.0),
+        (f64::INFINITY, -1.0),
+        (f64::NEG_INFINITY, -1.0),
+        (4_294_967_296.0, -1.0),
+    ] {
+        for export in ["bytes", "buffer"] {
+            assert_eq!(program.number(export, input), expected, "{export}({input})");
+        }
+    }
+}
+
+#[test]
+fn oversized_byte_storage_traps_before_allocation_size_can_wrap() {
+    for size in [4_294_967_295.0f64, 4_294_967_288.0] {
+        let mut program = Program::new(
+            "export function run(n: number): number { return new Uint8Array(n).length; }",
+        );
+        let run = program
+            .instance
+            .get_func(&mut program.store, "run")
+            .unwrap();
+        let mut results = [Val::F64(0), Val::I32(0)];
+        let error = run
+            .call(
+                &mut program.store,
+                &[Val::F64(size.to_bits())],
+                &mut results,
+            )
+            .expect_err("allocator must reject alignment/header overflow");
+        assert!(
+            matches!(
+                error.downcast_ref::<wasmtime::Trap>(),
+                Some(wasmtime::Trap::UnreachableCodeReached)
+            ),
+            "{error:#}"
+        );
+    }
+}

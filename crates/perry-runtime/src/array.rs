@@ -24,6 +24,16 @@ struct Array {
     data: *mut u64,
 }
 
+/// # Safety
+/// `array` is live; the caller must not mutate or free it while using the returned slots.
+pub(crate) unsafe fn slots(array: *mut u8) -> &'static [u64] {
+    // SAFETY: guaranteed by the caller; array storage includes every initialized slot.
+    unsafe {
+        let array = &*array.cast::<Array>();
+        core::slice::from_raw_parts(array.data, array.len as usize)
+    }
+}
+
 /// A new array with room for at least `capacity` elements and length 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {

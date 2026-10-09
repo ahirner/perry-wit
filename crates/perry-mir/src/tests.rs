@@ -114,6 +114,36 @@ builtin.module @m {{
 }
 
 #[test]
+fn byte_intrinsics_verify_storage_kinds_and_exception_effects() {
+    let body = r#"
+        buffer = perry.intrinsic BufferNew (v) : perry.buffer;
+        created = perry.caught_status : builtin.integer i32;
+        length = perry.wrap v : perry.optional <builtin.fp64>;
+        bytes = perry.intrinsic BytesView (buffer, v, length) : perry.bytes;
+        viewed = perry.caught_status : builtin.integer i32;
+        byte = perry.intrinsic BytesGet (bytes, v) : perry.optional <builtin.fp64>;
+        perry.intrinsic BytesSet (bytes, bytes, v) : ;
+        copied = perry.caught_status : builtin.integer i32;
+    "#;
+    let input = single_block(body);
+    verify_text(&input).expect("typed byte intrinsics verify");
+    let invalid = input.replace("BytesView (buffer, v, length)", "BytesView (v, v, length)");
+    assert!(
+        verify_text(&invalid)
+            .unwrap_err()
+            .contains("incorrect operand or result types")
+    );
+    let infallible = single_block(
+        "bytes = perry.intrinsic BytesNew (v) : perry.bytes; byte = perry.intrinsic BytesGet (bytes, v) : perry.optional <builtin.fp64>; status = perry.caught_status : builtin.integer i32;",
+    );
+    assert!(
+        verify_text(&infallible)
+            .unwrap_err()
+            .contains("immediately follow a throwing operation")
+    );
+}
+
+#[test]
 fn verifier_rejects_ill_typed_heap_ops() {
     const POINT: &str = "perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>";
     let flag = "builtin.integer i1";

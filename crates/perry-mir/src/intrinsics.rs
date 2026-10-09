@@ -1,6 +1,6 @@
-//! Typed host capabilities. Signatures are verified here; native representations and
+//! Typed built-in capabilities. Signatures are verified here; native representations and
 //! task scheduling belong to codegen and the runtime.
-use crate::types::{ArrayType, OptionalType, StringType};
+use crate::types::{ArrayType, BufferType, BytesType, OptionalType, StringType};
 use pliron::{
     builtin::types::FP64Type,
     common_traits::Verify,
@@ -31,6 +31,21 @@ pub enum Intrinsic {
     ExitCodeClear,
     ProcessExit,
     ProcessExitCurrent,
+    BufferNew,
+    BufferLength,
+    BytesNew,
+    BytesView,
+    BytesFromArray,
+    BytesCopy,
+    BytesLength,
+    BytesOffset,
+    BytesBuffer,
+    BytesGet,
+    BytesPut,
+    BytesSubarray,
+    BytesSlice,
+    BytesSet,
+    BytesSetArray,
 }
 
 #[derive(Clone, Copy)]
@@ -40,11 +55,20 @@ enum ValueType {
     OptionalNumber,
     Strings,
     Number,
+    Numbers,
+    Bytes,
+    Buffer,
 }
 
 impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
+            Self::Bytes => BytesType::get(ctx).into(),
+            Self::Buffer => BufferType::get(ctx).into(),
+            Self::Numbers => {
+                let number = FP64Type::get(ctx).into();
+                ArrayType::get(ctx, number).into()
+            }
             Self::Number => FP64Type::get(ctx).into(),
             Self::String => StringType::get(ctx).into(),
             Self::OptionalString | Self::OptionalNumber => {
@@ -63,6 +87,12 @@ impl ValueType {
     }
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
+            Self::Bytes => ty.deref(ctx).is::<BytesType>(),
+            Self::Buffer => ty.deref(ctx).is::<BufferType>(),
+            Self::Numbers => ty
+                .deref(ctx)
+                .downcast_ref::<ArrayType>()
+                .is_some_and(|ty| ty.element().deref(ctx).is::<FP64Type>()),
             Self::Number => ty.deref(ctx).is::<FP64Type>(),
             Self::String => ty.deref(ctx).is::<StringType>(),
             Self::OptionalString => ty
@@ -85,6 +115,19 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::BufferNew => (&[Number], &[Buffer]),
+            Self::BufferLength => (&[Buffer], &[Number]),
+            Self::BytesNew => (&[Number], &[Bytes]),
+            Self::BytesView => (&[Buffer, Number, OptionalNumber], &[Bytes]),
+            Self::BytesFromArray => (&[Numbers], &[Bytes]),
+            Self::BytesCopy => (&[Bytes], &[Bytes]),
+            Self::BytesLength | Self::BytesOffset => (&[Bytes], &[Number]),
+            Self::BytesBuffer => (&[Bytes], &[Buffer]),
+            Self::BytesGet => (&[Bytes, Number], &[OptionalNumber]),
+            Self::BytesPut => (&[Bytes, Number, Number], &[Number]),
+            Self::BytesSubarray | Self::BytesSlice => (&[Bytes, Number, OptionalNumber], &[Bytes]),
+            Self::BytesSet => (&[Bytes, Bytes, Number], &[]),
+            Self::BytesSetArray => (&[Bytes, Numbers, Number], &[]),
             Self::ExitCodeGet => (&[], &[OptionalNumber]),
             Self::ExitCodeSet => (&[Number], &[Number]),
             Self::ExitCodeClear | Self::ProcessExitCurrent => (&[], &[]),
@@ -159,7 +202,13 @@ impl crate::exceptions::MayThrowInterface for IntrinsicOp {
     fn may_throw(&self, ctx: &Context) -> bool {
         matches!(
             self.kind(ctx),
-            Intrinsic::ExitCodeSet | Intrinsic::ProcessExit
+            Intrinsic::ExitCodeSet
+                | Intrinsic::ProcessExit
+                | Intrinsic::BufferNew
+                | Intrinsic::BytesNew
+                | Intrinsic::BytesView
+                | Intrinsic::BytesSet
+                | Intrinsic::BytesSetArray
         )
     }
 }

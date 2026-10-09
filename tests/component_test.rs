@@ -276,3 +276,56 @@ export function run(n: number): number[] {
     }
     Ok(())
 }
+
+#[test]
+fn byte_views_share_storage_copies_are_independent_and_tasks_release_both() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "bytes.wit",
+        "package test:bytes; world bytes { export run: func(input: list<u8>) -> list<u8>; }",
+    )?;
+    let world = resolve.select_world(&[package], Some("bytes"))?;
+    let source = r#"
+function verify(input: Uint8Array): Uint8Array {
+  const buffer = new ArrayBuffer(input.length + 6);
+  const whole = new Uint8Array(buffer);
+  const view = new Uint8Array(buffer, 2, input.length);
+  const empty = new Uint8Array();
+  const literal = Uint8Array.of(257, -1);
+  if(literal.length !== 2 || literal[0] !== 1 || literal[1] !== 255) throw 5;
+  if(empty.length !== 0 || whole[0] !== 0 || whole[1] !== 0) throw 1;
+  if(view.buffer !== buffer || view.byteOffset !== 2 || view.byteLength !== input.length) throw 2;
+  view.set(input);
+  const copy = new Uint8Array(view);
+  const from = Uint8Array.from(view);
+  const sliced = view.slice();
+  const sub = view.subarray(-3);
+  if(sub.buffer !== buffer || copy.buffer === buffer || from.buffer === buffer) throw 3;
+  view[0] = 999;
+  if(input.length > 0 && (copy[0] !== input[0] || sliced[0] !== input[0] || from[0] !== input[0])) throw 4;
+  view.set(copy);
+  return whole.subarray(2, input.length + 2);
+}
+export function run(input: Uint8Array): Uint8Array { return verify(input); }
+"#;
+    let compiled = compile_for_world(source, "bytes.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(&[u8],), (Vec<u8>,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, (&[],))?.0, Vec::<u8>::new());
+    let input: Vec<u8> = (0..50_000).map(|i| i as u8).collect();
+    let mut peak = 0;
+    for round in 0..20 {
+        assert_eq!(run.call(&mut store, (&input,))?.0, input);
+        if round == 2 {
+            peak = store.data().0;
+        }
+        if round > 2 {
+            assert_eq!(store.data().0, peak, "byte storage leaked across tasks");
+        }
+    }
+    Ok(())
+}

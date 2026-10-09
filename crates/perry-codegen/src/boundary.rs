@@ -880,6 +880,15 @@ impl FunctionLowering<'_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
+        if mir_ty.deref(ctx).is::<perry_mir::types::BytesType>() {
+            ensure!(
+                matches!(element, AbiType::U8),
+                "Uint8Array needs a WIT list<u8>"
+            );
+            return Ok(self
+                .runtime(ctx, Runtime::BytesAdopt, vec![ptr, len])
+                .expect("bytes"));
+        }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
@@ -1021,6 +1030,20 @@ impl FunctionLowering<'_> {
         mir_ty: TypeHandle,
         value: Value,
     ) -> Result<(Value, Value)> {
+        if mir_ty.deref(ctx).is::<perry_mir::types::BytesType>() {
+            ensure!(
+                matches!(element, AbiType::U8),
+                "Uint8Array needs a WIT list<u8>"
+            );
+            let data = self
+                .runtime(ctx, Runtime::BytesData, vec![value])
+                .expect("byte storage");
+            let len = self
+                .runtime(ctx, Runtime::BytesLength, vec![value])
+                .expect("byte length");
+            let len = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![len]);
+            return Ok((data, len));
+        }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)

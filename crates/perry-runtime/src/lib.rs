@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod array;
+pub mod bytes;
 #[cfg(target_arch = "wasm32")]
 mod cli;
 pub mod exception;
@@ -24,6 +25,9 @@ pub mod process;
 pub mod promise;
 pub mod region;
 pub mod string;
+
+/// Reserved representation of an absent optional number.
+pub const UNDEFINED_NUMBER: u64 = 0x7FF0_0000_0000_0001;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
@@ -56,6 +60,7 @@ mod tests {
     fn runtime() {
         regions_release_in_bulk_and_reuse_chunks();
         arrays_grow_and_keep_elements();
+        byte_views_preserve_aliases_and_validate_before_writing();
         strings_append_in_place_and_share_prefixes();
         argument_lowering_opens_the_task_the_export_adopts();
         promises_queue_waiters_and_tasks_interleave();
@@ -102,6 +107,66 @@ mod tests {
         assert_eq!(perry_process_exit_status(), 255);
         perry_process_clear_exit_code();
         assert_eq!(perry_process_exit_status(), -1);
+    }
+
+    fn byte_views_preserve_aliases_and_validate_before_writing() {
+        use bytes::*;
+        perry_task_begin();
+        let undefined = f64::from_bits(UNDEFINED_NUMBER);
+        let values = [257.9, -1.9, f64::NAN, f64::INFINITY, -0.0, 511.0];
+        let array = perry_bytes_new(values.len() as f64);
+        // SAFETY: all views are live in this task; indices deliberately exercise checked APIs.
+        unsafe {
+            for (index, value) in values.into_iter().enumerate() {
+                assert_eq!(perry_bytes_get(array, index as f64), 0.0);
+                perry_bytes_put(array, index as f64, value);
+            }
+            for (index, expected) in [1.0, 255.0, 0.0, 0.0, 0.0, 255.0].into_iter().enumerate() {
+                assert_eq!(perry_bytes_get(array, index as f64), expected);
+            }
+            for index in [-1.0, 0.5, 6.0, f64::NAN, f64::INFINITY] {
+                assert_eq!(perry_bytes_get(array, index).to_bits(), UNDEFINED_NUMBER);
+                perry_bytes_put(array, index, 42.0);
+            }
+            let alias = perry_bytes_subarray(array, 1.0, undefined);
+            let copy = perry_bytes_slice(array, 1.0, undefined);
+            assert_eq!(perry_bytes_buffer(alias), perry_bytes_buffer(array));
+            assert_ne!(perry_bytes_buffer(copy), perry_bytes_buffer(array));
+            assert_eq!(perry_bytes_offset(alias), 1.0);
+            assert_eq!(perry_bytes_length(alias), 5.0);
+            assert_eq!(perry_bytes_set(array, alias, 0.0), 0);
+            assert_eq!(perry_bytes_get(array, 0.0), 255.0);
+            assert_eq!(perry_bytes_get(alias, 0.0), 0.0);
+            assert_eq!(perry_bytes_get(copy, 0.0), 255.0);
+            let before: Vec<_> = (0..6).map(|i| perry_bytes_get(array, i as f64)).collect();
+            for offset in [-1.0, 2.0, f64::INFINITY] {
+                let status = perry_bytes_set(array, alias, offset);
+                let error = exception::perry_exception_catch(status);
+                assert_eq!(
+                    exception::perry_exception_is(error, exception::RANGE_ERROR),
+                    1
+                );
+                assert_eq!(
+                    (0..6)
+                        .map(|i| perry_bytes_get(array, i as f64))
+                        .collect::<Vec<_>>(),
+                    before
+                );
+            }
+            let empty = perry_bytes_subarray(array, -2.0, f64::NAN);
+            assert_eq!(perry_bytes_length(empty), 0.0);
+            assert_eq!(perry_bytes_offset(empty), 4.0);
+            for length in [-1.0, f64::INFINITY, u32::MAX as f64 + 1.0] {
+                assert!(perry_bytes_new(length).is_null());
+                let error = exception::perry_exception_catch(exception::RANGE_ERROR as i32);
+                assert_eq!(
+                    exception::perry_exception_is(error, exception::RANGE_ERROR),
+                    1
+                );
+            }
+        }
+        perry_task_end();
+        assert_eq!(chunk_counts().0, 0, "byte allocations outlived their task");
     }
 
     fn exceptions_are_owned_by_each_task_and_rejections_keep_identity() {
