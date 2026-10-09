@@ -320,7 +320,7 @@ export async function run():Promise<void>{
 "#,
         "export run: async func();",
     )?;
-    let component = Component::new(&engine, cancellation::cancellation_caller(&worker)?)?;
+    let component = Component::new(&engine, cancellation::cancellation_caller(&worker, false)?)?;
     let root = tempfile::tempdir()?;
     let ctx = WasiCtx::builder()
         .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
@@ -522,5 +522,372 @@ fn native_filesystem_requires_async_exports_and_explicit_wit_imports() -> Result
         format!("{error:#}").contains("wasi:filesystem"),
         "{error:#}"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn file_transfers_roundtrip_bytes_text_and_directory_entries() -> Result<()> {
+    let source = r#"
+import fs from 'node:fs/promises';
+export async function run(input:Uint8Array):Promise<Uint8Array> {
+  await fs.mkdir('/sandbox/child');
+  try {
+    await fs.writeFile('/sandbox/child/binary',input);
+    const bytes=await fs.readFile('/sandbox/child/binary');
+    const other=await fs.readFile('/sandbox/child/binary',{encoding:'BiNaRy',flag:'r'});
+    if(other.length>0)other[0]=42;
+    await fs.writeFile('/sandbox/child/é🙂','\uFEFFé🙂\0',{encoding:'UTF-8',flag:'w'});
+    const text=await fs.readFile('/sandbox/child/é🙂','utf8');
+    if(text!=='\uFEFFé🙂\0'||text.length!==4)throw new Error('text round trip');
+    const names=await fs.readdir('/sandbox/child',{encoding:'UTF-8',recursive:false,withFileTypes:false});
+    if(names.length!==2)throw new Error('directory entries');
+    let found=0;for(let i=0;i<names.length;i++){if(names[i]==='binary'||names[i]==='é🙂')found++;}
+    if(found!==2)throw new Error('directory entry names');
+    await fs.unlink('/sandbox/child/binary');await fs.unlink('/sandbox/child/é🙂');
+    return bytes;
+  }finally{await fs.rmdir('/sandbox/child');}
+}
+export async function invalid():Promise<number> {
+  await fs.writeFile('/sandbox/bad',new Uint8Array([65,255]));
+  try{await fs.readFile('/sandbox/bad','utf8');}catch(e){if(e===9)return 9;throw e;}
+  finally{await fs.unlink('/sandbox/bad');}
+  return 0;
+}
+"#;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(
+        &engine,
+        compile(
+            source,
+            "export run: async func(input:list<u8>) -> list<u8>; export invalid: async func() -> f64;",
+        )?,
+    )?;
+    let root = tempfile::tempdir()?;
+    let ctx = WasiCtx::builder()
+        .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
+        .build();
+    let mut store = Store::new(
+        &engine,
+        Host {
+            ctx,
+            table: ResourceTable::new(),
+            peak: 0,
+        },
+    );
+    store.limiter(|host| host);
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&[u8],), (Vec<u8>,)>(&mut store, "run")?;
+    let invalid = instance.get_typed_func::<(), (f64,)>(&mut store, "invalid")?;
+    let mut peak = 0;
+    for round in 0..6 {
+        for length in [0, 1, 8191, 8192, 8193, 65536, 150000] {
+            let bytes: Vec<_> = (0..length).map(|i| (i * 37) as u8).collect();
+            assert_eq!(run.call_async(&mut store, (&bytes,)).await?.0, bytes);
+            assert!(store.data().table.is_empty());
+            store.assert_concurrent_state_empty();
+        }
+        assert_eq!(invalid.call_async(&mut store, ()).await?.0, 9.0);
+        if round == 1 {
+            peak = store.data().peak;
+        } else if round > 1 {
+            assert_eq!(store.data().peak, peak, "file buffers leaked");
+        }
+    }
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+    Ok(())
+}
+
+#[path = "support/filesystem_transfers.rs"]
+mod transfers;
+
+#[tokio::test(flavor = "current_thread")]
+async fn transfer_cancellation_and_late_errors_release_every_native_owner() -> Result<()> {
+    use transfers::{Behavior, Kind};
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    for (kind, call) in [
+        (Kind::Read, "fs.readFile('/sandbox/input')"),
+        (
+            Kind::Write,
+            "fs.writeFile('/sandbox/output','partial é🙂 write')",
+        ),
+        (Kind::Directory, "fs.readdir('/sandbox')"),
+    ] {
+        for behavior in [
+            Behavior::Success,
+            Behavior::BlockData,
+            Behavior::BlockCompletion,
+            Behavior::FinishError,
+            Behavior::Failure,
+            Behavior::EarlyClose,
+            Behavior::EarlyFailure,
+        ] {
+            if matches!(behavior, Behavior::EarlyClose | Behavior::EarlyFailure)
+                && !matches!(kind, Kind::Write)
+            {
+                continue;
+            }
+            let cancel = matches!(
+                behavior,
+                Behavior::BlockData | Behavior::BlockCompletion | Behavior::FinishError
+            );
+            let body = if matches!(behavior, Behavior::Success) {
+                match kind {
+                    Kind::Read => {
+                        format!("const value=await {call};return value.length===27000?1:0;")
+                    }
+                    Kind::Directory => {
+                        format!("const value=await {call};return value.length===36?1:0;")
+                    }
+                    Kind::Write => format!("await {call};return 1;"),
+                }
+            } else if cancel {
+                format!(
+                    "try{{await {call};}}finally{{throw new Error('cancelled continuation ran');}}"
+                )
+            } else {
+                format!(
+                    "try{{await {call};}}catch(e){{if(e==={})return 1;throw e;}}return 0;",
+                    if matches!(behavior, Behavior::Failure | Behavior::EarlyFailure) {
+                        37
+                    } else {
+                        32
+                    }
+                )
+            };
+            let source = format!(
+                "import fs from 'fs/promises';export async function run():Promise<{}>{{{body}}}",
+                if cancel { "void" } else { "number" }
+            );
+            let worker = compile(
+                &source,
+                if cancel {
+                    "export run: async func();"
+                } else {
+                    "export run: async func() -> f64;"
+                },
+            )?;
+            let component = Component::new(
+                &engine,
+                if cancel {
+                    cancellation::cancellation_caller(&worker, true)?
+                } else {
+                    worker
+                },
+            )?;
+            let root = tempfile::tempdir()?;
+            let ctx = WasiCtx::builder()
+                .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
+                .build();
+            let mut store = Store::new(
+                &engine,
+                Host {
+                    ctx,
+                    table: ResourceTable::new(),
+                    peak: 0,
+                },
+            );
+            store.limiter(|host| host);
+            let mut linker = Linker::new(&engine);
+            wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+            let observations = transfers::install(&mut linker, kind, behavior)?;
+            let instance = linker.instantiate_async(&mut store, &component).await?;
+            let mut peak = 0;
+            for round in 0..8 {
+                observations.ready.store(false, Ordering::SeqCst);
+                if cancel {
+                    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+                    assert_eq!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            run.call_async(&mut store, ())
+                        )
+                        .await??
+                        .0,
+                        4,
+                        "{kind:?} {behavior:?}"
+                    );
+                    assert!(
+                        observations.cancelled.load(Ordering::SeqCst) > round,
+                        "cancellation missed transfer phase: {kind:?} {behavior:?}"
+                    );
+                } else {
+                    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+                    assert_eq!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            run.call_async(&mut store, ())
+                        )
+                        .await??
+                        .0,
+                        1.0,
+                        "{kind:?} {behavior:?}"
+                    );
+                }
+                assert_eq!(
+                    observations.started.load(Ordering::SeqCst),
+                    round + 1,
+                    "open cancellation hid transfer test"
+                );
+                assert_eq!(observations.dropped_data.load(Ordering::SeqCst), round + 1);
+                if matches!(behavior, Behavior::Success) {
+                    let count = match kind {
+                        Kind::Read => 27000,
+                        Kind::Directory => 38,
+                        Kind::Write => "partial é🙂 write".len(),
+                    };
+                    assert_eq!(
+                        observations.transferred.load(Ordering::SeqCst),
+                        (round + 1) * count
+                    );
+                }
+                assert_eq!(
+                    observations.dropped_future.load(Ordering::SeqCst),
+                    round + 1
+                );
+                assert!(store.data().table.is_empty());
+                store.assert_concurrent_state_empty();
+                if round == 1 {
+                    peak = store.data().peak;
+                } else if round > 1 {
+                    assert_eq!(store.data().peak, peak, "{kind:?} {behavior:?}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn overlapping_file_transfers_preserve_views_and_validate_options_before_io() -> Result<()> {
+    let source = r#"
+import {writeFile,readFile,readdir} from 'fs/promises';
+export async function run(path:string,input:Uint8Array):Promise<Uint8Array> {
+  const pending=writeFile(path,input.subarray(1,-1));
+  const independent=readFile('/sandbox/original');
+  const other=await independent;
+  if(other.length!==8)throw new Error('independent read');
+  await pending;
+  return await readFile(path);
+}
+export async function invalid(path:string,label:string,flag:string):Promise<number> {
+  try{await writeFile(path,'changed',{encoding:label,flag});}catch(e){if(e===12)return 12;if(e===31)return 31;if(e===1)return 1;throw e;}
+  return 0;
+}
+export async function options():Promise<number> {
+  const trace={value:0};
+  try{await writeFile('/sandbox/original','changed',{encoding:'utf8',unknown:mark(trace)});}catch(e){if(e!==12)throw e;}
+  try{await readdir('/outside',{recursive:true});}catch(e){if(e===12)trace.value=trace.value+1;else throw e;}
+  try{await readFile('/outside',{encoding:'utf8',flag:'w'});}catch(e){if(e===12)trace.value=trace.value+1;else throw e;}
+  return trace.value;
+}
+function mark(trace:{value:number}):number {trace.value=trace.value+1;return 42;}
+"#;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(
+        &engine,
+        compile(
+            source,
+            "export run: async func(path:string,input:list<u8>)->list<u8>; export invalid: async func(path:string,label:string,flag:string)->f64; export options: async func()->f64;",
+        )?,
+    )?;
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("original"), b"original")?;
+    let ctx = WasiCtx::builder()
+        .preopened_dir(root.path(), "/sandbox", FsPerms::ReadWrite)?
+        .preopened_dir(root.path(), "/readonly", FsPerms::ReadOnly)?
+        .build();
+    let mut store = Store::new(
+        &engine,
+        Host {
+            ctx,
+            table: ResourceTable::new(),
+            peak: 0,
+        },
+    );
+    store.limiter(|host| host);
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str, Vec<u8>), (Vec<u8>,)>(&mut store, "run")?;
+    let a: Vec<_> = (0..35000).map(|i| (i * 17) as u8).collect();
+    let b: Vec<_> = (0..52000).map(|i| (i * 3) as u8).collect();
+    for _ in 0..32 {
+        let input_a = a.clone();
+        let input_b = b.clone();
+        let (actual_a, actual_b) = store
+            .run_concurrent(async move |accessor| -> wasmtime::Result<_> {
+                let (a, b) = tokio::join!(
+                    run.call_concurrent(accessor, ("/sandbox/a", input_a)),
+                    run.call_concurrent(accessor, ("/sandbox/b", input_b))
+                );
+                Ok((a?.0, b?.0))
+            })
+            .await??;
+        assert_eq!(actual_a, &a[1..a.len() - 1]);
+        assert_eq!(actual_b, &b[1..b.len() - 1]);
+        assert!(store.data().table.is_empty());
+        store.assert_concurrent_state_empty();
+        assert!(
+            store.data().peak <= 1024 * 1024,
+            "overlapping transfers leaked memory: {}",
+            store.data().peak
+        );
+    }
+    let invalid = instance.get_typed_func::<(&str, &str, &str), (f64,)>(&mut store, "invalid")?;
+    for path in [
+        "/sandbox/original",
+        "/outside/original",
+        "/readonly/original",
+    ] {
+        for (encoding, flag) in [("latin1", "w"), ("utf8", "r"), ("utf8", "W")] {
+            assert_eq!(
+                invalid
+                    .call_async(&mut store, (path, encoding, flag))
+                    .await?
+                    .0,
+                12.0
+            );
+        }
+    }
+    assert_eq!(
+        invalid
+            .call_async(&mut store, ("/readonly/original", "utf8", "w"))
+            .await?
+            .0,
+        31.0
+    );
+    let options = instance.get_typed_func::<(), (f64,)>(&mut store, "options")?;
+    assert_eq!(options.call_async(&mut store, ()).await?.0, 3.0);
+    assert_eq!(std::fs::read(root.path().join("original"))?, b"original");
+    assert!(store.data().table.is_empty());
+    store.assert_concurrent_state_empty();
+    Ok(())
+}
+
+#[test]
+fn metadata_only_components_exclude_file_transfer_builtins() -> Result<()> {
+    let bytes = compile(
+        "import {stat} from 'fs/promises';export async function run():Promise<number>{return (await stat('.')).size;}",
+        "export run: async func()->f64;",
+    )?;
+    let wat = wasmprinter::print_bytes(bytes)?;
+    for builtin in [
+        "[stream-new-0]",
+        "[async-lower][stream-read-0]",
+        "[async-lower][stream-write-0]",
+    ] {
+        assert!(
+            !wat.contains(builtin),
+            "metadata linked transfer builtin {builtin}"
+        );
+    }
     Ok(())
 }

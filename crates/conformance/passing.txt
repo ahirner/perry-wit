@@ -25,3 +25,5 @@ ecma.subset.exclusions
 web.textdecoder.streaming
 web.textencoder.values
 node.fs.metadata_lifecycle
+node.fs.directories
+node.fs.transfers

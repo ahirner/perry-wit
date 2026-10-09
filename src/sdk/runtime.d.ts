@@ -75,7 +75,9 @@ declare module "node:fs" { export type { Stats } from "fs"; }
 declare module "fs/promises" {
   import type { Stats } from "fs";
   export function readFile(path: string, encoding: "utf8" | "utf-8"): Promise<string>;
-  export function readFile(path: string, encoding?: null): Promise<Uint8Array>;
+  export function readFile(path: string, encoding?: "binary" | null): Promise<Uint8Array>;
+  export function readFile(path: string, options: { encoding: "utf8" | "utf-8"; flag?: "r"; signal?: AbortSignal }): Promise<string>;
+  export function readFile(path: string, options: { encoding?: "binary" | null; flag?: "r"; signal?: AbortSignal }): Promise<Uint8Array>;
   export function readFile(path: string, options: string | { encoding?: string | null; flag?: "r"; signal?: AbortSignal }): Promise<string | Uint8Array>;
   export function writeFile(path: string, data: string | Uint8Array, options?: string | { encoding?: string | null; flag?: "w"; signal?: AbortSignal } | null): Promise<void>;
   export function stat(path: string, options?: { bigint?: false; throwIfNoEntry?: true } | null): Promise<Stats>;

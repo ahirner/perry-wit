@@ -668,3 +668,14 @@ fn filesystem_options_reject_unpreserved_frontend_forms() {
         assert!(error.contains("builtin options"), "{error}");
     }
 }
+
+#[test]
+fn filesystem_value_apis_require_promises_modules() {
+    for module in ["fs", "node:fs"] {
+        for call in ["readFileSync('input','utf8')", "readFile('input',()=>{})"] {
+            let source =
+                format!("import fs from '{module}';export function run():void{{fs.{call};}}");
+            rejected(&source);
+        }
+    }
+}

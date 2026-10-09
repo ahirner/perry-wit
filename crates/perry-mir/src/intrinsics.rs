@@ -22,6 +22,12 @@ use thiserror::Error;
 #[pliron_attr(name = "perry.intrinsic_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum Intrinsic {
+    FsReadText,
+    FsReadBytes,
+    FsWriteText,
+    FsWriteBytes,
+    FsReadDir,
+    FsOptions,
     FsStat,
     FsMkdir,
     FsUnlink,
@@ -110,6 +116,9 @@ enum ValueType {
     FsStats,
     PromiseStats,
     PromiseVoid,
+    PromiseString,
+    PromiseBytes,
+    PromiseStrings,
     TextEncoder,
     TextDecoder,
     OptionalBytes,
@@ -132,6 +141,15 @@ impl ValueType {
     fn get(self, ctx: &mut Context) -> TypeHandle {
         match self {
             Self::FsStats => FsStatsType::get(ctx).into(),
+            Self::PromiseString | Self::PromiseBytes | Self::PromiseStrings => {
+                let value = match self {
+                    Self::PromiseString => Self::String,
+                    Self::PromiseBytes => Self::Bytes,
+                    _ => Self::Strings,
+                }
+                .get(ctx);
+                PromiseType::get(ctx, value).into()
+            }
             Self::PromiseStats => {
                 let stats = FsStatsType::get(ctx).into();
                 PromiseType::get(ctx, stats).into()
@@ -186,6 +204,17 @@ impl ValueType {
     fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
         match self {
             Self::FsStats => ty.deref(ctx).is::<FsStatsType>(),
+            Self::PromiseString | Self::PromiseBytes | Self::PromiseStrings => ty
+                .deref(ctx)
+                .downcast_ref::<PromiseType>()
+                .is_some_and(|promise| {
+                    match self {
+                        Self::PromiseString => Self::String,
+                        Self::PromiseBytes => Self::Bytes,
+                        _ => Self::Strings,
+                    }
+                    .matches(ctx, promise.value())
+                }),
             Self::PromiseStats | Self::PromiseVoid => {
                 ty.deref(ctx)
                     .downcast_ref::<PromiseType>()
@@ -250,6 +279,15 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::FsReadText => (&[String, Boolean], &[PromiseString]),
+            Self::FsReadBytes => (&[String, Boolean], &[PromiseBytes]),
+            Self::FsWriteText => (&[String, String, Boolean], &[PromiseVoid]),
+            Self::FsWriteBytes => (&[String, Bytes, Boolean], &[PromiseVoid]),
+            Self::FsReadDir => (&[String, Boolean], &[PromiseStrings]),
+            Self::FsOptions => (
+                &[OptionalString, OptionalString, Number, Boolean],
+                &[Boolean],
+            ),
             Self::FsStat => (&[String, Boolean], &[PromiseStats]),
             Self::FsMkdir | Self::FsUnlink | Self::FsRmdir => (&[String, Boolean], &[PromiseVoid]),
             Self::FsSize | Self::FsMtime | Self::FsKind => (&[FsStats], &[Number]),

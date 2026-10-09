@@ -6,6 +6,7 @@ use crate::{
 };
 use alloc::string::String;
 use core::ptr;
+mod transfer;
 
 #[link(wasm_import_module = "wasi:filesystem/preopens@0.3.0")]
 unsafe extern "C" {
@@ -102,6 +103,7 @@ type StatResult = Returned<Stat>;
 type UnitResult = Returned<()>;
 #[repr(C)]
 union ResultArea {
+    open: core::mem::ManuallyDrop<Returned<u32>>,
     stat: core::mem::ManuallyDrop<StatResult>,
     unit: core::mem::ManuallyDrop<UnitResult>,
 }
@@ -112,6 +114,7 @@ enum Kind {
     Mkdir,
     Unlink,
     Rmdir,
+    Transfer(*mut transfer::Transfer),
 }
 struct Operation {
     next: *mut Operation,
@@ -241,6 +244,7 @@ unsafe fn release_result(operation: *mut Operation) {
     // SAFETY: a returned canonical result owns only the optional string in its active variant.
     unsafe {
         let value = match (*operation).kind {
+            Kind::Transfer(_) => unreachable!("transfer owns its canonical result"),
             Kind::Stat => {
                 let result = &(*operation).result.stat;
                 if result.tag == 0 {
@@ -361,6 +365,7 @@ unsafe fn start(path: *mut u8, kind: Kind, valid: bool) -> *mut u8 {
             Kind::Mkdir => mkdir(directory, path.data, path.len, result.cast()),
             Kind::Unlink => unlink(directory, path.data, path.len, result.cast()),
             Kind::Rmdir => rmdir(directory, path.data, path.len, result.cast()),
+            Kind::Transfer(_) => unreachable!("transfer has its own entry"),
         };
         if status & 15 == 2 {
             complete(operation);
@@ -394,23 +399,48 @@ operation!(perry_fs_mkdir, Mkdir);
 operation!(perry_fs_unlink, Unlink);
 operation!(perry_fs_rmdir, Rmdir);
 
+unsafe fn detach(operation: *mut Operation) {
+    let mut link = &raw mut current().filesystem;
+    // SAFETY: the operation belongs to this task's pending list.
+    unsafe {
+        while !(*link).is_null() {
+            let node = (*link).cast::<Operation>();
+            if node == operation {
+                *link = (*node).next.cast();
+                return;
+            }
+            link = (&raw mut (*node).next).cast();
+        }
+    }
+}
+
+fn wait(handle: u32) {
+    let task = current();
+    // SAFETY: pending native handles belong to this task.
+    unsafe {
+        if task.set == 0 {
+            task.set = set_new();
+        }
+        join(handle, task.set);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_fs_event(event: u32, handle: u32, state: u32) {
     if event != 1 || state != 2 {
         return;
     }
-    let mut link = &raw mut current().filesystem;
-    // SAFETY: each list node owns exactly one active subtask and its result area.
+    let mut operation = current().filesystem.cast::<Operation>();
+    // SAFETY: each list node owns its pending native operation or transfer.
     unsafe {
-        while !(*link).is_null() {
-            let operation = (*link).cast::<Operation>();
-            if (*operation).handle == handle {
-                *link = (*operation).next.cast();
+        while !operation.is_null() {
+            if !matches!((*operation).kind, Kind::Transfer(_)) && (*operation).handle == handle {
+                detach(operation);
                 subtask_drop(handle);
                 complete(operation);
                 return;
             }
-            link = (&raw mut (*operation).next).cast();
+            operation = (*operation).next;
         }
     }
 }
@@ -423,6 +453,10 @@ pub extern "C" fn perry_fs_cancel() {
         let mut operation =
             core::mem::replace(&mut (*task).filesystem, ptr::null_mut()).cast::<Operation>();
         while !operation.is_null() {
+            assert!(
+                !matches!((*operation).kind, Kind::Transfer(_)),
+                "transfer cleanup must precede metadata cleanup"
+            );
             let handle = (*operation).handle;
             join(handle, 0);
             let status = subtask_cancel(handle);

@@ -663,7 +663,7 @@ export async function run(): Promise<void> {
     let worker = compile_for_world(source, "cancel.ts", &resolve, world, true)?
         .stripped
         .unwrap();
-    let caller = cancellation_caller(&worker)?;
+    let caller = cancellation_caller(&worker, false)?;
     let mut config = Config::new();
     config.wasm_component_model_async(true);
     let engine = Engine::new(&config)?;
@@ -731,7 +731,7 @@ async fn caller_cancellation_releases_output_buffers_and_completion_futures() ->
         let worker = compile_for_world(&source, "cancel-output.ts", &resolve, world, true)?
             .stripped
             .unwrap();
-        let caller = cancellation_caller(&worker)?;
+        let caller = cancellation_caller(&worker, false)?;
         wasmparser::Validator::new().validate_all(&caller)?;
         let component = Component::new(&engine, caller)?;
         for block_at in [BlockAt::Write, BlockAt::Completion] {

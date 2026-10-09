@@ -54,6 +54,9 @@ impl FunctionBuilder<'_> {
         operation: &str,
         args: &[Expr],
     ) -> Result<Value> {
+        if matches!(operation, "readFile" | "writeFile" | "readdir") {
+            return self.filesystem_transfer(ctx, operation, args);
+        }
         let intrinsic = match operation {
             "stat" => Intrinsic::FsStat,
             "mkdir" => Intrinsic::FsMkdir,
@@ -91,5 +94,130 @@ impl FunctionBuilder<'_> {
         let string = StringType::get(ctx).into();
         let path = self.fit(ctx, path, string)?;
         Ok(self.intrinsic(ctx, intrinsic, vec![path, valid]).unwrap())
+    }
+}
+
+impl FunctionBuilder<'_> {
+    fn filesystem_transfer(
+        &mut self,
+        ctx: &mut Context,
+        operation: &str,
+        args: &[Expr],
+    ) -> Result<Value> {
+        let writing = operation == "writeFile";
+        let position = if writing { 2 } else { 1 };
+        ensure!(
+            args.len() >= position && args.len() <= position + 1,
+            "filesystem {operation} takes a path, data for writes, and optional options"
+        );
+        let path = self.expression(ctx, &args[0])?;
+        let data = if writing {
+            Some(self.expression(ctx, &args[1])?)
+        } else {
+            None
+        };
+        let fields: Vec<(String, &Expr)> = match args.get(position) {
+            None | Some(Expr::Null | Expr::Undefined) => vec![],
+            Some(Expr::Object(fields)) => fields
+                .iter()
+                .map(|(name, value)| (name.clone(), value))
+                .collect(),
+            Some(Expr::New {
+                class_name, args, ..
+            }) => self
+                .shapes
+                .literal_fields(class_name)
+                .context("filesystem options must have plain data fields")?
+                .into_iter()
+                .zip(args)
+                .collect(),
+            Some(value) => vec![("encoding".into(), value)],
+        };
+        let mut encoding = None;
+        let mut flag = None;
+        let mut recursive = None;
+        let mut file_types = None;
+        let mut valid = true;
+        let mut text_read = false;
+        for (name, expression) in fields {
+            match name.as_str() {
+                "encoding" => {
+                    if operation == "readFile" {
+                        text_read = match expression {
+                            Expr::String(value) => {
+                                matches!(value.to_ascii_lowercase().as_str(), "utf8" | "utf-8")
+                            }
+                            Expr::Null | Expr::Undefined => false,
+                            _ => bail!(
+                                "dynamic readFile encodings require string | Uint8Array union migration"
+                            ),
+                        };
+                    }
+                    encoding = if matches!(expression, Expr::Null) {
+                        None
+                    } else {
+                        self.optional_argument(ctx, Some(expression))?
+                    };
+                }
+                "flag" if operation != "readdir" => {
+                    flag = self.optional_argument(ctx, Some(expression))?
+                }
+                "recursive" if operation == "readdir" => {
+                    recursive = self.optional_argument(ctx, Some(expression))?
+                }
+                "withFileTypes" if operation == "readdir" => {
+                    file_types = self.optional_argument(ctx, Some(expression))?
+                }
+                "signal"
+                    if operation != "readdir"
+                        && matches!(expression, Expr::Null | Expr::Undefined) => {}
+                _ => {
+                    self.effect(ctx, expression)?;
+                    valid = false;
+                }
+            }
+        }
+        let string = StringType::get(ctx).into();
+        let encoding = self.fit_optional(ctx, encoding, string)?;
+        let flag = self.fit_optional(ctx, flag, string)?;
+        let recursive = self.boolean_option(ctx, recursive, false)?;
+        let file_types = self.boolean_option(ctx, file_types, false)?;
+        let mut allowed = self.boolean(ctx, valid);
+        for unsupported in [recursive, file_types] {
+            let join = self.new_block(ctx, "filesystem_options_done");
+            let accept = self.new_block(ctx, "filesystem_options_accept");
+            let result = self.entry_slot(ctx, allowed.get_type(ctx));
+            let no = self.boolean(ctx, false);
+            self.store(ctx, result, no);
+            self.branch(ctx, unsupported, join, accept);
+            self.switch_to(accept);
+            self.store(ctx, result, allowed);
+            self.jump(ctx, join);
+            self.switch_to(join);
+            allowed = self.load(ctx, result)?;
+        }
+        let (intrinsic, mode) = match (operation, data.map(|value| kind(ctx, value)).transpose()?) {
+            ("readFile", _) if text_read => (Intrinsic::FsReadText, 1.0),
+            ("readFile", _) => (Intrinsic::FsReadBytes, 0.0),
+            ("readdir", _) => (Intrinsic::FsReadDir, 4.0),
+            ("writeFile", Some(Kind::String)) => (Intrinsic::FsWriteText, 2.0),
+            ("writeFile", Some(Kind::Bytes)) => (Intrinsic::FsWriteBytes, 3.0),
+            _ => bail!("writeFile data must be a string or Uint8Array"),
+        };
+        let mode = self.number(ctx, mode);
+        let valid = self
+            .intrinsic(
+                ctx,
+                Intrinsic::FsOptions,
+                vec![encoding, flag, mode, allowed],
+            )
+            .unwrap();
+        let path = self.fit(ctx, path, string)?;
+        let mut operands = vec![path];
+        if let Some(data) = data {
+            operands.push(data);
+        }
+        operands.push(valid);
+        Ok(self.intrinsic(ctx, intrinsic, operands).unwrap())
     }
 }

@@ -595,6 +595,43 @@ try {
   await unlink('contract-directory/value.bin');
 } finally {await rmdir('contract-directory');}
 "#;
+fn filesystem_transfers(bytes: Vec<u8>, text: String) -> Case {
+    let operation = format!(
+        r#"
+const text={text};
+const binary=writeFile('transfer.bin',input.subarray(1,-1));
+const textual=writeFile('transfer.txt',text,{{encoding:'utf8',flag:'w'}});
+await binary;await textual;
+try {{
+  const pending=readFile('transfer.bin');
+  const first=await pending;
+  const repeated=await pending;
+  const second:Uint8Array=await readFile('transfer.bin',{{encoding:null,flag:'r'}});
+  trace.push(first===repeated?1:0);trace.push(first.buffer===second.buffer?1:0);
+  for(let i=0;i<first.length;i++)trace.push(first[i]);
+  if(first.length>0)first[0]=first[0]+1;
+  for(let i=0;i<second.length;i++)trace.push(second[i]);
+  const restored=await readFile('transfer.txt',{{encoding:'utf8',flag:'r'}});
+  trace.push(restored===text?1:0);trace.push(restored.length);
+  const encoded=new TextEncoder().encode(restored);
+  for(let i=0;i<encoded.length;i++)trace.push(encoded[i]);
+  await writeFile('transfer.bin',input.subarray(0,0));
+  trace.push((await readFile('transfer.bin')).length);
+  const missing=readFile('missing-transfer-file','utf8');
+  try{{await missing;trace.push(0);}}catch{{trace.push(1);}}
+  try{{await missing;trace.push(0);}}catch{{trace.push(1);}}
+}} finally {{await unlink('transfer.bin');await unlink('transfer.txt');}}
+"#,
+        text = serde_json::to_string(&text).unwrap()
+    );
+    let Case::Function { source, .. } = bytes_function(bytes, &operation, true) else {
+        unreachable!()
+    };
+    Case::Function {
+        source: format!("import {{readFile,writeFile,unlink}} from 'node:fs/promises';\n{source}"),
+        asynchronous: true,
+    }
+}
 fn filesystem_metadata(depth: u8) -> Case {
     let mut operation = String::from(
         "const file=await stat('fixture.txt'); trace.push(file.size); trace.push(file.isFile()?1:0); trace.push(file.isDirectory()?1:0);\n",
@@ -733,6 +770,32 @@ fn additional_contracts() -> Vec<Contract> {
                 },
             ],
             strategy: (1u8..=6).prop_map(filesystem_metadata).boxed(),
+            check: check_equivalence,
+        },
+        Contract {
+            id: "node.fs.transfers",
+            description: "Promise file transfers preserve bytes, UTF-8 text and independent reads",
+            specification: "https://nodejs.org/api/fs.html#promises-api",
+            domain: "0..256 binary bytes, subview writes, 0..32 BMP scalars including BOM and NUL, empty truncation, repeated promise observation and rejected-read recovery; numeric inputs reuse the instance. Fixed programs seed P6.5; cancellation and malformed UTF-8 use separate component oracles",
+            witnesses: vec![
+                Witness {
+                    partition: "empty",
+                    case: filesystem_transfers(vec![], String::new()),
+                },
+                Witness {
+                    partition: "binary-bom-nul",
+                    case: filesystem_transfers(
+                        vec![19, 0, 255, 128, 42, 20],
+                        "\u{feff}é水\0".into(),
+                    ),
+                },
+            ],
+            strategy: (
+                prop::collection::vec(any::<u8>(), 0..=256),
+                prop::collection::vec(prop::char::range('\0', '\u{ffff}'), 0..=32),
+            )
+                .prop_map(|(bytes, chars)| filesystem_transfers(bytes, chars.into_iter().collect()))
+                .boxed(),
             check: check_equivalence,
         },
         Contract {

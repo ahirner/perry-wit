@@ -238,15 +238,23 @@ impl VisitMut for Builtins {
                 },
                 _ => None,
             };
-            if matches!(operation, Some("stat" | "mkdir" | "unlink" | "rmdir")) {
+            if matches!(
+                operation,
+                Some("stat" | "mkdir" | "unlink" | "rmdir" | "readFile" | "writeFile" | "readdir")
+            ) {
                 let result = (|| {
+                    let position = if operation == Some("writeFile") { 2 } else { 1 };
                     ensure!(
-                        expression.args.len() <= 2
+                        expression.args.len() <= position + 1
                             && expression.args.iter().all(|arg| arg.spread.is_none()),
                         "filesystem operation takes a path and options without spread"
                     );
-                    if let Some(argument) = expression.args.get(1) {
-                        options(&argument.expr)?;
+                    if let Some(argument) = expression.args.get(position) {
+                        let transfer =
+                            matches!(operation, Some("readFile" | "writeFile" | "readdir"));
+                        if !transfer || matches!(underlying(&argument.expr), ast::Expr::Object(_)) {
+                            options(&argument.expr)?;
+                        }
                     }
                     Ok(())
                 })();

@@ -232,6 +232,12 @@ pub fn status_code(kind: ErrorKind) -> i32 {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Runtime {
+    FsRead,
+    FsWrite,
+    FsReadDir,
+    FsOptions,
+    FsTransferEvent,
+    FsTransfersCancel,
     FsStat,
     FsMkdir,
     FsUnlink,
@@ -459,6 +465,12 @@ impl Runtime {
             Runtime::ExceptionEqual => "perry_exception_equal",
             Runtime::StringEqual => "perry_string_equal",
             Runtime::CabiRealloc => "perry_cabi_realloc",
+            Runtime::FsRead => "perry_fs_read",
+            Runtime::FsWrite => "perry_fs_write",
+            Runtime::FsReadDir => "perry_fs_readdir",
+            Runtime::FsOptions => "perry_fs_options",
+            Runtime::FsTransferEvent => "perry_fs_transfer_event",
+            Runtime::FsTransfersCancel => "perry_fs_transfers_cancel",
             Runtime::FsStat => "perry_fs_stat",
             Runtime::FsMkdir => "perry_fs_mkdir",
             Runtime::FsUnlink => "perry_fs_unlink",
@@ -619,9 +631,13 @@ impl Runtime {
             Runtime::FsStat | Runtime::FsMkdir | Runtime::FsUnlink | Runtime::FsRmdir => {
                 (vec![i32, i32], vec![i32])
             }
+            Runtime::FsRead => (vec![i32; 3], vec![i32]),
+            Runtime::FsWrite => (vec![i32; 4], vec![i32]),
+            Runtime::FsReadDir => (vec![i32; 2], vec![i32]),
+            Runtime::FsOptions => (vec![i32, i32, f64, i32], vec![i32]),
             Runtime::FsStatsGet => (vec![i32, i32], vec![f64]),
-            Runtime::FsEvent => (vec![i32; 3], vec![]),
-            Runtime::FsCancel => (vec![], vec![]),
+            Runtime::FsEvent | Runtime::FsTransferEvent => (vec![i32; 3], vec![]),
+            Runtime::FsCancel | Runtime::FsTransfersCancel => (vec![], vec![]),
             Runtime::ImportRealloc => (vec![i32; 4], vec![i32]),
             Runtime::TextEncoderNew => (vec![], vec![i32]),
             Runtime::TextEncode | Runtime::TextDecoderIgnoreBom => (vec![i32], vec![i32]),
@@ -2076,6 +2092,7 @@ impl<'s> FunctionLowering<'s> {
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
             let kind = intrinsic.kind(ctx);
             let value_runtime = match kind {
+                Intrinsic::FsOptions => Some((Runtime::FsOptions, None)),
                 Intrinsic::FsSize => Some((Runtime::FsStatsGet, Some(0))),
                 Intrinsic::FsMtime => Some((Runtime::FsStatsGet, Some(1))),
                 Intrinsic::FsKind => Some((Runtime::FsStatsGet, Some(2))),
@@ -2242,7 +2259,15 @@ impl<'s> FunctionLowering<'s> {
             }
             if matches!(
                 kind,
-                Intrinsic::FsStat | Intrinsic::FsMkdir | Intrinsic::FsUnlink | Intrinsic::FsRmdir
+                Intrinsic::FsStat
+                    | Intrinsic::FsMkdir
+                    | Intrinsic::FsUnlink
+                    | Intrinsic::FsRmdir
+                    | Intrinsic::FsReadText
+                    | Intrinsic::FsReadBytes
+                    | Intrinsic::FsWriteText
+                    | Intrinsic::FsWriteBytes
+                    | Intrinsic::FsReadDir
             ) {
                 self.state.uses_filesystem = true;
                 ensure!(
@@ -2251,6 +2276,13 @@ impl<'s> FunctionLowering<'s> {
                 );
             }
             let (runtime, interface) = match intrinsic.kind(ctx) {
+                Intrinsic::FsReadText | Intrinsic::FsReadBytes => {
+                    (Runtime::FsRead, "wasi:filesystem/types@0.3.0")
+                }
+                Intrinsic::FsWriteText | Intrinsic::FsWriteBytes => {
+                    (Runtime::FsWrite, "wasi:filesystem/types@0.3.0")
+                }
+                Intrinsic::FsReadDir => (Runtime::FsReadDir, "wasi:filesystem/types@0.3.0"),
                 Intrinsic::FsStat => (Runtime::FsStat, "wasi:filesystem/types@0.3.0"),
                 Intrinsic::FsMkdir => (Runtime::FsMkdir, "wasi:filesystem/types@0.3.0"),
                 Intrinsic::FsUnlink => (Runtime::FsUnlink, "wasi:filesystem/types@0.3.0"),
@@ -2269,9 +2301,25 @@ impl<'s> FunctionLowering<'s> {
                 "WIT world must import {interface}"
             );
             let count = op.deref(ctx).get_num_operands();
-            let operands = (0..count)
+            let mut operands = (0..count)
                 .map(|i| self.operand(ctx, op, i))
                 .collect::<Result<Vec<_>>>()?;
+            if matches!(
+                kind,
+                Intrinsic::FsReadText
+                    | Intrinsic::FsReadBytes
+                    | Intrinsic::FsWriteText
+                    | Intrinsic::FsWriteBytes
+            ) {
+                let text = self.i32_const(
+                    ctx,
+                    i32::from(matches!(
+                        kind,
+                        Intrinsic::FsReadText | Intrinsic::FsWriteText
+                    )),
+                );
+                operands.insert(operands.len() - 1, text);
+            }
             if let Some(value) = self.runtime(ctx, runtime, operands) {
                 self.define(ctx, op, value);
             }

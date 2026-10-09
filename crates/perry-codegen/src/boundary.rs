@@ -593,6 +593,16 @@ fn async_export(
         if b.state.uses_filesystem {
             b.runtime(ctx, Runtime::FsEvent, vec![event, handle, subtask_state]);
         }
+        if [Runtime::FsRead, Runtime::FsWrite, Runtime::FsReadDir]
+            .iter()
+            .any(|entry| b.state.runtime.contains(entry))
+        {
+            b.runtime(
+                ctx,
+                Runtime::FsTransferEvent,
+                vec![event, handle, subtask_state],
+            );
+        }
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
         let returned_state = b.i32_const(ctx, SUBTASK_RETURNED);
@@ -656,6 +666,12 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
     let abort = FuncOp::new(ctx, identifier("abort_task"), void);
     {
         let mut b = FunctionLowering::glue(state, ctx, &abort);
+        if [Runtime::FsRead, Runtime::FsWrite, Runtime::FsReadDir]
+            .iter()
+            .any(|entry| b.state.runtime.contains(entry))
+        {
+            b.runtime(ctx, Runtime::FsTransfersCancel, vec![]);
+        }
         if b.state.uses_filesystem {
             b.runtime(ctx, Runtime::FsCancel, vec![]);
         }
