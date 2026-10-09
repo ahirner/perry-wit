@@ -37,8 +37,8 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonReviverType, JsonType,
-        OptionalType, PromiseType, RecordType, StringType,
+        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonReplacerType,
+        JsonReviverType, JsonType, OptionalType, PromiseType, RecordType, StringType,
     },
 };
 use perry_runtime::array as layout;
@@ -246,6 +246,12 @@ enum Runtime {
     DictionaryKeys,
     DictionaryValues,
     JsonParse,
+    JsonReplacerStart,
+    JsonReplacerNext,
+    JsonReplacerKey,
+    JsonReplacerValue,
+    JsonReplacerApply,
+    JsonReplacerResult,
     JsonReviverStart,
     JsonReviverNext,
     JsonReviverKey,
@@ -365,12 +371,18 @@ impl Runtime {
             Runtime::DictionaryValues => "perry_dictionary_values",
             Runtime::JsonParse => "perry_json_parse",
             Runtime::JsonReviverStart => "perry_json_reviver_start",
+            Runtime::JsonReplacerStart => "perry_json_replacer_start",
             Runtime::JsonReviverNext => "perry_json_reviver_next",
+            Runtime::JsonReplacerNext => "perry_json_replacer_next",
             Runtime::JsonReviverKey => "perry_json_reviver_key",
+            Runtime::JsonReplacerKey => "perry_json_replacer_key",
             Runtime::JsonReviverContext => "perry_json_reviver_context",
             Runtime::JsonReviverValue => "perry_json_reviver_value",
+            Runtime::JsonReplacerValue => "perry_json_replacer_value",
             Runtime::JsonReviverApply => "perry_json_reviver_apply",
+            Runtime::JsonReplacerApply => "perry_json_replacer_apply",
             Runtime::JsonReviverResult => "perry_json_reviver_result",
+            Runtime::JsonReplacerResult => "perry_json_replacer_result",
 
             Runtime::JsonStringify => "perry_json_stringify",
             Runtime::JsonStringifyOptions => "perry_json_stringify_options",
@@ -487,6 +499,10 @@ impl Runtime {
             | Runtime::JsonString
             | Runtime::JsonArray
             | Runtime::JsonReviverStart
+            | Runtime::JsonReplacerNext
+            | Runtime::JsonReplacerKey
+            | Runtime::JsonReplacerValue
+            | Runtime::JsonReplacerResult
             | Runtime::JsonReviverNext
             | Runtime::JsonReviverKey
             | Runtime::JsonReviverValue
@@ -507,14 +523,15 @@ impl Runtime {
             Runtime::DictionaryGet => (vec![i32, i32], vec![i64]),
             Runtime::DictionarySet => (vec![i32, i32, i64], vec![]),
             Runtime::DictionaryDelete | Runtime::DictionaryHas => (vec![i32, i32], vec![i32]),
-            Runtime::JsonObject
+            Runtime::JsonReplacerStart
+            | Runtime::JsonObject
             | Runtime::JsonGet
             | Runtime::JsonEqual
             | Runtime::JsonHasOwn
             | Runtime::JsonDelete => (vec![i32, i32], vec![i32]),
             Runtime::JsonIndex => (vec![i32, f64], vec![i32]),
             Runtime::JsonAsNumber => (vec![i32], vec![f64]),
-            Runtime::JsonReviverApply => (vec![i32, i32], vec![]),
+            Runtime::JsonReplacerApply | Runtime::JsonReviverApply => (vec![i32, i32], vec![]),
             Runtime::JsonSet => (vec![i32, i32, i32], vec![]),
             Runtime::JsonStringifyOptions => (vec![i32, i32, i32], vec![i32]),
             Runtime::JsonSetIndex => (vec![i32, f64, i32], vec![]),
@@ -610,6 +627,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
+        || deref.is::<JsonReplacerType>()
         || deref.is::<JsonReviverType>()
         || deref.is::<JsonType>()
         || deref.is::<BytesType>()
@@ -1927,12 +1945,18 @@ impl<'s> FunctionLowering<'s> {
             let json_runtime = match kind {
                 Intrinsic::JsonParse => Some(Runtime::JsonParse),
                 Intrinsic::JsonReviverStart => Some(Runtime::JsonReviverStart),
+                Intrinsic::JsonReplacerStart => Some(Runtime::JsonReplacerStart),
                 Intrinsic::JsonReviverNext => Some(Runtime::JsonReviverNext),
+                Intrinsic::JsonReplacerNext => Some(Runtime::JsonReplacerNext),
                 Intrinsic::JsonReviverKey => Some(Runtime::JsonReviverKey),
+                Intrinsic::JsonReplacerKey => Some(Runtime::JsonReplacerKey),
                 Intrinsic::JsonReviverContext => Some(Runtime::JsonReviverContext),
                 Intrinsic::JsonReviverValue => Some(Runtime::JsonReviverValue),
+                Intrinsic::JsonReplacerValue => Some(Runtime::JsonReplacerValue),
                 Intrinsic::JsonReviverApply => Some(Runtime::JsonReviverApply),
+                Intrinsic::JsonReplacerApply => Some(Runtime::JsonReplacerApply),
                 Intrinsic::JsonReviverResult => Some(Runtime::JsonReviverResult),
+                Intrinsic::JsonReplacerResult => Some(Runtime::JsonReplacerResult),
 
                 Intrinsic::JsonStringify => Some(Runtime::JsonStringify),
                 Intrinsic::JsonStringifyOptions => Some(Runtime::JsonStringifyOptions),

@@ -1098,3 +1098,147 @@ export function check():number {
     }
     Ok(())
 }
+
+#[test]
+fn json_replacers_observe_mutation_and_serialize_each_visit_once() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("replacer.wit", "package test:replacer; world replacer { export encode: func(input: string, space: string) -> string; export check: func() -> u32; }")?;
+    let world = resolve.select_world(&[package], Some("replacer"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
+function identity(key:string,value:JsonValue|undefined):JsonValue|undefined {return value;}
+function twice(key:string,value:number):number {return value*2;}
+function discard():void {}
+function gap(state:{amount:number}):number {state.amount=7;return 2;}
+export function encode(input:string,space:string):string {
+  return JSON.stringify(JSON.parse(input),identity,space);
+}
+export function check():number {
+  let trace='';let calls=0;let outer=0;
+  let result:string|undefined=undefined;
+  try {
+    result=JSON.stringify(JSON.parse('{"2":2,"a":{"drop":1,"x":3},"drop":4,"b":[5,6]}'),(key,value)=>{
+      trace=trace+key+':'+typeof value+';';
+      try {
+        if(key==='drop' || key==='0') return undefined;
+        if(typeof value==='number') {const n:number=value;return n+1;}
+        return value;
+      } finally {calls=calls+1;}
+    });
+  } finally {outer=outer+1;}
+  if(result!=='{"2":3,"a":{"x":4},"b":[null,7]}') return 1;
+  if(trace!==':object;2:number;a:object;drop:number;x:number;drop:number;b:object;0:number;1:number;' || calls!==9 || outer!==1) return 2;
+  if(typeof JSON.stringify({x:1},()=>undefined)!=='undefined') return 3;
+  if(JSON.stringify(undefined,()=>3)!=='3') return 4;
+  if(JSON.stringify(2,twice)!=='4' || typeof JSON.stringify(2,discard)!=='undefined') return 5;
+  const replacement=JSON.stringify(0,(key,value)=>{if(key==='') return {x:4};return value;});
+  if(replacement!=='{"x":4}') return 6;
+  const root=JSON.parse('{"a":1,"b":2,"c":3}');let observed='';
+  const mutated=JSON.stringify(root,(key,value)=>{
+    observed=observed+key+':'+typeof value+';';
+    if(key==='a') {root.b=9;delete root.c;root.d=4;}
+    if(key==='c') return 10;
+    return value;
+  });
+  if(mutated!=='{"a":1,"b":9,"c":10}' || observed!==':object;a:number;b:number;c:undefined;') return 7;
+  const shared={n:1};const aliases={a:shared,b:shared};
+  const saved=JSON.stringify(aliases,(key,value)=>{if(key==='b')shared.n=8;return value;});
+  if(saved!=='{"a":{"n":1},"b":{"n":8}}') return 8;
+  const array=[1,2];
+  if(JSON.stringify(array,(key,value)=>{if(key==='0'){array[1]=8;array.push(9);}return value;})!=='[1,8]') return 9;
+  const dictionary:Record<string,number>={first:1,last:2};
+  const grown=JSON.stringify(dictionary,(key,value)=>{
+    if(key==='first'){for(let i=0;i<40;i++)dictionary[i]=i;dictionary.last=7;}
+    return value;
+  });
+  if(grown!=='{"first":1,"last":7}') return 10;
+  const cycle=JSON.parse('{"x":1}');cycle.self=cycle;
+  if(JSON.stringify(cycle,(key,value)=>{if(key==='self')return undefined;return value;})!=='{"x":1}')return 11;
+  let cyclic=false;let cycleCalls=0;
+  try {JSON.stringify(cycle,(key,value)=>{cycleCalls=cycleCalls+1;return value;});}
+  catch(e){cyclic=e instanceof TypeError;}
+  if(!cyclic || cycleCalls!==3)return 12;
+  let introduced=false;let introducedCalls=0;
+  const parent={x:1,y:2};
+  try {JSON.stringify(parent,(key,value)=>{introducedCalls=introducedCalls+1;if(key==='x')return parent;return value;});}
+  catch(e){introduced=e instanceof TypeError;}
+  if(!introduced || introducedCalls!==2)return 13;
+  let nested=0;
+  const nestedResult=JSON.stringify({x:2},(key,value)=>{
+    if(key==='x')return JSON.stringify([value],(_inner,next)=>{nested=nested+1;return next;});
+    return value;
+  });
+  if(nestedResult!=='{"x":"[2]"}' || nested!==2)return 14;
+  const marker=new Error('replacer');let effects=0;
+  try {JSON.stringify({x:1},(key,value)=>{try{if(key==='x')throw marker;return value;}finally{effects=effects+1;}});}
+  catch(e){if(e!==marker)return 15;effects=effects+10;}
+  finally{effects=effects+100;}
+  if(effects!==112)return 16;
+  if(JSON.stringify(1,(_key,value)=>{try{return value;}finally{return 5;}})!=='5')return 17;
+  let loopEffects=0;
+  const looped=JSON.stringify(0,()=>{
+    for(let i=0;i<4;i++){try{if(i===0)continue;if(i===2)break;}finally{loopEffects=loopEffects+1;}}
+    return loopEffects;
+  });
+  if(looped!=='3' || loopEffects!==3)return 18;
+  const state={amount:0};
+  if(JSON.stringify({x:1},(key,value)=>{if(key==='x')return state.amount;return value;},gap(state))!=='{\n  "x": 7\n}')return 19;
+  if(JSON.stringify({x:1},identity,'\u0000')!=='{\n\u0000"x": 1\n}')return 20;
+  if(JSON.stringify({x:1},identity,0.9)!=='{"x":1}')return 21;
+  if(JSON.stringify({},identity,'123456789🙂')!=='{}')return 22;
+  let invalidGap=false;
+  try {JSON.stringify({x:1},identity,'123456789🙂');}catch(e){invalidGap=e instanceof TypeError;}
+  if(!invalidGap)return 23;
+  let tooDeep=false;let deepCalls=0;
+  try{JSON.stringify(0,()=>{deepCalls=deepCalls+1;return {child:0};});}
+  catch(e){tooDeep=e instanceof TypeError;}
+  if(!tooDeep || deepCalls!==129)return 24;
+  const proto=JSON.parse('{"first":1,"__proto__":2}');let inherited=false;let protoCalls=0;
+  if(JSON.stringify(proto,identity)!=='{"first":1,"__proto__":2}')return 25;
+  try{JSON.stringify(proto,(key,value)=>{protoCalls=protoCalls+1;if(key==='first')delete proto.__proto__;return value;});}
+  catch(e){inherited=e instanceof TypeError;}
+  if(!inherited || protoCalls!==2)return 26;
+  return 0;
+}
+"#;
+    let compiled = compile_for_world(source, "replacer.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
+    let encode = instance.get_typed_func::<(&str, &str), (String,)>(&mut store, "encode")?;
+    let deep = format!("{}1{}", "[".repeat(127), "]".repeat(127));
+    let large =
+        serde_json::json!({"text":"é🙂\n\u{0000}".repeat(8192),"array":[1,2,3]}).to_string();
+    let mut peak = 0;
+    for round in 0..23 {
+        assert_eq!(
+            check.call(&mut store, ()).context("replacer semantics")?.0,
+            0
+        );
+        for input in [&deep, &large] {
+            assert_eq!(
+                encode
+                    .call(&mut store, (input, ""))
+                    .context("replacer size")?
+                    .0,
+                *input
+            );
+        }
+        assert_eq!(
+            encode
+                .call(&mut store, ("{\"x\":[1,true,null]}", "🙂"))
+                .context("replacer indentation")?
+                .0,
+            "{\n🙂\"x\": [\n🙂🙂1,\n🙂🙂true,\n🙂🙂null\n🙂]\n}"
+        );
+        if round == 2 {
+            peak = store.data().0;
+        } else if round > 2 {
+            assert_eq!(store.data().0, peak, "replacer state leaked across tasks");
+        }
+    }
+    Ok(())
+}

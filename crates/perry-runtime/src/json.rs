@@ -7,10 +7,12 @@ pub mod dictionary;
 mod native;
 mod object;
 mod properties;
+mod replacer;
 mod reviver;
 mod stringify;
 use object::{Field, Object};
 pub use properties::*;
+pub use replacer::*;
 pub use reviver::*;
 pub use stringify::{perry_json_stringify, perry_json_stringify_options};
 pub mod view;
@@ -368,6 +370,14 @@ fn canonical_index(key: &str) -> Option<usize> {
 pub unsafe extern "C" fn perry_json_get(value: *mut u8, key: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller; fields and array storage belong to the same task.
     unsafe {
+        if string::text(key) == "__proto__"
+            && !properties::has_own(*value.cast::<Json>(), "__proto__")
+        {
+            return failure(
+                exception::TYPE_ERROR,
+                "prototype lookup is outside the closed-shape subset",
+            );
+        }
         match *value.cast::<Json>() {
             Json::Native { reference, ty } => native::get(reference, &*ty, string::text(key)),
             Json::Null => failure(exception::TYPE_ERROR, "cannot read a property of null"),

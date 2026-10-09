@@ -106,6 +106,42 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = vec![
         Contract {
+            id: "ecma.json.replacer",
+            description: "JSON function replacers preserve pre-order callbacks, mutations and serialized snapshots",
+            specification: "https://tc39.es/ecma262/#sec-json.stringify",
+            domain: "Synchronous inline arrows and direct function references over parsed/native JSON values; root replacement/undefined, object omission, array null substitution, alias mutation, key/length snapshots, excluded/introduced cycles and callback finalizers; no callback this, custom toJSON methods or general closures; surrogate-splitting indentation and Node fractional/NUL-gap discrepancies have separate component assertions",
+            witnesses: vec![
+                Witness {
+                    partition: "key-order-and-replacement",
+                    case: json_replacer(
+                        r#"{"2":2,"drop":1,"a":{"x":-0},"replace":[3,4]}"#.into(),
+                        3,
+                        "2".into(),
+                    ),
+                },
+                Witness {
+                    partition: "array-omission-and-nested-mutation",
+                    case: json_replacer(
+                        r#"[1,{"a":[true,null]},"é🙂"]"#.into(),
+                        -2,
+                        r#""🙂""#.into(),
+                    ),
+                },
+                Witness {
+                    partition: "primitive-root",
+                    case: json_replacer("-0.00e1".into(), 0, "0".into()),
+                },
+            ],
+            strategy: (
+                json_strategy(),
+                -8i16..=8,
+                prop::sample::select(vec!["0", "2.9", "10", r#""é🙂""#]),
+            )
+                .prop_map(|(text, amount, gap)| json_replacer(text, amount, gap.into()))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "ecma.json.reviver",
             description: "JSON revivers preserve post-order effects, source contexts and captured updates",
             specification: "https://tc39.es/ecma262/#sec-json.parse",
@@ -692,6 +728,56 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn json_replacer(text: String, amount: i16, gap: String) -> Case {
+    let text = serde_json::to_string(&text).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {{[key:string]:JsonValue}};
+function identity(key:string,value:JsonValue|undefined):JsonValue|undefined {{return value;}}
+let calls=0;let outer=0;const trace:string[]=[];
+let output:string|undefined=undefined;
+try {{
+  output=JSON.stringify(JSON.parse({text}),(key,value)=>{{
+    trace.push(key);trace.push(typeof value);
+    try {{
+      if(key==='drop' || key==='0') return undefined;
+      if(key==='replace') return {{tag:{amount}}};
+      if(typeof value==='number') {{const n:number=value;return n+{amount};}}
+      return value;
+    }} finally {{calls=calls+1;}}
+  }},{gap});
+}} finally {{outer=outer+1;}}
+const shared={{n:1}};const aliases={{a:shared,b:shared}};
+const saved=JSON.stringify(aliases,(key,value)=>{{if(key==='b')shared.n={amount};return value;}});
+const array=[1,2];
+const grown=JSON.stringify(array,(key,value)=>{{if(key==='0'){{array[1]={amount};array.push(9);}}return value;}});
+const dictionary:Record<string,number>={{a:1,b:2,c:3}};let observed='';
+const changed=JSON.stringify(dictionary,(key,value)=>{{
+  observed=observed+key+':'+typeof value+';';
+  if(key==='a'){{dictionary.b={amount};delete dictionary.c;dictionary.d=4;}}
+  if(key==='c')return 10;
+  return value;
+}});
+const cycle:Record<string,JsonValue>={{x:1}};cycle.self=cycle;
+const filtered=JSON.stringify(cycle,(key,value)=>{{if(key==='self')return undefined;return value;}});
+let failed=false;let cycleCalls=0;
+try{{JSON.stringify(cycle,(key,value)=>{{cycleCalls=cycleCalls+1;return value;}});}}catch(e){{failed=e instanceof TypeError;}}
+let nestedCalls=0;
+const nested=JSON.stringify({{x:2}},(key,value)=>{{
+  if(key==='x')return JSON.stringify([value],(_inner,next)=>{{nestedCalls=nestedCalls+1;return next;}});
+  return value;
+}});
+const plain=JSON.stringify(JSON.parse({text}),identity,{gap});
+const absent=JSON.stringify(null,()=>undefined);
+const replaced=JSON.stringify(undefined,()=>{amount});
+console.log(JSON.stringify({{output,trace,calls,outer,saved,grown,changed,observed,filtered,failed,cycleCalls,nested,nestedCalls,plain,absent:typeof absent,replaced}}));
+"#
+        ),
+    }
 }
 
 fn json_reviver(text: String, amount: i16) -> Case {

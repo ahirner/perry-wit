@@ -27,7 +27,7 @@ unsafe fn property_list(replacer: *mut u8) -> Result<Option<Vec<&'static str>>, 
     Ok(Some(keys))
 }
 
-unsafe fn gap(space: *mut u8) -> Result<&'static str, Error> {
+pub(super) unsafe fn gap(space: *mut u8) -> Result<&'static str, Error> {
     // SAFETY: the space argument is undefined or a live JSON value.
     match unsafe { node_value(Node::Value(space)) } {
         Some(Json::Number(value)) => Ok(&"          "[..value.clamp(0.0, 10.0) as usize]),
@@ -50,7 +50,7 @@ unsafe fn gap(space: *mut u8) -> Result<&'static str, Error> {
     }
 }
 
-fn stringify_error(error: Error) -> *mut u8 {
+pub(super) fn stringify_error(error: Error) -> *mut u8 {
     match error {
         Error::Capacity => failure(exception::RANGE_ERROR, "JSON text is too large"),
         Error::UnpairedSurrogate(_) => failure(

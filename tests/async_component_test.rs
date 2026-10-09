@@ -70,6 +70,8 @@ export async function json(input: string): Promise<string> {
   for(let i=0;i<24;i++) alias[i] = i;
   const keys = Object.keys(alias);
   const formatted = JSON.stringify(value, ['text','item','count'], 2);
+  let visits=0;
+  const replaced = JSON.stringify(value,(key,value)=>{visits=visits+1;return value;},2);
   await setTimeout(1);
   reference.count = reference.count + 1;
   for(let i=0;i<24;i++) delete alias[i];
@@ -77,6 +79,7 @@ export async function json(input: string): Promise<string> {
   await setTimeout(1);
   dictionary.count = native.count;
   if(JSON.parse(formatted).item.count !== count) throw new TypeError('lost serialization snapshot');
+  if(JSON.parse(replaced).item.count !== count || visits < 3) throw new TypeError('lost replacer snapshot');
   if(JSON.parse(source) !== count) throw new TypeError('lost reviver source snapshot');
   if(storedValues[0] !== typed || storedValues[0].count !== dictionary.count) throw new TypeError('lost dictionary value');
   if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');

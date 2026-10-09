@@ -608,6 +608,14 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
         perry.intrinsic JsonReviverApply (reviver, value) : ;
         applied = perry.caught_status : builtin.integer i32;
         revived = perry.intrinsic JsonReviverResult (reviver) : perry.optional <perry.json>;
+        replacer = perry.intrinsic JsonReplacerStart (optional, optional) : perry.json_replacer;
+        replace_ready = perry.intrinsic JsonReplacerNext (replacer) : builtin.integer i1;
+        replace_advanced = perry.caught_status : builtin.integer i32;
+        replace_key = perry.intrinsic JsonReplacerKey (replacer) : perry.string;
+        replace_value = perry.intrinsic JsonReplacerValue (replacer) : perry.optional <perry.json>;
+        perry.intrinsic JsonReplacerApply (replacer, replace_value) : ;
+        replaced = perry.caught_status : builtin.integer i32;
+        replace_output = perry.intrinsic JsonReplacerResult (replacer) : perry.optional <perry.string>;
     "#,
     );
     verify_text(&input).expect("explicit JSON operations verify");
@@ -621,6 +629,15 @@ fn json_intrinsics_round_trip_and_reject_unchecked_scalar_uses() {
             .contains("incorrect operand or result types")
     );
     for invalid in [
+        input.replace("JsonReplacerNext (replacer)", "JsonReplacerNext (reviver)"),
+        input.replace(
+            "JsonReplacerApply (replacer, replace_value)",
+            "JsonReplacerApply (replacer, text)",
+        ),
+        input.replace(
+            "JsonReplacerStart (optional, optional)",
+            "JsonReplacerStart (optional, text)",
+        ),
         input.replace("JsonReviverNext (reviver)", "JsonReviverNext (json)"),
         input.replace("JsonReviverStart (text)", "JsonReviverStart (json)"),
         input.replace(

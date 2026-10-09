@@ -521,3 +521,35 @@ export function run(input:string):string {
     );
     assert!(error.contains("before its declaration"), "{error}");
 }
+
+#[test]
+fn replacer_callbacks_share_lowering_and_reject_escaping_forms() {
+    let printed = lowered(
+        r#"
+export function run(input:string):string {
+    let count=0;
+    const result=JSON.stringify(JSON.parse(input),(key,value)=>{
+        try {if(key==='drop')return undefined;return value;}
+        finally {count=count+1;}
+    });
+    return JSON.stringify({result,count});
+}
+"#,
+    );
+    assert!(printed.contains("JsonReplacerApply"), "{printed}");
+    assert!(
+        !printed.contains("perry.alloc"),
+        "callback environment allocated: {printed}"
+    );
+    for source in [
+        "export function run():string {return JSON.stringify(1,async (_key,value)=>value);}",
+        "export function run():string {return JSON.stringify(1,(_key,value,extra)=>value);}",
+        "export function run():string {return JSON.stringify(1,function(_key,value){return value;});}",
+    ] {
+        let error = rejected(source);
+        assert!(
+            error.contains("callback") || error.contains("subset rule R5"),
+            "{error}"
+        );
+    }
+}
