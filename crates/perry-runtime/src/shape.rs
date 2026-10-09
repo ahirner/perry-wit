@@ -13,6 +13,8 @@ pub enum Kind {
     Record,
     Optional,
     Dictionary,
+    Tuple,
+    Bytes,
 }
 
 /// `detail` points to an element/optional type, record fields, or a dictionary shape.
@@ -52,6 +54,17 @@ const _: () = {
 };
 
 impl Type {
+    /// # Safety
+    /// This is a valid array or tuple descriptor.
+    pub(crate) unsafe fn indexed_element(&self, index: usize) -> Option<&Self> {
+        // SAFETY: tuple descriptors contain exactly `count` type pointers.
+        unsafe {
+            if self.kind == Kind::Array {
+                return Some(self.element());
+            }
+            (index < self.count as usize).then(|| &**self.detail.cast::<*const Self>().add(index))
+        }
+    }
     /// # Safety
     /// This is a valid compiler-emitted descriptor of an array, dictionary or optional type.
     pub(crate) unsafe fn element(&self) -> &Self {

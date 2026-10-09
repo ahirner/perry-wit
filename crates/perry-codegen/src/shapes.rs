@@ -89,12 +89,21 @@ impl Data {
             (Kind::Boolean, 0, 0)
         } else if ty.is::<StringType>() {
             (Kind::String, 0, 0)
+        } else if ty.is::<BytesType>() {
+            (Kind::Bytes, 0, 0)
         } else if ty.is::<JsonType>() {
             (Kind::Json, 0, 0)
         } else if let Some(optional) = ty.downcast_ref::<OptionalType>() {
             (Kind::Optional, self.descriptor(ctx, optional.value())?, 0)
         } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
             (Kind::Array, self.descriptor(ctx, array.element())?, 0)
+        } else if let Some(tuple) = ty.downcast_ref::<TupleType>() {
+            let detail = self.reserve(4 * tuple.elements().len());
+            for (index, &element) in tuple.elements().iter().enumerate() {
+                let element = self.descriptor(ctx, element)?;
+                self.words(detail + 4 * index as u32, &[element]);
+            }
+            (Kind::Tuple, detail, tuple.elements().len() as u32)
         } else if let Some(dictionary) = ty.downcast_ref::<DictionaryType>() {
             let schema = dictionary.schema().context("opaque dictionary")?;
             let element = self.descriptor(ctx, schema.element)?;

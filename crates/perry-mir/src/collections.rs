@@ -6,7 +6,7 @@
 use crate::{
     attrs::{ErrorKind, Tier},
     exceptions::MayThrowInterface,
-    types::{ArrayType, OptionalType, StringType},
+    types::{ArrayType, OptionalType, StringType, TupleType},
 };
 use pliron::{
     builtin::{
@@ -153,11 +153,11 @@ impl ArrayLenOp {
 
 impl Verify for ArrayLenOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        element(
-            ctx,
-            self.get_operation().deref(ctx).get_operand(0),
-            "perry.array_len",
-        )?;
+        let ty = self.get_operation().deref(ctx).get_operand(0).get_type(ctx);
+        let ty = ty.deref(ctx);
+        if !ty.is::<ArrayType>() && !ty.is::<TupleType>() {
+            verify_err!(self.loc(ctx), CollectionErr::NotArray("perry.array_len"))?;
+        }
         if !is_index(ctx, self.get_result(ctx)) {
             verify_err!(self.loc(ctx), CollectionErr::Index("perry.array_len"))?
         }

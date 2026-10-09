@@ -66,6 +66,9 @@ export async function json(input: string): Promise<string> {
   const dictionary:{[key:string]:number;count:number} = alias;
   const stored:Record<string,{count:number}> = {item:typed};
   const storedValues=Object.values(stored);
+  const storedEntries=Object.entries(stored);
+  const countEntries=Object.entries(native);
+  const jsonEntries=Object.entries(value);
   const optional:{count:number;label?:string}={count:count};
   const optionalJson:JsonValue=optional;
   const optionalKeys=Object.keys(optional);
@@ -95,6 +98,8 @@ export async function json(input: string): Promise<string> {
   if(JSON.parse(replaced).item.count !== count || visits < 3) throw new TypeError('lost replacer snapshot');
   if(JSON.parse(source) !== count) throw new TypeError('lost reviver source snapshot');
   if(storedValues[0] !== typed || storedValues[0].count !== dictionary.count) throw new TypeError('lost dictionary value');
+  if(storedEntries[0][1] !== typed || storedEntries[0][1].count !== dictionary.count) throw new TypeError('lost entry alias');
+  if(countEntries[0][1] !== count || jsonEntries[0][1] !== alias) throw new TypeError('lost entry snapshot');
   if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');
   if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');
   return JSON.stringify(value);

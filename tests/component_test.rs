@@ -1533,3 +1533,208 @@ export function round(input:string):string {
     }
     Ok(())
 }
+
+#[test]
+fn enumeration_preserves_typed_snapshots_aliases_and_tuple_constraints() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("enumeration.wit", "package test:enumeration; world enumeration { export check: func() -> u32; export round: func(input: string) -> string; }")?;
+    let world = resolve.select_world(&[package], Some("enumeration"))?;
+    let source = r#"
+type JsonValue=null|boolean|number|string|JsonValue[]|{[key:string]:JsonValue};
+function source(effects:number[]):Record<string,number> {effects.push(1);return {b:2,a:3};}
+export function check():number {
+  const pair:[string,number]=['first',-0];
+  if(pair.length!==2 || !Array.isArray(pair) || 1/pair[1]!==-Infinity)return 1;
+  pair[0]='changed';pair[1]=3;
+  const packed:JsonValue=pair;
+  if(JSON.stringify(packed)!=='["changed",3]')return 2;
+  packed[1]=4;
+  let failures=0;
+  try{packed[0]=7;}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  try{packed[2]=8;}catch(e){if(e instanceof TypeError)failures=failures+1;}
+  if(failures!==2 || pair[0]!=='changed' || pair[1]!==4)return 3;
+  const raw=JSON.parse('["parsed",5]');
+  const parsed:[string,number]=raw;
+  if(parsed!==raw || parsed.length!==2)return 4;
+  parsed[1]=6;
+  if(raw[1]!==6)return 5;
+  raw[1]='stale';
+  let stale=false;
+  try{const unused=parsed[1];}catch(e){stale=e instanceof TypeError;}
+  if(!stale)return 6;
+  parsed[1]=7;raw[2]='extra';
+  if(parsed.length!==3 || JSON.stringify(Object.values(parsed))!=='["parsed",7,"extra"]')return 7;
+  const dictionary:Record<string,number>={b:2,'10':10,'2':2,a:-0};
+  const entries:[string,number][]=Object.entries(dictionary);
+  const values=Object.values(dictionary);
+  if(entries[0][0]!=='2' || entries[1][1]!==10 || 1/entries[3][1]!==-Infinity)return 8;
+  dictionary.b=8;delete dictionary.a;
+  entries[2][1]=12;
+  if(dictionary.b!==8 || values[2]!==2 || entries[2][0]!=='b')return 9;
+  const bytes=new Uint8Array([1,2]);
+  const byteDictionary:Record<string,Uint8Array>={first:bytes};
+  const byteEntries=Object.entries(byteDictionary);
+  const byteValues=Object.values({first:bytes});
+  const bytePair:[string,Uint8Array]=['direct',bytes];
+  byteEntries[0][1][0]=9;
+  if(byteValues[0]!==bytes || bytePair[1][0]!==9 || byteDictionary.first[0]!==9)return 10;
+  const byteFields:{first:Uint8Array;extra?:Uint8Array}={first:bytes};
+  byteFields.extra=undefined;
+  const optionalBytes=Object.entries(byteFields);
+  if(optionalBytes[0][1]!==bytes || optionalBytes[1][1]!==undefined)return 11;
+  if(JSON.stringify(Object.entries(bytes))!=='[["0",9],["1",2]]')return 12;
+  const record:{count:number;label?:string;flag:boolean}={flag:false,count:2};
+  record.label=undefined;
+  if(JSON.stringify(Object.entries(record))!=='[["flag",false],["count",2],["label",null]]')return 13;
+  if(Object.values(record)[2]!==undefined)return 14;
+  const nested={child:{value:1}};
+  const snapshot=Object.entries(nested);
+  nested.child.value=8;
+  if(snapshot[0][1]!==nested.child || snapshot[0][1].value!==8)return 15;
+  nested.child={value:9};
+  if(snapshot[0][1].value!==8)return 16;
+  const json=JSON.parse('{"2":2,"b":{"value":1},"a":null}');
+  json.absent=undefined;
+  const jsonEntries=Object.entries(json);
+  const jsonValues=Object.values(json);
+  json.b.value=7;json['2']=8;
+  if(jsonEntries[0][1]!==2 || jsonValues[0]!==2 || jsonEntries[1][1]!==json.b || jsonEntries[1][1].value!==7 || jsonValues[3]!==undefined)return 17;
+  const extras=JSON.parse('{"a":2,"b":3}');
+  const typed:{a:number}=extras;
+  if(JSON.stringify(Object.values(typed))!=='[2,3]')return 18;
+  extras.b='wrong';
+  let invalidExtra=false;
+  try{Object.values(typed);}catch(e){invalidExtra=e instanceof TypeError;}
+  if(!invalidExtra)return 19;
+  if(JSON.stringify(Object.values([1,undefined,'é']))!=='[1,null,"é"]')return 20;
+  if(JSON.stringify(Object.entries('é\0水'))!=='[["0","é"],["1","\\u0000"],["2","水"]]')return 21;
+  const jsonString:JsonValue='é水';
+  if(JSON.stringify(Object.values(jsonString))!=='["é","水"]')return 22;
+  if(Object.values(12).length!==0 || Object.entries(false).length!==0 || Object.keys(new ArrayBuffer(2)).length!==0)return 23;
+  let rejected=0;
+  try{Object.entries(null);}catch(e){if(e instanceof TypeError)rejected=rejected+1;}
+  try{Object.values(undefined);}catch(e){if(e instanceof TypeError)rejected=rejected+1;}
+  try{Object.values('🙂');}catch(e){if(e instanceof TypeError)rejected=rejected+1;}
+  if(rejected!==3 || Object.keys('🙂').length!==2)return 24;
+  const effects:number[]=[];
+  const once=Object.entries(source(effects));
+  if(effects.length!==1 || once[0][1]!==2)return 25;
+  const undefinedField=Object.entries({value:undefined});
+  if(undefinedField.length!==1 || undefinedField[0][1]!==undefined)return 26;
+  const homogeneous:[number,number]=[2,3];
+  if(Object.values(homogeneous)[1]!==3)return 27;
+  let index=0;
+  if(pair[index]!=='changed')return 28;
+  index=1;pair[index]=10;
+  if(pair[1]!==10)return 29;
+  let badShape=0;
+  try{const invalid:[string,number]=JSON.parse('["x"]');}catch(e){if(e instanceof TypeError)badShape=badShape+1;}
+  try{const invalid:[string,number]=JSON.parse('["x",true]');}catch(e){if(e instanceof TypeError)badShape=badShape+1;}
+  if(badShape!==2)return 30;
+  if(Object.keys({bytes,num:1}).length!==2 || Object.values([]).length!==0 || Object.entries({}).length!==0)return 31;
+  if(JSON.stringify(Object.values({a:[1,'x'],b:[null,true]}))!=='[[1,"x"],[null,true]]')return 32;
+  if(Object.keys([bytes,1]).length!==2 || Object.keys(bytePair).length!==2)return 33;
+  const assigned=JSON.parse('{}');assigned.nested={a:[1,'x']};assigned.nested.extra=true;
+  if(assigned.nested.extra!==true)return 34;
+  if(JSON.stringify(Object.entries({'10':10,'2':2,'é key':true}))!=='[["2",2],["10",10],["é key",true]]')return 35;
+  if(Object.entries({'byte key':bytes})[0][1]!==bytes)return 36;
+
+
+  return 0;
+}
+export function round(input:string):string {
+  const value=JSON.parse(input);
+  const entries=Object.entries(value);
+  const values=Object.values(value);
+  value.changed=true;
+  return JSON.stringify({entries,values});
+}
+"#;
+    let compiled = compile_for_world(source, "enumeration.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let check = instance.get_typed_func::<(), (u32,)>(&mut store, "check")?;
+    let round = instance.get_typed_func::<(&str,), (String,)>(&mut store, "round")?;
+    let large = serde_json::json!({"data":vec!["é水"; 4096]}).to_string();
+    let mut peak = 0;
+    for index in 0..16 {
+        assert_eq!(check.call(&mut store, ())?.0, 0);
+        assert_eq!(
+            round
+                .call(&mut store, (r#"{"2":2,"b":{"x":1},"a":null}"#,))?
+                .0,
+            r#"{"entries":[["2",2],["b",{"x":1}],["a",null]],"values":[2,{"x":1},null]}"#
+        );
+        round.call(&mut store, (&large,))?;
+        if index == 2 {
+            peak = store.data().0;
+        } else if index > 2 {
+            assert_eq!(
+                store.data().0,
+                peak,
+                "enumeration storage leaked across tasks"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn enumeration_without_json_views_keeps_native_values() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("slots.wit", "package test:slots; world slots { export number: func(value: f64) -> f64; export bytes: func(value: list<u8>) -> list<u8>; }")?;
+    let world = resolve.select_world(&[package], Some("slots"))?;
+    let compiled = compile_for_world(
+        r#"
+export function number(value:number):number {
+  const record:{value:number;absent?:number}={value:value};
+  record.absent=undefined;
+  const entries=Object.entries(record);
+  if(entries[0][1]===undefined || entries[1][1]!==undefined)throw new TypeError('lost numeric definedness');
+  const pair:[string,number]=['value',value];
+  if(pair['0']!=='value')throw new TypeError('lost tuple key');
+  return entries[0][1];
+}
+export function bytes(value:Uint8Array):Uint8Array {
+  const record={value:value};
+  const values=Object.values(record);
+  const entries=Object.entries(record);
+  entries[0][1][0]=17;
+  if(values[0]!==value || entries[0][1]!==value)throw new TypeError('lost byte alias');
+  return entries[0][1];
+}
+"#,
+        "slots.ts",
+        &resolve,
+        world,
+        true,
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let number = instance.get_typed_func::<(f64,), (f64,)>(&mut store, "number")?;
+    for value in [
+        0.0,
+        -0.0,
+        1.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        f64::from_bits(0x7ff0_0000_0000_0001),
+        f64::from_bits(0xffff_ffff_ffff_ffff),
+    ] {
+        let result = number.call(&mut store, (value,))?.0;
+        if value.is_nan() {
+            assert!(result.is_nan());
+        } else {
+            assert_eq!(result.to_bits(), value.to_bits());
+        }
+    }
+    let bytes = instance.get_typed_func::<(&[u8],), (Vec<u8>,)>(&mut store, "bytes")?;
+    assert_eq!(bytes.call(&mut store, (&[1, 2, 3],))?.0, vec![17, 2, 3]);
+    Ok(())
+}

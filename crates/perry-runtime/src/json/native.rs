@@ -14,8 +14,10 @@ pub(super) struct Slot {
 pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
     // SAFETY: descriptors and any referenced values are live for the task.
     unsafe {
-        if matches!(ty.kind, Kind::Array | Kind::Record | Kind::Dictionary)
-            && let Some(source) = view::source(bits as usize as *mut u8)
+        if matches!(
+            ty.kind,
+            Kind::Array | Kind::Tuple | Kind::Record | Kind::Dictionary
+        ) && let Some(source) = view::source(bits as usize as *mut u8)
         {
             return Some(*source.cast::<Json>());
         }
@@ -29,7 +31,7 @@ pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
             Kind::Boolean => Json::Boolean(bits != 0),
             Kind::String => Json::String(bits as usize as *mut u8),
             Kind::Json => return (bits != 0).then(|| *(bits as usize as *const Json)),
-            Kind::Array => Json::Native {
+            Kind::Array | Kind::Tuple => Json::Native {
                 reference: bits as usize as *mut u8,
                 ty,
             },
@@ -47,7 +49,7 @@ pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
                     ty: (*reference.cast::<dictionary::Dictionary>()).ty,
                 }
             }
-            Kind::Opaque => unreachable!("non-JSON type reached JSON packing"),
+            Kind::Opaque | Kind::Bytes => unreachable!("non-JSON type reached JSON packing"),
         })
     }
 }
@@ -76,7 +78,7 @@ pub(super) unsafe fn scalar_or_native(ty: &Type, value: *mut u8) -> Option<u64> 
             (Kind::Boolean, Json::Boolean(value)) => Some(value as u64),
             (Kind::String, Json::String(value)) => Some(value as usize as u64),
             (
-                Kind::Array | Kind::Record | Kind::Dictionary,
+                Kind::Array | Kind::Tuple | Kind::Record | Kind::Dictionary,
                 Json::Native {
                     reference,
                     ty: actual,
@@ -117,7 +119,7 @@ pub(super) unsafe fn field(reference: *mut u8, ty: &Type, key: &str) -> Option<S
 pub(super) unsafe fn get(reference: *mut u8, ty: &Type, key: &str) -> *mut u8 {
     // SAFETY: descriptor checks select the matching native layout.
     unsafe {
-        if ty.kind != Kind::Array {
+        if !matches!(ty.kind, Kind::Array | Kind::Tuple) {
             return field(reference, ty, key).map_or(ptr::null_mut(), |slot| {
                 perry_json_pack(slot.ty, (*slot.ty).read(slot.address))
             });
@@ -136,13 +138,15 @@ pub(super) unsafe fn get(reference: *mut u8, ty: &Type, key: &str) -> *mut u8 {
 pub(super) unsafe fn index(reference: *mut u8, ty: &Type, index: f64) -> *mut u8 {
     // SAFETY: the array index is checked before the initialized element is read.
     unsafe {
-        if ty.kind != Kind::Array {
+        if !matches!(ty.kind, Kind::Array | Kind::Tuple) {
             let mut buffer = ryu_js::Buffer::new();
             return get(reference, ty, buffer.format(index));
         }
         let slots = array::slots(reference);
         if index >= 0.0 && index < slots.len() as f64 && libm::trunc(index) == index {
-            let element = ty.element();
+            let element = ty
+                .indexed_element(index as usize)
+                .expect("native tuple slot");
             perry_json_pack(
                 element,
                 element.read(slots.as_ptr().add(index as usize).cast()),
@@ -170,7 +174,7 @@ pub(super) unsafe fn set_key(reference: *mut u8, ty: &Type, key: &str, replaceme
             }
             return;
         }
-        if ty.kind == Kind::Array {
+        if matches!(ty.kind, Kind::Array | Kind::Tuple) {
             if let Some(index) = canonical_index(key) {
                 set_index(reference, ty, index as f64, replacement);
                 return;
@@ -212,7 +216,14 @@ pub(super) unsafe fn set_index(reference: *mut u8, ty: &Type, index: f64, replac
                 exception::RANGE_ERROR,
                 "JSON array write would leave a hole",
             );
-        } else if let Some(bits) = view::convert(ty.element(), replacement) {
+        } else if let Some(element) = ty.indexed_element(index as usize) {
+            let Some(bits) = view::convert(element, replacement) else {
+                failure(
+                    exception::TYPE_ERROR,
+                    "JSON assignment does not match native array slot type",
+                );
+                return;
+            };
             array::set_slot(reference, index as usize, bits);
         } else {
             failure(
@@ -237,6 +248,11 @@ pub(super) unsafe fn children(reference: *mut u8, ty: &Type) -> Children {
                     ty: ty.element(),
                 }
             }
+            Kind::Tuple => Children::NativeTuple {
+                reference,
+                next: 0,
+                ty,
+            },
             Kind::Dictionary => Children::NativeDictionary {
                 fields: (*(*reference.cast::<dictionary::Dictionary>()).fields)
                     .fields()

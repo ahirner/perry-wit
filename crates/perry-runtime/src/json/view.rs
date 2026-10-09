@@ -48,13 +48,13 @@ unsafe fn member(value: Json, index: usize, key: Option<&str>) -> Option<Json> {
                 .get(index)
                 .and_then(|bits| (*bits as usize as *const Json).as_ref().copied()),
             Json::Native { reference, ty } => {
-                let slot = if (*ty).kind != Kind::Array {
+                let slot = if !matches!((*ty).kind, Kind::Array | Kind::Tuple) {
                     native::field(reference, &*ty, key?)?
                 } else {
                     let slots = array::slots(reference);
                     native::Slot {
                         address: slots.get(index)? as *const u64 as *mut u8,
-                        ty: (*ty).element(),
+                        ty: (*ty).indexed_element(index)?,
                         key: ptr::null_mut(),
                     }
                 };
@@ -70,7 +70,7 @@ unsafe fn length(value: Json) -> Option<usize> {
     unsafe {
         match value {
             Json::Array(array) => Some(array::slots(array).len()),
-            Json::Native { reference, ty } if (*ty).kind == Kind::Array => {
+            Json::Native { reference, ty } if matches!((*ty).kind, Kind::Array | Kind::Tuple) => {
                 Some(array::slots(reference).len())
             }
             _ => None,
@@ -128,11 +128,14 @@ unsafe fn matches(
                     node.is_ok_and(|node| matches(ty.element(), node_value(node), seen, depth + 1))
                 })
             }
-            Kind::Array | Kind::Record => {
-                let count = if ty.kind == Kind::Array {
+            Kind::Array | Kind::Tuple | Kind::Record => {
+                let count = if matches!(ty.kind, Kind::Array | Kind::Tuple) {
                     let Some(count) = length(value) else {
                         return false;
                     };
+                    if ty.kind == Kind::Tuple && count != ty.count as usize {
+                        return false;
+                    }
                     count
                 } else {
                     let object = match value {
@@ -156,8 +159,11 @@ unsafe fn matches(
                 }
                 seen.insert(pair);
                 (0..count).all(|index| {
-                    let (child, key) = if ty.kind == Kind::Array {
-                        (ty.element(), None)
+                    let (child, key) = if matches!(ty.kind, Kind::Array | Kind::Tuple) {
+                        (
+                            ty.indexed_element(index).expect("array or tuple schema"),
+                            None,
+                        )
                     } else {
                         let field = &ty.fields()[index];
                         if !properties::has_own(value, string::text(field.name)) {
@@ -235,8 +241,12 @@ pub unsafe extern "C" fn perry_view_get(reference: *mut u8, index: u32) -> u64 {
     unsafe {
         let view = &*((reference as usize & !1) as *const View);
         let ty = &*view.ty;
-        let (ty, value) = if ty.kind == Kind::Array {
-            (ty.element(), perry_json_index(view.source, index as f64))
+        let (ty, value) = if matches!(ty.kind, Kind::Array | Kind::Tuple) {
+            (
+                ty.indexed_element(index as usize)
+                    .expect("array or tuple schema"),
+                perry_json_index(view.source, index as f64),
+            )
         } else {
             let field = &ty.fields()[index as usize];
             if !field.optional
@@ -260,8 +270,12 @@ pub unsafe extern "C" fn perry_view_set(reference: *mut u8, index: u32, bits: u6
     unsafe {
         let view = &*((reference as usize & !1) as *const View);
         let ty = &*view.ty;
-        if ty.kind == Kind::Array {
-            let value = perry_json_pack(ty.element(), bits);
+        if matches!(ty.kind, Kind::Array | Kind::Tuple) {
+            let value = perry_json_pack(
+                ty.indexed_element(index as usize)
+                    .expect("array or tuple schema"),
+                bits,
+            );
             perry_json_set_index(view.source, index as f64, value);
         } else {
             let field = &ty.fields()[index as usize];

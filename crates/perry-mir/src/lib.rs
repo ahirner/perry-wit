@@ -11,6 +11,7 @@ pub mod calls;
 pub mod collections;
 pub mod control;
 pub mod dictionaries;
+pub mod enumeration;
 pub mod exceptions;
 pub mod heap;
 pub mod intrinsics;
@@ -20,6 +21,7 @@ pub mod optional;
 pub mod pipeline;
 pub mod records;
 pub mod scalar;
+pub mod tuples;
 pub mod types;
 
 #[cfg(test)]

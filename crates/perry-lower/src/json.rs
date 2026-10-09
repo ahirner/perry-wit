@@ -106,6 +106,7 @@ impl FunctionBuilder<'_> {
                 "boolean"
             } else if ty.is::<RecordType>()
                 || ty.is::<ArrayType>()
+                || ty.is::<TupleType>()
                 || ty.is::<DictionaryType>()
                 || ty.is::<BytesType>()
                 || ty.is::<BufferType>()
@@ -240,6 +241,77 @@ impl FunctionBuilder<'_> {
         }
     }
 
+    pub(super) fn enumeration_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+        match expr {
+            Expr::Array(items) => {
+                let values = items
+                    .iter()
+                    .map(|item| self.enumeration_operand(ctx, item))
+                    .collect::<Result<Vec<_>>>()?;
+                let Some(element) = perry_mir::enumeration::common_type(
+                    ctx,
+                    values.iter().map(|value| value.get_type(ctx)),
+                ) else {
+                    return Ok(
+                        self.emit_value(ctx, |ctx| perry_mir::tuples::NewOp::new(ctx, values))
+                    );
+                };
+                let values = values
+                    .into_iter()
+                    .map(|value| self.fit(ctx, value, element))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
+            }
+            Expr::Object(fields) => {
+                let fields = fields
+                    .iter()
+                    .map(|(name, expr)| Ok((name.clone(), self.enumeration_operand(ctx, expr)?)))
+                    .collect::<Result<_>>()?;
+                self.enumeration_fields(ctx, fields)
+            }
+            Expr::New {
+                class_name, args, ..
+            } if self.shapes.literal_fields(class_name).is_some() => {
+                let names = self.shapes.literal_fields(class_name).unwrap();
+                let fields = names
+                    .iter()
+                    .zip(args)
+                    .map(|(name, expr)| Ok((name.clone(), self.enumeration_operand(ctx, expr)?)))
+                    .collect::<Result<_>>()?;
+                self.enumeration_fields(ctx, fields)
+            }
+            _ => self.expression(ctx, expr),
+        }
+    }
+
+    fn enumeration_fields(
+        &mut self,
+        ctx: &mut Context,
+        fields: Vec<(String, Value)>,
+    ) -> Result<Value> {
+        let mut names = std::collections::HashSet::new();
+        if fields
+            .iter()
+            .all(|(name, _)| identifier(name).is_ok() && names.insert(name))
+        {
+            return self.record_from_values(ctx, fields, None);
+        }
+        ensure!(
+            !fields.iter().any(|(name, _)| name == "__proto__"),
+            "prototype setters are outside the closed-shape subset"
+        );
+        let element = perry_mir::enumeration::common_type(ctx,fields.iter().map(|(_, value)| value.get_type(ctx)))
+            .context("enumerated literal fields with arbitrary keys must share a native type or be JSON-compatible")?;
+        let fields = fields
+            .into_iter()
+            .map(|(name, value)| Ok((name, self.fit(ctx, value, element)?)))
+            .collect::<Result<_>>()?;
+        let ty = DictionaryType::get(ctx, element).into();
+        Ok(self.emit_value(ctx, |ctx| {
+            perry_mir::dictionaries::NewOp::new(ctx, ty, fields)
+        }))
+    }
+
     pub(super) fn property_key(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         let key = self.object_operand(ctx, expr)?;
         if key.get_type(ctx).deref(ctx).is::<StringType>() {
@@ -283,10 +355,11 @@ impl FunctionBuilder<'_> {
             Kind::Number => Intrinsic::JsonNumber,
             Kind::Boolean => Intrinsic::JsonBoolean,
             Kind::String => Intrinsic::JsonString,
-            Kind::Record | Kind::Array | Kind::Dictionary => {
+            Kind::Record | Kind::Array | Kind::Tuple | Kind::Dictionary => {
                 ensure!(
                     perry_mir::json::compatible(ctx, value.get_type(ctx)),
-                    "aggregate contains values outside the JSON subset"
+                    "aggregate contains values outside the JSON subset: {}",
+                    value.get_type(ctx).disp(ctx)
                 );
                 return Ok(self.emit_value(ctx, |ctx| perry_mir::json::PackOp::new(ctx, value)));
             }

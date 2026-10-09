@@ -106,6 +106,36 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = vec![
         Contract {
+            id: "ecma.object.enumeration",
+            description: "Values and entries preserve own-key order, scalar snapshots and aggregate aliases",
+            specification: "https://tc39.es/ecma262/#sec-enumerableownproperties",
+            domain: "Native/parsed records, dictionaries, dense arrays, typed tuples, byte views and BMP strings; optional values, numeric keys, snapshot mutation and aggregate identities; null/undefined and stale-view errors plus surrogate-splitting rejection have separate component assertions",
+            witnesses: vec![
+                Witness {
+                    partition: "empty-and-absent",
+                    case: enumeration(0, false, String::new(), vec![]),
+                },
+                Witness {
+                    partition: "unicode-and-present",
+                    case: enumeration(-3, true, "é\0水".into(), vec![2, -1, 255]),
+                },
+            ],
+            strategy: (
+                -32i16..=32,
+                any::<bool>(),
+                prop::collection::vec(
+                    prop::sample::select(vec!['a', 'é', '水', '\0', '"', '\\']),
+                    0..16,
+                ),
+                prop::collection::vec(-20i16..=300, 0..16),
+            )
+                .prop_map(|(number, present, text, values)| {
+                    enumeration(number, present, text.into_iter().collect(), values)
+                })
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "ecma.object.optional_record",
             description: "Optional record fields preserve own presence, property order and parsed/native aliases",
             specification: "https://www.typescriptlang.org/docs/handbook/2/objects.html#optional-properties",
@@ -783,6 +813,52 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn enumeration(number: i16, present: bool, text: String, values: Vec<i16>) -> Case {
+    let text = serde_json::to_string(&text).unwrap();
+    let values = serde_json::to_string(&values).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+const dictionary:Record<string,number|undefined>={{b:{number},'10':10,'2':2,a:-0}};
+if({present})dictionary.missing=undefined;
+const keys=Object.keys(dictionary);
+const entries:[string,number|undefined][]=Object.entries(dictionary);
+const values=Object.values(dictionary);
+dictionary.b=9;delete dictionary.a;dictionary.a=7;
+entries[2][1]=12;
+if(values[2]!=={number} || dictionary.b!==9 || 1/values[3]!!==-Infinity)throw 1;
+const native:{{first:{{count:number}};second?:{{count:number}}}}={{first:{{count:{number}}}}};
+if({present})native.second=undefined;
+const nativeEntries=Object.entries(native);
+const first=native.first;
+first.count=first.count+1;
+if(nativeEntries[0][1]!==first)throw 2;
+native.first={{count:99}};
+const parsed=JSON.parse('{{"2":2,"b":{{"count":1}},"a":null}}');
+parsed.missing=undefined;
+const parsedEntries=Object.entries(parsed);
+const parsedValues=Object.values(parsed);
+parsed.b.count={number};parsed['2']=8;
+if(parsedEntries[0][1]!==2 || parsedEntries[1][1]!==parsed.b || parsedValues[3]!==undefined)throw 3;
+const bytes=new Uint8Array({values});
+const byteEntries=Object.entries(bytes);
+const holders:Record<string,Uint8Array>={{data:bytes}};
+const holderEntries=Object.entries(holders);
+if(bytes.length>0)holderEntries[0][1][0]=17;
+if(holderEntries[0][1]!==bytes)throw 4;
+const pair:[string,number]=[{text},{number}];
+const tupleValues=Object.values(pair);
+pair[1]=pair[1]+1;
+const fresh=Object.entries({{present:undefined,count:{number}}});
+const record={{n:{number},text:{text},flag:{present}}};
+const array:number[]={values};
+console.log(JSON.stringify({{keys,entries,values,dictionary,nativeEntries,parsedEntries,parsedValues,byteEntries,bytesFirst:bytes[0],pair,tupleValues,fresh,record:Object.entries(record),array:Object.entries(array),string:Object.entries({text}),empty:[Object.values([]),Object.entries({{}}),Object.entries(false),Object.values(12)]}}));
+"#
+        ),
+    }
 }
 
 fn optional_record(number: i16, present: bool, text: String) -> Case {

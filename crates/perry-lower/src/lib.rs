@@ -50,7 +50,7 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
         ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, PromiseType,
-        RecordType, StringType,
+        RecordType, StringType, TupleType,
     },
 };
 use pliron::printable::Printable as _;
@@ -275,6 +275,27 @@ fn hir_module_name(hir: &HirModule) -> String {
     }
 }
 
+fn inferred_enumeration_type(ty: &HirType) -> bool {
+    match ty {
+        HirType::Any | HirType::Unknown => true,
+        HirType::Array(element) => inferred_enumeration_type(element),
+        HirType::Tuple(elements) => elements.iter().any(inferred_enumeration_type),
+        _ => false,
+    }
+}
+
+fn literal_index(index: &Expr) -> Option<usize> {
+    match index {
+        Expr::Integer(index) => usize::try_from(*index).ok(),
+        Expr::Number(index) if *index >= 0.0 && index.fract() == 0.0 => Some(*index as usize),
+        Expr::String(index) => index
+            .parse::<usize>()
+            .ok()
+            .filter(|value| value.to_string() == *index),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Number,
@@ -283,6 +304,7 @@ enum Kind {
     Record,
     Dictionary,
     Array,
+    Tuple,
     Exception,
     Bytes,
     Buffer,
@@ -308,6 +330,8 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Dictionary)
     } else if ty.is::<RecordType>() {
         Ok(Kind::Record)
+    } else if ty.is::<TupleType>() {
+        Ok(Kind::Tuple)
     } else if ty.is::<ArrayType>() {
         Ok(Kind::Array)
     } else if ty
@@ -584,12 +608,15 @@ impl<'s> FunctionBuilder<'s> {
                 // type. An explicit type the subset cannot represent is an error, not a fallback.
                 let declared = match ty {
                     HirType::Any | HirType::Unknown => None,
-                    HirType::Array(element)
-                        if matches!(element.as_ref(), HirType::Any)
-                            && matches!(
-                                init,
-                                Some(Expr::ObjectKeys(_) | Expr::ObjectValues(_))
-                            ) =>
+                    ty if inferred_enumeration_type(ty)
+                        && matches!(
+                            init,
+                            Some(
+                                Expr::ObjectKeys(_)
+                                    | Expr::ObjectValues(_)
+                                    | Expr::ObjectEntries(_)
+                            )
+                        ) =>
                     {
                         None
                     }
@@ -905,7 +932,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     let ty =
                         optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
-                    let array = ty.deref(ctx).is::<ArrayType>();
+                    let array = ty.deref(ctx).is::<ArrayType>() || ty.deref(ctx).is::<TupleType>();
                     if array && self.is_optional(ctx, value) {
                         let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
                         let no = self.boolean(ctx, false);
@@ -1060,7 +1087,10 @@ impl<'s> FunctionBuilder<'s> {
                     let ty =
                         optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
                     let ty = ty.deref(ctx);
-                    ty.is::<RecordType>() || ty.is::<ArrayType>() || ty.is::<DictionaryType>()
+                    ty.is::<RecordType>()
+                        || ty.is::<ArrayType>()
+                        || ty.is::<TupleType>()
+                        || ty.is::<DictionaryType>()
                 };
                 if matches!(op, CompareOp::Eq | CompareOp::Ne)
                     && (json::is_json(ctx, lhs)
@@ -1225,37 +1255,17 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ObjectKeys(object) if matches!(object.as_ref(), Expr::ProcessEnv) => {
                 self.intrinsic(ctx, Intrinsic::EnvKeys, vec![]).unwrap()
             }
-            Expr::ObjectKeys(object) | Expr::ObjectValues(object) => {
-                let value = self.object_operand(ctx, object)?;
-                let inner = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
-                if inner.deref(ctx).is::<DictionaryType>() {
-                    let value = self.defined(ctx, value)?;
-                    let action = if matches!(expr, Expr::ObjectKeys(_)) {
-                        perry_mir::dictionaries::Action::Keys
-                    } else {
-                        perry_mir::dictionaries::Action::Values
-                    };
-                    self.dictionary_access(ctx, action, vec![value]).unwrap()
-                } else if inner.deref(ctx).is::<RecordType>() && matches!(expr, Expr::ObjectKeys(_))
-                {
-                    let value = self.defined(ctx, value)?;
-                    self.emit_value(ctx, |ctx| {
-                        perry_mir::records::AccessOp::new(
-                            ctx,
-                            perry_mir::records::Action::Keys,
-                            vec![value],
-                        )
-                    })
-                } else {
-                    ensure!(
-                        matches!(expr, Expr::ObjectKeys(_)),
-                        "Object.values currently requires an explicit dictionary type"
-                    );
-                    let value = self.json_input(ctx, value)?;
-                    let value = self.optional(ctx, value);
-                    self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value])
-                        .unwrap()
-                }
+            Expr::ObjectKeys(object) | Expr::ObjectValues(object) | Expr::ObjectEntries(object) => {
+                use perry_mir::enumeration::{Action, EnumerateOp};
+                let source = self.enumeration_operand(ctx, object)?;
+                let action = match expr {
+                    Expr::ObjectKeys(_) => Action::Keys,
+                    Expr::ObjectValues(_) => Action::Values,
+                    _ => Action::Entries,
+                };
+                let op = EnumerateOp::new(ctx, action, source)
+                    .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+                self.append_value(ctx, &op)
             }
             Expr::ObjectHasOwn(object, key) => {
                 let value = self.object_operand(ctx, object)?;
@@ -1361,7 +1371,7 @@ impl<'s> FunctionBuilder<'s> {
                             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
                         })
                     }
-                    (Kind::Array, "length") => {
+                    (Kind::Array | Kind::Tuple, "length") => {
                         let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, value));
                         self.emit_value(ctx, |ctx| {
                             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
@@ -1420,6 +1430,26 @@ impl<'s> FunctionBuilder<'s> {
                 self.record_literal(ctx, &names, args, expected)?
             }
             Expr::Array(items) => {
+                if let Some(tuple) = expected_value.filter(|ty| ty.deref(ctx).is::<TupleType>()) {
+                    let elements = tuple
+                        .deref(ctx)
+                        .downcast_ref::<TupleType>()
+                        .unwrap()
+                        .elements()
+                        .to_vec();
+                    ensure!(
+                        items.len() == elements.len(),
+                        "tuple literal has a different number of elements than its type"
+                    );
+                    let mut values = Vec::with_capacity(items.len());
+                    for (item, ty) in items.iter().zip(elements) {
+                        let value = self.expression_with(ctx, item, Some(ty))?;
+                        values.push(self.fit(ctx, value, ty)?);
+                    }
+                    return Ok(
+                        self.emit_value(ctx, |ctx| perry_mir::tuples::NewOp::new(ctx, values))
+                    );
+                }
                 let element =
                     match expected_value.map(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx)) {
                         Some(Ok(array)) => Some(array.deref(ctx).element()),
@@ -1455,6 +1485,22 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
                 let array = self.defined(ctx, array)?;
+                if kind(ctx, array)? == Kind::Tuple {
+                    if let Some(index) = literal_index(index)
+                        && perry_mir::tuples::element(ctx, array.get_type(ctx), index).is_some()
+                    {
+                        let op = perry_mir::tuples::GetOp::new(ctx, array, index)?;
+                        return Ok(self.append_value(ctx, &op));
+                    }
+                    let array = self.pack_json(ctx, array)?;
+                    let index = self.json_key(ctx, index)?;
+                    let intrinsic = if kind(ctx, index)? == Kind::String {
+                        Intrinsic::JsonGet
+                    } else {
+                        Intrinsic::JsonIndex
+                    };
+                    return Ok(self.intrinsic(ctx, intrinsic, vec![array, index]).unwrap());
+                }
                 if kind(ctx, array)? == Kind::Dictionary {
                     let key = self.property_key(ctx, index)?;
                     return self.dictionary_get(ctx, array, key);
@@ -1635,6 +1681,28 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        if kind(ctx, array)? == Kind::Tuple {
+            if let Some(index) = literal_index(index)
+                && let Some(ty) = perry_mir::tuples::element(ctx, array.get_type(ctx), index)
+            {
+                let value = self.expression_with(ctx, value, Some(ty))?;
+                let value = self.fit(ctx, value, ty)?;
+                self.emit(ctx, |ctx| {
+                    perry_mir::tuples::SetOp::new(ctx, array, index, value)
+                });
+                return Ok(value);
+            }
+            let array = self.pack_json(ctx, array)?;
+            let index = self.json_key(ctx, index)?;
+            let (value, json) = self.json_assignment(ctx, value)?;
+            let intrinsic = if kind(ctx, index)? == Kind::String {
+                Intrinsic::JsonSet
+            } else {
+                Intrinsic::JsonSetIndex
+            };
+            self.intrinsic(ctx, intrinsic, vec![array, index, json]);
+            return Ok(value);
+        }
         if kind(ctx, array)? == Kind::Dictionary {
             let key = self.property_key(ctx, index)?;
             return self.dictionary_set(ctx, array, key, value);
@@ -1759,10 +1827,23 @@ impl<'s> FunctionBuilder<'s> {
             let value = self.expression_with(ctx, arg, field_type)?;
             let value = match field_type {
                 Some(field_type) => self.fit(ctx, value, field_type)?,
-                None => self.defined(ctx, value)?,
+                None => value,
             };
             values.push((name.clone(), value));
         }
+        self.record_from_values(ctx, values, expected)
+    }
+
+    fn record_from_values(
+        &mut self,
+        ctx: &mut Context,
+        mut values: Vec<(String, Value)>,
+        expected: Option<TypedHandle<RecordType>>,
+    ) -> Result<Value> {
+        ensure!(
+            !values.iter().any(|(name, _)| name == "__proto__"),
+            "prototype setters are outside the closed-shape subset"
+        );
         // With a matching expected type the fields were fitted to it; that includes recursive
         // records, which no literal's own structure can name.
         let record = match expected {
@@ -1775,6 +1856,16 @@ impl<'s> FunctionBuilder<'s> {
                 self.shapes.mir_record(ctx, fields)?
             }
         };
+        let order = values
+            .iter()
+            .map(|(name, _)| {
+                record
+                    .deref(ctx)
+                    .field(&identifier(name).expect("field name"))
+                    .expect("record field")
+                    .0
+            })
+            .collect();
         let fields = record.deref(ctx).fields().expect("record schema").to_vec();
         let mut operands = Vec::with_capacity(fields.len());
         for field in &fields {
@@ -1793,16 +1884,6 @@ impl<'s> FunctionBuilder<'s> {
             };
             operands.push(value);
         }
-        let order = names
-            .iter()
-            .map(|name| {
-                record
-                    .deref(ctx)
-                    .field(&identifier(name).expect("field name"))
-                    .expect("record field")
-                    .0
-            })
-            .collect();
         Ok(self.emit_value(ctx, |ctx| {
             let allocation = AllocOp::new(ctx, record, operands);
             allocation.set_order(ctx, order);

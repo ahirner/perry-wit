@@ -38,7 +38,7 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
         ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonReplacerType,
-        JsonReviverType, JsonType, OptionalType, PromiseType, RecordType, StringType,
+        JsonReviverType, JsonType, OptionalType, PromiseType, RecordType, StringType, TupleType,
     },
 };
 use perry_runtime::array as layout;
@@ -238,6 +238,7 @@ enum Runtime {
     ViewLength,
     ReferenceIdentity,
     ExceptionStatus,
+    Enumerate,
     DictionaryNew,
     DictionaryGet,
     DictionarySet,
@@ -366,6 +367,7 @@ impl Runtime {
             Runtime::ViewLength => "perry_view_length",
             Runtime::ReferenceIdentity => "perry_reference_identity",
             Runtime::ExceptionStatus => "perry_exception_status",
+            Runtime::Enumerate => "perry_enumerate",
             Runtime::DictionaryNew => "perry_dictionary_new",
             Runtime::DictionaryGet => "perry_dictionary_get",
             Runtime::DictionarySet => "perry_dictionary_set",
@@ -528,6 +530,7 @@ impl Runtime {
             Runtime::DictionaryNew | Runtime::DictionaryKeys | Runtime::DictionaryValues => {
                 (vec![i32], vec![i32])
             }
+            Runtime::Enumerate => (vec![i32, i64, i32, i32], vec![i32]),
             Runtime::DictionaryGet => (vec![i32, i32], vec![i64]),
             Runtime::DictionarySet => (vec![i32, i32, i64], vec![]),
             Runtime::RecordInclude => (vec![i32, i32], vec![]),
@@ -634,6 +637,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     }
     if deref.is::<RecordType>()
         || deref.is::<ArrayType>()
+        || deref.is::<TupleType>()
         || deref.is::<DictionaryType>()
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
@@ -1534,6 +1538,7 @@ impl<'s> FunctionLowering<'s> {
             if self.state.uses_typed_views
                 && (inner.deref(ctx).is::<RecordType>()
                     || inner.deref(ctx).is::<ArrayType>()
+                    || inner.deref(ctx).is::<TupleType>()
                     || inner.deref(ctx).is::<DictionaryType>())
             {
                 for operand in &mut operands {
@@ -1668,6 +1673,31 @@ impl<'s> FunctionLowering<'s> {
             }
             return Ok(());
         }
+        if let Some(enumerate) = Operation::get_op::<perry_mir::enumeration::EnumerateOp>(op, ctx) {
+            use perry_mir::enumeration::Action;
+            let source = op.deref(ctx).get_operand(0).get_type(ctx);
+            let element = Self::element_type(ctx, op.deref(ctx).get_result(0))?;
+            let source = self.state.data.descriptor(ctx, source)?;
+            let element = self.state.data.descriptor(ctx, element)?;
+            let source = self.i32_const(ctx, source as i32);
+            let element = self.i32_const(ctx, element as i32);
+            let operand = self.operand(ctx, op, 0)?;
+            let bits = self.slot_bits(ctx, operand);
+            let action = self.i32_const(
+                ctx,
+                match enumerate.action(ctx) {
+                    Action::Keys => 0,
+                    Action::Values => 1,
+                    Action::Entries => 2,
+                },
+            );
+            let value = self
+                .runtime(ctx, Runtime::Enumerate, vec![source, bits, element, action])
+                .expect("enumeration snapshot");
+            self.check_pending(ctx);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
         if let Some(new) = Operation::get_op::<perry_mir::dictionaries::NewOp>(op, ctx) {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
             let address = self.state.data.descriptor(ctx, ty)?;
@@ -1797,6 +1827,48 @@ impl<'s> FunctionLowering<'s> {
                 .expect("fields")[((offset - 8) / 8) as usize]
                 .optional;
             self.write_field(ctx, operands[0], offset, operands[1], kind, optional)?;
+            return Ok(());
+        }
+        if Operation::get_op::<perry_mir::tuples::NewOp>(op, ctx).is_some() {
+            let tuple_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let elements = tuple_ty
+                .deref(ctx)
+                .downcast_ref::<TupleType>()
+                .expect("tuple")
+                .elements()
+                .to_vec();
+            let operands = self.operands(ctx, op)?;
+            let capacity = self.i32_const(ctx, operands.len() as i32);
+            let tuple = self
+                .runtime(ctx, Runtime::ArrayNew, vec![capacity])
+                .expect("tuple array");
+            let data = self.load(ctx, MemKind::I32, tuple, layout::DATA);
+            for (index, (&ty, value)) in elements.iter().zip(operands).enumerate() {
+                self.store(
+                    ctx,
+                    slot_kind(ctx, ty)?,
+                    data,
+                    layout::SLOT * index as u32,
+                    value,
+                );
+            }
+            self.store(ctx, MemKind::I32, tuple, layout::LEN, capacity);
+            self.define(ctx, op, tuple);
+            return Ok(());
+        }
+        if let Some(get) = Operation::get_op::<perry_mir::tuples::GetOp>(op, ctx) {
+            let tuple = self.operand(ctx, op, 0)?;
+            let index = self.i32_const(ctx, get.index(ctx) as i32);
+            let ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let value = self.read_element(ctx, tuple, index, ty)?;
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(set) = Operation::get_op::<perry_mir::tuples::SetOp>(op, ctx) {
+            let operands = self.operands(ctx, op)?;
+            let index = self.i32_const(ctx, set.index(ctx) as i32);
+            let ty = op.deref(ctx).get_operand(1).get_type(ctx);
+            self.write_element(ctx, operands[0], index, operands[1], slot_kind(ctx, ty)?)?;
             return Ok(());
         }
         if Operation::get_op::<ArrayNewOp>(op, ctx).is_some() {

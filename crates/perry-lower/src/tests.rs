@@ -456,7 +456,7 @@ export function run(x: number): number {
         "perry.dictionary_new",
         "perry.dictionary Set",
         "perry.dictionary Get",
-        "perry.dictionary Values",
+        "perry.enumerate Values",
         "perry.dictionary Delete",
         "perry.dictionary Has",
         "perry.dictionary <builtin.fp64",
@@ -591,5 +591,33 @@ fn inline_dictionary_annotations_retain_index_and_named_constraints() {
             compact.contains("perry.dictionary<builtin.fp64{\"count\":builtin.fp64}>"),
             "{printed}"
         );
+    }
+}
+
+#[test]
+fn enumeration_retains_native_tuple_slots_and_inferred_values() {
+    for source in [
+        "export function run():number {const d:Record<string,number>={a:2};const entries=Object.entries(d);return entries[0][1]+3;}",
+        "export function run():number {const d:Record<string,Uint8Array>={a:new Uint8Array([2])};const entries=Object.entries(d);return entries[0][1][0];}",
+        "export function run():number {const d={a:2,b:3};const values=Object.values(d);return values[0]+values[1];}",
+        "export function run():number {const pair:[string,number]=['a',2];pair[1]=3;return pair[1];}",
+        "export function run():number {const entries:[string,number][]=Object.entries({a:2});return entries[0][1];}",
+    ] {
+        let printed = lowered(source);
+        assert!(
+            printed.contains("perry.enumerate") || printed.contains("perry.tuple_new"),
+            "{printed}"
+        );
+        assert!(
+            !printed.contains("perry.json_pack"),
+            "native enumeration boxed: {printed}"
+        );
+    }
+    for source in [
+        "type Recursive=[Recursive];export function run(input:Recursive):number{return 0;}",
+        "export function run():number {const pair:[string,number]=['a',2];pair[0]=3;return 0;}",
+        "export function run():number {const values=Object.values({bytes:new Uint8Array([2]),n:1});return values.length;}",
+    ] {
+        rejected(source);
     }
 }

@@ -4,6 +4,7 @@ use crate::{array, exception, region::perry_alloc, string};
 use core::ptr;
 use perry_json_codec::{Error, Graph, Tree, Value};
 pub mod dictionary;
+mod enumeration;
 mod native;
 mod object;
 mod properties;
@@ -208,6 +209,11 @@ enum Children {
         remaining: usize,
         ty: *const Type,
     },
+    NativeTuple {
+        reference: *mut u8,
+        next: usize,
+        ty: *const Type,
+    },
     NativeObject {
         reference: *mut u8,
         next: usize,
@@ -250,6 +256,23 @@ impl Iterator for Children {
                 *next = unsafe { next.add(8) };
                 *remaining -= 1;
                 Some(Ok(Node::NativeSlot(slot)))
+            }
+            Self::NativeTuple {
+                reference,
+                next,
+                ty,
+            } => {
+                // SAFETY: native tuple slots and their compiler descriptors have matching lengths.
+                unsafe {
+                    let slot = array::slots(*reference).get(*next)?;
+                    let element = (**ty).indexed_element(*next).expect("tuple element");
+                    *next += 1;
+                    Some(Ok(Node::NativeSlot(native::Slot {
+                        address: (slot as *const u64).cast_mut().cast(),
+                        ty: element,
+                        key: ptr::null_mut(),
+                    })))
+                }
             }
             Self::NativeObject {
                 reference,
@@ -320,7 +343,7 @@ impl Tree for RuntimeTree {
                 Json::Object(object) => Value::Object(Children::Object((*object).fields().iter())),
                 Json::Native { reference, ty } => {
                     let children = native::children(reference, &*ty);
-                    if (*ty).kind == NativeKind::Array {
+                    if matches!((*ty).kind, NativeKind::Array | NativeKind::Tuple) {
                         Value::Array(children)
                     } else {
                         Value::Object(children)
@@ -535,7 +558,9 @@ pub unsafe extern "C" fn perry_json_is_array(value: *mut u8) -> u32 {
     unsafe {
         match *value.cast::<Json>() {
             Json::Array(_) => 1,
-            Json::Native { ty, .. } => ((*ty).kind == NativeKind::Array) as u32,
+            Json::Native { ty, .. } => {
+                (matches!((*ty).kind, NativeKind::Array | NativeKind::Tuple)) as u32
+            }
             _ => 0,
         }
     }
@@ -580,7 +605,7 @@ pub unsafe extern "C" fn perry_json_set_index(value: *mut u8, index: f64, replac
     // SAFETY: references are live; dense bounds are validated before mutation.
     unsafe {
         if let Json::Native { reference, ty } = *value.cast::<Json>() {
-            if (*ty).kind == NativeKind::Array {
+            if matches!((*ty).kind, NativeKind::Array | NativeKind::Tuple) {
                 native::set_index(reference, &*ty, index, replacement);
             } else {
                 let mut buffer = ryu_js::Buffer::new();

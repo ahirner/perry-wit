@@ -328,6 +328,46 @@ impl ArrayType {
     }
 }
 
+/// A dense array with a statically declared type for each position.
+#[pliron_type(name = "perry.tuple", generate_get = true, verifier = "succ")]
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct TupleType {
+    elements: Vec<TypeHandle>,
+}
+impl TupleType {
+    pub fn elements(&self) -> &[TypeHandle] {
+        &self.elements
+    }
+}
+impl Printable for TupleType {
+    fn fmt(
+        &self,
+        ctx: &Context,
+        state: &printable::State,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        write!(f, "<")?;
+        for (index, ty) in self.elements.iter().enumerate() {
+            if index != 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", ty.print(ctx, state))?;
+        }
+        write!(f, ">")
+    }
+}
+impl Parsable for TupleType {
+    type Arg = ();
+    type Parsed = TypedHandle<Self>;
+    fn parse<'a>(stream: &mut StateStream<'a>, _arg: ()) -> ParseResult<'a, Self::Parsed> {
+        let elements = delimited_list_parser('<', '>', ',', spaced(type_parser()))
+            .parse_stream(stream)
+            .into_result()?
+            .0;
+        Ok(Self::get(stream.state.ctx, elements)).into_parse_result()
+    }
+}
+
 /// An ordered dictionary with a uniform element representation and named-field constraints.
 /// Named declarations reserve identity before resolving recursive schemas.
 #[pliron_type(name = "perry.dictionary")]

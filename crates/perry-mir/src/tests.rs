@@ -783,3 +783,40 @@ fn dictionary_signatures_and_recursive_types_round_trip() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn tuple_and_enumeration_operations_round_trip_and_verify_slot_types() {
+    let source = single_block(
+        r#"
+        key = perry.string_const "key" : perry.string;
+        tuple = perry.tuple_new Task (key, v) : perry.tuple<perry.string, builtin.fp64>;
+        value = perry.tuple_get tuple[(1)] : builtin.fp64;
+        perry.tuple_set tuple[(1)] = v;
+        keys = perry.enumerate Keys (tuple) : perry.array<perry.string>;
+        values = perry.enumerate Values (tuple) : perry.array<perry.json>;
+        entries = perry.enumerate Entries (tuple) : perry.array<perry.tuple<perry.string, perry.json>>;
+    "#,
+    );
+    verify_text(&source).expect("typed tuples and enumeration verify");
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &source);
+    verify_text(&normalized(&print(ctx, module))).expect("tuples and enumeration round trip");
+    for invalid in [
+        source.replace("Task (key, v)", "Task (v, key)"),
+        source.replace("tuple[(1)] = v", "tuple[(0)] = v"),
+        source.replace("tuple_get tuple[(1)]", "tuple_get tuple[(2)]"),
+        source.replace(
+            "Keys (tuple) : perry.array<perry.string>",
+            "Keys (tuple) : perry.array<builtin.fp64>",
+        ),
+        source.replace(
+            "Values (tuple) : perry.array<perry.json>",
+            "Values (tuple) : perry.array<builtin.fp64>",
+        ),
+    ] {
+        assert!(
+            verify_text(&invalid).is_err(),
+            "invalid tuple/enumeration accepted: {invalid}"
+        );
+    }
+}

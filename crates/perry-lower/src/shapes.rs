@@ -13,6 +13,7 @@ use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
     ArrayType, BufferType, BytesType, DictionaryField, DictionarySchema, DictionaryType,
     ExceptionType, JsonType, OptionalType, PromiseType, RecordField, RecordType, StringType,
+    TupleType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -32,6 +33,7 @@ pub(crate) struct Shapes<'h> {
     /// Resolved named types, so a recursive interface keeps its reserved name.
     named: RefCell<HashMap<String, TypeHandle>>,
     dictionaries: RefCell<HashMap<String, PendingDictionary>>,
+    resolving_tuples: RefCell<std::collections::HashSet<String>>,
 }
 #[derive(Clone, Copy)]
 enum PendingDictionary {
@@ -84,6 +86,7 @@ impl<'h> Shapes<'h> {
             reserved: RefCell::new(0),
             named: RefCell::new(HashMap::new()),
             dictionaries: RefCell::new(HashMap::new()),
+            resolving_tuples: RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -129,6 +132,13 @@ impl<'h> Shapes<'h> {
                 );
                 let element = self.value_type(ctx, &type_args[1])?;
                 DictionaryType::get(ctx, element).into()
+            }
+            HirType::Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|ty| self.value_type(ctx, ty))
+                    .collect::<Result<Vec<_>>>()?;
+                TupleType::get(ctx, elements).into()
             }
             HirType::Array(element) => {
                 let element = self.value_type(ctx, element)?;
@@ -201,6 +211,15 @@ impl<'h> Shapes<'h> {
             );
             return match &alias.ty {
                 HirType::Object(object) => self.object(ctx, Some(name), object),
+                HirType::Tuple(_) => {
+                    ensure!(
+                        self.resolving_tuples.borrow_mut().insert(name.to_owned()),
+                        "recursive tuple aliases are not supported yet"
+                    );
+                    let result = self.value_type(ctx, &alias.ty);
+                    self.resolving_tuples.borrow_mut().remove(name);
+                    result
+                }
                 HirType::Generic { base, type_args } if base == "Record" => {
                     ensure!(
                         type_args.len() == 2 && matches!(type_args[0], HirType::String),
