@@ -329,7 +329,7 @@ Owned (each with unit tests on MIR snippets):
   - Union discrimination by shape id.
 - [ ] **P3.7 Tier classification.** Implements D3, including the loop-growth rule. Emit a per-site report: `perry-wit --explain-tiers`.
 - [x] **P3.8 → Async split.** `perry_codegen::async_split`.
-  - Each async function becomes a ramp (allocate the frame in `task`, spill arguments, run eagerly to the first pending `await`) and a `step` state machine.
+  - Each async function becomes a ramp (allocate the frame in `task`, spill arguments, run eagerly to the first `await`) and a `step` state machine.
   - Frame fields are the values live across each `await`, by backward liveness over the MIR CFG. They are stored where defined and loaded where used, so resume entries need no SSA repair.
   - Every `await` queues a continuation, including for already-settled promises. The queue drains before the next host turn.
   - Resuming inside a loop enters the loop at a second block; `pliron_wasm::reducible` inserts a guard block (LLVM `FixIrreducible`), so the emitter's structuring still applies.
@@ -393,9 +393,9 @@ Owned (each with unit tests on MIR snippets):
   - Successful async completion drains host subtasks even after the export promise settles. Every await queues its continuation and observes the promise. After ready continuations drain, an unobserved rejection fails the task immediately, cancelling native work before releasing its region. Commands return an error; exports without an error result trap. Tests distinguish handlers installed in the same turn from handlers deferred until a later timer and verify cancellation of hour-long timers on failure. Checked rejection entries are discarded to avoid repeated scans.
   - `ecma.promise.await_ordering` now compares exact Node traces for two consumers sharing fulfilled/rejected, settled/timer-backed promises, repeated awaits and awaited finalizers. The ratchet includes this contract. Promise combinators, `.then` callbacks and non-promise awaits still need migration before the complete promise family passes.
   - Cancellation now fans out to timers and output with baseline sync `subtask.cancel`, `stream.cancel-write` and `future.cancel-read`. Waitables detach before cancellation; native handles close before task memory is freed. Callback cancellation acknowledges `task.cancel`; immediate process exit shares the cleanup. Real nested-component tests cancel timers, blocked stdout/stderr writes and pending completion futures, verify queued lines are abandoned, and repeat calls without memory growth or retained host operations. General stream/read cancellation follows when those features migrate.
+  - Synchronous exports now drain detached ready continuations before lifting their results and reject unhandled rejections. Pending native work cannot outlive a synchronous call (R3): cleanup is attempted before freeing the region. Wasmtime rejects blocking cancellation on that call stack with `CannotBlockSyncTask`; the task's buffers remain live in the poisoned store until disposal. Tests cover exact continuation order, memory reuse, raw-export rejection, and native-future disposal on both return and exception paths. Use async WIT exports for work that must wait on the host.
   - Open:
     - Results of async imports are lowered through `cabi_realloc` while no task is current. `wait-for` has none; the first import with a result needs the callback to resume the task first or a pre-allocated result area.
-    - Detached continuations from synchronous exports are not yet drained; only their eager prefix runs.
   - Run queue of frames, using an intrusive list.
   - Waiter table mapping waitable handle to frame and state.
   - Callback dispatch and the export entry, which sets `context.set 0` to the task.

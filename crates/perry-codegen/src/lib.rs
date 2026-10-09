@@ -545,6 +545,7 @@ struct ModuleState {
     async_functions: Vec<Identifier>,
     shapes: HashMap<String, i32>,
     uses_process: bool,
+    needs_task_cleanup: bool,
 }
 
 impl ModuleState {
@@ -577,7 +578,9 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         async_functions: async_functions.clone(),
         shapes: HashMap::new(),
         uses_process: false,
+        needs_task_cleanup: false,
     };
+    let mut raw_sync_exports = Vec::new();
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);
         if let Some(kind) = async_functions.iter().position(|f| *f == symbol) {
@@ -593,9 +596,12 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
             .with_context(|| format!("lowering function {symbol} to wasm"))?;
         state.wasm.append_operation(ctx, lowered.get_operation(), 0);
         if matches!(exports, Exports::Raw) && is_exported(ctx, function) {
-            let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
-            state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
+            raw_sync_exports.push((symbol, lowered));
         }
+    }
+    for (symbol, function) in raw_sync_exports {
+        let wrapper = export_wrapper(ctx, &mut state, &function, &symbol)?;
+        state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
     }
     if matches!(exports, Exports::Raw) {
         ensure!(
@@ -659,18 +665,30 @@ fn export_wrapper(
     set_export(ctx, &wrapper, name.as_ref());
     let entry = wrapper.get_entry_block(ctx);
     let args: Vec<_> = entry.deref(ctx).arguments().collect();
-    state.runtime.insert(Runtime::TaskEnter);
-    state.runtime.insert(Runtime::TaskFree);
-    let i32 = i32_type(ctx);
-    let begin = CallOp::new(ctx, Runtime::TaskEnter.symbol(), vec![], vec![i32]);
-    begin.get_operation().insert_at_back(entry, ctx);
-    let call = CallOp::new(ctx, name.clone(), args, results);
-    call.get_operation().insert_at_back(entry, ctx);
-    let values: Vec<_> = call.get_operation().deref(ctx).results().collect();
-    let end = CallOp::new(ctx, Runtime::TaskFree.symbol(), vec![], vec![]);
-    end.get_operation().insert_at_back(entry, ctx);
-    let ret = ReturnOp::new(ctx, values);
-    ret.get_operation().insert_at_back(entry, ctx);
+    let mut b = FunctionLowering::glue(state, ctx, &wrapper);
+    b.runtime(ctx, Runtime::TaskEnter, vec![]);
+    let call = CallOp::new(ctx, name.clone(), args, results).get_operation();
+    b.insert(ctx, call);
+    let values: Vec<_> = call.deref(ctx).results().collect();
+    if b.state.throws.contains(name) {
+        let failed = b.new_block(ctx, vec![]);
+        let normal = b.new_block(ctx, vec![]);
+        b.cond_br(
+            ctx,
+            *values.last().unwrap(),
+            (failed, vec![]),
+            (normal, vec![]),
+        );
+        b.block = failed;
+        b.abort_task(ctx);
+        let ret = ReturnOp::new(ctx, values.clone()).get_operation();
+        b.insert(ctx, ret);
+        b.block = normal;
+    }
+    b.finish_sync(ctx);
+    b.runtime(ctx, Runtime::TaskFree, vec![]);
+    let ret = ReturnOp::new(ctx, values).get_operation();
+    b.insert(ctx, ret);
     for param in params {
         ensure!(
             repr(ctx, param)? != Repr::Ref,

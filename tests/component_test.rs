@@ -225,3 +225,54 @@ fn repeated_calls_do_not_grow_memory() -> Result<()> {
     assert_eq!(component.store.data().0, before, "memory grew across tasks");
     Ok(())
 }
+
+#[test]
+fn synchronous_exports_drain_detached_continuations_before_lifting_results() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str(
+        "sync-jobs.wit",
+        "package test:jobs; world jobs { export run: func(n: u32) -> list<f64>; }",
+    )?;
+    let world = resolve.select_world(&[package], Some("jobs"))?;
+    let source = r#"
+async function ready(): Promise<number> { return 0; }
+async function append(trace: number[], tag: number): Promise<void> {
+  trace.push(tag);
+  await ready();
+  trace.push(tag+1000);
+  await ready();
+  trace.push(tag+2000);
+}
+export function run(n: number): number[] {
+  const trace: number[] = [];
+  for(let i=0; i<n; i++) append(trace,i);
+  trace.push(-1);
+  return trace;
+}
+"#;
+    let compiled = compile_for_world(source, "sync-jobs.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(u32,), (Vec<f64>,)>(&mut store, "run")?;
+    let n = 1000;
+    let expected: Vec<f64> = (0..n)
+        .chain(std::iter::once(-1))
+        .chain(1000..1000 + n)
+        .chain(2000..2000 + n)
+        .map(f64::from)
+        .collect();
+    let mut peak = 0;
+    for round in 0..10 {
+        let (trace,) = run.call(&mut store, (n as u32,))?;
+        assert_eq!(trace, expected);
+        if round == 0 {
+            peak = store.data().0;
+        } else {
+            assert_eq!(store.data().0, peak, "detached frames leaked task memory");
+        }
+    }
+    Ok(())
+}

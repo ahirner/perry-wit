@@ -96,11 +96,35 @@ struct Host {
     peak: usize,
 }
 
-struct PendingTimer(Arc<AtomicUsize>);
+#[derive(Default)]
+struct TimerActivity {
+    active: AtomicUsize,
+    started: AtomicUsize,
+}
+struct PendingTimer(Arc<TimerActivity>);
 impl Drop for PendingTimer {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+fn track_timers(linker: &mut Linker<Host>) -> Result<Arc<TimerActivity>> {
+    let activity = Arc::new(TimerActivity::default());
+    let timers = activity.clone();
+    linker.allow_shadowing(true);
+    linker
+        .instance("wasi:clocks/monotonic-clock@0.3.0")?
+        .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
+            timers.started.fetch_add(1, Ordering::SeqCst);
+            timers.active.fetch_add(1, Ordering::SeqCst);
+            let pending = PendingTimer(timers.clone());
+            Box::pin(async move {
+                let _pending = pending;
+                tokio::time::sleep(std::time::Duration::from_nanos(duration)).await;
+                Ok(())
+            })
+        })?;
+    Ok(activity)
 }
 
 impl WasiView for Host {
@@ -208,23 +232,7 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         .await??;
     assert_eq!((a, b), (35.0, 46.0));
     store.assert_concurrent_state_empty();
-    let active = Arc::new(AtomicUsize::new(0));
-    let started = Arc::new(AtomicUsize::new(0));
-    let active_timers = active.clone();
-    let started_timers = started.clone();
-    linker.allow_shadowing(true);
-    linker
-        .instance("wasi:clocks/monotonic-clock@0.3.0")?
-        .func_wrap_concurrent("wait-for", move |_, (duration,): (u64,)| {
-            started_timers.fetch_add(1, Ordering::SeqCst);
-            active_timers.fetch_add(1, Ordering::SeqCst);
-            let pending = PendingTimer(active_timers.clone());
-            Box::pin(async move {
-                let _pending = pending;
-                tokio::time::sleep(std::time::Duration::from_nanos(duration)).await;
-                Ok(())
-            })
-        })?;
+    let activity = track_timers(&mut linker)?;
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let fail = instance.get_typed_func::<(), ()>(&mut store, "fail")?;
     let rejected = tokio::time::timeout(
@@ -240,9 +248,9 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         ),
         "{error:#}"
     );
-    assert_eq!(started.load(Ordering::SeqCst), 2);
+    assert_eq!(activity.started.load(Ordering::SeqCst), 2);
     assert_eq!(
-        active.load(Ordering::SeqCst),
+        activity.active.load(Ordering::SeqCst),
         0,
         "rejected export retained timer futures before store disposal"
     );
@@ -250,5 +258,67 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         store.data().table.is_empty(),
         "rejected export retained native operations"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn synchronous_exports_trap_instead_of_releasing_pending_native_buffers() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        r#"
+package test:sync;
+world timers { import wasi:clocks/monotonic-clock@0.3.0; export run: func(fail: bool); }
+"#,
+    )?;
+    let (resolve, package) = resolve_wit(directory.path())?;
+    let world = resolve.select_world(&[package], Some("timers"))?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    for source in [
+        "import {setTimeout} from 'node:timers/promises'; export function run(fail:boolean):void {setTimeout(3600000); if(fail)throw new Error('root');}",
+        "import {setTimeout} from 'node:timers/promises'; export function run(fail:boolean):void {later(); if(fail)throw new Error('root');} async function later():Promise<void>{await setTimeout(3600000); throw new Error('unreachable');}",
+    ] {
+        let compiled = compile_for_world(source, "sync-timers.ts", &resolve, world, true)?;
+        let component = Component::new(&engine, compiled.stripped.unwrap())?;
+        for fail in [false, true] {
+            let mut linker = Linker::new(&engine);
+            let activity = track_timers(&mut linker)?;
+            let mut store = Store::new(
+                &engine,
+                Host {
+                    ctx: WasiCtx::builder().build(),
+                    table: ResourceTable::new(),
+                    peak: 0,
+                },
+            );
+            let instance = linker.instantiate_async(&mut store, &component).await?;
+            let run = instance.get_typed_func::<(bool,), ()>(&mut store, "run")?;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                run.call_async(&mut store, (fail,)),
+            )
+            .await?;
+            let error = result.expect_err("native work outlived a synchronous export");
+            assert!(
+                matches!(
+                    error.downcast_ref::<wasmtime::Trap>(),
+                    Some(wasmtime::Trap::CannotBlockSyncTask)
+                ),
+                "{error:#}"
+            );
+            assert_eq!(activity.started.load(Ordering::SeqCst), 1);
+            // Blocking cancellation traps before task.free; the poisoned store retains
+            // both the native future and its guest buffers until it is disposed.
+            assert_eq!(activity.active.load(Ordering::SeqCst), 1);
+            drop(store);
+            assert_eq!(
+                activity.active.load(Ordering::SeqCst),
+                0,
+                "store disposal did not release the native operation"
+            );
+        }
+    }
     Ok(())
 }

@@ -302,10 +302,12 @@ pub(crate) fn export(
             (normal, vec![]),
         );
         b.block = trap;
+        b.abort_task(ctx);
         let unreachable = UnreachableOp::new(ctx).get_operation();
         b.insert(ctx, unreachable);
         b.block = normal;
     }
+    b.finish_sync(ctx);
     let returned = match (&export.result, mir_results.first()) {
         (Some(ty), Some(mir_ty)) if flat_result.len() == 1 => {
             vec![b.lower_flat(ctx, ty, *mir_ty, values[0])?]
@@ -411,8 +413,7 @@ fn async_export(
         let active = b.new_block(ctx, vec![]);
         b.cond_br(ctx, failed, (abort, vec![]), (active, vec![]));
         b.block = abort;
-        let cleanup = CallOp::new(ctx, identifier("abort_task"), vec![], vec![]).get_operation();
-        b.insert(ctx, cleanup);
+        b.abort_task(ctx);
         if command {
             let error = b.i32_const(ctx, 1);
             b.host(ctx, task_return.clone(), vec![error]);
@@ -571,8 +572,7 @@ fn async_export(
         let active = b.new_block(ctx, vec![]);
         b.cond_br(ctx, is_cancelled, (cancelled, vec![]), (active, vec![]));
         b.block = cancelled;
-        let abort = CallOp::new(ctx, identifier("abort_task"), vec![], vec![]).get_operation();
-        b.insert(ctx, abort);
+        b.abort_task(ctx);
         b.host(ctx, crate::Host::TaskCancel, vec![]);
         let exit = b.i32_const(ctx, EXIT);
         let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
@@ -613,21 +613,26 @@ fn async_export(
 /// Shared lifecycle helpers. Cancellation finishes native operations before any task memory
 /// is freed; graceful completion uses the release half after task.return lifts the result.
 pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
-    if !state.host.contains(&crate::Host::TaskCancel) && !state.uses_process {
+    if !state.needs_task_cleanup && !state.uses_process {
         return;
     }
+    let native = state.host.contains(&crate::Host::WaitableSetNew)
+        || state.runtime.contains(&Runtime::Stdout)
+        || state.runtime.contains(&Runtime::Stderr);
     let void = FunctionType::get(ctx, vec![], vec![]);
     let release = FuncOp::new(ctx, identifier("release_task"), void);
     {
         let mut b = FunctionLowering::glue(state, ctx, &release);
-        let set = b.runtime(ctx, Runtime::TaskSet, vec![]).expect("set");
-        let drop_set = b.new_block(ctx, vec![]);
-        let free = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, set, (drop_set, vec![]), (free, vec![]));
-        b.block = drop_set;
-        b.host(ctx, crate::Host::WaitableSetDrop, vec![set]);
-        b.br(ctx, free, vec![]);
-        b.block = free;
+        if native {
+            let set = b.runtime(ctx, Runtime::TaskSet, vec![]).expect("set");
+            let drop_set = b.new_block(ctx, vec![]);
+            let free = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, set, (drop_set, vec![]), (free, vec![]));
+            b.block = drop_set;
+            b.host(ctx, crate::Host::WaitableSetDrop, vec![set]);
+            b.br(ctx, free, vec![]);
+            b.block = free;
+        }
         b.runtime(ctx, Runtime::TaskFree, vec![]);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         b.insert(ctx, ret);
@@ -661,8 +666,7 @@ pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
         let exit = FuncOp::new(ctx, identifier("process_exit"), ty);
         let code = exit.get_entry_block(ctx).deref(ctx).get_argument(0);
         let mut b = FunctionLowering::glue(state, ctx, &exit);
-        let call = CallOp::new(ctx, identifier("abort_task"), vec![], vec![]).get_operation();
-        b.insert(ctx, call);
+        b.abort_task(ctx);
         b.host(ctx, crate::Host::ProcessExit, vec![code]);
         let unreachable = UnreachableOp::new(ctx).get_operation();
         b.insert(ctx, unreachable);
@@ -699,6 +703,42 @@ fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> 
 }
 
 impl FunctionLowering<'_> {
+    /// End the synchronous job before its region can be released. Native work cannot
+    /// outlive a synchronous export, whose ABI has no callback to resume it.
+    pub(crate) fn finish_sync(&mut self, ctx: &mut Context) {
+        if self.state.async_functions.is_empty()
+            && !self.state.runtime.contains(&Runtime::SubtaskRegister)
+        {
+            return;
+        }
+        if !self.state.async_functions.is_empty() {
+            let drive =
+                CallOp::new(ctx, crate::async_split::drive_name(), vec![], vec![]).get_operation();
+            self.insert(ctx, drive);
+        }
+        let rejected = self
+            .runtime(ctx, Runtime::TaskFailed, vec![])
+            .expect("rejection status");
+        let pending = self
+            .runtime(ctx, Runtime::TaskPending, vec![])
+            .expect("pending native work");
+        let failed = self.num(ctx, NumOpcode::I32Or, vec![rejected, pending]);
+        let trap = self.new_block(ctx, vec![]);
+        let done = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, failed, (trap, vec![]), (done, vec![]));
+        self.block = trap;
+        self.abort_task(ctx);
+        let unreachable = UnreachableOp::new(ctx).get_operation();
+        self.insert(ctx, unreachable);
+        self.block = done;
+    }
+
+    pub(crate) fn abort_task(&mut self, ctx: &mut Context) {
+        self.state.needs_task_cleanup = true;
+        let call = CallOp::new(ctx, identifier("abort_task"), vec![], vec![]).get_operation();
+        self.insert(ctx, call);
+    }
+
     pub(crate) fn exit_process(&mut self, ctx: &mut Context) {
         let status = self
             .runtime(ctx, Runtime::ExitStatus, vec![])

@@ -405,7 +405,30 @@ export async function run(x: number): Promise<number> {
   }
   return total;
 }
+
 "#,
     );
     assert_eq!(program.throwing("run", 7.0), (40.0, 0));
+}
+
+#[test]
+fn synchronous_raw_exports_do_not_discard_detached_rejections() {
+    let mut program = Program::new(
+        r#"
+async function ready(): Promise<number> {return 0;}
+async function fail(): Promise<void> {await ready(); throw new Error("detached");}
+export function run(x: number): number {fail(); return x;}
+"#,
+    );
+    let run = program
+        .instance
+        .get_typed_func::<f64, f64>(&mut program.store, "run")
+        .unwrap();
+    let error = run
+        .call(&mut program.store, 7.0)
+        .expect_err("detached rejection was discarded");
+    assert!(matches!(
+        error.downcast_ref::<wasmtime::Trap>(),
+        Some(wasmtime::Trap::UnreachableCodeReached)
+    ));
 }
