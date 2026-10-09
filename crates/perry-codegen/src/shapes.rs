@@ -50,6 +50,12 @@ impl Data {
             (Kind::Optional, self.descriptor(ctx, optional.value())?, 0)
         } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
             (Kind::Array, self.descriptor(ctx, array.element())?, 0)
+        } else if let Some(dictionary) = ty.downcast_ref::<DictionaryType>() {
+            (
+                Kind::Dictionary,
+                self.descriptor(ctx, dictionary.element().context("opaque dictionary")?)?,
+                0,
+            )
         } else if let Some(record) = ty.downcast_ref::<RecordType>() {
             let fields = record
                 .fields()

@@ -58,7 +58,10 @@ export async function json(input: string): Promise<string> {
   const alias = value.item;
   const typed: {count: number} = alias;
   const count: number = typed.count;
-  const native = {count:count};
+  const native:Record<string,number> = {count:count};
+  const dictionary:Record<string,number> = alias;
+  const stored:Record<string,{count:number}> = {item:typed};
+  const storedValues=Object.values(stored);
   const reference: JsonValue = native;
   for(let i=0;i<24;i++) alias[i] = i;
   const keys = Object.keys(alias);
@@ -67,7 +70,8 @@ export async function json(input: string): Promise<string> {
   for(let i=0;i<24;i++) delete alias[i];
   delete alias.count;
   await setTimeout(1);
-  typed.count = native.count;
+  dictionary.count = native.count;
+  if(storedValues[0] !== typed || storedValues[0].count !== dictionary.count) throw new TypeError('lost dictionary value');
   if(keys.length !== 25 || Object.keys(alias).length !== 1) throw new TypeError('lost key snapshot');
   if(typed.count !== alias.count || typed !== alias) throw new TypeError('lost JSON alias');
   return JSON.stringify(value);

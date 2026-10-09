@@ -680,3 +680,111 @@ export function run(count: number, text: string): string {
     }
     Ok(())
 }
+
+#[test]
+fn typed_dictionaries_keep_native_slots_and_checked_json_aliases() -> Result<()> {
+    let mut resolve = wit_parser::Resolve::default();
+    let package = resolve.push_str("typed-dictionary.wit", "package test:typed-dictionary; world dictionaries { export run: func(count: u32, text: string) -> string; }")?;
+    let world = resolve.select_world(&[package], Some("dictionaries"))?;
+    let source = r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | {[key:string]:JsonValue};
+interface Numbers { [key:string]: number }
+type Tree = { [key: string]: Tree };
+type Point = {x:number;y:number};
+function numbers(value: JsonValue): Numbers { return value as unknown as Numbers; }
+function tree(value: JsonValue): Tree { return value as unknown as Tree; }
+function point(value: Numbers): Point { return value as unknown as Point; }
+export function run(count:number, text:string):string {
+  const native: Record<string, number> = {last:-0,first:2};
+  if(1/native.last !== -1/0 || native.absent !== undefined) throw 1;
+  const missing = native.absent + 1;
+  if(missing === missing) throw 2;
+  const keys = Object.keys(native);
+  const values = Object.values(native);
+  for(let i=0;i<count;i++) native[i] = i;
+  for(let i=0;i<count;i++) { if(native[i] !== i || !delete native[i]) throw 3; }
+  const packed: JsonValue = native;
+  packed.first = 5;
+  let mismatch=false;
+  try { packed.first='bad'; } catch(e) { mismatch=e instanceof TypeError; }
+  if(!mismatch || native.first !== 5 || keys[0] !== 'last' || values[1] !== 2) throw 4;
+  const strings: {[key:string]:string} = {};
+  strings.text=text;
+  if(strings.absent+'!' !== 'undefined!') throw 5;
+  const booleans:Record<string,boolean>={flag:false};
+  if(booleans.flag !== false || booleans.absent !== undefined) throw 6;
+  const arrays:Record<string,number[]>={first:[1,2]};
+  const arrayValues=Object.values(arrays);
+  arrays.first.push(3);
+  if(arrayValues[0] !== arrays.first || arrayValues[0].length !== 3) throw 7;
+  const bytes:Record<string,Uint8Array>={first:new Uint8Array([8,9])};
+  if(!Object.hasOwn(bytes,'first') || Object.keys(bytes).length !== 1 || Object.values(bytes)[0][1] !== 9) throw 8;
+  const optional:Record<string,number|undefined>={missing:undefined,present:3};
+  if(!Object.hasOwn(optional,'missing') || optional.missing !== undefined) throw 9;
+  const optionalValues=Object.values(optional);
+  if(optionalValues[0] !== undefined || optionalValues[1]+2 !== 5) throw 10;
+  const parsed=JSON.parse('{"first":1}');
+  const checked=numbers(parsed);
+  const again=numbers(parsed);
+  checked.second=2;
+  if(checked !== again || checked !== parsed || parsed.second !== 2) throw 11;
+  parsed.first='bad';
+  let stale=false;
+  try { checked.first; } catch(e) { stale=e instanceof TypeError; }
+  if(!stale) throw 12;
+  parsed.first=undefined;
+  stale=false;
+  try { checked.first; } catch(e) { stale=e instanceof TypeError; }
+  if(!stale || !delete checked.first || checked.first !== undefined) throw 13;
+  checked.first=7;
+  const record={existing:1};
+  const recordJson:JsonValue=record;
+  const closed=numbers(recordJson);
+  closed.existing=2;
+  let fixed=false;
+  try { closed.added=3; } catch(e) { fixed=e instanceof TypeError; }
+  if(!fixed || record.existing !== 2) throw 14;
+  const coordinate:Numbers={y:4,x:3};
+  const projected=point(coordinate);
+  projected.x=6;
+  if(coordinate.x !== 6 || projected !== coordinate) throw 15;
+  const cyclic:Tree={};
+  cyclic.self=cyclic;
+  if(cyclic.self !== cyclic) throw 16;
+  let cycle=false;
+  try { JSON.stringify(cyclic); } catch(e) { cycle=e instanceof TypeError; }
+  if(!cycle) throw 17;
+  const parsedCycle=JSON.parse('{}');
+  const recursive=tree(parsedCycle);
+  recursive.self=recursive;
+  if(recursive.self !== recursive) throw 18;
+  delete recursive.self;
+  return JSON.stringify([native,strings,booleans,arrays,optional,checked,projected,recursive]);
+}
+"#;
+    let compiled = compile_for_world(source, "typed-dictionary.ts", &resolve, world, true)?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut store = Store::new(&engine, Peak::default());
+    store.limiter(|peak| peak);
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(u32, &str), (String,)>(&mut store, "run")?;
+    let text = "é🙂".repeat(8_192);
+    let expected = format!(
+        r#"[{{"last":0,"first":5}},{{"text":{}}},{{"flag":false}},{{"first":[1,2,3]}},{{"present":3}},{{"second":2,"first":7}},{{"y":4,"x":6}},{{}}]"#,
+        serde_json::to_string(&text)?
+    );
+    for _ in 0..3 {
+        assert_eq!(run.call(&mut store, (128, &text))?.0, expected);
+    }
+    let peak = store.data().0;
+    for _ in 0..20 {
+        assert_eq!(run.call(&mut store, (128, &text))?.0, expected);
+        assert_eq!(
+            store.data().0,
+            peak,
+            "typed dictionary storage leaked across tasks"
+        );
+    }
+    Ok(())
+}

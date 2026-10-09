@@ -11,8 +11,8 @@
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::types::{
-    ArrayType, BufferType, BytesType, ExceptionType, JsonType, OptionalType, PromiseType,
-    RecordType, StringType,
+    ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, OptionalType,
+    PromiseType, RecordType, StringType,
 };
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -31,6 +31,12 @@ pub(crate) struct Shapes<'h> {
     reserved: RefCell<usize>,
     /// Resolved named types, so a recursive interface keeps its reserved name.
     named: RefCell<HashMap<String, TypeHandle>>,
+    dictionaries: RefCell<HashMap<String, PendingDictionary>>,
+}
+#[derive(Clone, Copy)]
+enum PendingDictionary {
+    Resolving,
+    Reserved(TypedHandle<DictionaryType>),
 }
 
 pub(crate) fn identifier(name: &str) -> Result<Identifier> {
@@ -77,6 +83,7 @@ impl<'h> Shapes<'h> {
             pending: RefCell::new(HashMap::new()),
             reserved: RefCell::new(0),
             named: RefCell::new(HashMap::new()),
+            dictionaries: RefCell::new(HashMap::new()),
         }
     }
 
@@ -88,26 +95,41 @@ impl<'h> Shapes<'h> {
         }) {
             return Ok(JsonType::get(ctx).into());
         }
-        if matches!(ty, HirType::Object(_))
+        if matches!(ty, HirType::Object(_) | HirType::Generic { .. })
             && let Some(alias) = self.hir.type_aliases.iter().find(|alias| &alias.ty == ty)
         {
             return self.named(ctx, &alias.name);
         }
         Ok(match ty {
             HirType::Union(types) => {
-                let (first, rest) = types.split_first().context("empty union type")?;
+                let mut present = types.iter().filter(|ty| !matches!(ty, HirType::Void));
+                let first = present
+                    .next()
+                    .context("undefined-only union has no value type")?;
                 let first = self.value_type(ctx, first)?;
-                for ty in rest {
+                for ty in present {
                     ensure!(
                         self.value_type(ctx, ty)? == first,
                         "unions of different shapes are not supported yet"
                     );
                 }
-                first
+                if types.iter().any(|ty| matches!(ty, HirType::Void)) {
+                    OptionalType::get(ctx, first).into()
+                } else {
+                    first
+                }
             }
             HirType::Number | HirType::Int32 => FP64Type::get(ctx).into(),
             HirType::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             HirType::String | HirType::StringLiteral(_) => StringType::get(ctx).into(),
+            HirType::Generic { base, type_args } if base == "Record" => {
+                ensure!(
+                    type_args.len() == 2 && matches!(type_args[0], HirType::String),
+                    "Record dictionaries require string keys (subset rule R1)"
+                );
+                let element = self.value_type(ctx, &type_args[1])?;
+                DictionaryType::get(ctx, element).into()
+            }
             HirType::Array(element) => {
                 let element = self.value_type(ctx, element)?;
                 ArrayType::get(ctx, element).into()
@@ -149,7 +171,9 @@ impl<'h> Shapes<'h> {
         }
         let ty = self.resolve_named(ctx, name)?;
         // A re-entrant reference returns the opaque record; only the outermost call caches.
-        if !self.pending.borrow().contains_key(name) {
+        if !self.pending.borrow().contains_key(name)
+            && !self.dictionaries.borrow().contains_key(name)
+        {
             self.named.borrow_mut().insert(name.to_string(), ty);
         }
         Ok(ty)
@@ -185,6 +209,13 @@ impl<'h> Shapes<'h> {
             );
             return match &alias.ty {
                 HirType::Object(object) => self.object(ctx, Some(name), object),
+                HirType::Generic { base, type_args } if base == "Record" => {
+                    ensure!(
+                        type_args.len() == 2 && matches!(type_args[0], HirType::String),
+                        "Record dictionaries require string keys (subset rule R1)"
+                    );
+                    self.dictionary(ctx, Some(name), &type_args[1])
+                }
                 ty => self.value_type(ctx, ty),
             };
         }
@@ -197,10 +228,13 @@ impl<'h> Shapes<'h> {
         name: Option<&str>,
         object: &perry_hir::types::ObjectType,
     ) -> Result<TypeHandle> {
-        ensure!(
-            object.index_signature.is_none(),
-            "index signatures need the dictionary type (subset rule R1), which is not supported yet"
-        );
+        if let Some(element) = &object.index_signature {
+            ensure!(
+                object.properties.is_empty(),
+                "mixed named fields and index signatures require a constrained dictionary type, which is not supported yet"
+            );
+            return self.dictionary(ctx, name, element);
+        }
         let fields = object
             .properties
             .iter()
@@ -210,6 +244,51 @@ impl<'h> Shapes<'h> {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(self.hir_record(ctx, name, fields)?.into())
+    }
+
+    fn dictionary(
+        &self,
+        ctx: &mut Context,
+        name: Option<&str>,
+        element: &HirType,
+    ) -> Result<TypeHandle> {
+        if let Some(name) = name {
+            let pending = self.dictionaries.borrow().get(name).copied();
+            match pending {
+                Some(PendingDictionary::Reserved(ty)) => return Ok(ty.into()),
+                Some(PendingDictionary::Resolving) => {
+                    let reserved = DictionaryType::named(
+                        ctx,
+                        identifier(&format!("dictionary_{name}"))?,
+                        None,
+                    )
+                    .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+                    self.dictionaries
+                        .borrow_mut()
+                        .insert(name.to_owned(), PendingDictionary::Reserved(reserved));
+                    return Ok(reserved.into());
+                }
+                None => {
+                    self.dictionaries
+                        .borrow_mut()
+                        .insert(name.to_owned(), PendingDictionary::Resolving);
+                }
+            }
+        }
+        let element = self.value_type(ctx, element);
+        let pending = name.and_then(|name| self.dictionaries.borrow_mut().remove(name));
+        let element = element?;
+        if matches!(pending, Some(PendingDictionary::Reserved(_))) {
+            DictionaryType::named(
+                ctx,
+                identifier(&format!("dictionary_{}", name.unwrap()))?,
+                Some(element),
+            )
+            .map(Into::into)
+            .map_err(|error| anyhow!("{}", error.disp(ctx)))
+        } else {
+            Ok(DictionaryType::get(ctx, element).into())
+        }
     }
 
     /// A record from HIR field types; `named` is the interface they come from, if any.

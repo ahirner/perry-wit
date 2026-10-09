@@ -14,6 +14,7 @@
 //! string concatenation; field reads and writes; array literals, `push`, indexing and
 //! `.length`. Everything else is rejected with a diagnostic.
 mod bytes;
+mod dictionaries;
 mod exceptions;
 mod json;
 mod shapes;
@@ -46,8 +47,8 @@ use perry_mir::{
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, ExceptionType, JsonType, PromiseType, RecordType,
-        StringType,
+        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, PromiseType,
+        RecordType, StringType,
     },
 };
 use pliron::printable::Printable as _;
@@ -90,8 +91,9 @@ pub fn lower_source(
     file: &str,
     entry: EntryPoint,
 ) -> Result<ModuleOp> {
-    let ast = perry_parser::parse_typescript(source, file)
+    let mut ast = perry_parser::parse_typescript(source, file)
         .map_err(|error| anyhow!("failed to parse {file}: {error:?}"))?;
+    dictionaries::preserve_interface_indices(&mut ast)?;
     let mut hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
     match entry {
@@ -277,6 +279,7 @@ enum Kind {
     Boolean,
     String,
     Record,
+    Dictionary,
     Array,
     Exception,
     Bytes,
@@ -299,6 +302,8 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::String)
     } else if ty.is::<ExceptionType>() {
         Ok(Kind::Exception)
+    } else if ty.is::<DictionaryType>() {
+        Ok(Kind::Dictionary)
     } else if ty.is::<RecordType>() {
         Ok(Kind::Record)
     } else if ty.is::<ArrayType>() {
@@ -569,7 +574,10 @@ impl<'s> FunctionBuilder<'s> {
                     HirType::Any | HirType::Unknown => None,
                     HirType::Array(element)
                         if matches!(element.as_ref(), HirType::Any)
-                            && matches!(init, Some(Expr::ObjectKeys(_))) =>
+                            && matches!(
+                                init,
+                                Some(Expr::ObjectKeys(_) | Expr::ObjectValues(_))
+                            ) =>
                     {
                         None
                     }
@@ -789,6 +797,28 @@ impl<'s> FunctionBuilder<'s> {
         expr: &Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if let Some(element) = expected.and_then(|ty| perry_mir::dictionaries::element(ctx, ty)) {
+            match expr {
+                Expr::Object(fields) => {
+                    return self.dictionary_literal(
+                        ctx,
+                        element,
+                        fields.iter().map(|(name, value)| (name.as_str(), value)),
+                    );
+                }
+                Expr::New {
+                    class_name, args, ..
+                } if self.shapes.literal_fields(class_name).is_some() => {
+                    let names = self.shapes.literal_fields(class_name).unwrap();
+                    return self.dictionary_literal(
+                        ctx,
+                        element,
+                        names.iter().map(String::as_str).zip(args),
+                    );
+                }
+                _ => {}
+            }
+        }
         if expected.is_some_and(|ty| ty.deref(ctx).is::<JsonType>()) {
             return self.json_value(ctx, expr);
         }
@@ -1003,19 +1033,21 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let lhs = self.expression(ctx, left)?;
                 let rhs = self.expression(ctx, right)?;
+                let aggregate = |value: Value| {
+                    let ty =
+                        optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
+                    let ty = ty.deref(ctx);
+                    ty.is::<RecordType>() || ty.is::<ArrayType>() || ty.is::<DictionaryType>()
+                };
                 if matches!(op, CompareOp::Eq | CompareOp::Ne)
-                    && (json::is_json(ctx, lhs) || json::is_json(ctx, rhs))
+                    && (json::is_json(ctx, lhs)
+                        || json::is_json(ctx, rhs)
+                        || (lhs.get_type(ctx) != rhs.get_type(ctx)
+                            && aggregate(lhs)
+                            && aggregate(rhs)))
                 {
-                    let lhs = if json::is_json(ctx, lhs) {
-                        lhs
-                    } else {
-                        self.pack_json(ctx, lhs)?
-                    };
-                    let rhs = if json::is_json(ctx, rhs) {
-                        rhs
-                    } else {
-                        self.pack_json(ctx, rhs)?
-                    };
+                    let lhs = self.json_input(ctx, lhs)?;
+                    let rhs = self.json_input(ctx, rhs)?;
                     let lhs = self.optional(ctx, lhs);
                     let rhs = self.optional(ctx, rhs);
                     let equal = self
@@ -1170,18 +1202,46 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ObjectKeys(object) if matches!(object.as_ref(), Expr::ProcessEnv) => {
                 self.intrinsic(ctx, Intrinsic::EnvKeys, vec![]).unwrap()
             }
-            Expr::ObjectKeys(object) => {
-                let value = self.json_value(ctx, object)?;
-                let value = self.optional(ctx, value);
-                self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value])
-                    .unwrap()
+            Expr::ObjectKeys(object) | Expr::ObjectValues(object) => {
+                let value = self.object_operand(ctx, object)?;
+                let inner = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
+                if inner.deref(ctx).is::<DictionaryType>() {
+                    let value = self.defined(ctx, value)?;
+                    let action = if matches!(expr, Expr::ObjectKeys(_)) {
+                        perry_mir::dictionaries::Action::Keys
+                    } else {
+                        perry_mir::dictionaries::Action::Values
+                    };
+                    self.dictionary_access(ctx, action, vec![value]).unwrap()
+                } else {
+                    ensure!(
+                        matches!(expr, Expr::ObjectKeys(_)),
+                        "Object.values currently requires an explicit dictionary type"
+                    );
+                    let value = self.json_input(ctx, value)?;
+                    let value = self.optional(ctx, value);
+                    self.intrinsic(ctx, Intrinsic::JsonKeys, vec![value])
+                        .unwrap()
+                }
             }
             Expr::ObjectHasOwn(object, key) => {
-                let value = self.json_value(ctx, object)?;
-                let value = self.optional(ctx, value);
+                let value = self.object_operand(ctx, object)?;
                 let key = self.property_key(ctx, key)?;
-                self.intrinsic(ctx, Intrinsic::JsonHasOwn, vec![value, key])
+                let inner = optional_value(ctx, value.get_type(ctx)).unwrap_or(value.get_type(ctx));
+                if inner.deref(ctx).is::<DictionaryType>() {
+                    let value = self.defined(ctx, value)?;
+                    self.dictionary_access(
+                        ctx,
+                        perry_mir::dictionaries::Action::Has,
+                        vec![value, key],
+                    )
                     .unwrap()
+                } else {
+                    let value = self.json_input(ctx, value)?;
+                    let value = self.optional(ctx, value);
+                    self.intrinsic(ctx, Intrinsic::JsonHasOwn, vec![value, key])
+                        .unwrap()
+                }
             }
             Expr::Delete(target) => {
                 let (object, key) = match target.as_ref() {
@@ -1199,13 +1259,22 @@ impl<'s> FunctionBuilder<'s> {
                     }
                     _ => bail!("delete requires a JSON dictionary property (subset rule R1)"),
                 };
-                ensure!(
-                    json::is_json(ctx, object),
-                    "delete requires a JSON dictionary; native records have closed shapes (subset rule R1)"
-                );
                 let object = self.defined(ctx, object)?;
-                self.intrinsic(ctx, Intrinsic::JsonDelete, vec![object, key])
+                if kind(ctx, object)? == Kind::Dictionary {
+                    self.dictionary_access(
+                        ctx,
+                        perry_mir::dictionaries::Action::Delete,
+                        vec![object, key],
+                    )
                     .unwrap()
+                } else {
+                    ensure!(
+                        json::is_json(ctx, object),
+                        "delete requires a dictionary; native records have closed shapes (subset rule R1)"
+                    );
+                    self.intrinsic(ctx, Intrinsic::JsonDelete, vec![object, key])
+                        .unwrap()
+                }
             }
             Expr::ProcessArgv => self.intrinsic(ctx, Intrinsic::Arguments, vec![]).unwrap(),
             Expr::PropertyGet {
@@ -1215,6 +1284,15 @@ impl<'s> FunctionBuilder<'s> {
                 // Property access on `undefined` throws TypeError, in ECMAScript and here.
                 let value = self.defined(ctx, value)?;
                 match (kind(ctx, value)?, property.as_str()) {
+                    (Kind::Dictionary, _) => {
+                        let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, property));
+                        self.dictionary_access(
+                            ctx,
+                            perry_mir::dictionaries::Action::Get,
+                            vec![value, key],
+                        )
+                        .unwrap()
+                    }
                     (Kind::Json, _) => {
                         let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, property));
                         self.intrinsic(ctx, Intrinsic::JsonGet, vec![value, key])
@@ -1332,6 +1410,16 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet { object, index } => {
                 let array = self.expression(ctx, object)?;
                 let array = self.defined(ctx, array)?;
+                if kind(ctx, array)? == Kind::Dictionary {
+                    let key = self.property_key(ctx, index)?;
+                    return Ok(self
+                        .dictionary_access(
+                            ctx,
+                            perry_mir::dictionaries::Action::Get,
+                            vec![array, key],
+                        )
+                        .unwrap());
+                }
                 if kind(ctx, array)? == Kind::Json {
                     let index = self.json_key(ctx, index)?;
                     let intrinsic = if kind(ctx, index)? == Kind::String {
@@ -1484,6 +1572,12 @@ impl<'s> FunctionBuilder<'s> {
             self.narrow_json(ctx, value, target)
         } else if target.deref(ctx).is::<JsonType>() {
             self.pack_json(ctx, value)
+        } else if (target.deref(ctx).is::<DictionaryType>() || ty.deref(ctx).is::<DictionaryType>())
+            && perry_mir::json::compatible(ctx, ty)
+            && perry_mir::json::compatible(ctx, target)
+        {
+            let json = self.json_input(ctx, value)?;
+            self.narrow_json(ctx, json, target)
         } else {
             bail!("value type differs from the expected type")
         }
@@ -1499,6 +1593,10 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        if kind(ctx, array)? == Kind::Dictionary {
+            let key = self.property_key(ctx, index)?;
+            return self.dictionary_set(ctx, array, key, value);
+        }
         if kind(ctx, array)? == Kind::Json {
             let index = self.json_key(ctx, index)?;
             let intrinsic = if kind(ctx, index)? == Kind::String {
@@ -1547,6 +1645,10 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
+        if kind(ctx, record)? == Kind::Dictionary {
+            let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, field));
+            return self.dictionary_set(ctx, record, key, value);
+        }
         if kind(ctx, record)? == Kind::Json {
             let key = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, field));
             let (value, json) = self.json_assignment(ctx, value)?;

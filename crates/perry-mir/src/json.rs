@@ -1,7 +1,7 @@
 //! Views of statically typed storage as JSON, without copying aggregates.
 use crate::{
     optional::optional_value,
-    types::{ArrayType, JsonType, OptionalType, RecordType, StringType},
+    types::{ArrayType, DictionaryType, JsonType, OptionalType, RecordType, StringType},
 };
 use pliron::{
     builtin::{
@@ -42,6 +42,11 @@ pub fn compatible(ctx: &Context, ty: TypeHandle) -> bool {
         }
         if let Some(array) = ty.downcast_ref::<ArrayType>() {
             return visit(ctx, array.element(), seen);
+        }
+        if let Some(dictionary) = ty.downcast_ref::<DictionaryType>() {
+            return dictionary
+                .element()
+                .is_some_and(|element| visit(ctx, element, seen));
         }
         if let Some(record) = ty.downcast_ref::<RecordType>() {
             return record

@@ -37,8 +37,8 @@ use perry_mir::{
     optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BufferType, BytesType, ExceptionType, JsonType, OptionalType, PromiseType,
-        RecordType, StringType,
+        ArrayType, BufferType, BytesType, DictionaryType, ExceptionType, JsonType, OptionalType,
+        PromiseType, RecordType, StringType,
     },
 };
 use perry_runtime::array as layout;
@@ -238,6 +238,13 @@ enum Runtime {
     ViewLength,
     ReferenceIdentity,
     ExceptionStatus,
+    DictionaryNew,
+    DictionaryGet,
+    DictionarySet,
+    DictionaryDelete,
+    DictionaryHas,
+    DictionaryKeys,
+    DictionaryValues,
     JsonParse,
     JsonStringify,
     JsonNull,
@@ -340,6 +347,13 @@ impl Runtime {
             Runtime::ViewLength => "perry_view_length",
             Runtime::ReferenceIdentity => "perry_reference_identity",
             Runtime::ExceptionStatus => "perry_exception_status",
+            Runtime::DictionaryNew => "perry_dictionary_new",
+            Runtime::DictionaryGet => "perry_dictionary_get",
+            Runtime::DictionarySet => "perry_dictionary_set",
+            Runtime::DictionaryDelete => "perry_dictionary_delete",
+            Runtime::DictionaryHas => "perry_dictionary_has",
+            Runtime::DictionaryKeys => "perry_dictionary_keys",
+            Runtime::DictionaryValues => "perry_dictionary_values",
             Runtime::JsonParse => "perry_json_parse",
             Runtime::JsonStringify => "perry_json_stringify",
             Runtime::JsonNull => "perry_json_null",
@@ -463,6 +477,12 @@ impl Runtime {
             | Runtime::JsonAsBoolean
             | Runtime::JsonTypeof
             | Runtime::JsonIsArray => (vec![i32], vec![i32]),
+            Runtime::DictionaryNew | Runtime::DictionaryKeys | Runtime::DictionaryValues => {
+                (vec![i32], vec![i32])
+            }
+            Runtime::DictionaryGet => (vec![i32, i32], vec![i64]),
+            Runtime::DictionarySet => (vec![i32, i32, i64], vec![]),
+            Runtime::DictionaryDelete | Runtime::DictionaryHas => (vec![i32, i32], vec![i32]),
             Runtime::JsonObject
             | Runtime::JsonGet
             | Runtime::JsonEqual
@@ -560,6 +580,7 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     }
     if deref.is::<RecordType>()
         || deref.is::<ArrayType>()
+        || deref.is::<DictionaryType>()
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
         || deref.is::<ExceptionType>()
@@ -1285,6 +1306,17 @@ impl<'s> FunctionLowering<'s> {
 
     // --- optional values ----------------------------------------------------------------------
 
+    /// Promote a present value without letting a host NaN become the absent-number sentinel.
+    fn wrap_defined(&mut self, ctx: &mut Context, value: Value, inner: TypeHandle) -> Value {
+        if inner.deref(ctx).is::<FP64Type>() {
+            let is_nan = self.num(ctx, NumOpcode::F64Ne, vec![value, value]);
+            let nan = self.f64_const(ctx, f64::NAN);
+            self.select(ctx, is_nan, nan, value)
+        } else {
+            value
+        }
+    }
+
     fn undefined(&mut self, ctx: &mut Context, inner: TypeHandle) -> Result<Value> {
         Ok(match repr(ctx, inner)? {
             Repr::F64 => {
@@ -1444,7 +1476,9 @@ impl<'s> FunctionLowering<'s> {
             let kind = compare.kind(ctx);
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
             if self.state.uses_typed_views
-                && (inner.deref(ctx).is::<RecordType>() || inner.deref(ctx).is::<ArrayType>())
+                && (inner.deref(ctx).is::<RecordType>()
+                    || inner.deref(ctx).is::<ArrayType>()
+                    || inner.deref(ctx).is::<DictionaryType>())
             {
                 for operand in &mut operands {
                     *operand = self
@@ -1578,6 +1612,42 @@ impl<'s> FunctionLowering<'s> {
             }
             return Ok(());
         }
+        if Operation::get_op::<perry_mir::dictionaries::NewOp>(op, ctx).is_some() {
+            let ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let address = self.state.data.descriptor(ctx, ty)?;
+            let descriptor = self.i32_const(ctx, address as i32);
+            let value = self
+                .runtime(ctx, Runtime::DictionaryNew, vec![descriptor])
+                .expect("dictionary");
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(access) = Operation::get_op::<perry_mir::dictionaries::AccessOp>(op, ctx) {
+            use perry_mir::dictionaries::Action;
+            let action = access.action(ctx);
+            let runtime = match action {
+                Action::Get => Runtime::DictionaryGet,
+                Action::Set => Runtime::DictionarySet,
+                Action::Delete => Runtime::DictionaryDelete,
+                Action::Has => Runtime::DictionaryHas,
+                Action::Keys => Runtime::DictionaryKeys,
+                Action::Values => Runtime::DictionaryValues,
+            };
+            let mut operands = self.operands(ctx, op)?;
+            if action == Action::Set {
+                operands[2] = self.slot_bits(ctx, operands[2]);
+            }
+            let result = self.runtime(ctx, runtime, operands);
+            self.check_pending(ctx);
+            if let Some(mut value) = result {
+                if action == Action::Get {
+                    let ty = op.deref(ctx).get_result(0).get_type(ctx);
+                    value = self.decode_slot_bits(ctx, value, ty)?;
+                }
+                self.define(ctx, op, value);
+            }
+            return Ok(());
+        }
         if Operation::get_op::<perry_mir::json::UnpackOp>(op, ctx).is_some() {
             let ty = op.deref(ctx).get_result(0).get_type(ctx);
             let address = self.state.data.descriptor(ctx, ty)?;
@@ -1693,6 +1763,7 @@ impl<'s> FunctionLowering<'s> {
                 let zero = self.i32_const(ctx, 0);
                 let slot = self.select(ctx, ok, i, zero);
                 let loaded = self.read_element(ctx, array, slot, element)?;
+                let loaded = self.wrap_defined(ctx, loaded, element);
                 let undefined = self.undefined(ctx, element)?;
                 self.select(ctx, ok, loaded, undefined)
             } else {
@@ -1703,6 +1774,7 @@ impl<'s> FunctionLowering<'s> {
                 self.cond_br(ctx, ok, (read, vec![]), (missing, vec![]));
                 self.block = read;
                 let value = self.read_element(ctx, array, i, element)?;
+                let value = self.wrap_defined(ctx, value, element);
                 self.br(ctx, done, vec![value]);
                 self.block = missing;
                 let undefined = self.undefined(ctx, element)?;
@@ -1749,7 +1821,9 @@ impl<'s> FunctionLowering<'s> {
             return Ok(());
         }
         if Operation::get_op::<WrapOp>(op, ctx).is_some() {
+            let inner = op.deref(ctx).get_operand(0).get_type(ctx);
             let value = self.operands(ctx, op)?[0];
+            let value = self.wrap_defined(ctx, value, inner);
             self.define(ctx, op, value);
             return Ok(());
         }

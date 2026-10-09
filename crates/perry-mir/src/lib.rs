@@ -10,6 +10,7 @@ pub mod attrs;
 pub mod calls;
 pub mod collections;
 pub mod control;
+pub mod dictionaries;
 pub mod exceptions;
 pub mod heap;
 pub mod intrinsics;

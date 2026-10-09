@@ -86,19 +86,27 @@ impl FunctionBuilder<'_> {
         ctx: &mut Context,
         expr: &Expr,
     ) -> Result<(Value, Value)> {
-        let value = match expr {
-            Expr::Array(_) | Expr::Object(_) => self.json_value(ctx, expr)?,
-            Expr::New { class_name, .. } if self.shapes.literal_fields(class_name).is_some() => {
-                self.json_value(ctx, expr)?
-            }
-            _ => self.expression(ctx, expr)?,
-        };
+        let value = self.object_operand(ctx, expr)?;
         let json = self.json_input(ctx, value)?;
         Ok((value, self.optional(ctx, json)))
     }
 
+    pub(super) fn object_operand(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+        match expr {
+            Expr::Array(_) | Expr::Object(_) => self.json_value(ctx, expr),
+            Expr::New { class_name, .. } if self.shapes.literal_fields(class_name).is_some() => {
+                self.json_value(ctx, expr)
+            }
+            _ => self.expression(ctx, expr),
+        }
+    }
+
     pub(super) fn property_key(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
-        let key = self.json_value(ctx, expr)?;
+        let key = self.object_operand(ctx, expr)?;
+        if key.get_type(ctx).deref(ctx).is::<StringType>() {
+            return Ok(key);
+        }
+        let key = self.json_input(ctx, key)?;
         let key = self.optional(ctx, key);
         Ok(self.intrinsic(ctx, Intrinsic::JsonKey, vec![key]).unwrap())
     }
@@ -136,7 +144,7 @@ impl FunctionBuilder<'_> {
             Kind::Number => Intrinsic::JsonNumber,
             Kind::Boolean => Intrinsic::JsonBoolean,
             Kind::String => Intrinsic::JsonString,
-            Kind::Record | Kind::Array => {
+            Kind::Record | Kind::Array | Kind::Dictionary => {
                 ensure!(
                     perry_mir::json::compatible(ctx, value.get_type(ctx)),
                     "aggregate contains values outside the JSON subset"

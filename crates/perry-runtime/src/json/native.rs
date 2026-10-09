@@ -14,7 +14,7 @@ pub(super) struct Slot {
 pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
     // SAFETY: descriptors and any referenced values are live for the task.
     unsafe {
-        if matches!(ty.kind, Kind::Array | Kind::Record)
+        if matches!(ty.kind, Kind::Array | Kind::Record | Kind::Dictionary)
             && let Some(source) = view::source(bits as usize as *mut u8)
         {
             return Some(*source.cast::<Json>());
@@ -22,11 +22,7 @@ pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
         Some(match ty.kind {
             Kind::Optional => {
                 let inner = ty.element();
-                let absent = match inner.kind {
-                    Kind::Number => bits == crate::UNDEFINED_NUMBER,
-                    Kind::Boolean => bits == 2,
-                    _ => bits == 0,
-                };
+                let absent = bits == inner.undefined();
                 return if absent { None } else { read(inner, bits) };
             }
             Kind::Number => Json::Number(f64::from_bits(bits)),
@@ -44,6 +40,13 @@ pub(super) unsafe fn read(ty: &Type, bits: u64) -> Option<Json> {
                     ty: (*reference.cast::<Record>()).shape,
                 }
             }
+            Kind::Dictionary => {
+                let reference = bits as usize as *mut u8;
+                Json::Native {
+                    reference,
+                    ty: (*reference.cast::<dictionary::Dictionary>()).ty,
+                }
+            }
             Kind::Opaque => unreachable!("non-JSON type reached JSON packing"),
         })
     }
@@ -57,11 +60,7 @@ pub(super) unsafe fn scalar_or_native(ty: &Type, value: *mut u8) -> Option<u64> 
         if ty.kind == Kind::Optional {
             let inner = ty.element();
             return if value.is_null() {
-                Some(match inner.kind {
-                    Kind::Number => crate::UNDEFINED_NUMBER,
-                    Kind::Boolean => 2,
-                    _ => 0,
-                })
+                Some(inner.undefined())
             } else {
                 scalar_or_native(inner, value)
             };
@@ -73,11 +72,11 @@ pub(super) unsafe fn scalar_or_native(ty: &Type, value: *mut u8) -> Option<u64> 
             return Some(value as usize as u64);
         }
         match (ty.kind, *value.cast::<Json>()) {
-            (Kind::Number, Json::Number(value)) => Some(value.to_bits()),
+            (Kind::Number, Json::Number(value)) => Some(crate::number_bits(value)),
             (Kind::Boolean, Json::Boolean(value)) => Some(value as u64),
             (Kind::String, Json::String(value)) => Some(value as usize as u64),
             (
-                Kind::Array | Kind::Record,
+                Kind::Array | Kind::Record | Kind::Dictionary,
                 Json::Native {
                     reference,
                     ty: actual,
@@ -93,6 +92,14 @@ pub(super) unsafe fn scalar_or_native(ty: &Type, value: *mut u8) -> Option<u64> 
 pub(super) unsafe fn field(reference: *mut u8, ty: &Type, key: &str) -> Option<Slot> {
     // SAFETY: native record field descriptors and storage agree.
     unsafe {
+        if ty.kind == Kind::Dictionary {
+            let dictionary = &*reference.cast::<dictionary::Dictionary>();
+            return (*dictionary.fields).find(key).map(|field| Slot {
+                address: (&raw mut (*field).value).cast(),
+                ty: ty.element(),
+                key: (*field).key,
+            });
+        }
         ty.fields().iter().enumerate().find_map(|(index, field)| {
             (string::text(field.name) == key).then(|| Slot {
                 address: Record::slot(reference, index),
@@ -108,7 +115,7 @@ pub(super) unsafe fn field(reference: *mut u8, ty: &Type, key: &str) -> Option<S
 pub(super) unsafe fn get(reference: *mut u8, ty: &Type, key: &str) -> *mut u8 {
     // SAFETY: descriptor checks select the matching native layout.
     unsafe {
-        if ty.kind == Kind::Record {
+        if ty.kind != Kind::Array {
             return field(reference, ty, key).map_or(ptr::null_mut(), |slot| {
                 perry_json_pack(slot.ty, (*slot.ty).read(slot.address))
             });
@@ -127,7 +134,7 @@ pub(super) unsafe fn get(reference: *mut u8, ty: &Type, key: &str) -> *mut u8 {
 pub(super) unsafe fn index(reference: *mut u8, ty: &Type, index: f64) -> *mut u8 {
     // SAFETY: the array index is checked before the initialized element is read.
     unsafe {
-        if ty.kind == Kind::Record {
+        if ty.kind != Kind::Array {
             let mut buffer = ryu_js::Buffer::new();
             return get(reference, ty, buffer.format(index));
         }
@@ -149,6 +156,18 @@ pub(super) unsafe fn index(reference: *mut u8, ty: &Type, index: f64) -> *mut u8
 pub(super) unsafe fn set_key(reference: *mut u8, ty: &Type, key: &str, replacement: *mut u8) {
     // SAFETY: the shape lookup or dense index check validates the destination.
     unsafe {
+        if ty.kind == Kind::Dictionary {
+            if let Some(bits) = view::convert(ty.element(), replacement) {
+                let key = string::copy(key);
+                dictionary::perry_dictionary_set(reference, key, bits);
+            } else {
+                failure(
+                    exception::TYPE_ERROR,
+                    "JSON assignment does not match dictionary element type",
+                );
+            }
+            return;
+        }
         if ty.kind == Kind::Array {
             if let Some(index) = canonical_index(key) {
                 set_index(reference, ty, index as f64, replacement);
@@ -217,6 +236,12 @@ pub(super) unsafe fn children(reference: *mut u8, ty: &Type) -> Children {
                     ty: ty.element(),
                 }
             }
+            Kind::Dictionary => Children::NativeDictionary {
+                fields: (*(*reference.cast::<dictionary::Dictionary>()).fields)
+                    .fields()
+                    .iter(),
+                ty: ty.element(),
+            },
             Kind::Record => Children::NativeObject {
                 reference,
                 next: 0,

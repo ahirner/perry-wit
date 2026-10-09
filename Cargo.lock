@@ -1449,6 +1449,7 @@ dependencies = [
  "perry-mir",
  "perry-parser",
  "pliron",
+ "swc_ecma_visit",
 ]
 
 [[package]]

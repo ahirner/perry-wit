@@ -4,9 +4,9 @@ use super::*;
 use crate::shape::Kind;
 
 #[repr(C)]
-struct View {
-    source: *mut u8,
-    ty: *const Type,
+pub(super) struct View {
+    pub source: *mut u8,
+    pub ty: *const Type,
 }
 
 /// # Safety
@@ -43,12 +43,12 @@ unsafe fn member(value: Json, index: usize, key: Option<&str>) -> Option<Json> {
         match value {
             Json::Object(object) => (*object)
                 .find(key?)
-                .and_then(|field| (*field).value.cast::<Json>().as_ref().copied()),
+                .and_then(|field| ((*field).value as usize as *const Json).as_ref().copied()),
             Json::Array(array) => array::slots(array)
                 .get(index)
                 .and_then(|bits| (*bits as usize as *const Json).as_ref().copied()),
             Json::Native { reference, ty } => {
-                let slot = if (*ty).kind == Kind::Record {
+                let slot = if (*ty).kind != Kind::Array {
                     native::field(reference, &*ty, key?)?
                 } else {
                     let slots = array::slots(reference);
@@ -99,6 +99,28 @@ unsafe fn matches(
             Kind::Number => matches!(value, Json::Number(_)),
             Kind::Boolean => matches!(value, Json::Boolean(_)),
             Kind::String => matches!(value, Json::String(_)),
+            Kind::Dictionary => {
+                let children = match value {
+                    Json::Object(object) => Children::Object((*object).fields().iter()),
+                    Json::Native { reference, ty }
+                        if matches!((*ty).kind, Kind::Record | Kind::Dictionary) =>
+                    {
+                        native::children(reference, &*ty)
+                    }
+                    _ => return false,
+                };
+                let pair = (ty as *const Type as usize, identity(value) as usize);
+                if seen.contains(&pair) {
+                    return true;
+                }
+                if depth == 128 {
+                    return false;
+                }
+                seen.insert(pair);
+                children.into_iter().all(|node| {
+                    node.is_ok_and(|node| matches(ty.element(), node_value(node), seen, depth + 1))
+                })
+            }
             Kind::Array | Kind::Record => {
                 let count = if ty.kind == Kind::Array {
                     let Some(count) = length(value) else {
@@ -108,7 +130,9 @@ unsafe fn matches(
                 } else {
                     let object = match value {
                         Json::Object(_) => true,
-                        Json::Native { ty, .. } => (*ty).kind == Kind::Record,
+                        Json::Native { ty, .. } => {
+                            matches!((*ty).kind, Kind::Record | Kind::Dictionary)
+                        }
                         _ => false,
                     };
                     if !object {

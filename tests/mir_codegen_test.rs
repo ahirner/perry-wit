@@ -60,6 +60,38 @@ impl Program {
 }
 
 #[test]
+fn number_payloads_do_not_become_missing_dictionary_entries() {
+    let mut program = Program::new(
+        r#"
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export function run(value: number): number {
+  const dictionary: Record<string, number> = {value:value};
+  if (dictionary.value === undefined) return 1;
+  const optional: Record<string, number | undefined> = {value:value};
+  if (optional.value === undefined) return 2;
+  const array: number[] = [value];
+  if (array[0] === undefined) return 3;
+  const packed: JsonValue = dictionary;
+  const checked = packed as unknown as Record<string, number | undefined>;
+  if (checked.value === undefined) return 4;
+  if (value === 0 && 1 / dictionary.value !== 1 / value) return 5;
+  if (value === 0 && 1 / array[0] !== 1 / value) return 6;
+  return 0;
+}
+"#,
+    );
+    for value in [
+        -0.0,
+        0.0,
+        f64::NAN,
+        f64::from_bits(perry_codegen::UNDEFINED_BITS),
+        f64::from_bits(0xfff0_0000_0000_0001),
+    ] {
+        assert_eq!(program.number("run", value), 0.0, "{:x}", value.to_bits());
+    }
+}
+
+#[test]
 fn scalar_loops_calls_and_remainder() {
     let mut program = Program::new(
         r#"

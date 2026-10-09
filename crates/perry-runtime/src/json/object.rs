@@ -1,10 +1,10 @@
-//! Ordered JSON dictionaries with stable identity and task-owned hash storage.
+//! Ordered property tables with native eight-byte slots and task-owned hash storage.
 use super::*;
 
 #[derive(Clone, Copy)]
 pub(super) struct Field {
     pub key: *mut u8,
-    pub value: *mut u8,
+    pub value: u64,
     next: usize,
 }
 
@@ -76,7 +76,7 @@ impl Object {
     }
 
     /// Both key and optional value remain live for this object's task.
-    pub unsafe fn set(&mut self, key: *mut u8, value: *mut u8) {
+    pub unsafe fn set(&mut self, key: *mut u8, value: u64) {
         // SAFETY: existing entries keep their position; new entries append after any compaction.
         unsafe {
             if let Some(field) = self.find(string::text(key)) {
@@ -110,7 +110,7 @@ impl Object {
                 if string::text((*field).key) == key {
                     *link = (*field).next;
                     (*field).key = ptr::null_mut();
-                    (*field).value = ptr::null_mut();
+                    (*field).value = 0;
                     self.length -= 1;
                     return;
                 }

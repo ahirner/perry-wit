@@ -186,7 +186,11 @@ pub struct ArrayGetOp;
 impl ArrayGetOp {
     pub fn new(ctx: &mut Context, array: Value, index: Value) -> Result<Self> {
         let element = element(ctx, array, "perry.array_get")?;
-        let ty = OptionalType::get(ctx, element).into();
+        let ty = if element.deref(ctx).is::<OptionalType>() {
+            element
+        } else {
+            OptionalType::get(ctx, element).into()
+        };
         Ok(ArrayGetOp {
             op: Operation::new(
                 ctx,
@@ -205,8 +209,12 @@ impl Verify for ArrayGetOp {
         let op = self.get_operation().deref(ctx);
         let element = element(ctx, op.get_operand(0), "perry.array_get")?;
         let result = self.get_result(ctx).get_type(ctx);
-        let optional = TypedHandle::<OptionalType>::from_handle(result, ctx)
-            .is_ok_and(|optional| optional.deref(ctx).value() == element);
+        let optional = if element.deref(ctx).is::<OptionalType>() {
+            result == element
+        } else {
+            TypedHandle::<OptionalType>::from_handle(result, ctx)
+                .is_ok_and(|optional| optional.deref(ctx).value() == element)
+        };
         if !optional {
             verify_err!(self.loc(ctx), CollectionErr::Element("perry.array_get"))?
         }

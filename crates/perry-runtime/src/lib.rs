@@ -31,6 +31,15 @@ pub mod string;
 /// Reserved representation of an absent optional number.
 pub const UNDEFINED_NUMBER: u64 = 0x7FF0_0000_0000_0001;
 
+/// Keep a present number distinct from the reserved optional sentinel, including host NaNs.
+pub(crate) fn number_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOCATOR: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();

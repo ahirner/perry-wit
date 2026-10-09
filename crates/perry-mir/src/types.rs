@@ -14,6 +14,7 @@ use pliron::{
     result::Result,
     r#type::{Type, TypeHandle, TypedHandle},
 };
+use std::any::TypeId;
 use thiserror::Error;
 
 /// A thrown value: an Error or a primitive, kept distinct from general dynamic values.
@@ -158,29 +159,30 @@ impl Verify for RecordType {
     }
 }
 
-dict_key!(RECORDS_IN_PRINTING, "perry_records_in_printing");
+dict_key!(NAMED_TYPES_IN_PRINTING, "perry_named_types_in_printing");
 
-/// Returns true when `name` is already being printed further up (a recursive reference).
-fn start_printing(state: &printable::State, name: &Identifier) -> bool {
+/// Returns true when this type and name are already being printed further up (recursion).
+fn start_printing<T: 'static>(state: &printable::State, name: &Identifier) -> bool {
     let mut aux = state.aux_data_mut();
     let active = aux
-        .entry(RECORDS_IN_PRINTING.clone())
-        .or_insert_with(|| Box::new(Vec::<Identifier>::new()))
-        .downcast_mut::<Vec<Identifier>>()
-        .expect("record printing state");
-    if active.contains(name) {
+        .entry(NAMED_TYPES_IN_PRINTING.clone())
+        .or_insert_with(|| Box::new(Vec::<(TypeId, Identifier)>::new()))
+        .downcast_mut::<Vec<(TypeId, Identifier)>>()
+        .expect("named type printing state");
+    let identity = (TypeId::of::<T>(), name.clone());
+    if active.contains(&identity) {
         true
     } else {
-        active.push(name.clone());
+        active.push(identity);
         false
     }
 }
 
 fn done_printing(state: &printable::State) {
     let mut aux = state.aux_data_mut();
-    aux.get_mut(&RECORDS_IN_PRINTING)
-        .and_then(|active| active.downcast_mut::<Vec<Identifier>>())
-        .expect("record printing state")
+    aux.get_mut(&NAMED_TYPES_IN_PRINTING)
+        .and_then(|active| active.downcast_mut::<Vec<(TypeId, Identifier)>>())
+        .expect("named type printing state")
         .pop();
 }
 
@@ -191,7 +193,7 @@ impl Printable for RecordType {
         state: &printable::State,
         f: &mut core::fmt::Formatter<'_>,
     ) -> core::fmt::Result {
-        if start_printing(state, &self.name) {
+        if start_printing::<Self>(state, &self.name) {
             return write!(f, "<{}>", self.name);
         }
         let result = (|| {
@@ -273,6 +275,135 @@ pub struct ArrayType {
 impl ArrayType {
     pub fn element(&self) -> TypeHandle {
         self.element
+    }
+}
+
+/// An ordered, mutable string-keyed dictionary with one statically known value type (R1).
+/// Named declarations reserve identity before resolving a recursive element type.
+#[pliron_type(name = "perry.dictionary")]
+#[derive(Debug)]
+pub struct DictionaryType {
+    identity: DictionaryIdentity,
+    element: Option<TypeHandle>,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq)]
+enum DictionaryIdentity {
+    Structural(TypeHandle),
+    Named(Identifier),
+}
+
+impl DictionaryType {
+    pub fn get(ctx: &Context, element: TypeHandle) -> TypedHandle<Self> {
+        Type::instantiate(
+            Self {
+                identity: DictionaryIdentity::Structural(element),
+                element: Some(element),
+            },
+            ctx,
+        )
+    }
+    pub fn named(
+        ctx: &Context,
+        name: Identifier,
+        element: Option<TypeHandle>,
+    ) -> Result<TypedHandle<Self>> {
+        let handle = Type::instantiate(
+            Self {
+                identity: DictionaryIdentity::Named(name.clone()),
+                element: None,
+            },
+            ctx,
+        );
+        if let Some(element) = element {
+            let mut ty = handle.to_handle().deref_mut(ctx);
+            let dictionary = ty.downcast_mut::<Self>().unwrap();
+            if dictionary
+                .element
+                .is_some_and(|existing| existing != element)
+            {
+                input_err_noloc!(DictionaryMismatch(name.to_string()))?;
+            }
+            dictionary.element = Some(element);
+        }
+        Ok(handle)
+    }
+    pub fn element(&self) -> Option<TypeHandle> {
+        self.element
+    }
+}
+#[derive(Debug, Error)]
+#[error("dictionary {0} already exists with another element type")]
+struct DictionaryMismatch(String);
+impl PartialEq for DictionaryType {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+impl Eq for DictionaryType {}
+impl std::hash::Hash for DictionaryType {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.identity.hash(state);
+    }
+}
+impl Verify for DictionaryType {
+    fn verify(&self, _ctx: &Context) -> Result<()> {
+        Ok(())
+    }
+}
+impl Printable for DictionaryType {
+    fn fmt(
+        &self,
+        ctx: &Context,
+        state: &printable::State,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        let DictionaryIdentity::Named(name) = &self.identity else {
+            return write!(
+                f,
+                "<{}>",
+                self.element
+                    .expect("structural dictionary element")
+                    .print(ctx, state)
+            );
+        };
+        if start_printing::<Self>(state, name) {
+            return write!(f, "<@{name}>");
+        }
+        let result = (|| {
+            write!(f, "<@{name}")?;
+            if let Some(element) = self.element {
+                write!(f, ": {}", element.print(ctx, state))?;
+            }
+            write!(f, ">")
+        })();
+        done_printing(state);
+        result
+    }
+}
+impl Parsable for DictionaryType {
+    type Arg = ();
+    type Parsed = TypedHandle<Self>;
+    fn parse<'a>(stream: &mut StateStream<'a>, _arg: ()) -> ParseResult<'a, Self::Parsed> {
+        enum Declaration {
+            Named(Identifier, Option<TypeHandle>),
+            Structural(TypeHandle),
+        }
+        let named = token('@')
+            .with(Identifier::parser(()))
+            .and(optional(spaced(token(':')).with(spaced(type_parser()))))
+            .map(|(name, element)| Declaration::Named(name, element));
+        let mut parser = between(
+            token('<'),
+            token('>'),
+            spaced(named.or(type_parser().map(Declaration::Structural))),
+        );
+        let declaration = parser.parse_stream(stream).into_result()?.0;
+        match declaration {
+            Declaration::Named(name, element) => Self::named(stream.state.ctx, name, element),
+            Declaration::Structural(element) => Ok(Self::get(stream.state.ctx, element)),
+        }
+        .into_parse_result()
     }
 }
 

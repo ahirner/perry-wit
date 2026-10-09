@@ -106,6 +106,30 @@ await errors.write(input);await errors.close();errors.releaseLock();
 pub fn contracts() -> Vec<Contract> {
     let mut contracts = vec![
         Contract {
+            id: "ecma.object.dictionary",
+            description: "Typed dictionaries retain native values, aliases and ordered key/value snapshots",
+            specification: "https://tc39.es/ecma262/#sec-ordinary-object-internal-methods-and-internal-slots",
+            domain: "Record<string,T> and pure index signatures over numbers, strings, booleans, arrays, bytes and recursive dictionaries; missing/optional values, deletion, checked JSON views and valid alias writes",
+            witnesses: vec![
+                Witness {
+                    partition: "empty",
+                    case: typed_dictionary(Vec::new(), 0),
+                },
+                Witness {
+                    partition: "growth",
+                    case: typed_dictionary((0..48).collect(), -7),
+                },
+                Witness {
+                    partition: "negative-values",
+                    case: typed_dictionary(vec![-3, 0, 7, -3], 9),
+                },
+            ],
+            strategy: (prop::collection::vec(any::<i16>(), 0..32), any::<i16>())
+                .prop_map(|(values, n)| typed_dictionary(values, n))
+                .boxed(),
+            check: check_equivalence,
+        },
+        Contract {
             id: "ecma.json.dictionary",
             description: "JSON dictionary insertion, deletion, own-property presence and ordered key snapshots",
             specification: "https://tc39.es/ecma262/#sec-ordinaryownpropertykeys",
@@ -590,6 +614,59 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 }
 fn combinator_contracts() -> Vec<Contract> {
     [("ecma.promise.all_settled",true,"Fulfilled and rejected results retain their status and payload"),("ecma.promise.race",false,"Already-settled contenders retain input order and repeated outcomes")].into_iter().map(|(id,settled,description)|Contract{id,description,specification:"https://tc39.es/ecma262/#sec-promise-objects",domain:"Two numeric tasks; one fulfillment and one rejection for allSettled, two already-completed contenders for race; repeated component calls and IEEE-754 inputs",witnesses:vec![Witness{partition:"zero",case:combinator(0,settled)},Witness{partition:"negative",case:combinator(-7,settled)}],strategy:(-32i16..=32).prop_map(move|value|combinator(value,settled)).boxed(),check:check_equivalence}).collect()
+}
+
+fn typed_dictionary(values: Vec<i16>, n: i16) -> Case {
+    let values = serde_json::to_string(&values).unwrap();
+    Case::Command {
+        exit: ExitStatus::Success,
+        source: format!(
+            r#"
+type JsonValue=null|boolean|number|string|JsonValue[]|{{[key:string]:JsonValue}};
+interface Numbers {{[key:string]:number}}
+type Tree={{[key:string]:Tree}};
+function numbers(value:JsonValue):Numbers {{return value as unknown as Numbers;}}
+const input:number[]={values};
+const dictionary:Record<string,number>={{last:-0,first:{n}}};
+for(let i=0;i<input.length;i++) dictionary[i]=input[i];
+const keys=Object.keys(dictionary);
+const snapshot=Object.values(dictionary);
+for(let i=0;i<input.length;i++) {{delete dictionary[i];dictionary[i]=input[i]+1;}}
+const alias:Numbers=dictionary;
+alias.first={n}+2;
+const packed:JsonValue=dictionary;
+packed.extra={n}+3;
+if(alias!==dictionary || dictionary.extra!=={n}+3) throw 1;
+const strings:Record<string,string>={{text:'é🙂'}};
+const flags:Record<string,boolean>={{off:false,on:true}};
+const arrays:Record<string,number[]>={{input:input}};
+const arrayValues=Object.values(arrays);
+arrays.input.push({n});
+if(arrayValues[0]!==input) throw 2;
+const bytes:Record<string,Uint8Array>={{input:new Uint8Array([0,8,255])}};
+const byteValues=Object.values(bytes);
+byteValues[0][1]=7;
+if(bytes.input[1]!==7 || !Object.hasOwn(bytes,'input')) throw 3;
+const optional:Record<string,number|undefined>={{gone:undefined,value:{n}}};
+const optionalValues=Object.values(optional);
+if(optionalValues[0]!==undefined || !Object.hasOwn(optional,'gone')) throw 4;
+const parsed=JSON.parse('{{"first":1}}');
+const checked=numbers(parsed);
+checked.second={n};
+parsed.first={n}+4;
+if(checked.first!=={n}+4 || checked!==parsed) throw 5;
+const before=Object.keys(checked);
+delete checked.first;checked.first={n}+5;
+const recursive:Tree={{}};recursive.self=recursive;
+if(recursive.self!==recursive) throw 6;
+let cycle=false;try{{JSON.stringify(recursive);}}catch(e){{cycle=e instanceof TypeError;}}
+if(!cycle) throw 7;
+delete recursive.self;
+console.log(JSON.stringify([keys,snapshot,dictionary,strings,flags,arrays,optional,optionalValues,before,parsed,recursive]));
+console.log(JSON.stringify([dictionary.absent+1,strings.absent+'!',flags.absent===undefined]));
+"#
+        ),
+    }
 }
 
 fn dictionary_json(values: Vec<i16>) -> Case {

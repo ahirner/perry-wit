@@ -110,8 +110,8 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "conditions must be boolean",
         ),
         (
-            "export function run(x: number): number { const d: Record<string, number> = {}; return x; }",
-            "MIR backend does not support",
+            "export function run(x: number): number { const d: Record<string, number> = { bad: true }; return x; }",
+            "value type differs",
         ),
         (
             "interface P { x: number; y?: number } export function run(x: number): number { const p: P = { x }; return p.x; }",
@@ -430,4 +430,58 @@ export function run(text: string): number {
         invalid.contains("prototype setters") || invalid.contains("only direct calls"),
         "{invalid}"
     );
+}
+
+#[test]
+fn dictionaries_keep_native_types_and_recursive_aliases() {
+    let printed = lowered(
+        r#"
+interface Numbers { [key: string]: number }
+type Tree = { [key: string]: Tree };
+function recursive(): Tree { const tree: Tree = {}; tree.self = tree; return tree; }
+export function run(x: number): number {
+  const values: Numbers = {first:x};
+  const alias: Record<string, number> = values;
+  alias.second = x + 1;
+  const snapshot = Object.values(values);
+  delete values.first;
+  if(Object.hasOwn(values, 'first')) throw 1;
+  const tree = recursive();
+  if(tree.self !== tree) throw 2;
+  return snapshot[0] + values.second;
+}
+"#,
+    );
+    for expected in [
+        "perry.dictionary_new",
+        "perry.dictionary Set",
+        "perry.dictionary Get",
+        "perry.dictionary Values",
+        "perry.dictionary Delete",
+        "perry.dictionary Has",
+        "perry.dictionary <builtin.fp64",
+        "<@dictionary_Tree",
+    ] {
+        assert!(printed.contains(expected), "missing {expected}: {printed}");
+    }
+    for declaration in [
+        "type Dictionary = { [key: string]: number; required: number };",
+        "type Dictionary = { required: number; [key: string]: number };",
+        "interface Dictionary { [key: string]: number; required: number }",
+        "type Dictionary = { nested: { [key: string]: number; required: number } };",
+    ] {
+        let invalid = rejected(&format!(
+            "{declaration} export function run(): number {{ return 0; }}"
+        ));
+        assert!(invalid.contains("constrained dictionary"), "{invalid}");
+    }
+    for declaration in [
+        "type Dictionary = { [key: number]: string };",
+        "interface Dictionary { [key: number]: string }",
+    ] {
+        let invalid = rejected(&format!(
+            "{declaration} export function run(): number {{ return 0; }}"
+        ));
+        assert!(invalid.contains("string key"), "{invalid}");
+    }
 }

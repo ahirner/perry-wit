@@ -24,11 +24,16 @@ pub unsafe extern "C" fn perry_json_key(value: *mut u8) -> *mut u8 {
     }
 }
 
-unsafe fn has_own(value: Json, key: &str) -> bool {
+pub(super) unsafe fn has_own(value: Json, key: &str) -> bool {
     // SAFETY: only matching variants reach their native storage accessor.
     unsafe {
         let length = match value {
             Json::Object(object) => return (*object).find(key).is_some(),
+            Json::Native { reference, ty } if (*ty).kind == NativeKind::Dictionary => {
+                return (*(*reference.cast::<dictionary::Dictionary>()).fields)
+                    .find(key)
+                    .is_some();
+            }
             Json::Native { reference, ty } if (*ty).kind == NativeKind::Record => {
                 return native::field(reference, &*ty, key).is_some();
             }
@@ -69,9 +74,27 @@ pub unsafe extern "C" fn perry_json_keys(value: *mut u8) -> *mut u8 {
         if value.is_null() || matches!(*value.cast::<Json>(), Json::Null) {
             return failure(exception::TYPE_ERROR, "cannot enumerate null or undefined");
         }
+        keys(*value.cast::<Json>())
+    }
+}
+
+pub(super) unsafe fn keys(value: Json) -> *mut u8 {
+    // SAFETY: the caller supplies a live aggregate or scalar; referenced keys stay task-live.
+    unsafe {
         let mut keys = Vec::new();
-        let length = match *value.cast::<Json>() {
+        let length = match value {
             Json::Object(object) => {
+                keys.extend(
+                    (*object)
+                        .fields()
+                        .iter()
+                        .filter(|field| !field.key.is_null())
+                        .map(|field| field.key),
+                );
+                0
+            }
+            Json::Native { reference, ty } if (*ty).kind == NativeKind::Dictionary => {
+                let object = (*reference.cast::<dictionary::Dictionary>()).fields;
                 keys.extend(
                     (*object)
                         .fields()
@@ -127,6 +150,12 @@ pub unsafe extern "C" fn perry_json_delete(value: *mut u8, key: *mut u8) -> u32 
         let value = *value.cast::<Json>();
         if let Json::Object(object) = value {
             (*object).delete(key);
+            return 1;
+        }
+        if let Json::Native { reference, ty } = value
+            && (*ty).kind == NativeKind::Dictionary
+        {
+            (*(*reference.cast::<dictionary::Dictionary>()).fields).delete(key);
             return 1;
         }
         let error = match value {

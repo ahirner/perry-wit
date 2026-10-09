@@ -12,6 +12,7 @@ pub enum Kind {
     Array,
     Record,
     Optional,
+    Dictionary,
 }
 
 /// `detail` points to the element/optional type, or `count` record fields.
@@ -44,7 +45,7 @@ const _: () = {
 
 impl Type {
     /// # Safety
-    /// This is a valid compiler-emitted descriptor of an array or optional type.
+    /// This is a valid compiler-emitted descriptor of an array, dictionary or optional type.
     pub(crate) unsafe fn element(&self) -> &Self {
         // SAFETY: guaranteed by the caller.
         unsafe { &*self.detail.cast() }
@@ -54,6 +55,17 @@ impl Type {
     pub(crate) unsafe fn fields(&self) -> &[Field] {
         // SAFETY: guaranteed by the caller.
         unsafe { core::slice::from_raw_parts(self.detail.cast(), self.count as usize) }
+    }
+    /// # Safety
+    /// This descriptor and any optional element descriptors are valid.
+    pub(crate) unsafe fn undefined(&self) -> u64 {
+        match self.kind {
+            Kind::Number => crate::UNDEFINED_NUMBER,
+            Kind::Boolean => 2,
+            // SAFETY: an optional's element descriptor is valid by the caller's contract.
+            Kind::Optional => unsafe { self.element().undefined() },
+            _ => 0,
+        }
     }
     /// # Safety
     /// `slot` contains a live value of this type in native storage.
