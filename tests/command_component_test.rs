@@ -55,7 +55,31 @@ world command { include wasi:cli/command@0.3.0; }
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     for (source, expected) in [
         ("", Ok(())),
+        (
+            "export async function runRun(): Promise<{ok:true}|{ok:false}> { return {ok:true}; }",
+            Ok(()),
+        ),
+        (
+            "export function runRun(): {ok:boolean} { return {ok:false}; }",
+            Err(()),
+        ),
+        (
+            "import {setTimeout} from 'node:timers/promises'; export async function runRun(): Promise<{ok:boolean}> { await setTimeout(1); return {ok:false}; }",
+            Err(()),
+        ),
+        (
+            "console.log('initialized');export async function runRun(): Promise<{ok:boolean}> { throw new Error('entry failed'); }",
+            Err(()),
+        ),
         ("throw new Error('command failed');", Err(())),
+        (
+            "process.exitCode=0;throw new Error('status must not hide rejection');",
+            Err(()),
+        ),
+        (
+            "process.exitCode=0;export function runRun(): {ok:boolean} {return {ok:false};}",
+            Err(()),
+        ),
         (
             "console.log('drained on rejection'); throw new Error('command failed');",
             Err(()),
@@ -140,15 +164,16 @@ if (total !== 6) throw new Error("top-level locals");
             );
         }
     }
-    let error = compile_for_world(
-        "export function runRun(): {ok: boolean} { return {ok: false}; }",
-        "explicit-command.ts",
-        &resolve,
-        world,
-        true,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("explicit command implementation runRun"));
+    for source in [
+        "export function runRun(n:number): {ok:boolean} {return {ok:true};}",
+        "export function runRun(): number {return 1;}",
+        "export function runRun(): {ok:number} {return {ok:1};}",
+    ] {
+        assert!(
+            compile_for_world(source, "invalid-command.ts", &resolve, world, true).is_err(),
+            "{source}"
+        );
+    }
     Ok(())
 }
 
@@ -234,6 +259,11 @@ console.log("last");
 console.log(process.env.PERRY_MISSING_TEST);
 if (process.env.PERRY_EMPTY_TEST !== "") throw new Error("empty environment");
 console.log(process.env.PERRY_EMPTY_TEST);
+export async function runRun(): Promise<{{ok:true}}|{{ok:false}}> {{
+  await setTimeout(1);
+  console.log("entry");
+  return {{ok:true}};
+}}
 "#
     );
     let compiled = compile_for_world(&source, "cli.ts", &resolve, world, true)?;
@@ -271,7 +301,7 @@ console.log(process.env.PERRY_EMPTY_TEST);
         assert_eq!(result, Ok(()));
         assert_eq!(
             stdout.contents().as_ref(),
-            format!("{text}\nsecond\nlast\nundefined\n\n")
+            format!("{text}\nsecond\nlast\nundefined\n\nentry\n")
                 .repeat(round)
                 .as_bytes()
         );
@@ -399,5 +429,325 @@ export async function echo(label: string): Promise<string> {
     )
     .unwrap_err();
     assert!(format!("{error:#}").contains("WIT world must import wasi:cli/stdout@0.3.0"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_exit_codes_and_immediate_exit_are_distinct_from_exceptions() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:exit; world command { include wasi:cli/command@0.3.0; }",
+    )?;
+    let (resolve, package) = resolve_wit(directory.path())?;
+    let world = resolve.select_world(&[package], Some("command"))?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    for (source, code, output) in [
+        (
+            "console.log('before-exit');process.exit(1);console.log('unreachable');",
+            1,
+            "before-exit\n",
+        ),
+        ("process.exitCode=9;process.exit();", 9, ""),
+        ("process.exitCode=9;process.exit(258);", 2, ""),
+        ("process.exit(-1);", 255, ""),
+        (
+            "process.exitCode=9;process.exitCode=undefined;process.exit();",
+            0,
+            "",
+        ),
+        (
+            "if(process.exitCode!==undefined) throw new Error('initial status'); process.exitCode=9;process.exitCode=null;if(process.exitCode!==undefined) throw new Error('cleared status');process.exit();",
+            0,
+            "",
+        ),
+        (
+            "function leave():void { try { process.exit(7); } finally { console.log('unreachable'); } } try { leave(); } catch(e) { console.log('unreachable'); }",
+            7,
+            "",
+        ),
+        (
+            "async function leave():Promise<void> { process.exit(8); } leave(); console.log('unreachable');",
+            8,
+            "",
+        ),
+        (
+            "process.exitCode=3; try { process.exit(1.5); } catch(e) { if (!(e instanceof RangeError)) throw e; } if(process.exitCode!==3) throw new Error('changed');",
+            3,
+            "",
+        ),
+        (
+            "import {setTimeout} from 'node:timers/promises'; setTimeout(3600000); process.exit(4);",
+            4,
+            "",
+        ),
+        (
+            "import {setTimeout} from 'node:timers/promises'; setTimeout(3600000); await setTimeout(1); process.exit(5);",
+            5,
+            "",
+        ),
+        (
+            "import {setTimeout} from 'node:timers/promises'; process.exitCode=6; await setTimeout(1);console.log('finished');",
+            6,
+            "finished\n",
+        ),
+    ] {
+        let compiled = compile_for_world(source, "exit.ts", &resolve, world, true)?;
+        let component = Component::new(&engine, compiled.stripped.unwrap())?;
+        let stdout = output_capture::MemoryOutput::new(1000);
+        let mut store = Store::new(
+            &engine,
+            Host {
+                ctx: WasiCtx::builder().stdout(stdout.clone()).build(),
+                table: ResourceTable::new(),
+                peak: 0,
+            },
+        );
+        let command = wasmtime_wasi::p3::bindings::Command::instantiate_async(
+            &mut store, &component, &linker,
+        )
+        .await?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            store.run_concurrent(async |accessor| command.wasi_cli_run().call_run(accessor).await),
+        )
+        .await?;
+        let error = match result {
+            Ok(Err(error)) | Err(error) => error,
+            Ok(Ok(value)) => panic!("expected exit {code}, got {value:?}: {source}"),
+        };
+        assert_eq!(
+            error.downcast_ref::<wasmtime_wasi::I32Exit>().map(|e| e.0),
+            Some(code),
+            "{source}: {error:#}"
+        );
+        assert_eq!(stdout.contents().as_ref(), output.as_bytes(), "{source}");
+        assert!(
+            store.data().table.is_empty(),
+            "exit leaked host resources: {source}"
+        );
+    }
+    Ok(())
+}
+
+/// Instantiate the compiled worker inside a component whose async entry starts and cancels it.
+/// Wasmtime's host API cannot yet request guest task cancellation; a component caller can.
+fn cancellation_caller(worker: &[u8]) -> Result<Vec<u8>> {
+    let printed = wasmprinter::print_bytes(worker)?;
+    let prelude = &printed[..printed
+        .find("  (core module")
+        .expect("component core module")];
+    let mut bindings = String::new();
+    let mut instance = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(worker) {
+        match payload? {
+            wasmparser::Payload::ModuleSection { .. } => break,
+            wasmparser::Payload::ComponentImportSection(imports) => {
+                for import in imports {
+                    let import = import?;
+                    bindings.push_str(&format!(
+                        "(with {:?} (instance {instance}))",
+                        import.name.name
+                    ));
+                    instance += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    let child = printed.replacen("(component", "(component $worker", 1);
+    Ok(wat::parse_str(format!(
+        r#"
+{prelude}
+{child}
+(instance $worker-instance (instantiate $worker {bindings}))
+(alias export $worker-instance "run" (func $run))
+(core func $start (canon lower (func $run) async))
+(core func $cancel (canon subtask.cancel))
+(core func $drop (canon subtask.drop))
+(core func $return (canon task.return (result u32)))
+(core module $caller
+  (import "host" "start" (func $start (result i32)))
+  (import "host" "cancel" (func $cancel (param i32) (result i32)))
+  (import "host" "drop" (func $drop (param i32)))
+  (import "host" "return" (func $return (param i32)))
+  (func (export "run") (result i32) (local $handle i32) (local $status i32)
+    call $start i32.const 4 i32.shr_u local.tee $handle
+    call $cancel local.set $status
+    local.get $handle call $drop
+    local.get $status call $return
+    i32.const 0)
+  (func (export "callback") (param i32 i32 i32) (result i32) unreachable))
+(core instance $host
+  (export "start" (func $start)) (export "cancel" (func $cancel))
+  (export "drop" (func $drop)) (export "return" (func $return)))
+(core instance $caller-instance (instantiate $caller (with "host" (instance $host))))
+(type $result (func async (result u32)))
+(alias core export $caller-instance "run" (core func $entry))
+(alias core export $caller-instance "callback" (core func $callback))
+(func (export "run") (type $result) (canon lift (core func $entry) async (callback $callback)))
+)"#
+    ))?)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn caller_cancellation_releases_timer_tasks_and_reuses_regions() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        r#"
+package test:cancel;
+world worker { import wasi:clocks/monotonic-clock@0.3.0; export run: async func(); }
+"#,
+    )?;
+    let (resolve, package) = resolve_wit(directory.path())?;
+    let world = resolve.select_world(&[package], Some("worker"))?;
+    let source = r#"
+import {setTimeout} from 'node:timers/promises';
+export async function run(): Promise<void> {
+  const values: number[] = [];
+  for (let i=0; i<10000; i++) values.push(i);
+  setTimeout(3600000);
+  try { await setTimeout(3600000); }
+  finally { throw new Error("cancelled continuation ran"); }
+}
+"#;
+    let worker = compile_for_world(source, "cancel.ts", &resolve, world, true)?
+        .stripped
+        .unwrap();
+    let caller = cancellation_caller(&worker)?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, caller)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = Store::new(
+        &engine,
+        Host {
+            ctx: WasiCtx::builder().build(),
+            table: ResourceTable::new(),
+            peak: 0,
+        },
+    );
+    store.limiter(|host| host);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+    let mut peak = 0;
+    for round in 0..10 {
+        let (status,) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run.call_async(&mut store, ()),
+        )
+        .await??;
+        assert_eq!(status, 4, "subtask did not acknowledge cancellation");
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+        if round == 0 {
+            peak = store.data().peak;
+        } else {
+            assert_eq!(
+                store.data().peak,
+                peak,
+                "cancelled task memory was retained"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[path = "support/cancellable_output.rs"]
+mod cancellable_output;
+
+#[tokio::test(flavor = "current_thread")]
+async fn caller_cancellation_releases_output_buffers_and_completion_futures() -> Result<()> {
+    use cancellable_output::BlockAt;
+    use std::sync::atomic::Ordering;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    for (channel, method) in [("stdout", "log"), ("stderr", "error")] {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(
+            directory.path().join("world.wit"),
+            format!(
+                "package test:cancel; world worker {{ import wasi:cli/{channel}@0.3.0; export run: async func(); }}"
+            ),
+        )?;
+        let (resolve, package) = resolve_wit(directory.path())?;
+        let world = resolve.select_world(&[package], Some("worker"))?;
+        let source = format!(
+            "export async function run(): Promise<void> {{ console.{method}('{}'); console.{method}('queued'); }}",
+            "é🙂".repeat(20000)
+        );
+        let worker = compile_for_world(&source, "cancel-output.ts", &resolve, world, true)?
+            .stripped
+            .unwrap();
+        let caller = cancellation_caller(&worker)?;
+        wasmparser::Validator::new().validate_all(&caller)?;
+        let component = Component::new(&engine, caller)?;
+        for block_at in [BlockAt::Write, BlockAt::Completion] {
+            let mut linker = Linker::new(&engine);
+            let observations = cancellable_output::install(
+                &mut linker,
+                &format!("wasi:cli/{channel}@0.3.0"),
+                block_at,
+            )?;
+            let mut store = Store::new(
+                &engine,
+                Host {
+                    ctx: WasiCtx::builder().build(),
+                    table: ResourceTable::new(),
+                    peak: 0,
+                },
+            );
+            store.limiter(|host| host);
+            let instance = linker.instantiate_async(&mut store, &component).await?;
+            let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+            let mut peak = 0;
+            for round in 1..=10 {
+                let (status,) = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    run.call_async(&mut store, ()),
+                )
+                .await??;
+                assert_eq!(status, 4, "{channel} {block_at:?}");
+                store.assert_concurrent_state_empty();
+                assert!(store.data().table.is_empty());
+                assert_eq!(
+                    observations.started.load(Ordering::SeqCst),
+                    round,
+                    "queued output started during cancellation"
+                );
+                assert_eq!(observations.dropped_writes.load(Ordering::SeqCst), round);
+                assert_eq!(
+                    observations.dropped_completions.load(Ordering::SeqCst),
+                    round
+                );
+                let cancelled = match block_at {
+                    BlockAt::Write => &observations.cancelled_writes,
+                    BlockAt::Completion => &observations.cancelled_completions,
+                };
+                assert_eq!(
+                    cancelled.load(Ordering::SeqCst),
+                    round,
+                    "pending operation was not cancelled"
+                );
+                if round == 1 {
+                    peak = store.data().peak;
+                } else {
+                    assert_eq!(
+                        store.data().peak,
+                        peak,
+                        "cancelled output memory was retained"
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }

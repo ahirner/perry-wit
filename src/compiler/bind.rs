@@ -20,10 +20,24 @@ use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 const CLI_RUN: &str = "wasi:cli/run@0.3.0";
 
-pub(crate) fn is_command(resolve: &Resolve, world: WorldId) -> bool {
-    resolve.worlds[world].exports.iter().any(|(key, item)| {
-        matches!(item, WorldItem::Interface { .. }) && resolve.name_world_key(key) == CLI_RUN
-    })
+pub(crate) fn command_implementation(resolve: &Resolve, world: WorldId) -> Option<String> {
+    resolve.worlds[world]
+        .exports
+        .iter()
+        .find_map(|(key, item)| {
+            let WorldItem::Interface { id, .. } = item else {
+                return None;
+            };
+            if resolve.name_world_key(key) != CLI_RUN {
+                return None;
+            }
+            resolve.interfaces[*id]
+                .functions
+                .get("run")
+                .map(|function| {
+                    interface_implementation_name(resolve, &resolve.worlds[world], key, function)
+                })
+        })
 }
 
 /// The component exports of `world`, each bound to the exported TypeScript function with the
@@ -71,10 +85,6 @@ pub(crate) fn exports(
         for (implementation, core_name, function) in functions {
             let command = resolve.name_world_key(key) == CLI_RUN && function.name == "run";
             let implementation = if command {
-                ensure!(
-                    !exported.contains_key(&implementation),
-                    "explicit command implementation {implementation} is not supported yet; use top-level statements"
-                );
                 perry_lower::COMMAND_ENTRY.to_string()
             } else {
                 implementation

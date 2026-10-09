@@ -403,3 +403,33 @@ pub fn chunk_counts() -> (usize, usize, usize) {
     };
     (chunks, large, count(runtime.free))
 }
+
+/// Cancel every native subtask before releasing its argument/result storage. Synchronous
+/// cancellation is part of the baseline P3 ABI and returns only after the host stops using it.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_subtasks_cancel() {
+    #[link(wasm_import_module = "$root")]
+    unsafe extern "C" {
+        #[link_name = "[waitable-join]"]
+        fn join(handle: u32, set: u32);
+        #[link_name = "[subtask-cancel]"]
+        fn cancel(handle: u32) -> u32;
+        #[link_name = "[subtask-drop]"]
+        fn drop_subtask(handle: u32);
+    }
+    let task = current() as *mut Task;
+    // SAFETY: entries and handles belong to this task. Detach before synchronous cancellation;
+    // restoring the task after that host call accounts for other tasks running while it waits.
+    unsafe {
+        let mut entry = core::mem::replace(&mut (*task).subtasks, ptr::null_mut());
+        while !entry.is_null() {
+            let handle = (*entry).handle;
+            join(handle, 0);
+            cancel(handle);
+            perry_task_resume(task);
+            drop_subtask(handle);
+            entry = (*entry).next;
+        }
+    }
+}

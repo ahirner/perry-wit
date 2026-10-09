@@ -26,12 +26,18 @@ pub enum Intrinsic {
     Arguments,
     MonotonicNow,
     DateNow,
+    ExitCodeGet,
+    ExitCodeSet,
+    ExitCodeClear,
+    ProcessExit,
+    ProcessExitCurrent,
 }
 
 #[derive(Clone, Copy)]
 enum ValueType {
     String,
     OptionalString,
+    OptionalNumber,
     Strings,
     Number,
 }
@@ -41,9 +47,13 @@ impl ValueType {
         match self {
             Self::Number => FP64Type::get(ctx).into(),
             Self::String => StringType::get(ctx).into(),
-            Self::OptionalString => {
-                let string = StringType::get(ctx).into();
-                OptionalType::get(ctx, string).into()
+            Self::OptionalString | Self::OptionalNumber => {
+                let value = if matches!(self, Self::OptionalString) {
+                    StringType::get(ctx).into()
+                } else {
+                    FP64Type::get(ctx).into()
+                };
+                OptionalType::get(ctx, value).into()
             }
             Self::Strings => {
                 let string = StringType::get(ctx).into();
@@ -59,6 +69,10 @@ impl ValueType {
                 .deref(ctx)
                 .downcast_ref::<OptionalType>()
                 .is_some_and(|ty| ty.value().deref(ctx).is::<StringType>()),
+            Self::OptionalNumber => ty
+                .deref(ctx)
+                .downcast_ref::<OptionalType>()
+                .is_some_and(|ty| ty.value().deref(ctx).is::<FP64Type>()),
             Self::Strings => ty
                 .deref(ctx)
                 .downcast_ref::<ArrayType>()
@@ -71,6 +85,10 @@ impl Intrinsic {
     fn signature(self) -> (&'static [ValueType], &'static [ValueType]) {
         use ValueType::*;
         match self {
+            Self::ExitCodeGet => (&[], &[OptionalNumber]),
+            Self::ExitCodeSet => (&[Number], &[Number]),
+            Self::ExitCodeClear | Self::ProcessExitCurrent => (&[], &[]),
+            Self::ProcessExit => (&[Number], &[]),
             Self::Stdout | Self::Stderr => (&[String], &[]),
             Self::EnvGet => (&[String], &[OptionalString]),
             Self::EnvKeys | Self::Arguments => (&[], &[Strings]),
@@ -130,5 +148,18 @@ impl Verify for IntrinsicOp {
 impl SideEffects for IntrinsicOp {
     fn has_side_effects(&self, _ctx: &Context) -> bool {
         true
+    }
+}
+
+#[op_interface_impl]
+impl crate::exceptions::MayThrowInterface for IntrinsicOp {
+    fn exception(&self, _ctx: &Context) -> crate::attrs::ErrorKind {
+        crate::attrs::ErrorKind::RangeError
+    }
+    fn may_throw(&self, ctx: &Context) -> bool {
+        matches!(
+            self.kind(ctx),
+            Intrinsic::ExitCodeSet | Intrinsic::ProcessExit
+        )
     }
 }

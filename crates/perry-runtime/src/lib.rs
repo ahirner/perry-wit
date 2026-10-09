@@ -20,6 +20,7 @@ mod cli;
 pub mod exception;
 #[cfg(target_arch = "wasm32")]
 mod output;
+pub mod process;
 pub mod promise;
 pub mod region;
 pub mod string;
@@ -59,6 +60,48 @@ mod tests {
         argument_lowering_opens_the_task_the_export_adopts();
         promises_queue_waiters_and_tasks_interleave();
         exceptions_are_owned_by_each_task_and_rejections_keep_identity();
+        process_status_validates_before_replacing_instance_state();
+    }
+
+    fn process_status_validates_before_replacing_instance_state() {
+        use process::*;
+        perry_task_begin();
+        perry_process_clear_exit_code();
+        assert_eq!(perry_process_get_exit_code().to_bits(), UNDEFINED_NUMBER);
+        assert_eq!(perry_process_exit_status(), -1);
+        for (value, code) in [
+            (0.0, 0),
+            (-1.0, 255),
+            (258.0, 2),
+            (9_007_199_254_740_991.0, 255),
+        ] {
+            assert_eq!(perry_process_set_exit_code(value), 0);
+            assert_eq!(perry_process_get_exit_code(), value);
+            assert_eq!(perry_process_exit_status(), code);
+        }
+        for value in [
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            9_007_199_254_740_992.0,
+        ] {
+            let status = perry_process_set_exit_code(value);
+            assert_ne!(status, 0);
+            // SAFETY: the checked setter raised a task-owned exception.
+            unsafe {
+                let error = exception::perry_exception_catch(status);
+                assert_eq!(
+                    exception::perry_exception_is(error, exception::RANGE_ERROR),
+                    1
+                );
+            }
+            assert_eq!(perry_process_get_exit_code(), 9_007_199_254_740_991.0);
+        }
+        perry_task_end();
+        assert_eq!(perry_process_exit_status(), 255);
+        perry_process_clear_exit_code();
+        assert_eq!(perry_process_exit_status(), -1);
     }
 
     fn exceptions_are_owned_by_each_task_and_rejections_keep_identity() {

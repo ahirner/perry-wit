@@ -20,7 +20,7 @@ pub(super) struct Cleanup {
 impl FunctionBuilder<'_> {
     pub(super) fn guard_exception(&mut self, ctx: &mut Context, op: &dyn Op) {
         if self.handlers.is_empty()
-            || op_cast::<dyn MayThrowInterface>(op).is_none()
+            || !op_cast::<dyn MayThrowInterface>(op).is_some_and(|op| op.may_throw(ctx))
             || op.get_operation().deref(ctx).get_num_successors() != 0
             || self.terminated(ctx)
         {

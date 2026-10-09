@@ -445,6 +445,34 @@ fn async_export(
             .runtime(ctx, Runtime::TaskFailed, vec![])
             .expect("unhandled rejection");
         let rejected = b.num(ctx, NumOpcode::I32Or, vec![rejected, unhandled]);
+        let rejected = if command {
+            ensure!(
+                mir_results.len() == 1 && crate::repr(ctx, mir_results[0])? == crate::Repr::Bool,
+                "command entry must return its boolean ok result"
+            );
+            let ok = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::VALUE);
+            let error_result = b.num(ctx, NumOpcode::I32Eqz, vec![ok]);
+            b.num(ctx, NumOpcode::I32Or, vec![rejected, error_result])
+        } else {
+            rejected
+        };
+        if command && b.state.uses_process {
+            let status = b
+                .runtime(ctx, Runtime::ExitStatus, vec![])
+                .expect("exit status");
+            let zero = b.i32_const(ctx, 0);
+            let assigned = b.num(ctx, NumOpcode::I32GeS, vec![status, zero]);
+            let success = b.num(ctx, NumOpcode::I32Eqz, vec![rejected]);
+            let explicit = b.num(ctx, NumOpcode::I32And, vec![assigned, success]);
+            let exit = b.new_block(ctx, vec![]);
+            let next = b.new_block(ctx, vec![]);
+            b.cond_br(ctx, explicit, (exit, vec![]), (next, vec![]));
+            b.block = exit;
+            b.exit_process(ctx);
+            let unreachable = UnreachableOp::new(ctx).get_operation();
+            b.insert(ctx, unreachable);
+            b.block = next;
+        }
         let mut flat = if command {
             vec![rejected]
         } else {
@@ -470,15 +498,8 @@ fn async_export(
             }
         }
         b.host(ctx, task_return, flat);
-        let set = b.runtime(ctx, Runtime::TaskSet, vec![]).expect("set");
-        let drop_set = b.new_block(ctx, vec![]);
-        let free = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, set, (drop_set, vec![]), (free, vec![]));
-        b.block = drop_set;
-        b.host(ctx, crate::Host::WaitableSetDrop, vec![set]);
-        b.br(ctx, free, vec![]);
-        b.block = free;
-        b.runtime(ctx, Runtime::TaskFree, vec![]);
+        let call = CallOp::new(ctx, identifier("release_task"), vec![], vec![]).get_operation();
+        b.insert(ctx, call);
         let exit = b.i32_const(ctx, EXIT);
         let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
         b.insert(ctx, ret);
@@ -528,6 +549,19 @@ fn async_export(
         let mut b = FunctionLowering::glue(state, ctx, &callback);
         let task = b.host(ctx, crate::Host::ContextGet0, vec![]).expect("task");
         b.runtime(ctx, Runtime::TaskResume, vec![task]);
+        let cancelled_event = b.i32_const(ctx, 6);
+        let is_cancelled = b.num(ctx, NumOpcode::I32Eq, vec![event, cancelled_event]);
+        let cancelled = b.new_block(ctx, vec![]);
+        let active = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, is_cancelled, (cancelled, vec![]), (active, vec![]));
+        b.block = cancelled;
+        let abort = CallOp::new(ctx, identifier("abort_task"), vec![], vec![]).get_operation();
+        b.insert(ctx, abort);
+        b.host(ctx, crate::Host::TaskCancel, vec![]);
+        let exit = b.i32_const(ctx, EXIT);
+        let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
+        b.insert(ctx, ret);
+        b.block = active;
         for (write, event_handler) in [
             (Runtime::Stdout, Runtime::StdoutEvent),
             (Runtime::Stderr, Runtime::StderrEvent),
@@ -560,6 +594,66 @@ fn async_export(
     Ok(())
 }
 
+/// Shared lifecycle helpers. Cancellation finishes native operations before any task memory
+/// is freed; graceful completion uses the release half after task.return lifts the result.
+pub(crate) fn task_cleanup(ctx: &mut Context, state: &mut ModuleState) {
+    if !state.host.contains(&crate::Host::TaskCancel) && !state.uses_process {
+        return;
+    }
+    let void = FunctionType::get(ctx, vec![], vec![]);
+    let release = FuncOp::new(ctx, identifier("release_task"), void);
+    {
+        let mut b = FunctionLowering::glue(state, ctx, &release);
+        let set = b.runtime(ctx, Runtime::TaskSet, vec![]).expect("set");
+        let drop_set = b.new_block(ctx, vec![]);
+        let free = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, set, (drop_set, vec![]), (free, vec![]));
+        b.block = drop_set;
+        b.host(ctx, crate::Host::WaitableSetDrop, vec![set]);
+        b.br(ctx, free, vec![]);
+        b.block = free;
+        b.runtime(ctx, Runtime::TaskFree, vec![]);
+        let ret = ReturnOp::new(ctx, vec![]).get_operation();
+        b.insert(ctx, ret);
+        b.state
+            .wasm
+            .append_operation(ctx, release.get_operation(), 0);
+    }
+    let abort = FuncOp::new(ctx, identifier("abort_task"), void);
+    {
+        let mut b = FunctionLowering::glue(state, ctx, &abort);
+        if b.state.runtime.contains(&Runtime::SubtaskRegister) {
+            b.runtime(ctx, Runtime::SubtasksCancel, vec![]);
+        }
+        for (write, cancel) in [
+            (Runtime::Stdout, Runtime::StdoutCancel),
+            (Runtime::Stderr, Runtime::StderrCancel),
+        ] {
+            if b.state.runtime.contains(&write) {
+                b.runtime(ctx, cancel, vec![]);
+            }
+        }
+        let call = CallOp::new(ctx, identifier("release_task"), vec![], vec![]).get_operation();
+        b.insert(ctx, call);
+        let ret = ReturnOp::new(ctx, vec![]).get_operation();
+        b.insert(ctx, ret);
+        b.state.wasm.append_operation(ctx, abort.get_operation(), 0);
+    }
+    if state.uses_process {
+        let i32 = i32_type(ctx);
+        let ty = FunctionType::get(ctx, vec![i32], vec![]);
+        let exit = FuncOp::new(ctx, identifier("process_exit"), ty);
+        let code = exit.get_entry_block(ctx).deref(ctx).get_argument(0);
+        let mut b = FunctionLowering::glue(state, ctx, &exit);
+        let call = CallOp::new(ctx, identifier("abort_task"), vec![], vec![]).get_operation();
+        b.insert(ctx, call);
+        b.host(ctx, crate::Host::ProcessExit, vec![code]);
+        let unreachable = UnreachableOp::new(ctx).get_operation();
+        b.insert(ctx, unreachable);
+        b.state.wasm.append_operation(ctx, exit.get_operation(), 0);
+    }
+}
+
 /// `cabi_realloc`, through which the host lowers strings and lists into guest memory.
 pub(crate) fn realloc(ctx: &mut Context, state: &mut ModuleState) {
     let i32 = i32_type(ctx);
@@ -589,6 +683,17 @@ fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> 
 }
 
 impl FunctionLowering<'_> {
+    pub(crate) fn exit_process(&mut self, ctx: &mut Context) {
+        let status = self
+            .runtime(ctx, Runtime::ExitStatus, vec![])
+            .expect("exit status");
+        let zero = self.i32_const(ctx, 0);
+        let unset = self.num(ctx, NumOpcode::I32LtS, vec![status, zero]);
+        let code = self.select(ctx, unset, zero, status);
+        let exit = CallOp::new(ctx, identifier("process_exit"), vec![code], vec![]).get_operation();
+        self.insert(ctx, exit);
+    }
+
     /// Convert a scalar core value to the MIR value of type `mir_ty`.
     fn lift_scalar(
         &mut self,

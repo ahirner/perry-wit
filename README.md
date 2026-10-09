@@ -5,7 +5,7 @@
 Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
 [Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
 
-> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with `try`/`catch`/`finally` and task-scoped memory. It also covers async functions on the WASI P3 callback ABI, with `setTimeout` from `node:timers/promises`, and CLI top-level execution, console output, environment/arguments and clocks. `fetch`, `node:fs`, general streams, JSON, Date objects, process exit and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
+> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with `try`/`catch`/`finally` and task-scoped memory. It also covers async functions on the WASI P3 callback ABI, with `setTimeout` from `node:timers/promises`, cancellation, and CLI execution, console output, environment/arguments, clocks and process exit. `fetch`, `node:fs`, general streams, JSON, Date objects and HTTP handlers return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
 
 - **WIT-first authoring**: Export typed functions matching a WIT world, or execute top-level code and `await` through a `wasi:cli/run` command world.
 - **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
@@ -119,7 +119,9 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("t
 
 ### CLI Scripts
 
-Worlds exporting `wasi:cli/run@0.3.0` execute top-level statements and `await`. Uncaught exceptions return a command error. `console.log` and `console.error` currently accept one string; their P3 streams drain before completion. `process.env.NAME`, `Object.keys(process.env)`, host-provided `process.argv`, `performance.now()` and `Date.now()` use the corresponding WIT imports. Process exit and explicit SDK command result adapters remain migration work.
+Worlds exporting `wasi:cli/run@0.3.0` execute top-level statements and `await`, followed by an exported SDK command implementation when present (`runRun` for the standard command world). Its `{ok:true}` or `{ok:false}` result becomes the command result; uncaught exceptions return a command error. `console.log` and `console.error` currently accept one string; their P3 streams drain before completion. `process.env.NAME`, `Object.keys(process.env)`, host-provided `process.argv`, `performance.now()` and `Date.now()` use the corresponding WIT imports.
+
+Assign a safe integer to `process.exitCode` for graceful termination after pending work and output drain. Assigning `undefined` or `null` clears it. `process.exit(code)` terminates immediately, cancels pending native operations, and bypasses catches and finalizers; pending output may be discarded. Omitting the code uses the assigned status or zero. Numeric exit codes are reduced modulo 256 at the WASI boundary; string codes are not supported yet.
 
 ```sh
 cargo run -- examples/cli.ts --wit wit --world command -o dist/cli.wasm

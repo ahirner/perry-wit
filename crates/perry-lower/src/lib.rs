@@ -70,10 +70,10 @@ use shapes::{Shapes, identifier};
 use std::collections::{HashMap, HashSet};
 
 /// How top-level statements enter the component.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum EntryPoint {
     Exports,
-    Command,
+    Command { implementation: String },
 }
 
 pub const COMMAND_ENTRY: &str = "perry_command_main";
@@ -90,7 +90,7 @@ pub fn lower_source(
     let mut hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
     match entry {
-        EntryPoint::Command => {
+        EntryPoint::Command { implementation } => {
             ensure!(
                 !hir.functions.iter().any(|f| f.name == COMMAND_ENTRY),
                 "{COMMAND_ENTRY} is reserved for the command entry point"
@@ -103,13 +103,43 @@ pub fn lower_source(
                 .unwrap_or(0)
                 .checked_add(1)
                 .context("too many functions")?;
+            let mut body = std::mem::take(&mut hir.init);
+            let result = if let Some(function) = hir
+                .functions
+                .iter()
+                .find(|f| f.is_exported && f.name == implementation)
+            {
+                ensure!(
+                    function.params.is_empty(),
+                    "command implementation {implementation} must take no parameters"
+                );
+                let call = Expr::Call {
+                    callee: Box::new(Expr::FuncRef(function.id)),
+                    args: vec![],
+                    type_args: vec![],
+                    byte_offset: 0,
+                };
+                let value = if function.is_async {
+                    Expr::Await(Box::new(call))
+                } else {
+                    call
+                };
+                Expr::PropertyGet {
+                    object: Box::new(value),
+                    property: "ok".into(),
+                    byte_offset: 0,
+                }
+            } else {
+                Expr::Bool(true)
+            };
+            body.push(Stmt::Return(Some(result)));
             hir.functions.push(Function {
                 id,
                 name: COMMAND_ENTRY.to_string(),
                 type_params: vec![],
                 params: vec![],
-                return_type: HirType::Void,
-                body: std::mem::take(&mut hir.init),
+                return_type: HirType::Boolean,
+                body,
                 is_async: true,
                 is_generator: false,
                 is_strict: hir.init_is_strict,
@@ -699,7 +729,21 @@ impl<'s> FunctionBuilder<'s> {
 
     /// Lower an expression evaluated for its effects; void calls are allowed here.
     fn effect(&mut self, ctx: &mut Context, expr: &Expr) -> Result<()> {
-        if let Expr::Call { callee, args, .. } = expr {
+        if let Expr::ProcessExit(code) = expr {
+            match code.as_deref() {
+                None | Some(Expr::Undefined | Expr::Null) => {
+                    self.intrinsic(ctx, Intrinsic::ProcessExitCurrent, vec![]);
+                }
+                Some(code) => {
+                    let value = self.expression(ctx, code)?;
+                    ensure!(
+                        kind(ctx, value)? == Kind::Number,
+                        "process.exit currently requires a numeric code"
+                    );
+                    self.intrinsic(ctx, Intrinsic::ProcessExit, vec![value]);
+                }
+            }
+        } else if let Expr::Call { callee, args, .. } = expr {
             self.call(ctx, callee, args)?;
         } else {
             self.expression(ctx, expr)?;
@@ -1301,6 +1345,27 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn call(&mut self, ctx: &mut Context, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee {
+            match name.as_str() {
+                "js_process_exit_code_get" => {
+                    ensure!(args.is_empty(), "exitCode getter takes no arguments");
+                    return Ok(self.intrinsic(ctx, Intrinsic::ExitCodeGet, vec![]));
+                }
+                "js_process_exit_code_set" => {
+                    ensure!(args.len() == 1, "exitCode setter takes one argument");
+                    if matches!(args[0], Expr::Undefined | Expr::Null) {
+                        return Ok(self.intrinsic(ctx, Intrinsic::ExitCodeClear, vec![]));
+                    }
+                    let value = self.expression(ctx, &args[0])?;
+                    ensure!(
+                        kind(ctx, value)? == Kind::Number,
+                        "process.exitCode currently requires a numeric code"
+                    );
+                    return Ok(self.intrinsic(ctx, Intrinsic::ExitCodeSet, vec![value]));
+                }
+                _ => {}
+            }
+        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee

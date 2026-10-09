@@ -57,6 +57,17 @@ impl<'h> Shapes<'h> {
     /// MIR type of a HIR value type, for the types supported so far.
     pub(crate) fn value_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
         Ok(match ty {
+            HirType::Union(types) => {
+                let (first, rest) = types.split_first().context("empty union type")?;
+                let first = self.value_type(ctx, first)?;
+                for ty in rest {
+                    ensure!(
+                        self.value_type(ctx, ty)? == first,
+                        "unions of different shapes are not supported yet"
+                    );
+                }
+                first
+            }
             HirType::Number | HirType::Int32 => FP64Type::get(ctx).into(),
             HirType::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             HirType::String | HirType::StringLiteral(_) => StringType::get(ctx).into(),

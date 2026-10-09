@@ -49,7 +49,7 @@ struct Queue {
 }
 
 macro_rules! channel {
-    ($module:ident, $interface:literal, $index:expr, $write:ident, $event:ident) => {
+    ($module:ident, $interface:literal, $index:expr, $write:ident, $event:ident, $cancel:ident) => {
         mod $module {
             use super::*;
             #[link(wasm_import_module = $interface)]
@@ -66,6 +66,10 @@ macro_rules! channel {
                 fn future_read(future: u32, result: *mut u8) -> u32;
                 #[link_name = "[future-drop-readable-1]write-via-stream"]
                 fn future_drop(future: u32);
+                #[link_name = "[stream-cancel-write-0]write-via-stream"]
+                fn stream_cancel(writer: u32) -> u32;
+                #[link_name = "[future-cancel-read-1]write-via-stream"]
+                fn future_cancel(future: u32) -> u32;
             }
 
             /// # Safety
@@ -121,6 +125,35 @@ macro_rules! channel {
                     };
                     if matched {
                         drive(queue, Some(result));
+                    }
+                }
+            }
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn $cancel() {
+                let task = current() as *mut crate::region::Task;
+                // SAFETY: only the head owns native handles; queued writes have not started.
+                unsafe {
+                    let queue = core::mem::replace(&mut (*task).outputs[$index], ptr::null_mut())
+                        as *mut Queue;
+                    if queue.is_null() {
+                        return;
+                    }
+                    match (*(*queue).head).phase {
+                        Phase::Writing { writer, future, .. } => {
+                            join(writer, 0);
+                            stream_cancel(writer);
+                            crate::region::perry_task_resume(task);
+                            stream_drop(writer);
+                            future_drop(future);
+                        }
+                        Phase::Completion { future } => {
+                            join(future, 0);
+                            future_cancel(future);
+                            crate::region::perry_task_resume(task);
+                            future_drop(future);
+                        }
+                        Phase::Queued => unreachable!("an idle queue has no native operation"),
                     }
                 }
             }
@@ -200,12 +233,14 @@ channel!(
     "wasi:cli/stdout@0.3.0",
     0,
     perry_stdout,
-    perry_stdout_event
+    perry_stdout_event,
+    perry_stdout_cancel
 );
 channel!(
     stderr,
     "wasi:cli/stderr@0.3.0",
     1,
     perry_stderr,
-    perry_stderr_event
+    perry_stderr_event,
+    perry_stderr_cancel
 );

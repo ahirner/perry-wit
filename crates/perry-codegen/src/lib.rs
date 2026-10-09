@@ -109,6 +109,8 @@ enum Host {
     ContextGet0,
     ContextSet0,
     WaitFor,
+    TaskCancel,
+    ProcessExit,
     /// `task.return` of an async export: (module, function, flat result types).
     TaskReturn(String, String, Vec<boundary::Flat>),
 }
@@ -123,6 +125,8 @@ impl Host {
             Host::ContextGet0 => "host_context_get_0".to_string(),
             Host::ContextSet0 => "host_context_set_0".to_string(),
             Host::WaitFor => "host_wait_for".to_string(),
+            Host::TaskCancel => "host_task_cancel".to_string(),
+            Host::ProcessExit => "host_process_exit".to_string(),
             Host::TaskReturn(module, function, _) => {
                 let clean = |s: &str| -> String {
                     s.chars()
@@ -139,6 +143,8 @@ impl Host {
     fn path(&self) -> (String, String) {
         let root = |name: &str| ("$root".to_string(), name.to_string());
         match self {
+            Host::TaskCancel => ("[export]$root".into(), "[task-cancel]".into()),
+            Host::ProcessExit => ("wasi:cli/exit@0.3.0".into(), "exit-with-code".into()),
             Host::WaitableSetNew => root("[waitable-set-new]"),
             Host::WaitableSetDrop => root("[waitable-set-drop]"),
             Host::WaitableJoin => root("[waitable-join]"),
@@ -163,6 +169,8 @@ impl Host {
             Host::WaitableSetDrop | Host::SubtaskDrop | Host::ContextSet0 => (vec![i32], vec![]),
             Host::WaitableJoin => (vec![i32, i32], vec![]),
             Host::WaitFor => (vec![i64], vec![i32]),
+            Host::TaskCancel => (vec![], vec![]),
+            Host::ProcessExit => (vec![i32], vec![]),
             Host::TaskReturn(_, _, flat) => (
                 flat.iter().map(|f| boundary::flat_type(ctx, *f)).collect(),
                 vec![],
@@ -172,7 +180,7 @@ impl Host {
 }
 
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN.
-pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
+pub const UNDEFINED_BITS: u64 = perry_runtime::process::UNDEFINED_NUMBER;
 /// `undefined` in a `boolean | undefined` slot.
 const UNDEFINED_BOOL: i32 = 2;
 
@@ -254,6 +262,13 @@ enum Runtime {
     Stderr,
     StdoutEvent,
     StderrEvent,
+    StdoutCancel,
+    StderrCancel,
+    SubtasksCancel,
+    ExitCodeGet,
+    ExitCodeSet,
+    ExitCodeClear,
+    ExitStatus,
     EnvGet,
     EnvKeys,
     Arguments,
@@ -299,6 +314,13 @@ impl Runtime {
             Runtime::StringConcat => "perry_string_concat",
             Runtime::Stdout => "perry_stdout",
             Runtime::Stderr => "perry_stderr",
+            Runtime::StdoutCancel => "perry_stdout_cancel",
+            Runtime::StderrCancel => "perry_stderr_cancel",
+            Runtime::SubtasksCancel => "perry_subtasks_cancel",
+            Runtime::ExitCodeGet => "perry_process_get_exit_code",
+            Runtime::ExitCodeSet => "perry_process_set_exit_code",
+            Runtime::ExitCodeClear => "perry_process_clear_exit_code",
+            Runtime::ExitStatus => "perry_process_exit_status",
             Runtime::StdoutEvent => "perry_stdout_event",
             Runtime::StderrEvent => "perry_stderr_event",
             Runtime::EnvGet => "perry_env_get",
@@ -321,6 +343,13 @@ impl Runtime {
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
+            Runtime::ExitCodeGet => (vec![], vec![f64]),
+            Runtime::ExitStatus => (vec![], vec![i32]),
+            Runtime::ExitCodeSet => (vec![f64], vec![i32]),
+            Runtime::ExitCodeClear
+            | Runtime::SubtasksCancel
+            | Runtime::StdoutCancel
+            | Runtime::StderrCancel => (vec![], vec![]),
             Runtime::Stdout | Runtime::Stderr => (vec![i32], vec![]),
             Runtime::StdoutEvent | Runtime::StderrEvent => (vec![i32; 3], vec![]),
             Runtime::EnvGet => (vec![i32], vec![i32]),
@@ -452,7 +481,7 @@ fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier
             if let Some(call) = Operation::get_op::<MirCallOp>(op, ctx) {
                 callees.push(call.callee(ctx));
             } else if op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref())
-                .is_some()
+                .is_some_and(|op| op.may_throw(ctx))
             {
                 throws.insert(name.clone());
             }
@@ -515,6 +544,7 @@ struct ModuleState {
     /// Async functions in dispatch-kind order.
     async_functions: Vec<Identifier>,
     shapes: HashMap<String, i32>,
+    uses_process: bool,
 }
 
 impl ModuleState {
@@ -546,6 +576,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         },
         async_functions: async_functions.clone(),
         shapes: HashMap::new(),
+        uses_process: false,
     };
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);
@@ -593,6 +624,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         }
         boundary::realloc(ctx, &mut state);
     }
+    boundary::task_cleanup(ctx, &mut state);
     for runtime in state.runtime.clone() {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
@@ -1561,6 +1593,47 @@ impl<'s> FunctionLowering<'s> {
             return Ok(());
         }
         if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
+            let kind = intrinsic.kind(ctx);
+            if matches!(
+                kind,
+                Intrinsic::ExitCodeGet
+                    | Intrinsic::ExitCodeSet
+                    | Intrinsic::ExitCodeClear
+                    | Intrinsic::ProcessExit
+                    | Intrinsic::ProcessExitCurrent
+            ) {
+                ensure!(
+                    self.state.can_import("wasi:cli/exit@0.3.0"),
+                    "WIT world must import wasi:cli/exit@0.3.0"
+                );
+                self.state.uses_process = true;
+                match kind {
+                    Intrinsic::ExitCodeGet => {
+                        let value = self
+                            .runtime(ctx, Runtime::ExitCodeGet, vec![])
+                            .expect("exit code");
+                        self.define(ctx, op, value);
+                    }
+                    Intrinsic::ExitCodeClear => {
+                        self.runtime(ctx, Runtime::ExitCodeClear, vec![]);
+                    }
+                    Intrinsic::ExitCodeSet | Intrinsic::ProcessExit => {
+                        let value = self.operand(ctx, op, 0)?;
+                        let status = self
+                            .runtime(ctx, Runtime::ExitCodeSet, vec![value])
+                            .expect("status");
+                        self.throw_status_if(ctx, status, status);
+                        if kind == Intrinsic::ExitCodeSet {
+                            self.define(ctx, op, value);
+                        } else {
+                            self.exit_process(ctx);
+                        }
+                    }
+                    Intrinsic::ProcessExitCurrent => self.exit_process(ctx),
+                    _ => unreachable!(),
+                }
+                return Ok(());
+            }
             let (runtime, interface) = match intrinsic.kind(ctx) {
                 Intrinsic::Stdout => (Runtime::Stdout, "wasi:cli/stdout@0.3.0"),
                 Intrinsic::Stderr => (Runtime::Stderr, "wasi:cli/stderr@0.3.0"),
@@ -1569,6 +1642,7 @@ impl<'s> FunctionLowering<'s> {
                 Intrinsic::Arguments => (Runtime::Arguments, "wasi:cli/environment@0.3.0"),
                 Intrinsic::MonotonicNow => (Runtime::MonotonicNow, MONOTONIC_CLOCK),
                 Intrinsic::DateNow => (Runtime::DateNow, "wasi:clocks/system-clock@0.3.0"),
+                _ => unreachable!("process intrinsic handled above"),
             };
             ensure!(
                 self.state.can_import(interface),

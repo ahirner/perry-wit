@@ -6,3 +6,4 @@ ecma.error.control_flow
 web.console.routing
 web.performance.monotonic
 node.process.environment
+node.process.exit_status

@@ -64,8 +64,8 @@ pub fn compile_for_world(
     audit::audit_no_llvm(include_str!("../../Cargo.lock"))
         .context("LLVM audit verification failed")?;
     let ctx = &mut Context::new();
-    let entry = if bind::is_command(resolve, world) {
-        perry_lower::EntryPoint::Command
+    let entry = if let Some(implementation) = bind::command_implementation(resolve, world) {
+        perry_lower::EntryPoint::Command { implementation }
     } else {
         perry_lower::EntryPoint::Exports
     };

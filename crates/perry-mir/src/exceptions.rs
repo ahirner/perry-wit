@@ -16,6 +16,11 @@ pub trait MayThrowInterface {
     /// The error this op raises when it throws.
     fn exception(&self, ctx: &Context) -> ErrorKind;
 
+    /// Whether this particular operation can fail (for table-driven intrinsics).
+    fn may_throw(&self, _ctx: &Context) -> bool {
+        true
+    }
+
     fn verify(_op: &dyn Op, _ctx: &Context) -> Result<()>
     where
         Self: Sized,
@@ -82,7 +87,8 @@ impl Verify for CaughtStatusOp {
         let previous = self.op.deref(ctx).get_prev();
         if !is_status(ctx, self.get_result(ctx).get_type(ctx))
             || !previous.is_some_and(|op| {
-                op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref()).is_some()
+                op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref())
+                    .is_some_and(|op| op.may_throw(ctx))
                     && Operation::get_op::<RethrowOp>(op, ctx).is_none()
             })
         {

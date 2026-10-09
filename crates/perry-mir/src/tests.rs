@@ -536,4 +536,14 @@ fn exception_ops_round_trip_and_keep_caught_pairs() {
     let invalid = verify_text(&single_block("s = perry.raise v : builtin.integer i32;"))
         .expect_err("invalid thrown type");
     assert!(invalid.contains("raise needs an exception"), "{invalid}");
+    verify_text(&single_block(
+        "code = perry.intrinsic ExitCodeSet (v) : builtin.fp64; s = perry.caught_status : builtin.integer i32;",
+    )).expect("checked intrinsic may throw");
+    let infallible = verify_text(&single_block(
+        "time = perry.intrinsic MonotonicNow () : builtin.fp64; s = perry.caught_status : builtin.integer i32;",
+    )).expect_err("infallible intrinsic cannot produce a caught status");
+    assert!(
+        infallible.contains("immediately follow a throwing operation"),
+        "{infallible}"
+    );
 }
