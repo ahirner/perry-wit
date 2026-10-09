@@ -50,6 +50,7 @@ pub enum Ty {
     Stats,
     PromiseString,
     PromiseBytes,
+    PromiseJson,
     PromiseStats,
     PromiseStringArray,
     /// `Promise<void>`: settles `undefined`.
@@ -114,6 +115,10 @@ impl Ty {
                 let bytes = BytesType::get(ctx).into();
                 PromiseType::get(ctx, bytes).into()
             }
+            Ty::PromiseJson => {
+                let json = JsonType::get(ctx).into();
+                PromiseType::get(ctx, json).into()
+            }
             Ty::PromiseStats => {
                 let stats = StatsType::get(ctx).into();
                 PromiseType::get(ctx, stats).into()
@@ -177,6 +182,7 @@ impl Ty {
             Ty::PromiseResponse => promise_of(&|t| t.deref(ctx).is::<ResponseType>()),
             Ty::PromiseString => promise_of(&string),
             Ty::PromiseBytes => promise_of(&|t| t.deref(ctx).is::<BytesType>()),
+            Ty::PromiseJson => promise_of(&|t| t.deref(ctx).is::<JsonType>()),
             Ty::PromiseStats => promise_of(&|t| t.deref(ctx).is::<StatsType>()),
             Ty::PromiseStringArray => promise_of(&|t| {
                 t.deref(ctx)
@@ -279,6 +285,15 @@ intrinsics! {
     JsonIsUndefined = "json_is_undefined" (Json) -> (Bool), pure;
     JsonSerialize = "json_serialize" (Json) -> (OptString), throws;
     JsonTypeOf = "json_type_of" (Json) -> (String), pure;
+    // Object literals with spreads over JSON values: `{}`, `...source`, `key: value`.
+    JsonObject = "json_object" () -> (Json);
+    JsonAssign = "json_assign" (Json, Json) -> ();
+    JsonSet = "json_set" (Json, String, Json) -> ();
+    JsonFromNumber = "json_from_number" (Number) -> (Json), pure;
+    JsonFromString = "json_from_string" (String) -> (Json), pure;
+    JsonFromBool = "json_from_bool" (Bool) -> (Json), pure;
+    JsonNull = "json_null" () -> (Json), pure;
+    JsonUndefined = "json_undefined" () -> (Json), pure;
     MathRandom = "math_random" () -> (Number);
     RandomUuid = "random_uuid" () -> (String);
     BytesFillRandom = "bytes_fill_random" (Bytes) -> (Bytes);
@@ -311,6 +326,7 @@ intrinsics! {
     ResponseBodyUsed = "response_body_used" (Response) -> (Bool);
     ResponseBytes = "response_bytes" (Response) -> (PromiseBytes);
     ResponseText = "response_text" (Response) -> (PromiseString);
+    ResponseJson = "response_json" (Response) -> (PromiseJson);
     RequestNew = "request_new" (String, String, OptBytes, Bool, Headers) -> (Request), throws;
     RequestMethod = "request_method" (Request) -> (String), pure;
     RequestUrl = "request_url" (Request) -> (String), pure;
@@ -318,6 +334,7 @@ intrinsics! {
     RequestBodyUsed = "request_body_used" (Request) -> (Bool);
     RequestBytes = "request_bytes" (Request) -> (PromiseBytes);
     RequestText = "request_text" (Request) -> (PromiseString);
+    RequestJson = "request_json" (Request) -> (PromiseJson);
     WritableStdout = "writable_stdout" () -> (Writable);
     WritableStderr = "writable_stderr" () -> (Writable);
     WritableLocked = "writable_locked" (Writable) -> (Bool);

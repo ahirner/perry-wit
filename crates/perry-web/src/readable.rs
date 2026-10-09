@@ -96,16 +96,20 @@ struct ReadResult {
     value: *mut u8,
 }
 
-/// A body read to its end: the promise of `bytes()` (or `text()`, decoding).
+/// A body read to its end: the promise of `bytes()`, `text()` or `json()`.
 struct Drain {
     promise: *mut u8,
-    text: bool,
+    form: Form,
     contents: Buffer,
+    /// The next `json()` drain waiting to be parsed.
+    next: *mut Drain,
 }
 
 struct Lists {
     readables: *mut Readable,
     waiting: *mut Reader,
+    /// `json()` drains that read their whole body, for [take_parsed].
+    parsing: *mut Drain,
 }
 struct Global(core::cell::UnsafeCell<Lists>);
 // SAFETY: one instance runs one thread.
@@ -113,6 +117,7 @@ unsafe impl Sync for Global {}
 static LISTS: Global = Global(core::cell::UnsafeCell::new(Lists {
     readables: core::ptr::null_mut(),
     waiting: core::ptr::null_mut(),
+    parsing: core::ptr::null_mut(),
 }));
 
 fn lists() -> &'static mut Lists {
@@ -306,13 +311,12 @@ fn deliver(r: &mut Reader, data: *mut u8, count: u32) -> bool {
                 .extend_from_slice(unsafe { slice(data as u32, count) });
             return true;
         }
-        let contents = drain.contents.as_slice();
-        let value = if drain.text {
-            decode(contents)
+        if drain.form == Form::Json {
+            drain.next = lists().parsing;
+            lists().parsing = drain;
         } else {
-            bytes_view(contents.len() as u32, contents.as_ptr() as *mut u8)
-        };
-        resolve(drain.promise, value as usize as u64);
+            settle_body(drain.promise, drain.form, drain.contents.as_slice());
+        }
         return false;
     }
     let promise = core::mem::replace(&mut r.pending, core::ptr::null_mut());
@@ -584,8 +588,9 @@ pub extern "C" fn web_read_value(result: *mut u8) -> *mut u8 {
     unsafe { (*(result as *const ReadResult)).value }
 }
 
-/// `bytes()`/`text()` of a body stream: read it to the end through an internal reader.
-pub(crate) fn drain(stream: *mut Readable, text: bool, promise: *mut u8) {
+/// `bytes()`/`text()`/`json()` of a body stream: read it to the end through an internal
+/// reader.
+pub(crate) fn drain(stream: *mut Readable, form: Form, promise: *mut u8) {
     // SAFETY: bodies keep their streams.
     if unsafe { (*stream).locked } != 0 {
         reject_with(
@@ -601,11 +606,42 @@ pub(crate) fn drain(stream: *mut Readable, text: bool, promise: *mut u8) {
     unsafe {
         drain.write(Drain {
             promise,
-            text,
+            form,
             contents: Buffer::new(),
+            next: core::ptr::null_mut(),
         });
         (*r).drain = drain;
         pump(&mut *r);
+    }
+}
+
+/// What a body is read as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Form {
+    Bytes,
+    Text,
+    Json,
+}
+
+/// Settle `promise` with a whole body read as bytes or text. The contents belong to the
+/// read. (`json()` bodies are parsed by [crate::body::web_json_settle], so that programs
+/// without `json()` do not link the JSON parser.)
+pub(crate) fn settle_body(promise: *mut u8, form: Form, contents: &[u8]) {
+    let value = if form == Form::Text {
+        decode(contents)
+    } else {
+        bytes_view(contents.len() as u32, contents.as_ptr() as *mut u8)
+    };
+    resolve(promise, value as usize as u64);
+}
+
+/// Take the `json()` drains that read their whole body: `(promise, contents)` each.
+pub(crate) fn take_parsed(mut each: impl FnMut(*mut u8, &[u8])) {
+    while let Some(drain) = core::ptr::NonNull::new(lists().parsing) {
+        // SAFETY: listed drains are live.
+        let drain = unsafe { &mut *drain.as_ptr() };
+        lists().parsing = drain.next;
+        each(drain.promise, drain.contents.as_slice());
     }
 }
 

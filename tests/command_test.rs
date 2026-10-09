@@ -234,3 +234,42 @@ Failed to parse URL from nope
     );
     Ok(())
 }
+
+/// Object spreads over JSON values, property order, `json()` and array destructuring,
+/// against output recorded from Node 22.
+#[tokio::test(flavor = "current_thread")]
+async fn json_values_match_node() -> Result<()> {
+    let run = execute(
+        r#"
+const a = JSON.parse('{"b":1,"2":[1],"1":true,"b":3,"x":{"z":null,"10":"t"}}');
+const list = JSON.parse('[7,8]');
+console.log(JSON.stringify({ ...a, ...list, x: 'y', n: null, ...JSON.parse('"hé"'), ...JSON.parse('5'), u: a.missing, b: false }));
+console.log(JSON.stringify(a), JSON.stringify(JSON.parse('{"4294967295":1,"4294967294":2,"01":3,"0":4}')));
+const merged = { ...a.x, ...JSON.parse('{"z":2}'), count: 3, ok: true };
+const z: number = merged.z;
+console.log(JSON.stringify(merged), z, typeof merged.count);
+const r = new Response('{"k":[1,2.5e-3]}');
+const parsed = await r.json();
+console.log(JSON.stringify(parsed), r.bodyUsed);
+try { await new Response('{"k":').json(); } catch (e) { if (e instanceof Error) console.log('rejected'); }
+const [first, second, third] = await Promise.all([new Response('[1]').json(), new Response('{"v":2}').json()]);
+console.log(JSON.stringify({ ...first, ...second }), third === undefined);
+const numeric = JSON.parse('{"0":0,"41":1,"82":2,"22":3,"63":4,"3":5,"44":6,"85":7,"25":8,"66":9,"6":10,"47":11,"88":12,"28":13,"69":14,"9":15,"50":16,"91":17,"31":18,"72":19,"12":20,"53":21,"94":22,"34":23,"75":24,"15":25,"56":26,"97":27,"37":28,"78":29,"18":30,"59":31,"100":32,"40":33,"81":34,"21":35,"62":36,"2":37,"43":38,"84":39}');
+console.log(JSON.stringify(numeric));
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        r#"{"0":"h","1":"é","2":[1],"b":false,"x":"y","n":null}
+{"1":true,"2":[1],"b":3,"x":{"10":"t","z":null}} {"0":4,"4294967294":2,"4294967295":1,"01":3}
+{"10":"t","z":2,"count":3,"ok":true} 2 number
+{"k":[1,0.0025]} true
+rejected
+{"0":1,"v":2} true
+{"0":0,"2":37,"3":5,"6":10,"9":15,"12":20,"15":25,"18":30,"21":35,"22":3,"25":8,"28":13,"31":18,"34":23,"37":28,"40":33,"41":1,"43":38,"44":6,"47":11,"50":16,"53":21,"56":26,"59":31,"62":36,"63":4,"66":9,"69":14,"72":19,"75":24,"78":29,"81":34,"82":2,"84":39,"85":7,"88":12,"91":17,"94":22,"97":27,"100":32}
+"#
+    );
+    Ok(())
+}

@@ -1,5 +1,6 @@
 //! `fetch` over `wasi:http/client`: request method, headers and body reach the server; the
-//! response's status, headers and body read back through `text()`, `bytes()` and readers.
+//! response's status, headers and body read back through `text()`, `bytes()`, `json()` and
+//! readers.
 use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
@@ -78,6 +79,36 @@ impl WasiHttpView for Host {
     }
 }
 
+/// Compile `source`, call its `run(url)` export against `server` and return the result.
+async fn run(source: &str, server: &http_fixture::HttpFixture) -> Result<String> {
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("world.wit"), WIT)?;
+    let (resolve, package) = resolve_wit(directory.path())?;
+    let world = resolve.select_world(&[package], Some("fetch"))?;
+    let compiled = compile_for_world(source, "fetch.ts", &resolve, world, true)?;
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    let mut store = Store::new(
+        &engine,
+        Host {
+            ctx: WasiCtx::builder().build(),
+            http: WasiHttpCtx::new(),
+            table: ResourceTable::new(),
+        },
+    );
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    let url = format!("http://{}", server.address);
+    let (text,) = run.call_async(&mut store, (&url,)).await?;
+    assert!(store.data().table.is_empty(), "host resources leaked");
+    Ok(text)
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_sends_requests_and_reads_responses() -> Result<()> {
     let server = http_fixture::HttpFixture::new(|request| match request.target.as_str() {
@@ -98,34 +129,40 @@ async fn fetch_sends_requests_and_reads_responses() -> Result<()> {
         "/bytes" => http_fixture::Reply::Bytes(200, (0..20_000u32).map(|i| i as u8).collect()),
         _ => http_fixture::Reply::Body(404, "no".into()),
     });
-    let directory = tempfile::tempdir()?;
-    std::fs::write(directory.path().join("world.wit"), WIT)?;
-    let (resolve, package) = resolve_wit(directory.path())?;
-    let world = resolve.select_world(&[package], Some("fetch"))?;
-    let compiled = compile_for_world(SOURCE, "fetch.ts", &resolve, world, true)?;
-    let mut config = Config::new();
-    config.wasm_component_model_async(true);
-    let engine = Engine::new(&config)?;
-    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-    let mut store = Store::new(
-        &engine,
-        Host {
-            ctx: WasiCtx::builder().build(),
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-        },
-    );
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
-    let url = format!("http://{}", server.address);
-    let (text,) = run.call_async(&mut store, (&url,)).await?;
+    let text = run(SOURCE, &server).await?;
     assert_eq!(
         text,
         "POST abc héllo|201|true|yes|20000|20000|true|404|false"
     );
-    assert!(store.data().table.is_empty(), "host resources leaked");
+    Ok(())
+}
+
+/// `examples/merge_docs.ts` with the server's address: concurrent requests, `json()` and an
+/// object spread of the parsed documents. A body that is not JSON rejects.
+const MERGE: &str = r#"
+export async function run(url: string): Promise<string> {
+  const [res1, res2] = await Promise.all([fetch(url + "/doc1.json"), fetch(url + "/doc2.json")]);
+  const doc1 = await res1.json();
+  const doc2 = await res2.json();
+  let rejected = false;
+  try { await (await fetch(url + "/broken")).json(); } catch (e) { rejected = true; }
+  return JSON.stringify({ ...doc1, ...doc2 }) + "|" + rejected;
+}
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+async fn fetched_json_documents_merge_like_node() -> Result<()> {
+    let server = http_fixture::HttpFixture::new(|request| match request.target.as_str() {
+        "/doc1.json" => http_fixture::Reply::Body(200, r#"{"b":1,"2":"x","a":[1,2]}"#.into()),
+        "/doc2.json" => {
+            http_fixture::Reply::Bytes(200, "\u{feff}{\"a\":null,\"1\":true,\"c\":\"é\"}".into())
+        }
+        _ => http_fixture::Reply::Body(200, "{\"a\":".into()),
+    });
+    // Recorded from Node 22.
+    assert_eq!(
+        run(MERGE, &server).await?,
+        r#"{"1":true,"2":"x","b":1,"a":null,"c":"é"}|true"#
+    );
     Ok(())
 }

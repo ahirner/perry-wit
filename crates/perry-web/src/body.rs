@@ -1,7 +1,7 @@
 //! Bodies, and constructed `Response` and `Request` objects.
 use crate::{
     headers::set_default,
-    readable::{Readable, decode, drain, snapshot_stream},
+    readable::{Form, Readable, decode, drain, settle_body, snapshot_stream, take_parsed},
     *,
 };
 
@@ -96,31 +96,74 @@ fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
     Some(unsafe { slice(body.data as u32, body.len) })
 }
 
-/// `await body.bytes()`: a fresh `Uint8Array` of the body.
-#[unsafe(no_mangle)]
-pub extern "C" fn web_body_bytes(object: *mut u8) -> *mut u8 {
+/// Read the whole body as `form`. A snapshot is handed over, not copied: once read, the
+/// body never exposes it again.
+fn read(object: *mut u8, form: Form) -> *mut u8 {
     let promise = promise_new();
     if !body(object).stream.is_null() {
-        drain(body(object).stream, false, promise);
+        drain(body(object).stream, form, promise);
     } else if let Some(contents) = consume(object, promise) {
-        let mut copy = Buffer::new();
-        copy.extend_from_slice(contents);
-        let view = bytes_view(contents.len() as u32, copy.as_slice().as_ptr() as *mut u8);
-        resolve(promise, view as usize as u64);
+        if form == Form::Json {
+            settle_json(promise, contents);
+        } else {
+            settle_body(promise, form, contents);
+        }
     }
     promise
+}
+
+/// `await body.bytes()`: a `Uint8Array` of the body.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_body_bytes(object: *mut u8) -> *mut u8 {
+    read(object, Form::Bytes)
 }
 
 /// `await body.text()`: the body decoded as UTF-8 (BOM removed, invalid bytes replaced).
 #[unsafe(no_mangle)]
 pub extern "C" fn web_body_text(object: *mut u8) -> *mut u8 {
-    let promise = promise_new();
-    if !body(object).stream.is_null() {
-        drain(body(object).stream, true, promise);
-    } else if let Some(contents) = consume(object, promise) {
-        resolve(promise, decode(contents) as usize as u64);
-    }
+    read(object, Form::Text)
+}
+
+/// `await body.json()`: the body's text parsed as JSON (`SyntaxError` if it is not).
+#[unsafe(no_mangle)]
+pub extern "C" fn web_body_json(object: *mut u8) -> *mut u8 {
+    let promise = read(object, Form::Json);
+    web_json_settle();
     promise
+}
+
+/// Parse the `json()` bodies read to their end since the last call. Compiled code calls
+/// this after each event when the program uses `json()`; stream readers only queue them.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_json_settle() {
+    take_parsed(settle_json);
+}
+
+fn settle_json(promise: *mut u8, contents: &[u8]) {
+    // SAFETY: `decode` returns a string.
+    let text = unsafe { bytes(decode(contents)) };
+    match parse_json(text) {
+        Some(root) => resolve(promise, root as usize as u64),
+        None => reject_with(
+            promise,
+            perry_abi::ERROR,
+            from_static("SyntaxError: Unexpected token in JSON"),
+        ),
+    }
+}
+
+/// `JSON.parse` through the JSON helper: the graph's root, or `None` for invalid text.
+fn parse_json(text: &[u8]) -> Option<*mut u8> {
+    // SAFETY: helper calls on a live input and a fresh disjoint output of the measured size.
+    unsafe {
+        let measured = helper::json_measure(text.as_ptr(), text.len() as u32);
+        if measured >> 32 != 0 {
+            return None;
+        }
+        let out = alloc(measured as u32);
+        let root = helper::json_populate(text.as_ptr(), text.len() as u32, out, measured as u32);
+        (root >> 32 == 0).then_some(root as u32 as usize as *mut u8)
+    }
 }
 
 // --- Response -----------------------------------------------------------------------------

@@ -37,7 +37,7 @@ impl Output<'_> {
             || byte >= 127
             || matches!(byte, b'"' | b'<' | b'>')
             || (query && byte == b'\'')
-            || (!query && matches!(byte, b'?' | b'^' | b'`' | b'{' | b'}'))
+            || (!query && matches!(byte, b'?' | b'`' | b'{' | b'}'))
         {
             self.byte(b'%')?;
             self.byte(b"0123456789ABCDEF"[(byte >> 4) as usize])?;

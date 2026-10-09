@@ -4,6 +4,14 @@
 //! 0, `next: u32` at 4, the payload at 8 (a number, a boolean, or a string's data and byte
 //! length), `first: u32` at 16, `count: u32` at 20, `key: u32` at 24 (a string node). The
 //! null address is `undefined`.
+//!
+//! Object spreads (`{ ...a, ...b, k: v }`) build new objects whose members are shallow
+//! copies of the sources' (values are immutable, so copies share their children). Members
+//! keep the order the sources list them in; ECMAScript's property order (array-index keys
+//! first, ascending, then the others in creation order, a repeated key keeping its first
+//! position and its last value) is applied once per object when it is first serialized or
+//! spread ([canonical]). Parsed objects go through the same step, so duplicate and numeric
+//! keys come out as in Node.
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise, utf16_length};
 
 const NULL: u32 = 1;
@@ -12,6 +20,11 @@ const NUMBER: u32 = 3;
 const STRING: u32 = 4;
 const ARRAY: u32 = 5;
 const OBJECT: u32 = 6;
+/// A member a spread set to `undefined`: it hides earlier values and is not serialized.
+const UNDEFINED: u32 = 0;
+/// Word 28 of an object: nonzero once its members are in property order.
+const CANONICAL: usize = 28;
+const NODE_BYTES: u32 = 32;
 
 fn word(node: *mut u8, offset: usize) -> u32 {
     // SAFETY: compiled code passes graph nodes.
@@ -20,6 +33,51 @@ fn word(node: *mut u8, offset: usize) -> u32 {
 
 fn node(address: u32) -> *mut u8 {
     address as usize as *mut u8
+}
+
+fn set_word(node: *mut u8, offset: usize, value: u32) {
+    // SAFETY: callers pass nodes they own.
+    unsafe { *(node.add(offset) as *mut u32) = value }
+}
+
+fn address(node: *mut u8) -> u32 {
+    node as usize as u32
+}
+
+/// A fresh zeroed node of `kind`.
+fn new_node(kind: u32) -> *mut u8 {
+    let node = crate::runtime::alloc(NODE_BYTES);
+    // SAFETY: a fresh block of `NODE_BYTES`.
+    unsafe { core::ptr::write_bytes(node, 0, NODE_BYTES as usize) };
+    set_word(node, 0, kind);
+    node
+}
+
+/// A string node over `bytes`, which must live in the task region.
+fn string_node(bytes: &[u8]) -> *mut u8 {
+    let node = new_node(STRING);
+    set_word(node, 8, bytes.as_ptr() as usize as u32);
+    set_word(node, 12, bytes.len() as u32);
+    // Word 16 of a string node is its scalar count, as the parser writes it.
+    set_word(
+        node,
+        16,
+        bytes.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32,
+    );
+    node
+}
+
+/// Scratch words in the task region.
+fn words(count: usize) -> &'static mut [u32] {
+    if count == 0 {
+        return &mut [];
+    }
+    let data = crate::runtime::alloc((count * 4) as u32) as *mut u32;
+    // SAFETY: a fresh block of `count` words.
+    unsafe {
+        core::ptr::write_bytes(data, 0, count);
+        core::slice::from_raw_parts_mut(data, count)
+    }
 }
 
 fn string_bytes(node: *mut u8) -> &'static [u8] {
@@ -55,6 +113,9 @@ pub unsafe extern "C" fn std_json_member(value: *mut u8, name: *mut u8) -> *mut 
             found = node(child);
         }
         child = word(node(child), 4);
+    }
+    if !found.is_null() && word(found, 0) == UNDEFINED {
+        return core::ptr::null_mut();
     }
     found
 }
@@ -337,10 +398,17 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
         }
         STRING => quote(text, string_bytes(value)),
         kind @ (ARRAY | OBJECT) => {
+            if kind == OBJECT {
+                canonical(value);
+            }
             text.push(if kind == ARRAY { b'[' } else { b'{' });
             let mut child = word(value, 16);
             let mut first = true;
             while child != 0 {
+                if word(node(child), 0) == UNDEFINED {
+                    child = word(node(child), 4);
+                    continue;
+                }
                 if !first {
                     text.push(b',');
                 }
@@ -372,4 +440,274 @@ pub extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
     if !value_text(&mut w.text, value, w.depth) {
         w.failed = true;
     }
+}
+
+/// The array index a key names (a canonical decimal below 2³² − 1), if any.
+fn array_index(key: &[u8]) -> Option<u32> {
+    if key.is_empty() || key.len() > 10 || (key[0] == b'0' && key.len() > 1) {
+        return None;
+    }
+    let mut value = 0u64;
+    for &digit in key {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + u64::from(digit - b'0');
+    }
+    (value < u64::from(u32::MAX)).then_some(value as u32)
+}
+
+fn key_bytes(member: u32) -> &'static [u8] {
+    string_bytes(node(word(node(member), 24)))
+}
+
+/// Put an object's members in ECMAScript property order, once: array-index keys first in
+/// ascending order, then the others in creation order; a repeated key keeps its first
+/// position and takes its last value. Reordered members are copied, so shallow copies of
+/// the object that still share the old member list are unaffected.
+fn canonical(object: *mut u8) {
+    if word(object, CANONICAL) != 0 {
+        return;
+    }
+    set_word(object, CANONICAL, 1);
+    let count = word(object, 20) as usize;
+    if count < 2 {
+        return;
+    }
+    let members = words(count);
+    let mut child = word(object, 16);
+    for slot in members.iter_mut() {
+        *slot = child;
+        child = word(node(child), 4);
+    }
+    // Deduplicate through an open-addressing table of entry positions (+1).
+    let size = (count * 2).next_power_of_two();
+    let table = words(size);
+    let entries = words(count);
+    let mut unique = 0;
+    for &member in members.iter() {
+        let key = key_bytes(member);
+        let mut hash = 0x811c_9dc5u32;
+        for &byte in key {
+            hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+        }
+        let mut at = hash as usize & (size - 1);
+        loop {
+            match table[at] {
+                0 => {
+                    table[at] = unique as u32 + 1;
+                    entries[unique] = member;
+                    unique += 1;
+                    break;
+                }
+                slot if key_bytes(entries[slot as usize - 1]) == key => {
+                    entries[slot as usize - 1] = member;
+                    break;
+                }
+                _ => at = (at + 1) & (size - 1),
+            }
+        }
+    }
+    let entries = &mut entries[..unique];
+    // Array-index keys move to the front in ascending order (keys are unique now).
+    let indexed = words(unique * 2);
+    let mut indices = 0;
+    for (position, &member) in entries.iter().enumerate() {
+        if let Some(index) = array_index(key_bytes(member)) {
+            indexed[indices * 2] = index;
+            indexed[indices * 2 + 1] = position as u32;
+            indices += 1;
+        }
+    }
+    let order = words(unique);
+    if indices > 0 {
+        // SAFETY: pairs of words reinterpreted as `u64` (index in the high word).
+        let pairs =
+            unsafe { core::slice::from_raw_parts_mut(indexed.as_mut_ptr() as *mut u64, indices) };
+        for pair in pairs.iter_mut() {
+            *pair = pair.rotate_left(32);
+        }
+        heapsort(pairs);
+        for (slot, pair) in order.iter_mut().zip(pairs.iter()) {
+            *slot = entries[*pair as u32 as usize];
+        }
+    }
+    let mut next = indices;
+    for &member in entries.iter() {
+        if array_index(key_bytes(member)).is_none() {
+            order[next] = member;
+            next += 1;
+        }
+    }
+    if order[..] == members[..] {
+        return;
+    }
+    let mut previous: *mut u8 = core::ptr::null_mut();
+    for &member in order.iter() {
+        let copy = crate::runtime::alloc(NODE_BYTES);
+        // SAFETY: both are `NODE_BYTES` blocks.
+        unsafe { core::ptr::copy_nonoverlapping(node(member), copy, NODE_BYTES as usize) };
+        set_word(copy, 4, 0);
+        if previous.is_null() {
+            set_word(object, 16, address(copy));
+        } else {
+            set_word(previous, 4, address(copy));
+        }
+        previous = copy;
+    }
+    set_word(object, 20, unique as u32);
+}
+
+/// In-place heapsort: `O(n log n)` like `sort_unstable`, at a tenth of its code.
+fn heapsort(values: &mut [u64]) {
+    fn sift(values: &mut [u64], mut root: usize, end: usize) {
+        loop {
+            let mut child = 2 * root + 1;
+            if child >= end {
+                return;
+            }
+            if child + 1 < end && values[child] < values[child + 1] {
+                child += 1;
+            }
+            if values[root] >= values[child] {
+                return;
+            }
+            values.swap(root, child);
+            root = child;
+        }
+    }
+    let len = values.len();
+    for root in (0..len / 2).rev() {
+        sift(values, root, len);
+    }
+    for end in (1..len).rev() {
+        values.swap(0, end);
+        sift(values, 0, end);
+    }
+}
+
+/// Append a shallow copy of `value` (or an `undefined` member) under `key` to an object
+/// under construction; word 8 tracks its last member.
+fn append(object: *mut u8, value: *mut u8, key: *mut u8) {
+    let copy = if value.is_null() {
+        new_node(UNDEFINED)
+    } else {
+        let copy = crate::runtime::alloc(NODE_BYTES);
+        // SAFETY: both are `NODE_BYTES` blocks.
+        unsafe { core::ptr::copy_nonoverlapping(value, copy, NODE_BYTES as usize) };
+        set_word(copy, 4, 0);
+        copy
+    };
+    set_word(copy, 24, address(key));
+    match word(object, 8) {
+        0 => set_word(object, 16, address(copy)),
+        last => set_word(node(last), 4, address(copy)),
+    }
+    set_word(object, 8, address(copy));
+    set_word(object, 20, word(object, 20) + 1);
+    set_word(object, CANONICAL, 0);
+}
+
+/// A key node for array index `index`.
+fn index_key(index: u32) -> *mut u8 {
+    let mut digits = [0u8; 10];
+    let mut at = digits.len();
+    let mut rest = index;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    let data = crate::runtime::alloc((digits.len() - at) as u32);
+    // SAFETY: a fresh block of the digits' length.
+    let text = unsafe {
+        core::ptr::copy_nonoverlapping(digits[at..].as_ptr(), data, digits.len() - at);
+        core::slice::from_raw_parts(data, digits.len() - at)
+    };
+    string_node(text)
+}
+
+/// `{}`: the object a spread literal starts from.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_json_object() -> *mut u8 {
+    new_node(OBJECT)
+}
+
+/// `...source` in an object literal: an object's members, an array's elements or a string's
+/// characters under their indices; other values add nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
+    if source.is_null() {
+        return;
+    }
+    match word(source, 0) {
+        OBJECT => {
+            let mut child = word(source, 16);
+            while child != 0 {
+                append(object, node(child), node(word(node(child), 24)));
+                child = word(node(child), 4);
+            }
+        }
+        ARRAY => {
+            let mut child = word(source, 16);
+            let mut index = 0;
+            while child != 0 {
+                append(object, node(child), index_key(index));
+                index += 1;
+                child = word(node(child), 4);
+            }
+        }
+        STRING => {
+            let text = string_bytes(source);
+            let (mut at, mut index) = (0, 0);
+            for character in core::str::from_utf8(text).unwrap_or("").chars() {
+                let width = character.len_utf8();
+                append(object, string_node(&text[at..at + width]), index_key(index));
+                at += width;
+                index += 1;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `key: value` in an object literal with spreads.
+///
+/// # Safety
+/// `key` must be a string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_json_set(object: *mut u8, key: *mut u8, value: *mut u8) {
+    // SAFETY: guaranteed by the caller; strings live in the task region.
+    let key = string_node(unsafe { crate::runtime::bytes(key) });
+    append(object, value, key);
+}
+
+/// A number as a JSON value.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
+    let node = new_node(NUMBER);
+    // SAFETY: number nodes hold an f64 at 8.
+    unsafe { *(node.add(8) as *mut f64) = value };
+    node
+}
+
+/// A string as a JSON value.
+///
+/// # Safety
+/// `value` must be a string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_json_from_string(value: *mut u8) -> *mut u8 {
+    // SAFETY: guaranteed by the caller; strings live in the task region.
+    string_node(unsafe { crate::runtime::bytes(value) })
+}
+
+/// A boolean (`kind` 2) or `null` (`kind` 1) as a JSON value.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_json_from_scalar(kind: u32, truth: u32) -> *mut u8 {
+    let node = new_node(kind);
+    set_word(node, 8, truth);
+    node
 }

@@ -1,14 +1,16 @@
-use super::{
-    Error, Kind, MAX_DEPTH, NODE_BYTES,
-    storage::{Buffer, Measure, Output},
-};
+use super::{Error, Kind, MAX_DEPTH, NODE_BYTES, storage::Storage};
 
 /// Validates a document and computes its exact node/data storage requirement.
 pub fn measure(input: &str) -> Result<usize, Error> {
     let mut parser = Parser {
         input,
         position: 0,
-        output: Measure { length: 0 },
+        output: Storage {
+            bytes: &mut [],
+            length: 0,
+            base: 0,
+            stores: false,
+        },
     };
     parser.document()?;
     Ok(parser.output.length)
@@ -17,27 +19,29 @@ pub fn measure(input: &str) -> Result<usize, Error> {
 /// Writes a validated graph using absolute addresses relative to `base`.
 /// Nodes contain kind, next sibling, payload, first child, count, and member key.
 /// String payloads contain a data address and byte length; offset 16 is scalar length.
+/// Word 28 is zero: the runtime marks objects whose members it has put in property order.
 pub fn populate(input: &str, output: &mut [u8], base: u32) -> Result<u32, Error> {
     let mut parser = Parser {
         input,
         position: 0,
-        output: Buffer {
+        output: Storage {
             bytes: output,
             length: 0,
             base,
+            stores: true,
         },
     };
     let root = parser.document()?;
     parser.output.address(root)
 }
 
-struct Parser<'a, W> {
+struct Parser<'a> {
     input: &'a str,
     position: usize,
-    output: W,
+    output: Storage<'a>,
 }
 
-impl<W: Output> Parser<'_, W> {
+impl Parser<'_> {
     fn document(&mut self) -> Result<usize, Error> {
         let root = self.value(0)?;
         self.whitespace();
@@ -53,7 +57,7 @@ impl<W: Output> Parser<'_, W> {
             return Err(Error::Depth(self.position));
         }
         let node = self.output.reserve(NODE_BYTES, 8)?;
-        self.pointer(node + 28, 0)?;
+        self.word(node + 28, 0)?;
         match self.peek() {
             Some(b'n') => {
                 self.keyword(b"null")?;
@@ -128,11 +132,12 @@ impl<W: Output> Parser<'_, W> {
                     }
                     self.digits()?;
                 }
-                let value = self.input[start..self.position]
-                    .parse::<f64>()
-                    .map_err(|_| Error::Syntax(start))?;
                 self.word(node, Kind::Number as u32)?;
-                self.output.write(node + 8, &value.to_le_bytes())?;
+                if self.output.stores {
+                    let literal = &self.input.as_bytes()[start..self.position];
+                    let value = super::number::parse_number(literal);
+                    self.output.write(node + 8, &value.to_le_bytes())?;
+                }
             }
             _ => return Err(Error::Syntax(self.position)),
         }
@@ -190,12 +195,26 @@ impl<W: Output> Parser<'_, W> {
                 }
                 None | Some(0..=31) => return Err(Error::Syntax(self.position)),
                 Some(_) => {
-                    let scalar = self.input[self.position..]
-                        .chars()
-                        .next()
-                        .ok_or(Error::Syntax(self.position))?;
-                    self.position += scalar.len_utf8();
-                    scalar
+                    // A run of unescaped bytes, copied as is: the input is valid UTF-8.
+                    let bytes = self.input.as_bytes();
+                    let start = self.position;
+                    while bytes
+                        .get(self.position)
+                        .is_some_and(|&b| b >= 0x20 && b != b'"' && b != b'\\')
+                    {
+                        self.position += 1;
+                    }
+                    let run = &bytes[start..self.position];
+                    let destination = self.output.reserve(run.len(), 1)?;
+                    self.output.write(destination, run)?;
+                    byte_length = byte_length
+                        .checked_add(run.len() as u32)
+                        .ok_or(Error::Capacity)?;
+                    let scalars = run.iter().filter(|&&b| b & 0xC0 != 0x80).count();
+                    scalar_length = scalar_length
+                        .checked_add(scalars as u32)
+                        .ok_or(Error::Capacity)?;
+                    continue;
                 }
             };
             let mut bytes = [0; 4];
@@ -208,7 +227,7 @@ impl<W: Output> Parser<'_, W> {
             scalar_length = scalar_length.checked_add(1).ok_or(Error::Capacity)?;
         }
         self.word(node, Kind::String as u32)?;
-        self.pointer(node + 28, 0)?;
+        self.word(node + 28, 0)?;
         self.pointer(node + 8, start)?;
         self.word(node + 12, byte_length)?;
         self.word(node + 16, scalar_length)

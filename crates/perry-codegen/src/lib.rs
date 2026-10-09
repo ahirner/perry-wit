@@ -574,6 +574,8 @@ struct ModuleState {
     uses_streams: bool,
     /// Whether the module calls `fetch` (callbacks pass it events; tasks close its handles).
     uses_fetch: bool,
+    /// `json()` of a body: events also settle the bodies read to their end.
+    uses_json_bodies: bool,
     /// Operations whose previous results are dead whenever they run again (`lease`).
     leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
@@ -613,6 +615,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         uses_fs: false,
         uses_streams: false,
         uses_fetch: false,
+        uses_json_bodies: false,
         json_serializers: HashMap::new(),
         leased: HashSet::new(),
     };
@@ -1483,6 +1486,24 @@ impl<'s> FunctionLowering<'s> {
                 Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
             }
             Intrinsic::JsonIsUndefined => Some(self.num(ctx, NumOpcode::I32Eqz, args)),
+            // The null address is the JSON `undefined`.
+            Intrinsic::JsonUndefined => Some(self.i32_const(ctx, 0)),
+            Intrinsic::JsonFromBool | Intrinsic::JsonNull => {
+                // Node kinds of the JSON graph: 1 null, 2 boolean.
+                let null = intrinsic == Intrinsic::JsonNull;
+                let kind = self.i32_const(ctx, if null { 1 } else { 2 });
+                let truth = match args.first() {
+                    Some(&truth) => truth,
+                    None => self.i32_const(ctx, 0),
+                };
+                self.call(
+                    ctx,
+                    "std_json_from_scalar",
+                    &[W::I32, W::I32],
+                    &[W::I32],
+                    vec![kind, truth],
+                )
+            }
             Intrinsic::MathRandom => {
                 self.needs_import("wasi:random/insecure@0.3.0", "Math.random()")?;
                 self.call(ctx, "std_math_random", &[], &[W::F64], args)
@@ -1531,6 +1552,10 @@ impl<'s> FunctionLowering<'s> {
                     &[W::I32],
                     args,
                 )
+            }
+            Intrinsic::ResponseJson | Intrinsic::RequestJson => {
+                self.state.uses_json_bodies = true;
+                self.call(ctx, "web_body_json", &[W::I32], &[W::I32], args)
             }
             Intrinsic::ResponseBody | Intrinsic::RequestBody => {
                 self.state.uses_streams = true;
@@ -1634,6 +1659,11 @@ impl<'s> FunctionLowering<'s> {
                         Intrinsic::JsonToString => ("std_json_to_string", &[W::I32], &[W::I32]),
                         Intrinsic::JsonToBool => ("std_json_to_bool", &[W::I32], &[W::I32]),
                         Intrinsic::JsonTypeOf => ("std_json_type_of", &[W::I32], &[W::I32]),
+                        Intrinsic::JsonObject => ("std_json_object", &[], &[W::I32]),
+                        Intrinsic::JsonAssign => ("std_json_assign", &[W::I32, W::I32], &[]),
+                        Intrinsic::JsonSet => ("std_json_set", &[W::I32, W::I32, W::I32], &[]),
+                        Intrinsic::JsonFromNumber => ("std_json_from_number", &[W::F64], &[W::I32]),
+                        Intrinsic::JsonFromString => ("std_json_from_string", &[W::I32], &[W::I32]),
                         Intrinsic::StatsIsFile => ("fs_stats_is_file", &[W::I32], &[W::I32]),
                         Intrinsic::StatsIsDirectory => {
                             ("fs_stats_is_directory", &[W::I32], &[W::I32])

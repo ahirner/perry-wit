@@ -420,6 +420,9 @@ struct FunctionBuilder<'s> {
     ins: IRInserter<DummyListener>,
     block: Ptr<BasicBlock>,
     locals: HashMap<LocalId, Value>,
+    /// Iterator-protocol guards of array destructuring that are statically false: the
+    /// branches they select are not lowered.
+    false_guards: HashSet<LocalId>,
     loops: Vec<Loop>,
     handlers: Vec<Handler>,
     finallies: Vec<Finally>,
@@ -472,6 +475,7 @@ impl<'s> FunctionBuilder<'s> {
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
             locals: HashMap::new(),
+            false_guards: HashSet::new(),
             loops: Vec::new(),
             handlers: Vec::new(),
             finallies: Vec::new(),
@@ -702,12 +706,14 @@ impl<'s> FunctionBuilder<'s> {
             (Kind::Response, "bodyUsed", false) => (Intrinsic::ResponseBodyUsed, vec![receiver]),
             (Kind::Response, "bytes", true) => (Intrinsic::ResponseBytes, vec![receiver]),
             (Kind::Response, "text", true) => (Intrinsic::ResponseText, vec![receiver]),
+            (Kind::Response, "json", true) => (Intrinsic::ResponseJson, vec![receiver]),
             (Kind::Request, "method", false) => (Intrinsic::RequestMethod, vec![receiver]),
             (Kind::Request, "url", false) => (Intrinsic::RequestUrl, vec![receiver]),
             (Kind::Request, "headers", false) => (Intrinsic::RequestHeaders, vec![receiver]),
             (Kind::Request, "bodyUsed", false) => (Intrinsic::RequestBodyUsed, vec![receiver]),
             (Kind::Request, "bytes", true) => (Intrinsic::RequestBytes, vec![receiver]),
             (Kind::Request, "text", true) => (Intrinsic::RequestText, vec![receiver]),
+            (Kind::Request, "json", true) => (Intrinsic::RequestJson, vec![receiver]),
             (Kind::Writable, "locked", false) => (Intrinsic::WritableLocked, vec![receiver]),
             (Kind::Writable, "getWriter", true) => (Intrinsic::WritableGetWriter, vec![receiver]),
             (Kind::Writer, "write", true) => {
@@ -1131,19 +1137,100 @@ impl<'s> FunctionBuilder<'s> {
     // ── Statements ─────────────────────────────────────────────────────────
 
     fn statements(&mut self, ctx: &mut Context, statements: &[Stmt]) -> Result<()> {
-        for statement in statements {
-            self.statement(ctx, statement)?;
+        let mut index = 0;
+        while index < statements.len() {
+            if let Some(element) = self.destructured_element(&statements[index..]) {
+                self.statement(ctx, &element)?;
+                index += 2;
+                continue;
+            }
+            self.statement(ctx, &statements[index])?;
+            index += 1;
         }
         Ok(())
     }
 
+    /// Array destructuring declares each element as `let e = undefined` and assigns it in
+    /// `if (guard) { <iterator pull> } else { e = i < a.length ? a[i] : undefined }`. With a
+    /// statically false guard this is `let e = a[i]` (a read that is `undefined` out of
+    /// bounds, R8).
+    fn destructured_element(&self, statements: &[Stmt]) -> Option<Stmt> {
+        let [
+            Stmt::Let {
+                id,
+                name,
+                ty: HirType::Any,
+                init: Some(Expr::Undefined),
+                ..
+            },
+            Stmt::If {
+                condition: Expr::LocalGet(guard),
+                else_branch: Some(else_branch),
+                ..
+            },
+            ..,
+        ] = statements
+        else {
+            return None;
+        };
+        let [Stmt::Expr(Expr::LocalSet(target, value))] = else_branch.as_slice() else {
+            return None;
+        };
+        if target != id || !self.false_guards.contains(guard) {
+            return None;
+        }
+        let value = match &**value {
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } if matches!(**else_expr, Expr::Undefined)
+                && matches!(**then_expr, Expr::IndexGet { .. }) =>
+            {
+                (**then_expr).clone()
+            }
+            other => other.clone(),
+        };
+        Some(Stmt::Let {
+            id: *id,
+            name: name.clone(),
+            ty: HirType::Any,
+            mutable: false,
+            init: Some(value),
+        })
+    }
+
     fn statement(&mut self, ctx: &mut Context, statement: &Stmt) -> Result<()> {
         match statement {
+            Stmt::Let {
+                id,
+                init: Some(guard),
+                ..
+            } if self.iterator_guard(ctx, guard)? => {
+                self.false_guards.insert(*id);
+            }
+            // The iterator of the protocol arm (`guard ? GetIterator(a) : undefined`).
+            Stmt::Let {
+                init: Some(Expr::Conditional { condition, .. }),
+                ..
+            } if matches!(condition.as_ref(), Expr::LocalGet(guard) if self.false_guards.contains(guard)) =>
+                {}
+            Stmt::If {
+                condition: Expr::LocalGet(guard),
+                else_branch,
+                ..
+            } if self.false_guards.contains(guard) => {
+                if let Some(else_branch) = else_branch {
+                    self.statements(ctx, else_branch)?;
+                }
+            }
             Stmt::Let { id, ty, init, .. } => {
                 // Perry HIR leaves some bindings untyped (`Any`); those take the initializer's
                 // type. An explicit type the subset cannot represent is an error, not a fallback.
+                // `Array(Any)` is such a binding too (array destructuring's element source).
                 let declared = match ty {
                     HirType::Any | HirType::Unknown => None,
+                    HirType::Array(element) if matches!(**element, HirType::Any) => None,
                     ty => Some(self.shapes.value_type(ctx, ty)?),
                 };
                 let init = init
@@ -1528,6 +1615,13 @@ impl<'s> FunctionBuilder<'s> {
                 self.jump(ctx, join);
                 self.switch_to(join);
                 self.load(ctx, result)?
+            }
+            Expr::Conditional {
+                condition,
+                else_expr,
+                ..
+            } if matches!(&**condition, Expr::LocalGet(guard) if self.false_guards.contains(guard)) => {
+                self.expression(ctx, else_expr)?
             }
             Expr::Conditional {
                 condition,
@@ -2076,6 +2170,132 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
+    /// Whether `expr` is array destructuring's guard for the iterator protocol, which is
+    /// false for MIR arrays: they are plain arrays, and `Array.prototype[Symbol.iterator]`
+    /// cannot be patched. Other sources are an error.
+    fn iterator_guard(&mut self, ctx: &mut Context, expr: &Expr) -> Result<bool> {
+        let source = match expr {
+            Expr::ArrayIterationPatched => return Ok(true),
+            Expr::NativeMethodCall {
+                module,
+                object: None,
+                method,
+                args,
+                ..
+            } if module == "__perry_runtime" && method == "arrayDestructureNeedsIterator" => {
+                let [source] = args.as_slice() else {
+                    bail!("arrayDestructureNeedsIterator takes one value");
+                };
+                source
+            }
+            _ => return Ok(false),
+        };
+        let source = self.expression(ctx, source)?;
+        ensure!(
+            kind(ctx, source)? == Kind::Array,
+            "array destructuring is supported for arrays so far"
+        );
+        Ok(true)
+    }
+
+    /// An object literal with spreads, which Perry HIR lowers to a source-ordered IIFE over
+    /// `{}` (`__o`): `js_object_assign_one(__o, source)` per spread and `__o[key] = value`
+    /// per static member. Over JSON values it builds a JSON object; typed records do not
+    /// spread yet.
+    fn object_spread(
+        &mut self,
+        ctx: &mut Context,
+        target: LocalId,
+        body: &[Stmt],
+    ) -> Result<Value> {
+        const UNSUPPORTED: &str = "object spread is supported over JSON values (JSON.parse, \
+            response.json()) with static keys; computed keys, methods and accessors are not";
+        let object = self
+            .intrinsic(ctx, Intrinsic::JsonObject, vec![])
+            .expect("object");
+        let is_target = |expr: &Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
+        for statement in body {
+            match statement {
+                Stmt::Expr(Expr::Call { callee, args, .. })
+                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
+                        if name == "js_object_assign_one")
+                        && args.len() == 2
+                        && is_target(&args[0]) =>
+                {
+                    let source = self.expression(ctx, &args[1])?;
+                    let Some(source) = self.json_operand(ctx, source)? else {
+                        bail!("{UNSUPPORTED}");
+                    };
+                    self.intrinsic(ctx, Intrinsic::JsonAssign, vec![object, source]);
+                }
+                Stmt::Expr(Expr::IndexSet {
+                    object: set,
+                    index,
+                    value,
+                }) if is_target(set) => {
+                    let Expr::String(key) = &**index else {
+                        bail!("{UNSUPPORTED}");
+                    };
+                    let key = self.string(ctx, key);
+                    let value = self.json_value(ctx, value)?;
+                    self.intrinsic(ctx, Intrinsic::JsonSet, vec![object, key, value]);
+                }
+                Stmt::Return(Some(result)) if is_target(result) => {}
+                _ => bail!("{UNSUPPORTED}"),
+            }
+        }
+        Ok(object)
+    }
+
+    /// A JSON value, or `Json | undefined` (an array element) as one: the JSON `undefined` is
+    /// the null address. `None` for other types.
+    fn json_operand(&mut self, ctx: &mut Context, value: Value) -> Result<Option<Value>> {
+        let ty = value.get_type(ctx);
+        if ty.deref(ctx).is::<JsonType>() {
+            return Ok(Some(value));
+        }
+        if !optional_value(ctx, ty).is_some_and(|inner| inner.deref(ctx).is::<JsonType>()) {
+            return Ok(None);
+        }
+        let json = JsonType::get(ctx).into();
+        let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+        self.choose(
+            ctx,
+            json,
+            undefined,
+            |b, ctx| {
+                Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
+                    .expect("json"))
+            },
+            |b, ctx| b.defined(ctx, value),
+        )
+        .map(Some)
+    }
+
+    /// A member value of a JSON object literal: a JSON value, or a number, string, boolean
+    /// or `null` converted to one.
+    fn json_value(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+        if matches!(expr, Expr::Null) {
+            return Ok(self
+                .intrinsic(ctx, Intrinsic::JsonNull, vec![])
+                .expect("json"));
+        }
+        let value = self.expression(ctx, expr)?;
+        if let Some(json) = self.json_operand(ctx, value)? {
+            return Ok(json);
+        }
+        let intrinsic = match kind(ctx, value)? {
+            Kind::Number => Intrinsic::JsonFromNumber,
+            Kind::String => Intrinsic::JsonFromString,
+            Kind::Boolean => Intrinsic::JsonFromBool,
+            _ => bail!(
+                "members of a spread object literal are JSON values, numbers, strings, \
+                 booleans or null so far"
+            ),
+        };
+        Ok(self.intrinsic(ctx, intrinsic, vec![value]).expect("json"))
+    }
+
     /// `typeof value`: static, except for `undefined` and JSON values.
     fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         if let Some(inner) = optional_value(ctx, value.get_type(ctx)) {
@@ -2552,6 +2772,18 @@ impl<'s> FunctionBuilder<'s> {
         otherwise: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
     ) -> Result<Value> {
         let ty = StringType::get(ctx).into();
+        self.choose(ctx, ty, condition, then, otherwise)
+    }
+
+    /// A value of type `ty` from one of two branches.
+    fn choose(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        condition: Value,
+        then: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+        otherwise: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+    ) -> Result<Value> {
         let slot = self.entry_slot(ctx, ty);
         let then_block = self.new_block(ctx, "then");
         let else_block = self.new_block(ctx, "else");
@@ -2624,6 +2856,16 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn call(&mut self, ctx: &mut Context, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::Closure { params, body, .. } = callee
+            && let [param] = params.as_slice()
+            && param.name == "__perry_obj_iife"
+        {
+            ensure!(
+                matches!(args, [Expr::Object(fields)] if fields.is_empty()),
+                "object literals with methods are not supported yet"
+            );
+            return self.object_spread(ctx, param.id, body).map(Some);
+        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee

@@ -1,14 +1,13 @@
 //! Allocation-free JSON parsing into caller-owned typed nodes.
 
+#[path = "json/number.rs"]
+mod number;
 #[path = "json/parse.rs"]
 mod parse;
-#[path = "json/serialize.rs"]
-mod serialize;
 #[path = "json/storage.rs"]
 mod storage;
 
 pub use parse::{measure, populate};
-pub use serialize::{measure_serialized, serialize};
 
 const NODE_BYTES: usize = 32;
 const MAX_DEPTH: usize = 128;
@@ -29,5 +28,4 @@ pub enum Error {
     UnpairedSurrogate(usize),
     Depth(usize),
     Capacity,
-    InvalidGraph,
 }

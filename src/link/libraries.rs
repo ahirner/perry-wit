@@ -56,9 +56,7 @@ impl LibraryId {
             | "str_split_populate"
             | "str_join_total_len"
             | "str_join" => Self::Text,
-            "json_measure" | "json_populate" | "json_serialized_size" | "json_serialize" => {
-                Self::Json
-            }
+            "json_measure" | "json_populate" => Self::Json,
             "time_date_iso"
             | "time_date_parse"
             | "time_date_part"

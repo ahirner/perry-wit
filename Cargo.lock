@@ -1443,9 +1443,6 @@ dependencies = [
 [[package]]
 name = "perry-json-helper"
 version = "0.1.0"
-dependencies = [
- "ryu-js",
-]
 
 [[package]]
 name = "perry-lower"

@@ -577,6 +577,11 @@ fn async_export(
         }
         b.br(ctx, next, vec![]);
         b.block = next;
+        if b.state.uses_json_bodies {
+            // Bodies an event finished reading for `json()` are parsed here, so that the
+            // stream machinery does not link the JSON parser.
+            b.call(ctx, "web_json_settle", &[], &[], vec![]);
+        }
         let call = CallOp::new(ctx, finish_name, vec![], vec![i32]);
         let code = b.result(ctx, call.get_operation());
         let ret = ReturnOp::new(ctx, vec![code]).get_operation();
