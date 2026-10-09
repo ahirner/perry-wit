@@ -41,17 +41,104 @@ struct Parser<'a> {
     output: Storage<'a>,
 }
 
+/// An array or object being parsed: its node, the last member linked, the member count and
+/// (objects) the key node of the member being parsed.
+#[derive(Clone, Copy)]
+struct Open {
+    node: usize,
+    previous: Option<usize>,
+    count: u32,
+    key: usize,
+    object: bool,
+}
+
+const CLOSED: Open = Open {
+    node: 0,
+    previous: None,
+    count: 0,
+    key: 0,
+    object: false,
+};
+
 impl Parser<'_> {
+    /// One loop over values with an explicit stack of open containers instead of recursion:
+    /// the frame is fixed, so the linker can bound the stack of programs that parse JSON.
+    /// Nodes are reserved in document order (a container, then each member's key and value).
     fn document(&mut self) -> Result<usize, Error> {
-        let root = self.value(0)?;
-        self.whitespace();
-        if self.position != self.input.len() {
-            return Err(Error::Syntax(self.position));
+        let mut stack = [CLOSED; MAX_DEPTH];
+        let mut depth = 0;
+        loop {
+            let (mut node, opened) = self.value(depth)?;
+            if let Some(object) = opened {
+                let end = if object { b'}' } else { b']' };
+                self.whitespace();
+                if self.peek() != Some(end) {
+                    stack[depth] = Open {
+                        node,
+                        object,
+                        ..CLOSED
+                    };
+                    depth += 1;
+                    if object {
+                        stack[depth - 1].key = self.key()?;
+                    }
+                    continue;
+                }
+                self.position += 1;
+                self.word(node + 20, 0)?;
+            }
+            // `node` is complete: link it into its container, closing containers it ends.
+            loop {
+                let Some(open) = depth.checked_sub(1).map(|top| &mut stack[top]) else {
+                    self.whitespace();
+                    if self.position != self.input.len() {
+                        return Err(Error::Syntax(self.position));
+                    }
+                    return Ok(node);
+                };
+                let open = *open;
+                if open.object {
+                    self.pointer(node + 24, open.key)?;
+                }
+                match open.previous {
+                    Some(previous) => self.pointer(previous + 4, node)?,
+                    None => self.pointer(open.node + 16, node)?,
+                }
+                let count = open.count.checked_add(1).ok_or(Error::Capacity)?;
+                stack[depth - 1].previous = Some(node);
+                stack[depth - 1].count = count;
+                self.whitespace();
+                let end = if open.object { b'}' } else { b']' };
+                if self.peek() == Some(end) {
+                    self.position += 1;
+                    self.word(open.node + 20, count)?;
+                    depth -= 1;
+                    node = open.node;
+                    continue;
+                }
+                self.expect(b',')?;
+                if open.object {
+                    stack[depth - 1].key = self.key()?;
+                }
+                break;
+            }
         }
-        Ok(root)
     }
 
-    fn value(&mut self, depth: usize) -> Result<usize, Error> {
+    /// An object member's key and colon: the key's string node.
+    fn key(&mut self) -> Result<usize, Error> {
+        self.whitespace();
+        let key = self.output.reserve(NODE_BYTES, 8)?;
+        self.string(key)?;
+        self.whitespace();
+        self.expect(b':')?;
+        Ok(key)
+    }
+
+    /// Parse a scalar value, or open an array or object (its kind written, the bracket
+    /// consumed; [Parser::document] parses its members). Returns the node and, for a
+    /// container, whether it is an object.
+    fn value(&mut self, depth: usize) -> Result<(usize, Option<bool>), Error> {
         self.whitespace();
         if depth >= MAX_DEPTH {
             return Err(Error::Depth(self.position));
@@ -74,42 +161,7 @@ impl Parser<'_> {
                 let object = self.peek() == Some(b'{');
                 self.position += 1;
                 self.word(node, if object { Kind::Object } else { Kind::Array } as u32)?;
-                let end = if object { b'}' } else { b']' };
-                let mut previous = None;
-                let mut count = 0u32;
-                self.whitespace();
-                if self.peek() != Some(end) {
-                    loop {
-                        let key = if object {
-                            self.whitespace();
-                            let key = self.output.reserve(NODE_BYTES, 8)?;
-                            self.string(key)?;
-                            self.whitespace();
-                            self.expect(b':')?;
-                            Some(key)
-                        } else {
-                            None
-                        };
-                        let child = self.value(depth + 1)?;
-                        if let Some(key) = key {
-                            self.pointer(child + 24, key)?;
-                        }
-                        if let Some(previous) = previous {
-                            self.pointer(previous + 4, child)?;
-                        } else {
-                            self.pointer(node + 16, child)?;
-                        }
-                        previous = Some(child);
-                        count = count.checked_add(1).ok_or(Error::Capacity)?;
-                        self.whitespace();
-                        if self.peek() == Some(end) {
-                            break;
-                        }
-                        self.expect(b',')?;
-                    }
-                }
-                self.expect(end)?;
-                self.word(node + 20, count)?;
+                return Ok((node, Some(object)));
             }
             Some(b'-' | b'0'..=b'9') => {
                 let start = self.position;
@@ -141,7 +193,7 @@ impl Parser<'_> {
             }
             _ => return Err(Error::Syntax(self.position)),
         }
-        Ok(node)
+        Ok((node, None))
     }
 
     fn string(&mut self, node: usize) -> Result<(), Error> {

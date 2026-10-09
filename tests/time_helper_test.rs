@@ -80,7 +80,7 @@ fn linked_time_and_json_share_memory_and_keep_exact_immutable_values() -> Result
     let mut placement = libraries::HelperMemory::new(59_004);
     placement.place(&libraries::Library::parse(libraries::JSON)?, None)?;
     placement.place(&libraries::Library::parse(libraries::TIME)?, None)?;
-    let data_end = (placement.stack_top()? - 65_536) as usize;
+    let data_end = placement.data_end() as usize;
     assert_eq!(
         &guest.memory.data(&guest.store)[..data_end],
         &reserved[..data_end]

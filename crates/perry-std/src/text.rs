@@ -98,7 +98,11 @@ pub extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *mut u8 
         return substring(&view, position, position + 1);
     }
     let from = offset(view.text, false, position);
-    let scalar = view.text[from..].chars().next().expect("in range");
+    let scalar = view
+        .text
+        .get(from..)
+        .and_then(|rest| rest.chars().next())
+        .unwrap_or('\0');
     if scalar.len_utf16() == 2 {
         // Half of a surrogate pair.
         return from_static("\u{FFFD}");
@@ -143,10 +147,40 @@ pub extern "C" fn std_string_index_of(string: *mut u8, needle: *mut u8, position
     let needle = self::view(needle).text;
     let start = clamp(position, view.units);
     let from = offset(view.text, view.ascii, start);
-    match view.text[from..].find(needle) {
+    match find(tail(view.text, from), needle.as_bytes()) {
         Some(found) => position_of(&view, from + found) as f64,
         None => -1.0,
     }
+}
+
+/// The bytes of `text` from `from`, and up to `to`. Searching bytes is exact for UTF-8: a
+/// match of a valid needle starts at a scalar boundary. Byte searches avoid `core`'s
+/// two-way `str` searcher, which is larger and links a panic path the linker reads as
+/// recursion (keeping the conservative stack reservation).
+fn tail(text: &str, from: usize) -> &[u8] {
+    text.as_bytes().get(from..).unwrap_or(&[])
+}
+
+fn head(text: &str, to: usize) -> &[u8] {
+    text.as_bytes().get(..to).unwrap_or(&[])
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(haystack.len());
+    }
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
 }
 
 fn position_of(view: &View, offset: usize) -> u64 {
@@ -170,7 +204,7 @@ pub extern "C" fn std_string_last_index_of(string: *mut u8, needle: *mut u8, pos
     while !view.text.is_char_boundary(end) {
         end -= 1;
     }
-    match view.text[..end].rfind(needle) {
+    match rfind(head(view.text, end), needle.as_bytes()) {
         Some(found) => position_of(&view, found) as f64,
         None => -1.0,
     }
@@ -182,7 +216,7 @@ pub extern "C" fn std_string_starts_with(string: *mut u8, needle: *mut u8, posit
     let view = view(string);
     let needle = self::view(needle).text;
     let from = offset(view.text, view.ascii, clamp(position, view.units));
-    u32::from(view.text[from..].starts_with(needle))
+    u32::from(tail(view.text, from).starts_with(needle.as_bytes()))
 }
 
 /// `s.endsWith(needle, end)` (pass `+Infinity` for a missing end).
@@ -191,7 +225,7 @@ pub extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, end: f6
     let view = view(string);
     let needle = self::view(needle).text;
     let to = offset(view.text, view.ascii, clamp(end, view.units));
-    u32::from(view.text[..to].ends_with(needle))
+    u32::from(head(view.text, to).ends_with(needle.as_bytes()))
 }
 
 /// ECMAScript WhiteSpace and LineTerminator code points.

@@ -374,59 +374,91 @@ pub extern "C" fn std_json_type_of(value: *mut u8) -> *mut u8 {
     })
 }
 
+/// Write a parsed JSON value starting `depth` levels deep; false when it nests deeper than
+/// [MAX_DEPTH]. Iterative, with a fixed stack of open containers, so the linker can bound
+/// the stack of programs that serialize JSON values.
 fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
-    if depth > MAX_DEPTH {
-        return false;
+    /// An array or object being written: its node, its next member, and whether a member
+    /// was written (for separators).
+    #[derive(Clone, Copy)]
+    struct Open {
+        node: *mut u8,
+        next: u32,
+        written: bool,
     }
-    match word(value, 0) {
-        NULL => text.extend_from_slice(b"null"),
-        BOOLEAN => text.extend_from_slice(if word(value, 8) != 0 {
-            b"true"
-        } else {
-            b"false"
-        }),
-        NUMBER => {
-            // SAFETY: number nodes hold an f64 at 8.
-            let number = unsafe { *(value.add(8) as *const f64) };
-            if number.is_finite() {
-                let mut digits = [0u8; 40];
-                let len = crate::runtime::number_format(number, &mut digits);
-                text.extend_from_slice(&digits[..len]);
+    let mut stack = [Open {
+        node: core::ptr::null_mut(),
+        next: 0,
+        written: false,
+    }; MAX_DEPTH as usize + 1];
+    let mut open = 0usize;
+    let mut current = value;
+    loop {
+        if depth + open as u32 > MAX_DEPTH {
+            return false;
+        }
+        match word(current, 0) {
+            NULL => text.extend_from_slice(b"null"),
+            BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
+                b"true"
             } else {
-                text.extend_from_slice(b"null");
-            }
-        }
-        STRING => quote(text, string_bytes(value)),
-        kind @ (ARRAY | OBJECT) => {
-            if kind == OBJECT {
-                canonical(value);
-            }
-            text.push(if kind == ARRAY { b'[' } else { b'{' });
-            let mut child = word(value, 16);
-            let mut first = true;
-            while child != 0 {
-                if word(node(child), 0) == UNDEFINED {
-                    child = word(node(child), 4);
-                    continue;
+                b"false"
+            }),
+            NUMBER => {
+                // SAFETY: number nodes hold an f64 at 8.
+                let number = unsafe { *(current.add(8) as *const f64) };
+                if number.is_finite() {
+                    let mut digits = [0u8; 40];
+                    let len = crate::runtime::number_format(number, &mut digits);
+                    text.extend_from_slice(&digits[..len]);
+                } else {
+                    text.extend_from_slice(b"null");
                 }
-                if !first {
-                    text.push(b',');
-                }
-                first = false;
+            }
+            STRING => quote(text, string_bytes(current)),
+            kind @ (ARRAY | OBJECT) => {
                 if kind == OBJECT {
-                    quote(text, string_bytes(node(word(node(child), 24))));
-                    text.push(b':');
+                    canonical(current);
                 }
-                if !value_text(text, node(child), depth + 1) {
-                    return false;
-                }
-                child = word(node(child), 4);
+                text.push(if kind == ARRAY { b'[' } else { b'{' });
+                stack[open] = Open {
+                    node: current,
+                    next: word(current, 16),
+                    written: false,
+                };
+                open += 1;
             }
-            text.push(if kind == ARRAY { b']' } else { b'}' });
+            _ => return false,
         }
-        _ => return false,
+        // The next member to write, closing the containers that are done.
+        loop {
+            let Some(top) = open.checked_sub(1) else {
+                return true;
+            };
+            let container = stack[top];
+            let mut member = container.next;
+            while member != 0 && word(node(member), 0) == UNDEFINED {
+                member = word(node(member), 4);
+            }
+            let object = word(container.node, 0) == OBJECT;
+            if member == 0 {
+                text.push(if object { b'}' } else { b']' });
+                open = top;
+                continue;
+            }
+            if container.written {
+                text.push(b',');
+            }
+            if object {
+                quote(text, string_bytes(node(word(node(member), 24))));
+                text.push(b':');
+            }
+            stack[top].next = word(node(member), 4);
+            stack[top].written = true;
+            current = node(member);
+            break;
+        }
     }
-    true
 }
 
 /// Append a parsed JSON value (`JSON.stringify` of `JSON.parse` output; `undefined` writes

@@ -41,9 +41,8 @@ fn linked_json_helpers_share_a_measured_layout_with_the_guest_heap() -> Result<(
         instance,
         memory,
     };
-    let helper_data = guest.memory.data(&guest.store)
-        [59_004..(placement.stack_top()? - 65_536) as usize]
-        .to_vec();
+    let helper_data =
+        guest.memory.data(&guest.store)[59_004..placement.data_end() as usize].to_vec();
     for input in [
         format!("{}0{}", "[".repeat(127), "]".repeat(127)),
         r#"{"b":5e-324,"1":"😀","a":1e21,"b":1e-7}"#.to_string(),

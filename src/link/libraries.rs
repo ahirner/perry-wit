@@ -126,6 +126,12 @@ impl HelperMemory {
         Ok(base)
     }
 
+    /// The end of the placed static data, where the helper stack's reservation starts.
+    #[allow(dead_code)]
+    pub(crate) fn data_end(&self) -> u32 {
+        self.end
+    }
+
     pub(crate) fn stack_top(&self) -> Result<u32> {
         align_to(self.end, 16)?
             .checked_add(self.stack_bytes)
@@ -205,6 +211,10 @@ impl Library {
             let mut restored = false;
             let mut restored_returns = BTreeSet::new();
             let mut calls = Vec::new();
+            // Structured reachability: a function end that no path reaches (a loop left only
+            // through `return`) cannot leave the frame in place.
+            let mut controls: Vec<Control> = Vec::new();
+            let mut reachable = true;
             for (index, op) in ops.iter().enumerate() {
                 match op {
                     Op::Call { function_index } if (*function_index as usize) < imported => {}
@@ -274,6 +284,7 @@ impl Library {
                     Op::End
                         if frame.is_some()
                             && !restored
+                            && reachable
                             && !matches!(ops.get(index.wrapping_sub(1)), Some(Op::Unreachable)) =>
                     {
                         return None;
@@ -294,6 +305,7 @@ impl Library {
                     }
                     _ => {}
                 }
+                reachable = Control::step(&mut controls, op, reachable);
             }
             graph.push(calls);
             frames.push(frame.map_or(0, |(_, size)| size as u32));
@@ -683,13 +695,87 @@ impl Reencode for Relocations<'_> {
     }
 }
 
+/// A block, loop or `if` for [Library::fixed_stack_bound]'s reachability: whether its end
+/// is reached by falling through, by a branch to it, or (an `if` without `else`) by the
+/// condition being false.
+struct Control {
+    looping: bool,
+    conditional: bool,
+    otherwise: bool,
+    entry: bool,
+    branched: bool,
+}
+
+impl Control {
+    /// Whether the code after `op` is reachable, given that `op` is (`reachable`).
+    fn step(controls: &mut Vec<Control>, op: &wasmparser::Operator<'_>, reachable: bool) -> bool {
+        use wasmparser::Operator as Op;
+        let branch = |controls: &mut Vec<Control>, depth: u32| {
+            let len = controls.len();
+            if let Some(target) = len
+                .checked_sub(1 + depth as usize)
+                .map(|at| &mut controls[at])
+                && !target.looping
+            {
+                target.branched |= reachable;
+            }
+        };
+        match op {
+            Op::Block { .. } | Op::Loop { .. } | Op::If { .. } => {
+                controls.push(Control {
+                    looping: matches!(op, Op::Loop { .. }),
+                    conditional: matches!(op, Op::If { .. }),
+                    otherwise: false,
+                    entry: reachable,
+                    branched: false,
+                });
+                reachable
+            }
+            Op::Else => match controls.last_mut() {
+                Some(control) => {
+                    control.branched |= reachable;
+                    control.otherwise = true;
+                    control.entry
+                }
+                None => reachable,
+            },
+            Op::End => match controls.pop() {
+                Some(control) if control.looping => reachable,
+                Some(control) => {
+                    reachable
+                        || control.branched
+                        || (control.conditional && !control.otherwise && control.entry)
+                }
+                None => reachable,
+            },
+            Op::Br { relative_depth } => {
+                branch(controls, *relative_depth);
+                false
+            }
+            Op::BrIf { relative_depth } => {
+                branch(controls, *relative_depth);
+                reachable
+            }
+            Op::BrTable { targets } => {
+                branch(controls, targets.default());
+                for target in targets.targets().flatten() {
+                    branch(controls, target);
+                }
+                false
+            }
+            Op::Return | Op::Unreachable => false,
+            _ => reachable,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn helper_libraries_have_checked_small_stacks() {
-        for bytes in [TIME, NUMBER, RUNTIME, FS, WEB] {
+        for bytes in [TIME, NUMBER, RUNTIME, FS, WEB, JSON, STD] {
             let library = Library::parse(bytes).unwrap();
             assert!(
                 library
@@ -709,6 +795,8 @@ mod tests {
             "(func (local i32) loop global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 br 0 end)",
             "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 return)",
             "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 i32.const 1 if return end local.get 0 i32.const 16 i32.add global.set 0)",
+            // A branch out of the block reaches the end with the frame in place.
+            "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 block i32.const 1 br_if 0 local.get 0 i32.const 16 i32.add global.set 0 return end)",
         ] {
             let bytes = wat::parse_str(format!(
                 "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
@@ -717,5 +805,17 @@ mod tests {
             let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
             assert_eq!(library.fixed_stack_bound(None), None, "{body}");
         }
+    }
+
+    #[test]
+    fn a_loop_left_only_through_restoring_returns_is_bounded() {
+        let body = "(func (local i32) global.get 0 i32.const 16 i32.sub local.tee 0 global.set 0 \
+            loop i32.const 1 if local.get 0 i32.const 16 i32.add global.set 0 return end br 0 end)";
+        let bytes = wat::parse_str(format!(
+            "(module (import \"env\" \"__stack_pointer\" (global (mut i32))) {body})"
+        ))
+        .unwrap();
+        let library = Library::parse(Box::leak(bytes.into_boxed_slice())).unwrap();
+        assert_eq!(library.fixed_stack_bound(None), Some(1024));
     }
 }
