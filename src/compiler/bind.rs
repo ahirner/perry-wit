@@ -62,10 +62,6 @@ pub(crate) fn exports(
         };
         for (implementation, core_name, function) in functions {
             ensure!(
-                !function.kind.is_async(),
-                "WIT export {core_name} is async; async exports need the async split (TODOs.md P3.8)"
-            );
-            ensure!(
                 exported.remove(&implementation).is_some(),
                 "WIT export {core_name} needs an exported TypeScript function {implementation}"
             );
@@ -79,17 +75,38 @@ pub(crate) fn exports(
                 .as_ref()
                 .map(|ty| abi_type(resolve, ty))
                 .transpose()?;
+            // Async exports return through `task.return`, imported from `[export]<interface>`.
+            let task_return = function.kind.is_async().then(|| {
+                let module = match item {
+                    WorldItem::Interface { .. } => {
+                        format!("[export]{}", resolve.name_world_key(key))
+                    }
+                    _ => "[export]$root".to_string(),
+                };
+                (module, function.name.clone())
+            });
             bound.push(Export {
                 core_name,
                 function: implementation,
                 params,
                 result,
+                task_return,
             });
         }
     }
     // Exported functions outside the world stay internal, so one module can serve several
     // worlds (`examples/merge_task.ts` implements both `task-runner` and `merge-task`).
     Ok(bound)
+}
+
+/// Names of the interfaces `world` imports.
+pub(crate) fn imports(resolve: &Resolve, world_id: WorldId) -> Vec<String> {
+    resolve.worlds[world_id]
+        .imports
+        .iter()
+        .filter(|(_, item)| matches!(item, WorldItem::Interface { .. }))
+        .map(|(key, _)| resolve.name_world_key(key))
+        .collect()
 }
 
 fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {

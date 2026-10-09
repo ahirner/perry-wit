@@ -24,7 +24,7 @@
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
     attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
-    calls::{CallOp as MirCallOp, is_exported},
+    calls::{AsyncCallOp, AwaitOp, CallOp as MirCallOp, TimerOp, is_exported},
     collections::{
         ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp, StringConstOp,
         StringLenOp,
@@ -72,6 +72,7 @@ use std::{
     num::NonZeroUsize,
 };
 
+mod async_split;
 pub mod boundary;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
@@ -82,10 +83,90 @@ pub const DATA_BASE: u32 = 16;
 /// How functions are exported.
 pub enum Exports {
     /// Every exported TypeScript function under its own name, with the core signature of its
-    /// MIR type plus the exception status, as one task per call. For tests and `--core-only`.
+    /// MIR type plus the exception status, as one task per call. An async function's export
+    /// drives it to completion without a host (no imports) and returns its value and status.
+    /// For tests and inspection.
     Raw,
-    /// Canonical-ABI exports of a WIT world.
-    Canonical(Vec<boundary::Export>),
+    /// Canonical-ABI exports of a WIT world, and the interfaces the world imports.
+    Canonical {
+        exports: Vec<boundary::Export>,
+        imports: Vec<String>,
+    },
+}
+
+/// The interface `setTimeout` waits on.
+pub const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
+
+/// Canonical built-ins and host functions the module may import.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Host {
+    WaitableSetNew,
+    WaitableSetDrop,
+    WaitableJoin,
+    SubtaskDrop,
+    ContextGet0,
+    ContextSet0,
+    WaitFor,
+    /// `task.return` of an async export: (module, function, flat result types).
+    TaskReturn(String, String, Vec<boundary::Flat>),
+}
+
+impl Host {
+    fn symbol(&self) -> Identifier {
+        let name = match self {
+            Host::WaitableSetNew => "host_waitable_set_new".to_string(),
+            Host::WaitableSetDrop => "host_waitable_set_drop".to_string(),
+            Host::WaitableJoin => "host_waitable_join".to_string(),
+            Host::SubtaskDrop => "host_subtask_drop".to_string(),
+            Host::ContextGet0 => "host_context_get_0".to_string(),
+            Host::ContextSet0 => "host_context_set_0".to_string(),
+            Host::WaitFor => "host_wait_for".to_string(),
+            Host::TaskReturn(module, function, _) => {
+                let clean = |s: &str| -> String {
+                    s.chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                        .collect()
+                };
+                format!("host_task_return_{}_{}", clean(module), clean(function))
+            }
+        };
+        name.try_into().expect("identifier")
+    }
+
+    /// Import module and field.
+    fn path(&self) -> (String, String) {
+        let root = |name: &str| ("$root".to_string(), name.to_string());
+        match self {
+            Host::WaitableSetNew => root("[waitable-set-new]"),
+            Host::WaitableSetDrop => root("[waitable-set-drop]"),
+            Host::WaitableJoin => root("[waitable-join]"),
+            Host::SubtaskDrop => root("[subtask-drop]"),
+            Host::ContextGet0 => root("[context-get-0]"),
+            Host::ContextSet0 => root("[context-set-0]"),
+            Host::WaitFor => (
+                MONOTONIC_CLOCK.to_string(),
+                "[async-lower]wait-for".to_string(),
+            ),
+            Host::TaskReturn(module, function, _) => {
+                (module.clone(), format!("[task-return]{function}"))
+            }
+        }
+    }
+
+    fn signature(&self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
+        let i32 = i32_type(ctx);
+        let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
+        match self {
+            Host::WaitableSetNew | Host::ContextGet0 => (vec![], vec![i32]),
+            Host::WaitableSetDrop | Host::SubtaskDrop | Host::ContextSet0 => (vec![i32], vec![]),
+            Host::WaitableJoin => (vec![i32, i32], vec![]),
+            Host::WaitFor => (vec![i64], vec![i32]),
+            Host::TaskReturn(_, _, flat) => (
+                flat.iter().map(|f| boundary::flat_type(ctx, *f)).collect(),
+                vec![],
+            ),
+        }
+    }
 }
 
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN.
@@ -97,6 +178,10 @@ const UNDEFINED_BOOL: i32 = 2;
 /// runtime functions from [HELPER_MODULE].
 pub fn compile(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<Vec<u8>> {
     let (wasm, data) = lower(ctx, mir, exports)?;
+    // Resuming an `await` inside a loop enters the loop at a second block.
+    for function in module_functions(ctx, &wasm) {
+        pliron_wasm::reducible::make_reducible(ctx, &function);
+    }
     verify_operation(wasm.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("verifying the lowered wasm module")?;
@@ -134,9 +219,21 @@ enum Runtime {
     ArrayNew,
     ArrayGrow,
     F64Rem,
-    TaskBegin,
     TaskEnter,
-    TaskEnd,
+    TaskResume,
+    TaskSuspend,
+    TaskFree,
+    TaskSet,
+    TaskSetSet,
+    TaskResult,
+    TaskSetResult,
+    ReadyPop,
+    SubtaskRegister,
+    SubtaskDone,
+    PromiseNew,
+    PromiseResolve,
+    PromiseReject,
+    PromiseWait,
     CabiRealloc,
     StringAdopt,
     StringConcat,
@@ -149,9 +246,21 @@ impl Runtime {
             Runtime::ArrayNew => "perry_array_new",
             Runtime::ArrayGrow => "perry_array_grow",
             Runtime::F64Rem => "perry_f64_rem",
-            Runtime::TaskBegin => "perry_task_begin",
             Runtime::TaskEnter => "perry_task_enter",
-            Runtime::TaskEnd => "perry_task_end",
+            Runtime::TaskResume => "perry_task_resume",
+            Runtime::TaskSuspend => "perry_task_suspend",
+            Runtime::TaskFree => "perry_task_free",
+            Runtime::TaskSet => "perry_task_set",
+            Runtime::TaskSetSet => "perry_task_set_set",
+            Runtime::TaskResult => "perry_task_result",
+            Runtime::TaskSetResult => "perry_task_set_result",
+            Runtime::ReadyPop => "perry_ready_pop",
+            Runtime::SubtaskRegister => "perry_subtask_register",
+            Runtime::SubtaskDone => "perry_subtask_done",
+            Runtime::PromiseNew => "perry_promise_new",
+            Runtime::PromiseResolve => "perry_promise_resolve",
+            Runtime::PromiseReject => "perry_promise_reject",
+            Runtime::PromiseWait => "perry_promise_wait",
             Runtime::CabiRealloc => "perry_cabi_realloc",
             Runtime::StringAdopt => "perry_string_adopt",
             Runtime::StringConcat => "perry_string_concat",
@@ -167,12 +276,26 @@ impl Runtime {
     /// (parameters, results) as (f64?, count) pairs: all runtime values are i32 or f64.
     fn signature(self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
         let i32 = i32_type(ctx);
+        let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let f64: TypeHandle = FP64Type::get(ctx).into();
         match self {
             Runtime::Alloc | Runtime::ArrayNew => (vec![i32], vec![i32]),
             Runtime::ArrayGrow => (vec![i32], vec![]),
             Runtime::F64Rem => (vec![f64, f64], vec![f64]),
-            Runtime::TaskBegin | Runtime::TaskEnter | Runtime::TaskEnd => (vec![], vec![]),
+            Runtime::TaskFree => (vec![], vec![]),
+            Runtime::TaskEnter
+            | Runtime::TaskSuspend
+            | Runtime::TaskSet
+            | Runtime::TaskResult
+            | Runtime::ReadyPop
+            | Runtime::PromiseNew => (vec![], vec![i32]),
+            Runtime::TaskResume | Runtime::TaskSetSet | Runtime::TaskSetResult => {
+                (vec![i32], vec![])
+            }
+            Runtime::SubtaskDone => (vec![i32], vec![i32]),
+            Runtime::SubtaskRegister => (vec![i32, i32, i64], vec![]),
+            Runtime::PromiseResolve => (vec![i32, i64], vec![]),
+            Runtime::PromiseReject | Runtime::PromiseWait => (vec![i32, i32], vec![]),
             Runtime::CabiRealloc => (vec![i32; 4], vec![i32]),
             Runtime::StringAdopt | Runtime::StringConcat => (vec![i32, i32], vec![i32]),
         }
@@ -261,6 +384,10 @@ fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier
     let mut calls: Vec<(Identifier, Vec<Identifier>)> = Vec::new();
     for function in functions {
         let name = function.get_symbol_name(ctx);
+        // An async function rejects its promise instead of returning a status.
+        if perry_mir::calls::is_async(ctx, function) {
+            continue;
+        }
         let mut callees = Vec::new();
         for op in function_ops(ctx, function) {
             if let Some(call) = Operation::get_op::<MirCallOp>(op, ctx) {
@@ -323,22 +450,55 @@ struct ModuleState {
     wasm: ModuleOp,
     throws: HashSet<Identifier>,
     runtime: BTreeSet<Runtime>,
+    host: BTreeSet<Host>,
+    /// Interfaces the WIT world imports; `None` when compiling without a world.
+    imports: Option<HashSet<String>>,
+    /// Async functions in dispatch-kind order.
+    async_functions: Vec<Identifier>,
     shapes: HashMap<String, i32>,
+}
+
+impl ModuleState {
+    fn can_import(&self, interface: &str) -> bool {
+        self.imports
+            .as_ref()
+            .is_none_or(|imports| imports.contains(interface))
+    }
 }
 
 /// Lower canonicalized MIR (after `perry_mir::pipeline::canonicalize`) to the `wasm` dialect.
 pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(ModuleOp, Vec<u8>)> {
     let name = mir.get_symbol_name(ctx);
     let functions = module_functions(ctx, mir);
+    let async_functions: Vec<Identifier> = functions
+        .iter()
+        .filter(|f| perry_mir::calls::is_async(ctx, f))
+        .map(|f| f.get_symbol_name(ctx))
+        .collect();
     let mut state = ModuleState {
         data: Data::default(),
         wasm: ModuleOp::new(ctx, name),
         throws: throwing_functions(ctx, &functions),
         runtime: BTreeSet::new(),
+        host: BTreeSet::new(),
+        imports: match exports {
+            Exports::Raw => None,
+            Exports::Canonical { imports, .. } => Some(imports.iter().cloned().collect()),
+        },
+        async_functions: async_functions.clone(),
         shapes: HashMap::new(),
     };
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);
+        if let Some(kind) = async_functions.iter().position(|f| *f == symbol) {
+            async_split::lower(ctx, &mut state, function, kind as i32)
+                .with_context(|| format!("lowering async function {symbol} to wasm"))?;
+            if matches!(exports, Exports::Raw) && is_exported(ctx, function) {
+                let wrapper = async_export_wrapper(ctx, &mut state, function, &symbol)?;
+                state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
+            }
+            continue;
+        }
         let lowered = FunctionLowering::lower(ctx, &mut state, function)
             .with_context(|| format!("lowering function {symbol} to wasm"))?;
         state.wasm.append_operation(ctx, lowered.get_operation(), 0);
@@ -347,7 +507,10 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
             state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
         }
     }
-    if let Exports::Canonical(exports) = exports {
+    if !async_functions.is_empty() {
+        async_split::drive(ctx, &mut state, &async_functions);
+    }
+    if let Exports::Canonical { exports, .. } = exports {
         let mir_functions: HashMap<String, FuncOp> = functions
             .iter()
             .map(|f| (f.get_symbol_name(ctx).to_string(), *f))
@@ -371,6 +534,13 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         let import = ImportFuncOp::new(ctx, runtime.symbol(), ty, HELPER_MODULE, runtime.name());
         state.wasm.append_operation(ctx, import.get_operation(), 0);
     }
+    for host in state.host.clone() {
+        let (params, results) = host.signature(ctx);
+        let ty = FunctionType::get(ctx, params, results);
+        let (module, field) = host.path();
+        let import = ImportFuncOp::new(ctx, host.symbol(), ty, &module, &field);
+        state.wasm.append_operation(ctx, import.get_operation(), 0);
+    }
     Ok((state.wasm, state.data.bytes))
 }
 
@@ -392,14 +562,15 @@ fn export_wrapper(
     set_export(ctx, &wrapper, name.as_ref());
     let entry = wrapper.get_entry_block(ctx);
     let args: Vec<_> = entry.deref(ctx).arguments().collect();
-    state.runtime.insert(Runtime::TaskBegin);
-    state.runtime.insert(Runtime::TaskEnd);
-    let begin = CallOp::new(ctx, Runtime::TaskBegin.symbol(), vec![], vec![]);
+    state.runtime.insert(Runtime::TaskEnter);
+    state.runtime.insert(Runtime::TaskFree);
+    let i32 = i32_type(ctx);
+    let begin = CallOp::new(ctx, Runtime::TaskEnter.symbol(), vec![], vec![i32]);
     begin.get_operation().insert_at_back(entry, ctx);
     let call = CallOp::new(ctx, name.clone(), args, results);
     call.get_operation().insert_at_back(entry, ctx);
     let values: Vec<_> = call.get_operation().deref(ctx).results().collect();
-    let end = CallOp::new(ctx, Runtime::TaskEnd.symbol(), vec![], vec![]);
+    let end = CallOp::new(ctx, Runtime::TaskFree.symbol(), vec![], vec![]);
     end.get_operation().insert_at_back(entry, ctx);
     let ret = ReturnOp::new(ctx, values);
     ret.get_operation().insert_at_back(entry, ctx);
@@ -412,6 +583,68 @@ fn export_wrapper(
     Ok(wrapper)
 }
 
+/// Raw export of an async function: run it to completion without a host and return its value
+/// and status (0 fulfilled, the exception code if rejected, 99 if still pending).
+fn async_export_wrapper(
+    ctx: &mut Context,
+    state: &mut ModuleState,
+    mir: &FuncOp,
+    name: &Identifier,
+) -> Result<FuncOp> {
+    let ty = TypedHandle::<FunctionType>::from_handle(mir.get_type(ctx), ctx)
+        .map_err(|_| anyhow!("function type"))?;
+    let (params, results) = {
+        let ty = ty.deref(ctx);
+        (ty.arg_types(), ty.res_types())
+    };
+    let wasm_params = params
+        .iter()
+        .map(|t| wasm_type(ctx, *t))
+        .collect::<Result<Vec<_>>>()?;
+    let value_ty = results[0];
+    let value_wasm = wasm_type(ctx, value_ty)?;
+    let i32 = i32_type(ctx);
+    let fn_ty = FunctionType::get(ctx, wasm_params, vec![value_wasm, i32]);
+    let wrapper = FuncOp::new(
+        ctx,
+        format!("export_{name}").try_into().expect("identifier"),
+        fn_ty,
+    );
+    set_export(ctx, &wrapper, name.as_ref());
+    let args: Vec<_> = wrapper
+        .get_entry_block(ctx)
+        .deref(ctx)
+        .arguments()
+        .collect();
+    let mut b = FunctionLowering::glue(state, ctx, &wrapper);
+    b.runtime(ctx, Runtime::TaskEnter, vec![]);
+    let call = CallOp::new(ctx, name.clone(), args, vec![i32]).get_operation();
+    b.insert(ctx, call);
+    let promise = call.deref(ctx).get_result(0);
+    let drive = CallOp::new(ctx, async_split::drive_name(), vec![], vec![]).get_operation();
+    b.insert(ctx, drive);
+    let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
+    let fulfilled_state = b.i32_const(ctx, perry_runtime::promise::FULFILLED as i32);
+    let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
+    let fulfilled = b.num(ctx, NumOpcode::I32Eq, vec![settled, fulfilled_state]);
+    let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
+    let reason = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATUS);
+    let pending = b.i32_const(ctx, 99);
+    let failure = b.select(ctx, rejected, reason, pending);
+    let zero = b.i32_const(ctx, 0);
+    let status = b.select(ctx, fulfilled, zero, failure);
+    let value = b.load(
+        ctx,
+        slot_kind(ctx, value_ty)?,
+        promise,
+        perry_runtime::promise::VALUE,
+    );
+    b.runtime(ctx, Runtime::TaskFree, vec![]);
+    let ret = ReturnOp::new(ctx, vec![value, status]).get_operation();
+    b.insert(ctx, ret);
+    Ok(wrapper)
+}
+
 struct FunctionLowering<'s> {
     state: &'s mut ModuleState,
     region: Ptr<Region>,
@@ -421,6 +654,8 @@ struct FunctionLowering<'s> {
     throws: bool,
     results: Vec<TypeHandle>,
     throw_block: Option<Ptr<BasicBlock>>,
+    /// The frame, when lowering the step function of an async function.
+    frame: Option<async_split::Frame>,
 }
 
 impl<'s> FunctionLowering<'s> {
@@ -436,6 +671,7 @@ impl<'s> FunctionLowering<'s> {
             throws: false,
             results: vec![],
             throw_block: None,
+            frame: None,
         }
     }
 
@@ -462,53 +698,86 @@ impl<'s> FunctionLowering<'s> {
         }
         let fn_ty = FunctionType::get(ctx, params, signature_results);
         let function = FuncOp::new(ctx, symbol, fn_ty);
-        let region = function.get_region(ctx);
         let entry = function.get_entry_block(ctx);
+        let mut lowering = FunctionLowering::glue(state, ctx, &function);
+        lowering.throws = throws;
+        lowering.results = results;
+        lowering.map_blocks(ctx, mir, Some(entry))?;
+        lowering.translate(ctx, mir)?;
+        Ok(function)
+    }
 
-        let mut lowering = FunctionLowering {
-            state,
-            region,
-            block: entry,
-            values: HashMap::new(),
-            blocks: HashMap::new(),
-            throws,
-            results,
-            throw_block: None,
-        };
+    /// Create a Wasm block for every block of `mir` (the MIR entry maps to `entry` if given)
+    /// and map block arguments. Returns the block of the MIR entry.
+    fn map_blocks(
+        &mut self,
+        ctx: &mut Context,
+        mir: &FuncOp,
+        entry: Option<Ptr<BasicBlock>>,
+    ) -> Result<Ptr<BasicBlock>> {
         let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
         for (index, &mir_block) in mir_blocks.iter().enumerate() {
-            let block = if index == 0 {
-                entry
-            } else {
-                let mir_types: Vec<_> = mir_block
-                    .deref(ctx)
-                    .arguments()
-                    .map(|arg| arg.get_type(ctx))
-                    .collect();
-                let types = mir_types
-                    .into_iter()
-                    .map(|t| wasm_type(ctx, t))
-                    .collect::<Result<Vec<_>>>()?;
-                lowering.new_block(ctx, types)
+            let block = match entry {
+                Some(entry) if index == 0 => entry,
+                _ => {
+                    let mir_types: Vec<_> = mir_block
+                        .deref(ctx)
+                        .arguments()
+                        .map(|arg| arg.get_type(ctx))
+                        .collect();
+                    let types = mir_types
+                        .into_iter()
+                        .map(|t| wasm_type(ctx, t))
+                        .collect::<Result<Vec<_>>>()?;
+                    self.new_block(ctx, types)
+                }
             };
             let pairs: Vec<_> = mir_block
                 .deref(ctx)
                 .arguments()
                 .zip(block.deref(ctx).arguments())
                 .collect();
-            lowering.values.extend(pairs);
-            lowering.blocks.insert(mir_block, block);
+            self.values.extend(pairs);
+            self.blocks.insert(mir_block, block);
         }
+        Ok(self.blocks[&mir_blocks[0]])
+    }
+
+    /// Translate the ops of every block of `mir` (after [Self::map_blocks]). In a step
+    /// function, values kept in the frame are stored where they are defined.
+    fn translate(&mut self, ctx: &mut Context, mir: &FuncOp) -> Result<()> {
+        let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
         for mir_block in mir_blocks {
-            lowering.block = lowering.blocks[&mir_block];
+            self.block = self.blocks[&mir_block];
+            let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
+            self.spill(ctx, &args);
             let ops: Vec<_> = mir_block.deref(ctx).iter(ctx).collect();
             for op in ops {
-                lowering.op(ctx, op).with_context(|| {
+                self.op(ctx, op).with_context(|| {
                     format!("lowering {}", Operation::get_op_dyn(op, ctx).get_opid())
                 })?;
+                let results: Vec<_> = op.deref(ctx).results().collect();
+                self.spill(ctx, &results);
             }
         }
-        Ok(function)
+        Ok(())
+    }
+
+    /// Store the frame-resident values among `values` into their slots.
+    fn spill(&mut self, ctx: &mut Context, values: &[Value]) {
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        let frame_value = frame.frame;
+        let stores: Vec<_> = values
+            .iter()
+            .filter_map(|v| frame.slots.get(v).map(|slot| (*v, *slot)))
+            .collect();
+        for (value, (offset, kind)) in stores {
+            if let Some(&wasm) = self.values.get(&value) {
+                self.store(ctx, kind, frame_value, offset, wasm);
+            }
+        }
     }
 
     // --- construction helpers ---------------------------------------------------------------
@@ -608,15 +877,38 @@ impl<'s> FunctionLowering<'s> {
         self.insert(ctx, op);
     }
 
-    fn mapped(&self, value: Value) -> Result<Value> {
+    /// The Wasm value of MIR `value`; frame-resident values are loaded from the frame.
+    fn mapped(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if let Some(frame) = &self.frame
+            && let Some(&(offset, kind)) = frame.slots.get(&value)
+        {
+            let frame = frame.frame;
+            return Ok(self.load(ctx, kind, frame, offset));
+        }
         self.values
             .get(&value)
             .copied()
             .ok_or_else(|| anyhow!("operand defined after its use"))
     }
 
-    fn operands(&self, ctx: &Context, op: Ptr<Operation>) -> Result<Vec<Value>> {
-        op.deref(ctx).operands().map(|v| self.mapped(v)).collect()
+    fn operand(&mut self, ctx: &mut Context, op: Ptr<Operation>, index: usize) -> Result<Value> {
+        let value = op.deref(ctx).get_operand(index);
+        self.mapped(ctx, value)
+    }
+
+    fn operands(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<Vec<Value>> {
+        let operands: Vec<_> = op.deref(ctx).operands().collect();
+        operands.into_iter().map(|v| self.mapped(ctx, v)).collect()
+    }
+
+    /// Call a canonical built-in or host import.
+    fn host(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) -> Option<Value> {
+        let (_, results) = host.signature(ctx);
+        let symbol = host.symbol();
+        self.state.host.insert(host);
+        let op = CallOp::new(ctx, symbol, args, results).get_operation();
+        self.insert(ctx, op);
+        op.deref(ctx).results().next()
     }
 
     fn define(&mut self, ctx: &Context, op: Ptr<Operation>, value: Value) {
@@ -628,6 +920,11 @@ impl<'s> FunctionLowering<'s> {
     /// The block that returns zero results with the status in its argument.
     fn throw_block(&mut self, ctx: &mut Context) -> Ptr<BasicBlock> {
         if let Some(block) = self.throw_block {
+            return block;
+        }
+        if self.frame.is_some() {
+            let block = self.reject_block(ctx);
+            self.throw_block = Some(block);
             return block;
         }
         let i32 = i32_type(ctx);
@@ -652,12 +949,17 @@ impl<'s> FunctionLowering<'s> {
 
     /// Throw `status` if `failed` is non-zero; code after this runs on the normal path.
     fn throw_if(&mut self, ctx: &mut Context, failed: Value, kind: ErrorKind) {
+        let status = self.i32_const(ctx, status_code(kind));
+        self.throw_status_if(ctx, failed, status);
+    }
+
+    /// Throw with `status` if `failed` is non-zero.
+    fn throw_status_if(&mut self, ctx: &mut Context, failed: Value, status: Value) {
         debug_assert!(
             self.throws,
             "throwing op in a function classified as non-throwing"
         );
         let throw = self.throw_block(ctx);
-        let status = self.i32_const(ctx, status_code(kind));
         let next = self.new_block(ctx, vec![]);
         self.cond_br(ctx, failed, (throw, vec![status]), (next, vec![]));
         self.block = next;
@@ -877,15 +1179,14 @@ impl<'s> FunctionLowering<'s> {
             return Ok(());
         }
         if let Some(cond_br) = Operation::get_op::<MirCondBrOp>(op, ctx) {
-            let condition = self.mapped(op.deref(ctx).get_operand(0))?;
+            let condition = self.operand(ctx, op, 0)?;
             let mut arms = Vec::new();
             for succ in 0..2 {
                 let dest = self.blocks[&op.deref(ctx).get_successor(succ)];
-                let args = cond_br
-                    .successor_operands(ctx, succ)
-                    .into_iter()
-                    .map(|v| self.mapped(v))
-                    .collect::<Result<Vec<_>>>()?;
+                let mut args = Vec::new();
+                for v in cond_br.successor_operands(ctx, succ) {
+                    args.push(self.mapped(ctx, v)?);
+                }
                 arms.push((dest, args));
             }
             let otherwise = arms.pop().unwrap();
@@ -895,6 +1196,10 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<MirReturnOp>(op, ctx).is_some() {
             let mut values = self.operands(ctx, op)?;
+            if self.frame.is_some() {
+                self.settle_return(ctx, values);
+                return Ok(());
+            }
             if self.throws {
                 values.push(self.i32_const(ctx, 0));
             }
@@ -966,7 +1271,7 @@ impl<'s> FunctionLowering<'s> {
             let record = op.deref(ctx).get_operand(0);
             let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
             let kind = slot_kind(ctx, ty)?;
-            let object = self.mapped(record)?;
+            let object = self.mapped(ctx, record)?;
             let value = self.load(ctx, kind, object, offset);
             self.define(ctx, op, value);
             return Ok(());
@@ -1075,7 +1380,7 @@ impl<'s> FunctionLowering<'s> {
             let mir = op.deref(ctx).get_operand(0);
             let inner =
                 optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
-            let value = self.mapped(mir)?;
+            let value = self.mapped(ctx, mir)?;
             let result = self.is_undefined(ctx, value, inner)?;
             self.define(ctx, op, result);
             return Ok(());
@@ -1084,7 +1389,7 @@ impl<'s> FunctionLowering<'s> {
             let mir = op.deref(ctx).get_operand(0);
             let inner =
                 optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
-            let value = self.mapped(mir)?;
+            let value = self.mapped(ctx, mir)?;
             let undefined = self.is_undefined(ctx, value, inner)?;
             let nan = self.f64_const(ctx, f64::NAN);
             let result = self.select(ctx, undefined, nan, value);
@@ -1095,7 +1400,7 @@ impl<'s> FunctionLowering<'s> {
             let mir = op.deref(ctx).get_operand(0);
             let inner =
                 optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
-            let value = self.mapped(mir)?;
+            let value = self.mapped(ctx, mir)?;
             let undefined = self.is_undefined(ctx, value, inner)?;
             self.throw_if(ctx, undefined, ErrorKind::TypeError);
             // The defined value has the same representation.
@@ -1131,7 +1436,7 @@ impl<'s> FunctionLowering<'s> {
             let mir = op.deref(ctx).get_operand(0);
             let inner =
                 optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
-            let value = self.mapped(mir)?;
+            let value = self.mapped(ctx, mir)?;
             let undefined = self.is_undefined(ctx, value, inner)?;
             let text = self.state.data.string("undefined");
             let text = self.i32_const(ctx, text as i32);
@@ -1139,10 +1444,23 @@ impl<'s> FunctionLowering<'s> {
             self.define(ctx, op, result);
             return Ok(());
         }
-        let name = Operation::get_op_dyn(op, ctx).get_opid().to_string();
-        if name == "perry.async_call" || name == "perry.await" {
-            bail!("async is not supported by the MIR backend yet ({name})");
+        if Operation::get_op::<AwaitOp>(op, ctx).is_some() {
+            return self.lower_await(ctx, op);
         }
+        if Operation::get_op::<TimerOp>(op, ctx).is_some() {
+            return self.lower_timer(ctx, op);
+        }
+        if let Some(call) = Operation::get_op::<AsyncCallOp>(op, ctx) {
+            // The callee's ramp runs it to its first suspension and returns its promise.
+            let callee = call.callee(ctx);
+            let args = self.operands(ctx, op)?;
+            let i32 = i32_type(ctx);
+            let ramp = CallOp::new(ctx, callee, args, vec![i32]).get_operation();
+            let promise = self.result(ctx, ramp);
+            self.define(ctx, op, promise);
+            return Ok(());
+        }
+        let name = Operation::get_op_dyn(op, ctx).get_opid().to_string();
         bail!("{name} has no lowering to wasm (did canonicalize run?)")
     }
 }

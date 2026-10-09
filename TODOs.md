@@ -297,7 +297,8 @@ The phases run in order. Items within a phase can run in parallel unless they ar
       - direct calls, string `+` and `.length`.
     - Everything else is rejected with a diagnostic.
     - Since added: records (interfaces and literals unify by sorted field names), arrays, `push`, index and property reads and writes, R8 optionals with ECMAScript coercions and `=== undefined`. Eight tests pass.
-    - Next: async (`perry.async_call` and `perry.await`), globals and module state, truthiness, string comparison, labeled control flow, try/throw.
+    - Since added: async functions, `await`, and `setTimeout` from `timers/promises` / `node:timers/promises` (`perry.timer`).
+    - Next: globals and module state, truthiness, string comparison, labeled control flow, try/throw.
 - [ ] **P2.3 MIR snapshot tests** replace the 10 `waffle_ir` references in the test suite.
 
 ### P3. Pass pipeline
@@ -321,11 +322,14 @@ Owned (each with unit tests on MIR snippets):
   - Per-(shape, interface) field-offset tables.
   - Union discrimination by shape id.
 - [ ] **P3.7 Tier classification.** Implements D3, including the loop-growth rule. Emit a per-site report: `perry-wit --explain-tiers`.
-- [ ] **P3.8 → Async split.**
+- [x] **P3.8 → Async split.** `perry_codegen::async_split`.
   - Each async function becomes a ramp (allocate the frame in `task`, spill arguments, run eagerly to the first pending `await`) and a `step` state machine.
-  - Frame fields are the values live across each `await`, taken from pliron liveness.
+  - Frame fields are the values live across each `await`, by backward liveness over the MIR CFG. They are stored where defined and loaded where used, so resume entries need no SSA repair.
   - An already-settled `await` continues inline with no host turn.
-  - Combinators register the frame as waiter and allocate nothing per operand beyond a node in `task`.
+  - Resuming inside a loop enters the loop at a second block; `pliron_wasm::reducible` inserts a guard block (LLVM `FixIrreducible`), so the emitter's structuring still applies.
+  - An exception in an async function rejects its promise; `await` of a rejected promise rethrows the status.
+  - Tests: `async_functions_await_each_other` (raw, no host) and `tests/async_component_test.rs` (WASI P3 timers, overlapping calls, no memory growth across tasks).
+  - Open: combinators (`Promise.all` and friends) with one waiter node per operand.
 - [ ] **P3.9 → Root planning.**
   - Interprocedural may-collect summary.
   - Spill sets at may-collect call sites are the `instance` references in the liveness set.
@@ -379,6 +383,11 @@ Owned (each with unit tests on MIR snippets):
   - A cycle-collection contract passes.
   - Allocator entries are 0 per iteration for the temporary-record loop.
 - [ ] **P5.4 Scheduler.**
+  - *Status:* `perry_runtime::region::Task` holds the run queue, the pending host subtasks (handle → promise and value) and the waitable set; `perry_runtime::promise` queues waiters in order. `[async-lift]<export>` sets `context.set 0` to the task, and `finish` drives ready frames, then returns `EXIT` after `task.return` or `WAIT` on the task's set. The callback settles returned subtasks. YIELD is never returned.
+  - Open:
+    - Cancellation (below).
+    - Results of async imports are lowered through `cabi_realloc` while no task is current. `wait-for` has none; the first import with a result needs the callback to resume the task first or a pre-allocated result area.
+    - Frames of an async function called, but not awaited, from a synchronous export never run.
   - Run queue of frames, using an intrusive list.
   - Waiter table mapping waitable handle to frame and state.
   - Callback dispatch and the export entry, which sets `context.set 0` to the task.

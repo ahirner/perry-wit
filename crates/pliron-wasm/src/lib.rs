@@ -4,7 +4,8 @@
 //! block arguments, so ordinary pliron passes (`mem2reg`, DCE, CFG simplification, SCCP) run
 //! on it unchanged. [emit::emit_module] then:
 //!
-//! 1. checks that every function's CFG is reducible;
+//! 1. checks that every function's CFG is reducible ([reducible::make_reducible] makes it so
+//!    beforehand);
 //! 2. structures it with the dominator-tree algorithm of Ramsey, *Beyond Relooper: Recursive
 //!    Translation of Unstructured Control Flow to Structured Control Flow* (ICFP 2022);
 //! 3. schedules single-use values onto the operand stack and gives the rest locals;
@@ -17,6 +18,7 @@ pub mod attrs;
 pub mod control;
 pub mod emit;
 pub mod ops;
+pub mod reducible;
 pub mod types;
 
 #[cfg(test)]

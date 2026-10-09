@@ -101,8 +101,8 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "operator Pow",
         ),
         (
-            "export async function run(x: number): Promise<number> { return x; }",
-            "async or generator",
+            "function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }",
+            "generator function",
         ),
         (
             "export function run(x: number): number { if (x) { return 1; } return 0; }",
@@ -279,4 +279,47 @@ export function run(n: number): number {
 "#,
     );
     assert!(printed.contains("shape_next_value_rec1"), "{printed}");
+}
+
+#[test]
+#[ignore]
+fn dump_hir() {
+    let path = std::env::var("PERRY_HIR").expect("PERRY_HIR=<file.ts>");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let ast = perry_parser::parse_typescript(&source, "case.ts").unwrap();
+    let hir = perry_hir::lower_module(&ast, "main", "case.ts").unwrap();
+    println!("{:#?}", hir.functions);
+    println!("IMPORTS {:#?}", hir.imports);
+}
+
+#[test]
+fn async_functions_await_promises_and_timers() {
+    let printed = lowered(
+        r#"
+import { setTimeout } from 'node:timers/promises';
+async function later(v: number): Promise<number> {
+  const a = v + 1;
+  await setTimeout(1);
+  return a;
+}
+async function nothing(): Promise<void> {
+  await setTimeout(0);
+}
+export async function run(x: number): Promise<number> {
+  const value = await setTimeout(0, x);
+  const pending = later(value);
+  await nothing();
+  return (await pending) + (await pending);
+}
+"#,
+    );
+    for op in [
+        "perry.async_call later",
+        "perry.await",
+        "perry.timer",
+        "perry.promise <builtin.fp64 >",
+        "perry_async",
+    ] {
+        assert!(printed.contains(op), "missing {op}:\n{printed}");
+    }
 }

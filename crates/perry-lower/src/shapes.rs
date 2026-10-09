@@ -10,7 +10,7 @@
 //! Widening a record to a narrower shape (subset rule R2) is not supported yet.
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{ir::Module as HirModule, types::Type as HirType};
-use perry_mir::types::{ArrayType, RecordType, StringType};
+use perry_mir::types::{ArrayType, OptionalType, PromiseType, RecordType, StringType};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::Context,
@@ -63,6 +63,10 @@ impl<'h> Shapes<'h> {
                 ArrayType::get(ctx, element).into()
             }
             HirType::Named(name) => self.named(ctx, name)?,
+            HirType::Promise(inner) => {
+                let settled = self.settled_type(ctx, inner)?;
+                PromiseType::get(ctx, settled).into()
+            }
             HirType::Object(object) => {
                 ensure!(
                     object.index_signature.is_none(),
@@ -80,6 +84,17 @@ impl<'h> Shapes<'h> {
             }
             other => bail!("MIR backend does not support type {other:?} yet"),
         })
+    }
+
+    /// The value a promise of `ty` settles with; `void` settles `undefined`.
+    pub(crate) fn settled_type(&self, ctx: &mut Context, ty: &HirType) -> Result<TypeHandle> {
+        match ty {
+            HirType::Void => {
+                let number = FP64Type::get(ctx).into();
+                Ok(OptionalType::get(ctx, number).into())
+            }
+            ty => self.value_type(ctx, ty),
+        }
     }
 
     fn named(&self, ctx: &mut Context, name: &str) -> Result<TypeHandle> {

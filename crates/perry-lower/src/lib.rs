@@ -24,7 +24,7 @@ use perry_hir::{
 };
 use perry_mir::{
     attrs::{BinaryKind, CompareKind, ConvertKind},
-    calls::CallOp,
+    calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, set_async},
     collections::{
         ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp, StringConstOp,
         StringLenOp,
@@ -32,10 +32,13 @@ use perry_mir::{
     control::{BrOp, CondBrOp, ReturnOp},
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
-    optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UnwrapOp, WrapOp, optional_value},
+    optional::{
+        IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
+    },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
-    types::{ArrayType, RecordType, StringType},
+    types::{ArrayType, PromiseType, RecordType, StringType},
 };
+use pliron::printable::Printable as _;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -57,7 +60,7 @@ use pliron::{
     value::Value,
 };
 use shapes::{Shapes, identifier};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module.
 pub fn lower_source(ctx: &mut Context, source: &str, file: &str) -> Result<ModuleOp> {
@@ -70,6 +73,8 @@ pub fn lower_source(ctx: &mut Context, source: &str, file: &str) -> Result<Modul
 
 struct Signature {
     name: Identifier,
+    /// `async`: callers start it with `perry.async_call` and get a promise of `results[0]`.
+    is_async: bool,
     params: Vec<TypeHandle>,
     results: Vec<TypeHandle>,
 }
@@ -78,11 +83,30 @@ struct Signature {
 pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
     let shapes = Shapes::new(hir);
+    let timers: HashSet<String> = hir
+        .imports
+        .iter()
+        .filter(|import| {
+            matches!(
+                import.source.as_str(),
+                "timers/promises" | "node:timers/promises"
+            )
+        })
+        .flat_map(|import| import.specifiers.iter())
+        .filter_map(|specifier| match specifier {
+            perry_hir::ir::ImportSpecifier::Named { imported, local }
+                if imported == "setTimeout" =>
+            {
+                Some(local.clone())
+            }
+            _ => None,
+        })
+        .collect();
     let mut signatures = HashMap::new();
     for function in &hir.functions {
         ensure!(
-            !function.is_async && !function.is_generator,
-            "MIR backend does not support async or generator function {} yet",
+            !function.is_generator,
+            "generator function {} is not supported yet",
             function.name
         );
         ensure!(
@@ -104,9 +128,12 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
                     .with_context(|| format!("parameter {} of {}", param.name, function.name))
             })
             .collect::<Result<Vec<_>>>()?;
-        let results = match &function.return_type {
-            HirType::Void => vec![],
-            ty => {
+        let results = match (&function.return_type, function.is_async) {
+            (HirType::Void, false) => vec![],
+            // An async function settles its promise with its result; `void` settles `undefined`.
+            (HirType::Promise(inner), true) => vec![shapes.settled_type(ctx, inner)?],
+            (ty, true) => vec![shapes.settled_type(ctx, ty)?],
+            (ty, false) => {
                 vec![
                     shapes
                         .value_type(ctx, ty)
@@ -117,6 +144,7 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
         signatures.insert(
             function.id,
             Signature {
+                is_async: function.is_async,
                 name: identifier(&function.name)?,
                 params,
                 results,
@@ -124,10 +152,13 @@ pub fn lower_module(ctx: &mut Context, hir: &HirModule) -> Result<ModuleOp> {
         );
     }
     for function in &hir.functions {
-        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes)
+        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &timers)
             .with_context(|| format!("lowering function {}", function.name))?;
         if function.is_exported {
             perry_mir::calls::set_exported(ctx, &func);
+        }
+        if function.is_async {
+            set_async(ctx, &func);
         }
         module.append_operation(ctx, func.get_operation(), 0);
     }
@@ -190,7 +221,10 @@ struct FunctionBuilder<'s> {
     loops: Vec<Loop>,
     signatures: &'s HashMap<FuncId, Signature>,
     shapes: &'s Shapes<'s>,
+    /// Local names bound to `setTimeout` from `node:timers/promises`.
+    timers: &'s HashSet<String>,
     results: Vec<TypeHandle>,
+    is_async: bool,
     labels: usize,
 }
 
@@ -200,6 +234,7 @@ impl<'s> FunctionBuilder<'s> {
         function: &Function,
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
+        timers: &'s HashSet<String>,
     ) -> Result<FuncOp> {
         let signature = &signatures[&function.id];
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
@@ -214,7 +249,9 @@ impl<'s> FunctionBuilder<'s> {
             loops: Vec::new(),
             signatures,
             shapes,
+            timers,
             results: signature.results.clone(),
+            is_async: signature.is_async,
             labels: 0,
         };
         for (index, param) in function.params.iter().enumerate() {
@@ -225,15 +262,55 @@ impl<'s> FunctionBuilder<'s> {
         }
         builder.statements(ctx, &function.body)?;
         if !builder.terminated(ctx) {
-            let values = builder
-                .results
-                .clone()
-                .into_iter()
-                .map(|ty| builder.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)))
-                .collect();
+            let values = builder.implicit_results(ctx);
             builder.emit(ctx, |ctx| ReturnOp::new(ctx, values));
         }
         Ok(func)
+    }
+
+    /// `setTimeout(delay?, value?)` from `node:timers/promises`.
+    fn timer(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+        ensure!(
+            args.len() <= 2,
+            "setTimeout options (AbortSignal, ref) are not supported yet"
+        );
+        let delay = match args.first() {
+            Some(delay) => {
+                let value = self.expression(ctx, delay)?;
+                let value = self.arithmetic(ctx, value);
+                ensure!(
+                    kind(ctx, value)? == Kind::Number,
+                    "setTimeout delay must be a number"
+                );
+                value
+            }
+            None => self.number(ctx, 1.0),
+        };
+        let value = match args.get(1) {
+            Some(value) => {
+                let value = self.expression(ctx, value)?;
+                self.defined(ctx, value)?
+            }
+            None => {
+                let number = FP64Type::get(ctx).into();
+                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
+            }
+        };
+        Ok(self.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, value)))
+    }
+
+    /// Results of falling off the end or `return;`: an async function settles `undefined`.
+    fn implicit_results(&mut self, ctx: &mut Context) -> Vec<Value> {
+        self.results
+            .clone()
+            .into_iter()
+            .map(|ty| match optional_value(ctx, ty) {
+                Some(inner) if self.is_async => {
+                    self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, inner))
+                }
+                _ => self.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)),
+            })
+            .collect()
     }
 
     // ── IR plumbing ────────────────────────────────────────────────────────
@@ -409,7 +486,7 @@ impl<'s> FunctionBuilder<'s> {
                         let value = self.expression_with(ctx, expr, Some(expected))?;
                         vec![self.fit(ctx, value, expected)?]
                     }
-                    None => vec![],
+                    None => self.implicit_results(ctx),
                 };
                 ensure!(
                     values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
@@ -752,6 +829,16 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Call { callee, args, .. } => self
                 .call(ctx, callee, args)?
                 .context("a void call has no value")?,
+            Expr::Await(promise) => {
+                ensure!(self.is_async, "await is only valid in async functions");
+                let promise = self.expression(ctx, promise)?;
+                ensure!(
+                    TypedHandle::<PromiseType>::from_handle(promise.get_type(ctx), ctx).is_ok(),
+                    "await of a non-promise value is not supported yet"
+                );
+                let op = AwaitOp::new(ctx, promise).map_err(|e| anyhow!("{}", e.disp(ctx)))?;
+                self.append_value(ctx, &op)
+            }
             Expr::PropertyGet {
                 object, property, ..
             } => {
@@ -1062,6 +1149,11 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn call(&mut self, ctx: &mut Context, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && self.timers.contains(name)
+        {
+            return self.timer(ctx, args).map(Some);
+        }
         let Expr::FuncRef(id) = callee else {
             bail!("only direct calls to module functions are supported yet");
         };
@@ -1088,6 +1180,11 @@ impl<'s> FunctionBuilder<'s> {
                 self.fit(ctx, value, *param)
             })
             .collect::<Result<Vec<_>>>()?;
+        if signature.is_async {
+            let value = results[0];
+            let promise = self.emit_value(ctx, |ctx| AsyncCallOp::new(ctx, name, values, value));
+            return Ok(Some(promise));
+        }
         let op = CallOp::new(ctx, name, values, results);
         self.append(ctx, &op);
         let operation = op.get_operation().deref(ctx);

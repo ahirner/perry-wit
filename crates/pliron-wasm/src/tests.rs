@@ -396,6 +396,142 @@ builtin.module @m {{
     assert!(error.to_string().contains("irreducible"), "{error}");
 }
 
+/// A cycle entered at two blocks gets a guard; nested multi-entry cycles inside a reducible
+/// loop are fixed too, and the code runs as before.
+#[test]
+fn irreducible_control_flow_is_made_reducible() {
+    let input = format!(
+        r#"
+builtin.module @m {{
+  ^module():
+    builtin.func @twice: builtin.function <({I32}) -> ({I32})> {{
+      ^entry(x: {I32}):
+        one = builtin.constant <builtin.integer <1: i32>> : {I32};
+        zero = builtin.constant <builtin.integer <0: i32>> : {I32};
+        odd = wasm.num I32And x, one : {I32};
+        wasm.cond_br if odd ^a(x, zero) else ^b(x, zero)
+      ^a(n: {I32}, acc: {I32}):
+        acc_a = wasm.num I32Add acc, one : {I32};
+        wasm.br ^b(n, acc_a)
+      ^b(m: {I32}, acc2: {I32}):
+        left = wasm.num I32Sub m, one : {I32};
+        acc_b = wasm.num I32Add acc2, acc2 : {I32};
+        more = wasm.num I32GtS left, zero : {I32};
+        wasm.cond_br if more ^a(left, acc_b) else ^exit()
+      ^exit():
+        wasm.return acc_b
+    }};
+    builtin.func @nested: builtin.function <({I32}) -> ({I32})> {{
+      ^entry(x: {I32}):
+        one = builtin.constant <builtin.integer <1: i32>> : {I32};
+        zero = builtin.constant <builtin.integer <0: i32>> : {I32};
+        wasm.br ^outer(x, zero)
+      ^outer(n: {I32}, acc: {I32}):
+        odd = wasm.num I32And n, one : {I32};
+        wasm.cond_br if odd ^p(acc) else ^q(acc)
+      ^p(u: {I32}):
+        u1 = wasm.num I32Add u, one : {I32};
+        big = wasm.num I32GtS u1, n : {I32};
+        wasm.cond_br if big ^latch(u1) else ^q(u1)
+      ^q(v: {I32}):
+        v1 = wasm.num I32Add v, v : {I32};
+        wasm.cond_br if v1 ^p(v1) else ^latch(v1)
+      ^latch(w: {I32}):
+        left = wasm.num I32Sub n, one : {I32};
+        more = wasm.num I32GtS left, zero : {I32};
+        wasm.cond_br if more ^outer(left, w) else ^exit(w)
+      ^exit(r: {I32}):
+        wasm.return r
+    }}
+}}
+"#
+    );
+    let reference = |x: i32| {
+        // ^twice by hand.
+        let (mut m, mut acc) = (x, 0i32);
+        if x & 1 != 0 {
+            acc += 1;
+        }
+        loop {
+            let left = m - 1;
+            let acc_b = acc.wrapping_add(acc);
+            if left > 0 {
+                m = left;
+                acc = acc_b + 1;
+            } else {
+                return acc_b;
+            }
+        }
+    };
+    let nested = |x: i32| {
+        let (mut n, mut acc) = (x, 0i32);
+        loop {
+            let mut at_p = n & 1 != 0;
+            let mut value = acc;
+            let w = loop {
+                if at_p {
+                    let u1 = value.wrapping_add(1);
+                    if u1 > n {
+                        break u1;
+                    }
+                    value = u1;
+                    at_p = false;
+                } else {
+                    let v1 = value.wrapping_add(value);
+                    if v1 != 0 {
+                        value = v1;
+                        at_p = true;
+                    } else {
+                        break v1;
+                    }
+                }
+            };
+            let left = n - 1;
+            if left > 0 {
+                n = left;
+                acc = w;
+            } else {
+                return w;
+            }
+        }
+    };
+    let ctx = &mut Context::new();
+    let module = parse_from_str(spaced(Operation::top_level_parser()), ctx, &input).unwrap();
+    let module = Operation::get_op::<ModuleOp>(module, ctx).unwrap();
+    let body = module.get_body(ctx, 0);
+    let functions: Vec<_> = body
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+        .collect();
+    let mut guards = Vec::new();
+    for function in functions {
+        use pliron::builtin::op_interfaces::SymbolOpInterface;
+        let name = function.get_symbol_name(ctx).to_string();
+        crate::ops::set_export(ctx, &function, &name);
+        guards.push(crate::reducible::make_reducible(ctx, &function));
+    }
+    assert_eq!(guards, vec![1, 1]);
+    verify_operation(pliron::op::Op::get_operation(&module), ctx)
+        .unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    let wasm = emit_module(ctx, &module, &EmitOptions::default()).unwrap_or_else(|e| panic!("{e}"));
+    wasmparser::Validator::new()
+        .validate_all(&wasm)
+        .unwrap_or_else(|error| panic!("{error}\n{}", wat(&wasm)));
+    for x in [1, 2, 5, 8] {
+        assert_eq!(
+            i32_of(call(&wasm, "twice", &[Val::I32(x)])),
+            reference(x),
+            "twice({x})"
+        );
+        assert_eq!(
+            i32_of(call(&wasm, "nested", &[Val::I32(x)])),
+            nested(x),
+            "nested({x})"
+        );
+    }
+}
+
 #[test]
 fn dialect_round_trips_through_text() {
     let ctx = &mut Context::new();

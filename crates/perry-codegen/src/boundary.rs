@@ -8,7 +8,13 @@
 //!
 //! Supported: `bool`, integers, `f32`, `f64` (all ECMAScript numbers), `string`, `list<T>` and
 //! records. An uncaught exception in an export without an error result traps; `result` types
-//! and async exports follow with P6.2 and P3.8.
+//! follow with P6.2.
+//!
+//! Async exports (P3.8) use the callback ABI: `[async-lift]<export>` lifts the arguments,
+//! starts the async function and returns through `finish`, which drives ready frames and either
+//! delivers the settled value with `task.return` (code `EXIT`) or suspends the task and asks the
+//! host to `WAIT` on its waitable set. `[callback][async-lift]<export>` resumes the task
+//! (kept in `context.get 0`), settles the promise of a returned host subtask and finishes again.
 use crate::{FunctionLowering, ModuleState, Runtime, i32_type};
 use anyhow::{Result, anyhow, bail, ensure};
 use perry_mir::types::{ArrayType, RecordType};
@@ -61,12 +67,15 @@ pub struct Export {
     pub function: String,
     pub params: Vec<AbiType>,
     pub result: Option<AbiType>,
+    /// For an async export (lifted with the callback ABI): the import module and WIT function
+    /// name of its `task.return`.
+    pub task_return: Option<(String, String)>,
 }
 
 const MAX_FLAT_PARAMS: usize = 16;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Flat {
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum Flat {
     I32,
     I64,
     F32,
@@ -162,7 +171,7 @@ fn align(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
 }
 
-fn flat_type(ctx: &mut Context, flat: Flat) -> TypeHandle {
+pub(crate) fn flat_type(ctx: &mut Context, flat: Flat) -> TypeHandle {
     match flat {
         Flat::I32 => i32_type(ctx),
         Flat::I64 => IntegerType::get(ctx, 64, Signedness::Signless).into(),
@@ -186,6 +195,23 @@ pub(crate) fn export(
     function: &FuncOp,
     export: &Export,
 ) -> Result<()> {
+    let is_async = state
+        .async_functions
+        .contains(&function.get_symbol_name(ctx));
+    ensure!(
+        is_async == export.task_return.is_some(),
+        "{} is {}async but the WIT export is {}async",
+        export.function,
+        if is_async { "" } else { "not " },
+        if export.task_return.is_some() {
+            ""
+        } else {
+            "not "
+        },
+    );
+    if is_async {
+        return async_export(ctx, state, function, export);
+    }
     let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
         .map_err(|_| anyhow!("function type"))?;
     let (mir_params, mir_results) = {
@@ -286,10 +312,201 @@ pub(crate) fn export(
     let post = FuncOp::new(ctx, identifier(&post_name), post_ty);
     set_export(ctx, &post, &post_name);
     let mut b = FunctionLowering::glue(state, ctx, &post);
-    b.runtime(ctx, Runtime::TaskEnd, vec![]);
+    b.runtime(ctx, Runtime::TaskFree, vec![]);
     let ret = ReturnOp::new(ctx, vec![]).get_operation();
     b.insert(ctx, ret);
     b.state.wasm.append_operation(ctx, post.get_operation(), 0);
+    Ok(())
+}
+
+/// Callback codes and events of the callback ABI.
+const EXIT: i32 = 0;
+const WAIT: i32 = 2;
+const EVENT_SUBTASK: i32 = 1;
+const SUBTASK_RETURNED: i32 = 2;
+
+/// `[async-lift]<export>`, its callback and their shared `finish`.
+fn async_export(
+    ctx: &mut Context,
+    state: &mut ModuleState,
+    function: &FuncOp,
+    export: &Export,
+) -> Result<()> {
+    let (module, wit_name) = export.task_return.clone().expect("async export");
+    let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)
+        .map_err(|_| anyhow!("function type"))?;
+    let (mir_params, mir_results) = {
+        let ty = ty.deref(ctx);
+        (ty.arg_types(), ty.res_types())
+    };
+    ensure!(
+        mir_params.len() == export.params.len(),
+        "{} takes {} parameters but the WIT export has {}",
+        export.function,
+        mir_params.len(),
+        export.params.len()
+    );
+    let flat_params: Vec<Flat> = export.params.iter().flat_map(AbiType::flat).collect();
+    ensure!(
+        flat_params.len() <= MAX_FLAT_PARAMS,
+        "exports with more than {MAX_FLAT_PARAMS} flat parameters are not supported yet"
+    );
+    // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
+    let result_flat = export
+        .result
+        .as_ref()
+        .map(AbiType::flat)
+        .unwrap_or_default();
+    let indirect = result_flat.len() > MAX_FLAT_PARAMS;
+    let task_return = crate::Host::TaskReturn(
+        module,
+        wit_name,
+        if indirect {
+            vec![Flat::I32]
+        } else {
+            result_flat
+        },
+    );
+    let i32 = i32_type(ctx);
+
+    // finish_<export>() -> code
+    let finish_name = identifier(&format!("finish_{}", export.core_name));
+    let finish_ty = FunctionType::get(ctx, vec![], vec![i32]);
+    let finish = FuncOp::new(ctx, finish_name.clone(), finish_ty);
+    {
+        let mut b = FunctionLowering::glue(state, ctx, &finish);
+        let drive = CallOp::new(ctx, crate::async_split::drive_name(), vec![], vec![]);
+        b.insert(ctx, drive.get_operation());
+        let promise = b
+            .runtime(ctx, Runtime::TaskResult, vec![])
+            .expect("promise");
+        let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
+        let wait = b.new_block(ctx, vec![]);
+        let done = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, settled, (done, vec![]), (wait, vec![]));
+
+        // Pending: leave the task and wait on its subtasks (none would wait forever).
+        b.block = wait;
+        let set = b.runtime(ctx, Runtime::TaskSuspend, vec![]).expect("set");
+        let stuck = b.num(ctx, NumOpcode::I32Eqz, vec![set]);
+        let trap = b.new_block(ctx, vec![]);
+        let suspend = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, stuck, (trap, vec![]), (suspend, vec![]));
+        b.block = trap;
+        let unreachable = UnreachableOp::new(ctx).get_operation();
+        b.insert(ctx, unreachable);
+        b.block = suspend;
+        let four = b.i32_const(ctx, 4);
+        let shifted = b.num(ctx, NumOpcode::I32Shl, vec![set, four]);
+        let wait_code = b.i32_const(ctx, WAIT);
+        let code = b.num(ctx, NumOpcode::I32Or, vec![shifted, wait_code]);
+        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
+        b.insert(ctx, ret);
+
+        // Settled: a rejection without a WIT error type traps; otherwise return the value.
+        b.block = done;
+        let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);
+        let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
+        let trap = b.new_block(ctx, vec![]);
+        let fulfilled = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
+        b.block = trap;
+        let unreachable = UnreachableOp::new(ctx).get_operation();
+        b.insert(ctx, unreachable);
+        b.block = fulfilled;
+        let mut flat = Vec::new();
+        if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
+            let kind = crate::slot_kind(ctx, *mir_ty)?;
+            let value = b.load(ctx, kind, promise, perry_runtime::promise::VALUE);
+            if indirect {
+                let size = b.i32_const(ctx, ty.size() as i32);
+                let area = b.runtime(ctx, Runtime::Alloc, vec![size]).expect("area");
+                b.lower_store(ctx, ty, *mir_ty, value, area, 0)?;
+                flat.push(area);
+            } else {
+                b.lower_flat_values(ctx, ty, *mir_ty, value, &mut flat)?;
+            }
+        }
+        b.host(ctx, task_return, flat);
+        let set = b.runtime(ctx, Runtime::TaskSet, vec![]).expect("set");
+        let drop_set = b.new_block(ctx, vec![]);
+        let free = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, set, (drop_set, vec![]), (free, vec![]));
+        b.block = drop_set;
+        b.host(ctx, crate::Host::WaitableSetDrop, vec![set]);
+        b.br(ctx, free, vec![]);
+        b.block = free;
+        b.runtime(ctx, Runtime::TaskFree, vec![]);
+        let exit = b.i32_const(ctx, EXIT);
+        let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
+        b.insert(ctx, ret);
+        b.state
+            .wasm
+            .append_operation(ctx, finish.get_operation(), 0);
+    }
+
+    // [async-lift]<export>(params) -> code
+    let lift_name = format!("[async-lift]{}", export.core_name);
+    let params: Vec<_> = flat_params.iter().map(|f| flat_type(ctx, *f)).collect();
+    let lift_ty = FunctionType::get(ctx, params, vec![i32]);
+    let lift = FuncOp::new(ctx, identifier(&lift_name), lift_ty);
+    set_export(ctx, &lift, &lift_name);
+    {
+        let mut flat: Vec<Value> = lift.get_entry_block(ctx).deref(ctx).arguments().collect();
+        flat.reverse();
+        let mut b = FunctionLowering::glue(state, ctx, &lift);
+        let task = b.runtime(ctx, Runtime::TaskEnter, vec![]).expect("task");
+        b.host(ctx, crate::Host::ContextSet0, vec![task]);
+        let mut args = Vec::new();
+        for (ty, mir_ty) in export.params.iter().zip(&mir_params) {
+            args.push(b.lift_flat(ctx, ty, *mir_ty, &mut flat)?);
+        }
+        let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
+        let promise = b.result(ctx, ramp.get_operation());
+        b.runtime(ctx, Runtime::TaskSetResult, vec![promise]);
+        let call = CallOp::new(ctx, finish_name.clone(), vec![], vec![i32]);
+        let code = b.result(ctx, call.get_operation());
+        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
+        b.insert(ctx, ret);
+        b.state.wasm.append_operation(ctx, lift.get_operation(), 0);
+    }
+
+    // [callback][async-lift]<export>(event, p1, p2) -> code
+    let callback_name = format!("[callback]{lift_name}");
+    let callback_ty = FunctionType::get(ctx, vec![i32; 3], vec![i32]);
+    let callback = FuncOp::new(ctx, identifier(&callback_name), callback_ty);
+    set_export(ctx, &callback, &callback_name);
+    {
+        let args: Vec<Value> = callback
+            .get_entry_block(ctx)
+            .deref(ctx)
+            .arguments()
+            .collect();
+        let (event, handle, subtask_state) = (args[0], args[1], args[2]);
+        let mut b = FunctionLowering::glue(state, ctx, &callback);
+        let task = b.host(ctx, crate::Host::ContextGet0, vec![]).expect("task");
+        b.runtime(ctx, Runtime::TaskResume, vec![task]);
+        let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
+        let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
+        let returned_state = b.i32_const(ctx, SUBTASK_RETURNED);
+        let returned = b.num(ctx, NumOpcode::I32Eq, vec![subtask_state, returned_state]);
+        let both = b.num(ctx, NumOpcode::I32And, vec![is_subtask, returned]);
+        let settle = b.new_block(ctx, vec![]);
+        let next = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, both, (settle, vec![]), (next, vec![]));
+        b.block = settle;
+        b.runtime(ctx, Runtime::SubtaskDone, vec![handle]);
+        b.host(ctx, crate::Host::SubtaskDrop, vec![handle]);
+        b.br(ctx, next, vec![]);
+        b.block = next;
+        let call = CallOp::new(ctx, finish_name, vec![], vec![i32]);
+        let code = b.result(ctx, call.get_operation());
+        let ret = ReturnOp::new(ctx, vec![code]).get_operation();
+        b.insert(ctx, ret);
+        b.state
+            .wasm
+            .append_operation(ctx, callback.get_operation(), 0);
+    }
     Ok(())
 }
 
@@ -564,27 +781,7 @@ impl FunctionLowering<'_> {
                 self.store(ctx, MemKind::I32, address, offset + 4, len);
             }
             AbiType::List(element) => {
-                let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-                    .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
-                    .deref(ctx)
-                    .element();
-                let kind = crate::slot_kind(ctx, element_mir)?;
-                let len = self.load(ctx, MemKind::I32, value, layout::LEN);
-                let data = self.load(ctx, MemKind::I32, value, layout::DATA);
-                let stride = self.i32_const(ctx, element.size() as i32);
-                let bytes = self.num(ctx, NumOpcode::I32Mul, vec![len, stride]);
-                let buffer = self
-                    .runtime(ctx, Runtime::Alloc, vec![bytes])
-                    .expect("list");
-                let size = element.size() as i32;
-                self.counted_loop(ctx, len, |b, ctx, i| {
-                    let slot = b.slot_address(ctx, data, i);
-                    let item = b.load(ctx, kind, slot, 0);
-                    let stride = b.i32_const(ctx, size);
-                    let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
-                    let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
-                    b.lower_store(ctx, element, element_mir, item, target, 0)
-                })?;
+                let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
                 self.store(ctx, MemKind::I32, address, offset, buffer);
                 self.store(ctx, MemKind::I32, address, offset + 4, len);
             }
@@ -601,6 +798,74 @@ impl FunctionLowering<'_> {
                 let raw = self.lower_flat(ctx, scalar, mir_ty, value)?;
                 self.store(ctx, scalar.mem_kind().unwrap(), address, offset, raw);
             }
+        }
+        Ok(())
+    }
+
+    /// Copy a MIR array into a canonical list buffer; returns (buffer, length).
+    fn lower_list(
+        &mut self,
+        ctx: &mut Context,
+        element: &AbiType,
+        mir_ty: TypeHandle,
+        value: Value,
+    ) -> Result<(Value, Value)> {
+        let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
+            .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
+            .deref(ctx)
+            .element();
+        let kind = crate::slot_kind(ctx, element_mir)?;
+        let len = self.load(ctx, MemKind::I32, value, layout::LEN);
+        let data = self.load(ctx, MemKind::I32, value, layout::DATA);
+        let stride = self.i32_const(ctx, element.size() as i32);
+        let bytes = self.num(ctx, NumOpcode::I32Mul, vec![len, stride]);
+        let buffer = self
+            .runtime(ctx, Runtime::Alloc, vec![bytes])
+            .expect("list");
+        let size = element.size() as i32;
+        self.counted_loop(ctx, len, |b, ctx, i| {
+            let slot = b.slot_address(ctx, data, i);
+            let item = b.load(ctx, kind, slot, 0);
+            let stride = b.i32_const(ctx, size);
+            let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
+            let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
+            b.lower_store(ctx, element, element_mir, item, target, 0)
+        })?;
+        Ok((buffer, len))
+    }
+
+    /// Lower a MIR value to its flat core values (appended to `out`).
+    fn lower_flat_values(
+        &mut self,
+        ctx: &mut Context,
+        ty: &AbiType,
+        mir_ty: TypeHandle,
+        value: Value,
+        out: &mut Vec<Value>,
+    ) -> Result<()> {
+        match ty {
+            AbiType::String => {
+                ensure!(
+                    mir_ty.deref(ctx).is::<perry_mir::types::StringType>(),
+                    "WIT string needs a TypeScript string"
+                );
+                out.push(self.load(ctx, MemKind::I32, value, strings::DATA));
+                out.push(self.load(ctx, MemKind::I32, value, strings::LEN));
+            }
+            AbiType::List(element) => {
+                let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
+                out.extend([buffer, len]);
+            }
+            AbiType::Record(fields) => {
+                let record = self.record_type(ctx, mir_ty)?;
+                for (name, field_ty) in fields {
+                    let (index, field_mir) = record_field(ctx, record, name)?;
+                    let kind = crate::slot_kind(ctx, field_mir)?;
+                    let field = self.load(ctx, kind, value, 8 + 8 * index as u32);
+                    self.lower_flat_values(ctx, field_ty, field_mir, field, out)?;
+                }
+            }
+            scalar => out.push(self.lower_flat(ctx, scalar, mir_ty, value)?),
         }
         Ok(())
     }

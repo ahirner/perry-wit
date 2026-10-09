@@ -27,7 +27,7 @@ TypeScript ─ perry-parser ─ Perry HIR ─ perry-lower ─ perry MIR
 - **Builder.** Every TypeScript local becomes a `perry.local` slot, and pliron's `mem2reg` builds SSA from them, so the builder hand-rolls no SSA. Expression types come from operand MIR types. Records are identified by shape (sorted fields and their types). Unsupported constructs fail with a diagnostic; there is no fallback path.
 - **Codegen.** A direct translation from `perry.*` to `wasm.*`, splitting blocks where exceptions and array growth need control flow.
 - **Emitter.**
-  - Checks reducibility.
+  - Makes control flow reducible (`pliron_wasm::reducible`): a cycle with several entries gets one guard block that dispatches on a label. Only resumes inside loops produce such cycles.
   - Structures the CFG with Ramsey's dominator-tree algorithm ("Beyond Relooper", ICFP 2022).
   - Folds single-use values into stack trees, keeping effects and traps in order.
   - Rematerializes constants.
@@ -79,7 +79,27 @@ At a component export without an error type, an escaping exception traps.
 - the core function, which lifts flat arguments (or loads them from memory), calls the implementation and lowers the result (flat, or into a return area);
 - `cabi_post_<export>`.
 
-Supported WIT types are `bool`, integers, `f32`, `f64`, `string`, `list<T>` and records. Async exports and the remaining types follow the plan.
+Supported WIT types are `bool`, integers, `f32`, `f64`, `string`, `list<T>` and records; the remaining types follow the plan.
+
+An `async func` export must be implemented by an async TypeScript function and uses the callback ABI (see Async).
+
+## Async
+
+Stackless state machines on the WASI P3 callback ABI. It uses no Component Model thread builtins and only the builtins of the default `component-model-async` feature.
+
+- **Split.** Each async function becomes a ramp and a step function (`perry_codegen::async_split`).
+  - The ramp allocates a frame in the task region, stores the arguments, creates the result promise and runs the step.
+  - The step dispatches on the frame's state: 0 starts the body, `k` resumes after the `k`-th `await`.
+  - Values live across an `await` live in frame slots.
+  - `await` of a settled promise continues inline. Otherwise the frame waits on the promise and the step returns.
+  - `return` fulfils the frame's promise; an exception rejects it.
+- **Runtime.** A promise is `{ state, status, value, waiters }` (`perry_runtime::promise`). Settling queues its waiters on the task's run queue. `drive` runs queued frames, dispatching on the frame's kind.
+- **Timers.** `setTimeout(delay, value)` from `node:timers/promises` is an async-lowered `wasi:clocks/monotonic-clock.wait-for`. A pending call joins the task's waitable set, and its promise settles when the subtask returns.
+- **Exports.**
+  - `[async-lift]<export>` enters the task, stores it with `context.set 0`, lifts the arguments, calls the ramp and finishes.
+  - `finish` drives ready frames. If the result promise is settled, it calls `task.return` with the lowered value, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
+  - `[callback][async-lift]<export>` resumes the task from `context.get 0`, settles a returned subtask, drops it and finishes again.
+  - Calls may overlap: every task has its own region, run queue and subtasks.
 
 ## Verification
 
@@ -89,5 +109,6 @@ Supported WIT types are `bool`, integers, `f32`, `f64`, `string`, `list<T>` and 
   - runtime tests on the host.
 - **End to end:**
   - `tests/mir_codegen_test.rs`: linked core modules with fuel metering;
-  - `tests/component_test.rs`: WIT values through the component model.
+  - `tests/component_test.rs`: WIT values through the component model;
+  - `tests/async_component_test.rs`: async exports with WASI P3 timers, including overlapping calls.
 - **Conformance:** `cargo run -p perry-conformance -- check`, against Node.js as the oracle, gated by the `passing.txt` ratchet.
