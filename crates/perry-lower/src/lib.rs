@@ -13,7 +13,17 @@
 //! `if`, `while`, `do`/`while`, `for`, unlabeled `break`/`continue`, `return`; direct calls;
 //! string concatenation; field reads and writes; array literals, `push`, indexing and
 //! `.length`. Everything else is rejected with a diagnostic.
+mod control_flow;
+mod dates;
+mod decoder;
+mod foreign;
+mod json;
+mod modules;
 mod shapes;
+mod source;
+mod streams;
+mod url;
+mod variants;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{
     ir::{
@@ -41,12 +51,13 @@ use perry_mir::{
     },
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
-        IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, optional_value,
+        IsNullOp, IsUndefinedOp, NullOp, OptionalCastOp, ToNumberOp, ToStringOp, UndefinedOp,
+        UnwrapOp, WrapOp, absence, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType, JsonType,
-        PromiseType, ReadResultType, ReadableType, ReaderType, RecordType, RequestType,
+        AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
+        JsonType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordType, RequestType,
         ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
@@ -77,7 +88,7 @@ use std::collections::{HashMap, HashSet};
 
 /// HIR types, for callers that describe foreign (WIT) types.
 pub mod hir {
-    pub use perry_hir::types::{ObjectType, PropertyInfo, Type};
+    pub use perry_hir::types::{FunctionType, ObjectType, PropertyInfo, Type};
 }
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module.
@@ -93,11 +104,19 @@ pub fn lower_source_with(
     file: &str,
     foreign: &HashMap<String, HirType>,
 ) -> Result<ModuleOp> {
-    let ast = perry_parser::parse_typescript(source, file)
-        .map_err(|error| anyhow!("failed to parse {file}: {error:?}"))?;
+    let mut ast = modules::load(source, file, foreign)?;
+    source::validate(&ast)?;
+    streams::lower(&mut ast)?;
+    decoder::preserve_options(&mut ast)?;
     let hir = perry_hir::lower_module(&ast, "main", file)
         .map_err(|error| anyhow!("failed to lower {file}: {error:?}"))?;
-    lower_module_with(ctx, &hir, foreign)
+    let spans = source::inferred_bindings(&ast);
+    let inferred = hir
+        .local_source_spans
+        .iter()
+        .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
+        .collect();
+    build_module(ctx, &hir, foreign, inferred)
 }
 
 struct Signature {
@@ -122,8 +141,17 @@ pub fn lower_module_with(
     hir: &HirModule,
     foreign: &HashMap<String, HirType>,
 ) -> Result<ModuleOp> {
+    build_module(ctx, hir, foreign, HashSet::new())
+}
+
+fn build_module(
+    ctx: &mut Context,
+    hir: &HirModule,
+    foreign: &HashMap<String, HirType>,
+    inferred: HashSet<LocalId>,
+) -> Result<ModuleOp> {
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
-    let shapes = Shapes::new(hir, foreign);
+    let shapes = Shapes::new(module, hir, foreign, inferred);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<String, Builtin> = HashMap::new();
@@ -166,11 +194,7 @@ pub fn lower_module_with(
             "generator function {} is not supported yet",
             function.name
         );
-        ensure!(
-            function.captures.is_empty(),
-            "closures are not supported (subset rule R5): {}",
-            function.name
-        );
+
         let params = function
             .params
             .iter()
@@ -208,17 +232,6 @@ pub fn lower_module_with(
             },
         );
     }
-    for function in &hir.functions {
-        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)
-            .with_context(|| format!("lowering function {}", function.name))?;
-        if function.is_exported {
-            perry_mir::calls::set_exported(ctx, &func);
-        }
-        if function.is_async {
-            set_async(ctx, &func);
-        }
-        module.append_operation(ctx, func.get_operation(), 0);
-    }
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run; without other statements there is no main function.
     let init: Vec<Stmt> = hir
@@ -234,11 +247,20 @@ pub fn lower_module_with(
     if !init.is_empty() {
         // Top-level statements (with top-level `await`) form the async main function of a
         // command (`wasi:cli/run`), settling `undefined`.
+        let persistent = hir.functions.iter().any(|f| f.is_exported);
         let signature = Signature {
-            name: identifier(MAIN)?,
-            is_async: true,
+            name: identifier(if persistent {
+                perry_mir::globals::INITIALIZER
+            } else {
+                MAIN
+            })?,
+            is_async: !persistent,
             params: vec![],
-            results: vec![shapes.settled_type(ctx, &HirType::Void)?],
+            results: if persistent {
+                vec![]
+            } else {
+                vec![shapes.settled_type(ctx, &HirType::Void)?]
+            },
         };
         let func = FunctionBuilder::lower_body(
             ctx,
@@ -250,7 +272,20 @@ pub fn lower_module_with(
             &builtins,
         )
         .context("lowering top-level statements")?;
-        set_async(ctx, &func);
+        if signature.is_async {
+            set_async(ctx, &func);
+        }
+        module.append_operation(ctx, func.get_operation(), 0);
+    }
+    for function in &hir.functions {
+        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)
+            .with_context(|| format!("lowering function {}", function.name))?;
+        if function.is_exported {
+            perry_mir::calls::set_exported(ctx, &func);
+        }
+        if function.is_async {
+            set_async(ctx, &func);
+        }
         module.append_operation(ctx, func.get_operation(), 0);
     }
     Ok(module)
@@ -307,15 +342,25 @@ fn hir_module_name(hir: &HirModule) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    BigInt,
+    Url,
+    SearchParams,
     Number,
     Boolean,
     String,
     Record,
+    Variant,
+    NumberString,
+    Resource,
     Array,
     Exception,
     Bytes,
+    ByteBuffer,
+    ByobReader,
     Json,
     Date,
+    Decoder,
+    Regex,
     Settled,
     Stats,
     Headers,
@@ -327,6 +372,7 @@ enum Kind {
     Reader,
     ReadResult,
     Incoming,
+    Abort,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -392,10 +438,18 @@ impl Builtin {
 fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     let ty = value.get_type(ctx);
     let ty = ty.deref(ctx);
-    if ty.is::<FP64Type>() {
+    if ty.is::<perry_mir::types::BigIntType>() {
+        Ok(Kind::BigInt)
+    } else if ty.is::<FP64Type>() {
         Ok(Kind::Number)
     } else if ty.is::<StringType>() {
         Ok(Kind::String)
+    } else if ty.is::<perry_mir::types::ResourceType>() {
+        Ok(Kind::Resource)
+    } else if ty.is::<perry_mir::types::NumberStringType>() {
+        Ok(Kind::NumberString)
+    } else if ty.is::<perry_mir::types::VariantType>() {
+        Ok(Kind::Variant)
     } else if ty.is::<RecordType>() {
         Ok(Kind::Record)
     } else if ty.is::<ArrayType>() {
@@ -404,8 +458,16 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Exception)
     } else if ty.is::<BytesType>() {
         Ok(Kind::Bytes)
+    } else if ty.is::<perry_mir::types::UrlType>() {
+        Ok(Kind::Url)
+    } else if ty.is::<perry_mir::types::SearchParamsType>() {
+        Ok(Kind::SearchParams)
     } else if ty.is::<JsonType>() {
         Ok(Kind::Json)
+    } else if ty.is::<perry_mir::types::RegexType>() {
+        Ok(Kind::Regex)
+    } else if ty.is::<perry_mir::types::DecoderType>() {
+        Ok(Kind::Decoder)
     } else if ty.is::<DateType>() {
         Ok(Kind::Date)
     } else if ty.is::<SettledType>() {
@@ -424,8 +486,14 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::Writer)
     } else if ty.is::<ReadableType>() {
         Ok(Kind::Readable)
+    } else if ty.is::<perry_mir::types::ByteBufferType>() {
+        Ok(Kind::ByteBuffer)
+    } else if ty.is::<perry_mir::types::ByobReaderType>() {
+        Ok(Kind::ByobReader)
     } else if ty.is::<ReaderType>() {
         Ok(Kind::Reader)
+    } else if ty.is::<AbortType>() {
+        Ok(Kind::Abort)
     } else if ty.is::<IncomingType>() {
         Ok(Kind::Incoming)
     } else if ty.is::<ReadResultType>() {
@@ -440,9 +508,14 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     }
 }
 
-struct Loop {
-    continue_to: Ptr<BasicBlock>,
-    break_to: Ptr<BasicBlock>,
+enum Control {
+    Loop {
+        continue_to: Ptr<BasicBlock>,
+        break_to: Ptr<BasicBlock>,
+    },
+    Switch {
+        break_to: Ptr<BasicBlock>,
+    },
 }
 
 /// The innermost enclosing `catch` or exceptional `finally` path: throwing ops store their
@@ -457,9 +530,9 @@ struct Handler {
 #[derive(Clone)]
 struct Finally {
     body: Vec<Stmt>,
-    /// `handlers.len()` and `loops.len()` outside the `try`.
+    /// `handlers.len()` and `controls.len()` outside the `try`.
     handlers: usize,
-    loops: usize,
+    controls: usize,
 }
 
 /// Status of `process.exit` (`ErrorKind::Exit`): handlers pass it on.
@@ -470,10 +543,12 @@ struct FunctionBuilder<'s> {
     ins: IRInserter<DummyListener>,
     block: Ptr<BasicBlock>,
     locals: HashMap<LocalId, Value>,
+    global_slots: HashSet<Value>,
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
     false_guards: HashSet<LocalId>,
-    loops: Vec<Loop>,
+    variant_guards: HashMap<variants::Path, Vec<(String, bool)>>,
+    controls: Vec<Control>,
     handlers: Vec<Handler>,
     finallies: Vec<Finally>,
     signatures: &'s HashMap<FuncId, Signature>,
@@ -493,6 +568,14 @@ impl<'s> FunctionBuilder<'s> {
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
     ) -> Result<FuncOp> {
+        ensure!(
+            function
+                .captures
+                .iter()
+                .all(|id| shapes.globals.borrow().contains_key(id)),
+            "closures capturing activation-local values are unsupported: {}",
+            function.name
+        );
         let signature = &signatures[&function.id];
         let params: Vec<LocalId> = function.params.iter().map(|p| p.id).collect();
         Self::lower_body(
@@ -520,22 +603,25 @@ impl<'s> FunctionBuilder<'s> {
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
         let entry = func.get_entry_block(ctx);
         let region = func.get_operation().deref(ctx).get_region(0);
-        let mut builder = FunctionBuilder {
-            region,
-            ins: IRInserter::new_at_block_end(entry),
-            block: entry,
-            locals: HashMap::new(),
-            false_guards: HashSet::new(),
-            loops: Vec::new(),
-            handlers: Vec::new(),
-            finallies: Vec::new(),
-            signatures,
-            shapes,
-            builtins,
-            results: signature.results.clone(),
-            is_async: signature.is_async,
-            labels: 0,
-        };
+        let mut builder = Self::new(ctx, &func, signature, signatures, shapes, builtins);
+        let mut globals: Vec<_> = shapes
+            .globals
+            .borrow()
+            .iter()
+            .map(|(&id, &ty)| (id, ty))
+            .collect();
+        globals.sort_by_key(|(id, _)| *id);
+        for (id, ty) in globals {
+            let slot = builder.emit_value(ctx, |ctx| {
+                perry_mir::globals::GlobalOp::new(
+                    ctx,
+                    format!("global_{id}").try_into().expect("global name"),
+                    ty,
+                )
+            });
+            builder.locals.insert(id, slot);
+            builder.global_slots.insert(slot);
+        }
         for (index, param) in params.iter().enumerate() {
             let value = entry.deref(ctx).get_argument(index);
             let slot = builder.slot(ctx, value.get_type(ctx));
@@ -551,11 +637,41 @@ impl<'s> FunctionBuilder<'s> {
         Ok(func)
     }
 
+    fn new(
+        ctx: &Context,
+        func: &FuncOp,
+        signature: &Signature,
+        signatures: &'s HashMap<FuncId, Signature>,
+        shapes: &'s Shapes<'s>,
+        builtins: &'s HashMap<String, Builtin>,
+    ) -> Self {
+        let entry = func.get_entry_block(ctx);
+        let region = func.get_operation().deref(ctx).get_region(0);
+        Self {
+            region,
+            ins: IRInserter::new_at_block_end(entry),
+            block: entry,
+            locals: HashMap::new(),
+            global_slots: HashSet::new(),
+            false_guards: HashSet::new(),
+            variant_guards: HashMap::new(),
+            controls: Vec::new(),
+            handlers: Vec::new(),
+            finallies: Vec::new(),
+            signatures,
+            shapes,
+            builtins,
+            results: signature.results.clone(),
+            is_async: signature.is_async,
+            labels: 0,
+        }
+    }
+
     /// `setTimeout(delay?, value?)` from `node:timers/promises`.
     fn timer(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
         ensure!(
-            args.len() <= 2,
-            "setTimeout options (AbortSignal, ref) are not supported yet"
+            args.len() <= 3,
+            "setTimeout takes a delay, a value and options"
         );
         let delay = match args.first() {
             Some(delay) => {
@@ -579,7 +695,29 @@ impl<'s> FunctionBuilder<'s> {
                 self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
             }
         };
-        Ok(self.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, value)))
+        // `{ signal }`: the only option (`ref` has no meaning in a component).
+        let signal = match args.get(2) {
+            None => None,
+            Some(options) => {
+                let signal = match options {
+                    Expr::New {
+                        class_name, args, ..
+                    } if self
+                        .shapes
+                        .literal_fields(class_name)
+                        .is_some_and(|names| names == ["signal"]) =>
+                    {
+                        &args[0]
+                    }
+                    Expr::Object(fields) if fields.len() == 1 && fields[0].0 == "signal" => {
+                        &fields[0].1
+                    }
+                    _ => bail!("setTimeout options must be a literal {{ signal }}"),
+                };
+                Some(self.typed_operand(ctx, signal, Kind::Abort, "an AbortSignal")?)
+            }
+        };
+        Ok(self.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, value, signal)))
     }
 
     /// `new Headers(init?)`, `new Response(body?, init?)`, `new Request(url, init?)`.
@@ -779,22 +917,59 @@ impl<'s> FunctionBuilder<'s> {
             (Kind::Writer, "close", true) => (Intrinsic::WriterClose, vec![receiver]),
             (Kind::Readable, "locked", false) => (Intrinsic::ReadableLocked, vec![receiver]),
             (Kind::Readable, "getReader", true) => {
-                ensure!(
-                    args.is_some_and(<[Expr]>::is_empty),
-                    "BYOB readers are not supported (accepted deviation, TODOs.md P6.2)"
-                );
-                (Intrinsic::ReadableGetReader, vec![receiver])
+                let args = args.unwrap_or(&[]);
+                if args.is_empty() {
+                    (Intrinsic::ReadableGetReader, vec![receiver])
+                } else {
+                    ensure!(
+                        args.len() == 1,
+                        "getReader takes an optional {{mode: 'byob'}}"
+                    );
+                    let fields = self.init_fields(args.first())?;
+                    ensure!(
+                        fields.len() == 1
+                            && fields[0].0 == "mode"
+                            && matches!(fields[0].1, Expr::String(mode) if mode == "byob"),
+                        "getReader supports only {{mode: 'byob'}}"
+                    );
+                    return Ok(self
+                        .intrinsic(ctx, Intrinsic::ReadableGetByobReader, vec![receiver])
+                        .expect("reader"));
+                }
             }
             (Kind::Readable, "cancel", true) => (Intrinsic::ReadableCancel, vec![receiver]),
             (Kind::Reader, "read", true) => {
                 ensure!(
                     args.is_some_and(<[Expr]>::is_empty),
-                    "BYOB reads are not supported (accepted deviation, TODOs.md P6.2)"
+                    "default reader.read takes no arguments"
                 );
                 (Intrinsic::ReaderRead, vec![receiver])
             }
-            (Kind::Reader, "cancel", true) => (Intrinsic::ReaderCancel, vec![receiver]),
-            (Kind::Reader, "releaseLock", true) => {
+            (Kind::ByobReader, "read", true) => {
+                let args = args.unwrap_or(&[]);
+                ensure!(
+                    (1..=2).contains(&args.len()),
+                    "BYOB read requires a Uint8Array and optional {{min}}"
+                );
+                let view = self.typed_operand(ctx, &args[0], Kind::Bytes, "a Uint8Array")?;
+                let fields = self.init_fields(args.get(1))?;
+                ensure!(
+                    fields.is_empty() || (fields.len() == 1 && fields[0].0 == "min"),
+                    "BYOB read supports only {{min}}"
+                );
+                let minimum = self.number_or(ctx, fields.first().map(|(_, value)| *value), 1.0)?;
+                return Ok(self
+                    .intrinsic(
+                        ctx,
+                        Intrinsic::ReaderReadByob,
+                        vec![receiver, view, minimum],
+                    )
+                    .expect("promise"));
+            }
+            (Kind::Reader | Kind::ByobReader, "cancel", true) => {
+                (Intrinsic::ReaderCancel, vec![receiver])
+            }
+            (Kind::Reader | Kind::ByobReader, "releaseLock", true) => {
                 self.intrinsic(ctx, Intrinsic::ReaderReleaseLock, vec![receiver]);
                 let number = FP64Type::get(ctx).into();
                 return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
@@ -998,7 +1173,7 @@ impl<'s> FunctionBuilder<'s> {
         let outer = Finally {
             body: finally.map(<[Stmt]>::to_vec).unwrap_or_default(),
             handlers: self.handlers.len(),
-            loops: self.loops.len(),
+            controls: self.controls.len(),
         };
         // The exceptional path of `finally`: run it, then throw the exception again.
         let rethrow_block = finally.map(|_| self.new_block(ctx, "finally"));
@@ -1131,6 +1306,10 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn load(&mut self, ctx: &mut Context, slot: Value) -> Result<Value> {
+        if self.global_slots.contains(&slot) {
+            let op = perry_mir::globals::GlobalLoadOp::new(ctx, slot)?;
+            return Ok(self.append_value(ctx, &op));
+        }
         let op = LoadOp::new(ctx, slot)?;
         Ok(self.append_value(ctx, &op))
     }
@@ -1165,11 +1344,55 @@ impl<'s> FunctionBuilder<'s> {
 
     fn condition(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
-        ensure!(
-            kind(ctx, value)? == Kind::Boolean,
-            "conditions must be boolean (implicit truthiness is not supported yet)"
-        );
-        Ok(value)
+        self.truthy(ctx, value)
+    }
+
+    fn truthy(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if self.is_optional(ctx, value) {
+            let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+            let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+            return self.choose(
+                ctx,
+                ty,
+                absent,
+                |b, ctx| Ok(b.boolean(ctx, false)),
+                |b, ctx| {
+                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+                    b.choose(
+                        ctx,
+                        ty,
+                        null,
+                        |b, ctx| Ok(b.boolean(ctx, false)),
+                        |b, ctx| {
+                            let value = b.defined(ctx, value)?;
+                            b.truthy(ctx, value)
+                        },
+                    )
+                },
+            );
+        }
+        match kind(ctx, value)? {
+            Kind::Boolean => Ok(value),
+            Kind::String => {
+                let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
+                let zero = self.i32(ctx, 0);
+                Ok(self.compare(ctx, CompareKind::Ne, length, zero))
+            }
+            Kind::Number => {
+                let zero = self.number(ctx, 0.0);
+                let absolute = self
+                    .intrinsic(ctx, Intrinsic::MathAbs, vec![value])
+                    .expect("number");
+                Ok(self.compare(ctx, CompareKind::Gt, absolute, zero))
+            }
+            Kind::Json => Ok(self
+                .intrinsic(ctx, Intrinsic::JsonTruthy, vec![value])
+                .expect("boolean")),
+            Kind::BigInt | Kind::NumberString => {
+                bail!("narrow this scalar before testing truthiness")
+            }
+            _ => Ok(self.boolean(ctx, true)),
+        }
     }
 
     fn branch(
@@ -1287,11 +1510,14 @@ impl<'s> FunctionBuilder<'s> {
                     .as_ref()
                     .map(|e| self.expression_with(ctx, e, declared))
                     .transpose()?;
-                // A binding initialized with `T | undefined` (an out-of-bounds read, R8) holds
-                // `undefined` at runtime even when declared `T`, as in ECMAScript.
+                // Inferred bindings preserve absence states and the selected reader mode.
+                // HIR's getReader signature assumes the default overload.
                 let ty = match (declared, init) {
                     (Some(ty), Some(value))
-                        if optional_value(ctx, value.get_type(ctx)) == Some(ty) =>
+                        if self.shapes.inferred_bindings.contains(id)
+                            && (optional_value(ctx, value.get_type(ctx)) == Some(ty)
+                                || (ty.deref(ctx).is::<ReaderType>()
+                                    && kind(ctx, value)? == Kind::ByobReader)) =>
                     {
                         value.get_type(ctx)
                     }
@@ -1299,7 +1525,21 @@ impl<'s> FunctionBuilder<'s> {
                     (None, Some(value)) => value.get_type(ctx),
                     (None, None) => bail!("an untyped binding needs an initializer"),
                 };
-                let slot = self.entry_slot(ctx, ty);
+                let slot = if self.shapes.global_ids.contains(id) {
+                    self.shapes.globals.borrow_mut().insert(*id, ty);
+                    self.emit_value(ctx, |ctx| {
+                        perry_mir::globals::GlobalOp::new(
+                            ctx,
+                            format!("global_{id}").try_into().expect("global name"),
+                            ty,
+                        )
+                    })
+                } else {
+                    self.entry_slot(ctx, ty)
+                };
+                if self.shapes.global_ids.contains(id) {
+                    self.global_slots.insert(slot);
+                }
                 if let Some(value) = init {
                     let value = self.fit(ctx, value, ty)?;
                     self.store(ctx, slot, value);
@@ -1310,7 +1550,8 @@ impl<'s> FunctionBuilder<'s> {
                 self.effect(ctx, expr)?;
             }
             Stmt::Return(value) => {
-                let values = match value {
+                let mut adopts_promise = false;
+                let mut values = match value {
                     Some(expr) => {
                         let expected = self
                             .results
@@ -1318,19 +1559,34 @@ impl<'s> FunctionBuilder<'s> {
                             .copied()
                             .context("a void function returns a value")?;
                         let value = self.expression_with(ctx, expr, Some(expected))?;
-                        vec![self.fit(ctx, value, expected)?]
+                        adopts_promise =
+                            self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>();
+                        vec![if adopts_promise {
+                            value
+                        } else {
+                            self.fit(ctx, value, expected)?
+                        }]
                     }
                     None => self.implicit_results(ctx),
                 };
-                ensure!(
-                    values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
-                    "return value type differs from the declared result"
-                );
                 self.run_finallies(ctx, |_| true)?;
                 if self.terminated(ctx) {
                     self.after_terminator(ctx);
                     return Ok(());
                 }
+                if adopts_promise {
+                    // Returning a promise runs finalizers before adoption; its later rejection
+                    // does not enter a catch surrounding the return expression.
+                    let handlers = std::mem::take(&mut self.handlers);
+                    let await_ = AwaitOp::new(ctx, values[0])?;
+                    let value = self.append_value(ctx, &await_);
+                    values[0] = self.fit(ctx, value, self.results[0])?;
+                    self.handlers = handlers;
+                }
+                ensure!(
+                    values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
+                    "return value type differs from the declared result"
+                );
                 self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
                 self.after_terminator(ctx);
             }
@@ -1339,7 +1595,8 @@ impl<'s> FunctionBuilder<'s> {
                 then_branch,
                 else_branch,
             } => {
-                let condition = self.condition(ctx, condition)?;
+                let guards = self.variant_guards.clone();
+                let test = self.condition(ctx, condition)?;
                 let then = self.new_block(ctx, "then");
                 let join = self.new_block(ctx, "join");
                 let otherwise = if else_branch.is_some() {
@@ -1347,14 +1604,27 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     join
                 };
-                self.branch(ctx, condition, then, otherwise);
+                self.branch(ctx, test, then, otherwise);
                 self.switch_to(then);
+                self.variant_condition(condition, true);
                 self.statements(ctx, then_branch)?;
+                let then_reachable = self.reachable(ctx, self.block);
                 self.jump(ctx, join);
+                self.variant_guards = guards.clone();
+                let mut else_reachable = true;
                 if let Some(else_branch) = else_branch {
                     self.switch_to(otherwise);
+                    self.variant_condition(condition, false);
                     self.statements(ctx, else_branch)?;
+                    else_reachable = self.reachable(ctx, self.block);
                     self.jump(ctx, join);
+                }
+                self.variant_guards = guards;
+                if !then_reachable {
+                    self.variant_condition(condition, false);
+                }
+                if !else_reachable {
+                    self.variant_condition(condition, true);
                 }
                 self.switch_to(join);
             }
@@ -1377,20 +1647,28 @@ impl<'s> FunctionBuilder<'s> {
                 body,
                 false,
             )?,
+            Stmt::Switch {
+                discriminant,
+                cases,
+            } => self.switch(ctx, discriminant, cases)?,
             Stmt::Break | Stmt::Continue => {
-                let target = self
-                    .loops
-                    .last()
-                    .map(|l| {
-                        if matches!(statement, Stmt::Break) {
-                            l.break_to
-                        } else {
-                            l.continue_to
+                let (index, target) = self
+                    .controls
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, control)| match (statement, control) {
+                        (
+                            Stmt::Break,
+                            Control::Loop { break_to, .. } | Control::Switch { break_to },
+                        ) => Some((index, *break_to)),
+                        (Stmt::Continue, Control::Loop { continue_to, .. }) => {
+                            Some((index, *continue_to))
                         }
+                        _ => None,
                     })
-                    .context("break/continue outside a loop")?;
-                let depth = self.loops.len();
-                self.run_finallies(ctx, |f| f.loops >= depth)?;
+                    .context("break/continue has no enclosing target")?;
+                self.run_finallies(ctx, |f| f.controls > index)?;
                 self.jump(ctx, target);
                 self.after_terminator(ctx);
             }
@@ -1400,9 +1678,13 @@ impl<'s> FunctionBuilder<'s> {
                 ensure!(
                     matches!(
                         kind(ctx, value)?,
-                        Kind::Exception | Kind::Number | Kind::Boolean | Kind::String
+                        Kind::Exception
+                            | Kind::Number
+                            | Kind::Boolean
+                            | Kind::String
+                            | Kind::BigInt
                     ),
-                    "only Error objects, numbers, booleans and strings can be thrown yet"
+                    "only Error objects, numbers, bigints, booleans and strings can be thrown"
                 );
                 let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, value));
                 self.propagate(ctx, status);
@@ -1450,12 +1732,12 @@ impl<'s> FunctionBuilder<'s> {
         }
 
         self.switch_to(body_block);
-        self.loops.push(Loop {
+        self.controls.push(Control::Loop {
             continue_to: latch,
             break_to: exit,
         });
         let lowered = self.statements(ctx, body);
-        self.loops.pop();
+        self.controls.pop();
         lowered?;
         self.jump(ctx, latch);
 
@@ -1508,7 +1790,75 @@ impl<'s> FunctionBuilder<'s> {
         expr: &Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        Ok(match expr {
+        if let Some(value) = self.date_expression(ctx, expr)? {
+            return Ok(value);
+        }
+        if let Some(value) = self.url_expression(ctx, expr)? {
+            return Ok(value);
+        }
+        let value = match expr {
+            Expr::RegExp { pattern, flags } => self.emit_value(ctx, |ctx| {
+                perry_mir::regex::RegexConstOp::new(ctx, pattern, flags)
+            }),
+            Expr::RegExpDynamic { .. } => {
+                bail!("RegExp construction is unsupported; use a bounded regex literal")
+            }
+            Expr::RegExpTest { regex, string } => {
+                let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
+                let string = self.string_operand(ctx, string)?;
+                self.regex_test(ctx, regex, string)
+            }
+            Expr::BigInt(text) => {
+                let text = text.trim_end_matches('n').replace('_', "");
+                let (radix, digits) = if let Some(n) =
+                    text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                {
+                    (16, n)
+                } else if let Some(n) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O"))
+                {
+                    (8, n)
+                } else if let Some(n) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B"))
+                {
+                    (2, n)
+                } else {
+                    (10, text.as_str())
+                };
+                let magnitude = u64::from_str_radix(digits, radix)
+                    .context("bigint literal exceeds the 64-bit transport domain")?;
+                self.emit_value(ctx, |ctx| {
+                    perry_mir::integers::BigIntConstOp::new(ctx, magnitude)
+                })
+            }
+            Expr::BigIntCoerce(expr) => {
+                let value = self.expression(ctx, expr)?;
+                let value = self.defined(ctx, value)?;
+                match kind(ctx, value)? {
+                    Kind::BigInt => value,
+                    Kind::Number => self
+                        .intrinsic(ctx, Intrinsic::BigIntFromNumber, vec![value])
+                        .expect("bigint"),
+                    _ => bail!(
+                        "BigInt conversion requires a number or bigint in the 64-bit transport profile"
+                    ),
+                }
+            }
+            Expr::NumberCoerce(expr) => {
+                let value = self.expression(ctx, expr)?;
+                ensure!(
+                    kind(ctx, value)? != Kind::NumberString,
+                    "narrow number | string before numeric conversion"
+                );
+                if kind(ctx, value)? == Kind::BigInt {
+                    self.intrinsic(ctx, Intrinsic::BigIntToNumber, vec![value])
+                        .expect("number")
+                } else {
+                    self.arithmetic(ctx, value)
+                }
+            }
+            Expr::StringCoerce(expr) | Expr::TemplateStringCoerce(expr) => {
+                let value = self.expression(ctx, expr)?;
+                self.display(ctx, value)?
+            }
             Expr::Number(value) => self.number(ctx, *value),
             Expr::Integer(value) => self.number(ctx, *value as f64),
             Expr::Bool(value) => self.boolean(ctx, *value),
@@ -1520,10 +1870,37 @@ impl<'s> FunctionBuilder<'s> {
                 let slot = self.local(*id)?;
                 self.load(ctx, slot)?
             }
-            // `undefined` where `T | undefined` is expected.
-            Expr::Undefined if expected.is_some_and(|ty| optional_value(ctx, ty).is_some()) => {
-                let inner = optional_value(ctx, expected.expect("checked")).expect("checked");
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, inner))
+            Expr::Null | Expr::Undefined => {
+                let null = matches!(expr, Expr::Null);
+                let ty = match expected {
+                    Some(ty) => ty,
+                    None => {
+                        let number = FP64Type::get(ctx).into();
+                        let kind = if null {
+                            perry_mir::attrs::Absence::Null
+                        } else {
+                            perry_mir::attrs::Absence::Undefined
+                        };
+                        perry_mir::types::OptionalType::get_with(ctx, number, kind).into()
+                    }
+                };
+                let allowed = absence(ctx, ty).is_some_and(|a| {
+                    if null {
+                        a.admits_null()
+                    } else {
+                        a.admits_undefined()
+                    }
+                });
+                ensure!(
+                    allowed,
+                    "{} is not admitted by the declared type",
+                    if null { "null" } else { "undefined" }
+                );
+                if null {
+                    self.emit_value(ctx, |ctx| NullOp::new(ctx, ty))
+                } else {
+                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+                }
             }
             Expr::LocalSet(id, value) => {
                 let slot = self.local(*id)?;
@@ -1548,6 +1925,36 @@ impl<'s> FunctionBuilder<'s> {
                 let stored = self.fit(ctx, new, slot_type)?;
                 self.store(ctx, slot, stored);
                 if *prefix { new } else { old }
+            }
+            Expr::PropertyUpdate {
+                object,
+                property,
+                op,
+                prefix,
+                ..
+            } => {
+                let object = self.expression(ctx, object)?;
+                let object = self.defined(ctx, object)?;
+                let field = property.clone();
+                let get = FieldGetOp::new(ctx, object, field.clone())
+                    .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
+                let previous = self.append_value(ctx, &get);
+                let field_type = previous.get_type(ctx);
+                let old = self.arithmetic(ctx, previous);
+                ensure!(
+                    kind(ctx, old)? == Kind::Number,
+                    "property update needs a numeric field"
+                );
+                let one = self.number(ctx, 1.0);
+                let kind = match op {
+                    BinaryOp::Add => BinaryKind::Add,
+                    BinaryOp::Sub => BinaryKind::Sub,
+                    _ => bail!("invalid property update"),
+                };
+                let next = self.binary(ctx, kind, old, one);
+                let stored = self.fit(ctx, next, field_type)?;
+                self.emit(ctx, |ctx| FieldSetOp::new(ctx, object, field, stored));
+                if *prefix { next } else { old }
             }
             Expr::Binary { op, left, right } => {
                 let lhs = self.expression(ctx, left)?;
@@ -1580,21 +1987,36 @@ impl<'s> FunctionBuilder<'s> {
                 }
             }
             Expr::Compare { op, left, right } => {
+                if matches!(op, CompareOp::Eq | CompareOp::Ne)
+                    && matches!(&**left, Expr::Null | Expr::Undefined)
+                    && matches!(&**right, Expr::Null | Expr::Undefined)
+                {
+                    let equal = matches!(&**left, Expr::Null) == matches!(&**right, Expr::Null);
+                    return Ok(self.boolean(ctx, equal == matches!(op, CompareOp::Eq)));
+                }
                 if let (CompareOp::Eq | CompareOp::Ne, Some(other)) = (
                     op,
                     match (&**left, &**right) {
-                        // `null` and `undefined` share the absent representation: built-ins
-                        // that return `T | null` (Headers.get) produce optionals, and
-                        // TypeScript rejects comparing `T | undefined` with `null` (TS2367).
                         (Expr::Undefined | Expr::Null, other)
                         | (other, Expr::Undefined | Expr::Null) => Some(other),
                         _ => None,
                     },
                 ) {
-                    // `x === undefined`: a definedness test; always false for defined types.
                     let value = self.expression(ctx, other)?;
-                    let undefined = if self.is_optional(ctx, value) {
-                        self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value))
+                    let undefined = if let Some(json) = self.json_operand(ctx, value)? {
+                        let intrinsic =
+                            if matches!(&**left, Expr::Null) || matches!(&**right, Expr::Null) {
+                                Intrinsic::JsonIsNull
+                            } else {
+                                Intrinsic::JsonIsUndefined
+                            };
+                        self.intrinsic(ctx, intrinsic, vec![json]).expect("boolean")
+                    } else if self.is_optional(ctx, value) {
+                        if matches!(&**left, Expr::Null) || matches!(&**right, Expr::Null) {
+                            self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))
+                        } else {
+                            self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value))
+                        }
                     } else {
                         self.boolean(ctx, false)
                     };
@@ -1607,6 +2029,61 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let lhs = self.expression(ctx, left)?;
                 let rhs = self.expression(ctx, right)?;
+                if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                    let json_left = self.json_operand(ctx, lhs)?;
+                    let json_right = self.json_operand(ctx, rhs)?;
+                    let operands = match (json_left, json_right) {
+                        (Some(_), Some(_)) => {
+                            bail!(
+                                "strict equality between JSON snapshots requires an explicit scalar conversion"
+                            )
+                        }
+                        (Some(json), None) => Some((json, rhs)),
+                        (None, Some(json)) => Some((json, lhs)),
+                        (None, None) => None,
+                    };
+                    if let Some((json, scalar)) = operands {
+                        let equal = self.json_scalar_equal(ctx, json, scalar)?;
+                        return Ok(if matches!(op, CompareOp::Eq) {
+                            equal
+                        } else {
+                            let no = self.boolean(ctx, false);
+                            self.compare(ctx, CompareKind::Eq, equal, no)
+                        });
+                    }
+                }
+                let union = |value: Value| {
+                    optional_value(ctx, value.get_type(ctx))
+                        .unwrap_or(value.get_type(ctx))
+                        .deref(ctx)
+                        .is::<perry_mir::types::NumberStringType>()
+                };
+                if matches!(op, CompareOp::Eq | CompareOp::Ne) && (union(lhs) || union(rhs)) {
+                    let base = perry_mir::types::NumberStringType::get(ctx).into();
+                    let states = match (
+                        absence(ctx, lhs.get_type(ctx)),
+                        absence(ctx, rhs.get_type(ctx)),
+                    ) {
+                        (Some(a), Some(b)) if a != b => Some(perry_mir::attrs::Absence::Both),
+                        (Some(a), _) | (_, Some(a)) => Some(a),
+                        _ => None,
+                    };
+                    let target = states.map_or(base, |a| {
+                        perry_mir::types::OptionalType::get_with(ctx, base, a).into()
+                    });
+                    let lhs = self.fit(ctx, lhs, target)?;
+                    let rhs = self.fit(ctx, rhs, target)?;
+                    return Ok(self.compare(
+                        ctx,
+                        if matches!(op, CompareOp::Eq) {
+                            CompareKind::Eq
+                        } else {
+                            CompareKind::Ne
+                        },
+                        lhs,
+                        rhs,
+                    ));
+                }
                 if matches!(op, CompareOp::Eq | CompareOp::Ne)
                     && (self.is_optional(ctx, lhs) || self.is_optional(ctx, rhs))
                 {
@@ -1616,8 +2093,25 @@ impl<'s> FunctionBuilder<'s> {
                     } else {
                         CompareKind::Ne
                     };
-                    let lhs = self.optional(ctx, lhs);
-                    let rhs = self.optional(ctx, rhs);
+                    let left_inner =
+                        optional_value(ctx, lhs.get_type(ctx)).unwrap_or(lhs.get_type(ctx));
+                    let right_inner =
+                        optional_value(ctx, rhs.get_type(ctx)).unwrap_or(rhs.get_type(ctx));
+                    ensure!(
+                        left_inner == right_inner,
+                        "comparison of different types is not supported"
+                    );
+                    let left_absence = absence(ctx, lhs.get_type(ctx));
+                    let right_absence = absence(ctx, rhs.get_type(ctx));
+                    let states = match (left_absence, right_absence) {
+                        (Some(a), Some(b)) if a != b => perry_mir::attrs::Absence::Both,
+                        (Some(a), _) | (_, Some(a)) => a,
+                        _ => unreachable!(),
+                    };
+                    let target =
+                        perry_mir::types::OptionalType::get_with(ctx, left_inner, states).into();
+                    let lhs = self.fit(ctx, lhs, target)?;
+                    let rhs = self.fit(ctx, rhs, target)?;
                     ensure!(
                         lhs.get_type(ctx) == rhs.get_type(ctx),
                         "comparison of different types is not supported"
@@ -1627,6 +2121,10 @@ impl<'s> FunctionBuilder<'s> {
                 let lhs = self.arithmetic(ctx, lhs);
                 let rhs = self.arithmetic(ctx, rhs);
                 let (left_kind, right_kind) = (kind(ctx, lhs)?, kind(ctx, rhs)?);
+                ensure!(
+                    left_kind != Kind::Regex && right_kind != Kind::Regex,
+                    "regex object identity is outside the literal matching profile"
+                );
                 ensure!(
                     left_kind == right_kind,
                     "comparison of different types is not supported"
@@ -1643,7 +2141,7 @@ impl<'s> FunctionBuilder<'s> {
                     }
                 };
                 ensure!(
-                    matches!(left_kind, Kind::Number | Kind::String)
+                    matches!(left_kind, Kind::Number | Kind::String | Kind::BigInt)
                         || matches!(kind, CompareKind::Eq | CompareKind::Ne),
                     "ordered comparison is only supported on numbers and strings"
                 );
@@ -1683,13 +2181,15 @@ impl<'s> FunctionBuilder<'s> {
                 then_expr,
                 else_expr,
             } => {
-                let condition = self.condition(ctx, condition)?;
+                let guards = self.variant_guards.clone();
+                let test = self.condition(ctx, condition)?;
                 let then = self.new_block(ctx, "then");
                 let otherwise = self.new_block(ctx, "else");
                 let join = self.new_block(ctx, "join");
-                self.branch(ctx, condition, then, otherwise);
+                self.branch(ctx, test, then, otherwise);
                 self.switch_to(then);
                 // With an expected type both arms fit it (`cond ? value : undefined`).
+                self.variant_condition(condition, true);
                 let then_value = self.expression_with(ctx, then_expr, expected)?;
                 let then_value = match expected {
                     Some(expected) => self.fit(ctx, then_value, expected)?,
@@ -1701,29 +2201,42 @@ impl<'s> FunctionBuilder<'s> {
                 self.store(ctx, result, then_value);
                 self.jump(ctx, join);
                 self.switch_to(otherwise);
+                self.variant_guards = guards.clone();
+                self.variant_condition(condition, false);
                 let else_value = self.expression_with(ctx, else_expr, Some(ty))?;
                 let else_value = self.fit(ctx, else_value, ty)?;
                 self.store(ctx, result, else_value);
                 self.jump(ctx, join);
+                self.variant_guards = guards;
                 self.switch_to(join);
                 self.load(ctx, result)?
             }
             Expr::Unary { op, operand } => {
                 let value = self.expression(ctx, operand)?;
+                if *op == UnaryOp::Not {
+                    let value = self.truthy(ctx, value)?;
+                    let no = self.boolean(ctx, false);
+                    return Ok(self.compare(ctx, CompareKind::Eq, value, no));
+                }
                 let value = self.arithmetic(ctx, value);
                 match (op, kind(ctx, value)?) {
+                    (UnaryOp::Neg, Kind::BigInt) => self
+                        .intrinsic(ctx, Intrinsic::BigIntNegate, vec![value])
+                        .expect("bigint"),
                     (UnaryOp::Neg, Kind::Number) => {
                         // `0 - x` loses the sign of zero; `-1 * x` keeps IEEE negation.
                         let minus_one = self.number(ctx, -1.0);
                         self.binary(ctx, BinaryKind::Mul, minus_one, value)
                     }
                     (UnaryOp::Pos, Kind::Number) => value,
-                    (UnaryOp::Not, Kind::Boolean) => {
-                        let no = self.boolean(ctx, false);
-                        self.compare(ctx, CompareKind::Eq, value, no)
-                    }
                     (op, _) => bail!("unary {op:?} on this type is not supported yet"),
                 }
+            }
+            Expr::StringSplit(text, separator) => {
+                let text = self.string_operand(ctx, text)?;
+                let separator = self.string_operand(ctx, separator)?;
+                self.intrinsic(ctx, Intrinsic::StringSplit, vec![text, separator])
+                    .expect("strings")
             }
             Expr::Call { callee, args, .. } => self
                 .call(ctx, callee, args)?
@@ -1760,27 +2273,6 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 result
             }
-            Expr::DateNew(args) => {
-                let time = match args.as_slice() {
-                    [] => self
-                        .intrinsic(ctx, Intrinsic::DateNow, vec![])
-                        .expect("time"),
-                    [time] => self.number_operand(ctx, time)?,
-                    _ => bail!("new Date(year, month, …) is not supported yet"),
-                };
-                self.intrinsic(ctx, Intrinsic::DateFromTime, vec![time])
-                    .expect("date")
-            }
-            Expr::DateGetTime(date) => {
-                let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
-                self.intrinsic(ctx, Intrinsic::DateTime, vec![date])
-                    .expect("time")
-            }
-            Expr::DateToISOString(date) => {
-                let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
-                self.intrinsic(ctx, Intrinsic::DateIso, vec![date])
-                    .expect("text")
-            }
             Expr::Uint8ArrayNew(None) => {
                 let zero = self.number(ctx, 0.0);
                 self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
@@ -1805,6 +2297,9 @@ impl<'s> FunctionBuilder<'s> {
                         self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![value])
                             .expect("bytes")
                     }
+                    Kind::ByteBuffer => self
+                        .intrinsic(ctx, Intrinsic::BytesFromBuffer, vec![value])
+                        .expect("bytes"),
                     Kind::Bytes => self
                         .intrinsic(ctx, Intrinsic::BytesCopy, vec![value])
                         .expect("bytes"),
@@ -1848,20 +2343,47 @@ impl<'s> FunctionBuilder<'s> {
                         || matches!(&**label, Expr::String(l) if l.eq_ignore_ascii_case("utf-8") || l.eq_ignore_ascii_case("utf8")),
                     "TextDecoder supports UTF-8 only"
                 );
-                ensure!(
-                    matches!(&**ignore_bom, Expr::Bool(false) | Expr::Undefined),
-                    "TextDecoder ignoreBOM is not supported yet"
-                );
-                match &**fatal {
+                let fatal = match &**fatal {
                     Expr::Undefined => self.boolean(ctx, false),
                     fatal => self.condition(ctx, fatal)?,
-                }
+                };
+                let ignore_bom = match &**ignore_bom {
+                    Expr::Undefined => self.boolean(ctx, false),
+                    ignore_bom => self.condition(ctx, ignore_bom)?,
+                };
+                self.intrinsic(ctx, Intrinsic::DecoderNew, vec![fatal, ignore_bom])
+                    .expect("decoder")
             }
             Expr::TextDecoderDecode { decoder, input } => {
-                let fatal = self.condition(ctx, decoder)?;
-                let bytes = self.typed_operand(ctx, input, Kind::Bytes, "a Uint8Array")?;
-                self.intrinsic(ctx, Intrinsic::TextDecode, vec![bytes, fatal])
-                    .expect("text")
+                let decoder = self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
+                self.decode(ctx, decoder, Some(input), None)?
+            }
+            Expr::TextDecoderEncoding(decoder) => {
+                self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
+                self.string(ctx, "utf-8")
+            }
+            Expr::TextDecoderFatal(decoder) | Expr::TextDecoderIgnoreBom(decoder) => {
+                let decoder = self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
+                let intrinsic = if matches!(expr, Expr::TextDecoderFatal(_)) {
+                    Intrinsic::DecoderFatal
+                } else {
+                    Intrinsic::DecoderIgnoreBom
+                };
+                self.intrinsic(ctx, intrinsic, vec![decoder]).expect("flag")
+            }
+            Expr::StringFromCharCode(_) | Expr::StringFromCharCodeSpread(_) => {
+                bail!("fromCharCode uses UTF-16 code units; use fromCodePoint")
+            }
+            Expr::StringFromCodePoint(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::StringFromCodePoint, vec![value])
+                    .expect("string")
+            }
+            Expr::StringCodePointAt { string, index } => {
+                let value = self.string_operand(ctx, string)?;
+                let index = self.number_operand(ctx, index)?;
+                self.intrinsic(ctx, Intrinsic::StringCodePointAt, vec![value, index])
+                    .expect("code point")
             }
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
@@ -1906,6 +2428,15 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ObjectKeys(object) if matches!(**object, Expr::ProcessEnv) => self
                 .intrinsic(ctx, Intrinsic::EnvKeys, vec![])
                 .expect("keys"),
+            Expr::ObjectKeys(object) => {
+                let object = self.expression(ctx, object)?;
+                ensure!(
+                    kind(ctx, object)? == Kind::Json,
+                    "Object.keys requires a JSON snapshot"
+                );
+                self.intrinsic(ctx, Intrinsic::JsonKeys, vec![object])
+                    .expect("keys")
+            }
             Expr::PerformanceNow => self
                 .intrinsic(ctx, Intrinsic::PerformanceNow, vec![])
                 .expect("time"),
@@ -2009,6 +2540,16 @@ impl<'s> FunctionBuilder<'s> {
                 // Property access on `undefined` throws TypeError, in ECMAScript and here.
                 let value = self.defined(ctx, value)?;
                 match (kind(ctx, value)?, property.as_str()) {
+                    (Kind::Url, field) => self.url_field(ctx, value, field)?,
+                    (Kind::Decoder, "encoding") => self.string(ctx, "utf-8"),
+                    (Kind::Decoder, "fatal" | "ignoreBOM") => {
+                        let intrinsic = if property == "fatal" {
+                            Intrinsic::DecoderFatal
+                        } else {
+                            Intrinsic::DecoderIgnoreBom
+                        };
+                        self.intrinsic(ctx, intrinsic, vec![value]).expect("flag")
+                    }
                     (Kind::String, "length") => {
                         let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
                         self.emit_value(ctx, |ctx| {
@@ -2021,6 +2562,15 @@ impl<'s> FunctionBuilder<'s> {
                             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
                         })
                     }
+                    (Kind::Bytes, "buffer") => self
+                        .intrinsic(ctx, Intrinsic::BytesBuffer, vec![value])
+                        .expect("buffer"),
+                    (Kind::Bytes, "byteOffset") => self
+                        .intrinsic(ctx, Intrinsic::BytesOffset, vec![value])
+                        .expect("offset"),
+                    (Kind::ByteBuffer, "byteLength") => self
+                        .intrinsic(ctx, Intrinsic::BufferLength, vec![value])
+                        .expect("length"),
                     (Kind::Bytes, "length" | "byteLength") => self
                         .intrinsic(ctx, Intrinsic::BytesLength, vec![value])
                         .expect("length"),
@@ -2050,9 +2600,14 @@ impl<'s> FunctionBuilder<'s> {
                         | Kind::Writer
                         | Kind::Readable
                         | Kind::Reader
+                        | Kind::ByobReader
                         | Kind::ReadResult,
                         name,
                     ) => self.web_member(ctx, value, name, None)?,
+                    (Kind::Abort, "signal") => value,
+                    (Kind::Abort, "aborted") => self
+                        .intrinsic(ctx, Intrinsic::AbortAborted, vec![value])
+                        .expect("aborted"),
                     (Kind::Stats, "size") => self
                         .intrinsic(ctx, Intrinsic::StatsSize, vec![value])
                         .expect("size"),
@@ -2065,8 +2620,9 @@ impl<'s> FunctionBuilder<'s> {
                     (Kind::Exception, "message") => {
                         self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
                     }
+                    (Kind::Variant, field) => self.variant_member(ctx, object, value, field)?,
                     (Kind::Record, field) => {
-                        let field = identifier(field)?;
+                        let field = field.to_string();
                         let op = FieldGetOp::new(ctx, value, field.clone()).map_err(|_| {
                             anyhow!(
                                 "property {field} does not exist on this shape (subset rule R1)"
@@ -2090,6 +2646,13 @@ impl<'s> FunctionBuilder<'s> {
             },
             Expr::New {
                 class_name, args, ..
+            } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
+                ensure!(args.is_empty(), "new AbortController takes no arguments");
+                self.intrinsic(ctx, Intrinsic::AbortNew, vec![])
+                    .expect("controller")
+            }
+            Expr::New {
+                class_name, args, ..
             } if matches!(class_name.as_str(), "Headers" | "Response" | "Request")
                 && !self.shapes.is_user_type(class_name) =>
             {
@@ -2108,7 +2671,7 @@ impl<'s> FunctionBuilder<'s> {
                     signal.is_none() && redirect.is_none(),
                     "fetch signal and redirect options are not supported yet"
                 );
-                let url = self.typed_operand(ctx, url, Kind::String, "a URL string")?;
+                let url = self.url_string(ctx, url)?;
                 let method = self.typed_operand(ctx, method, Kind::String, "a method string")?;
                 let list = match headers_dynamic {
                     Some(dynamic) => self.headers_init(ctx, Some(dynamic))?,
@@ -2178,6 +2741,7 @@ impl<'s> FunctionBuilder<'s> {
                             | Kind::Writer
                             | Kind::Readable
                             | Kind::Reader
+                            | Kind::ByobReader
                             | Kind::ReadResult
                     ),
                     "{method} is not supported on this type yet"
@@ -2199,36 +2763,68 @@ impl<'s> FunctionBuilder<'s> {
             }
             // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
             Expr::Array(items)
-                if expected
-                    .is_some_and(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).is_ok()) =>
+                if expected.is_some_and(|ty| {
+                    TypedHandle::<RecordType>::from_handle(
+                        optional_value(ctx, ty).unwrap_or(ty),
+                        ctx,
+                    )
+                    .is_ok_and(|record| record.deref(ctx).is_tuple())
+                }) =>
             {
                 let names: Vec<String> = (0..items.len()).map(|i| format!("_{i}")).collect();
                 self.record_literal(ctx, &names, items, expected)?
             }
             Expr::Array(items) => {
-                let element =
-                    match expected.map(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx)) {
-                        Some(Ok(array)) => Some(array.deref(ctx).element()),
-                        _ => None,
-                    };
+                let element = match expected.map(|ty| {
+                    TypedHandle::<ArrayType>::from_handle(
+                        optional_value(ctx, ty).unwrap_or(ty),
+                        ctx,
+                    )
+                }) {
+                    Some(Ok(array)) => Some(array.deref(ctx).element()),
+                    _ => None,
+                };
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     let value = self.expression_with(ctx, item, element)?;
                     let value = match element {
                         Some(element) => self.fit(ctx, value, element)?,
-                        None => self.defined(ctx, value)?,
+                        None => value,
                     };
                     values.push(value);
                 }
                 let element = match (element, values.first()) {
                     (Some(element), _) => element,
-                    (None, Some(first)) => first.get_type(ctx),
+                    (None, Some(first)) => {
+                        let first = first.get_type(ctx);
+                        let inner = optional_value(ctx, first).unwrap_or(first);
+                        let mut states = absence(ctx, first);
+                        for value in &values[1..] {
+                            let ty = value.get_type(ctx);
+                            ensure!(
+                                optional_value(ctx, ty).unwrap_or(ty) == inner,
+                                "array literals must have one element type"
+                            );
+                            states = match (states, absence(ctx, ty)) {
+                                (None, next) => next,
+                                (current, None) => current,
+                                (Some(a), Some(b)) => Some(if a == b {
+                                    a
+                                } else {
+                                    perry_mir::attrs::Absence::Both
+                                }),
+                            };
+                        }
+                        states.map_or(inner, |states| {
+                            perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
+                        })
+                    }
                     (None, None) => bail!("an empty array literal needs a declared element type"),
                 };
-                ensure!(
-                    values.iter().all(|v| v.get_type(ctx) == element),
-                    "array literals must be homogeneous"
-                );
+                let values = values
+                    .into_iter()
+                    .map(|v| self.fit(ctx, v, element))
+                    .collect::<Result<_>>()?;
                 self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values))
             }
             Expr::ArrayPush {
@@ -2249,6 +2845,12 @@ impl<'s> FunctionBuilder<'s> {
                 let array = self.expression(ctx, object)?;
                 let array = self.defined(ctx, array)?;
                 match kind(ctx, array)? {
+                    Kind::String => {
+                        let index = self.number_operand(ctx, index)?;
+                        return Ok(self
+                            .intrinsic(ctx, Intrinsic::StringIndex, vec![array, index])
+                            .expect("character"));
+                    }
                     Kind::Bytes => {
                         let index = self.number_operand(ctx, index)?;
                         return Ok(self
@@ -2256,21 +2858,30 @@ impl<'s> FunctionBuilder<'s> {
                             .expect("byte"));
                     }
                     Kind::Json => {
-                        let index = self.number_operand(ctx, index)?;
+                        let index = self.expression(ctx, index)?;
+                        let index = self.defined(ctx, index)?;
+                        let intrinsic = match kind(ctx, index)? {
+                            Kind::String => Intrinsic::JsonMember,
+                            Kind::Number => Intrinsic::JsonIndex,
+                            _ => bail!("JSON lookup requires a string or number key"),
+                        };
                         return Ok(self
-                            .intrinsic(ctx, Intrinsic::JsonIndex, vec![array, index])
+                            .intrinsic(ctx, intrinsic, vec![array, index])
                             .expect("json"));
                     }
-                    // A tuple element (`pair[0]`): field `_0` of the tuple's record.
                     Kind::Record => {
-                        let position = match &**index {
-                            Expr::Number(n) if n.fract() == 0.0 && *n >= 0.0 => *n as u64,
-                            Expr::Integer(n) if *n >= 0 => *n as u64,
-                            _ => bail!("tuples are indexed with literal positions"),
+                        let field = match &**index {
+                            Expr::String(name) => name.clone(),
+                            Expr::Number(n) if n.fract() == 0.0 && *n >= 0.0 => {
+                                format!("_{}", *n as u64)
+                            }
+                            Expr::Integer(n) if *n >= 0 => format!("_{n}"),
+                            _ => bail!(
+                                "closed records require literal keys; tuples require literal positions"
+                            ),
                         };
-                        let field = identifier(&format!("_{position}"))?;
-                        let op = FieldGetOp::new(ctx, array, field)
-                            .map_err(|_| anyhow!("tuple position {position} is out of range"))?;
+                        let op = FieldGetOp::new(ctx, array, field.clone())
+                            .map_err(|_| anyhow!("record has no field {field}"))?;
                         return Ok(self.append_value(ctx, &op));
                     }
                     _ => {}
@@ -2292,7 +2903,8 @@ impl<'s> FunctionBuilder<'s> {
                 "MIR backend does not support expression {} yet",
                 expression_name(other)
             ),
-        })
+        };
+        self.narrow_primitive(ctx, expr, value)
     }
 
     /// Whether `expr` is array destructuring's guard for the iterator protocol, which is
@@ -2405,7 +3017,7 @@ impl<'s> FunctionBuilder<'s> {
         perry_mir::types::OptionalType::get(ctx, number).into()
     }
 
-    /// Set the `cause` of a new error: a string (accepted deviation, TODOs.md P6.2).
+    /// Set the `cause` of a new error: a string (accepted profile).
     fn error_cause(&mut self, ctx: &mut Context, error: Value, cause: &Expr) -> Result<()> {
         let cause = self.typed_operand(ctx, cause, Kind::String, "a string error cause")?;
         self.intrinsic(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
@@ -2514,22 +3126,35 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.intrinsic(ctx, intrinsic, vec![value]).expect("json"))
     }
 
-    /// `typeof value`: static, except for `undefined` and JSON values.
+    /// `typeof value`, including the active case of a closed primitive union.
     fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
-        if let Some(inner) = optional_value(ctx, value.get_type(ctx)) {
+        if optional_value(ctx, value.get_type(ctx)).is_some() {
             let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
             return self.choose_string(
                 ctx,
                 undefined,
                 |b, ctx| Ok(b.string(ctx, "undefined")),
                 |b, ctx| {
-                    let ty = UndefOp::new(ctx, inner);
-                    let placeholder = b.append_value(ctx, &ty);
-                    b.type_of(ctx, placeholder)
+                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+                    b.choose_string(
+                        ctx,
+                        null,
+                        |b, ctx| Ok(b.string(ctx, "object")),
+                        |b, ctx| {
+                            let defined = b.defined(ctx, value)?;
+                            b.type_of(ctx, defined)
+                        },
+                    )
                 },
             );
         }
         let name = match kind(ctx, value)? {
+            Kind::NumberString => {
+                return Ok(self.emit_value(ctx, |ctx| {
+                    perry_mir::variants::VariantTagOp::new(ctx, value)
+                }));
+            }
+            Kind::BigInt => "bigint",
             Kind::Number => "number",
             Kind::String => "string",
             Kind::Boolean => "boolean",
@@ -2641,6 +3266,16 @@ impl<'s> FunctionBuilder<'s> {
         Ok(value)
     }
 
+    fn regex_test(&mut self, ctx: &mut Context, regex: Value, text: Value) -> Value {
+        let index = self
+            .intrinsic(ctx, Intrinsic::RegexSearch, vec![text, regex])
+            .expect("index");
+        let zero = self.number(ctx, 0.0);
+        self.emit_value(ctx, |ctx| {
+            MirCompare::new(ctx, CompareKind::Ge, index, zero)
+        })
+    }
+
     /// `object.method(args)` on built-in values.
     fn method(
         &mut self,
@@ -2652,7 +3287,51 @@ impl<'s> FunctionBuilder<'s> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
         let arg = |index: usize| args.get(index);
+        let method = if method == decoder::DECODE {
+            "decode"
+        } else {
+            method
+        };
         let value = match (kind(ctx, receiver)?, method) {
+            (Kind::String, "split") => {
+                let [separator] = args else {
+                    bail!("string.split requires one string separator");
+                };
+                let separator = self.string_operand(ctx, separator)?;
+                self.intrinsic(ctx, Intrinsic::StringSplit, vec![receiver, separator])
+            }
+            (Kind::Regex, "test") => {
+                let [text] = args else {
+                    bail!("literal regex.test requires one string");
+                };
+                let text = self.string_operand(ctx, text)?;
+                Some(self.regex_test(ctx, receiver, text))
+            }
+            (Kind::String, "search") => {
+                let [regex] = args else {
+                    bail!("string.search requires one literal regex");
+                };
+                let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
+                self.intrinsic(ctx, Intrinsic::RegexSearch, vec![receiver, regex])
+            }
+            (Kind::Decoder, "decode") => {
+                ensure!(
+                    args.len() <= 2,
+                    "TextDecoder.decode takes bytes and stream options"
+                );
+                Some(self.decode(ctx, receiver, arg(0), arg(1))?)
+            }
+            (Kind::Url, "toString" | "toJSON") => Some(self.url_field(ctx, receiver, "href")?),
+            (Kind::SearchParams, "append") => {
+                let [name, value] = args else {
+                    bail!("searchParams.append needs a name and value");
+                };
+                let name = self.string_operand(ctx, name)?;
+                let value = self.string_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::UrlAppend, vec![receiver, name, value]);
+                let ty = self.void_type(ctx);
+                Some(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
+            }
             (
                 Kind::Headers
                 | Kind::Response
@@ -2660,10 +3339,16 @@ impl<'s> FunctionBuilder<'s> {
                 | Kind::Writable
                 | Kind::Writer
                 | Kind::Readable
-                | Kind::Reader,
+                | Kind::Reader
+                | Kind::ByobReader,
                 _,
             ) => {
                 return self.web_member(ctx, receiver, method, Some(args)).map(Some);
+            }
+            (Kind::Abort, "abort") => {
+                ensure!(args.is_empty(), "abort reasons are not supported yet");
+                self.intrinsic(ctx, Intrinsic::AbortAbort, vec![receiver]);
+                return Ok(None);
             }
             (Kind::Stats, "isFile" | "isDirectory") => {
                 let intrinsic = if method == "isFile" {
@@ -2673,10 +3358,13 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.intrinsic(ctx, intrinsic, vec![receiver])
             }
-            (Kind::String, "charAt" | "charCodeAt" | "at") => {
+            (Kind::String, "charCodeAt") => {
+                bail!("charCodeAt uses UTF-16 code units; use codePointAt with scalar indices")
+            }
+            (Kind::String, "charAt" | "codePointAt" | "at") => {
                 let position = self.number_or(ctx, arg(0), 0.0)?;
-                let intrinsic = if method == "charCodeAt" {
-                    Intrinsic::StringCharCodeAt
+                let intrinsic = if method == "codePointAt" {
+                    Intrinsic::StringCodePointAt
                 } else {
                     ensure!(method != "at", "String.prototype.at is not supported yet");
                     Intrinsic::StringCharAt
@@ -2772,7 +3460,12 @@ impl<'s> FunctionBuilder<'s> {
                 self.intrinsic(ctx, Intrinsic::DateTime, vec![receiver])
             }
             (Kind::Date, "toISOString" | "toJSON") => {
-                self.intrinsic(ctx, Intrinsic::DateIso, vec![receiver])
+                let intrinsic = if method == "toJSON" {
+                    Intrinsic::DateJson
+                } else {
+                    Intrinsic::DateIso
+                };
+                self.intrinsic(ctx, intrinsic, vec![receiver])
             }
             (_, method) => bail!("method {method} is not supported on this type yet"),
         };
@@ -2825,21 +3518,82 @@ impl<'s> FunctionBuilder<'s> {
     /// (throwing `TypeError` on `undefined`) where `T` is required.
     fn fit(&mut self, ctx: &mut Context, value: Value, target: TypeHandle) -> Result<Value> {
         let ty = value.get_type(ctx);
+        let wanted = optional_value(ctx, target).unwrap_or(target);
+        if wanted.deref(ctx).is::<perry_mir::types::NumberStringType>()
+            && (ty.deref(ctx).is::<FP64Type>() || ty.deref(ctx).is::<StringType>())
+        {
+            let tag = if ty.deref(ctx).is::<FP64Type>() {
+                "number"
+            } else {
+                "string"
+            };
+            let boxed = self.emit_value(ctx, |ctx| {
+                perry_mir::variants::VariantNewOp::new(ctx, wanted, tag, Some(value))
+            });
+            return self.fit(ctx, boxed, target);
+        }
+        if target.deref(ctx).is::<perry_mir::types::ByteInputType>() {
+            let convert = if ty.deref(ctx).is::<StringType>() {
+                Some(Intrinsic::StringByteInput)
+            } else if ty.deref(ctx).is::<BytesType>() {
+                Some(Intrinsic::BytesByteInput)
+            } else {
+                None
+            };
+            if let Some(convert) = convert {
+                return Ok(self
+                    .intrinsic(ctx, convert, vec![value])
+                    .expect("byte input"));
+            }
+        }
         if ty.deref(ctx).is::<JsonType>() && ty != target {
-            // A JSON value used at a typed boundary must have that type (R6); `undefined`
-            // and mismatches throw `TypeError`.
-            let inner = optional_value(ctx, target).unwrap_or(target);
-            let intrinsic = if inner.deref(ctx).is::<FP64Type>() {
-                Intrinsic::JsonToNumber
-            } else if inner.deref(ctx).is::<StringType>() {
+            if let Some(states) = absence(ctx, target) {
+                let inner = optional_value(ctx, target).expect("optional");
+                let convert = |b: &mut Self, ctx: &mut Context| {
+                    let converted = b.fit(ctx, value, inner)?;
+                    b.fit(ctx, converted, target)
+                };
+                let null_or_value = |b: &mut Self, ctx: &mut Context| {
+                    if states.admits_null() {
+                        let null = b
+                            .intrinsic(ctx, Intrinsic::JsonIsNull, vec![value])
+                            .expect("boolean");
+                        b.choose(
+                            ctx,
+                            target,
+                            null,
+                            |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, target))),
+                            convert,
+                        )
+                    } else {
+                        convert(b, ctx)
+                    }
+                };
+                return if states.admits_undefined() {
+                    let undefined = self
+                        .intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![value])
+                        .expect("boolean");
+                    self.choose(
+                        ctx,
+                        target,
+                        undefined,
+                        |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))),
+                        null_or_value,
+                    )
+                } else {
+                    null_or_value(self, ctx)
+                };
+            }
+            let intrinsic = if target.deref(ctx).is::<FP64Type>() {
+                Intrinsic::JsonRequireNumber
+            } else if target.deref(ctx).is::<StringType>() {
                 Intrinsic::JsonToString
-            } else if kind(ctx, value).is_ok() && self.is_bool_type(ctx, inner) {
+            } else if self.is_bool_type(ctx, target) {
                 Intrinsic::JsonToBool
             } else {
-                bail!("JSON values can only be used as numbers, strings and booleans yet")
+                return self.decode_aggregate(ctx, value, target);
             };
-            let converted = self.intrinsic(ctx, intrinsic, vec![value]).expect("value");
-            return self.fit(ctx, converted, target);
+            return Ok(self.intrinsic(ctx, intrinsic, vec![value]).expect("value"));
         }
         let thrown = optional_value(ctx, ty).unwrap_or(ty);
         let wanted = optional_value(ctx, target).unwrap_or(target);
@@ -2861,9 +3615,17 @@ impl<'s> FunctionBuilder<'s> {
         if ty == target {
             Ok(value)
         } else if optional_value(ctx, target) == Some(ty) {
-            Ok(self.optional(ctx, value))
+            Ok(self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, target)))
+        } else if optional_value(ctx, target).is_some()
+            && optional_value(ctx, target) == optional_value(ctx, ty)
+        {
+            Ok(self.emit_value(ctx, |ctx| OptionalCastOp::new(ctx, value, target)))
         } else if optional_value(ctx, ty) == Some(target) {
             self.defined(ctx, value)
+        } else if perry_mir::views::can_widen(ctx, ty, target) {
+            Ok(self.emit_value(ctx, |ctx| {
+                perry_mir::views::AggregateViewOp::new(ctx, value, target)
+            }))
         } else {
             bail!(
                 "value type {} differs from the expected type {}",
@@ -2908,7 +3670,7 @@ impl<'s> FunctionBuilder<'s> {
             kind(ctx, record)? == Kind::Record,
             "property writes are only supported on records so far"
         );
-        let field = identifier(field)?;
+        let field = field.to_string();
         let field_type = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected a record"))?
             .deref(ctx)
@@ -2931,6 +3693,11 @@ impl<'s> FunctionBuilder<'s> {
         args: &[Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if let Some(ty) = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty))
+            && ty.deref(ctx).is::<perry_mir::types::VariantType>()
+        {
+            return self.variant_literal(ctx, ty, names, args);
+        }
         let mut wanted: Vec<&str> = names.iter().map(String::as_str).collect();
         wanted.sort_unstable();
         // A record where `T | undefined` is expected is a `T`.
@@ -2939,30 +3706,45 @@ impl<'s> FunctionBuilder<'s> {
             .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
             .filter(|record| {
                 record.deref(ctx).fields().is_ok_and(|fields| {
-                    fields
+                    wanted
                         .iter()
-                        .map(|(n, _)| n.to_string())
-                        .collect::<Vec<_>>()
-                        == wanted
+                        .all(|name| fields.iter().any(|(field, _)| field.as_str() == *name))
+                        && fields.iter().all(|(name, ty)| {
+                            wanted.contains(&name.as_str())
+                                || absence(ctx, *ty).is_some_and(|states| states.admits_undefined())
+                        })
                 })
             });
         let mut values = Vec::with_capacity(args.len());
         for (name, arg) in names.iter().zip(args) {
-            let field_type = match (expected, identifier(name)) {
-                (Some(record), Ok(field)) => record.deref(ctx).field(&field).map(|(_, ty)| ty),
+            let field_type = match expected {
+                Some(record) => record.deref(ctx).field(name).map(|(_, ty)| ty),
                 _ => None,
             };
             let value = self.expression_with(ctx, arg, field_type)?;
             let value = match field_type {
                 Some(field_type) => self.fit(ctx, value, field_type)?,
-                None => self.defined(ctx, value)?,
+                None => value,
             };
             values.push((name.clone(), value));
         }
         // With a matching expected type the fields were fitted to it; that includes recursive
         // records, which no literal's own structure can name.
         let record = match expected {
-            Some(record) => record,
+            Some(record) => {
+                let fields = record
+                    .deref(ctx)
+                    .fields()
+                    .map_err(|_| anyhow!("record without fields"))?
+                    .to_vec();
+                for (name, ty) in fields {
+                    if !names.iter().any(|n| n == &name) {
+                        let value = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
+                        values.push((name.to_string(), value));
+                    }
+                }
+                record
+            }
             None => {
                 let fields = values
                     .iter()
@@ -2971,7 +3753,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.shapes.mir_record(ctx, fields)?
             }
         };
-        values.sort_by(|a, b| a.0.cmp(&b.0));
+        values.sort_by_key(|(name, _)| record.deref(ctx).field(name).expect("field").0);
         let operands = values.into_iter().map(|(_, v)| v).collect();
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
     }
@@ -3037,13 +3819,48 @@ impl<'s> FunctionBuilder<'s> {
                 undefined,
                 |b, ctx| Ok(b.string(ctx, "undefined")),
                 |b, ctx| {
-                    let op = UnwrapOp::new(ctx, value)?;
-                    let defined = b.append_value(ctx, &op);
-                    b.display(ctx, defined)
+                    let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+                    b.choose_string(
+                        ctx,
+                        null,
+                        |b, ctx| Ok(b.string(ctx, "null")),
+                        |b, ctx| {
+                            let op = UnwrapOp::new(ctx, value)?;
+                            let defined = b.append_value(ctx, &op);
+                            b.display(ctx, defined)
+                        },
+                    )
                 },
             );
         }
         Ok(match kind(ctx, value)? {
+            Kind::NumberString => {
+                let tag = self.emit_value(ctx, |ctx| {
+                    perry_mir::variants::VariantTagOp::new(ctx, value)
+                });
+                let number = self.string(ctx, "number");
+                let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
+                self.choose_string(
+                    ctx,
+                    is_number,
+                    |b, ctx| {
+                        let ty = FP64Type::get(ctx).into();
+                        let payload = b.emit_value(ctx, |ctx| {
+                            perry_mir::variants::VariantPayloadOp::new(ctx, value, ty)
+                        });
+                        b.display(ctx, payload)
+                    },
+                    |b, ctx| {
+                        let ty = StringType::get(ctx).into();
+                        Ok(b.emit_value(ctx, |ctx| {
+                            perry_mir::variants::VariantPayloadOp::new(ctx, value, ty)
+                        }))
+                    },
+                )?
+            }
+            Kind::BigInt => self
+                .intrinsic(ctx, Intrinsic::BigIntToString, vec![value])
+                .expect("string"),
             Kind::String => value,
             Kind::Number => self
                 .intrinsic(ctx, Intrinsic::NumberToString, vec![value])
@@ -3180,6 +3997,64 @@ impl<'s> FunctionBuilder<'s> {
                 fs => self.fs(ctx, *fs, args).map(Some),
             };
         }
+        if let Expr::ExternFuncRef { name, .. } = callee
+            && let Some((binding, signature)) = self.shapes.foreign_function(name)
+        {
+            ensure!(
+                args.len() == signature.params.len(),
+                "WIT import {binding} expects {} arguments",
+                signature.params.len()
+            );
+            let mut values = Vec::new();
+            for (arg, (_, ty, _)) in args.iter().zip(&signature.params) {
+                let ty = self.shapes.value_type(ctx, ty)?;
+                let value = self.expression_with(ctx, arg, Some(ty))?;
+                let actual = value.get_type(ctx);
+                let value = if foreign::accepts_input(ctx, ty, actual) {
+                    value
+                } else if optional_value(ctx, ty).is_none()
+                    && optional_value(ctx, actual)
+                        .is_some_and(|inner| foreign::accepts_input(ctx, ty, inner))
+                {
+                    self.defined(ctx, value)?
+                } else if optional_value(ctx, actual).is_none()
+                    && optional_value(ctx, ty)
+                        .is_some_and(|inner| foreign::accepts_input(ctx, inner, actual))
+                {
+                    let wrapped = perry_mir::types::OptionalType::get_with(
+                        ctx,
+                        actual,
+                        absence(ctx, ty).expect("optional"),
+                    )
+                    .into();
+                    self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, wrapped))
+                } else {
+                    self.fit(ctx, value, ty)?
+                };
+                values.push(value);
+            }
+            let results = if *signature.return_type == HirType::Void {
+                vec![]
+            } else {
+                vec![self.shapes.value_type(ctx, &signature.return_type)?]
+            };
+            if signature.is_async {
+                let payload = self.shapes.settled_type(ctx, &signature.return_type)?;
+                let params = values.iter().map(|v| v.get_type(ctx)).collect();
+                let wrapper = foreign::wrapper(ctx, self.shapes, &binding, params, payload)?;
+                let op = AsyncCallOp::new(ctx, wrapper, values, payload);
+                return Ok(Some(self.append_value(ctx, &op)));
+            }
+            let op = perry_mir::foreign::ForeignOp::new(
+                ctx,
+                perry_mir::foreign::Phase::Call,
+                &binding,
+                values,
+                results,
+            );
+            self.append(ctx, &op);
+            return Ok(op.get_operation().deref(ctx).results().next());
+        }
         let Expr::FuncRef(id) = callee else {
             bail!("only direct calls to module functions are supported yet");
         };
@@ -3219,7 +4094,7 @@ impl<'s> FunctionBuilder<'s> {
 }
 
 /// Accepted deviation: JSON revivers, replacers and indentation are diagnosed at compile time.
-const JSON_CALLBACKS: &str = "JSON revivers, replacers and indentation are not supported (accepted deviation, TODOs.md P6.2): parse into a typed shape and transform it in code";
+const JSON_CALLBACKS: &str = "JSON revivers, replacers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
 
 fn is_utf8(encoding: &str) -> bool {
     matches!(encoding, "utf8" | "utf-8" | "UTF-8" | "UTF8")

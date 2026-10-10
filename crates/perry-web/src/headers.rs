@@ -8,6 +8,11 @@ pub struct Headers {
     fields: Buffer,
 }
 
+fn field_buffer() -> Buffer {
+    // SAFETY: every 16-byte entry contains name and value pointers at offsets 0 and 8.
+    unsafe { Buffer::with_shape(&[16, 2, 0, 8]) }
+}
+
 fn headers<'a>(h: *mut u8) -> &'a mut Headers {
     // SAFETY: compiled code passes header lists.
     unsafe { &mut *(h as *mut Headers) }
@@ -15,11 +20,16 @@ fn headers<'a>(h: *mut u8) -> &'a mut Headers {
 
 impl Headers {
     fn fields(&self) -> impl Iterator<Item = (&'static [u8], &'static [u8])> + '_ {
-        self.fields.as_slice().chunks_exact(16).map(|field| {
-            let word = |at: usize| u32::from_le_bytes(field[at..at + 4].try_into().unwrap());
-            // SAFETY: fields point at bytes in the task region.
-            unsafe { (slice(word(0), word(4)), slice(word(8), word(12))) }
-        })
+        self.fields
+            .as_slice()
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|field| {
+                let word = |at: usize| u32::from_le_bytes(field[at..at + 4].try_into().unwrap());
+                // SAFETY: fields point at bytes in the task region.
+                unsafe { (slice(word(0), word(4)), slice(word(8), word(12))) }
+            })
     }
 
     fn push(&mut self, name: &[u8], value: &[u8]) {
@@ -35,8 +45,15 @@ impl Headers {
 
     /// Keep the fields `keep` accepts, in order.
     fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
-        let mut kept = Buffer::new();
-        for (field, (name, _)) in self.fields.as_slice().chunks_exact(16).zip(self.fields()) {
+        let mut kept = field_buffer();
+        for (field, (name, _)) in self
+            .fields
+            .as_slice()
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .zip(self.fields())
+        {
             if keep(name) {
                 kept.extend_from_slice(field);
             }
@@ -48,11 +65,11 @@ impl Headers {
 /// A new empty header list.
 #[unsafe(no_mangle)]
 pub extern "C" fn web_headers_new() -> *mut u8 {
-    let h = alloc(core::mem::size_of::<Headers>() as u32) as *mut Headers;
+    let h = perry_abi::object!(Headers; fields);
     // SAFETY: a fresh block.
     unsafe {
         h.write(Headers {
-            fields: Buffer::new(),
+            fields: field_buffer(),
         })
     };
     h as *mut u8
@@ -124,9 +141,16 @@ pub extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8) {
         return;
     };
     let list = headers(h);
-    let mut replaced = Buffer::new();
+    let mut replaced = field_buffer();
     let mut found = false;
-    for (field, (name, _)) in list.fields.as_slice().chunks_exact(16).zip(list.fields()) {
+    for (field, (name, _)) in list
+        .fields
+        .as_slice()
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .zip(list.fields())
+    {
         if name != key {
             replaced.extend_from_slice(field);
         } else if !found {
@@ -153,7 +177,7 @@ pub extern "C" fn web_headers_get(h: *mut u8, key: *mut u8) -> *mut u8 {
     let Some(key) = name(b"Headers.get", key) else {
         return core::ptr::null_mut();
     };
-    let mut joined = Buffer::new();
+    let mut joined = field_buffer();
     let mut found = false;
     for (name, value) in headers(h).fields() {
         if name != key {
@@ -211,9 +235,23 @@ pub(crate) fn fields(h: *mut u8) -> impl Iterator<Item = (&'static [u8], &'stati
 /// response's headers, lowered into the task region by the host).
 pub(crate) fn adopt_fields(list: *mut u8, count: u32) -> *mut u8 {
     let h = web_headers_new();
-    // SAFETY: `count` 16-byte fields at `list`.
-    headers(h)
-        .fields
-        .extend_from_slice(unsafe { slice(list as u32, count * 16) });
+    headers(h).fields = adopt_field_buffer(list, count);
     h
+}
+
+/// Native pointer-map storage over the canonical header payloads.
+pub(crate) fn adopt_field_buffer(list: *mut u8, count: u32) -> Buffer {
+    let mut fields = field_buffer();
+    // SAFETY: `count` 16-byte fields at `list`.
+    fields.extend_from_slice(unsafe { slice(list as u32, count * 16) });
+    // SAFETY: the copied field buffer traces the original canonical name/value payloads.
+    unsafe {
+        for index in 0..count as usize {
+            let field = list.add(index * 16).cast::<u32>();
+            perry_abi::release_canonical(*field as usize as *mut u8);
+            perry_abi::release_canonical(*field.add(2) as usize as *mut u8);
+        }
+        perry_abi::release_canonical(list);
+    }
+    fields
 }

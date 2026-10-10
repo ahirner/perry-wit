@@ -8,9 +8,12 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 pub mod bytes;
+pub mod decoder;
 pub mod exception;
+pub mod integers;
 pub mod json;
 pub mod random;
+pub mod regex;
 pub mod text;
 
 pub use perry_abi as runtime;

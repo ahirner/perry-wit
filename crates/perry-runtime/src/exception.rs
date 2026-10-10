@@ -26,6 +26,7 @@ pub const EXIT: u32 = 5;
 pub const TAG_NUMBER: u32 = 1;
 pub const TAG_BOOLEAN: u32 = 2;
 pub const TAG_STRING: u32 = 3;
+pub const TAG_BIGINT: u32 = 4;
 
 #[repr(C)]
 struct Exception {
@@ -33,12 +34,22 @@ struct Exception {
     tag: u32,
     value: u64,
     cause: *mut u8,
+    owner: *mut u8,
 }
 
 /// A new exception object in the current task.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u8 {
-    let exception = current().allocate(core::mem::size_of::<Exception>()) as *mut Exception;
+    static SHAPE: [u32; 4] = [
+        0,
+        2,
+        core::mem::offset_of!(Exception, cause) as u32,
+        core::mem::offset_of!(Exception, owner) as u32,
+    ];
+    // SAFETY: the map lists only explicit reference fields.
+    let exception = unsafe {
+        crate::region::perry_alloc_shaped(core::mem::size_of::<Exception>() as u32, SHAPE.as_ptr())
+    } as *mut Exception;
     // SAFETY: freshly allocated.
     unsafe {
         exception.write(Exception {
@@ -46,6 +57,11 @@ pub extern "C" fn perry_exception_new(kind: u32, tag: u32, value: u64) -> *mut u
             tag,
             value,
             cause: ptr::null_mut(),
+            owner: if matches!(tag, TAG_STRING | TAG_BIGINT) {
+                value as usize as *mut u8
+            } else {
+                ptr::null_mut()
+            },
         })
     };
     exception as *mut u8

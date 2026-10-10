@@ -5,13 +5,12 @@
 use crate::{attrs::Tier, types::RecordType};
 use pliron::{
     builtin::{
-        attributes::IdentifierAttr,
+        attributes::StringAttr,
         op_interfaces::{NOpdsInterface, NResultsInterface, OneOpdInterface, OneResultInterface},
     },
     common_traits::Verify,
     context::Context,
     derive::{op_interface_impl, pliron_op},
-    identifier::Identifier,
     op::Op,
     operation::Operation,
     opts::dce::SideEffects,
@@ -131,7 +130,7 @@ impl SideEffects for AllocOp {
 fn field_type(
     ctx: &Context,
     reference: Value,
-    field: &Identifier,
+    field: &str,
     op: &'static str,
 ) -> Result<TypeHandle> {
     let record = record(ctx, reference.get_type(ctx), op)?;
@@ -150,14 +149,14 @@ fn field_type(
 /// Read one field of a record.
 #[pliron_op(
     name = "perry.field_get",
-    format = "$0 `.` attr($perry_get_field, $IdentifierAttr) ` : ` type($0)",
+    format = "$0 `.` attr($perry_get_field, $StringAttr) ` : ` type($0)",
     interfaces = [OneOpdInterface, OneResultInterface],
-    attributes = (perry_get_field: IdentifierAttr)
+    attributes = (perry_get_field: StringAttr)
 )]
 pub struct FieldGetOp;
 
 impl FieldGetOp {
-    pub fn new(ctx: &mut Context, reference: Value, field: Identifier) -> Result<Self> {
+    pub fn new(ctx: &mut Context, reference: Value, field: String) -> Result<Self> {
         let ty = field_type(ctx, reference, &field, "perry.field_get")?;
         let op = FieldGetOp {
             op: Operation::new(
@@ -169,11 +168,11 @@ impl FieldGetOp {
                 0,
             ),
         };
-        op.set_attr_perry_get_field(ctx, IdentifierAttr::new(field));
+        op.set_attr_perry_get_field(ctx, StringAttr::new(field));
         Ok(op)
     }
 
-    pub fn field(&self, ctx: &Context) -> Identifier {
+    pub fn field(&self, ctx: &Context) -> String {
         self.get_attr_perry_get_field(ctx)
             .expect("field name")
             .clone()
@@ -209,14 +208,14 @@ impl SideEffects for FieldGetOp {
 /// Write one field of a record.
 #[pliron_op(
     name = "perry.field_set",
-    format = "$0 `.` attr($perry_set_field, $IdentifierAttr) ` = ` $1",
+    format = "$0 `.` attr($perry_set_field, $StringAttr) ` = ` $1",
     interfaces = [NOpdsInterface<2>, NResultsInterface<0>],
-    attributes = (perry_set_field: IdentifierAttr)
+    attributes = (perry_set_field: StringAttr)
 )]
 pub struct FieldSetOp;
 
 impl FieldSetOp {
-    pub fn new(ctx: &mut Context, reference: Value, field: Identifier, value: Value) -> Self {
+    pub fn new(ctx: &mut Context, reference: Value, field: String, value: Value) -> Self {
         let op = FieldSetOp {
             op: Operation::new(
                 ctx,
@@ -227,11 +226,11 @@ impl FieldSetOp {
                 0,
             ),
         };
-        op.set_attr_perry_set_field(ctx, IdentifierAttr::new(field));
+        op.set_attr_perry_set_field(ctx, StringAttr::new(field));
         op
     }
 
-    pub fn field(&self, ctx: &Context) -> Identifier {
+    pub fn field(&self, ctx: &Context) -> String {
         self.get_attr_perry_set_field(ctx)
             .expect("field name")
             .clone()

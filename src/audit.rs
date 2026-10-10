@@ -1,6 +1,22 @@
-//! Verification that the compiler has zero LLVM or inkwell dependencies.
+//! Compiler dependency and guest feature contracts.
 
 use anyhow::{Result, ensure};
+
+/// Validate the supported stackless component profile independently of host defaults.
+pub(crate) fn validate_guest(bytes: &[u8]) -> Result<()> {
+    use wasmparser::{Validator, WasmFeatures};
+    let mut features = WasmFeatures::default();
+    features.remove(
+        WasmFeatures::THREADS
+            | WasmFeatures::SHARED_EVERYTHING_THREADS
+            | WasmFeatures::STACK_SWITCHING
+            | WasmFeatures::CM_ASYNC_STACKFUL
+            | WasmFeatures::CM_MORE_ASYNC_BUILTINS
+            | WasmFeatures::CM_THREADING,
+    );
+    Validator::new_with_features(features).validate_all(bytes)?;
+    Ok(())
+}
 
 /// Verifies that the compiler dependency graph contains no LLVM or inkwell references.
 pub(crate) fn audit_no_llvm(cargo_lock: &str) -> Result<()> {

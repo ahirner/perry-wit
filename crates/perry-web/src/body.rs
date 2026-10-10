@@ -12,7 +12,7 @@ pub(crate) struct Body {
     /// 1 once read.
     used: u32,
     /// The snapshot, or null without one.
-    data: *mut u8,
+    pub(crate) data: *mut u8,
     len: u32,
     /// The body's stream, once created.
     pub(crate) stream: *mut Readable,
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn web_response_new(
     if text != 0 {
         set_default(h, b"content-type", b"text/plain;charset=UTF-8");
     }
-    let r = alloc(core::mem::size_of::<Response>() as u32) as *mut Response;
+    let r = perry_abi::object!(Response; body.data, body.stream, status_text, headers);
     // SAFETY: a fresh block.
     unsafe {
         r.write(Response {
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn web_request_new(
     if text != 0 {
         set_default(h, b"content-type", b"text/plain;charset=UTF-8");
     }
-    let r = alloc(core::mem::size_of::<Request>() as u32) as *mut Request;
+    let r = perry_abi::object!(Request; body.data, body.stream, url, method, headers);
     // SAFETY: a fresh block.
     unsafe {
         r.write(Request {

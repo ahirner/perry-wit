@@ -34,10 +34,14 @@ mod imports {
         pub fn bytes_read(stream: u32, buffer: *mut u8, len: u32) -> u32;
         #[link_name = "[stream-drop-readable-0][method]descriptor.read-via-stream"]
         pub fn bytes_read_drop(stream: u32);
+        #[link_name = "[stream-cancel-read-0][method]descriptor.read-via-stream"]
+        pub fn bytes_read_cancel(handle: u32) -> u32;
         #[link_name = "[async-lower][future-read-1][method]descriptor.read-via-stream"]
         pub fn bytes_read_result(future: u32, result: *mut u8) -> u32;
         #[link_name = "[future-drop-readable-1][method]descriptor.read-via-stream"]
         pub fn bytes_read_result_drop(future: u32);
+        #[link_name = "[future-cancel-read-1][method]descriptor.read-via-stream"]
+        pub fn bytes_read_result_cancel(handle: u32) -> u32;
 
         #[link_name = "[stream-new-0][method]descriptor.write-via-stream"]
         pub fn bytes_write_new() -> u64;
@@ -47,10 +51,14 @@ mod imports {
         pub fn bytes_write(stream: u32, data: *const u8, len: u32) -> u32;
         #[link_name = "[stream-drop-writable-0][method]descriptor.write-via-stream"]
         pub fn bytes_write_drop(stream: u32);
+        #[link_name = "[stream-cancel-write-0][method]descriptor.write-via-stream"]
+        pub fn bytes_write_cancel(handle: u32) -> u32;
         #[link_name = "[async-lower][future-read-1][method]descriptor.write-via-stream"]
         pub fn bytes_write_result(future: u32, result: *mut u8) -> u32;
         #[link_name = "[future-drop-readable-1][method]descriptor.write-via-stream"]
         pub fn bytes_write_result_drop(future: u32);
+        #[link_name = "[future-cancel-read-1][method]descriptor.write-via-stream"]
+        pub fn bytes_write_result_cancel(handle: u32) -> u32;
 
         #[link_name = "[method]descriptor.read-directory"]
         pub fn read_directory(fd: u32, result: *mut u32);
@@ -58,10 +66,14 @@ mod imports {
         pub fn entries_read(stream: u32, buffer: *mut u8, count: u32) -> u32;
         #[link_name = "[stream-drop-readable-0][method]descriptor.read-directory"]
         pub fn entries_read_drop(stream: u32);
+        #[link_name = "[stream-cancel-read-0][method]descriptor.read-directory"]
+        pub fn entries_read_cancel(handle: u32) -> u32;
         #[link_name = "[async-lower][future-read-1][method]descriptor.read-directory"]
         pub fn entries_read_result(future: u32, result: *mut u8) -> u32;
         #[link_name = "[future-drop-readable-1][method]descriptor.read-directory"]
         pub fn entries_read_result_drop(future: u32);
+        #[link_name = "[future-cancel-read-1][method]descriptor.read-directory"]
+        pub fn entries_read_result_cancel(handle: u32) -> u32;
     }
 }
 
@@ -95,19 +107,25 @@ mod host {
         read_via_stream(u32, u64, *mut u32);
         bytes_read(u32, *mut u8, u32) -> u32;
         bytes_read_drop(u32);
+        bytes_read_cancel(u32) -> u32;
         bytes_read_result(u32, *mut u8) -> u32;
         bytes_read_result_drop(u32);
+        bytes_read_result_cancel(u32) -> u32;
         bytes_write_new() -> u64;
         write_via_stream(u32, u32, u64) -> u32;
         bytes_write(u32, *const u8, u32) -> u32;
         bytes_write_drop(u32);
+        bytes_write_cancel(u32) -> u32;
         bytes_write_result(u32, *mut u8) -> u32;
         bytes_write_result_drop(u32);
+        bytes_write_result_cancel(u32) -> u32;
         read_directory(u32, *mut u32);
         entries_read(u32, *mut u8, u32) -> u32;
         entries_read_drop(u32);
+        entries_read_cancel(u32) -> u32;
         entries_read_result(u32, *mut u8) -> u32;
         entries_read_result_drop(u32);
+        entries_read_result_cancel(u32) -> u32;
     }
 }
 
@@ -127,6 +145,8 @@ pub const SYMLINK_FOLLOW: u8 = 1;
 /// `descriptor-type` cases.
 pub const TYPE_DIRECTORY: u8 = 2;
 pub const TYPE_REGULAR_FILE: u8 = 5;
+pub const TYPE_OTHER: u8 = 7;
+pub const ERROR_OTHER: u8 = 36;
 
 /// Parameters of the async-lowered `open-at` (more than four flat values).
 #[repr(C)]

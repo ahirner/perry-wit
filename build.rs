@@ -37,6 +37,13 @@ fn main() {
             helper,
         );
     }
+    compile_cargo_helper(
+        &manifest_dir,
+        &out_dir,
+        "perry-runtime",
+        "crates/perry-runtime",
+        "runtime-collectible",
+    );
 }
 
 fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
@@ -86,7 +93,11 @@ fn compile_cargo_helper(
     // Symbols `src/link` resolves: `__heap_base` (end of linked data and stack).
     let undefined = output.join("helper-undefined.txt");
     fs::write(&undefined, "__heap_base\n").expect("write undefined symbol list");
-    let status = Command::new(env::var_os("CARGO").expect("Cargo sets CARGO"))
+    let mut command = Command::new(env::var_os("CARGO").expect("Cargo sets CARGO"));
+    if helper == "runtime-collectible" {
+        command.args(["--config", "build.jobs=1"]);
+    }
+    let command = command
         .current_dir(manifest)
         .env("CARGO_ENCODED_RUSTFLAGS", "-Crelocation-model=pic")
         .env_remove("RUSTFLAGS")
@@ -100,7 +111,11 @@ fn compile_cargo_helper(
             "--target=wasm32-unknown-unknown",
             "--target-dir",
         ])
-        .arg(&target)
+        .arg(&target);
+    if helper == "runtime-collectible" {
+        command.args(["--features", "collectible"]);
+    }
+    let status = command
         .args([
             "--",
             "-Clto=fat",

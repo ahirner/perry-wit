@@ -17,12 +17,48 @@ world timers {
   export run: async func(x: f64) -> observation;
   export label: async func(name: string) -> string;
   export count: async func(n: u32) -> u32;
+  export pressure: async func(n: u32) -> u32;
+  export completion: async func(fail: bool) -> result<string, string>;
+  export adopt: async func(a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:string,fail:bool) -> result<string,string>;
 }
 "#;
 
 const SOURCE: &str = r#"
 import { setTimeout } from 'node:timers/promises';
 interface Observation { value: number; trace: number[] }
+interface Cell { value: number; next: Cell | null }
+let finalized = 0;
+async function finishAdopt(label:string, fail:boolean):Promise<string> {
+  await setTimeout(1);
+  if (fail) throw 'failed:' + finalized;
+  return label + ':' + finalized;
+}
+export async function adopt(a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:string,fail:boolean):Promise<string> {
+  try { return finishAdopt(a+b+c+d+e+f+g+h+i, fail); }
+  catch { return 'caught too early'; }
+  finally { finalized++; }
+}
+export async function completion(fail: boolean): Promise<string> {
+  await setTimeout(1);
+  if (fail) throw "failed";
+  return "done";
+}
+export async function pressure(n: number): Promise<number> {
+  let saved: Cell = { value: 17, next: null };
+  const retained: Cell = { value: 3, next: saved };
+  for (let i = 0; i < n; i++) {
+    const cell: Cell = { value: i, next: retained };
+    saved = await Promise.resolve(cell);
+    if (i % 10000 === 0) {
+      const pending = setTimeout(1, saved);
+      const input = await pending;
+      const repeated = await pending;
+      if (input.value !== repeated.value) { throw new Error('repeated observation'); }
+      saved = input;
+    }
+  }
+  return saved.value + retained.next.value;
+}
 async function later(v: number): Promise<number> {
   const a = v + 1;
   await setTimeout(1);
@@ -102,7 +138,11 @@ fn compile() -> Result<Vec<u8>> {
 async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let wasm = compile()?;
     let mut config = Config::new();
-    config.wasm_component_model_async(true);
+    config
+        .wasm_component_model_async(true)
+        .wasm_component_model_async_stackful(false)
+        .wasm_component_model_more_async_builtins(false)
+        .wasm_component_model_threading(false);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, &wasm)?;
     let mut linker = Linker::new(&engine);
@@ -120,7 +160,39 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
 
     let run = instance.get_typed_func::<(f64,), (Observation,)>(&mut store, "run")?;
     let label = instance.get_typed_func::<(&str,), (String,)>(&mut store, "label")?;
+    let pressure = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "pressure")?;
     let count = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "count")?;
+    let completion = instance.get_typed_func::<(bool,), (std::result::Result<String, String>,)>(
+        &mut store,
+        "completion",
+    )?;
+    let adopt = instance.get_typed_func::<(&str,&str,&str,&str,&str,&str,&str,&str,&str,bool), (std::result::Result<String,String>,)>(&mut store, "adopt")?;
+    assert_eq!(
+        adopt
+            .call_async(
+                &mut store,
+                ("a", "b", "c", "d", "e", "f", "g", "h", "i", false)
+            )
+            .await?,
+        (Ok("abcdefghi:1".into()),)
+    );
+    assert_eq!(
+        adopt
+            .call_async(
+                &mut store,
+                ("a", "b", "c", "d", "e", "f", "g", "h", "i", true)
+            )
+            .await?,
+        (Err("failed:2".into()),)
+    );
+    assert_eq!(
+        completion.call_async(&mut store, (false,)).await?,
+        (Ok("done".into()),)
+    );
+    assert_eq!(
+        completion.call_async(&mut store, (true,)).await?,
+        (Err("failed".into()),)
+    );
     for round in 0..20 {
         let (observation,) = run.call_async(&mut store, (3.5,)).await?;
         assert_eq!(
@@ -156,6 +228,29 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         .await??;
     assert_eq!((a, c), (6, 15));
     assert_eq!(b.trace, vec![1.0, 2.0, 2.0]);
+    let (a, b) = store
+        .run_concurrent(async |accessor| -> wasmtime::Result<_> {
+            let (a, b) = tokio::join!(
+                pressure.call_concurrent(accessor, (200_000,)),
+                pressure.call_concurrent(accessor, (100_000,))
+            );
+            Ok((a?.0, b?.0))
+        })
+        .await??;
+    assert_eq!((a, b), (200_016, 100_016));
+    assert!(
+        store.data().peak <= 768 * 1024,
+        "async pressure grew to {} bytes",
+        store.data().peak
+    );
+    store.data_mut().peak = 0;
+    let (total,) = pressure.call_async(&mut store, (400_000,)).await?;
+    assert_eq!(total, 400_016);
+    assert_eq!(
+        store.data().peak,
+        0,
+        "longer async workload grew after warm-up"
+    );
     store.assert_concurrent_state_empty();
     Ok(())
 }

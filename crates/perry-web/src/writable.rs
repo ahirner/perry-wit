@@ -52,7 +52,7 @@ pub extern "C" fn web_writable_get_writer(stream: *mut u8) -> *mut u8 {
         }
         (*stream).locked = 1;
     }
-    let writer = alloc(core::mem::size_of::<Writer>() as u32) as *mut Writer;
+    let writer = perry_abi::object!(Writer; stream, promise);
     // SAFETY: a fresh block.
     unsafe {
         writer.write(Writer {
@@ -119,7 +119,7 @@ pub extern "C" fn web_writer_close(writer: *mut u8) -> *mut u8 {
     let promise = promise_new();
     if let Some(stream) = bound(writer, promise) {
         stream.closed = 1;
-        resolve(promise, perry_abi::UNDEFINED_BITS);
+        perry_abi::write_acknowledged(stream.fd, &[], promise);
     }
     promise
 }

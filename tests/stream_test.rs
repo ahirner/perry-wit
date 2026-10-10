@@ -9,16 +9,126 @@ use wasmtime::{
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
+struct BlockedRead {
+    acknowledged: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for BlockedRead {
+    fn drop(&mut self) {
+        self.dropped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl wasmtime::component::StreamProducer<()> for BlockedRead {
+    type Item = u8;
+    type Buffer = Option<u8>;
+    fn poll_produce<'a>(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: wasmtime::StoreContextMut<'a, ()>,
+        _: wasmtime::component::Destination<'a, u8, Option<u8>>,
+        finish: bool,
+    ) -> std::task::Poll<wasmtime::Result<wasmtime::component::StreamResult>> {
+        if finish {
+            self.acknowledged
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            std::task::Poll::Ready(Ok(wasmtime::component::StreamResult::Cancelled))
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_reads_acknowledge_cancellation_before_dropping_stream() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let (resolve, package) = perry_wit::component::wit::resolve_source(
+        "detached.wit",
+        "package test:detached; world run {export run:async func(input:stream<u8>, mode:u32)->u32;}",
+    )?;
+    let world = resolve.select_world(&[package], Some("run"))?;
+    let compiled = compile_for_world(
+        "export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise<number> {const reader=input.getReader(); const pending=reader.read(); if(mode===1){await reader.cancel();const result=await pending;if(!result.done)throw 1;} if(mode===2){reader.releaseLock();try{await pending;throw 1;}catch(e){if(!(e instanceof TypeError))throw e;}} return 7;}",
+        "detached.ts",
+        &resolve,
+        world,
+        true,
+    )?;
+    let mut config = Config::new();
+    config
+        .wasm_component_model_async(true)
+        .wasm_component_model_threading(false)
+        .wasm_component_model_async_stackful(false)
+        .wasm_component_model_more_async_builtins(false);
+    let engine = Engine::new(&config)?;
+    let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
+    for mode in [0, 1, 2] {
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine)
+            .instantiate_async(&mut store, &component)
+            .await?;
+        let run = instance.get_typed_func::<(StreamReader<u8>, u32), (u32,)>(&mut store, "run")?;
+        let acknowledged = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let input = StreamReader::new(
+            &mut store,
+            BlockedRead {
+                acknowledged: acknowledged.clone(),
+                dropped: dropped.clone(),
+            },
+        )?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run.call_async(&mut store, (input, mode)),
+        )
+        .await?;
+        if mode == 0 {
+            assert!(
+                result.is_err(),
+                "unresolved detached read must fail the task"
+            );
+        } else {
+            assert_eq!(result?.0, 7);
+        }
+        assert!(acknowledged.load(Ordering::SeqCst), "mode={mode}");
+        assert!(dropped.load(Ordering::SeqCst), "mode={mode}");
+    }
+    Ok(())
+}
+
 const WIT: &str = r#"
 package test:streams;
 world streams {
   include wasi:cli/imports@0.3.0;
   export kept: async func(input: stream<u8>) -> f64;
   export leased: async func(input: stream<u8>) -> f64;
+  export iterated: async func(input: stream<u8>, stop: bool) -> f64;
+  export interrupted: async func(input: stream<u8>) -> result<f64, string>;
 }
 "#;
 
 const SOURCE: &str = r#"
+export async function iterated(input: ReadableStream<Uint8Array>, stop: boolean): Promise<number> {
+  let total = 0;
+  let index = 0;
+  for await (const bytes of input) {
+    index++;
+    if (stop) break;
+    for (let i = 0; i < bytes.length; i++) total += bytes[i] * index;
+    continue;
+  }
+  if (input.locked) throw 9;
+  return total;
+}
+export async function interrupted(input: ReadableStream<Uint8Array>): Promise<number> {
+  try {
+    for await (const bytes of input) { if (bytes.length > 0) throw "stopped"; }
+  } catch (error) { if (input.locked) throw "locked"; throw error; }
+  return 0;
+}
 // Every chunk stays reachable: each read needs its own buffer.
 export async function kept(input: ReadableStream<Uint8Array>): Promise<number> {
   const reader = input.getReader();
@@ -102,6 +212,13 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let kept = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "kept")?;
     let leased = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "leased")?;
+    let iterated =
+        instance.get_typed_func::<(StreamReader<u8>, bool), (f64,)>(&mut store, "iterated")?;
+    let interrupted = instance
+        .get_typed_func::<(StreamReader<u8>,), (std::result::Result<f64, String>,)>(
+            &mut store,
+            "interrupted",
+        )?;
 
     // Chunks arrive 8192 bytes at a time; weights tell their order apart.
     let weighted = |bytes: &[u8]| -> f64 {
@@ -132,6 +249,99 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
             weighted(&large)
         );
         assert!(store.data().table.is_empty(), "host resources leaked");
+    }
+    let input = StreamReader::new(&mut store, large.clone())?;
+    assert_eq!(
+        iterated.call_async(&mut store, (input, false)).await?.0,
+        weighted(&large)
+    );
+    let input = StreamReader::new(&mut store, large.clone())?;
+    assert_eq!(iterated.call_async(&mut store, (input, true)).await?.0, 0.0);
+    let input = StreamReader::new(&mut store, large)?;
+    assert_eq!(
+        interrupted.call_async(&mut store, (input,)).await?.0,
+        Err("stopped".into())
+    );
+    store.assert_concurrent_state_empty();
+    assert!(store.data().table.is_empty(), "host resources leaked");
+    Ok(())
+}
+
+#[path = "support/output_capture.rs"]
+mod output_capture;
+
+#[tokio::test(flavor = "current_thread")]
+async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
+    let source = r#"
+    import {Writable} from 'node:stream';
+    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+        const reader=input.getReader({mode:"byob"});
+        const writer=Writable.toWeb(process.stdout).getWriter();
+        let buffer=new Uint8Array(8196);buffer[0]=19;buffer[8195]=23;let count=0;
+        while(true) {
+            const result=await reader.read(buffer.subarray(2,8194),{min:8192});
+            const bytes=result.value;if(bytes===undefined)throw 1;
+            buffer=new Uint8Array(bytes.buffer);
+            if(buffer[0]!==19 || buffer[8195]!==23)throw 2;
+            if(bytes.length>0) {
+                const pending=writer.write(bytes);await pending;await pending;count+=bytes.length;
+            }
+            if(result.done)break;
+        }
+        writer.releaseLock();reader.releaseLock();return count;
+    }
+    "#;
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("world.wit"),
+        "package test:echo; world echo { include wasi:cli/imports@0.3.0; export run:async func(input:stream<u8>)->f64; }",
+    )?;
+    let (resolve, package) = resolve_wit(directory.path())?;
+    let world = resolve.select_world(&[package], Some("echo"))?;
+    for poison in [false, true] {
+        let compiled = if poison {
+            perry_wit::compiler::compile_for_world_with_memory_checks(
+                source, "echo.ts", &resolve, world,
+            )?
+        } else {
+            compile_for_world(source, "echo.ts", &resolve, world, true)?
+        };
+        let mut config = Config::new();
+        config
+            .wasm_component_model_async(true)
+            .wasm_component_model_threading(false)
+            .wasm_component_model_async_stackful(false)
+            .wasm_component_model_more_async_builtins(false);
+        let engine = Engine::new(&config)?;
+        let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
+        let mut linker = Linker::new(&engine);
+        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+        let bytes: Vec<u8> = (0..4 * 1024 * 1024)
+            .map(|i| (i * 37 + i / 251) as u8)
+            .collect();
+        let output = output_capture::MemoryOutput::new(bytes.len() * 3);
+        let mut store = Store::new(
+            &engine,
+            Host {
+                ctx: WasiCtx::builder().stdout(output.clone()).build(),
+                table: ResourceTable::new(),
+                limits: StoreLimitsBuilder::new().memory_size(65536).build(),
+            },
+        );
+        store.limiter(|host| &mut host.limits);
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+        for _ in 0..3 {
+            let input = StreamReader::new(&mut store, bytes.clone())?;
+            assert_eq!(
+                run.call_async(&mut store, (input,)).await?.0,
+                bytes.len() as f64,
+                "poison={poison}"
+            );
+            store.assert_concurrent_state_empty();
+            assert!(store.data().table.is_empty());
+        }
+        assert_eq!(output.contents().as_ref(), bytes.repeat(3));
     }
     Ok(())
 }

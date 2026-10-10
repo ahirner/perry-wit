@@ -9,8 +9,8 @@ use crate::{
     attrs::ErrorKind,
     exceptions::MayThrowInterface,
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType, JsonType,
-        OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RequestType,
+        AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
+        JsonType, OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RequestType,
         ResponseType, StatsType, StringType, WritableType, WriterType,
     },
 };
@@ -36,16 +36,25 @@ use thiserror::Error;
 /// Operand and result kinds of intrinsic signatures.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ty {
+    BigInt,
     Number,
     Bool,
     String,
     OptString,
+    NullString,
     OptNumber,
     StringArray,
     NumberArray,
     Bytes,
+    ByteBuffer,
+    ByobReader,
+    ByteInput,
+    Url,
+    SearchParams,
     Json,
     Date,
+    Decoder,
+    Regex,
     Exception,
     Stats,
     PromiseString,
@@ -66,7 +75,8 @@ pub enum Ty {
     ReadResult,
     PromiseReadResult,
     Incoming,
-    OptReadable,
+    Abort,
+    NullReadable,
     PromiseResponse,
 }
 
@@ -75,15 +85,26 @@ impl Ty {
         let string: TypeHandle = StringType::get(ctx).into();
         let number: TypeHandle = FP64Type::get(ctx).into();
         match self {
+            Ty::BigInt => crate::types::BigIntType::get(ctx).into(),
             Ty::Number => number,
             Ty::Bool => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             Ty::String => string,
             Ty::OptString => OptionalType::get(ctx, string).into(),
+            Ty::NullString => {
+                OptionalType::get_with(ctx, string, crate::attrs::Absence::Null).into()
+            }
             Ty::OptNumber => OptionalType::get(ctx, number).into(),
             Ty::StringArray => ArrayType::get(ctx, string).into(),
             Ty::NumberArray => ArrayType::get(ctx, number).into(),
             Ty::Bytes => BytesType::get(ctx).into(),
+            Ty::ByteBuffer => crate::types::ByteBufferType::get(ctx).into(),
+            Ty::ByobReader => crate::types::ByobReaderType::get(ctx).into(),
+            Ty::ByteInput => crate::types::ByteInputType::get(ctx).into(),
+            Ty::Url => crate::types::UrlType::get(ctx).into(),
+            Ty::SearchParams => crate::types::SearchParamsType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
+            Ty::Regex => crate::types::RegexType::get(ctx).into(),
+            Ty::Decoder => crate::types::DecoderType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
             Ty::Exception => ExceptionType::get(ctx).into(),
             Ty::Stats => StatsType::get(ctx).into(),
@@ -100,13 +121,14 @@ impl Ty {
             Ty::Reader => ReaderType::get(ctx).into(),
             Ty::ReadResult => ReadResultType::get(ctx).into(),
             Ty::Incoming => IncomingType::get(ctx).into(),
+            Ty::Abort => AbortType::get(ctx).into(),
             Ty::PromiseReadResult => {
                 let result = ReadResultType::get(ctx).into();
                 PromiseType::get(ctx, result).into()
             }
-            Ty::OptReadable => {
+            Ty::NullReadable => {
                 let stream = ReadableType::get(ctx).into();
-                OptionalType::get(ctx, stream).into()
+                OptionalType::get_with(ctx, stream, crate::attrs::Absence::Null).into()
             }
             Ty::PromiseResponse => {
                 let response = ResponseType::get(ctx).into();
@@ -156,17 +178,32 @@ impl Ty {
         let string = |t: TypeHandle| t.deref(ctx).is::<StringType>();
         let number = |t: TypeHandle| t.deref(ctx).is::<FP64Type>();
         match self {
+            Ty::BigInt => deref.is::<crate::types::BigIntType>(),
             Ty::Number => deref.is::<FP64Type>(),
             Ty::Bool => deref
                 .downcast_ref::<IntegerType>()
                 .is_some_and(|i| i.width() == 1),
             Ty::String => deref.is::<StringType>(),
-            Ty::OptString => optional_of(&string),
+            Ty::OptString => {
+                optional_of(&string)
+                    && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Undefined)
+            }
+            Ty::NullString => {
+                optional_of(&string)
+                    && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Null)
+            }
             Ty::OptNumber => optional_of(&number),
             Ty::StringArray => array_of(&string),
             Ty::NumberArray => array_of(&number),
             Ty::Bytes => deref.is::<BytesType>(),
+            Ty::ByteBuffer => deref.is::<crate::types::ByteBufferType>(),
+            Ty::ByobReader => deref.is::<crate::types::ByobReaderType>(),
+            Ty::ByteInput => deref.is::<crate::types::ByteInputType>(),
+            Ty::Url => deref.is::<crate::types::UrlType>(),
+            Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
             Ty::Json => deref.is::<JsonType>(),
+            Ty::Regex => deref.is::<crate::types::RegexType>(),
+            Ty::Decoder => deref.is::<crate::types::DecoderType>(),
             Ty::Date => deref.is::<DateType>(),
             Ty::Exception => deref.is::<ExceptionType>(),
             Ty::Stats => deref.is::<StatsType>(),
@@ -177,11 +214,15 @@ impl Ty {
             Ty::Writable => deref.is::<WritableType>(),
             Ty::Writer => deref.is::<WriterType>(),
             Ty::Readable => deref.is::<ReadableType>(),
-            Ty::Reader => deref.is::<ReaderType>(),
+            Ty::Reader => deref.is::<ReaderType>() || deref.is::<crate::types::ByobReaderType>(),
             Ty::ReadResult => deref.is::<ReadResultType>(),
             Ty::Incoming => deref.is::<IncomingType>(),
+            Ty::Abort => deref.is::<AbortType>(),
             Ty::PromiseReadResult => promise_of(&|t| t.deref(ctx).is::<ReadResultType>()),
-            Ty::OptReadable => optional_of(&|t| t.deref(ctx).is::<ReadableType>()),
+            Ty::NullReadable => {
+                optional_of(&|t| t.deref(ctx).is::<ReadableType>())
+                    && crate::optional::absence(ctx, ty) == Some(crate::attrs::Absence::Null)
+            }
             Ty::PromiseResponse => promise_of(&|t| t.deref(ctx).is::<ResponseType>()),
             Ty::PromiseString => promise_of(&string),
             Ty::PromiseBytes => promise_of(&|t| t.deref(ctx).is::<BytesType>()),
@@ -235,6 +276,10 @@ macro_rules! intrinsics {
 }
 
 intrinsics! {
+    BigIntFromNumber = "bigint_from_number" (Number) -> (BigInt), throws;
+    BigIntNegate = "bigint_negate" (BigInt) -> (BigInt), pure;
+    BigIntToNumber = "bigint_to_number" (BigInt) -> (Number), pure;
+    BigIntToString = "bigint_to_string" (BigInt) -> (String), pure;
     PrintOut = "print_out" (String) -> ();
     PrintErr = "print_err" (String) -> ();
     NumberToString = "number_to_string" (Number) -> (String), pure;
@@ -251,11 +296,17 @@ intrinsics! {
     MathSqrt = "math_sqrt" (Number) -> (Number), pure;
     MathMin = "math_min" (Number, Number) -> (Number), pure;
     MathMax = "math_max" (Number, Number) -> (Number), pure;
-    DateFromTime = "date_from_time" (Number) -> (Date), pure;
-    DateTime = "date_time" (Date) -> (Number), pure;
+    DateFromTime = "date_from_time" (Number) -> (Date);
+    DateTime = "date_time" (Date) -> (Number);
+    DateParse = "date_parse" (String) -> (Number), pure;
+    DateUtc = "date_utc" (Number, Number, Number, Number, Number, Number, Number) -> (Number), pure;
+    DatePart = "date_part" (Date, Number) -> (Number);
+    DateSet = "date_set" (Date, Number, Number, Number, Number, Number, Number) -> (Number);
     DateIso = "date_iso" (Date) -> (String), throws;
+    DateJson = "date_json" (Date) -> (NullString);
+    StringFromCodePoint = "string_from_code_point" (Number) -> (String), throws;
     StringCharAt = "string_char_at" (String, Number) -> (String), pure;
-    StringCharCodeAt = "string_char_code_at" (String, Number) -> (Number), pure;
+    StringCodePointAt = "string_code_point_at" (String, Number) -> (OptNumber), pure;
     StringSlice = "string_slice" (String, Number, Number) -> (String), pure;
     StringSubstring = "string_substring" (String, Number, Number) -> (String), pure;
     StringIndexOf = "string_index_of" (String, String, Number) -> (Number), pure;
@@ -263,31 +314,56 @@ intrinsics! {
     StringStartsWith = "string_starts_with" (String, String, Number) -> (Bool), pure;
     StringEndsWith = "string_ends_with" (String, String, Number) -> (Bool), pure;
     StringTrim = "string_trim" (String) -> (String), pure;
+    StringSplit = "string_split" (String, String) -> (StringArray), pure;
+    StringIndex = "string_index" (String, Number) -> (OptString), pure;
     StringLower = "string_lower" (String) -> (String), pure;
     StringUpper = "string_upper" (String) -> (String), pure;
     StringRepeat = "string_repeat" (String, Number) -> (String), throws;
     BytesNew = "bytes_new" (Number) -> (Bytes), throws;
     BytesFromArray = "bytes_from_array" (NumberArray) -> (Bytes);
-    BytesCopy = "bytes_copy" (Bytes) -> (Bytes);
+    BytesCopy = "bytes_copy" (Bytes) -> (Bytes), throws;
+    BytesBuffer = "bytes_buffer" (Bytes) -> (ByteBuffer), pure;
+    BytesOffset = "bytes_offset" (Bytes) -> (Number);
+    BufferLength = "buffer_length" (ByteBuffer) -> (Number);
+    BytesFromBuffer = "bytes_from_buffer" (ByteBuffer) -> (Bytes), throws;
     BytesGet = "bytes_get" (Bytes, Number) -> (OptNumber);
     BytesSet = "bytes_set" (Bytes, Number, Number) -> ();
-    BytesLength = "bytes_length" (Bytes) -> (Number), pure;
-    BytesSubarray = "bytes_subarray" (Bytes, Number, Number) -> (Bytes), pure;
-    BytesSlice = "bytes_slice" (Bytes, Number, Number) -> (Bytes);
+    BytesLength = "bytes_length" (Bytes) -> (Number);
+    BytesSubarray = "bytes_subarray" (Bytes, Number, Number) -> (Bytes), throws;
+    BytesSlice = "bytes_slice" (Bytes, Number, Number) -> (Bytes), throws;
     BytesSetFrom = "bytes_set_from" (Bytes, Bytes, Number) -> (), throws;
-    BytesFill = "bytes_fill" (Bytes, Number, Number, Number) -> ();
+    BytesFill = "bytes_fill" (Bytes, Number, Number, Number) -> (), throws;
     TextEncode = "text_encode" (String) -> (Bytes);
-    TextDecode = "text_decode" (Bytes, Bool) -> (String), throws;
+    StringByteInput = "string_byte_input" (String) -> (ByteInput);
+    BytesByteInput = "bytes_byte_input" (Bytes) -> (ByteInput);
+    UrlNew = "url_new" (String, OptString) -> (Url), throws;
+    UrlGet = "url_get" (Url, Number) -> (String);
+    UrlSetPathname = "url_set_pathname" (Url, String) -> ();
+    UrlSearchParams = "url_search_params" (Url) -> (SearchParams), pure;
+    UrlAppend = "url_append" (SearchParams, String, String) -> ();
+    EncodeUriComponent = "encode_uri_component" (String) -> (String);
+    DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), pure;
+    DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), pure;
+    RegexSearch = "regex_search" (String, Regex) -> (Number), pure;
+    DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
+    TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
     JsonParse = "json_parse" (String) -> (Json), throws;
     JsonMember = "json_member" (Json, String) -> (Json), throws;
+    JsonKeys = "json_keys" (Json) -> (StringArray), throws;
     JsonIndex = "json_index" (Json, Number) -> (Json), throws;
     JsonLength = "json_length" (Json) -> (OptNumber), throws;
     JsonToNumber = "json_to_number" (Json) -> (Number), throws;
+    JsonRequireNumber = "json_require_number" (Json) -> (Number), throws;
     JsonToString = "json_to_string" (Json) -> (String), throws;
     JsonToBool = "json_to_bool" (Json) -> (Bool), throws;
+    JsonTruthy = "json_truthy" (Json) -> (Bool), pure;
     JsonIsUndefined = "json_is_undefined" (Json) -> (Bool), pure;
+    JsonIsNull = "json_is_null" (Json) -> (Bool), pure;
     JsonSerialize = "json_serialize" (Json) -> (OptString), throws;
     JsonTypeOf = "json_type_of" (Json) -> (String), pure;
+    JsonRequireObject = "json_require_object" (Json) -> (), throws;
+    JsonFirst = "json_first" (Json) -> (Json), throws;
+    JsonNext = "json_next" (Json) -> (Json), pure;
     // Object literals with spreads over JSON values: `{}`, `...source`, `key: value`.
     JsonObject = "json_object" () -> (Json);
     JsonAssign = "json_assign" (Json, Json) -> ();
@@ -297,6 +373,9 @@ intrinsics! {
     JsonFromBool = "json_from_bool" (Bool) -> (Json), pure;
     JsonNull = "json_null" () -> (Json), pure;
     JsonUndefined = "json_undefined" () -> (Json), pure;
+    AbortNew = "abort_new" () -> (Abort);
+    AbortAbort = "abort_abort" (Abort) -> (), throws;
+    AbortAborted = "abort_aborted" (Abort) -> (Bool);
     // `Error` objects: `cause` (strings only, set at construction) and `name`.
     ExceptionSetCause = "exception_set_cause" (Exception, String) -> ();
     ExceptionCause = "exception_cause" (Exception) -> (OptString);
@@ -322,7 +401,7 @@ intrinsics! {
     HeadersCopy = "headers_copy" (Headers) -> (Headers);
     HeadersAppend = "headers_append" (Headers, String, String) -> (), throws;
     HeadersSet = "headers_set" (Headers, String, String) -> (), throws;
-    HeadersGet = "headers_get" (Headers, String) -> (OptString), throws;
+    HeadersGet = "headers_get" (Headers, String) -> (NullString), throws;
     HeadersHas = "headers_has" (Headers, String) -> (Bool), throws;
     HeadersDelete = "headers_delete" (Headers, String) -> (), throws;
     ResponseNew = "response_new" (OptBytes, Bool, Number, String, Headers) -> (Response), throws;
@@ -369,16 +448,92 @@ intrinsics! {
     ReadableGetReader = "readable_get_reader" (Readable) -> (Reader), throws;
     ReadableCancel = "readable_cancel" (Readable) -> (PromiseVoid);
     ReaderRead = "reader_read" (Reader) -> (PromiseReadResult);
+    ReadableGetByobReader = "readable_get_byob_reader" (Readable) -> (ByobReader), throws;
+    ReaderReadByob = "reader_read_byob" (ByobReader, Bytes, Number) -> (PromiseReadResult);
     ReaderCancel = "reader_cancel" (Reader) -> (PromiseVoid);
     ReaderReleaseLock = "reader_release_lock" (Reader) -> ();
     ReadDone = "read_done" (ReadResult) -> (Bool), pure;
     ReadValue = "read_value" (ReadResult) -> (OptBytes), pure;
     Fetch = "fetch" (String, String, Headers, OptBytes, Bool) -> (PromiseResponse);
-    ResponseBody = "response_body" (Response) -> (OptReadable);
-    RequestBody = "request_body" (Request) -> (OptReadable);
+    ResponseBody = "response_body" (Response) -> (NullReadable);
+    RequestBody = "request_body" (Request) -> (NullReadable);
 }
 
 impl Intrinsic {
+    /// Conservative allocation effect, including exceptions and hidden helper temporaries.
+    pub fn may_allocate(self) -> bool {
+        !matches!(
+            self,
+            Self::PerformanceNow
+                | Self::BigIntToNumber
+                | Self::BytesByteInput
+                | Self::UrlSearchParams
+                | Self::AbortAborted
+                | Self::DateNow
+                | Self::ExitCodeSet
+                | Self::MathFloor
+                | Self::MathCeil
+                | Self::MathTrunc
+                | Self::MathAbs
+                | Self::MathRound
+                | Self::MathSqrt
+                | Self::MathMin
+                | Self::MathMax
+                | Self::RegexSearch
+                | Self::DecoderFatal
+                | Self::DecoderIgnoreBom
+                | Self::DateTime
+                | Self::DateParse
+                | Self::DateUtc
+                | Self::DatePart
+                | Self::DateSet
+                | Self::StringCodePointAt
+                | Self::StringIndexOf
+                | Self::StringLastIndexOf
+                | Self::StringStartsWith
+                | Self::StringEndsWith
+                | Self::BytesGet
+                | Self::BytesSet
+                | Self::BytesBuffer
+                | Self::BytesOffset
+                | Self::BufferLength
+                | Self::BytesLength
+                | Self::JsonIsUndefined
+                | Self::JsonTruthy
+                | Self::JsonIsNull
+                | Self::JsonNext
+                | Self::ExceptionSetCause
+                | Self::ExceptionCause
+                | Self::MathRandom
+                | Self::BytesFillRandom
+                | Self::StatsIsFile
+                | Self::StatsIsDirectory
+                | Self::StatsSize
+                | Self::ResponseStatus
+                | Self::ResponseStatusText
+                | Self::ResponseOk
+                | Self::ResponseHeaders
+                | Self::ResponseBodyUsed
+                | Self::RequestMethod
+                | Self::RequestUrl
+                | Self::RequestHeaders
+                | Self::RequestBodyUsed
+                | Self::ServeMethod
+                | Self::ServeMethodOther
+                | Self::ServeHasScheme
+                | Self::ServeScheme
+                | Self::ServeSchemeOther
+                | Self::ServeAuthority
+                | Self::ServePath
+                | Self::ServeHeaderCount
+                | Self::WritableLocked
+                | Self::WriterReleaseLock
+                | Self::ReadableLocked
+                | Self::ReadDone
+                | Self::ReadValue
+        )
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|i| i.name() == name)
     }
@@ -720,7 +875,6 @@ impl SettledFieldOp {
                 .value();
         let result = match field {
             SettledField::Status => StringType::get(ctx).into(),
-            SettledField::Value if value.deref(ctx).is::<OptionalType>() => value,
             SettledField::Value => OptionalType::get(ctx, value).into(),
             SettledField::Reason => {
                 let exception = ExceptionType::get(ctx).into();

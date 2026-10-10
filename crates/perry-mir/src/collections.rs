@@ -205,8 +205,7 @@ impl Verify for ArrayGetOp {
         let op = self.get_operation().deref(ctx);
         let element = element(ctx, op.get_operand(0), "perry.array_get")?;
         let result = self.get_result(ctx).get_type(ctx);
-        let optional = TypedHandle::<OptionalType>::from_handle(result, ctx)
-            .is_ok_and(|optional| optional.deref(ctx).value() == element);
+        let optional = result == OptionalType::get(ctx, element).into();
         if !optional {
             verify_err!(self.loc(ctx), CollectionErr::Element("perry.array_get"))?
         }

@@ -38,12 +38,38 @@ world handler {
 }";
 
 const ADAPTER: &str = r#"
+import type { PerryHttpHandlerTypesMethod as __PerryMethod,
+  PerryHttpHandlerTypesScheme as __PerryScheme } from './handler-types/world';
 import { request as __perryRequest, body as __perryBody, method as __perryMethod,
   methodOther as __perryMethodOther, hasScheme as __perryHasScheme, scheme as __perryScheme,
   schemeOther as __perrySchemeOther, authority as __perryAuthority, path as __perryPath,
   headerCount as __perryHeaderCount, headerName as __perryHeaderName,
   headerValue as __perryHeaderValue, addHeader as __perryAddHeader,
   respond as __perryRespond } from "perry:http-server";
+
+function __perryRequestMethod(tag: string, other: string | undefined): __PerryMethod {
+  switch (tag) {
+    case 'get': return { tag: 'get' };
+    case 'head': return { tag: 'head' };
+    case 'post': return { tag: 'post' };
+    case 'put': return { tag: 'put' };
+    case 'delete': return { tag: 'delete' };
+    case 'connect': return { tag: 'connect' };
+    case 'options': return { tag: 'options' };
+    case 'trace': return { tag: 'trace' };
+    case 'patch': return { tag: 'patch' };
+    default: return { tag: 'other', val: other! };
+  }
+}
+
+function __perryRequestScheme(present: boolean, tag: string, other: string | undefined): __PerryScheme | undefined {
+  if (!present) return undefined;
+  switch (tag) {
+    case 'http': return { tag: 'http' };
+    case 'https': return { tag: 'https' };
+    default: return { tag: 'other', val: other! };
+  }
+}
 
 export async function __perryHttpHandle(__perryHandle: number): Promise<number> {
   const incoming = __perryRequest(__perryHandle);
@@ -53,12 +79,9 @@ export async function __perryHttpHandle(__perryHandle: number): Promise<number> 
   for (let i = 0; i < count; i++) {
     headers.push([__perryHeaderName(incoming, i), __perryHeaderValue(incoming, i)]);
   }
-  const scheme: { tag: string; val: string | undefined } | undefined = __perryHasScheme(incoming)
-    ? { tag: __perryScheme(incoming), val: __perrySchemeOther(incoming) }
-    : undefined;
   const response = AWAIT handle({
-    method: { tag: __perryMethod(incoming), val: __perryMethodOther(incoming) },
-    scheme,
+    method: __perryRequestMethod(__perryMethod(incoming), __perryMethodOther(incoming)),
+    scheme: __perryRequestScheme(__perryHasScheme(incoming), __perryScheme(incoming), __perrySchemeOther(incoming)),
     authority: __perryAuthority(incoming),
     pathWithQuery: __perryPath(incoming),
     headers,
@@ -79,6 +102,7 @@ pub(crate) fn compile(
     file_name: &str,
     types: &Resolve,
     componentize: bool,
+    memory_checks: bool,
 ) -> Result<Compiled> {
     let asynchronous = source.contains("async function handle");
     let adapter = ADAPTER.replace("AWAIT ", if asynchronous { "await " } else { "" });
@@ -111,7 +135,18 @@ pub(crate) fn compile(
     }];
     let imports = bind::imports(&resolve, world);
     let streams = bind::stream_anchor(&resolve, world);
-    let core = perry_codegen::compile(ctx, &mir, &Exports::Canonical { exports, imports })?;
+    let tiers = perry_codegen::explain_tiers(ctx, &mir);
+    let core = perry_codegen::compile(
+        ctx,
+        &mir,
+        &Exports::Canonical {
+            memory_checks,
+            exports,
+            imports,
+            bindings: vec![],
+            resources: vec![],
+        },
+    )?;
     let core = finish(core, streams.as_ref())?;
     let (component, stripped) = if componentize {
         let component = component::encode_resolved(&core, &resolve, world)?;
@@ -124,6 +159,7 @@ pub(crate) fn compile(
         core,
         component,
         stripped,
+        tiers,
     })
 }
 

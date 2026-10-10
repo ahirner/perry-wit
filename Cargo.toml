@@ -22,6 +22,11 @@ members = [
     "crates/perry-codegen",
 ]
 
+[workspace.dependencies]
+wasmtime = { version = "=49.0.2", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p3"] }
+wasmtime-wasi-http = { version = "=49.0.2", default-features = false, features = ["p3", "default-send-request"] }
+
 [profile.dev.package.perry-hir]
 opt-level = 1
 
@@ -54,9 +59,9 @@ bytes = "1"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
-wasmtime = { version = "49.0.2", default-features = false, features = ["component-model-async", "cranelift", "runtime", "std", "anyhow"] }
-wasmtime-wasi = { version = "49.0.2", default-features = false, features = ["p3"] }
-wasmtime-wasi-http = { version = "49.0.2", default-features = false, features = ["p3", "default-send-request"] }
+wasmtime = { workspace = true, features = ["component-model-async"] }
+wasmtime-wasi.workspace = true
+wasmtime-wasi-http.workspace = true
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
 tempfile = "3.27.0"
 perry-json-helper = { path = "crates/json-helper" }

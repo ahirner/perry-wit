@@ -13,6 +13,7 @@
 //! (`ENOENT: no such file or directory, open 'missing.txt'`).
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
+mod canonical;
 mod wasi;
 
 use core::{cell::UnsafeCell, ptr};
@@ -71,6 +72,8 @@ enum Wait {
 }
 
 struct Op {
+    task: *mut u8,
+    pin: u32,
     kind: Kind,
     stage: Stage,
     promise: *mut u8,
@@ -110,13 +113,15 @@ const CHUNK: usize = 16 * 1024;
 const ENTRIES: usize = 16;
 
 fn start(kind: Kind, path: *mut u8, data: &[u8]) -> *mut u8 {
-    let op = alloc(core::mem::size_of::<Op>() as u32) as *mut Op;
+    let op = perry_abi::object!(Op; promise, path, target, data, area, contents);
     let promise = promise_new();
     let mut copy = Buffer::new();
     copy.extend_from_slice(data);
     // SAFETY: a fresh block for the operation, linked into the list until it settles.
     unsafe {
         op.write(Op {
+            task: perry_abi::task(),
+            pin: perry_abi::pin(op.cast()),
             kind,
             stage: Stage::Start,
             promise,
@@ -253,11 +258,12 @@ pub extern "C" fn fs_event(event: u32, handle: u32, code: u32) -> u32 {
     // SAFETY: listed operations are live until they settle.
     unsafe {
         while !op.is_null() {
-            if (*op).wait == wait && (*op).waiting == handle {
+            if (*op).task == perry_abi::task() && (*op).wait == wait && (*op).waiting == handle {
                 if wait == Wait::Subtask {
                     if code != SUBTASK_RETURNED {
                         return 1;
                     }
+                    unjoin(handle);
                     subtask_drop(handle);
                 }
                 (*op).wait = Wait::Nothing;
@@ -268,6 +274,86 @@ pub extern "C" fn fs_event(event: u32, handle: u32, code: u32) -> u32 {
         }
     }
     0
+}
+
+/// Cancel this task's outstanding operations before releasing any borrowed buffer.
+/// Returns the number of detached calls, for the task-boundary diagnostic.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_close() -> u32 {
+    let task = perry_abi::task();
+    let mut cursor = *ops();
+    let mut cancelled = 0;
+    // SAFETY: each listed operation remains pinned through acknowledgement and unlinking.
+    unsafe {
+        while !cursor.is_null() {
+            let op = &mut *cursor;
+            if op.task == task {
+                cancelled += 1;
+                if op.wait != Wait::Nothing {
+                    unjoin(op.waiting);
+                }
+                match op.wait {
+                    Wait::Subtask => {
+                        let status = perry_abi::subtask_cancel(op.waiting);
+                        if status == SUBTASK_RETURNED {
+                            canonical::release_result(op);
+                        }
+                        if status == SUBTASK_RETURNED
+                            && op.stage == Stage::Opened
+                            && byte(op.area, 0) == 0
+                        {
+                            op.file = word(op.area, 4);
+                        }
+                        subtask_drop(op.waiting);
+                    }
+                    Wait::Stream => {
+                        let copied = perry_abi::acknowledged(|| match op.kind {
+                            Kind::Write => wasi::bytes_write_cancel(op.stream),
+                            Kind::Readdir => wasi::entries_read_cancel(op.stream),
+                            _ => wasi::bytes_read_cancel(op.stream),
+                        });
+                        if op.kind == Kind::Readdir {
+                            op.contents
+                                .advance((copied >> 4) as usize * wasi::ENTRY_SIZE);
+                        }
+                    }
+                    Wait::Future => {
+                        let result = perry_abi::acknowledged(|| match op.kind {
+                            Kind::Write => wasi::bytes_write_result_cancel(op.future),
+                            Kind::Readdir => wasi::entries_read_result_cancel(op.future),
+                            _ => wasi::bytes_read_result_cancel(op.future),
+                        });
+                        if result == 0 {
+                            canonical::release_result(op);
+                        }
+                    }
+                    Wait::Nothing => {}
+                }
+                if op.stream != 0 {
+                    match op.kind {
+                        Kind::Write => wasi::bytes_write_drop(op.stream),
+                        Kind::Readdir => wasi::entries_read_drop(op.stream),
+                        _ => wasi::bytes_read_drop(op.stream),
+                    }
+                    op.stream = 0;
+                }
+                if op.future != 0 {
+                    match op.kind {
+                        Kind::Write => wasi::bytes_write_result_drop(op.future),
+                        Kind::Readdir => wasi::entries_read_result_drop(op.future),
+                        _ => wasi::bytes_read_result_drop(op.future),
+                    }
+                    op.future = 0;
+                }
+                op.wait = Wait::Nothing;
+                finish(op);
+                cursor = *ops();
+            } else {
+                cursor = op.next;
+            }
+        }
+    }
+    cancelled
 }
 
 /// Wait for an async-lowered call that returned `status`; false if it already returned.
@@ -362,6 +448,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                 }
             }
             Stage::Opened => {
+                canonical::release_result(op);
                 if byte(op.area, 0) != 0 {
                     return fail(op, byte(op.area, 4));
                 }
@@ -406,6 +493,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     unjoin(op.stream);
                     // SAFETY: the readable end this operation owns.
                     unsafe { wasi::bytes_read_drop(op.stream) };
+                    op.stream = 0;
                     op.stage = Stage::ReadResult;
                 }
             }
@@ -420,6 +508,8 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                 unjoin(op.future);
                 // SAFETY: the readable end this operation owns.
                 unsafe { wasi::bytes_read_result_drop(op.future) };
+                op.future = 0;
+                canonical::release_result(op);
                 if byte(op.area, 0) != 0 {
                     return fail(op, byte(op.area, 4));
                 }
@@ -435,10 +525,10 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                 if let Some(result) = code.take() {
                     op.written += (result >> 4) as usize;
                     if result & 0xF == DROPPED {
-                        op.written = op.data.len();
+                        op.stage = Stage::WriteResult;
                     }
                 }
-                if op.written < op.data.len() {
+                if op.stage == Stage::Writing && op.written < op.data.len() {
                     let rest = &op.data.as_slice()[op.written..];
                     // SAFETY: the data buffer outlives the operation.
                     let result =
@@ -452,6 +542,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                 unjoin(op.stream);
                 // SAFETY: the writable end this operation owns.
                 unsafe { wasi::bytes_write_drop(op.stream) };
+                op.stream = 0;
                 op.stage = Stage::WriteResult;
             }
             Stage::WriteResult => {
@@ -465,8 +556,13 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                 unjoin(op.future);
                 // SAFETY: the readable end this operation owns.
                 unsafe { wasi::bytes_write_result_drop(op.future) };
+                op.future = 0;
+                canonical::release_result(op);
                 if byte(op.area, 0) != 0 {
                     return fail(op, byte(op.area, 4));
+                }
+                if op.written < op.data.len() {
+                    return fail(op, wasi::ERROR_OTHER);
                 }
                 return succeed(op, UNDEFINED_BITS);
             }
@@ -491,6 +587,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     unjoin(op.stream);
                     // SAFETY: the readable end this operation owns.
                     unsafe { wasi::entries_read_drop(op.stream) };
+                    op.stream = 0;
                     op.stage = Stage::ListResult;
                 }
             }
@@ -505,16 +602,21 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                 unjoin(op.future);
                 // SAFETY: the readable end this operation owns.
                 unsafe { wasi::entries_read_result_drop(op.future) };
+                op.future = 0;
+                canonical::release_result(op);
                 if byte(op.area, 0) != 0 {
                     return fail(op, byte(op.area, 4));
                 }
                 let entries = op.contents.as_slice();
                 let mut names = Buffer::new();
-                for entry in entries.chunks_exact(wasi::ENTRY_SIZE) {
+                for entry in entries.as_chunks::<{ wasi::ENTRY_SIZE }>().0 {
                     let at = entry.as_ptr() as *mut u8;
                     let (data, len) = (word(at, wasi::ENTRY_NAME), word(at, wasi::ENTRY_NAME + 4));
                     // SAFETY: the host lowered the name into this task's region as UTF-8.
                     let name = unsafe { adopt(data as usize as *mut u8, len) };
+                    if matches!(unsafe { bytes(name) }, b"." | b"..") {
+                        continue;
+                    }
                     names.extend_from_slice(&(name as usize as u64).to_le_bytes());
                 }
                 let slots = names.as_slice();
@@ -526,6 +628,7 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                 return succeed(op, array as usize as u64);
             }
             Stage::Finished => {
+                canonical::release_result(op);
                 let payload = if op.kind == Kind::Stat {
                     wasi::STAT_PAYLOAD
                 } else {
@@ -611,7 +714,11 @@ fn open_preopen(op: &mut Op) -> bool {
             }
             _ => drop_descriptor(fd),
         }
+        if !name.is_empty() {
+            unsafe { perry_abi::release_canonical(name.as_ptr().cast_mut()) };
+        }
     }
+    unsafe { perry_abi::release_canonical(entries.cast_mut().cast()) };
     let Some((depth, fd, _)) = best else {
         return false;
     };
@@ -660,6 +767,9 @@ fn drop_descriptor(fd: u32) {
 
 /// Release the operation's descriptors and unlink it.
 fn finish(op: &mut Op) {
+    if op.kind == Kind::Readdir {
+        canonical::release_entries(op.contents.as_slice());
+    }
     if op.file != 0 {
         drop_descriptor(op.file);
         op.file = 0;
@@ -668,6 +778,7 @@ fn finish(op: &mut Op) {
         drop_descriptor(op.dir);
         op.dir = 0;
     }
+    perry_abi::unpin(core::mem::take(&mut op.pin));
     op.stage = Stage::Done;
     let this = op as *mut Op;
     let mut link: *mut *mut Op = ops();

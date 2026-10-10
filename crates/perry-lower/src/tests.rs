@@ -105,16 +105,8 @@ fn unsupported_forms_are_rejected_with_diagnostics() {
             "generator function",
         ),
         (
-            "export function run(x: number): number { if (x) { return 1; } return 0; }",
-            "conditions must be boolean",
-        ),
-        (
             "export function run(x: number): number { const d: Record<string, number> = {}; return x; }",
             "MIR backend does not support",
-        ),
-        (
-            "interface P { x: number; y?: number } export function run(x: number): number { const p: P = { x }; return p.x; }",
-            "optional field",
         ),
     ] {
         let error = rejected(source);
@@ -154,8 +146,8 @@ export function run(x: number): number {
     );
     assert!(!printed.contains("__AnonShape"), "{printed}");
     for op in [
-        "perry.alloc Unassigned",
-        "perry.array_new Unassigned",
+        "perry.alloc Instance",
+        "perry.array_new Instance",
         "perry.array_push",
         "perry.array_get",
         "perry.array_set",
@@ -183,7 +175,7 @@ export function run(n: number): number {
 "#,
     );
     for op in [
-        "perry.optional <builtin.fp64 >",
+        "perry.optional <builtin.fp64 ,Undefined>",
         "perry.is_undefined",
         "perry.to_number",
     ] {
@@ -220,6 +212,7 @@ fn literal_fields_evaluate_in_source_order() {
         r#"
 interface Point { x: number; y: number }
 function trace(v: number): number {
+  if (v < 0) throw new Error('negative');
   return v;
 }
 export function run(n: number): number {
@@ -338,4 +331,22 @@ fn dump_mir() {
     if let Err(e) = pliron::operation::verify_operation(op, ctx) {
         println!("VERIFY: {}", e.disp(ctx));
     }
+}
+
+#[test]
+fn frame_proofs_follow_reference_escape_through_calls() {
+    let ctx = &mut Context::new();
+    let source = r#"
+interface Cell { value: number }
+let retained: Cell | null = null;
+function read(cell: Cell): number { if (cell.value < 0) return 0; return cell.value; }
+function save(cell: Cell): void { retained = cell; }
+export function local(x: number): number { const cell: Cell = { value: x }; return read(cell); }
+export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell); return x; }
+"#;
+    let module = lower_source(ctx, source, "lifetimes.ts").unwrap();
+    perry_mir::pipeline::canonicalize(module.get_operation(), ctx).unwrap();
+    let printed = module.disp(ctx).to_string();
+    assert!(printed.contains("perry.alloc Frame"), "{printed}");
+    assert!(printed.contains("perry.alloc Instance"), "{printed}");
 }

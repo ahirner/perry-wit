@@ -6,7 +6,7 @@
 //! is typed `T` (parameter, return, field, element) unwraps and throws a catchable `TypeError`
 //! on `undefined`, as does property access on `undefined`.
 use crate::{
-    attrs::ErrorKind,
+    attrs::{Absence, ErrorKind},
     exceptions::MayThrowInterface,
     scalar::is_bool,
     types::{OptionalType, StringType},
@@ -42,6 +42,12 @@ pub fn optional_value(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
     TypedHandle::<OptionalType>::from_handle(ty, ctx)
         .ok()
         .map(|optional| optional.deref(ctx).value())
+}
+
+pub fn absence(ctx: &Context, ty: TypeHandle) -> Option<Absence> {
+    TypedHandle::<OptionalType>::from_handle(ty, ctx)
+        .ok()
+        .map(|optional| optional.deref(ctx).absence())
 }
 
 fn operand(op: &dyn Op, ctx: &Context) -> Value {
@@ -80,6 +86,10 @@ pub struct UndefinedOp;
 impl UndefinedOp {
     pub fn new(ctx: &mut Context, value: TypeHandle) -> Self {
         let ty = OptionalType::get(ctx, value).into();
+        Self::with_type(ctx, ty)
+    }
+
+    pub fn with_type(ctx: &mut Context, ty: TypeHandle) -> Self {
         UndefinedOp {
             op: Operation::new(
                 ctx,
@@ -95,7 +105,8 @@ impl UndefinedOp {
 
 impl Verify for UndefinedOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if optional_value(ctx, self.get_result(ctx).get_type(ctx)).is_none() {
+        if !absence(ctx, self.get_result(ctx).get_type(ctx)).is_some_and(Absence::admits_undefined)
+        {
             verify_err!(self.loc(ctx), OptionalErr::Result("perry.undefined"))?
         }
         Ok(())
@@ -113,6 +124,10 @@ pub struct WrapOp;
 impl WrapOp {
     pub fn new(ctx: &mut Context, value: Value) -> Self {
         let ty = OptionalType::get(ctx, value.get_type(ctx)).into();
+        Self::with_type(ctx, value, ty)
+    }
+
+    pub fn with_type(ctx: &mut Context, value: Value, ty: TypeHandle) -> Self {
         WrapOp {
             op: Operation::new(
                 ctx,
@@ -244,6 +259,114 @@ impl Verify for ToStringOp {
 }
 
 pure!(UndefinedOp, WrapOp, IsUndefinedOp, ToNumberOp, ToStringOp);
+
+/// The explicit `null` value of a nullable type.
+#[pliron_op(
+    name = "perry.null",
+    format = "` : ` type($0)",
+    interfaces = [NOpdsInterface<0>, OneResultInterface]
+)]
+pub struct NullOp;
+
+impl NullOp {
+    pub fn new(ctx: &mut Context, ty: TypeHandle) -> Self {
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![ty],
+                vec![],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for NullOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        if !absence(ctx, self.get_result(ctx).get_type(ctx)).is_some_and(Absence::admits_null) {
+            verify_err!(self.loc(ctx), OptionalErr::Result("perry.null"))?
+        }
+        Ok(())
+    }
+}
+
+/// Whether a nullable value is `null`.
+#[pliron_op(
+    name = "perry.is_null",
+    format = "$0 ` : ` type($0)",
+    interfaces = [OneOpdInterface, OneResultInterface]
+)]
+pub struct IsNullOp;
+
+impl IsNullOp {
+    pub fn new(ctx: &mut Context, value: Value) -> Self {
+        let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![ty],
+                vec![value],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for IsNullOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        inner(ctx, operand(self, ctx), "perry.is_null")?;
+        if !is_bool(ctx, self.get_result(ctx)) {
+            verify_err!(self.loc(ctx), OptionalErr::Result("perry.is_null"))?
+        }
+        Ok(())
+    }
+}
+
+pure!(NullOp, IsNullOp);
+
+/// Change admitted absence states, checking any states excluded by the target type.
+#[pliron_op(
+    name = "perry.optional_cast",
+    format = "$0 ` : ` type($0)",
+    interfaces = [OneOpdInterface, OneResultInterface]
+)]
+pub struct OptionalCastOp;
+
+impl OptionalCastOp {
+    pub fn new(ctx: &mut Context, value: Value, target: TypeHandle) -> Self {
+        Self {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![target],
+                vec![value],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for OptionalCastOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let source = inner(ctx, operand(self, ctx), "perry.optional_cast")?;
+        if optional_value(ctx, self.get_result(ctx).get_type(ctx)) != Some(source) {
+            verify_err!(self.loc(ctx), OptionalErr::Result("perry.optional_cast"))?
+        }
+        Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl MayThrowInterface for OptionalCastOp {
+    fn exception(&self, _ctx: &Context) -> ErrorKind {
+        ErrorKind::TypeError
+    }
+}
 
 /// The defined value; throws a catchable `TypeError` on `undefined`. Emitted at typed
 /// boundaries and before property access, where ECMAScript also throws `TypeError`.

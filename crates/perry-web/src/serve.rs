@@ -154,6 +154,7 @@ const SCHEMES: [&str; 3] = ["http", "https", "other"];
 
 /// One exchange: the request's parts and the waitables the task still owns (0 when none).
 struct Serve {
+    pin: u32,
     method: *mut u8,
     method_other: *mut u8,
     scheme: *mut u8,
@@ -161,7 +162,7 @@ struct Serve {
     authority: *mut u8,
     path: *mut u8,
     /// `copy-all` entries: name and value (data, length) pairs.
-    headers: *const u32,
+    headers: perry_abi::Buffer,
     header_count: u32,
     body: *mut Readable,
     /// The consume-body outcome future (writable end, written `Ok`) and the request's
@@ -228,10 +229,10 @@ fn word(area: *const u8, offset: usize) -> u32 {
 fn host_string(area: *const u8, offset: usize) -> *mut u8 {
     // SAFETY: the host wrote a string's data and length.
     unsafe {
-        perry_abi::adopt(
-            word(area, offset) as usize as *mut u8,
-            word(area, offset + 4),
-        )
+        let data = word(area, offset) as usize as *mut u8;
+        let value = perry_abi::adopt(data, word(area, offset + 4));
+        perry_abi::release_canonical(data);
+        value
     }
 }
 
@@ -240,7 +241,7 @@ fn host_string(area: *const u8, offset: usize) -> *mut u8 {
 pub extern "C" fn web_serve_request(request: f64) -> *mut u8 {
     let request = request as u32;
     let area = alloc(RESULT_SIZE);
-    let op = alloc(core::mem::size_of::<Serve>() as u32) as *mut Serve;
+    let op = perry_abi::object!(Serve; method, method_other, scheme, scheme_other, authority, path, headers, body, ended, data, transmitted, zero);
     let zero = alloc(RESULT_SIZE);
     // SAFETY: canonical calls on the request this export owns; fresh areas.
     unsafe {
@@ -284,13 +285,14 @@ pub extern "C" fn web_serve_request(request: f64) -> *mut u8 {
         let mut ends = [0u32; 2];
         http::consume_body(request, outcome as u32, ends.as_mut_ptr());
         op.write(Serve {
+            pin: perry_abi::pin(op.cast()),
             method: from_static(METHODS[tag]),
             method_other,
             scheme,
             scheme_other,
             authority,
             path,
-            headers: list[0] as usize as *const u32,
+            headers: crate::headers::adopt_field_buffer(list[0] as usize as *mut u8, list[1]),
             header_count: list[1],
             body: body_stream(ends[0]),
             outcome: (outcome >> 32) as u32,
@@ -378,7 +380,7 @@ fn header(s: *mut u8, index: f64) -> [u32; 4] {
     let s = serve(s);
     let index = (index as u32).min(s.header_count.saturating_sub(1)) as usize;
     // SAFETY: `copy-all` wrote `header_count` entries of four words.
-    unsafe { *(s.headers.add(index * 4) as *const [u32; 4]) }
+    unsafe { *(s.headers.as_slice().as_ptr().add(index * 16) as *const [u32; 4]) }
 }
 
 #[unsafe(no_mangle)]
@@ -648,23 +650,24 @@ pub extern "C" fn web_serve_close() {
                 link = &mut s.next;
                 continue;
             }
+            *link = s.next;
             if s.outcome != 0 {
                 if s.outcome_blocked {
                     perry_abi::unjoin(s.outcome);
-                    http::outcome_cancel(s.outcome);
+                    perry_abi::acknowledged(|| http::outcome_cancel(s.outcome));
                 }
                 drop_outcome(s);
             }
             if s.end != 0 {
                 perry_abi::unjoin(s.end);
-                http::end_cancel(s.end);
+                perry_abi::acknowledged(|| http::end_cancel(s.end));
                 http::end_drop(s.end);
                 s.end = 0;
             }
             if s.contents != 0 {
                 perry_abi::unjoin(s.contents);
                 if s.contents_blocked {
-                    http::contents_cancel(s.contents);
+                    perry_abi::acknowledged(|| http::contents_cancel(s.contents));
                 }
                 http::contents_drop(s.contents);
                 s.contents = 0;
@@ -672,20 +675,21 @@ pub extern "C" fn web_serve_close() {
             if s.trailers != 0 {
                 if s.trailers_blocked {
                     perry_abi::unjoin(s.trailers);
-                    http::trailers_cancel(s.trailers);
+                    perry_abi::acknowledged(|| http::trailers_cancel(s.trailers));
                 }
                 drop_trailers(s);
             }
             if s.transmit != 0 {
                 perry_abi::unjoin(s.transmit);
-                http::transmit_cancel(s.transmit);
+                perry_abi::acknowledged(|| http::transmit_cancel(s.transmit));
                 drop_transmit(s);
             }
             if s.fields != 0 {
                 http::fields_drop(s.fields);
                 s.fields = 0;
             }
-            *link = s.next;
+            perry_abi::unpin(core::mem::take(&mut s.pin));
+            link = ops();
         }
     }
 }

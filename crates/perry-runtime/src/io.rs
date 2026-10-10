@@ -112,12 +112,24 @@ struct Ack {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Open,
+    Failed,
     /// Writable end dropped; waiting for the completion future.
     Closing,
     Closed,
 }
 
 impl Output {
+    pub(crate) unsafe fn trace_roots(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
+        let mut ack = self.acks;
+        // SAFETY: only active acknowledgements in this live task are visited.
+        unsafe {
+            while !ack.is_null() {
+                roots.push((*ack).promise);
+                ack = (*ack).next;
+            }
+        }
+    }
+
     pub(crate) const fn new() -> Self {
         Output {
             writable: 0,
@@ -148,7 +160,19 @@ impl Output {
                 }
                 (*ack).next = self.spare_acks;
                 self.spare_acks = ack;
-                crate::promise::perry_promise_resolve((*ack).promise, crate::UNDEFINED_BITS);
+                let promise = core::mem::replace(&mut (*ack).promise, core::ptr::null_mut());
+                if self.state == State::Failed {
+                    let message = crate::string::from_static("Output stream is closed");
+                    let exception = crate::exception::perry_exception_new(
+                        crate::exception::ERROR,
+                        TAG_STRING,
+                        message as usize as u64,
+                    );
+                    let status = crate::exception::perry_exception_raise(exception);
+                    crate::promise::perry_promise_reject(promise, status as i32);
+                } else {
+                    crate::promise::perry_promise_resolve(promise, crate::UNDEFINED_BITS);
+                }
             }
         }
     }
@@ -189,6 +213,12 @@ fn print_bytes(fd: usize, bytes: &[u8], newline: bool) {
     let output = &mut current().outputs[fd.min(1)];
     if output.state != State::Open {
         return;
+    }
+    if output.idle() && output.writing.cap > output.queued.cap {
+        // Acknowledgement ended the host borrow; serial writes can reuse this buffer.
+        core::mem::swap(&mut output.writing, &mut output.queued);
+        output.queued.clear();
+        output.written = 0;
     }
     output.queued.extend_from_slice(bytes);
     output.appended += bytes.len() as u64;
@@ -254,6 +284,7 @@ fn finish_copy(output: &mut Output, code: u32) {
         output.written = output.writing.len();
         output.queued.clear();
         output.flushed = output.appended;
+        output.state = State::Failed;
     }
     output.acknowledge();
 }
@@ -330,7 +361,7 @@ pub extern "C" fn perry_io_close() -> u32 {
         let output = &mut current().outputs[fd];
         match output.state {
             State::Open if output.writable == 0 => output.state = State::Closed,
-            State::Open if output.idle() => {
+            State::Open | State::Failed if output.idle() => {
                 // SAFETY: canonical built-ins on handles this output owns.
                 unsafe { host::waitable_join(output.writable, 0) };
                 host::output::drop_writer(fd, output.writable);
@@ -350,6 +381,41 @@ pub extern "C" fn perry_io_close() -> u32 {
         }
     }
     done
+}
+
+/// Cancel output transfers before their task-owned buffers are released.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_io_cancel() {
+    let task = crate::region::perry_task_current();
+    for fd in 0..2 {
+        let output = &mut current().outputs[fd];
+        if output.state == State::Closed {
+            continue;
+        }
+        if output.writable != 0 && output.state != State::Closing {
+            // SAFETY: this task owns the waitable; cancellation may run other tasks.
+            unsafe { host::waitable_join(output.writable, 0) };
+            if output.blocked {
+                host::output::cancel_write(fd, output.writable);
+                // SAFETY: the cancelling task stays live through acknowledgement.
+                unsafe { crate::region::perry_task_resume(task) };
+                output.blocked = false;
+            }
+            host::output::drop_writer(fd, output.writable);
+        }
+        if output.future != 0 {
+            if output.state == State::Closing {
+                unsafe { host::waitable_join(output.future, 0) };
+                host::output::cancel_read(fd, output.future);
+                // SAFETY: the cancelling task stays live through acknowledgement.
+                unsafe { crate::region::perry_task_resume(task) };
+            }
+            host::output::drop_future(fd, output.future);
+        }
+        output.writable = 0;
+        output.future = 0;
+        output.state = State::Closed;
+    }
 }
 
 /// Join `waitable` to the current task's waitable set, creating the set on first use.
@@ -408,6 +474,19 @@ fn exit_code(code: f64) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_exit_code_set(code: f64) {
     process().exit_code = exit_code(code);
+}
+
+/// Report unresolved detached work once, before command output is drained.
+///
+/// # Safety
+/// `message` is a live UTF-8 runtime string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_task_detached(count: u32, message: *mut u8) {
+    if count != 0 {
+        // SAFETY: compiled code passes a static diagnostic string.
+        print_bytes(1, unsafe { crate::string::bytes(message) }, true);
+        current().outcome = Some(1);
+    }
 }
 
 /// `process.exit(code)`: record the code and return the exit status that unwinds to the
@@ -576,6 +655,19 @@ fn adopt(ptr: u32, len: u32) -> *mut u8 {
     unsafe { crate::string::perry_string_adopt(ptr as usize as *mut u8, len) }
 }
 
+fn release_environment(entries: &[[u32; 4]]) {
+    // SAFETY: all entries and the outer list came from canonical lowering.
+    unsafe {
+        for [key, _, value, _] in entries {
+            crate::region::perry_cabi_release(*key as usize as *mut u8);
+            crate::region::perry_cabi_release(*value as usize as *mut u8);
+        }
+        if !entries.is_empty() {
+            crate::region::perry_cabi_release(entries.as_ptr().cast_mut().cast());
+        }
+    }
+}
+
 /// `process.env[name]`: the value, or null for `undefined`.
 ///
 /// # Safety
@@ -584,22 +676,25 @@ fn adopt(ptr: u32, len: u32) -> *mut u8 {
 pub unsafe extern "C" fn perry_env_get(name: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let name = unsafe { crate::string::bytes(name) };
-    for [key, key_len, value, value_len] in environment() {
-        // SAFETY: entries point into task memory.
+    let entries = environment();
+    let mut found = core::ptr::null_mut();
+    for [key, key_len, value, value_len] in entries {
+        // SAFETY: entries point to live canonical storage; adoption does not collect.
         let key =
             unsafe { core::slice::from_raw_parts(*key as usize as *const u8, *key_len as usize) };
         if key == name {
-            return adopt(*value, *value_len);
+            found = adopt(*value, *value_len);
         }
     }
-    core::ptr::null_mut()
+    release_environment(entries);
+    found
 }
 
 /// `Object.keys(process.env)`: an array of strings.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_env_keys() -> *mut u8 {
     let entries = environment();
-    let array = crate::array::perry_array_new(entries.len().max(1) as u32);
+    let array = crate::array::perry_array_new_typed(entries.len().max(1) as u32, 1);
     for (index, [key, key_len, ..]) in entries.iter().enumerate() {
         let string = adopt(*key, *key_len);
         // SAFETY: the array has capacity for every entry (layout of crate::array).
@@ -610,6 +705,7 @@ pub extern "C" fn perry_env_keys() -> *mut u8 {
     }
     // SAFETY: as above.
     unsafe { *(array.add(crate::array::LEN as usize) as *mut u32) = entries.len() as u32 };
+    release_environment(entries);
     array
 }
 

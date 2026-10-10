@@ -42,11 +42,16 @@ pub(crate) struct Node {
 
 /// A host subtask whose completion settles a promise.
 #[repr(C)]
-struct Subtask {
-    handle: u32,
-    promise: *mut u8,
+pub(crate) struct Subtask {
+    pub(crate) handle: u32,
+    foreign: bool,
+    pub(crate) promise: *mut u8,
     value: u64,
-    next: *mut Subtask,
+    pub(crate) next: *mut Subtask,
+    pub(crate) owner: *mut Task,
+    pub(crate) signal: *mut crate::abort::Signal,
+    pub(crate) watch_previous: *mut Subtask,
+    pub(crate) watch_next: *mut Subtask,
 }
 
 /// One export call.
@@ -64,7 +69,8 @@ pub struct Task {
     /// them instead of growing the region.
     spare_nodes: *mut Node,
     spare_subtasks: *mut Subtask,
-    subtasks: *mut Subtask,
+    pub(crate) subtasks: *mut Subtask,
+    cancelled: *mut Subtask,
     /// Waitable set of the pending subtasks and output streams, created on first use; 0 if
     /// none.
     pub(crate) set: u32,
@@ -80,6 +86,37 @@ pub struct Task {
     /// Status of the last runtime service that threw (`crate::exception::raise`), taken by
     /// compiled code with `perry_status`.
     pub(crate) status: u32,
+}
+
+impl Task {
+    /// Active scheduler edges; recycled nodes and allocation history never retain objects.
+    pub(crate) unsafe fn trace_roots(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
+        roots.extend([self.result, self.exception]);
+        // SAFETY: active queue entries belong to this live task.
+        unsafe {
+            let mut node = self.ready_head;
+            while !node.is_null() {
+                roots.push((*node).frame);
+                node = (*node).next;
+            }
+            let mut subtask = self.subtasks;
+            while !subtask.is_null() {
+                roots.extend([(*subtask).promise, (*subtask).signal.cast()]);
+                if crate::promise::has_reference_value((*subtask).promise) {
+                    roots.push((*subtask).value as usize as *mut u8);
+                }
+                subtask = (*subtask).next;
+            }
+            let mut cancelled = self.cancelled;
+            while !cancelled.is_null() {
+                roots.push((*cancelled).value as usize as *mut u8);
+                cancelled = (*cancelled).next;
+            }
+            for output in &self.outputs {
+                output.trace_roots(roots);
+            }
+        }
+    }
 }
 
 struct Runtime {
@@ -146,6 +183,7 @@ fn new_task() -> *mut Task {
             spare_nodes: ptr::null_mut(),
             spare_subtasks: ptr::null_mut(),
             subtasks: ptr::null_mut(),
+            cancelled: ptr::null_mut(),
             set: 0,
             result: ptr::null_mut(),
             exception: ptr::null_mut(),
@@ -350,6 +388,7 @@ pub extern "C" fn perry_ready_pop() -> *mut u8 {
             task.ready_tail = ptr::null_mut();
         }
         let frame = (*node).frame;
+        (*node).frame = ptr::null_mut();
         (*node).next = task.spare_nodes;
         task.spare_nodes = node;
         frame
@@ -359,6 +398,16 @@ pub extern "C" fn perry_ready_pop() -> *mut u8 {
 /// Settle `promise` with `value` when host subtask `handle` returns.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_subtask_register(handle: u32, promise: *mut u8, value: u64) {
+    register_subtask(handle, promise, value, false);
+}
+
+/// Register a typed canonical transfer whose cancelled result needs compiler-generated disposal.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_foreign_register(handle: u32, promise: *mut u8, value: u64) {
+    register_subtask(handle, promise, value, true);
+}
+
+fn register_subtask(handle: u32, promise: *mut u8, value: u64, foreign: bool) {
     let task = current();
     let entry = if task.spare_subtasks.is_null() {
         task.allocate(core::mem::size_of::<Subtask>()) as *mut Subtask
@@ -372,9 +421,14 @@ pub extern "C" fn perry_subtask_register(handle: u32, promise: *mut u8, value: u
     unsafe {
         entry.write(Subtask {
             handle,
+            foreign,
             promise,
             value,
             next: task.subtasks,
+            owner: task,
+            signal: ptr::null_mut(),
+            watch_previous: ptr::null_mut(),
+            watch_next: ptr::null_mut(),
         })
     };
     task.subtasks = entry;
@@ -383,6 +437,16 @@ pub extern "C" fn perry_subtask_register(handle: u32, promise: *mut u8, value: u
 /// Host subtask `handle` returned: settle its promise. Returns 0 if `handle` is unknown.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_subtask_done(handle: u32) -> u32 {
+    if let Some((promise, value)) = take_subtask(handle) {
+        crate::promise::perry_promise_resolve(promise, value);
+        1
+    } else {
+        0
+    }
+}
+
+/// Remove a completed timer or transfer, severing its roots before recycling the entry.
+pub(crate) fn take_subtask(handle: u32) -> Option<(*mut u8, u64)> {
     let task = current();
     let mut link: *mut *mut Subtask = &mut task.subtasks;
     // SAFETY: the list holds live entries of this task.
@@ -391,16 +455,73 @@ pub extern "C" fn perry_subtask_done(handle: u32) -> u32 {
             let entry = *link;
             if (*entry).handle == handle {
                 *link = (*entry).next;
-                let (promise, value) = ((*entry).promise, (*entry).value);
+                crate::abort::detach(entry);
+                let value = ((*entry).promise, (*entry).value);
+                (*entry).promise = ptr::null_mut();
+                (*entry).value = 0;
                 (*entry).next = task.spare_subtasks;
                 task.spare_subtasks = entry;
-                crate::promise::perry_promise_resolve(promise, value);
-                return 1;
+                return Some(value);
             }
             link = &mut (*entry).next;
         }
     }
-    0
+    None
+}
+
+/// Cancel unobserved host calls before their task storage is reclaimed.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_task_cancel() -> u32 {
+    let task = perry_task_current();
+    let mut count = 0;
+    // SAFETY: cancellation acknowledges each host call; the task remains live throughout.
+    unsafe {
+        while !(*task).subtasks.is_null() {
+            let entry = (*task).subtasks;
+            let handle = (*entry).handle;
+            crate::host::waitable_join(handle, 0);
+            let status = crate::host::subtask_cancel(handle);
+            perry_task_resume(task);
+            crate::host::subtask_drop(handle);
+            (*task).subtasks = (*entry).next;
+            crate::abort::detach(entry);
+            (*entry).promise = ptr::null_mut();
+            if (*entry).foreign {
+                let transfer = (*entry).value as usize as *mut u8;
+                transfer
+                    .add(crate::foreign::RETURNED as usize)
+                    .cast::<u32>()
+                    .write(u32::from(status == crate::host::SUBTASK_RETURNED));
+                (*entry).next = (*task).cancelled;
+                (*task).cancelled = entry;
+            } else {
+                (*entry).value = 0;
+                (*entry).next = (*task).spare_subtasks;
+                (*task).spare_subtasks = entry;
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Take a cancelled transfer after acknowledgement. Disposal does not introduce safe points.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_foreign_cancelled() -> *mut u8 {
+    let task = current();
+    let entry = task.cancelled;
+    if entry.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: cancellation queues live scheduler nodes until the compiled cleanup drains them.
+    unsafe {
+        task.cancelled = (*entry).next;
+        let transfer = (*entry).value as usize as *mut u8;
+        (*entry).value = 0;
+        (*entry).next = task.spare_subtasks;
+        task.spare_subtasks = entry;
+        transfer
+    }
 }
 
 /// The canonical ABI `realloc`, exported by compiled components as `cabi_realloc`.
@@ -418,22 +539,86 @@ pub unsafe extern "C" fn perry_cabi_realloc(
     _align: u32,
     new_size: u32,
 ) -> *mut u8 {
-    perry_task_enter();
-    if new_size == 0 {
-        return ALIGN as *mut u8;
+    #[cfg(feature = "collectible")]
+    {
+        unsafe { crate::buffers::reallocate(old, old_size, new_size) }
     }
-    let block = current().allocate(new_size as usize);
-    if !old.is_null() {
-        // SAFETY: both blocks are live and distinct; the copy stays within both.
-        unsafe { ptr::copy_nonoverlapping(old, block, old_size.min(new_size) as usize) };
+    #[cfg(not(feature = "collectible"))]
+    {
+        perry_task_enter();
+        if new_size == 0 {
+            return ALIGN as *mut u8;
+        }
+        let block = current().allocate(new_size as usize);
+        if !old.is_null() {
+            // SAFETY: both blocks are live and distinct; the copy stays within both.
+            unsafe { ptr::copy_nonoverlapping(old, block, old_size.min(new_size) as usize) };
+        }
+        block
     }
-    block
+}
+
+/// Release the host's canonical pin after its value is lifted or discarded.
+///
+/// # Safety
+/// `data` is a pointer produced by [perry_cabi_realloc].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_cabi_release(data: *mut u8) {
+    #[cfg(feature = "collectible")]
+    unsafe {
+        crate::buffers::release(data)
+    };
+    #[cfg(not(feature = "collectible"))]
+    let _ = data;
 }
 
 /// Allocate `size` bytes, 8-aligned, in the current task's region. Never returns null.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_alloc(size: u32) -> *mut u8 {
-    current().allocate(size as usize)
+    // SAFETY: an opaque allocation has no traced fields.
+    unsafe { perry_alloc_shaped(size, ptr::null()) }
+}
+
+/// Allocate an object with a static map of its reference fields, without collecting.
+///
+/// # Safety
+/// `shape` meets `Collector::allocate`'s shape contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mut u8 {
+    #[cfg(feature = "collectible")]
+    {
+        unsafe { crate::roots::perry_gc_alloc(size, shape) }
+    }
+    #[cfg(not(feature = "collectible"))]
+    {
+        let _ = shape;
+        current().allocate(size as usize)
+    }
+}
+
+/// Pin an active runtime operation; bounded-region components need no pin table.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_operation_pin(owner: *mut u8) -> u32 {
+    #[cfg(feature = "collectible")]
+    {
+        crate::roots::perry_gc_pin(owner)
+    }
+    #[cfg(not(feature = "collectible"))]
+    {
+        let _ = owner;
+        0
+    }
+}
+
+/// Release a completed operation only after its host transfers are acknowledged.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_operation_unpin(token: u32) {
+    #[cfg(feature = "collectible")]
+    if token != 0 {
+        crate::roots::perry_gc_unpin(token);
+    }
+    #[cfg(not(feature = "collectible"))]
+    let _ = token;
 }
 
 /// Chunks in use and dedicated chunks of the current task (0, 0 without one), and chunks on

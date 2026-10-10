@@ -270,24 +270,27 @@ pub fn is_async(ctx: &Context, function: &FuncOp) -> bool {
 #[error("perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value")]
 pub struct TimerErr;
 
-/// `setTimeout(delay, value)` from `node:timers/promises`: a promise that settles with `value`
-/// once `delay` milliseconds (at least 1, as in Node) have passed on the host's monotonic clock.
+/// `setTimeout(delay, value, { signal })` from `node:timers/promises`: a promise that settles
+/// with `value` once `delay` milliseconds (at least 1, as in Node) have passed on the host's
+/// monotonic clock. An optional third operand is the `AbortSignal` that rejects it early.
 #[pliron_op(
     name = "perry.timer",
-    format = "$0 `, ` $1 ` : ` type($0)",
-    interfaces = [OneResultInterface, pliron::builtin::op_interfaces::NOpdsInterface<2>]
+    format = "operands(CharSpace(`,`)) ` : ` type($0)",
+    interfaces = [OneResultInterface]
 )]
 pub struct TimerOp;
 
 impl TimerOp {
-    pub fn new(ctx: &mut Context, delay: Value, value: Value) -> Self {
+    pub fn new(ctx: &mut Context, delay: Value, value: Value, signal: Option<Value>) -> Self {
         let promise = PromiseType::get(ctx, value.get_type(ctx)).into();
+        let mut operands = vec![delay, value];
+        operands.extend(signal);
         TimerOp {
             op: Operation::new(
                 ctx,
                 Self::get_concrete_op_info(),
                 vec![promise],
-                vec![delay, value],
+                operands,
                 vec![],
                 0,
             ),
@@ -298,6 +301,18 @@ impl TimerOp {
 impl Verify for TimerOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
         let op = self.get_operation().deref(ctx);
+        if !(2..=3).contains(&op.get_num_operands()) {
+            verify_err!(self.loc(ctx), TimerErr)?
+        }
+        if op.get_num_operands() == 3
+            && !op
+                .get_operand(2)
+                .get_type(ctx)
+                .deref(ctx)
+                .is::<crate::types::AbortType>()
+        {
+            verify_err!(self.loc(ctx), TimerErr)?
+        }
         let delay = op.get_operand(0).get_type(ctx);
         let value = op.get_operand(1).get_type(ctx);
         let promise =

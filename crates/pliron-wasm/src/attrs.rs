@@ -138,6 +138,8 @@ numeric! {
     F64ConvertI64S: [I64] -> F64, Pure;
     F64ConvertI64U: [I64] -> F64, Pure;
     I64ReinterpretF64: [F64] -> I64, Pure;
+    I32ReinterpretF32: [F32] -> I32, Pure;
+    F32ReinterpretI32: [I32] -> F32, Pure;
     F64ReinterpretI64: [I64] -> F64, Pure;
     F64PromoteF32: [F32] -> F64, Pure;
     F32DemoteF64: [F64] -> F32, Pure;

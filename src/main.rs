@@ -28,6 +28,7 @@ fn run() -> Result<()> {
     let mut wit_dir_path = "wit".to_string();
     let mut world_name = None;
     let mut core_only = false;
+    let mut explain_tiers = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -43,6 +44,10 @@ fn run() -> Result<()> {
             "--world" if i + 1 < args.len() => {
                 world_name = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--explain-tiers" => {
+                explain_tiers = true;
+                i += 1;
             }
             "--core-only" => {
                 core_only = true;
@@ -70,6 +75,7 @@ fn run() -> Result<()> {
                 println!(
                     "      --core-only       Output Core WebAssembly without component encoding"
                 );
+                println!("      --explain-tiers   Explain allocation lifetimes and stream reuse");
                 println!("  -h, --help            Print help information");
                 return Ok(());
             }
@@ -104,6 +110,9 @@ fn run() -> Result<()> {
     let ts_file = Path::new(&ts_file_path);
     println!("Compiling {}...", ts_file.display());
     let compiled = compile_file(ts_file, &options)?;
+    if explain_tiers {
+        print!("{}", compiled.tiers);
+    }
     perry_wit::sdk::write_runtime_declarations(Path::new(".perry/types"))?;
 
     if let Some(parent) = Path::new(&out_file_path).parent() {

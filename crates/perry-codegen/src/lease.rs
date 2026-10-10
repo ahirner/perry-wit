@@ -22,7 +22,7 @@
 use perry_mir::{
     calls::AwaitOp,
     intrinsics::{Intrinsic, IntrinsicOp},
-    optional::{IsUndefinedOp, UnwrapOp, WrapOp},
+    optional::{IsNullOp, IsUndefinedOp, OptionalCastOp, UnwrapOp, WrapOp},
     scalar::CompareOp,
 };
 use pliron::{
@@ -111,9 +111,11 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
             if Operation::get_op::<AwaitOp>(user, ctx).is_some()
                 || Operation::get_op::<UnwrapOp>(user, ctx).is_some()
                 || Operation::get_op::<WrapOp>(user, ctx).is_some()
+                || Operation::get_op::<OptionalCastOp>(user, ctx).is_some()
             {
                 work.push(result());
             } else if Operation::get_op::<IsUndefinedOp>(user, ctx).is_some()
+                || Operation::get_op::<IsNullOp>(user, ctx).is_some()
                 || Operation::get_op::<CompareOp>(user, ctx).is_some()
             {
                 // Tests read the value.
@@ -152,7 +154,10 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
 }
 
 /// The values live right after each operation (backward liveness over the CFG).
-fn live_after_ops(ctx: &Context, function: &FuncOp) -> HashMap<Ptr<Operation>, HashSet<Value>> {
+pub(super) fn live_after_ops(
+    ctx: &Context,
+    function: &FuncOp,
+) -> HashMap<Ptr<Operation>, HashSet<Value>> {
     let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
     let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
     let live_out = |live_in: &HashMap<Ptr<BasicBlock>, HashSet<Value>>, block: Ptr<BasicBlock>| {

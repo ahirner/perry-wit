@@ -190,6 +190,10 @@ pub(crate) fn link_helpers_with(
         }
     }
 
+    let collectible = helper_imports
+        .iter()
+        .any(|(_, name, _)| *name == "perry_roots_mark");
+
     // 3. Select and prepare helper libraries
     let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<String>>::new();
     for (_, entry_name, _) in &helper_imports {
@@ -204,7 +208,7 @@ pub(crate) fn link_helpers_with(
     loop {
         let mut added = Vec::new();
         for (lib_id, entries) in &requested_by_lib {
-            let lib = Library::parse(lib_id.bytes())?;
+            let lib = Library::parse(lib_id.for_memory(collectible))?;
             let reachable = lib.reachable(entries.iter().map(String::as_str))?;
             for &orig in reachable
                 .iter()
@@ -258,7 +262,7 @@ pub(crate) fn link_helpers_with(
 
     let mut prepared_libs = Vec::new();
     for (lib_id, entries) in requested_by_lib {
-        let lib = Library::parse(lib_id.bytes())?;
+        let lib = Library::parse(lib_id.for_memory(collectible))?;
         let reachable = lib.reachable(entries.iter().map(String::as_str))?;
         let type_base = new_types.len();
         for ty in &lib.types {

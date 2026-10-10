@@ -30,10 +30,12 @@ mod imports {
         pub fn waitable_join(waitable: u32, set: u32);
         #[link_name = "[subtask-drop]"]
         pub fn subtask_drop(subtask: u32);
+        #[link_name = "[subtask-cancel]"]
+        pub fn subtask_cancel(subtask: u32) -> u32;
     }
 
     macro_rules! output {
-        ($module:literal, $new:ident, $start:ident, $write:ident, $drop_writer:ident, $read:ident, $drop_future:ident) => {
+        ($module:literal, $new:ident, $start:ident, $write:ident, $drop_writer:ident, $read:ident, $drop_future:ident, $cancel_write:ident, $cancel_read:ident) => {
             #[link(wasm_import_module = $module)]
             unsafe extern "C" {
                 #[link_name = "[stream-new-0]write-via-stream"]
@@ -48,6 +50,10 @@ mod imports {
                 pub fn $read(future: u32, result: *mut u8) -> u32;
                 #[link_name = "[future-drop-readable-1]write-via-stream"]
                 pub fn $drop_future(future: u32);
+                #[link_name = "[stream-cancel-write-0]write-via-stream"]
+                pub fn $cancel_write(writable: u32) -> u32;
+                #[link_name = "[future-cancel-read-1]write-via-stream"]
+                pub fn $cancel_read(future: u32) -> u32;
             }
         };
     }
@@ -58,7 +64,9 @@ mod imports {
         stdout_write,
         stdout_drop_writer,
         stdout_read,
-        stdout_drop_future
+        stdout_drop_future,
+        stdout_cancel_write,
+        stdout_cancel_read
     );
     output!(
         "wasi:cli/stderr@0.3.0",
@@ -67,7 +75,9 @@ mod imports {
         stderr_write,
         stderr_drop_writer,
         stderr_read,
-        stderr_drop_future
+        stderr_drop_future,
+        stderr_cancel_write,
+        stderr_cancel_read
     );
 
     #[link(wasm_import_module = "wasi:cli/environment@0.3.0")]
@@ -148,6 +158,24 @@ pub mod output {
             }
         }
     }
+    pub fn cancel_write(fd: usize, writable: u32) {
+        unsafe {
+            if fd == 0 {
+                stdout_cancel_write(writable);
+            } else {
+                stderr_cancel_write(writable);
+            }
+        }
+    }
+    pub fn cancel_read(fd: usize, future: u32) {
+        unsafe {
+            if fd == 0 {
+                stdout_cancel_read(future);
+            } else {
+                stderr_cancel_read(future);
+            }
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -177,6 +205,9 @@ pub mod mock {
         JOINED.with(|j| j.borrow_mut().push((waitable, set)));
     }
     pub unsafe fn subtask_drop(_: u32) {}
+    pub unsafe fn subtask_cancel(_: u32) -> u32 {
+        3
+    }
     pub unsafe fn get_environment(result: *mut u32) {
         unsafe {
             *result = 0;
@@ -233,5 +264,9 @@ pub mod mock {
             super::super::COMPLETED
         }
         pub fn drop_future(_: usize, _: u32) {}
+        pub fn cancel_write(_: usize, _: u32) {
+            PENDING.with(|p| *p.borrow_mut() = None);
+        }
+        pub fn cancel_read(_: usize, _: u32) {}
     }
 }

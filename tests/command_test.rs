@@ -41,18 +41,30 @@ async fn execute(source: &str) -> Result<Run> {
 
 /// Run with `root` preopened as `/` when given.
 async fn execute_in(source: &str, root: Option<&std::path::Path>) -> Result<Run> {
+    execute_output(source, root, 1 << 20).await
+}
+
+async fn execute_output(
+    source: &str,
+    root: Option<&std::path::Path>,
+    output_limit: usize,
+) -> Result<Run> {
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), WIT)?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("command"))?;
     let compiled = compile_for_world(source, "main.ts", &resolve, world, true)?;
     let mut config = Config::new();
-    config.wasm_component_model_async(true);
+    config
+        .wasm_component_model_async(true)
+        .wasm_component_model_async_stackful(false)
+        .wasm_component_model_more_async_builtins(false)
+        .wasm_component_model_threading(false);
     let engine = Engine::new(&config)?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let (stdout, stderr) = (MemoryOutput::new(1 << 20), MemoryOutput::new(1 << 20));
+    let (stdout, stderr) = (MemoryOutput::new(output_limit), MemoryOutput::new(1 << 20));
     let mut builder = WasiCtx::builder();
     builder
         .stdout(stdout.clone())
@@ -162,6 +174,8 @@ import { readFile, writeFile, stat, readdir, mkdir, unlink, rmdir } from 'node:f
 async function message(pending: Promise<number>): Promise<void> {
   try { await pending; } catch (e) { if (e instanceof Error) console.log(e.message); }
 }
+
+
 async function text(path: string): Promise<number> { await readFile(path, 'utf8'); return 0; }
 async function made(path: string): Promise<number> { await mkdir(path); return 0; }
 async function removed(path: string): Promise<number> { await rmdir(path); return 0; }
@@ -274,6 +288,77 @@ rejected
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn native_nullable_values_preserve_declared_absence_states() -> Result<()> {
+    let run = execute(
+        r#"
+function numberState(value: number | null | undefined): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  const required: number = value;
+  return 'number:' + required;
+}
+function textState(value: string | null | undefined): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  return 'string:' + value;
+}
+const number: number | null = null;
+const text: string | null = null;
+const flag: boolean | null | undefined = null;
+console.log(numberState(number), numberState(undefined), numberState(4));
+console.log(textState(text), textState(undefined), textState('yes'));
+console.log(number, text, flag, typeof number, typeof text, typeof flag);
+console.log(number === undefined, text === undefined, flag === undefined);
+const values: (string | null)[] = ['yes', null];
+console.log(textState(values[0]), textState(values[1]), textState(values[2]));
+const data = JSON.parse('{"nil":null,"count":4,"text":"yes","flag":false}');
+const a: number | null | undefined = data.nil;
+const b: number | null | undefined = data.missing;
+const c: number | null | undefined = data.count;
+console.log(numberState(a), numberState(b), numberState(c));
+const absent: string | undefined = undefined;
+console.log(JSON.stringify({ number, text, flag, absent }));
+try { const required: string = absent; console.log(required); } catch (e) { console.log('undefined required'); }
+try { const required: number = number; console.log(required); } catch (e) { console.log('native required'); }
+try { const required: number = data.nil; console.log(required); } catch (e) { console.log('null required'); }
+try { const required: number = data.missing; console.log(required); } catch (e) { console.log('missing required'); }
+try { const required: number = data.flag; console.log(required); } catch (e) { console.log('boolean required'); }
+"#,
+    ).await?;
+    assert!(run.ok, "{}\nstdout:\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        run.stdout,
+        "null undefined number:4\nnull undefined string:yes\nnull null null object object object\nfalse false false\nstring:yes null undefined\nnull undefined number:4\n{\"flag\":null,\"number\":null,\"text\":null}\nundefined required\nnative required\nnull required\nmissing required\nboolean required\n"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn json_absence_is_distinct_from_null() -> Result<()> {
+    let run = execute(
+        r#"
+const value = JSON.parse('{"a":null,"zero":0,"no":false,"text":""}');
+const missing = value.missing;
+console.log(value.a === null, null === value.a, value.a === undefined);
+console.log(missing === undefined, undefined === missing, missing === null);
+console.log(value.a !== null, value.a !== undefined, missing !== null);
+console.log(value.zero === null, value.no === null, value.text === null);
+console.log(typeof value.a, typeof missing);
+const list = JSON.parse('[null]');
+console.log(list[0] === null, list[1] === undefined, list[1] === null);
+try { const text: string = missing; console.log(text); } catch (e) { console.log('required'); }
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "true true false\ntrue true false\nfalse true true\nfalse false false\nobject undefined\ntrue true false\nrequired\n"
+    );
+    Ok(())
+}
+
 /// `Error` names and string causes, `Promise.resolve`/`reject` and plain values among
 /// combinator inputs, and error spreads, against output recorded from Node 22.
 #[tokio::test(flavor = "current_thread")]
@@ -301,6 +386,99 @@ try { throw typed; } catch (e) { console.log(e === typed, JSON.stringify({ ...ty
 4 fulfilled rejected true
 true {"extra":1}
 "#
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn detached_filesystem_calls_and_timers_are_cancelled_before_task_cleanup() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("fixture.txt"), vec![b'x'; 1024 * 1024])?;
+    let run = execute_in(
+        r#"
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { setTimeout } from 'node:timers/promises';
+readFile('fixture.txt');
+readdir('.');
+stat('fixture.txt');
+setTimeout(60_000);
+"#,
+        Some(root.path()),
+    )
+    .await?;
+    assert!(!run.ok);
+    assert_eq!(
+        run.stderr,
+        "Unresolved detached work at task boundary; pending operations cancelled\n"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn writer_close_waits_for_queued_writes_and_propagates_failure() -> Result<()> {
+    let run = execute(r#"
+import { Writable } from 'node:stream';
+async function observed(pending: Promise<void>, trace: number[]): Promise<void> { await pending; trace.push(1); }
+const writer = Writable.toWeb(process.stdout).getWriter();
+const trace: number[] = [];
+const first = writer.write(new Uint8Array(65536));
+const observer = observed(first, trace);
+await writer.close();
+trace.push(2);
+await observer;
+console.error(JSON.stringify(trace));
+"#).await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout.len(), 65536);
+    assert_eq!(run.stderr, "[1,2]\n");
+
+    let run = execute_output(
+        r#"
+import { Writable } from 'node:stream';
+const writer = Writable.toWeb(process.stdout).getWriter();
+const first = writer.write(new Uint8Array(65536));
+const second = writer.write(new Uint8Array(65536));
+const closed = writer.close();
+let failed = 0;
+try { await first; } catch { }
+try { await second; } catch { failed++; }
+try { await closed; } catch { failed++; }
+console.error(failed);
+"#,
+        None,
+        3,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout.len(), 3);
+    assert_eq!(run.stderr, "2\n");
+    Ok(())
+}
+
+/// `AbortController` with `node:timers/promises`: aborting cancels the host timer and rejects
+/// the pending promise; an aborted signal rejects a new timer at once. Against output recorded
+/// from Node 22.
+#[tokio::test(flavor = "current_thread")]
+async fn aborted_timers_match_node() -> Result<()> {
+    let run = execute(
+        r#"
+import { setTimeout } from 'node:timers/promises';
+const c = new AbortController();
+const t = setTimeout(50, 7, { signal: c.signal });
+console.log(c.signal.aborted);
+c.abort();
+try { await t; console.log('resolved'); } catch (e) { if (e instanceof Error) console.log('rejected', e.message, c.signal.aborted); }
+const d = new AbortController();
+console.log(await setTimeout(1, 8, { signal: d.signal }));
+d.abort();
+try { await setTimeout(1, 9, { signal: c.signal }); } catch (e) { console.log('pre-aborted'); }
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "false\nrejected The operation was aborted true\n8\npre-aborted\n"
     );
     Ok(())
 }

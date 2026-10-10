@@ -25,8 +25,8 @@ builtin.module @scaling {
         two = builtin.constant <builtin.double 2.0> : builtin.fp64;
         doubled = perry.binary Mul i, two : builtin.fp64;
         point = perry.alloc Unassigned (i, doubled) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>;
-        x = perry.field_get point.x : builtin.fp64;
-        y = perry.field_get point.y : builtin.fp64;
+        x = perry.field_get point."x" : builtin.fp64;
+        y = perry.field_get point."y" : builtin.fp64;
         partial = perry.binary Add sum, x : builtin.fp64;
         total = perry.binary Add partial, y : builtin.fp64;
         modulus = builtin.constant <builtin.double 1000003.0> : builtin.fp64;
@@ -130,7 +130,7 @@ fn verifier_rejects_ill_typed_heap_ops() {
         ),
         (
             format!(
-                "p = perry.alloc Unassigned (v, v) : {POINT}; z = perry.field_get p.z : builtin.fp64;"
+                "p = perry.alloc Unassigned (v, v) : {POINT}; z = perry.field_get p.\"z\" : builtin.fp64;"
             ),
             "has no field z",
         ),
@@ -151,7 +151,7 @@ fn verifier_rejects_ill_typed_heap_ops() {
         );
     }
     verify_text(&single_block(&format!(
-        "p = perry.alloc Task (v, v) : {POINT}; perry.field_set p.y = v; y = perry.field_get p.y : builtin.fp64;"
+        "p = perry.alloc Task (v, v) : {POINT}; perry.field_set p.\"y\" = v; y = perry.field_get p.\"y\" : builtin.fp64;"
     )))
     .expect("well-typed heap ops verify");
 }
@@ -173,8 +173,8 @@ builtin.module @m {
   ^module():
     builtin.func @f: builtin.function <(perry.record <Node { value: builtin.fp64, next: perry.record <Node> }>) -> (builtin.fp64)> {
       ^entry(node: perry.record <Node>):
-        next = perry.field_get node.next : perry.record <Node>;
-        value = perry.field_get next.value : builtin.fp64;
+        next = perry.field_get node."next" : perry.record <Node>;
+        value = perry.field_get next."value" : builtin.fp64;
         perry.return value
     }
 }
@@ -197,7 +197,7 @@ fn dce_removes_unused_allocation_and_reads() -> Result<()> {
     let module = parse(
         ctx,
         &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.x : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;",
+            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; x = perry.field_get p.\"x\" : builtin.fp64; s = perry.binary Add x, v : builtin.fp64;",
         ),
     );
     assert_eq!(dce(module, ctx)?, IRStatus::Changed);
@@ -218,7 +218,7 @@ fn dce_keeps_field_writes() -> Result<()> {
     let module = parse(
         ctx,
         &single_block(
-            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; perry.field_set p.x = v;",
+            "p = perry.alloc Unassigned (v, v) : perry.record <Point { x: builtin.fp64, y: builtin.fp64 }>; perry.field_set p.\"x\" = v;",
         ),
     );
     dce(module, ctx)?;
@@ -326,7 +326,7 @@ builtin.module @scaling {
         perry.br ^header(next)
       ^exit():
         count = perry.array_len items : builtin.integer i32;
-        maybe = perry.array_get items[zero] : perry.optional <perry.record <Point>>;
+        maybe = perry.array_get items[zero] : perry.optional <perry.record <Point>,Undefined>;
         first = perry.unwrap maybe : perry.record <Point>;
         perry.return count
     }
@@ -411,7 +411,7 @@ fn verifier_rejects_mismatched_calls_and_awaits() {
 #[test]
 fn optional_reads_coerce_and_unwrap() {
     let numbers = "perry.array <builtin.fp64>";
-    let maybe = "perry.optional <builtin.fp64>";
+    let maybe = "perry.optional <builtin.fp64,Undefined>";
     let read = format!(
         "a = perry.array_new Unassigned (v) : {numbers}; m = perry.array_get a[v] : {maybe};"
     );
@@ -500,4 +500,45 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         ],
         "array_get, to_number and the rest are pure reads"
     );
+}
+
+#[test]
+fn scalar_replacement_removes_iteration_local_records() -> Result<()> {
+    let ctx = &mut Context::new();
+    let module = parse(ctx, TEMPORARY_RECORDS);
+    crate::pipeline::canonicalize(module, ctx)?;
+    let printed = print(ctx, module);
+    assert!(!printed.contains("perry.alloc"), "{printed}");
+    assert!(!printed.contains("perry.field_get"), "{printed}");
+    assert!(!printed.contains("perry.local"), "{printed}");
+    Ok(())
+}
+
+#[test]
+fn finite_variants_round_trip_and_verify_payload_types() -> Result<()> {
+    let variant = r#"perry.variant <"empty", "n": builtin.fp64, "text": perry.string>"#;
+    let input = single_block(&format!(
+        r#"
+        value = perry.variant_new "n" (v) : {variant};
+        tag = perry.variant_tag value : perry.string;
+        payload = perry.variant_payload value : builtin.fp64;
+    "#
+    ));
+    let ctx = &mut Context::new();
+    let module = parse(ctx, &input);
+    verify_operation(module, ctx)?;
+    let printed = normalized(&print(ctx, module));
+    let ctx = &mut Context::new();
+    let reparsed = parse(ctx, &printed);
+    verify_operation(reparsed, ctx)?;
+    assert_eq!(printed, normalized(&print(ctx, reparsed)));
+    let invalid = single_block(&format!(
+        r#"value = perry.variant_new "text" (v) : {variant};"#
+    ));
+    assert!(
+        verify_text(&invalid)
+            .unwrap_err()
+            .contains("invalid tag or payload type")
+    );
+    Ok(())
 }

@@ -1,5 +1,5 @@
 //! Built-in services against values recorded from Node.js 22 (`node --experimental-strip-types`):
-//! `Math`, `Date`, string methods with UTF-16 indices and Unicode case mapping,
+//! `Math`, `Date`, string methods over BMP scalar indices and Unicode case mapping,
 //! `Uint8Array`, `TextEncoder`/`TextDecoder` and `JSON`.
 use perry_codegen::status_code;
 use perry_mir::attrs::ErrorKind;
@@ -12,13 +12,13 @@ export function math(x: number): number {
 }
 export function roundSign(x: number): number { return 1 / Math.round(x); }
 export function dates(x: number): number { return new Date(x).getTime(); }
-export function iso(x: number): number { return new Date(x).toISOString().length + new Date(x).toISOString().charCodeAt(5); }
+export function iso(x: number): number { return new Date(x).toISOString().length + new Date(x).toISOString().codePointAt(5); }
 export function strings(x: number): number {
   const s = "é漢abc  ";
   return s.charAt(x).length * 1e9 + s.indexOf("a", x) * 1e7 + s.slice(-4, x).length * 1e5 + s.substring(x, 1).length * 1e4
-    + s.toUpperCase().charCodeAt(0) + s.trim().length * 1e-1 + s.lastIndexOf("b") * 1e-3 + (s.includes("漢") ? 1e-5 : 0);
+    + s.toUpperCase().codePointAt(0) + s.trim().length * 1e-1 + s.lastIndexOf("b") * 1e-3 + (s.includes("漢") ? 1e-5 : 0);
 }
-export function cases(x: number): number { return ("Straße" + x).toUpperCase().length * 100 + "ÀÉ".toLowerCase().charCodeAt(1); }
+export function cases(x: number): number { return ("Straße" + x).toUpperCase().length * 100 + "ÀÉ".toLowerCase().codePointAt(1); }
 export function bytes(x: number): number {
   const b = new Uint8Array([x, 256 + x, -1, 1.7]);
   const sub = b.subarray(1, 3);
@@ -37,12 +37,13 @@ export function decoded(x: number): number {
   const text = new TextDecoder().decode(input);
   let fatal = 0;
   try { new TextDecoder("utf-8", { fatal: true }).decode(input); } catch (e) { fatal = 1; }
-  return text.length * 10 + fatal + text.charCodeAt(2) * 1e-5;
+  return text.length * 10 + fatal + text.codePointAt(2) * 1e-5;
 }
 export function json(x: number): number {
   const text = JSON.stringify({ text: "a\"\n\u0001é", value: x, list: [1, x, -0], flag: true });
   const parsed = JSON.parse(text);
-  return identity(parsed.text.length) * 1000 + text.length + identity(parsed.list[1]) * 1e-3 + identity(JSON.parse([JSON.stringify({ text: "漢" })][0]).text.length) * 1e-6;
+  const item = parsed.list[1] === null ? 0 : identity(parsed.list[1]);
+  return identity(parsed.text.length) * 1000 + text.length + item * 1e-3 + identity(JSON.parse([JSON.stringify({ text: "漢" })][0]).text.length) * 1e-6;
 }
 export function badJson(x: number): number {
   try { JSON.parse("{" + x); return 0; } catch (e) { return 1; }

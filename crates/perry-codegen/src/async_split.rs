@@ -46,7 +46,8 @@ pub(crate) const KIND: u32 = 0;
 pub(crate) const STATE: u32 = 4;
 pub(crate) const PROMISE: u32 = 8;
 pub(crate) const AWAITED: u32 = 12;
-const SLOTS: u32 = 16;
+const PIN: u32 = 16;
+const SLOTS: u32 = 24;
 
 /// The frame of the async function being lowered.
 pub(crate) struct Frame {
@@ -170,14 +171,44 @@ pub(crate) fn lower(
         let args: Vec<_> = ramp.get_entry_block(ctx).deref(ctx).arguments().collect();
         let mut b = FunctionLowering::glue(state, ctx, &ramp);
         let size = b.i32_const(ctx, frame_size as i32);
-        let frame = b.runtime(ctx, Runtime::Alloc, vec![size]).expect("frame");
+        let frame = if b.state.collectible {
+            let mut offsets = vec![PROMISE, AWAITED];
+            offsets.extend(slots.iter().filter_map(|(value, (offset, _))| {
+                crate::repr(ctx, value.get_type(ctx))
+                    .is_ok_and(|kind| kind == crate::Repr::Ref)
+                    .then_some(*offset)
+            }));
+            offsets.sort_unstable();
+            let shape = b.pointer_shape(&offsets);
+            let shape = b.i32_const(ctx, shape as i32);
+            let frame = b
+                .call(
+                    ctx,
+                    "perry_gc_alloc",
+                    &[crate::W::I32, crate::W::I32],
+                    &[crate::W::I32],
+                    vec![size, shape],
+                )
+                .expect("frame");
+            let pin = b
+                .call(
+                    ctx,
+                    "perry_gc_pin",
+                    &[crate::W::I32],
+                    &[crate::W::I32],
+                    vec![frame],
+                )
+                .expect("pin");
+            b.store(ctx, MemKind::I32, frame, PIN, pin);
+            frame
+        } else {
+            b.runtime(ctx, Runtime::Alloc, vec![size]).expect("frame")
+        };
         let kind_value = b.i32_const(ctx, kind);
         b.store(ctx, MemKind::I32, frame, KIND, kind_value);
         let zero = b.i32_const(ctx, 0);
         b.store(ctx, MemKind::I32, frame, STATE, zero);
-        let promise = b
-            .runtime(ctx, Runtime::PromiseNew, vec![])
-            .expect("promise");
+        let promise = b.new_promise(ctx, mir_results[0])?;
         b.store(ctx, MemKind::I32, frame, PROMISE, promise);
         for (param, arg) in params.iter().zip(args) {
             let (at, access) = slots[param];
@@ -207,6 +238,7 @@ pub(crate) fn lower(
         slots,
         resumes: Vec::new(),
     });
+    b.enter_roots(ctx);
     let start = b.map_blocks(ctx, mir, None)?;
     b.translate(ctx, mir)?;
 
@@ -328,11 +360,14 @@ impl FunctionLowering<'_> {
         self.store(ctx, MemKind::I32, frame, STATE, state);
         self.store(ctx, MemKind::I32, frame, AWAITED, promise);
         self.runtime(ctx, Runtime::PromiseWait, vec![promise, frame]);
+        self.leave_roots(ctx);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
 
         self.block = take;
         let promise = take.deref(ctx).get_argument(0);
+        let zero = self.i32_const(ctx, 0);
+        self.store(ctx, MemKind::I32, frame, AWAITED, zero);
         let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
         let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
         let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
@@ -362,8 +397,18 @@ impl FunctionLowering<'_> {
             None => self.i64_const(ctx, 0),
         };
         self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
+        self.finish_frame(ctx);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
+    }
+
+    fn finish_frame(&mut self, ctx: &mut Context) {
+        if self.state.collectible {
+            let frame = self.frame.as_ref().unwrap().frame;
+            let pin = self.load(ctx, MemKind::I32, frame, PIN);
+            self.call(ctx, "perry_gc_unpin", &[crate::W::I32], &[], vec![pin]);
+        }
+        self.leave_roots(ctx);
     }
 
     /// The throw target of a step function: reject the frame's promise.
@@ -375,6 +420,7 @@ impl FunctionLowering<'_> {
         let promise = self.load(ctx, MemKind::I32, frame, PROMISE);
         let status = block.deref(ctx).get_argument(0);
         self.runtime(ctx, Runtime::PromiseReject, vec![promise, status]);
+        self.finish_frame(ctx);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
         self.block = saved;
@@ -398,20 +444,40 @@ impl FunctionLowering<'_> {
         let million = self.f64_const(ctx, 1e6);
         let nanos = self.num(ctx, NumOpcode::F64Mul, vec![delay, million]);
         let nanos = self.num(ctx, NumOpcode::I64TruncSatF64S, vec![nanos]);
+        let payload = op.deref(ctx).get_operand(1).get_type(ctx);
+        let promise = self.new_promise(ctx, payload)?;
+        let bits = self.slot_bits(ctx, value);
+        let joined = self.new_block(ctx, vec![]);
+        // With an aborted signal the timer rejects at once and never starts.
+        let operands = op.deref(ctx).get_num_operands();
+        let signal = if operands == 3 {
+            Some(self.operand(ctx, op, 2)?)
+        } else {
+            None
+        };
+        if let Some(signal) = signal {
+            let aborted = self
+                .runtime(ctx, Runtime::AbortAborted, vec![signal])
+                .expect("aborted");
+            let reject = self.new_block(ctx, vec![]);
+            let start = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, aborted, (reject, vec![]), (start, vec![]));
+            self.block = reject;
+            let message = self.state.data.string("The operation was aborted");
+            let message = self.i32_const(ctx, message as i32);
+            self.runtime(ctx, Runtime::AbortReject, vec![promise, message]);
+            self.br(ctx, joined, vec![]);
+            self.block = start;
+        }
         let status = self
             .host(ctx, crate::Host::WaitFor, vec![nanos])
             .expect("status");
-        let promise = self
-            .runtime(ctx, Runtime::PromiseNew, vec![])
-            .expect("promise");
-        let bits = self.slot_bits(ctx, value);
         let mask = self.i32_const(ctx, 0xF);
         let subtask_state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
         let returned_state = self.i32_const(ctx, 2);
         let returned = self.num(ctx, NumOpcode::I32Eq, vec![subtask_state, returned_state]);
         let now = self.new_block(ctx, vec![]);
         let later = self.new_block(ctx, vec![]);
-        let joined = self.new_block(ctx, vec![]);
         self.cond_br(ctx, returned, (now, vec![]), (later, vec![]));
         self.block = now;
         self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
@@ -421,6 +487,9 @@ impl FunctionLowering<'_> {
         let handle = self.num(ctx, NumOpcode::I32ShrU, vec![status, four]);
         self.runtime(ctx, Runtime::SubtaskRegister, vec![handle, promise, bits]);
         self.runtime(ctx, Runtime::TaskJoin, vec![handle]);
+        if let Some(signal) = signal {
+            self.runtime(ctx, Runtime::AbortWatch, vec![signal, handle, promise]);
+        }
         self.br(ctx, joined, vec![]);
         self.block = joined;
         self.define(ctx, op, promise);

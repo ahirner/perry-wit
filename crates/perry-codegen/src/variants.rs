@@ -1,0 +1,227 @@
+//! Compact finite variants: tag string, traced payload owner, and one eight-byte value slot.
+use crate::{FunctionLowering, Repr, Runtime, W, repr, slot_kind};
+use anyhow::Result;
+use perry_mir::{types::VariantType, variants::admits_payload};
+use pliron::{
+    context::Context,
+    r#type::{TypeHandle, TypedHandle},
+    value::Value,
+};
+use pliron_wasm::attrs::{MemKind, NumOpcode};
+
+impl FunctionLowering<'_> {
+    pub(super) fn number_string_equal(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        a: Value,
+        b: Value,
+    ) -> Result<Value> {
+        let result_type = crate::i32_type(ctx);
+        let done = self.new_block(ctx, vec![result_type]);
+        if crate::optional_inner(ctx, ty).is_some() {
+            let absent_a = self.is_absent(ctx, a, ty)?;
+            let absent_b = self.is_absent(ctx, b, ty)?;
+            let either = self.num(ctx, NumOpcode::I32Or, vec![absent_a, absent_b]);
+            let same = self.num(ctx, NumOpcode::I32Eq, vec![a, b]);
+            let present = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, either, (done, vec![same]), (present, vec![]));
+            self.block = present;
+        }
+        let tag_a = self.load(ctx, MemKind::I32, a, 0);
+        let tag_b = self.load(ctx, MemKind::I32, b, 0);
+        let same_tag = self.num(ctx, NumOpcode::I32Eq, vec![tag_a, tag_b]);
+        let same = self.new_block(ctx, vec![]);
+        let no = self.i32_const(ctx, 0);
+        self.cond_br(ctx, same_tag, (same, vec![]), (done, vec![no]));
+        self.block = same;
+        let number = self.state.data.string("number");
+        let number = self.i32_const(ctx, number as i32);
+        let is_number = self.num(ctx, NumOpcode::I32Eq, vec![tag_a, number]);
+        let numbers = self.new_block(ctx, vec![]);
+        let strings = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, is_number, (numbers, vec![]), (strings, vec![]));
+        self.block = numbers;
+        let a_number = self.load(ctx, MemKind::F64, a, 8);
+        let b_number = self.load(ctx, MemKind::F64, b, 8);
+        let equal = self.num(ctx, NumOpcode::F64Eq, vec![a_number, b_number]);
+        self.br(ctx, done, vec![equal]);
+        self.block = strings;
+        let a_string = self.load(ctx, MemKind::I32, a, 8);
+        let b_string = self.load(ctx, MemKind::I32, b, 8);
+        let order = self
+            .runtime(ctx, Runtime::StringCompare, vec![a_string, b_string])
+            .expect("order");
+        let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
+        self.br(ctx, done, vec![equal]);
+        self.block = done;
+        Ok(done.deref(ctx).get_argument(0))
+    }
+
+    pub(super) fn json_number_string(
+        &mut self,
+        ctx: &mut Context,
+        writer: Value,
+        value: Value,
+    ) -> Result<()> {
+        let tag = self.load(ctx, MemKind::I32, value, 0);
+        let number = self.state.data.string("number");
+        let number = self.i32_const(ctx, number as i32);
+        let is_number = self.num(ctx, NumOpcode::I32Eq, vec![tag, number]);
+        let numbers = self.new_block(ctx, vec![]);
+        let strings = self.new_block(ctx, vec![]);
+        let done = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, is_number, (numbers, vec![]), (strings, vec![]));
+        self.block = numbers;
+        let payload = self.load(ctx, MemKind::F64, value, 8);
+        let ty = pliron::builtin::types::FP64Type::get(ctx).into();
+        self.json_value(ctx, writer, payload, ty)?;
+        self.br(ctx, done, vec![]);
+        self.block = strings;
+        let payload = self.load(ctx, MemKind::I32, value, 8);
+        let ty = perry_mir::types::StringType::get(ctx).into();
+        self.json_value(ctx, writer, payload, ty)?;
+        self.br(ctx, done, vec![]);
+        self.block = done;
+        Ok(())
+    }
+
+    pub(super) fn variant_new(
+        &mut self,
+        ctx: &mut Context,
+        tag: &str,
+        payload: Option<(TypeHandle, Value)>,
+    ) -> Result<Value> {
+        let size = self.i32_const(ctx, 16);
+        let object = if self.state.collectible {
+            let shape = self.pointer_shape(&[4]);
+            let shape = self.i32_const(ctx, shape as i32);
+            self.call(
+                ctx,
+                "perry_gc_alloc",
+                &[W::I32, W::I32],
+                &[W::I32],
+                vec![size, shape],
+            )
+            .expect("variant")
+        } else {
+            self.runtime(ctx, Runtime::Alloc, vec![size])
+                .expect("variant")
+        };
+        let text = self.state.data.string(tag);
+        let text = self.i32_const(ctx, text as i32);
+        self.store(ctx, MemKind::I32, object, 0, text);
+        let owner = match payload {
+            Some((ty, value)) if repr(ctx, ty)? == Repr::Ref => value,
+            _ => self.i32_const(ctx, 0),
+        };
+        self.store(ctx, MemKind::I32, object, 4, owner);
+        if let Some((ty, value)) = payload {
+            self.store(ctx, slot_kind(ctx, ty)?, object, 8, value);
+        }
+        Ok(object)
+    }
+
+    pub(super) fn json_variant(
+        &mut self,
+        ctx: &mut Context,
+        writer: Value,
+        value: Value,
+        variant: TypedHandle<VariantType>,
+    ) -> Result<()> {
+        let cases = variant.deref(ctx).cases().to_vec();
+        let tag = self.load(ctx, MemKind::I32, value, 0);
+        let key = self.state.data.string("\"tag\":");
+        let key = self.i32_const(ctx, key as i32);
+        self.call(
+            ctx,
+            "std_json_key",
+            &[W::I32, W::I32],
+            &[],
+            vec![writer, key],
+        );
+        self.call(
+            ctx,
+            "std_json_quote",
+            &[W::I32, W::I32],
+            &[],
+            vec![writer, tag],
+        );
+        let done = self.new_block(ctx, vec![]);
+        for (name, payload) in cases {
+            let Some(payload) = payload else {
+                continue;
+            };
+            let text = self.state.data.string(&name);
+            let text = self.i32_const(ctx, text as i32);
+            let comparison = self
+                .runtime(ctx, Runtime::StringCompare, vec![tag, text])
+                .expect("comparison");
+            let matches = self.num(ctx, NumOpcode::I32Eqz, vec![comparison]);
+            let member = self.new_block(ctx, vec![]);
+            let next = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, matches, (member, vec![]), (next, vec![]));
+            self.block = member;
+            let slot = self.load(ctx, slot_kind(ctx, payload)?, value, 8);
+            if perry_mir::optional::absence(ctx, payload).is_some_and(|a| a.admits_undefined()) {
+                let absent = self.absence_test(ctx, slot, payload, false)?;
+                let present = self.new_block(ctx, vec![]);
+                self.cond_br(ctx, absent, (done, vec![]), (present, vec![]));
+                self.block = present;
+            }
+            let key = self.state.data.string("\"val\":");
+            let key = self.i32_const(ctx, key as i32);
+            self.call(
+                ctx,
+                "std_json_key",
+                &[W::I32, W::I32],
+                &[],
+                vec![writer, key],
+            );
+            self.json_value(ctx, writer, slot, payload)?;
+            self.br(ctx, done, vec![]);
+            self.block = next;
+        }
+        self.br(ctx, done, vec![]);
+        self.block = done;
+        Ok(())
+    }
+
+    pub(super) fn variant_payload(
+        &mut self,
+        ctx: &mut Context,
+        ty: TypeHandle,
+        object: Value,
+        result: TypeHandle,
+    ) -> Result<Value> {
+        let cases = perry_mir::variants::cases(ctx, ty)?;
+        let tag = self.load(ctx, MemKind::I32, object, 0);
+        let mut admitted = self.i32_const(ctx, 0);
+        let mut present = self.i32_const(ctx, 0);
+        for (name, payload) in cases {
+            if !admits_payload(ctx, result, payload) {
+                continue;
+            }
+            let text = self.state.data.string(&name);
+            let text = self.i32_const(ctx, text as i32);
+            let comparison = self
+                .runtime(ctx, Runtime::StringCompare, vec![tag, text])
+                .expect("comparison");
+            let matches = self.num(ctx, NumOpcode::I32Eqz, vec![comparison]);
+            admitted = self.num(ctx, NumOpcode::I32Or, vec![admitted, matches]);
+            if payload.is_some() {
+                present = self.num(ctx, NumOpcode::I32Or, vec![present, matches]);
+            }
+        }
+        let invalid = self.num(ctx, NumOpcode::I32Eqz, vec![admitted]);
+        self.throw_if(ctx, invalid, perry_mir::attrs::ErrorKind::TypeError);
+        let kind = slot_kind(ctx, result)?;
+        let value = self.load(ctx, kind, object, 8);
+        if perry_mir::optional::absence(ctx, result).is_some_and(|a| a.admits_undefined()) {
+            let undefined = self.undefined(ctx, result)?;
+            Ok(self.select(ctx, present, value, undefined))
+        } else {
+            Ok(value)
+        }
+    }
+}

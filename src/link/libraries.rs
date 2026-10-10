@@ -18,6 +18,8 @@ pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/text.wa
 pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/time.wasm"));
 pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));
 pub(crate) const NUMBER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/number.wasm"));
+pub(crate) const COLLECTIBLE_RUNTIME: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/runtime-collectible.wasm"));
 pub(crate) const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime.wasm"));
 pub(crate) const STD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/std.wasm"));
 pub(crate) const FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.wasm"));
@@ -45,9 +47,9 @@ impl LibraryId {
             entry if entry.starts_with("fs_") => Self::Fs,
             entry if entry.starts_with("web_") => Self::Web,
             "number_remainder" | "number_format" => Self::Number,
-            "fetch_status_text" | "fetch_url" | "fetch_redirect" | "fetch_decode"
-            | "fetch_method" | "fetch_header_value" | "fetch_header_size" | "fetch_header_get"
-            | "fetch_header_name" | "fetch_header_edit" => Self::Fetch,
+            "fetch_status_text" | "fetch_url" | "fetch_url_value" | "fetch_redirect"
+            | "fetch_decode" | "fetch_method" | "fetch_header_value" | "fetch_header_size"
+            | "fetch_header_get" | "fetch_header_name" | "fetch_header_edit" => Self::Fetch,
             "str_find_substring" | "str_scalar_to_byte" => Self::Search,
             "str_code_point_at"
             | "str_from_code_point"
@@ -60,6 +62,8 @@ impl LibraryId {
             "time_date_iso"
             | "time_date_parse"
             | "time_date_part"
+            | "time_date_utc"
+            | "time_date_set"
             | "time_instant_parse"
             | "time_utc_parse"
             | "time_instant_from_ms"
@@ -73,6 +77,14 @@ impl LibraryId {
             | "time_plain_date_format" => Self::Time,
             _ => bail!("unknown helper entry {entry}"),
         })
+    }
+
+    pub(crate) fn for_memory(self, collectible: bool) -> &'static [u8] {
+        if self == Self::Runtime && collectible {
+            COLLECTIBLE_RUNTIME
+        } else {
+            self.bytes()
+        }
     }
 
     pub(crate) fn bytes(self) -> &'static [u8] {
@@ -119,9 +131,12 @@ impl HelperMemory {
             .context("helper data exceeds memory32")?;
         self.needs_stack |= library.globals.contains(&Global::Stack);
         if library.globals.contains(&Global::Stack) {
+            // Guest libraries share the shadow stack and call one another. Each library's
+            // bound treats imports as leaves, so their reservations must compose by addition.
             self.stack_bytes = self
                 .stack_bytes
-                .max(library.fixed_stack_bound(reachable).unwrap_or(65_536));
+                .checked_add(library.fixed_stack_bound(reachable).unwrap_or(65_536))
+                .context("combined helper stack exceeds memory32")?;
         }
         Ok(base)
     }
@@ -186,7 +201,7 @@ impl Library {
     /// conservative reservation. The allocator and linker use this same bound.
     fn fixed_stack_bound(&self, reachable: Option<&BTreeSet<u32>>) -> Option<u32> {
         use wasmparser::Operator as Op;
-        // Imported functions are leaves: host code does not use the shadow stack.
+        // Imported functions are leaves here; HelperMemory adds the guest-library bounds.
         let imported = self.imports.len();
         let stack = self
             .globals
@@ -223,7 +238,9 @@ impl Library {
                     | Op::CallRef { .. }
                     | Op::ReturnCall { .. }
                     | Op::ReturnCallIndirect { .. }
-                    | Op::ReturnCallRef { .. } => return None,
+                    | Op::ReturnCallRef { .. } => {
+                        return None;
+                    }
                     Op::GlobalSet { global_index } if *global_index == stack => {
                         if index == 4
                             && let [
@@ -258,6 +275,8 @@ impl Library {
                                             | Op::I64Const { .. }
                                             | Op::F32Const { .. }
                                             | Op::F64Const { .. }
+                                            | Op::I32Add
+                                            | Op::I32Sub
                                     )
                                 })?;
                                 if !matches!(tail[returned], Op::Return) {
@@ -775,14 +794,30 @@ mod tests {
 
     #[test]
     fn helper_libraries_have_checked_small_stacks() {
-        for bytes in [TIME, NUMBER, RUNTIME, FS, WEB, JSON, STD] {
+        for (name, bytes) in [
+            ("time", TIME),
+            ("number", NUMBER),
+            ("runtime", RUNTIME),
+            ("fs", FS),
+            ("web", WEB),
+            ("json", JSON),
+            ("std", STD),
+        ] {
             let library = Library::parse(bytes).unwrap();
             assert!(
                 library
                     .fixed_stack_bound(None)
                     .is_some_and(|size| size < 8192),
-                "{:?}",
-                library.fixed_stack_bound(None)
+                "{name}: {:?}; unbounded exports: {:?}",
+                library.fixed_stack_bound(None),
+                library
+                    .exports
+                    .keys()
+                    .filter(|entry| {
+                        let reachable = library.reachable([entry.as_str()]).expect("reachable");
+                        library.fixed_stack_bound(Some(&reachable)).is_none()
+                    })
+                    .collect::<Vec<_>>()
             );
         }
     }

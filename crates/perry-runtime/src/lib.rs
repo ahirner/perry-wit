@@ -1,25 +1,27 @@
-//! Runtime for components built by the MIR backend (`TODOs.md` P5).
+//! Runtime services linked on demand into compiled components.
 //!
-//! Built like the helper libraries (position-independent, imported memory) and linked into
-//! every compiled module by `src/link`, which resolves the `__perry_helper` imports of
-//! compiled code against the `perry_*` exports here. Memory tiers (design decision D3):
-//!
-//! - `buffer`: [talc] over the memory after the linked data ([heap]), chosen by the bake-off in `bench/allocators`:
-//!   1.9 KB of code against dlmalloc's 6.7 KB, in-place `realloc`, equal or better speed.
-//! - `task`: [region] bump allocation in 64 KiB chunks taken from the buffer allocator and
-//!   released in bulk at task end.
-//! - `instance`: the collector (P5.3) is not built yet. The MIR builder cannot express module
-//!   state (R4) yet, so no allocation can outlive its task and every site is `task`.
+//! `talc` supplies linear-memory storage. Proven bounded tasks use regions; unproven and
+//! persistent allocations use precise non-moving collection. Compiled safe points root live
+//! values, while suspended operations retain explicit owners through acknowledgement.
+//! Scheduler nodes and proven stream leases reuse their storage independently of collection.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 extern crate alloc;
 
+pub mod abort;
 pub mod array;
+#[cfg(feature = "collectible")]
+mod buffers;
+pub mod collectible;
 pub mod exception;
+pub mod foreign;
 pub mod host;
 pub mod io;
 pub mod promise;
 pub mod region;
+#[cfg(any(feature = "collectible", not(target_arch = "wasm32")))]
+pub mod resources;
+pub mod roots;
 pub mod string;
 
 #[cfg(target_arch = "wasm32")]
@@ -27,8 +29,7 @@ pub mod heap;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
-static ALLOCATOR: talc::cell::TalcSyncCell<heap::Heap, talc::wasm::WasmBinning> =
-    talc::cell::TalcSyncCell::new_wasm(heap::Heap::new());
+static ALLOCATOR: heap::Allocator = heap::Allocator::new();
 
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
@@ -59,6 +60,7 @@ mod tests {
     /// The runtime state is a per-instance global, so the checks run in one test thread.
     #[test]
     fn runtime() {
+        #[cfg(not(feature = "collectible"))]
         regions_release_in_bulk_and_reuse_chunks();
         arrays_grow_and_keep_elements();
         strings_append_in_place_and_share_prefixes();
@@ -148,7 +150,7 @@ mod tests {
         let x = unsafe { string::perry_string_adopt(x.as_mut_ptr(), 1) };
         let mut emoji = String::from("é🙂");
         let emoji = unsafe { string::perry_string_adopt(emoji.as_mut_ptr(), 6) };
-        assert_eq!(unsafe { *(emoji.add(4) as *const u32) }, 3);
+        assert_eq!(unsafe { *(emoji.add(4) as *const u32) }, 2);
         let mut text_value = unsafe { string::perry_string_concat(x, x) };
         let first = text_value;
         for _ in 0..1000 {
@@ -160,14 +162,15 @@ mod tests {
         let branch = unsafe { string::perry_string_concat(first, emoji) };
         assert_eq!(text(branch), "xxé🙂");
         assert_eq!(&text(text_value)[..3], "xxx");
-        assert_eq!(unsafe { *(branch.add(4) as *const u32) }, 5);
+        assert_eq!(unsafe { *(branch.add(4) as *const u32) }, 4);
         let chunks_before = chunk_counts().0;
         for _ in 0..100_000 {
             text_value = unsafe { string::perry_string_concat(text_value, x) };
         }
-        // Linear: about 16 bytes of header per append plus amortized doubling.
+        // Linear header storage; buffer growth uses separate large chunks.
         assert!(
-            chunk_counts().0 - chunks_before < 64,
+            chunk_counts().0 - chunks_before
+                <= (100_000 * core::mem::size_of::<string::Str>()).div_ceil(region::CHUNK - 64) + 1,
             "{:?}",
             chunk_counts()
         );
@@ -179,12 +182,14 @@ mod tests {
         let block = unsafe { region::perry_cabi_realloc(core::ptr::null_mut(), 0, 1, 40_000) };
         assert!(!block.is_null());
         region::perry_task_enter();
+        unsafe { region::perry_cabi_release(block) };
         perry_alloc(64);
         perry_task_end();
         let after = chunk_counts();
         assert_eq!((after.0, after.1), (before.0, before.1));
     }
 
+    #[cfg(not(feature = "collectible"))]
     fn regions_release_in_bulk_and_reuse_chunks() {
         perry_task_begin();
         let first = perry_alloc(24) as usize;

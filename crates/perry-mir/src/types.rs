@@ -1,5 +1,6 @@
 //! Types of the `perry` dialect.
 use pliron::{
+    builtin::attributes::StringAttr,
     combine::{Parser, between, optional, token},
     common_traits::Verify,
     context::Context,
@@ -16,6 +17,15 @@ use pliron::{
 };
 use thiserror::Error;
 
+/// Whether a value can retain native storage; unknown dialect types are conservative.
+pub fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
+    if let Some(inner) = crate::optional::optional_value(ctx, ty) {
+        return is_reference(ctx, inner);
+    }
+    let ty = ty.deref(ctx);
+    !ty.is::<pliron::builtin::types::FP64Type>() && !ty.is::<pliron::builtin::types::IntegerType>()
+}
+
 /// A closed-shape record, referenced by value of this type (subset rule R1).
 ///
 /// Records are nominal and uniqued by name, so shapes may be recursive: create the record
@@ -26,7 +36,8 @@ use thiserror::Error;
 #[derive(Debug)]
 pub struct RecordType {
     name: Identifier,
-    fields: Option<Vec<(Identifier, TypeHandle)>>,
+    fields: Option<Vec<(String, TypeHandle)>>,
+    tuple: bool,
 }
 
 #[derive(Debug, Error)]
@@ -45,7 +56,24 @@ impl RecordType {
     pub fn get(
         ctx: &Context,
         name: Identifier,
-        fields: Option<Vec<(Identifier, TypeHandle)>>,
+        fields: Option<Vec<(String, TypeHandle)>>,
+    ) -> Result<TypedHandle<Self>> {
+        Self::get_kind(ctx, name, fields, false)
+    }
+
+    pub fn get_tuple(
+        ctx: &Context,
+        name: Identifier,
+        fields: Option<Vec<(String, TypeHandle)>>,
+    ) -> Result<TypedHandle<Self>> {
+        Self::get_kind(ctx, name, fields, true)
+    }
+
+    fn get_kind(
+        ctx: &Context,
+        name: Identifier,
+        fields: Option<Vec<(String, TypeHandle)>>,
+        tuple: bool,
     ) -> Result<TypedHandle<Self>> {
         if let Some(fields) = &fields {
             for (index, (field, _)) in fields.iter().enumerate() {
@@ -61,6 +89,7 @@ impl RecordType {
             RecordType {
                 name: name.clone(),
                 fields: None,
+                tuple,
             },
             ctx,
         );
@@ -68,7 +97,7 @@ impl RecordType {
             let mut record = handle.to_handle().deref_mut(ctx);
             let record = record.downcast_mut::<RecordType>().unwrap();
             match &record.fields {
-                Some(existing) if *existing != fields => {
+                Some(existing) if *existing != fields || record.tuple != tuple => {
                     input_err_noloc!(RecordErr::Mismatch(name.to_string()))?
                 }
                 Some(_) => {}
@@ -82,7 +111,11 @@ impl RecordType {
         &self.name
     }
 
-    pub fn fields(&self) -> Result<&[(Identifier, TypeHandle)]> {
+    pub fn is_tuple(&self) -> bool {
+        self.tuple
+    }
+
+    pub fn fields(&self) -> Result<&[(String, TypeHandle)]> {
         match &self.fields {
             Some(fields) => Ok(fields),
             None => input_err_noloc!(RecordErr::Opaque(self.name.to_string())),
@@ -90,7 +123,7 @@ impl RecordType {
     }
 
     /// Index and type of `field`, if the record is defined and has it.
-    pub fn field(&self, field: &Identifier) -> Option<(usize, TypeHandle)> {
+    pub fn field(&self, field: &str) -> Option<(usize, TypeHandle)> {
         self.fields
             .as_ref()?
             .iter()
@@ -157,14 +190,19 @@ impl Printable for RecordType {
         let result = (|| {
             write!(f, "<{}", self.name)?;
             if let Some(fields) = &self.fields {
-                write!(f, " {{")?;
+                write!(f, " {}", if self.tuple { '[' } else { '{' })?;
                 for (index, (name, ty)) in fields.iter().enumerate() {
                     if index > 0 {
                         write!(f, ",")?;
                     }
-                    write!(f, " {name}: {}", ty.print(ctx, state))?;
+                    if Identifier::is_valid(name) {
+                        write!(f, " {name}")?;
+                    } else {
+                        write!(f, " {}", StringAttr::from(name.clone()).print(ctx, state))?;
+                    }
+                    write!(f, ": {}", ty.print(ctx, state))?;
                 }
-                write!(f, " }}")?;
+                write!(f, " {}", if self.tuple { ']' } else { '}' })?;
             }
             write!(f, ">")
         })();
@@ -181,17 +219,26 @@ impl Parsable for RecordType {
         state_stream: &mut StateStream<'a>,
         _arg: Self::Arg,
     ) -> ParseResult<'a, Self::Parsed> {
-        let field = spaced(Identifier::parser(()))
+        let field = || {
+            spaced(
+                Identifier::parser(())
+                    .map(String::from)
+                    .or(StringAttr::parser(()).map(String::from)),
+            )
             .skip(spaced(token(':')))
-            .and(spaced(type_parser()));
-        let fields = delimited_list_parser('{', '}', ',', field);
+            .and(spaced(type_parser()))
+        };
+        let fields = delimited_list_parser('{', '}', ',', field())
+            .map(|fields| (fields, false))
+            .or(delimited_list_parser('[', ']', ',', field()).map(|fields| (fields, true)));
         let mut parser = between(
             token('<'),
             token('>'),
             spaced((location(), Identifier::parser(()))).and(spaced(optional(fields))),
         );
         let ((loc, name), fields) = parser.parse_stream(state_stream).into_result()?.0;
-        RecordType::get(state_stream.state.ctx, name, fields)
+        let (fields, tuple) = fields.map_or((None, false), |(fields, tuple)| (Some(fields), tuple));
+        RecordType::get_kind(state_stream.state.ctx, name, fields, tuple)
             .map_err(|mut error| {
                 error.set_loc(loc);
                 error
@@ -241,11 +288,39 @@ impl ArrayType {
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct StringType;
 
+/// Immutable sign and 64-bit magnitude, preserving every WIT s64/u64 value.
+#[pliron_type(name = "perry.bigint", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct BigIntType;
+
 /// A `Uint8Array`: a view `{ length, data }` over bytes in the task region; `subarray`
 /// views share their bytes.
 #[pliron_type(name = "perry.bytes", generate_get = true, format, verifier = "succ")]
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct BytesType;
+
+/// Read-only outbound WIT byte storage, accepting either UTF-8 strings or mutable bytes.
+#[pliron_type(
+    name = "perry.byte_input",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ByteInputType;
+
+#[pliron_type(name = "perry.url", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct UrlType;
+
+#[pliron_type(
+    name = "perry.search_params",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct SearchParamsType;
 
 /// A parsed JSON value (`JSON.parse`): a node of the JSON helper's graph, or `undefined`.
 /// Untyped data is a JSON tree, never `any` (subset rule R6).
@@ -253,7 +328,7 @@ pub struct BytesType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct JsonType;
 
-/// A `Date`: its time value (milliseconds since the epoch, or `NaN`), held by value.
+/// A mutable Date object containing epoch milliseconds or NaN.
 #[pliron_type(name = "perry.date", generate_get = true, format, verifier = "succ")]
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct DateType;
@@ -308,6 +383,26 @@ pub struct WriterType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct ReadableType;
 
+/// A detachable `ArrayBuffer` backing mutable byte views.
+#[pliron_type(
+    name = "perry.byte_buffer",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ByteBufferType;
+
+/// A `ReadableStreamBYOBReader`.
+#[pliron_type(
+    name = "perry.byob_reader",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ByobReaderType;
+
 /// A `ReadableStreamDefaultReader`.
 #[pliron_type(name = "perry.reader", generate_get = true, format, verifier = "succ")]
 #[derive(Hash, PartialEq, Eq, Debug)]
@@ -322,6 +417,12 @@ pub struct ReaderType;
 )]
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct ReadResultType;
+
+/// An `AbortController` and its `AbortSignal` (one object): aborting rejects the timers that
+/// watch it.
+#[pliron_type(name = "perry.abort", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct AbortType;
 
 /// An HTTP request a handler serves (`wasi:http/handler`): its parts, its body and the
 /// response being built.
@@ -382,23 +483,174 @@ impl SettledType {
     }
 }
 
-/// `T | undefined`. Produced by reads that may miss (out-of-bounds array reads, later optional
-/// fields); consumed through `perry.to_number`, `perry.to_string`, `perry.is_undefined` and
-/// `perry.unwrap`. The representation is chosen at lowering: a reserved NaN payload for numbers
-/// (so arithmetic yields NaN as in ECMAScript), a null reference for references.
+/// A value with one or both absence states. Single-absence references use a null pointer;
+/// values admitting both states reserve a second sentinel without boxing the payload.
 #[pliron_type(
     name = "perry.optional",
-    generate_get = true,
-    format = "`<` $value `>`",
+    format = "`<` $value `,` $absence `>`",
     verifier = "succ"
 )]
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct OptionalType {
     value: TypeHandle,
+    absence: crate::attrs::Absence,
 }
 
 impl OptionalType {
+    pub fn get(ctx: &Context, value: TypeHandle) -> TypedHandle<Self> {
+        let existing = value
+            .deref(ctx)
+            .downcast_ref::<Self>()
+            .map(|v| (v.value, v.absence));
+        let (value, absence) = match existing {
+            Some((inner, kind)) => (
+                inner,
+                if kind.admits_null() {
+                    crate::attrs::Absence::Both
+                } else {
+                    kind
+                },
+            ),
+            None => (value, crate::attrs::Absence::Undefined),
+        };
+        Self::get_with(ctx, value, absence)
+    }
+
+    pub fn get_with(
+        ctx: &Context,
+        value: TypeHandle,
+        absence: crate::attrs::Absence,
+    ) -> TypedHandle<Self> {
+        Type::instantiate(Self { value, absence }, ctx)
+    }
+
     pub fn value(&self) -> TypeHandle {
         self.value
+    }
+
+    pub fn absence(&self) -> crate::attrs::Absence {
+        self.absence
+    }
+}
+
+/// Stateful UTF-8 decoder with at most three pending bytes.
+#[pliron_type(name = "perry.decoder", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct DecoderType;
+
+/// Immutable, statically compiled regex program; no mutable lastIndex state.
+#[pliron_type(name = "perry.regex", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct RegexType;
+
+/// Canonical result area and argument owners of a suspended host call.
+#[pliron_type(
+    name = "perry.transfer",
+    generate_get = true,
+    format = "",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct TransferType;
+
+/// A closed tagged union. Only its active payload owns storage.
+#[pliron_type(name = "perry.variant")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct VariantType {
+    cases: Vec<(String, Option<TypeHandle>)>,
+}
+
+impl VariantType {
+    pub fn get(ctx: &Context, mut cases: Vec<(String, Option<TypeHandle>)>) -> TypedHandle<Self> {
+        cases.sort_by(|a, b| a.0.cmp(&b.0));
+        Type::instantiate(Self { cases }, ctx)
+    }
+
+    pub fn cases(&self) -> &[(String, Option<TypeHandle>)] {
+        &self.cases
+    }
+}
+
+impl Verify for VariantType {
+    fn verify(&self, _: &Context) -> Result<()> {
+        if self.cases.is_empty() || self.cases.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            input_err_noloc!(InvalidVariant)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("a variant needs distinct literal tags")]
+struct InvalidVariant;
+
+impl Printable for VariantType {
+    fn fmt(
+        &self,
+        ctx: &Context,
+        state: &printable::State,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        use pliron::builtin::attributes::StringAttr;
+        write!(f, "<")?;
+        for (index, (name, payload)) in self.cases.iter().enumerate() {
+            if index > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", StringAttr::from(name.as_str()).print(ctx, state))?;
+            if let Some(payload) = payload {
+                write!(f, ": {}", payload.print(ctx, state))?;
+            }
+        }
+        write!(f, ">")
+    }
+}
+
+impl Parsable for VariantType {
+    type Arg = ();
+    type Parsed = TypedHandle<Self>;
+    fn parse<'a>(stream: &mut StateStream<'a>, _: ()) -> ParseResult<'a, Self::Parsed> {
+        use pliron::builtin::attributes::StringAttr;
+        let case = spaced(StringAttr::parser(()))
+            .and(optional(spaced(token(':')).with(spaced(type_parser()))));
+        let cases = delimited_list_parser('<', '>', ',', case)
+            .parse_stream(stream)
+            .into_result()?
+            .0;
+        Ok(Self::get(
+            stream.state.ctx,
+            cases
+                .into_iter()
+                .map(|(name, ty)| (name.as_str().to_owned(), ty))
+                .collect(),
+        ))
+        .into_parse_result()
+    }
+}
+
+/// The finite primitive union `number | string`, with an exact owner slot for its string case.
+#[pliron_type(
+    name = "perry.number_string",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct NumberStringType;
+
+/// An opaque canonical resource identity. Ownership is checked by the shared descriptor.
+#[pliron_type(
+    name = "perry.resource",
+    generate_get = true,
+    format = "`<` $key `>`",
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct ResourceType {
+    key: u32,
+}
+impl ResourceType {
+    pub fn key(&self) -> u32 {
+        self.key
     }
 }

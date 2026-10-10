@@ -73,3 +73,45 @@ unsafe impl Source for Heap {
         talc.source.end.map(|_| ()).ok_or(())
     }
 }
+
+/// Single-threaded talc adapter exposing pressure information at compiler safe points.
+pub struct Allocator(talc::cell::TalcCell<Heap, talc::wasm::WasmBinning>);
+// SAFETY: components have one guest thread and never use shared-memory atomics.
+unsafe impl Sync for Allocator {}
+impl Default for Allocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Allocator {
+    pub const fn new() -> Self {
+        const {
+            assert!(!cfg!(target_feature = "atomics"));
+        }
+        Self(talc::cell::TalcCell::new(Heap::new()))
+    }
+    #[cfg(feature = "collectible")]
+    pub fn available(&self) -> usize {
+        let counters = self.0.counters();
+        if counters.heap_count == 0 {
+            core::arch::wasm32::memory_size::<0>() * PAGE - (&raw const __heap_base as usize)
+        } else {
+            counters.available_bytes
+        }
+    }
+}
+// SAFETY: allocation/deallocation forward unchanged layouts and pointers to talc.
+unsafe impl core::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe { self.0.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        unsafe { self.0.alloc_zeroed(layout) }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { self.0.dealloc(pointer, layout) }
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        unsafe { self.0.realloc(pointer, layout, size) }
+    }
+}

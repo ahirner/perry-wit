@@ -6,18 +6,27 @@
 //!
 //! The control-flow ops are adapted from `pliron-llvm`, which perry-wit must not depend on:
 //! that crate's default feature links `llvm-sys`, which the LLVM audit rejects.
+mod aggregates;
 pub mod attrs;
 pub mod calls;
 pub mod collections;
 pub mod control;
+pub mod effects;
 pub mod exceptions;
+pub mod foreign;
+pub mod globals;
 pub mod heap;
+pub mod integers;
 pub mod intrinsics;
+mod lifetimes;
 pub mod locals;
 pub mod optional;
 pub mod pipeline;
+pub mod regex;
 pub mod scalar;
 pub mod types;
+pub mod variants;
+pub mod views;
 
 #[cfg(test)]
 mod tests;

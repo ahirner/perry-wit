@@ -161,6 +161,7 @@ const RESULT_SIZE: u32 = 40;
 
 /// One `fetch` call: the waitables it still owns (0 when none).
 struct Fetch {
+    pin: u32,
     promise: *mut u8,
     /// The `send` subtask, while it runs.
     sending: u32,
@@ -265,7 +266,7 @@ pub unsafe extern "C" fn web_fetch(
     let mut copy = Buffer::new();
     copy.extend_from_slice(body);
 
-    let op = alloc(core::mem::size_of::<Fetch>() as u32) as *mut Fetch;
+    let op = perry_abi::object!(Fetch; promise, data, body, sent, ended, transmitted, zero);
     let zero = alloc(RESULT_SIZE);
     // SAFETY: fresh blocks; every canonical call below takes live arguments.
     unsafe {
@@ -316,6 +317,7 @@ pub unsafe extern "C" fn web_fetch(
         http::set_authority(request, 1, authority.as_ptr(), authority.len() as u32);
         http::set_path(request, 1, target.as_ptr(), target.len() as u32);
         op.write(Fetch {
+            pin: perry_abi::pin(op.cast()),
             promise,
             sending: 0,
             contents: (contents >> 32) as u32,
@@ -431,7 +433,7 @@ fn sent(op: &mut Fetch) {
         op.outcome = (outcome >> 32) as u32;
         op.body = body_stream(ends[0]);
         op.end = ends[1];
-        let r = alloc(core::mem::size_of::<Response>() as u32) as *mut Response;
+        let r = perry_abi::object!(Response; body.data, body.stream, status_text, headers);
         r.write(Response {
             body: Body::streamed(op.body),
             status: f64::from(status),
@@ -522,7 +524,7 @@ fn cancel_writes(op: &mut Fetch) {
         if op.contents != 0 {
             perry_abi::unjoin(op.contents);
             if op.contents_blocked {
-                http::contents_cancel(op.contents);
+                perry_abi::acknowledged(|| http::contents_cancel(op.contents));
             }
             http::contents_drop(op.contents);
             op.contents = 0;
@@ -530,7 +532,7 @@ fn cancel_writes(op: &mut Fetch) {
         if op.trailers != 0 {
             if op.trailers_blocked {
                 perry_abi::unjoin(op.trailers);
-                http::trailers_cancel(op.trailers);
+                perry_abi::acknowledged(|| http::trailers_cancel(op.trailers));
             }
             drop_trailers(op);
         }
@@ -548,6 +550,7 @@ fn finish_if_idle(op: &mut Fetch) {
     {
         return;
     }
+    perry_abi::unpin(core::mem::take(&mut op.pin));
     let this = op as *mut Fetch;
     let mut link: *mut *mut Fetch = ops();
     // SAFETY: the list holds live operations.
@@ -575,6 +578,7 @@ pub extern "C" fn web_fetch_event(event: u32, handle: u32, code: u32) -> u32 {
             let handled = match event {
                 perry_abi::EVENT_SUBTASK if fetch.sending == handle => {
                     if code == SUBTASK_RETURNED {
+                        perry_abi::unjoin(handle);
                         perry_abi::subtask_drop(handle);
                         fetch.sending = 0;
                         sent(fetch);
@@ -617,6 +621,26 @@ pub extern "C" fn web_fetch_event(event: u32, handle: u32, code: u32) -> u32 {
 
 const EVENT_FUTURE_WRITE: u32 = 5;
 
+/// Unsettled fetch promises and final body reads belonging to the current task.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_fetch_pending() -> u32 {
+    let task = perry_abi::task();
+    let mut op = *ops();
+    let mut pending = 0;
+    // SAFETY: listed fetches retain their bodies until all completion handles are released.
+    unsafe {
+        while !op.is_null() {
+            let fetch = &*op;
+            if fetch.task == task {
+                pending += u32::from(fetch.sending != 0);
+                pending += u32::from(crate::readable::pending_completion(fetch.body));
+            }
+            op = fetch.next;
+        }
+    }
+    pending
+}
+
 /// At the end of the current task: cancel what its fetches still wait for and drop their
 /// handles.
 #[unsafe(no_mangle)]
@@ -627,34 +651,40 @@ pub extern "C" fn web_fetch_close() {
     unsafe {
         while !op.is_null() {
             let fetch = &mut *op;
-            let next = fetch.next;
             if fetch.task == task {
+                if fetch.sending != 0 {
+                    perry_abi::unjoin(fetch.sending);
+                    let status = perry_abi::subtask_cancel(fetch.sending);
+                    perry_abi::subtask_drop(fetch.sending);
+                    fetch.sending = 0;
+                    if status == SUBTASK_RETURNED {
+                        sent(fetch);
+                    }
+                }
                 cancel_writes(fetch);
                 if fetch.end != 0 {
                     perry_abi::unjoin(fetch.end);
-                    http::end_cancel(fetch.end);
+                    perry_abi::acknowledged(|| http::end_cancel(fetch.end));
                     http::end_drop(fetch.end);
                     fetch.end = 0;
                 }
                 if fetch.outcome != 0 {
                     if fetch.outcome_blocked {
                         perry_abi::unjoin(fetch.outcome);
-                        http::outcome_cancel(fetch.outcome);
+                        perry_abi::acknowledged(|| http::outcome_cancel(fetch.outcome));
                     }
                     drop_outcome(fetch);
                 }
                 if fetch.transmit != 0 {
                     perry_abi::unjoin(fetch.transmit);
-                    http::transmit_cancel(fetch.transmit);
+                    perry_abi::acknowledged(|| http::transmit_cancel(fetch.transmit));
                     drop_transmit(fetch);
                 }
-                if fetch.sending != 0 {
-                    // An unawaited request: its subtask still runs; leave it to the host.
-                    fetch.sending = 0;
-                }
                 finish_if_idle(fetch);
+                op = *ops();
+            } else {
+                op = fetch.next;
             }
-            op = next;
         }
     }
 }

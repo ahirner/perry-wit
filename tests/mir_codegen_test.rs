@@ -17,6 +17,10 @@ struct Program {
 impl Program {
     fn new(source: &str) -> Self {
         let wasm = build(source);
+        Self::from_wasm(wasm)
+    }
+
+    fn from_wasm(wasm: Vec<u8>) -> Self {
         wasmparser::Validator::new()
             .validate_all(&wasm)
             .unwrap_or_else(|e| panic!("{e}\n{}", wasmprinter::print_bytes(&wasm).unwrap()));
@@ -454,4 +458,607 @@ fn dump() {
         wasm.len(),
         wasmprinter::print_bytes(&wasm).unwrap()
     );
+}
+
+#[test]
+fn temporary_records_use_bounded_memory_across_iterations() {
+    let mut program = Program::new(
+        r#"
+interface Point { x: number; y: number }
+function make(i: number): Point { return { x: i, y: i * 2 }; }
+export function run(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const point = make(i);
+    if (i % 2 === 0) point.x = point.x + 1;
+    sum = (sum + point.x + point.y) % 1000003;
+  }
+  return sum;
+}
+
+"#,
+    );
+    let mut expected = 0.0;
+    for i in 0..200_000 {
+        expected = (expected + f64::from(i * 3 + i32::from(i % 2 == 0))) % 1000003.0;
+    }
+    assert_eq!(program.number("run", 200_000.0), expected);
+    let memory = program
+        .instance
+        .get_memory(&mut program.store, "memory")
+        .unwrap();
+    assert!(memory.data_size(&program.store) <= 512 * 1024);
+}
+
+#[test]
+fn unchanged_module_graph_does_not_collect_on_every_export() {
+    let source = r#"
+interface Cell { value: number; next: Cell | null }
+function build(): Cell {
+  let head: Cell = { value: 0, next: null };
+  for (let i = 1; i < 5000; i++) head = { value: i, next: head };
+  return head;
+}
+const saved: Cell = build();
+export function run(n: number): number { return saved.value + n; }
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "retained.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    assert_eq!(program.number("run", 1.0), 5000.0);
+    let (before, _) = program.call("__perry_gc_counter", &[Val::I32(1)]);
+    for i in 0..100 {
+        assert_eq!(program.number("run", f64::from(i)), 4999.0 + f64::from(i));
+    }
+    let (after, _) = program.call("__perry_gc_counter", &[Val::I32(1)]);
+    assert_eq!(after[0].unwrap_i64(), before[0].unwrap_i64());
+}
+
+#[test]
+fn collection_reclaims_overwrites_and_preserves_reachable_cycles() {
+    let mut program = Program::new(
+        r#"
+interface Node { value: number; next: Node | null }
+export function run(n: number): number {
+  const first: Node = { value: 7, next: null };
+  const second: Node = { value: 11, next: first };
+  first.next = second;
+  const latest: Node[] = [first];
+  for (let i = 0; i < n; i++) latest[0] = { value: i, next: null };
+  const next = first.next;
+  if (next === null) return -1;
+  if (next.next !== first) return -2;
+  return first.value + next.value + latest[0].value;
+}
+"#,
+    );
+    assert_eq!(program.throwing("run", 200_000.0), (200_017.0, 0));
+    let memory = program
+        .instance
+        .get_memory(&mut program.store, "memory")
+        .unwrap();
+    assert!(
+        memory.data_size(&program.store) <= 512 * 1024,
+        "{} bytes",
+        memory.data_size(&program.store)
+    );
+}
+
+#[test]
+fn completed_async_frames_and_promises_are_collectible() {
+    let mut program = Program::new(
+        r#"
+interface Cell { value: number; next: Cell | null }
+async function advance(cell: Cell): Promise<Cell> {
+  const pending = Promise.resolve(cell);
+  const first = await pending;
+  const again = await pending;
+  return { value: first.value + again.value, next: null };
+}
+export async function run(n: number): Promise<number> {
+  let current: Cell = { value: 1, next: null };
+  for (let i = 0; i < n; i++) {
+    const cell: Cell = { value: i, next: current };
+    current = await advance(cell);
+  }
+  return current.value;
+}
+"#,
+    );
+    assert_eq!(program.throwing("run", 200_000.0), (399_998.0, 0));
+    let memory = program
+        .instance
+        .get_memory(&mut program.store, "memory")
+        .unwrap();
+    assert!(
+        memory.data_size(&program.store) <= 512 * 1024,
+        "completed async objects accumulated: {} bytes",
+        memory.data_size(&program.store)
+    );
+}
+
+#[test]
+fn builtin_churn_preserves_shared_views_and_reclaims_temporaries() {
+    let mut program = Program::new(
+        r#"
+export function run(n: number): number {
+  const initial = new TextEncoder().encode('é🙂!');
+  const retained = initial.subarray(2, 6);
+  const prefix = ('prefix-' + n).slice(0, 6);
+  const parsed = JSON.parse('{"keep":{"value":17},"drop":[1,2,3]}').keep;
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const bytes = new Uint8Array([i, 7, 8]);
+    const tail = bytes.subarray(1);
+    tail[0] = 9;
+    const text = ('é🙂-' + i).slice(1, 3);
+    total = (total + text.length + bytes[1]) % 100003;
+    const json = JSON.parse('{"value":5}');
+    total = (total + json.value) % 100003;
+  }
+  return total + retained.length + prefix.length + parsed.value;
+}
+"#,
+    );
+    assert_eq!(
+        program.throwing("run", 200_000.0),
+        ((200_000.0 * 16.0) % 100003.0 + 27.0, 0)
+    );
+    let memory = program
+        .instance
+        .get_memory(&mut program.store, "memory")
+        .unwrap();
+    let warmed = memory.data_size(&program.store);
+    assert!(
+        warmed <= 1024 * 1024,
+        "builtin churn retained {warmed} bytes"
+    );
+    program.throwing("run", 400_000.0);
+    assert_eq!(
+        memory.data_size(&program.store),
+        warmed,
+        "builtin memory did not stabilize"
+    );
+}
+
+#[test]
+fn astral_strings_use_scalar_positions_and_keep_append_prefixes() {
+    let mut program = Program::new(
+        r#"
+export function run(n: number): number {
+  let text = '🙂é';
+  const prefix = text + '!';
+  text = prefix;
+  for (let i = 0; i < n; i++) { text = text + '漢'; }
+  if (prefix !== '🙂é!') { throw new Error('retained prefix changed'); }
+  if (text.slice(0, 2) !== '🙂é') { throw new Error('scalar slice'); }
+  if (text.charAt(0) !== '🙂') { throw new Error('scalar character'); }
+  if (text.codePointAt(text.length) !== undefined) { throw new Error('out of bounds'); }
+  return text.length + text.indexOf('!') + text.codePointAt(0);
+}
+"#,
+    );
+    assert_eq!(program.throwing("run", 100_000.0), (228_583.0, 0));
+}
+
+#[test]
+fn record_updates_evaluate_the_receiver_once_and_preserve_prefix_values() {
+    let mut program = Program::new(
+        r#"
+interface Cell { value: number }
+function receiver(cell: Cell, visits: number[]): Cell { visits.push(1); return cell; }
+export function run(x: number): number {
+    const cell: Cell = { value: x };
+    const visits: number[] = [];
+    const first = receiver(cell, visits).value++;
+    const second = --receiver(cell, visits).value;
+    return first * 100 + second * 10 + cell.value + visits.length * 1000;
+}
+"#,
+    );
+    assert_eq!(program.number("run", 3.0), 2333.0);
+}
+
+#[test]
+fn inferred_arrays_preserve_optional_elements_in_either_order() {
+    let mut program = Program::new(
+        r#"
+export function run(x: number): number {
+    const bytes = new Uint8Array([7]);
+    const a = [bytes[x], 11];
+    const b = [13, bytes[x]];
+    if (a[0] === undefined && b[1] === undefined) { return a[1] + b[0]; }
+    return a[0] + b[1];
+}
+"#,
+    );
+    assert_eq!(program.number("run", 0.0), 14.0);
+    assert_eq!(program.number("run", 1.0), 24.0);
+}
+
+#[test]
+fn forced_collection_poisoning_preserves_suspended_and_persistent_roots() {
+    let source = r#"
+interface Cell { value: number; next: Cell | null }
+let saved: Cell = { value: 7, next: null };
+saved.next = saved;
+async function compute(n: number): Promise<number> {
+    const bytes = new TextEncoder().encode('é🙂');
+    const alias = bytes.subarray(2);
+    const payload = JSON.parse('{"value":11}');
+    const cell: Cell = { value: n, next: saved };
+    const settled = await Promise.all([Promise.resolve(n), Promise.resolve(n + 1)]);
+    for (let i = 0; i < n; i++) {
+        const temporary: Cell = { value: i, next: null };
+        saved.value = temporary.value;
+        const text = 'iteration:' + i;
+        if (text.length < 2) throw new Error('bad text');
+    }
+    return cell.value + cell.next.value + alias[0] + payload.value + settled[1];
+}
+export async function run(n: number): Promise<number> { return await compute(n); }
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "stress.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    for n in [40.0, 80.0, 120.0] {
+        assert_eq!(program.throwing("run", n), (3.0 * n + 251.0, 0));
+        for counter in [5, 6] {
+            let (count, _) = program.call("__perry_gc_counter", &[Val::I32(counter)]);
+            assert_eq!(
+                count[0].unwrap_i64(),
+                0,
+                "completed task retained counter {counter}"
+            );
+        }
+    }
+    let (collections, _) = program.call("__perry_gc_counter", &[Val::I32(1)]);
+    assert!(
+        collections[0].unwrap_i64() > 240,
+        "safe points did not force collection"
+    );
+    let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
+    assert!(
+        live[0].unwrap_i64() < 128,
+        "only module state should survive"
+    );
+}
+
+#[test]
+fn proven_frame_records_reuse_storage_across_calls_and_iterations() {
+    let source = r#"
+interface Cell { value: number }
+function inspect(cell: Cell): number {
+    let result = 0;
+    for (let i = 0; i < 3; i++) result = result + cell.value;
+    return result;
+}
+export function run(n: number): number {
+    let result = 0;
+    for (let i = 0; i < n; i++) {
+        const cell: Cell = { value: i };
+        result = result + inspect(cell);
+    }
+    return result;
+}
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "frames.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 40.0), 2340.0);
+    program.call("__perry_gc_debug", &[Val::I32(0)]);
+    assert_eq!(
+        program.number("run", 200_000.0),
+        3.0 * 200_000.0 * 199_999.0 / 2.0
+    );
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert_eq!(
+        allocations[0].unwrap_i64(),
+        2,
+        "one frame per activation, independent of iterations"
+    );
+    let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
+    assert_eq!(live[0].unwrap_i64(), 0);
+    assert!(
+        program
+            .instance
+            .get_memory(&mut program.store, "memory")
+            .unwrap()
+            .data_size(&program.store)
+            <= 512 * 1024
+    );
+}
+
+#[test]
+fn mutable_dates_survive_calls_suspension_and_collection() {
+    let source = r#"
+let saved: Date = new Date(0);
+function set(date: Date, time: number): number { return date.setTime(time); }
+export async function run(n: number): Promise<number> {
+    const alias = saved;
+    const dates: Date[] = [saved];
+    for (let i = 0; i < n; i++) {
+        const temporary = new Date(i);
+        set(temporary, i + 1);
+        saved = temporary;
+    }
+    const result = await Promise.resolve(saved.getTime());
+    set(alias, 7);
+    return result + dates[0].getTime();
+}
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "dates.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    let initial = program
+        .instance
+        .get_memory(&mut program.store, "memory")
+        .unwrap()
+        .data_size(&program.store);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.throwing("run", 120.0), (127.0, 0));
+    program.call("__perry_gc_debug", &[Val::I32(0)]);
+    assert_eq!(program.throwing("run", 200_000.0), (200_007.0, 0));
+    let size = program
+        .instance
+        .get_memory(&mut program.store, "memory")
+        .unwrap()
+        .data_size(&program.store);
+    let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
+    assert!(
+        size <= 512 * 1024,
+        "initial={initial} size={size} live={live:?}"
+    );
+}
+
+#[test]
+fn frame_storage_is_released_on_exception_and_finalizer_paths() {
+    let source = r#"
+interface Cell { value: number }
+function inspect(cell: Cell): number {
+    let result = 0;
+    for (let i = 0; i < 3; i++) result = result + cell.value;
+    return result;
+}
+function fail(n: number): number {
+    const cell: Cell = { value: n };
+    try { if (n > 0) throw n; return inspect(cell); }
+    finally { if (inspect(cell) < 0) throw 77; }
+}
+export function run(n: number): number {
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+        try { total = total + fail(i); } catch (error) { total = total + 1; }
+    }
+    return total;
+}
+"#;
+    let wasm =
+        perry_wit::compiler::compile_core_with_memory_checks(source, "frame-throws.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.throwing("run", 120.0), (119.0, 0));
+    for counter in [2, 5, 6] {
+        let (count, _) = program.call("__perry_gc_counter", &[Val::I32(counter)]);
+        assert_eq!(
+            count[0].unwrap_i64(),
+            0,
+            "completed task retained counter {counter}"
+        );
+    }
+}
+
+#[test]
+fn literal_regex_search_allocates_nothing_and_uses_scalar_positions() {
+    let source = r#"
+export function run(n: number): number {
+    const expression = /[a-z]+\d{2}/u;
+    const text = '🙂x42';
+    let total = 0;
+    for (let i = 0; i < n; i++) total = total + text.search(expression) + (expression.test(text) ? 1 : 0);
+    return total;
+}
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "regex.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    assert_eq!(program.number("run", 20_000.0), 40_000.0);
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert_eq!(allocations[0].unwrap_i64(), 0);
+}
+
+#[test]
+fn incremental_decoder_copies_only_pending_bytes_and_survives_collection() {
+    let source = r#"
+export async function run(n: number): Promise<number> {
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    const alias = decoder;
+    const head = new Uint8Array([0xf0, 0x9f]);
+    const before = decoder.decode(head, { stream: true });
+    head.fill(65);
+    for (let i = 0; i < n; i++) {
+        const garbage = 'temporary:' + i;
+        if (garbage.length < 5) throw new Error('bad string');
+    }
+    await Promise.resolve(n);
+    const result = alias.decode(new Uint8Array([0x99, 0x82]));
+    return before.length + result.length + result.codePointAt(0);
+}
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "decoder.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.throwing("run", 120.0), (128579.0, 0));
+    for counter in [2, 5, 6] {
+        let (count, _) = program.call("__perry_gc_counter", &[Val::I32(counter)]);
+        assert_eq!(
+            count[0].unwrap_i64(),
+            0,
+            "completed decoder task retained counter {counter}"
+        );
+    }
+}
+
+#[test]
+fn finite_variant_graphs_survive_forced_collection_and_checked_json() {
+    let source = r#"
+type Value = { tag: 'empty' } | { tag: 'number', val: number } | { tag: 'text', val: string } | { tag: 'point', val: { x: number, label: string } };
+let retained: Value = { tag: 'point', val: { x: 9, label: 'retained' } };
+function make(n: number): Value {
+    if (n % 3 === 0) return { tag: 'number', val: n };
+    if (n % 3 === 1) return { tag: 'text', val: 'value:' + n };
+    return { tag: 'point', val: { x: n, label: 'point:' + n } };
+}
+export function run(n: number): number {
+    let value: Value = { tag: 'empty' };
+    for (let i = 0; i < n; i++) value = make(i);
+    const parsed: Value = JSON.parse('{"tag":"point","val":{"x":7,"label":"json"}}');
+    let total = 0;
+    if (retained.tag === 'point') total = retained.val.x + retained.val.label.length;
+    if (parsed.tag === 'point') total = total + parsed.val.x;
+    if (value.tag === 'number') total = total + value.val;
+    if (value.tag === 'text') total = total + value.val.length;
+    if (value.tag === 'point') total = total + value.val.x;
+    if (JSON.stringify(parsed) !== '{"tag":"point","val":{"label":"json","x":7}}') throw new Error('serialization');
+    try {
+        const bad: Value = JSON.parse('{"tag":"number","val":null}');
+        return -1;
+    } catch (error) { if (!(error instanceof TypeError)) return -2; }
+    try {
+        const bad: Value = JSON.parse('{"tag":"unknown"}');
+        return -3;
+    } catch (error) { if (!(error instanceof TypeError)) return -4; }
+    return total;
+}
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "variants.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    for n in [3000.0, 3001.0, 3002.0] {
+        let expected = 24.0 + if n == 3002.0 { 10.0 } else { n - 1.0 };
+        assert_eq!(program.throwing("run", n), (expected, 0));
+    }
+    let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
+    assert!(
+        live[0].unwrap_i64() < 4096,
+        "discarded variant payloads remained live"
+    );
+}
+
+#[test]
+fn switches_preserve_tests_fallthrough_and_finalizers() {
+    let mut program = Program::new(
+        r#"
+let trace = 0;
+function mark(n: number): number { trace = trace * 10 + n; return n; }
+export function run(n: number): number {
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+        try {
+            switch (i) {
+                case 0: total += 10; break;
+                case 1: total += 20;
+                case 2: total += 3; continue;
+                default: total += 40;
+                case 4: total += 5; break;
+            }
+        } finally { total += 100; }
+        total += 1;
+    }
+    return total;
+}
+export function dispatch(n: number): number {
+    trace = 0;
+    let value = 0;
+    switch (n) {
+        case mark(1): value = 1; break;
+        default: value = 4;
+        case mark(2): value += 2; break;
+        case mark(3): value = 3;
+    }
+    return trace * 10 + value;
+}
+"#,
+    );
+    assert_eq!(program.number("run", 6.0), 735.0);
+    for (value, expected) in [(1.0, 11.0), (2.0, 122.0), (3.0, 1233.0), (4.0, 1236.0)] {
+        assert_eq!(program.number("dispatch", value), expected);
+    }
+}
+
+#[test]
+fn optional_closed_fields_keep_null_distinct_from_missing_values() {
+    let mut program = Program::new(
+        r#"
+interface Options { label?: string; value?: number | null; next?: Options | null; }
+function read(value: Options): number {
+    let result = 0;
+    if (value.label !== undefined) result += value.label.length;
+    if (value.value === undefined) result += 10;
+    else if (value.value === null) result += 20;
+    else result += value.value;
+    const next = value.next;
+    if (next !== undefined && next !== null) result += read(next);
+    return result;
+}
+export function run(n: number): number {
+    const empty: Options = {};
+    const nullable: Options = { value: null, next: { label: 'abc', value: n } };
+    const parsed: Options = JSON.parse('{"value":null,"next":{"label":"é"}}');
+    if (JSON.stringify(empty) !== '{}') return -1;
+    if (JSON.stringify(parsed) !== '{"next":{"label":"é"},"value":null}') return -2;
+    empty.label = 'x';
+    empty.value = 5;
+    empty.label = undefined;
+    empty.value = undefined;
+    return read(empty) + read(nullable) + read(parsed);
+}
+"#,
+    );
+    assert_eq!(program.throwing("run", 7.0), (71.0, 0));
+}
+
+#[test]
+fn closed_number_string_values_preserve_tags_equality_and_checked_json() {
+    let source = r#"
+interface Item { value?: number | string | null; }
+function text(value: number | string): string {
+    if (typeof value === 'string') return value;
+    return JSON.stringify(value);
+}
+function size(value: number | string): number {
+    if (typeof value === 'number') { return value + 1; }
+    else { return value.length; }
+}
+function same(a: number | string, b: number | string): boolean { return a === b; }
+let retained: Item = {};
+export function run(n: number): number {
+    const absent: Item = {};
+    const nil: Item = {value: null};
+    if (typeof absent.value !== 'undefined' || typeof nil.value !== 'object') return -1;
+    const values: (number | string)[] = [n, 'é😀'];
+    if (text(values[0]) !== '7' || text(values[1]) !== 'é😀') return -2;
+    if (!same('abc', 'a' + 'bc') || same(7, '7') || same(NaN, NaN) || !same(0, -0)) return -3;
+    const parsed: Item = JSON.parse('{"value":"ok"}');
+    if (typeof parsed.value !== 'string') return -4;
+    if (JSON.stringify(parsed) !== '{"value":"ok"}') return -5;
+    if (JSON.stringify(values) !== '[7,"é😀"]') return -6;
+    if (String(values[0]) !== '7' || String(values[1]) !== 'é😀') return -7;
+    if (values[0] !== 7 || values[1] !== 'é😀') return -8;
+    let sum = 0;
+    for (let i = 0; i < 3000; i++) {
+        const item: Item = {value: i};
+        retained = item;
+        if (typeof item.value === 'number') sum += item.value;
+    }
+    if (retained.value !== 2999) return -9;
+    try { const bad: Item = JSON.parse('{"value":true}'); return -10; }
+    catch (error) { if (!(error instanceof TypeError)) return -11; }
+    return size(values[0]) + size(values[1]) + sum;
+}
+"#;
+    let wasm =
+        perry_wit::compiler::compile_core_with_memory_checks(source, "number-string.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.throwing("run", 7.0), (4_498_510.0, 0));
+    let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
+    assert!(live[0].unwrap_i64() < 4096);
 }

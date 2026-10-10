@@ -65,14 +65,21 @@ const _: () = {
 mod imports {
     #[link(wasm_import_module = "__perry_helper")]
     unsafe extern "C" {
+        pub fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mut u8;
+        pub fn perry_operation_pin(owner: *mut u8) -> u32;
+        pub fn perry_operation_unpin(token: u32);
+        pub fn perry_promise_new_typed(references: u32) -> *mut u8;
+        pub fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8;
         pub fn perry_alloc(size: u32) -> *mut u8;
+        pub fn perry_cabi_release(data: *mut u8);
+        pub fn perry_string_offset(string: *mut u8, position: u32) -> u32;
+        pub fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
         pub fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8;
         pub fn perry_raise(kind: u32, message: *mut u8);
         pub fn perry_status() -> u32;
-        pub fn perry_array_new(capacity: u32) -> *mut u8;
-        pub fn perry_promise_new() -> *mut u8;
         pub fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
         pub fn perry_task_current() -> *mut u8;
+        pub fn perry_task_resume(task: *mut u8);
         pub fn perry_promise_resolve(promise: *mut u8, value: u64);
         pub fn perry_promise_reject(promise: *mut u8, status: i32);
         pub fn perry_task_join(waitable: u32);
@@ -87,6 +94,8 @@ mod imports {
         pub fn waitable_join(waitable: u32, set: u32);
         #[link_name = "[subtask-drop]"]
         pub fn subtask_drop(subtask: u32);
+        #[link_name = "[subtask-cancel]"]
+        pub fn subtask_cancel(subtask: u32) -> u32;
     }
 
     #[link(wasm_import_module = "wasi:random/random@0.3.0")]
@@ -107,18 +116,26 @@ mod imports {
 mod imports {
     extern crate std;
     pub use perry_runtime::{
-        array::perry_array_new,
+        array::perry_array_new_typed,
         exception::{perry_raise, perry_status},
-        host::{subtask_drop, waitable_join},
+        host::{subtask_cancel, subtask_drop, waitable_join},
         io::{perry_task_join, perry_write_acknowledged},
         promise::{
-            perry_promise_new, perry_promise_reject, perry_promise_resolve, perry_promise_reuse,
+            perry_promise_new_typed, perry_promise_reject, perry_promise_resolve,
+            perry_promise_reuse,
         },
-        region::{perry_alloc, perry_task_current},
+        region::{
+            perry_alloc, perry_alloc_shaped, perry_cabi_release, perry_operation_pin,
+            perry_operation_unpin, perry_task_current,
+        },
+        string::{perry_string_offset, perry_string_view},
     };
 
     pub unsafe fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
         unsafe { perry_runtime::string::perry_string_adopt(data, len) }
+    }
+    pub unsafe fn perry_task_resume(task: *mut u8) {
+        unsafe { perry_runtime::region::perry_task_resume(task.cast()) };
     }
     pub unsafe fn number_format(value: f64, output: *mut u8) -> u32 {
         // Rust's shortest round-trip notation; equal to ECMAScript's for test values.
@@ -141,6 +158,44 @@ pub fn alloc(size: u32) -> *mut u8 {
     unsafe { imports::perry_alloc(size) }
 }
 
+/// Release the host pin after a canonical payload is adopted or discarded.
+///
+/// # Safety
+/// `data` was lowered through the component's canonical allocator.
+pub unsafe fn release_canonical(data: *mut u8) {
+    unsafe { imports::perry_cabi_release(data) };
+}
+
+/// An object with a static exact pointer map; allocation cannot trigger collection.
+///
+/// # Safety
+/// Shape is `[stride, count, offsets...]`, valid for every instance of this allocation.
+#[allow(unused_unsafe)]
+pub unsafe fn alloc_shaped(size: u32, shape: &'static [u32]) -> *mut u8 {
+    unsafe { imports::perry_alloc_shaped(size, shape.as_ptr()) }
+}
+
+/// Allocate a native helper object, tracing the listed pointer or Buffer fields.
+#[macro_export]
+macro_rules! object {
+    ($ty:ty; $($($field:tt).+),* $(,)?) => {{
+        const COUNT: usize = [$(stringify!($($field).+)),*].len();
+        static SHAPE: [u32; 2 + COUNT] = [0, COUNT as u32, $(core::mem::offset_of!($ty, $($field).+) as u32),*];
+        // SAFETY: callers list only pointer fields; Buffer has its pointer at offset zero.
+        #[allow(unused_unsafe)]
+        unsafe { $crate::alloc_shaped(core::mem::size_of::<$ty>() as u32, &SHAPE) as *mut $ty }
+    }};
+}
+
+#[allow(unused_unsafe, clippy::not_unsafe_ptr_arg_deref)]
+pub fn pin(owner: *mut u8) -> u32 {
+    unsafe { imports::perry_operation_pin(owner) }
+}
+#[allow(unused_unsafe)]
+pub fn unpin(token: u32) {
+    unsafe { imports::perry_operation_unpin(token) };
+}
+
 /// A string over `len` bytes of valid UTF-8 at `data`, which must outlive the task.
 ///
 /// # Safety
@@ -148,6 +203,17 @@ pub fn alloc(size: u32) -> *mut u8 {
 pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     unsafe { imports::perry_string_adopt(data, len) }
+}
+
+/// # Safety
+/// `string` is live; position is a scalar index.
+pub unsafe fn string_offset(string: *mut u8, position: u32) -> u32 {
+    unsafe { imports::perry_string_offset(string, position) }
+}
+/// # Safety
+/// `from..to` names valid UTF-8 boundaries within `string`.
+pub unsafe fn string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
+    unsafe { imports::perry_string_view(string, from, to) }
 }
 
 /// The UTF-8 bytes of a string.
@@ -176,32 +242,11 @@ pub fn from_bytes(bytes: &[u8]) -> *mut u8 {
     }
 }
 
-/// A `Uint8Array` over `len` bytes at `data` in the task region.
-pub fn bytes_view(len: u32, data: *mut u8) -> *mut u8 {
-    let view = alloc(8);
-    // SAFETY: a fresh 8-byte block.
-    unsafe {
-        *(view.add(BYTES_LEN) as *mut u32) = len;
-        *(view.add(BYTES_DATA) as *mut *mut u8) = data;
-    }
-    view
-}
-
-/// The bytes of a `Uint8Array`.
-///
-/// # Safety
-/// `view` must be a `Uint8Array` that outlives the returned slice's use.
-pub unsafe fn view_bytes(view: *mut u8) -> &'static [u8] {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        let len = *(view.add(BYTES_LEN) as *const u32);
-        let data = *(view.add(BYTES_DATA) as *const *const u8);
-        if len == 0 {
-            return &[];
-        }
-        core::slice::from_raw_parts(data, len as usize)
-    }
-}
+mod byte_buffer;
+pub use byte_buffer::{
+    ByteBuffer, Bytes, buffer_view, bytes_subview, bytes_transfer, bytes_view, normalize_bytes,
+    view_bytes,
+};
 
 /// A string over static text.
 pub fn from_static(text: &'static str) -> *mut u8 {
@@ -209,12 +254,9 @@ pub fn from_static(text: &'static str) -> *mut u8 {
     unsafe { adopt(text.as_ptr() as *mut u8, text.len() as u32) }
 }
 
-/// UTF-16 code units in valid UTF-8: one per scalar, two for scalars above U+FFFF.
-pub fn utf16_length(bytes: &[u8]) -> u32 {
-    bytes
-        .iter()
-        .map(|&b| u32::from(b & 0xC0 != 0x80) + u32::from(b >= 0xF0))
-        .sum()
+/// Unicode scalar count in valid UTF-8.
+pub fn scalars_length(bytes: &[u8]) -> u32 {
+    bytes.iter().map(|&b| u32::from(b & 0xC0 != 0x80)).sum()
 }
 
 /// Throw an `Error` of `kind` with `message`: the exception becomes pending, and compiled
@@ -239,8 +281,13 @@ pub fn number_format(value: f64, output: &mut [u8; 40]) -> usize {
 /// A pending promise of the current task.
 #[allow(unused_unsafe)]
 pub fn promise_new() -> *mut u8 {
+    promise_typed(true)
+}
+
+#[allow(unused_unsafe)]
+pub fn promise_typed(references: bool) -> *mut u8 {
     // SAFETY: a runtime service without preconditions.
-    unsafe { imports::perry_promise_new() }
+    unsafe { imports::perry_promise_new_typed(u32::from(references)) }
 }
 
 /// `promise` pending again if it settled and nothing waits on it, else a new promise.
@@ -281,17 +328,24 @@ pub fn reject_with(promise: *mut u8, kind: u32, message: *mut u8) {
     }
 }
 
-/// An array of `values` (slot bits) in the task region.
+/// A reference array and its writable slots; allocation cannot collect inside a helper.
 #[allow(unused_unsafe)]
-pub fn array(values: &[u64]) -> *mut u8 {
-    // SAFETY: a fresh array with capacity for `values` (layout of `perry_runtime::array`).
+pub fn array_storage(len: usize) -> (*mut u8, &'static mut [u64]) {
+    // SAFETY: a fresh array with capacity for `len` (layout of `perry_runtime::array`).
     unsafe {
-        let array = imports::perry_array_new(values.len() as u32);
+        let len = u32::try_from(len).expect("array length overflow");
+        let array = imports::perry_array_new_typed(len, 1);
         let data = *(array.add(ARRAY_DATA as usize) as *const *mut u64);
-        ptr::copy_nonoverlapping(values.as_ptr(), data, values.len());
-        *(array as *mut u32) = values.len() as u32;
-        array
+        *(array as *mut u32) = len;
+        (array, core::slice::from_raw_parts_mut(data, len as usize))
     }
+}
+
+/// An array of reference slot bits, retaining their owners through the array shape.
+pub fn array(values: &[u64]) -> *mut u8 {
+    let (array, slots) = array_storage(values.len());
+    slots.copy_from_slice(values);
+    array
 }
 
 /// Append `bytes` to the task's output `fd` (0 stdout, 1 stderr); `promise` settles once the
@@ -321,6 +375,20 @@ pub fn subtask_drop(subtask: u32) {
     unsafe { imports::subtask_drop(subtask) }
 }
 
+/// Cancel an unjoined subtask and wait for acknowledgement before releasing its storage.
+pub fn subtask_cancel(subtask: u32) -> u32 {
+    acknowledged(|| unsafe { imports::subtask_cancel(subtask) })
+}
+
+/// Restore the current task after a canonical cancellation that can run another callback.
+pub fn acknowledged<T>(cancel: impl FnOnce() -> T) -> T {
+    let current = task();
+    let result = cancel();
+    // SAFETY: cancellation cannot release the caller's task.
+    unsafe { imports::perry_task_resume(current) };
+    result
+}
+
 /// 64 bits from `wasi:random/random`.
 pub fn random_u64() -> u64 {
     // SAFETY: WASI import.
@@ -334,10 +402,12 @@ pub fn insecure_random_u64() -> u64 {
 }
 
 /// A growable byte buffer in the task region: released with the task.
+#[repr(C)]
 pub struct Buffer {
     ptr: *mut u8,
     len: usize,
     cap: usize,
+    shape: *const u32,
 }
 
 impl Buffer {
@@ -346,6 +416,20 @@ impl Buffer {
             ptr: ptr::null_mut(),
             len: 0,
             cap: 0,
+            shape: ptr::null(),
+        }
+    }
+
+    /// A buffer of repeated typed entries; unused capacity is zeroed before tracing.
+    ///
+    /// # Safety
+    /// `shape` describes every entry written to this buffer, with a nonzero repetition stride.
+    pub const unsafe fn with_shape(shape: &'static [u32]) -> Self {
+        Self {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            shape: shape.as_ptr(),
         }
     }
 
@@ -361,7 +445,8 @@ impl Buffer {
     pub fn reserve(&mut self, additional: usize) {
         if self.len + additional > self.cap {
             let cap = (self.cap * 2).max(self.len + additional).max(64);
-            let ptr = alloc(cap as u32);
+            // SAFETY: every instance keeps the same static element shape.
+            let ptr = unsafe { imports::perry_alloc_shaped(cap as u32, self.shape) };
             if self.len > 0 {
                 // SAFETY: both blocks are live and disjoint.
                 unsafe { ptr::copy_nonoverlapping(self.ptr, ptr, self.len) };

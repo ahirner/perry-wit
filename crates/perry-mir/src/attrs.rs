@@ -1,6 +1,25 @@
 //! Attributes of the `perry` dialect.
 use pliron::derive::pliron_attr;
 
+/// Absence states admitted by a statically typed value.
+#[pliron_attr(name = "perry.absence", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum Absence {
+    Undefined,
+    Null,
+    Both,
+}
+
+impl Absence {
+    pub fn admits_null(self) -> bool {
+        self != Self::Undefined
+    }
+
+    pub fn admits_undefined(self) -> bool {
+        self != Self::Null
+    }
+}
+
 /// Arithmetic on IEEE-754 doubles with ECMAScript semantics (`%` is `fmod`).
 #[pliron_attr(name = "perry.binary_kind", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]

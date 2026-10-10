@@ -1,11 +1,14 @@
 //! `ReadableStream<Uint8Array>`: over a WIT `stream<u8>` (an export argument or a fetched
-//! body) or over a body snapshot, with default readers.
+//! body) or over a body snapshot, with default and BYOB readers.
 //!
-//! A reader has at most one read outstanding. Its copy completes inline or by a stream event
+//! A default reader has one outstanding read; BYOB readers queue transferred views. A copy
+//! completes inline or by a stream event
 //! ([web_event]); an empty copy of an open stream reads again. When the writer drops its end
 //! the stream ends; a stream with a pending completion (a fetched body whose trailers decide
 //! between success and truncation) holds its final read until [complete] reports the outcome.
 use crate::*;
+
+mod byob;
 
 /// Canonical built-ins for `stream<u8>`. `src/link` binds these placeholders to the built-ins
 /// of a function of the WIT world that carries a `stream<u8>` (all such streams share one
@@ -37,7 +40,7 @@ mod canon {
     pub use host::*;
 }
 
-/// Bytes read per `read()`: the transfer size of the stream contracts.
+/// Default-reader transfer size. BYOB reads use the destination's remaining capacity.
 const READ_SIZE: u32 = 8192;
 
 const OPEN: u32 = 0;
@@ -51,6 +54,7 @@ const COMPLETION_FAILED: u32 = 2;
 /// A `ReadableStream<Uint8Array>`.
 #[repr(C)]
 pub(crate) struct Readable {
+    pin: u32,
     /// The readable end of a `stream<u8>`, 0 once dropped (or for a snapshot).
     handle: u32,
     state: u32,
@@ -67,14 +71,17 @@ pub(crate) struct Readable {
     next: *mut Readable,
 }
 
-/// A `ReadableStreamDefaultReader`, or the internal reader of `bytes()`/`text()`.
+/// A default or BYOB reader, or the internal reader of `bytes()`/`text()`.
 #[repr(C)]
 pub(crate) struct Reader {
+    pin: u32,
     stream: *mut Readable,
     released: u32,
     /// The outstanding read's promise and whether it is leased.
     pending: *mut u8,
     pending_leased: u32,
+    reads: *mut byob::Read,
+    tail: *mut byob::Read,
     /// 1 while the host fills `buffer`.
     copying: u32,
     buffer: *mut u8,
@@ -98,6 +105,7 @@ struct ReadResult {
 
 /// A body read to its end: the promise of `bytes()`, `text()` or `json()`.
 struct Drain {
+    pin: u32,
     promise: *mut u8,
     form: Form,
     contents: Buffer,
@@ -126,10 +134,15 @@ fn lists() -> &'static mut Lists {
 }
 
 fn new_readable(handle: u32, memory: *mut u8, memory_len: u32, completion: u32) -> *mut Readable {
-    let stream = alloc(core::mem::size_of::<Readable>() as u32) as *mut Readable;
+    let stream = perry_abi::object!(Readable; memory, parked);
     // SAFETY: a fresh block, linked into the list of open streams.
     unsafe {
         stream.write(Readable {
+            pin: if handle != 0 {
+                perry_abi::pin(stream.cast())
+            } else {
+                0
+            },
             handle,
             state: OPEN,
             locked: 0,
@@ -142,7 +155,9 @@ fn new_readable(handle: u32, memory: *mut u8, memory_len: u32, completion: u32) 
             next: lists().readables,
         })
     };
-    lists().readables = stream;
+    if handle != 0 {
+        lists().readables = stream;
+    }
     stream
 }
 
@@ -180,6 +195,7 @@ fn reader<'a>(r: *mut u8) -> &'a mut Reader {
 
 /// Drop the readable end and forget the stream.
 fn end(stream: &mut Readable) {
+    perry_abi::unpin(core::mem::take(&mut stream.pin));
     stream.state = ENDED;
     stream.memory = core::ptr::null_mut();
     if stream.handle != 0 {
@@ -209,15 +225,18 @@ pub extern "C" fn web_readable_locked(stream: *mut u8) -> u32 {
 }
 
 fn new_reader(stream: *mut Readable) -> *mut Reader {
-    let r = alloc(core::mem::size_of::<Reader>() as u32) as *mut Reader;
+    let r = perry_abi::object!(Reader; stream, pending, buffer, promise, result, view, leased, drain, reads, tail);
     // SAFETY: a fresh block; the caller locked the stream.
     unsafe {
         (*stream).locked = 1;
         r.write(Reader {
+            pin: 0,
             stream,
             released: 0,
             pending: core::ptr::null_mut(),
             pending_leased: 0,
+            reads: core::ptr::null_mut(),
+            tail: core::ptr::null_mut(),
             copying: 0,
             buffer: core::ptr::null_mut(),
             promise: core::ptr::null_mut(),
@@ -265,10 +284,7 @@ fn settle_read(r: &mut Reader, promise: *mut u8, leased: bool, data: *mut u8, co
     let (result, view) = if leased && !r.result.is_null() {
         (r.result, r.view)
     } else {
-        (
-            alloc(core::mem::size_of::<ReadResult>() as u32) as *mut ReadResult,
-            core::ptr::null_mut(),
-        )
+        (perry_abi::object!(ReadResult; value), core::ptr::null_mut())
     };
     let value = if count == 0 {
         core::ptr::null_mut()
@@ -278,7 +294,11 @@ fn settle_read(r: &mut Reader, promise: *mut u8, leased: bool, data: *mut u8, co
         // SAFETY: the reader's own view header.
         unsafe {
             *(view as *mut u32) = count;
-            *(view.add(4) as *mut *mut u8) = data;
+            let view = &mut *(view as *mut perry_abi::Bytes);
+            view.data = data;
+            (*view.owner).data = data;
+            (*view.owner).len = count;
+            view.offset = 0;
         }
         view
     };
@@ -301,6 +321,9 @@ fn settle_read(r: &mut Reader, promise: *mut u8, leased: bool, data: *mut u8, co
 /// Deliver `count` bytes at `data` (0: the end) to the reader's consumer. Returns true if a
 /// drain wants the next chunk.
 fn deliver(r: &mut Reader, data: *mut u8, count: u32) -> bool {
+    if !r.reads.is_null() {
+        return byob::deliver(r, count);
+    }
     if !r.drain.is_null() {
         // SAFETY: drains live as long as their reader.
         let drain = unsafe { &mut *r.drain };
@@ -312,6 +335,7 @@ fn deliver(r: &mut Reader, data: *mut u8, count: u32) -> bool {
             return true;
         }
         if drain.form == Form::Json {
+            drain.pin = perry_abi::pin((drain as *mut Drain).cast());
             drain.next = lists().parsing;
             lists().parsing = drain;
         } else {
@@ -331,14 +355,15 @@ fn at_end(r: &mut Reader) {
     match stream.completion {
         COMPLETION_PENDING => stream.parked = r,
         COMPLETION_FAILED => fail(r),
-        _ => {
-            deliver(r, core::ptr::null_mut(), 0);
-        }
+        _ => while deliver(r, core::ptr::null_mut(), 0) {},
     }
 }
 
 /// A truncated body: the read (or drain) rejects as Node's `fetch` does.
 fn fail(r: &mut Reader) {
+    if !r.reads.is_null() {
+        return byob::reject(r, "terminated");
+    }
     let promise = if r.drain.is_null() {
         core::mem::replace(&mut r.pending, core::ptr::null_mut())
     } else {
@@ -368,35 +393,71 @@ pub(crate) fn complete(stream: *mut Readable, ok: bool) {
 /// Read until the reader waits on the host or its consumer is served.
 fn pump(r: &mut Reader) {
     loop {
-        // SAFETY: readers point at their stream.
+        if !r.reads.is_null() && byob::short_closed_queue(r) {
+            end(unsafe { &mut *r.stream });
+            unsafe {
+                (*r.stream).completion = COMPLETION_FAILED;
+            }
+            return byob::reject(r, "The closed stream cannot fill the requested minimum");
+        }
+        // SAFETY: readers retain their stream; helpers do not collect internally.
         let stream = unsafe { &mut *r.stream };
         stream.disturbed = 1;
-        if stream.state != OPEN {
-            return at_end(r);
-        }
         if !stream.memory.is_null() {
-            let (data, len) = (stream.memory, stream.memory_len);
-            stream.memory = core::ptr::null_mut();
-            stream.state = ENDED;
-            if deliver(r, data, len) {
-                continue;
+            if !r.reads.is_null() {
+                let (destination, capacity) = byob::destination(r);
+                let count = capacity.min(stream.memory_len);
+                unsafe {
+                    core::ptr::copy(stream.memory, destination, count as usize);
+                }
+                stream.memory_len -= count;
+                stream.memory = if stream.memory_len == 0 {
+                    core::ptr::null_mut()
+                } else {
+                    unsafe { stream.memory.add(count as usize) }
+                };
+                if stream.handle == 0 {
+                    stream.state = ENDED;
+                }
+                if deliver(r, destination, count) {
+                    continue;
+                }
+            } else {
+                let (data, len) = (stream.memory, stream.memory_len);
+                stream.memory = core::ptr::null_mut();
+                if stream.handle == 0 {
+                    stream.state = ENDED;
+                }
+                if deliver(r, data, len) {
+                    continue;
+                }
             }
             return;
         }
-        // Leased reads and drains reuse one buffer; other reads hand theirs out.
-        r.buffer = if r.pending_leased != 0 || !r.drain.is_null() {
-            if r.leased.is_null() {
-                r.leased = alloc(READ_SIZE);
-            }
-            r.leased
+        if stream.state != OPEN {
+            return at_end(r);
+        }
+        let capacity = if !r.reads.is_null() {
+            let (data, capacity) = byob::destination(r);
+            r.buffer = data;
+            capacity
         } else {
-            alloc(READ_SIZE)
+            r.buffer = if r.pending_leased != 0 || !r.drain.is_null() {
+                if r.leased.is_null() {
+                    r.leased = alloc(READ_SIZE);
+                }
+                r.leased
+            } else {
+                alloc(READ_SIZE)
+            };
+            READ_SIZE
         };
-        // SAFETY: the buffer stays valid until the copy completes.
-        let code = unsafe { canon::read(stream.handle, r.buffer, READ_SIZE) };
+        // SAFETY: the reader retains the buffer until completion or cancellation acknowledges it.
+        let code = unsafe { canon::read(stream.handle, r.buffer, capacity) };
         if code == perry_abi::BLOCKED {
             perry_abi::join(stream.handle);
             r.copying = 1;
+            r.pin = perry_abi::pin((r as *mut Reader).cast());
             r.next = lists().waiting;
             lists().waiting = r;
             return;
@@ -470,6 +531,7 @@ fn unwait(r: *mut Reader) {
     let mut link: *mut *mut Reader = &mut lists().waiting;
     // SAFETY: the list holds live readers.
     unsafe {
+        perry_abi::unpin(core::mem::take(&mut (*r).pin));
         (*r).copying = 0;
         while !(*link).is_null() {
             if *link == r {
@@ -511,10 +573,18 @@ fn cancel_copy(r: &mut Reader) {
     if r.copying == 0 {
         return;
     }
-    unwait(r);
-    // SAFETY: readers point at their stream; the copy is outstanding on its handle.
-    let code = unsafe { canon::cancel_read((*r.stream).handle) };
+    let code = stop_copy(r);
     copied(r, code);
+}
+
+/// Detach the waitable, acknowledge cancellation, then release its buffer pin.
+fn stop_copy(r: &mut Reader) -> u32 {
+    // SAFETY: the reader retains its stream and buffer until cancellation acknowledges it.
+    let handle = unsafe { (*r.stream).handle };
+    perry_abi::unjoin(handle);
+    let code = perry_abi::acknowledged(|| unsafe { canon::cancel_read(handle) });
+    unwait(r);
+    code
 }
 
 /// `reader.cancel()`: ends the stream; an outstanding read settles first.
@@ -530,7 +600,14 @@ pub extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
         );
         return promise;
     }
-    cancel_copy(r);
+    if !r.reads.is_null() {
+        if r.copying != 0 {
+            stop_copy(r);
+        }
+        byob::cancel(r);
+    } else {
+        cancel_copy(r);
+    }
     // SAFETY: readers point at their stream.
     let stream = unsafe { &mut *r.stream };
     stream.disturbed = 1;
@@ -552,10 +629,10 @@ pub extern "C" fn web_reader_release_lock(r: *mut u8) {
     if r.released != 0 {
         return;
     }
-    if r.copying != 0 {
-        unwait(r);
-        // SAFETY: readers point at their stream; the copy is outstanding on its handle.
-        unsafe { canon::cancel_read((*r.stream).handle) };
+    let copied = if r.copying != 0 { stop_copy(r) >> 4 } else { 0 };
+    if !r.reads.is_null() {
+        byob::requeue(r, copied);
+        byob::reject(r, "Invalid state: Releasing reader");
     }
     // SAFETY: readers point at their stream.
     let stream = unsafe { &mut *r.stream };
@@ -581,7 +658,7 @@ pub extern "C" fn web_read_done(result: *mut u8) -> u32 {
     unsafe { (*(result as *const ReadResult)).done }
 }
 
-/// `result.value`: a `Uint8Array`, or null (`undefined`) when done.
+/// `result.value`: bytes, or null (`undefined`) after default-reader EOF or BYOB cancellation.
 #[unsafe(no_mangle)]
 pub extern "C" fn web_read_value(result: *mut u8) -> *mut u8 {
     // SAFETY: compiled code passes read results.
@@ -601,10 +678,11 @@ pub(crate) fn drain(stream: *mut Readable, form: Form, promise: *mut u8) {
         return;
     }
     let r = new_reader(stream);
-    let drain = alloc(core::mem::size_of::<Drain>() as u32) as *mut Drain;
+    let drain = perry_abi::object!(Drain; promise, contents);
     // SAFETY: fresh blocks.
     unsafe {
         drain.write(Drain {
+            pin: 0,
             promise,
             form,
             contents: Buffer::new(),
@@ -642,6 +720,7 @@ pub(crate) fn take_parsed(mut each: impl FnMut(*mut u8, &[u8])) {
         let drain = unsafe { &mut *drain.as_ptr() };
         lists().parsing = drain.next;
         each(drain.promise, drain.contents.as_slice());
+        perry_abi::unpin(core::mem::take(&mut drain.pin));
     }
 }
 
@@ -658,6 +737,28 @@ pub(crate) fn decode(contents: &[u8]) -> *mut u8 {
     from_bytes(text.as_slice())
 }
 
+/// Whether a fetched body's final read still awaits its completion acknowledgement.
+pub(crate) fn pending_completion(stream: *mut Readable) -> bool {
+    // SAFETY: fetch operations retain their body, or have not received one yet.
+    !stream.is_null() && unsafe { !(*stream).parked.is_null() }
+}
+
+/// Outstanding read promises owned by this task. Open, unread streams are not work.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_streams_pending() -> u32 {
+    let task = perry_abi::task();
+    let mut reader = lists().waiting;
+    let mut pending = 0;
+    // SAFETY: waiting readers and their streams are pinned until acknowledgement.
+    unsafe {
+        while !reader.is_null() {
+            pending += u32::from((*(*reader).stream).task == task);
+            reader = (*reader).next;
+        }
+    }
+    pending
+}
+
 /// At the end of the current task: cancel its outstanding copies and drop the streams it
 /// still owns, so no host handle outlives the export call.
 #[unsafe(no_mangle)]
@@ -667,12 +768,12 @@ pub extern "C" fn web_streams_close() {
     // SAFETY: listed readers and streams are live.
     unsafe {
         while !r.is_null() {
-            let next = (*r).next;
             if (*(*r).stream).task == task {
-                unwait(r);
-                canon::cancel_read((*(*r).stream).handle);
+                stop_copy(&mut *r);
+                r = lists().waiting;
+            } else {
+                r = (*r).next;
             }
-            r = next;
         }
         let mut stream = lists().readables;
         while !stream.is_null() {

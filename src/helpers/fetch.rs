@@ -2,6 +2,7 @@
 
 #[path = "fetch/url.rs"]
 mod url;
+#[cfg(test)]
 use url::normalize;
 
 fn header(input: &[u8]) -> Result<u32, ()> {
@@ -152,6 +153,12 @@ pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32)
         }
         Ok(0)
     })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn fetch_url_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+    borrow(input, length, output, capacity, |input, output| Ok(url::normalize_url(input, output)?[5]))
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -1,30 +1,26 @@
-//! Strings: UTF-8 bytes with their UTF-16 length cached (design decision, `TODOs.md` P6.1).
-//!
-//! WIT strings are UTF-8, so arguments and results cross the component boundary without
-//! transcoding. ECMAScript lengths and indices count UTF-16 code units; the cached count makes
-//! `.length` O(1), and `utf16 == len` identifies ASCII strings, where every index is a byte
-//! offset.
-//!
-//! Layout, read inline by compiled code: `len: u32` (bytes) at 0, `utf16: u32` at 4,
-//! `data: u32` at 8, `buffer: u32` at 12. Compiled constants are static objects with a null
-//! buffer. Concatenation writes into a growable buffer shared by successive results:
-//! `s = s + x` appends in place while `s` is still the buffer's most recent string, so append
-//! loops are linear, and every earlier string keeps its own length over the shared prefix.
+//! Immutable UTF-8 strings with cached scalar counts and shared append storage.
+//! Views retain an owner, byte offset and length. The cached data pointer keeps boundary
+//! transfers direct; a scalar-position cursor makes sequential non-ASCII indexing linear.
 use crate::region::perry_alloc;
 use core::ptr;
 
 pub const LEN: u32 = 0;
-pub const UTF16: u32 = 4;
+pub const SCALARS: u32 = 4;
 pub const DATA: u32 = 8;
 pub const BUFFER: u32 = 12;
-pub const SIZE: u32 = 16;
+pub const SIZE: u32 = 32;
+pub const OWNER: u32 = 16;
 
 #[repr(C)]
-struct Str {
+pub(crate) struct Str {
     len: u32,
-    utf16: u32,
+    scalars: u32,
     data: *mut u8,
     buffer: *mut Buffer,
+    owner: *mut u8,
+    offset: u32,
+    cursor_scalar: u32,
+    cursor_byte: u32,
 }
 
 /// Header of a concatenation buffer; `cap` bytes follow.
@@ -39,23 +35,33 @@ const MIN_BUFFER: u32 = 32;
 #[cfg(target_arch = "wasm32")]
 const _: () = assert!(core::mem::size_of::<Str>() == SIZE as usize);
 
-/// UTF-16 code units in valid UTF-8: one per scalar, two for scalars above U+FFFF.
-pub fn utf16_length(bytes: &[u8]) -> u32 {
-    bytes
-        .iter()
-        .map(|&b| u32::from(b & 0xC0 != 0x80) + u32::from(b >= 0xF0))
-        .sum()
+/// Unicode scalar count in valid UTF-8.
+pub fn scalars_length(bytes: &[u8]) -> u32 {
+    bytes.iter().map(|&b| u32::from(b & 0xC0 != 0x80)).sum()
 }
 
-fn new(len: u32, utf16: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
-    let string = perry_alloc(core::mem::size_of::<Str>() as u32) as *mut Str;
+fn new(len: u32, scalars: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
+    static SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Str, owner) as u32];
+    // SAFETY: the only owner field retains the immutable payload allocation.
+    let string = unsafe {
+        crate::region::perry_alloc_shaped(core::mem::size_of::<Str>() as u32, SHAPE.as_ptr())
+    } as *mut Str;
+    let owner = if buffer.is_null() {
+        data
+    } else {
+        buffer.cast()
+    };
     // SAFETY: freshly allocated, 8-aligned and SIZE bytes long.
     unsafe {
         string.write(Str {
             len,
-            utf16,
+            scalars,
             data,
             buffer,
+            owner,
+            offset: (data as usize).wrapping_sub(owner as usize) as u32,
+            cursor_scalar: 0,
+            cursor_byte: 0,
         })
     };
     string as *mut u8
@@ -75,7 +81,7 @@ pub(crate) unsafe fn bytes(string: *mut u8) -> &'static [u8] {
 pub(crate) fn from_static(text: &'static str) -> *mut u8 {
     new(
         text.len() as u32,
-        utf16_length(text.as_bytes()),
+        scalars_length(text.as_bytes()),
         text.as_ptr() as *mut u8,
         ptr::null_mut(),
     )
@@ -89,7 +95,7 @@ pub(crate) fn from_static(text: &'static str) -> *mut u8 {
 pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
-    new(len, utf16_length(bytes), data, ptr::null_mut())
+    new(len, scalars_length(bytes), data, ptr::null_mut())
 }
 
 /// `a + b`.
@@ -108,7 +114,7 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
             return b as *mut u8;
         }
         let len = (*a).len.checked_add((*b).len).expect("string too long");
-        let utf16 = (*a).utf16 + (*b).utf16;
+        let scalars = (*a).scalars + (*b).scalars;
         let buffer = (*a).buffer;
         if !buffer.is_null() {
             let bytes = (buffer as *mut u8).add(8);
@@ -120,7 +126,7 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
                     (*b).len as usize,
                 );
                 (*buffer).used += (*b).len;
-                return new(len, utf16, (*a).data, buffer);
+                return new(len, scalars, (*a).data, buffer);
             }
         }
         let cap = len.saturating_mul(2).max(MIN_BUFFER);
@@ -129,11 +135,11 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
         let bytes = (buffer as *mut u8).add(8);
         ptr::copy_nonoverlapping((*a).data, bytes, (*a).len as usize);
         ptr::copy_nonoverlapping((*b).data, bytes.add((*a).len as usize), (*b).len as usize);
-        new(len, utf16, bytes, buffer)
+        new(len, scalars, bytes, buffer)
     }
 }
 
-/// Compare two strings in UTF-16 code unit order, as ECMAScript relational comparison does:
+/// Compare two strings in Unicode scalar order (the byte order of valid UTF-8):
 /// negative, zero or positive. Null (`undefined` in `string | undefined`) equals only null.
 ///
 /// # Safety
@@ -163,9 +169,67 @@ pub unsafe extern "C" fn perry_string_compare(a: *mut u8, b: *mut u8) -> i32 {
     if a.len() == b.len() && a.as_bytes() == b.as_bytes() {
         return 0;
     }
-    match a.encode_utf16().cmp(b.encode_utf16()) {
+    match a.as_bytes().cmp(b.as_bytes()) {
         core::cmp::Ordering::Less => -1,
         core::cmp::Ordering::Equal => 0,
         core::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// Byte offset of a clamped scalar position, reusing the last forward scan.
+///
+/// # Safety
+/// `string` is a live string. A position beyond its scalar length clamps to its byte length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_offset(string: *mut u8, position: u32) -> u32 {
+    // SAFETY: caller supplies the string and the cache always names a scalar boundary.
+    unsafe {
+        let s = &mut *(string as *mut Str);
+        let position = position.min(s.scalars);
+        if s.scalars == s.len {
+            return position;
+        }
+        let (mut scalar, mut offset) = if position >= s.cursor_scalar {
+            (s.cursor_scalar, s.cursor_byte)
+        } else {
+            (0, 0)
+        };
+        while scalar < position {
+            let first = *s.data.add(offset as usize);
+            offset += if first < 0x80 {
+                1
+            } else if first < 0xe0 {
+                2
+            } else if first < 0xf0 {
+                3
+            } else {
+                4
+            };
+            scalar += 1;
+        }
+        s.cursor_scalar = scalar;
+        s.cursor_byte = offset;
+        offset
+    }
+}
+
+/// Shared immutable substring over byte boundaries.
+///
+/// # Safety
+/// `[from, to]` are ordered UTF-8 boundaries in a live string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
+    unsafe {
+        let source = &*(string as *const Str);
+        let data = source.data.add(from as usize);
+        let view = new(
+            to - from,
+            scalars_length(core::slice::from_raw_parts(data, (to - from) as usize)),
+            data,
+            source.buffer,
+        ) as *mut Str;
+        (*view).owner = source.owner;
+        (*view).offset = source.offset + from;
+        view.cast()
     }
 }

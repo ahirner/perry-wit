@@ -37,7 +37,7 @@ impl Output<'_> {
             || byte >= 127
             || matches!(byte, b'"' | b'<' | b'>')
             || (query && byte == b'\'')
-            || (!query && matches!(byte, b'?' | b'`' | b'{' | b'}'))
+            || (!query && matches!(byte, b'?' | b'^' | b'`' | b'{' | b'}'))
         {
             self.byte(b'%')?;
             self.byte(b"0123456789ABCDEF"[(byte >> 4) as usize])?;
@@ -235,6 +235,14 @@ fn dot(segment: &[u8]) -> usize {
 /// Returns secure, authority start/end, path start, and total byte length.
 /// Input storage is immutable and disjoint from output; no allocation occurs.
 pub(super) fn normalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
+    normalize_with_credentials(input, output, false)
+}
+
+fn normalize_with_credentials(
+    input: &[u8],
+    output: &mut [u8],
+    credentials: bool,
+) -> Result<[u32; 5], ()> {
     let start = input.iter().position(|byte| *byte > 32).ok_or(())?;
     let end = input.iter().rposition(|byte| *byte > 32).ok_or(())? + 1;
     let input = &input[start..end];
@@ -259,13 +267,13 @@ pub(super) fn normalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()>
             *scratch.get_mut(length).ok_or(())? = *byte;
             length += 1;
         }
-        canonicalize(&scratch[..length], target)
+        canonicalize(&scratch[..length], target, credentials)
     } else {
-        canonicalize(input, output)
+        canonicalize(input, output, credentials)
     }
 }
 
-fn canonicalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
+fn canonicalize(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u32; 5], ()> {
     let input = input.split(|byte| *byte == b'#').next().ok_or(())?;
     let scheme_end = input.iter().position(|byte| *byte == b':').ok_or(())?;
     let secure = if input[..scheme_end].eq_ignore_ascii_case(b"https") {
@@ -284,6 +292,16 @@ fn canonicalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
         .position(|byte| matches!(byte, b'/' | b'?' | b'\\'))
         .unwrap_or(rest.len());
     let authority = &rest[..end];
+    let (userinfo, authority) = if credentials {
+        authority
+            .iter()
+            .rposition(|b| *b == b'@')
+            .map_or((None, authority), |at| {
+                (Some(&authority[..at]), &authority[at + 1..])
+            })
+    } else {
+        (None, authority)
+    };
     if authority.is_empty() {
         return Err(());
     }
@@ -311,6 +329,34 @@ fn canonicalize(input: &[u8], output: &mut [u8]) -> Result<[u32; 5], ()> {
         length: 0,
     };
     out.bytes(if secure { b"https://" } else { b"http://" })?;
+    if let Some(userinfo) = userinfo {
+        let (username, password) = userinfo
+            .iter()
+            .position(|b| *b == b':')
+            .map_or((userinfo, &b""[..]), |at| {
+                (&userinfo[..at], &userinfo[at + 1..])
+            });
+        if !username.is_empty() || !password.is_empty() {
+            for (part, bytes) in [username, password].iter().enumerate() {
+                if part == 1 {
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    out.byte(b':')?;
+                }
+                for &byte in *bytes {
+                    if byte <= 32 || byte >= 127 || b"\"#<>?`{}/:;=@[\\]^|".contains(&byte) {
+                        out.byte(b'%')?;
+                        out.byte(b"0123456789ABCDEF"[(byte >> 4) as usize])?;
+                        out.byte(b"0123456789ABCDEF"[(byte & 15) as usize])?;
+                    } else {
+                        out.byte(byte)?;
+                    }
+                }
+            }
+            out.byte(b'@')?;
+        }
+    }
     let authority_start = out.length;
     if host.starts_with(b"[") {
         out.ipv6(ipv6(&host[1..host.len() - 1])?)?;
@@ -477,7 +523,15 @@ pub(super) fn resolve(base: &[u8], location: &[u8], output: &mut [u8]) -> Result
 
 /// Request.url retains its fragment, while the transport metadata excludes it.
 pub(super) fn normalize_request(input: &[u8], output: &mut [u8]) -> Result<[u32; 6], ()> {
-    let metadata = normalize(input, output)?;
+    normalize_value(input, output, false)
+}
+
+pub(super) fn normalize_url(input: &[u8], output: &mut [u8]) -> Result<[u32; 6], ()> {
+    normalize_value(input, output, true)
+}
+
+fn normalize_value(input: &[u8], output: &mut [u8], credentials: bool) -> Result<[u32; 6], ()> {
+    let metadata = normalize_with_credentials(input, output, credentials)?;
     let start = input.iter().position(|byte| *byte > 32).ok_or(())?;
     let end = input.iter().rposition(|byte| *byte > 32).ok_or(())? + 1;
     let input = &input[start..end];

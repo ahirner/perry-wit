@@ -204,7 +204,7 @@ fn stream_functions<'a>(
     })
 }
 
-fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
+pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
     Ok(match ty {
         Type::Bool => AbiType::Bool,
         Type::U8 => AbiType::U8,
@@ -222,7 +222,63 @@ fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
             let definition = &resolve.types[*id];
             match &definition.kind {
                 TypeDefKind::Type(inner) => abi_type(resolve, inner)?,
+                TypeDefKind::Resource => AbiType::Resource {
+                    key: super::resources::canonical(resolve, *id).index() as u32,
+                    owned: true,
+                },
+                TypeDefKind::Handle(
+                    wit_parser::Handle::Own(resource) | wit_parser::Handle::Borrow(resource),
+                ) => AbiType::Resource {
+                    key: super::resources::canonical(resolve, *resource).index() as u32,
+                    owned: matches!(
+                        definition.kind,
+                        TypeDefKind::Handle(wit_parser::Handle::Own(_))
+                    ),
+                },
                 TypeDefKind::List(element) => AbiType::List(Box::new(abi_type(resolve, element)?)),
+                TypeDefKind::Option(inner) => AbiType::Option(Box::new(abi_type(resolve, inner)?)),
+                TypeDefKind::Result(result) => AbiType::Result {
+                    ok: result
+                        .ok
+                        .as_ref()
+                        .map(|ty| abi_type(resolve, ty).map(Box::new))
+                        .transpose()?,
+                    err: result
+                        .err
+                        .as_ref()
+                        .map(|ty| abi_type(resolve, ty).map(Box::new))
+                        .transpose()?,
+                },
+                TypeDefKind::Variant(variant) => AbiType::Variant(
+                    variant
+                        .cases
+                        .iter()
+                        .map(|case| {
+                            Ok((
+                                case.name.clone(),
+                                case.ty
+                                    .as_ref()
+                                    .map(|ty| abi_type(resolve, ty))
+                                    .transpose()?,
+                            ))
+                        })
+                        .collect::<Result<_>>()?,
+                ),
+                TypeDefKind::Enum(enumeration) => AbiType::Enum(
+                    enumeration
+                        .cases
+                        .iter()
+                        .map(|case| case.name.clone())
+                        .collect(),
+                ),
+                TypeDefKind::Tuple(tuple) => AbiType::Record(
+                    tuple
+                        .types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| Ok((format!("_{i}"), abi_type(resolve, ty)?)))
+                        .collect::<Result<_>>()?,
+                ),
                 TypeDefKind::Stream(Some(Type::U8)) => AbiType::ByteStream,
                 TypeDefKind::Record(record) => AbiType::Record(
                     record

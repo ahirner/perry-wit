@@ -1,12 +1,8 @@
 //! `Uint8Array`, `TextEncoder` and `TextDecoder`.
 //!
-//! Layout, read inline by compiled code: `len: u32` at 0, `data: u32` at 4. A view over
-//! bytes in the task region; `subarray` views share bytes with their source.
+//! Views share a detachable owner; subarrays preserve offsets and transfer reuses the payload.
 use crate::{
-    runtime::{
-        ARRAY_DATA, RANGE_ERROR, TYPE_ERROR, adopt, alloc, bytes as string_bytes, from_static,
-        raise,
-    },
+    runtime::{ARRAY_DATA, RANGE_ERROR, alloc, bytes as string_bytes, raise},
     text::{integer, relative},
 };
 use core::ptr;
@@ -14,37 +10,100 @@ use core::ptr;
 pub const LEN: u32 = 0;
 pub const DATA: u32 = 4;
 
-#[repr(C)]
-struct Bytes {
-    len: u32,
-    data: *mut u8,
-}
+use perry_abi::Bytes;
 
-/// Largest length accepted, as in engines that cap typed arrays well below 4 GiB.
+/// Largest supported typed-array length.
 const MAX: u64 = 1 << 30;
-
-fn view(len: u32, data: *mut u8) -> *mut u8 {
-    let bytes = alloc(core::mem::size_of::<Bytes>() as u32) as *mut Bytes;
-    // SAFETY: freshly allocated.
-    unsafe { bytes.write(Bytes { len, data }) };
-    bytes as *mut u8
-}
 
 fn zeroed(len: u32) -> *mut u8 {
     let data = alloc(len);
     // SAFETY: fresh block of `len` bytes.
     unsafe { ptr::write_bytes(data, 0, len as usize) };
-    view(len, data)
+    perry_abi::bytes_view(len, data)
 }
 
 fn slice(bytes: *mut u8) -> &'static mut [u8] {
-    let bytes = bytes as *mut Bytes;
-    // SAFETY: compiled code passes live views.
+    // SAFETY: compiled code passes live views; only the attached range is mutable.
     unsafe {
-        if (*bytes).len == 0 {
+        let view = &*bytes.cast::<Bytes>();
+        if view.len == 0 || view.detached() {
             return &mut [];
         }
-        core::slice::from_raw_parts_mut((*bytes).data, (*bytes).len as usize)
+        core::slice::from_raw_parts_mut(view.data, view.len as usize)
+    }
+}
+
+fn attached(bytes: *mut u8) -> bool {
+    if unsafe { (*bytes.cast::<Bytes>()).detached() } {
+        raise(
+            crate::runtime::TYPE_ERROR,
+            "Cannot use a detached ArrayBuffer",
+        );
+        false
+    } else {
+        true
+    }
+}
+
+/// The canonical boundary reads refreshed bounds after observing detachment.
+///
+/// # Safety
+/// `view` is a live byte view.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_bytes_boundary(view: *mut u8) -> *mut u8 {
+    unsafe { perry_abi::normalize_bytes(view) }
+}
+
+/// `bytes.buffer` retains the buffer identity even after detachment.
+///
+/// # Safety
+/// `view` is a live byte view.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_bytes_buffer(view: *mut u8) -> *mut u8 {
+    unsafe { (*view.cast::<Bytes>()).owner.cast() }
+}
+
+/// `bytes.byteOffset` is zero after detachment.
+///
+/// # Safety
+/// `view` is a live byte view.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_bytes_offset(view: *mut u8) -> f64 {
+    unsafe {
+        let view = &*view.cast::<Bytes>();
+        if view.detached() {
+            0.0
+        } else {
+            f64::from(view.offset)
+        }
+    }
+}
+
+/// `buffer.byteLength`.
+///
+/// # Safety
+/// `buffer` is a live buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_buffer_length(buffer: *mut u8) -> f64 {
+    unsafe { f64::from((*buffer.cast::<perry_abi::ByteBuffer>()).len) }
+}
+
+/// `new Uint8Array(buffer)` shares an attached buffer without copying its payload.
+///
+/// # Safety
+/// `buffer` is a live buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_bytes_from_buffer(buffer: *mut u8) -> *mut u8 {
+    let buffer = buffer.cast::<perry_abi::ByteBuffer>();
+    unsafe {
+        if (*buffer).detached {
+            raise(
+                crate::runtime::TYPE_ERROR,
+                "Cannot use a detached ArrayBuffer",
+            );
+            return core::ptr::null_mut();
+        }
+        perry_abi::buffer_view(buffer, 0, (*buffer).len)
     }
 }
 
@@ -103,6 +162,9 @@ pub unsafe extern "C" fn std_bytes_from_array(array: *mut u8) -> *mut u8 {
 /// `new Uint8Array(bytes)` and `bytes.slice()`: a copy.
 #[unsafe(no_mangle)]
 pub extern "C" fn std_bytes_copy(bytes: *mut u8) -> *mut u8 {
+    if !attached(bytes) {
+        return core::ptr::null_mut();
+    }
     let source = slice(bytes);
     let copy = zeroed(source.len() as u32);
     slice(copy).copy_from_slice(source);
@@ -141,43 +203,61 @@ fn range(bytes: *mut u8, start: f64, end: f64) -> (usize, usize) {
 }
 
 /// `bytes.subarray(start, end)`: a view sharing the bytes (pass `+Infinity` for a missing end).
+///
+/// # Safety
+/// `bytes` is a live mutable byte view.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_subarray(bytes: *mut u8, start: f64, end: f64) -> *mut u8 {
+pub unsafe extern "C" fn std_bytes_subarray(bytes: *mut u8, start: f64, end: f64) -> *mut u8 {
+    if !attached(bytes) {
+        return core::ptr::null_mut();
+    }
     let (start, end) = range(bytes, start, end);
-    let data = slice(bytes).as_mut_ptr();
-    // SAFETY: `start <= len`.
-    view((end - start) as u32, unsafe { data.add(start) })
+    // SAFETY: range clamps both indices to the source length.
+    unsafe { perry_abi::bytes_subview(bytes, start as u32, (end - start) as u32) }
 }
 
 /// `bytes.slice(start, end)`: a copy.
+///
+/// # Safety
+/// `bytes` is a live mutable byte view.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_bytes_slice(bytes: *mut u8, start: f64, end: f64) -> *mut u8 {
-    std_bytes_copy(std_bytes_subarray(bytes, start, end))
+pub unsafe extern "C" fn std_bytes_slice(bytes: *mut u8, start: f64, end: f64) -> *mut u8 {
+    if !attached(bytes) {
+        return core::ptr::null_mut();
+    }
+    std_bytes_copy(unsafe { std_bytes_subarray(bytes, start, end) })
 }
 
 /// `target.set(source, offset)`; throws `RangeError` when `source` does not fit. Overlapping
 /// views copy as if through a temporary, as the specification requires.
 #[unsafe(no_mangle)]
 pub extern "C" fn std_bytes_set_from(target: *mut u8, source: *mut u8, offset: f64) {
+    if !attached(target) || !attached(source) {
+        return;
+    }
     let offset = integer(offset);
-    let (target, source) = (slice(target), slice(source));
-    if offset < 0 || offset as u64 + source.len() as u64 > target.len() as u64 {
+    let target_len = unsafe { (*target.cast::<Bytes>()).len as usize };
+    let source_len = unsafe { (*source.cast::<Bytes>()).len as usize };
+    if offset < 0 || offset as u64 + source_len as u64 > target_len as u64 {
         raise(RANGE_ERROR, "offset is out of bounds");
         return;
     }
-    // SAFETY: both ranges are in bounds; `copy` handles overlap.
+    // SAFETY: validated attached ranges; raw pointers permit overlapping aliases.
     unsafe {
         ptr::copy(
-            source.as_ptr(),
-            target.as_mut_ptr().add(offset as usize),
-            source.len(),
-        )
-    };
+            (*source.cast::<Bytes>()).data,
+            (*target.cast::<Bytes>()).data.add(offset as usize),
+            source_len,
+        );
+    }
 }
 
 /// `bytes.fill(value, start, end)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn std_bytes_fill(bytes: *mut u8, value: f64, start: f64, end: f64) {
+    if !attached(bytes) {
+        return;
+    }
     let (start, end) = range(bytes, start, end);
     slice(bytes)[start..end].fill(to_uint8(value));
 }
@@ -195,41 +275,22 @@ pub unsafe extern "C" fn std_text_encode(string: *mut u8) -> *mut u8 {
     bytes
 }
 
-/// `new TextDecoder('utf-8', { fatal }).decode(bytes)`: strips a leading BOM; malformed input
-/// throws `TypeError` when `fatal`, otherwise each maximal invalid subpart becomes U+FFFD.
+/// Adopt mutable canonical byte storage without copying its payload.
+///
+/// # Safety
+/// `data` is owned storage of at least `len` initialized bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_text_decode(bytes: *mut u8, fatal: u32) -> *mut u8 {
-    let mut input: &[u8] = slice(bytes);
-    if input.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        input = &input[3..];
-    }
-    if let Ok(text) = core::str::from_utf8(input) {
-        return crate::runtime::from_bytes(text.as_bytes());
-    }
-    if fatal != 0 {
-        raise(
-            TYPE_ERROR,
-            "The encoded data was not valid for encoding utf-8",
-        );
-        return from_static("");
-    }
-    let mut size = 0;
-    for chunk in input.utf8_chunks() {
-        size += chunk.valid().len() + if chunk.invalid().is_empty() { 0 } else { 3 };
-    }
-    let data = alloc(size as u32);
-    let mut at = 0;
-    for chunk in input.utf8_chunks() {
-        let mut put = |bytes: &[u8]| {
-            // SAFETY: `size` bytes were reserved for exactly these pieces.
-            unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), data.add(at), bytes.len()) };
-            at += bytes.len();
-        };
-        put(chunk.valid().as_bytes());
-        if !chunk.invalid().is_empty() {
-            put("\u{FFFD}".as_bytes());
-        }
-    }
-    // SAFETY: valid UTF-8 by construction.
-    unsafe { adopt(data, size as u32) }
+pub unsafe extern "C" fn std_bytes_adopt(len: u32, data: *mut u8) -> *mut u8 {
+    perry_abi::bytes_view(len, data)
+}
+
+/// Borrow existing UTF-8 storage for an outbound WIT byte list. The compiler exposes this
+/// header only through its read-only byte-input type.
+///
+/// # Safety
+/// `text` is a live Perry string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn std_string_byte_input(text: *mut u8) -> *mut u8 {
+    let bytes = unsafe { string_bytes(text) };
+    perry_abi::bytes_view(bytes.len() as u32, bytes.as_ptr().cast_mut())
 }

@@ -14,9 +14,9 @@
 //!   before arithmetic.
 //! - Records are an `i32` shape id followed by 8-byte field slots in declaration order; arrays
 //!   use the layout in [perry_runtime::array]. Exact layouts are P3.6.
-//! - Every allocation is `task` tier: the builder cannot express module state yet (R4), so no
-//!   value outlives its export call. Each export call is one task (see `perry_runtime::region`).
-//! - Strings are UTF-8 with a cached UTF-16 length (layout in [perry_runtime::string]);
+//! - Unproven and repeated allocations use precise collectible storage. Bounded task storage
+//!   remains available for small synchronous exports and recycled scheduler nodes.
+//! - Strings are UTF-8 with a cached Unicode scalar count (layout in [perry_runtime::string]);
 //!   constants are static objects in the data segment.
 //! - Exceptions use the status convention: a function that may throw returns an extra `i32`
 //!   status after its results (0 = normal, otherwise an [ErrorKind] code), and callers branch on
@@ -40,11 +40,14 @@ use perry_mir::{
         PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp, may_throw,
     },
     locals::UndefOp,
-    optional::{IsUndefinedOp, ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp},
+    optional::{
+        IsNullOp, IsUndefinedOp, NullOp, OptionalCastOp, ToNumberOp, ToStringOp, UndefinedOp,
+        UnwrapOp, WrapOp, absence,
+    },
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
-        ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType, JsonType,
-        OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordType,
+        AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
+        JsonType, OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordType,
         RequestType, ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
@@ -85,7 +88,12 @@ use std::{
 
 mod async_split;
 pub mod boundary;
+mod dates;
 mod lease;
+mod memory;
+mod regex;
+mod variants;
+pub use memory::explain_tiers;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -99,10 +107,16 @@ pub enum Exports {
     /// drives it to completion without a host (no imports) and returns its value and status.
     /// For tests and inspection.
     Raw,
+    /// Raw exports plus test-only GC stress controls and ownership counters.
+    RawChecked,
     /// Canonical-ABI exports of a WIT world, and the interfaces the world imports.
     Canonical {
+        /// Test-only forced collection and reclamation poisoning at existing safe points.
+        memory_checks: bool,
         exports: Vec<boundary::Export>,
         imports: Vec<String>,
+        bindings: Vec<boundary::Import>,
+        resources: Vec<boundary::ResourceDefinition>,
     },
 }
 
@@ -114,7 +128,9 @@ pub const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
 enum Host {
     ContextGet0,
     ContextSet0,
+    TaskCancel,
     WaitFor,
+    Foreign(String, String, Vec<boundary::Flat>, Vec<boundary::Flat>),
     /// `task.return` of an async export: (module, function, flat result types).
     TaskReturn(String, String, Vec<boundary::Flat>),
 }
@@ -122,8 +138,17 @@ enum Host {
 impl Host {
     fn symbol(&self) -> Identifier {
         let name = match self {
+            Host::Foreign(module, name, _, _) => {
+                let mut symbol = String::from("host_foreign_");
+                use std::fmt::Write;
+                for byte in format!("{module}#{name}").bytes() {
+                    write!(symbol, "{byte:02x}").unwrap();
+                }
+                symbol
+            }
             Host::ContextGet0 => "host_context_get_0".to_string(),
             Host::ContextSet0 => "host_context_set_0".to_string(),
+            Host::TaskCancel => "host_task_cancel".to_string(),
             Host::WaitFor => "host_wait_for".to_string(),
             Host::TaskReturn(module, function, _) => {
                 let clean = |s: &str| -> String {
@@ -141,8 +166,10 @@ impl Host {
     fn path(&self) -> (String, String) {
         let root = |name: &str| ("$root".to_string(), name.to_string());
         match self {
+            Host::Foreign(module, name, _, _) => (module.clone(), name.clone()),
             Host::ContextGet0 => root("[context-get-0]"),
             Host::ContextSet0 => root("[context-set-0]"),
+            Host::TaskCancel => ("[export]$root".into(), "[task-cancel]".into()),
             Host::WaitFor => (
                 MONOTONIC_CLOCK.to_string(),
                 "[async-lower]wait-for".to_string(),
@@ -157,8 +184,19 @@ impl Host {
         let i32 = i32_type(ctx);
         let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
         match self {
+            Host::Foreign(_, _, params, results) => (
+                params
+                    .iter()
+                    .map(|f| boundary::flat_type(ctx, *f))
+                    .collect(),
+                results
+                    .iter()
+                    .map(|f| boundary::flat_type(ctx, *f))
+                    .collect(),
+            ),
             Host::ContextGet0 => (vec![], vec![i32]),
             Host::ContextSet0 => (vec![i32], vec![]),
+            Host::TaskCancel => (vec![], vec![]),
             Host::WaitFor => (vec![i64], vec![i32]),
             Host::TaskReturn(_, _, flat) => (
                 flat.iter().map(|f| boundary::flat_type(ctx, *f)).collect(),
@@ -267,6 +305,11 @@ enum Runtime {
     ExitCodeSet,
     CommandOutcome,
     RejectionText,
+    AbortNew,
+    Abort,
+    AbortAborted,
+    AbortReject,
+    AbortWatch,
     EnvGet,
     EnvKeys,
     PerformanceNow,
@@ -325,6 +368,11 @@ impl Runtime {
             Runtime::ExitCodeSet => "perry_exit_code_set",
             Runtime::CommandOutcome => "perry_command_outcome",
             Runtime::RejectionText => "perry_rejection_text",
+            Runtime::AbortNew => "perry_abort_new",
+            Runtime::Abort => "perry_abort",
+            Runtime::AbortAborted => "perry_abort_aborted",
+            Runtime::AbortReject => "perry_abort_reject",
+            Runtime::AbortWatch => "perry_abort_watch",
             Runtime::EnvGet => "perry_env_get",
             Runtime::EnvKeys => "perry_env_keys",
             Runtime::PerformanceNow => "perry_performance_now",
@@ -369,6 +417,11 @@ impl Runtime {
             Runtime::CommandOutcome | Runtime::EnvGet | Runtime::RejectionText => {
                 (vec![i32], vec![i32])
             }
+            Runtime::AbortAborted => (vec![i32], vec![i32]),
+            Runtime::AbortNew => (vec![], vec![i32]),
+            Runtime::AbortReject => (vec![i32; 2], vec![]),
+            Runtime::Abort => (vec![i32; 3], vec![]),
+            Runtime::AbortWatch => (vec![i32; 3], vec![]),
             Runtime::PerformanceNow | Runtime::DateNow => (vec![], vec![f64]),
             Runtime::NumberFormat => (vec![f64, i32], vec![i32]),
             Runtime::PromiseRethrow
@@ -420,7 +473,7 @@ enum Repr {
 
 fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     let deref = ty.deref(ctx);
-    if deref.is::<FP64Type>() || deref.is::<DateType>() {
+    if deref.is::<FP64Type>() {
         return Ok(Repr::F64);
     }
     if let Some(int) = deref.downcast_ref::<IntegerType>() {
@@ -430,7 +483,14 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
             width => bail!("integers of width {width} are not supported"),
         };
     }
-    if deref.is::<RecordType>()
+    if deref.is::<DateType>()
+        || deref.is::<RecordType>()
+        || deref.is::<perry_mir::types::VariantType>()
+        || deref.is::<perry_mir::types::ResourceType>()
+        || deref.is::<perry_mir::types::NumberStringType>()
+        || deref.is::<perry_mir::types::RegexType>()
+        || deref.is::<perry_mir::types::DecoderType>()
+        || deref.is::<perry_mir::types::BigIntType>()
         || deref.is::<ArrayType>()
         || deref.is::<StringType>()
         || deref.is::<PromiseType>()
@@ -443,11 +503,19 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
         || deref.is::<WriterType>()
         || deref.is::<ReadableType>()
         || deref.is::<ReaderType>()
+        || deref.is::<perry_mir::types::ByobReaderType>()
+        || deref.is::<perry_mir::types::ByteBufferType>()
         || deref.is::<ReadResultType>()
         || deref.is::<IncomingType>()
+        || deref.is::<AbortType>()
         || deref.is::<ExceptionType>()
         || deref.is::<BytesType>()
+        || deref.is::<perry_mir::types::ByteInputType>()
+        || deref.is::<perry_mir::types::UrlType>()
+        || deref.is::<perry_mir::types::SearchParamsType>()
         || deref.is::<JsonType>()
+        || deref.is::<perry_mir::types::TransferType>()
+        || deref.is::<perry_mir::types::SlotType>()
     {
         return Ok(Repr::Ref);
     }
@@ -533,6 +601,7 @@ fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier
 struct Data {
     bytes: Vec<u8>,
     strings: HashMap<String, u32>,
+    regexes: HashMap<(String, String), u32>,
 }
 
 impl Data {
@@ -545,11 +614,15 @@ impl Data {
             self.bytes.push(0);
         }
         let address = DATA_BASE + self.bytes.len() as u32;
-        let utf16 = text.encode_utf16().count() as u32;
+        let scalars = text.chars().count() as u32;
         for word in [
             text.len() as u32,
-            utf16,
+            scalars,
             address + perry_runtime::string::SIZE,
+            0,
+            0,
+            0,
+            0,
             0,
         ] {
             self.bytes.extend_from_slice(&word.to_le_bytes());
@@ -568,6 +641,9 @@ struct ModuleState {
     host: BTreeSet<Host>,
     /// Interfaces the WIT world imports; `None` when compiling without a world.
     imports: Option<HashSet<String>>,
+    bindings: HashMap<String, boundary::Import>,
+    resources: HashMap<u32, boundary::ResourceDefinition>,
+    foreign_transfers: Vec<String>,
     /// Async functions in dispatch-kind order.
     async_functions: Vec<Identifier>,
     shapes: HashMap<String, i32>,
@@ -588,6 +664,11 @@ struct ModuleState {
     leased: HashSet<Ptr<Operation>>,
     /// Generated `JSON.stringify` serializers by MIR type.
     json_serializers: HashMap<TypeHandle, Identifier>,
+    collectible: bool,
+    memory_checks: bool,
+    pointer_maps: HashMap<TypeHandle, u32>,
+    globals: HashMap<Identifier, (u32, TypeHandle)>,
+    initializer: Option<(Identifier, u32)>,
 }
 
 impl ModuleState {
@@ -607,6 +688,8 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         .filter(|f| perry_mir::calls::is_async(ctx, f))
         .map(|f| f.get_symbol_name(ctx))
         .collect();
+    let effects = perry_mir::effects::summarize(ctx, &functions);
+    let resource_keys = boundary::resources::used_keys(ctx, &functions);
     let mut state = ModuleState {
         data: Data::default(),
         wasm: ModuleOp::new(ctx, name),
@@ -614,9 +697,27 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         runtime: BTreeSet::new(),
         host: BTreeSet::new(),
         imports: match exports {
-            Exports::Raw => None,
+            Exports::Raw | Exports::RawChecked => None,
             Exports::Canonical { imports, .. } => Some(imports.iter().cloned().collect()),
         },
+        bindings: match exports {
+            Exports::Canonical { bindings, .. } => bindings
+                .iter()
+                .cloned()
+                .map(|import| (import.binding.clone(), import))
+                .collect(),
+            _ => HashMap::new(),
+        },
+        resources: match exports {
+            Exports::Canonical { resources, .. } => resources
+                .iter()
+                .filter(|r| resource_keys.contains(&r.key))
+                .cloned()
+                .map(|r| (r.key, r))
+                .collect(),
+            _ => HashMap::new(),
+        },
+        foreign_transfers: Vec::new(),
         async_functions: async_functions.clone(),
         shapes: HashMap::new(),
         uses_io: false,
@@ -627,7 +728,41 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         uses_http_server: false,
         json_serializers: HashMap::new(),
         leased: HashSet::new(),
+        collectible: !resource_keys.is_empty()
+            || matches!(
+                exports,
+                Exports::RawChecked
+                    | Exports::Canonical {
+                        memory_checks: true,
+                        ..
+                    }
+            )
+            || memory::needs_collector(ctx, &functions, &effects),
+        memory_checks: matches!(
+            exports,
+            Exports::Canonical {
+                memory_checks: true,
+                ..
+            }
+        ),
+        pointer_maps: HashMap::new(),
+        globals: HashMap::new(),
+        initializer: None,
     };
+    if functions
+        .iter()
+        .any(|f| f.get_symbol_name(ctx).as_ref() == perry_mir::globals::INITIALIZER)
+    {
+        let address = DATA_BASE + state.data.bytes.len() as u32;
+        state.data.bytes.extend_from_slice(&[0; 8]);
+        state.initializer = Some((
+            perry_mir::globals::INITIALIZER
+                .try_into()
+                .expect("initializer"),
+            address,
+        ));
+        state.collectible = true;
+    }
     for function in &functions {
         state.leased.extend(lease::leased(ctx, function));
     }
@@ -636,7 +771,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         if let Some(kind) = async_functions.iter().position(|f| *f == symbol) {
             async_split::lower(ctx, &mut state, function, kind as i32)
                 .with_context(|| format!("lowering async function {symbol} to wasm"))?;
-            if matches!(exports, Exports::Raw) && is_exported(ctx, function) {
+            if matches!(exports, Exports::Raw | Exports::RawChecked) && is_exported(ctx, function) {
                 let wrapper = async_export_wrapper(ctx, &mut state, function, &symbol)?;
                 state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
             }
@@ -645,7 +780,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         let lowered = FunctionLowering::lower(ctx, &mut state, function)
             .with_context(|| format!("lowering function {symbol} to wasm"))?;
         state.wasm.append_operation(ctx, lowered.get_operation(), 0);
-        if matches!(exports, Exports::Raw) && is_exported(ctx, function) {
+        if matches!(exports, Exports::Raw | Exports::RawChecked) && is_exported(ctx, function) {
             let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
             state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
         }
@@ -690,6 +825,10 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         }
         boundary::realloc(ctx, &mut state);
     }
+    if matches!(exports, Exports::RawChecked) {
+        memory::export_checks(ctx, &mut state);
+    }
+    boundary::resources::emit_drain(ctx, &mut state);
     for runtime in state.runtime.clone() {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
@@ -724,18 +863,15 @@ fn export_wrapper(
     set_export(ctx, &wrapper, name.as_ref());
     let entry = wrapper.get_entry_block(ctx);
     let args: Vec<_> = entry.deref(ctx).arguments().collect();
-    state.runtime.insert(Runtime::TaskEnter);
-    state.runtime.insert(Runtime::TaskFree);
-    let i32 = i32_type(ctx);
-    let begin = CallOp::new(ctx, Runtime::TaskEnter.symbol(), vec![], vec![i32]);
-    begin.get_operation().insert_at_back(entry, ctx);
-    let call = CallOp::new(ctx, name.clone(), args, results);
-    call.get_operation().insert_at_back(entry, ctx);
-    let values: Vec<_> = call.get_operation().deref(ctx).results().collect();
-    let end = CallOp::new(ctx, Runtime::TaskFree.symbol(), vec![], vec![]);
-    end.get_operation().insert_at_back(entry, ctx);
-    let ret = ReturnOp::new(ctx, values);
-    ret.get_operation().insert_at_back(entry, ctx);
+    let mut b = FunctionLowering::glue(state, ctx, &wrapper);
+    b.runtime(ctx, Runtime::TaskEnter, vec![]);
+    b.initialize_module(ctx);
+    let call = CallOp::new(ctx, name.clone(), args, results).get_operation();
+    b.insert(ctx, call);
+    let values: Vec<_> = call.deref(ctx).results().collect();
+    b.runtime(ctx, Runtime::TaskFree, vec![]);
+    let ret = ReturnOp::new(ctx, values).get_operation();
+    b.insert(ctx, ret);
     for param in params {
         ensure!(
             repr(ctx, param)? != Repr::Ref,
@@ -780,9 +916,11 @@ fn async_export_wrapper(
         .collect();
     let mut b = FunctionLowering::glue(state, ctx, &wrapper);
     b.runtime(ctx, Runtime::TaskEnter, vec![]);
+    b.initialize_module(ctx);
     let call = CallOp::new(ctx, name.clone(), args, vec![i32]).get_operation();
     b.insert(ctx, call);
     let promise = call.deref(ctx).get_result(0);
+    b.runtime(ctx, Runtime::TaskSetResult, vec![promise]);
     let drive = CallOp::new(ctx, async_split::drive_name(), vec![], vec![]).get_operation();
     b.insert(ctx, drive);
     let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
@@ -822,6 +960,11 @@ struct FunctionLowering<'s> {
     landing: Option<(Ptr<BasicBlock>, Vec<TypeHandle>)>,
     /// The frame, when lowering the step function of an async function.
     frame: Option<async_split::Frame>,
+    root_base: Option<Value>,
+    local_frame: Option<Value>,
+    frame_slots: HashMap<Ptr<Operation>, u32>,
+    canonical_borrows: bool,
+    resource_scope: Option<(Value, Option<Value>)>,
 }
 
 impl<'s> FunctionLowering<'s> {
@@ -839,6 +982,11 @@ impl<'s> FunctionLowering<'s> {
             throw_block: None,
             landing: None,
             frame: None,
+            root_base: None,
+            local_frame: None,
+            frame_slots: HashMap::new(),
+            canonical_borrows: false,
+            resource_scope: None,
         }
     }
 
@@ -870,6 +1018,8 @@ impl<'s> FunctionLowering<'s> {
         lowering.throws = throws;
         lowering.results = results;
         lowering.map_blocks(ctx, mir, Some(entry))?;
+        lowering.enter_roots(ctx);
+        lowering.prepare_frame_storage(ctx, mir)?;
         lowering.translate(ctx, mir)?;
         Ok(function)
     }
@@ -914,6 +1064,7 @@ impl<'s> FunctionLowering<'s> {
     /// function, values kept in the frame are stored where they are defined.
     fn translate(&mut self, ctx: &mut Context, mir: &FuncOp) -> Result<()> {
         let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
+        let live = lease::live_after_ops(ctx, mir);
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];
             let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
@@ -922,6 +1073,8 @@ impl<'s> FunctionLowering<'s> {
             let mut index = 0;
             while index < ops.len() {
                 let op = ops[index];
+                self.clear_dead_frame_slots(ctx, op, &live[&op]);
+                let root_mark = self.safe_point(ctx, op, &live[&op])?;
                 // `op; status = perry.caught`: route the exception of `op` to `status`.
                 let caught = ops
                     .get(index + 1)
@@ -964,6 +1117,7 @@ impl<'s> FunctionLowering<'s> {
                     self.spill(ctx, &results);
                     index += 1;
                 }
+                self.end_safe_point(ctx, root_mark);
                 index += 1;
             }
         }
@@ -1054,11 +1208,12 @@ impl<'s> FunctionLowering<'s> {
         if ty.deref(ctx).is::<ExceptionType>() {
             return Ok(value);
         }
-        use perry_runtime::exception::{TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
+        use perry_runtime::exception::{TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
         let tag = match repr(ctx, ty)? {
             Repr::F64 => TAG_NUMBER,
             Repr::Bool => TAG_BOOLEAN,
             _ if ty.deref(ctx).is::<StringType>() => TAG_STRING,
+            _ if ty.deref(ctx).is::<perry_mir::types::BigIntType>() => TAG_BIGINT,
             _ => bail!("this value cannot be thrown yet"),
         };
         let kind = self.i32_const(ctx, status_code(ErrorKind::Value));
@@ -1082,11 +1237,37 @@ impl<'s> FunctionLowering<'s> {
     }
 
     fn runtime(&mut self, ctx: &mut Context, function: Runtime, args: Vec<Value>) -> Option<Value> {
+        if matches!(function, Runtime::TaskFree) && self.state.collectible {
+            self.call(ctx, "perry_gc_task_leave", &[], &[], vec![]);
+        }
         self.state.runtime.insert(function);
         let (_, results) = function.signature(ctx);
         let op = CallOp::new(ctx, function.symbol(), args, results).get_operation();
         self.insert(ctx, op);
-        op.deref(ctx).results().next()
+        let result = op.deref(ctx).results().next();
+        if self.canonical_borrows && matches!(function, Runtime::Alloc) {
+            self.call(
+                ctx,
+                "perry_roots_push",
+                &[W::I32],
+                &[],
+                vec![result.expect("allocation")],
+            );
+        }
+        if self.state.collectible {
+            if matches!(function, Runtime::TaskEnter) {
+                if self.state.memory_checks {
+                    let flags = self.i32_const(ctx, 3);
+                    self.call(ctx, "perry_gc_debug", &[W::I32], &[], vec![flags]);
+                }
+                self.call(ctx, "perry_gc_task_enter", &[], &[], vec![]);
+                self.drain_resources(ctx);
+            }
+            if matches!(function, Runtime::TaskFree) {
+                self.call(ctx, "perry_gc_task_end", &[], &[], vec![]);
+            }
+        }
+        result
     }
 
     fn br(&mut self, ctx: &mut Context, dest: Ptr<BasicBlock>, args: Vec<Value>) {
@@ -1169,6 +1350,7 @@ impl<'s> FunctionLowering<'s> {
             values.push(zero);
         }
         values.push(block.deref(ctx).get_argument(0));
+        self.leave_roots(ctx);
         let op = ReturnOp::new(ctx, values).get_operation();
         self.insert(ctx, op);
         self.block = saved;
@@ -1250,6 +1432,79 @@ impl<'s> FunctionLowering<'s> {
         })
     }
 
+    fn null(&mut self, ctx: &mut Context, ty: TypeHandle) -> Result<Value> {
+        Ok(match repr(ctx, ty)? {
+            Repr::F64 => {
+                let bits = self.i64_const(ctx, 0x7ff0_0000_0000_0002);
+                self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits])
+            }
+            Repr::Bool => self.i32_const(ctx, 3),
+            Repr::Ref => self.i32_const(ctx, 1),
+            Repr::I32 => bail!("i32 | null has no representation"),
+        })
+    }
+
+    fn absence_test(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        ty: TypeHandle,
+        null: bool,
+    ) -> Result<Value> {
+        let admitted = absence(ctx, ty).is_some_and(|a| {
+            if null {
+                a.admits_null()
+            } else {
+                a.admits_undefined()
+            }
+        });
+        if !admitted {
+            return Ok(self.i32_const(ctx, 0));
+        }
+        if !null {
+            return self.is_undefined(ctx, value, ty);
+        }
+        let sentinel = self.null(ctx, ty)?;
+        Ok(if repr(ctx, ty)? == Repr::F64 {
+            let bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value]);
+            let sentinel = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![sentinel]);
+            self.num(ctx, NumOpcode::I64Eq, vec![bits, sentinel])
+        } else {
+            self.num(ctx, NumOpcode::I32Eq, vec![value, sentinel])
+        })
+    }
+
+    fn is_absent(&mut self, ctx: &mut Context, value: Value, ty: TypeHandle) -> Result<Value> {
+        let undefined = self.absence_test(ctx, value, ty, false)?;
+        let null = self.absence_test(ctx, value, ty, true)?;
+        Ok(self.num(ctx, NumOpcode::I32Or, vec![undefined, null]))
+    }
+
+    fn optional_cast(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        source: TypeHandle,
+        target: TypeHandle,
+    ) -> Result<Value> {
+        let from = absence(ctx, source).expect("optional source");
+        let to = absence(ctx, target).expect("optional target");
+        if from == to {
+            return Ok(value);
+        }
+        if from.admits_undefined() && !to.admits_undefined() {
+            let rejected = self.absence_test(ctx, value, source, false)?;
+            self.throw_if(ctx, rejected, ErrorKind::TypeError);
+        }
+        if from.admits_null() {
+            let null = self.absence_test(ctx, value, source, true)?;
+            if !to.admits_null() {
+                self.throw_if(ctx, null, ErrorKind::TypeError);
+            }
+        }
+        Ok(value)
+    }
+
     // --- arrays -------------------------------------------------------------------------------
 
     /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
@@ -1279,7 +1534,14 @@ impl<'s> FunctionLowering<'s> {
     }
 
     /// Append `value` to `array`, growing it through the runtime when full.
-    fn push(&mut self, ctx: &mut Context, array: Value, value: Value, kind: MemKind) {
+    fn push(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        value: Value,
+        kind: MemKind,
+        references: bool,
+    ) {
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
@@ -1287,7 +1549,18 @@ impl<'s> FunctionLowering<'s> {
         let write = self.new_block(ctx, vec![]);
         self.cond_br(ctx, full, (grow, vec![]), (write, vec![]));
         self.block = grow;
-        self.runtime(ctx, Runtime::ArrayGrow, vec![array]);
+        if self.state.collectible {
+            let references = self.i32_const(ctx, i32::from(references));
+            self.call(
+                ctx,
+                "perry_array_grow_collectible",
+                &[W::I32, W::I32],
+                &[],
+                vec![array, references],
+            );
+        } else {
+            self.runtime(ctx, Runtime::ArrayGrow, vec![array]);
+        }
         self.br(ctx, write, vec![]);
         self.block = write;
         let data = self.load(ctx, MemKind::I32, array, layout::DATA);
@@ -1304,7 +1577,7 @@ impl<'s> FunctionLowering<'s> {
         Ok(ty.deref(ctx).element())
     }
 
-    fn field_slot(ctx: &Context, record: Value, field: &Identifier) -> Result<(u32, TypeHandle)> {
+    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
         let ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
             .map_err(|_| anyhow!("expected a record"))?;
         let ty = ty.deref(ctx);
@@ -1332,6 +1605,7 @@ impl<'s> FunctionLowering<'s> {
     ) -> Result<()> {
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {
+            Intrinsic::BytesByteInput | Intrinsic::UrlSearchParams => Some(args[0]),
             Intrinsic::PrintOut | Intrinsic::PrintErr => {
                 let (interface, fd) = if intrinsic == Intrinsic::PrintOut {
                     ("wasi:cli/stdout@0.3.0", 0)
@@ -1346,23 +1620,14 @@ impl<'s> FunctionLowering<'s> {
                 None
             }
             Intrinsic::NumberToString => {
-                // A string header followed by up to 40 bytes of ryu-js output.
-                let size = self.i32_const(ctx, (perry_runtime::string::SIZE + 40) as i32);
-                let string = self
+                let size = self.i32_const(ctx, 40);
+                let data = self
                     .runtime(ctx, Runtime::Alloc, vec![size])
-                    .expect("string");
-                let header = self.i32_const(ctx, perry_runtime::string::SIZE as i32);
-                let data = self.num(ctx, NumOpcode::I32Add, vec![string, header]);
+                    .expect("number text");
                 let len = self
                     .runtime(ctx, Runtime::NumberFormat, vec![args[0], data])
                     .expect("length");
-                use perry_runtime::string::{BUFFER, DATA, LEN, UTF16};
-                self.store(ctx, MemKind::I32, string, LEN, len);
-                self.store(ctx, MemKind::I32, string, UTF16, len);
-                self.store(ctx, MemKind::I32, string, DATA, data);
-                let zero = self.i32_const(ctx, 0);
-                self.store(ctx, MemKind::I32, string, BUFFER, zero);
-                Some(string)
+                self.runtime(ctx, Runtime::StringAdopt, vec![data, len])
             }
             Intrinsic::EnvGet | Intrinsic::EnvKeys => {
                 self.needs_import("wasi:cli/environment@0.3.0", "process.env")?;
@@ -1405,47 +1670,21 @@ impl<'s> FunctionLowering<'s> {
                 let rounded = self.select(ctx, up, next, floor);
                 Some(self.num(ctx, NumOpcode::F64Copysign, vec![rounded, x]))
             }
-            Intrinsic::DateFromTime => {
-                // TimeClip: NaN beyond ±8.64e15 ms, else the integer part, without -0.
-                let t = args[0];
-                let magnitude = self.num(ctx, NumOpcode::F64Abs, vec![t]);
-                let limit = self.f64_const(ctx, 8.64e15);
-                let valid = self.num(ctx, NumOpcode::F64Le, vec![magnitude, limit]);
-                let truncated = self.num(ctx, NumOpcode::F64Trunc, vec![t]);
-                let zero = self.f64_const(ctx, 0.0);
-                let clipped = self.num(ctx, NumOpcode::F64Add, vec![truncated, zero]);
-                let nan = self.f64_const(ctx, f64::NAN);
-                Some(self.select(ctx, valid, clipped, nan))
-            }
-            Intrinsic::DateTime => Some(args[0]),
-            Intrinsic::DateIso => {
-                let size = self.i32_const(ctx, 32);
-                let out = self.runtime(ctx, Runtime::Alloc, vec![size]).expect("out");
-                let capacity = self.i32_const(ctx, 32);
-                let packed = self
-                    .call(
-                        ctx,
-                        "time_date_iso",
-                        &[W::F64, W::I32, W::I32],
-                        &[W::I64],
-                        vec![args[0], out, capacity],
-                    )
-                    .expect("result");
-                let thirty_two = self.i64_const(ctx, 32);
-                let error = self.num(ctx, NumOpcode::I64ShrU, vec![packed, thirty_two]);
-                let error = self.num(ctx, NumOpcode::I32WrapI64, vec![error]);
-                let failed = self.new_block(ctx, vec![]);
-                let formatted = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, error, (failed, vec![]), (formatted, vec![]));
-                self.block = failed;
-                let status = self
-                    .call(ctx, "std_raise_invalid_date", &[], &[W::I32], vec![])
-                    .expect("status");
-                let (target, throw_args) = self.throw_target(ctx, status);
-                self.br(ctx, target, throw_args);
-                self.block = formatted;
-                let len = self.num(ctx, NumOpcode::I32WrapI64, vec![packed]);
-                self.runtime(ctx, Runtime::StringAdopt, vec![out, len])
+            Intrinsic::DateFromTime
+            | Intrinsic::DateTime
+            | Intrinsic::DateParse
+            | Intrinsic::DateUtc
+            | Intrinsic::DatePart
+            | Intrinsic::DateSet
+            | Intrinsic::DateIso
+            | Intrinsic::DateJson => self.date_intrinsic(ctx, intrinsic, args),
+            Intrinsic::DecoderFatal | Intrinsic::DecoderIgnoreBom => {
+                let offset = if intrinsic == Intrinsic::DecoderFatal {
+                    0
+                } else {
+                    4
+                };
+                Some(self.load(ctx, MemKind::I32, args[0], offset))
             }
             Intrinsic::StringLower | Intrinsic::StringUpper => {
                 // The text helper measures, then converts (full Unicode case mappings).
@@ -1516,6 +1755,18 @@ impl<'s> FunctionLowering<'s> {
                     .expect("root");
                 Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
             }
+            Intrinsic::AbortNew => self.runtime(ctx, Runtime::AbortNew, args),
+            Intrinsic::AbortAbort => {
+                let message = self.state.data.string("The operation was aborted");
+                let message = self.i32_const(ctx, message as i32);
+                let scope_error = self
+                    .state
+                    .data
+                    .string("AbortSignal cancellation is limited to the current export task");
+                let scope_error = self.i32_const(ctx, scope_error as i32);
+                self.runtime(ctx, Runtime::Abort, vec![args[0], message, scope_error])
+            }
+            Intrinsic::AbortAborted => self.runtime(ctx, Runtime::AbortAborted, args),
             Intrinsic::JsonIsUndefined => Some(self.num(ctx, NumOpcode::I32Eqz, args)),
             Intrinsic::ExceptionSetCause => {
                 let (exception, cause) = (args[0], args[1]);
@@ -1612,6 +1863,16 @@ impl<'s> FunctionLowering<'s> {
                 self.state.uses_streams = true;
                 self.call(ctx, "web_body_stream", &[W::I32], &[W::I32], args)
             }
+            Intrinsic::ReaderReadByob => {
+                self.state.uses_streams = true;
+                self.call(
+                    ctx,
+                    "web_reader_read_byob",
+                    &[W::I32, W::I32, W::F64],
+                    &[W::I32],
+                    args,
+                )
+            }
             Intrinsic::ReaderRead => {
                 self.state.uses_streams = true;
                 let leased = self.i32_const(ctx, i32::from(self.state.leased.contains(&op)));
@@ -1654,8 +1915,20 @@ impl<'s> FunctionLowering<'s> {
                         Intrinsic::StringCharAt => {
                             ("std_string_char_at", &[W::I32, W::F64], &[W::I32])
                         }
-                        Intrinsic::StringCharCodeAt => {
-                            ("std_string_char_code_at", &[W::I32, W::F64], &[W::F64])
+                        Intrinsic::BigIntFromNumber => {
+                            ("std_bigint_from_number", &[W::F64], &[W::I32])
+                        }
+                        Intrinsic::BigIntNegate => ("std_bigint_negate", &[W::I32], &[W::I32]),
+                        Intrinsic::BigIntToNumber => ("std_bigint_to_number", &[W::I32], &[W::F64]),
+                        Intrinsic::BigIntToString => ("std_bigint_to_string", &[W::I32], &[W::I32]),
+                        Intrinsic::StringFromCodePoint => {
+                            ("std_string_from_code_point", &[W::F64], &[W::I32])
+                        }
+                        Intrinsic::StringCodePointAt => {
+                            ("std_string_code_point_at", &[W::I32, W::F64], &[W::F64])
+                        }
+                        Intrinsic::StringIndex => {
+                            ("std_string_index", &[W::I32, W::F64], &[W::I32])
                         }
                         Intrinsic::StringSlice => {
                             ("std_string_slice", &[W::I32, W::F64, W::F64], &[W::I32])
@@ -1680,11 +1953,20 @@ impl<'s> FunctionLowering<'s> {
                             ("std_string_ends_with", &[W::I32, W::I32, W::F64], &[W::I32])
                         }
                         Intrinsic::StringTrim => ("std_string_trim", &[W::I32], &[W::I32]),
+                        Intrinsic::StringSplit => {
+                            ("std_string_split", &[W::I32, W::I32], &[W::I32])
+                        }
                         Intrinsic::StringRepeat => {
                             ("std_string_repeat", &[W::I32, W::F64], &[W::I32])
                         }
                         Intrinsic::BytesNew => ("std_bytes_new", &[W::F64], &[W::I32]),
                         Intrinsic::BytesFromArray => ("std_bytes_from_array", &[W::I32], &[W::I32]),
+                        Intrinsic::BytesBuffer => ("std_bytes_buffer", &[W::I32], &[W::I32]),
+                        Intrinsic::BytesOffset => ("std_bytes_offset", &[W::I32], &[W::F64]),
+                        Intrinsic::BufferLength => ("std_buffer_length", &[W::I32], &[W::F64]),
+                        Intrinsic::BytesFromBuffer => {
+                            ("std_bytes_from_buffer", &[W::I32], &[W::I32])
+                        }
                         Intrinsic::BytesCopy => ("std_bytes_copy", &[W::I32], &[W::I32]),
                         Intrinsic::BytesGet => ("std_bytes_get", &[W::I32, W::F64], &[W::I64]),
                         Intrinsic::BytesSet => ("std_bytes_set", &[W::I32, W::F64, W::F64], &[]),
@@ -1702,14 +1984,39 @@ impl<'s> FunctionLowering<'s> {
                             ("std_bytes_fill", &[W::I32, W::F64, W::F64, W::F64], &[])
                         }
                         Intrinsic::TextEncode => ("std_text_encode", &[W::I32], &[W::I32]),
-                        Intrinsic::TextDecode => ("std_text_decode", &[W::I32, W::I32], &[W::I32]),
+                        Intrinsic::StringByteInput => {
+                            ("std_string_byte_input", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::UrlNew => ("web_url_new", &[W::I32; 2], &[W::I32]),
+                        Intrinsic::UrlGet => ("web_url_get", &[W::I32, W::F64], &[W::I32]),
+                        Intrinsic::UrlSetPathname => ("web_url_set_pathname", &[W::I32; 2], &[]),
+                        Intrinsic::UrlAppend => ("web_url_append", &[W::I32; 3], &[]),
+                        Intrinsic::EncodeUriComponent => {
+                            ("web_encode_uri_component", &[W::I32], &[W::I32])
+                        }
+                        Intrinsic::RegexSearch => {
+                            ("std_regex_search", &[W::I32, W::I32], &[W::F64])
+                        }
+                        Intrinsic::DecoderNew => ("std_decoder_new", &[W::I32, W::I32], &[W::I32]),
+                        Intrinsic::TextDecode => {
+                            ("std_decoder_decode", &[W::I32, W::I32, W::I32], &[W::I32])
+                        }
                         Intrinsic::JsonMember => ("std_json_member", &[W::I32, W::I32], &[W::I32]),
+                        Intrinsic::JsonKeys => ("std_json_keys", &[W::I32], &[W::I32]),
                         Intrinsic::JsonIndex => ("std_json_index", &[W::I32, W::F64], &[W::I32]),
                         Intrinsic::JsonLength => ("std_json_length", &[W::I32], &[W::I64]),
                         Intrinsic::JsonToNumber => ("std_json_to_number", &[W::I32], &[W::F64]),
+                        Intrinsic::JsonRequireNumber => {
+                            ("std_json_require_number", &[W::I32], &[W::F64])
+                        }
                         Intrinsic::JsonToString => ("std_json_to_string", &[W::I32], &[W::I32]),
                         Intrinsic::JsonToBool => ("std_json_to_bool", &[W::I32], &[W::I32]),
+                        Intrinsic::JsonTruthy => ("std_json_truthy", &[W::I32], &[W::I32]),
                         Intrinsic::JsonTypeOf => ("std_json_type_of", &[W::I32], &[W::I32]),
+                        Intrinsic::JsonRequireObject => ("std_json_require_object", &[W::I32], &[]),
+                        Intrinsic::JsonFirst => ("std_json_first", &[W::I32], &[W::I32]),
+                        Intrinsic::JsonNext => ("std_json_next", &[W::I32], &[W::I32]),
+                        Intrinsic::JsonIsNull => ("std_json_is_null", &[W::I32], &[W::I32]),
                         Intrinsic::JsonObject => ("std_json_object", &[], &[W::I32]),
                         Intrinsic::JsonAssign => ("std_json_assign", &[W::I32, W::I32], &[]),
                         Intrinsic::JsonSet => ("std_json_set", &[W::I32, W::I32, W::I32], &[]),
@@ -1793,7 +2100,7 @@ impl<'s> FunctionLowering<'s> {
                         Intrinsic::WriterClose => ("web_writer_close", &[W::I32], &[W::I32]),
                         Intrinsic::WriterReleaseLock => ("web_writer_release_lock", &[W::I32], &[]),
                         Intrinsic::ReadableLocked => ("web_readable_locked", &[W::I32], &[W::I32]),
-                        Intrinsic::ReadableGetReader => {
+                        Intrinsic::ReadableGetReader | Intrinsic::ReadableGetByobReader => {
                             ("web_readable_get_reader", &[W::I32], &[W::I32])
                         }
                         Intrinsic::ReadableCancel => ("web_readable_cancel", &[W::I32], &[W::I32]),
@@ -1829,7 +2136,16 @@ impl<'s> FunctionLowering<'s> {
                 .expect("status");
             self.throw_status_if(ctx, status, status);
         }
-        if let Some(value) = value {
+        if let Some(mut value) = value {
+            let ty = op.deref(ctx).get_result(0).get_type(ctx);
+            if absence(ctx, ty) == Some(perry_mir::attrs::Absence::Null)
+                && repr(ctx, ty)? == Repr::Ref
+            {
+                // Helpers use C null pointers; compiled null has a stable distinct sentinel.
+                let absent = self.num(ctx, NumOpcode::I32Eqz, vec![value]);
+                let null = self.null(ctx, ty)?;
+                value = self.select(ctx, absent, null, value);
+            }
             self.define(ctx, op, value);
         }
         Ok(())
@@ -1879,7 +2195,7 @@ impl<'s> FunctionLowering<'s> {
     ) -> Result<()> {
         if let Some(inner) = optional_inner(ctx, ty) {
             // Inside arrays, `undefined` is written as `null`.
-            let undefined = self.is_undefined(ctx, value, inner)?;
+            let undefined = self.is_absent(ctx, value, ty)?;
             let null = self.new_block(ctx, vec![]);
             let defined = self.new_block(ctx, vec![]);
             let join = self.new_block(ctx, vec![]);
@@ -1892,6 +2208,9 @@ impl<'s> FunctionLowering<'s> {
             self.br(ctx, join, vec![]);
             self.block = join;
             return Ok(());
+        }
+        if ty.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+            return self.json_number_string(ctx, writer, value);
         }
         let deref = ty.deref(ctx);
         if deref.is::<FP64Type>() {
@@ -1937,6 +2256,16 @@ impl<'s> FunctionLowering<'s> {
             );
             return Ok(());
         }
+        if deref.is::<DateType>() {
+            drop(deref);
+            let text = self
+                .date_intrinsic(ctx, Intrinsic::DateJson, vec![value])
+                .expect("date JSON");
+            let string = StringType::get(ctx).into();
+            let nullable =
+                OptionalType::get_with(ctx, string, perry_mir::attrs::Absence::Null).into();
+            return self.json_value(ctx, writer, text, nullable);
+        }
         if deref.is::<ExceptionType>() {
             drop(deref);
             self.json_raw(ctx, writer, "{}");
@@ -1971,7 +2300,9 @@ impl<'s> FunctionLowering<'s> {
             );
             return Ok(());
         }
-        let container = deref.is::<RecordType>() || deref.is::<ArrayType>();
+        let container = deref.is::<RecordType>()
+            || deref.is::<ArrayType>()
+            || deref.is::<perry_mir::types::VariantType>();
         drop(deref);
         ensure!(
             container,
@@ -2003,7 +2334,9 @@ impl<'s> FunctionLowering<'s> {
         let value = entry.deref(ctx).get_argument(1);
         let mut b = FunctionLowering::glue(self.state, ctx, &function);
         let record = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
-        let (open, close) = if record.is_some() {
+        let tuple = record.is_some_and(|record| record.deref(ctx).is_tuple());
+        let variant = TypedHandle::<perry_mir::types::VariantType>::from_handle(ty, ctx).ok();
+        let (open, close) = if (record.is_some() && !tuple) || variant.is_some() {
             ('{', '}')
         } else {
             ('[', ']')
@@ -2033,19 +2366,24 @@ impl<'s> FunctionLowering<'s> {
             for (index, (field, field_ty)) in fields.into_iter().enumerate() {
                 let kind = slot_kind(ctx, field_ty)?;
                 let slot = b.load(ctx, kind, value, 8 + 8 * index as u32);
+                if tuple {
+                    b.call(ctx, "std_json_item", &[W::I32], &[], vec![writer]);
+                    b.json_value(ctx, writer, slot, field_ty)?;
+                    continue;
+                }
                 let mut key = Vec::new();
                 quote_json(&mut key, &field);
                 key.push(b':');
                 let key = String::from_utf8(key).expect("UTF-8");
                 let key = b.state.data.string(&key);
                 // Members holding `undefined` are left out.
-                let (present, inner) = match optional_inner(ctx, field_ty) {
-                    Some(inner) => {
-                        let undefined = b.is_undefined(ctx, slot, inner)?;
+                let present = match optional_inner(ctx, field_ty) {
+                    Some(_) => {
+                        let undefined = b.absence_test(ctx, slot, field_ty, false)?;
                         let present = b.num(ctx, NumOpcode::I32Eqz, vec![undefined]);
-                        (Some(present), inner)
+                        Some(present)
                     }
-                    None => (None, field_ty),
+                    None => None,
                 };
                 let member = b.new_block(ctx, vec![]);
                 let next = b.new_block(ctx, vec![]);
@@ -2062,10 +2400,12 @@ impl<'s> FunctionLowering<'s> {
                     &[],
                     vec![writer, key],
                 );
-                b.json_value(ctx, writer, slot, inner)?;
+                b.json_value(ctx, writer, slot, field_ty)?;
                 b.br(ctx, next, vec![]);
                 b.block = next;
             }
+        } else if let Some(variant) = variant {
+            b.json_variant(ctx, writer, value, variant)?;
         } else {
             let element = FunctionLowering::element_type(ctx, value).or_else(|_| {
                 TypedHandle::<ArrayType>::from_handle(ty, ctx)
@@ -2108,12 +2448,11 @@ impl<'s> FunctionLowering<'s> {
             .expect("writer");
         let json = ty.deref(ctx).is::<JsonType>();
         let text = if json || optional_inner(ctx, ty).is_some() {
-            let inner = optional_inner(ctx, ty).unwrap_or(ty);
             // A top-level `undefined` stringifies to `undefined`.
             let undefined = if json {
                 self.num(ctx, NumOpcode::I32Eqz, vec![value])
             } else {
-                self.is_undefined(ctx, value, inner)?
+                self.absence_test(ctx, value, ty, false)?
             };
             let i32 = i32_type(ctx);
             let write = self.new_block(ctx, vec![]);
@@ -2121,7 +2460,7 @@ impl<'s> FunctionLowering<'s> {
             let null = self.i32_const(ctx, 0);
             self.cond_br(ctx, undefined, (join, vec![null]), (write, vec![]));
             self.block = write;
-            self.json_value(ctx, writer, value, inner)?;
+            self.json_value(ctx, writer, value, ty)?;
             let text = self.json_finish(ctx, writer);
             self.br(ctx, join, vec![text]);
             self.block = join;
@@ -2148,6 +2487,114 @@ impl<'s> FunctionLowering<'s> {
     // --- ops ----------------------------------------------------------------------------------
 
     fn op(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
+        if let Some(variant) = Operation::get_op::<perry_mir::variants::VariantNewOp>(op, ctx) {
+            let payload = if op.deref(ctx).get_num_operands() == 0 {
+                None
+            } else {
+                let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+                Some((ty, self.operand(ctx, op, 0)?))
+            };
+            let value = self.variant_new(ctx, &variant.tag(ctx), payload)?;
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<perry_mir::variants::VariantTagOp>(op, ctx).is_some() {
+            let object = self.operand(ctx, op, 0)?;
+            let value = self.load(ctx, MemKind::I32, object, 0);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<perry_mir::variants::VariantPayloadOp>(op, ctx).is_some() {
+            let object = self.operand(ctx, op, 0)?;
+            let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+            let result = op.deref(ctx).get_result(0).get_type(ctx);
+            let value = self.variant_payload(ctx, ty, object, result)?;
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(global) = Operation::get_op::<perry_mir::globals::GlobalOp>(op, ctx) {
+            let ty = TypedHandle::<perry_mir::types::SlotType>::from_handle(
+                op.deref(ctx).get_result(0).get_type(ctx),
+                ctx,
+            )?
+            .deref(ctx)
+            .value();
+            let name = global.name(ctx);
+            let address = if let Some(&(address, existing)) = self.state.globals.get(&name) {
+                ensure!(
+                    existing == ty,
+                    "module binding {name} has conflicting types"
+                );
+                address
+            } else {
+                while !self.state.data.bytes.len().is_multiple_of(8) {
+                    self.state.data.bytes.push(0);
+                }
+                let address = DATA_BASE + self.state.data.bytes.len() as u32;
+                self.state.data.bytes.extend_from_slice(&[0; 16]);
+                self.state.globals.insert(name, (address, ty));
+                address
+            };
+            let cell = self.i32_const(ctx, address as i32);
+            if repr(ctx, ty)? == Repr::Ref {
+                self.call(ctx, "perry_gc_global", &[W::I32], &[], vec![cell]);
+            }
+            self.define(ctx, op, cell);
+            return Ok(());
+        }
+        if Operation::get_op::<perry_mir::globals::GlobalLoadOp>(op, ctx).is_some() {
+            let slot = self.operand(ctx, op, 0)?;
+            let initialized = self.load(ctx, MemKind::I32, slot, 8);
+            let missing = self.num(ctx, NumOpcode::I32Eqz, vec![initialized]);
+            self.throw_if(ctx, missing, ErrorKind::TypeError);
+            let kind = slot_kind(ctx, op.deref(ctx).get_result(0).get_type(ctx))?;
+            let value = self.load(ctx, kind, slot, 0);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<perry_mir::locals::StoreOp>(op, ctx).is_some() {
+            let slot = self.operand(ctx, op, 0)?;
+            let value = self.operand(ctx, op, 1)?;
+            let kind = slot_kind(ctx, op.deref(ctx).get_operand(1).get_type(ctx))?;
+            self.store(ctx, kind, slot, 0, value);
+            let one = self.i32_const(ctx, 1);
+            self.store(ctx, MemKind::I32, slot, 8, one);
+            return Ok(());
+        }
+        if let Some(constant) = Operation::get_op::<perry_mir::regex::RegexConstOp>(op, ctx) {
+            let key = (constant.pattern(ctx), constant.flags(ctx));
+            let address = if let Some(&address) = self.state.data.regexes.get(&key) {
+                address
+            } else {
+                let table = regex::compile(&key.0, &key.1)?;
+                while !self.state.data.bytes.len().is_multiple_of(4) {
+                    self.state.data.bytes.push(0);
+                }
+                let address = DATA_BASE + self.state.data.bytes.len() as u32;
+                self.state.data.bytes.extend(table);
+                self.state.data.regexes.insert(key, address);
+                address
+            };
+            let value = self.i32_const(ctx, address as i32);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if let Some(constant) = Operation::get_op::<perry_mir::integers::BigIntConstOp>(op, ctx) {
+            while !self.state.data.bytes.len().is_multiple_of(8) {
+                self.state.data.bytes.push(0);
+            }
+            let address = DATA_BASE + self.state.data.bytes.len() as u32;
+            self.state.data.bytes.extend_from_slice(
+                &constant
+                    .magnitude(ctx)
+                    .expect("verified integer")
+                    .to_le_bytes(),
+            );
+            self.state.data.bytes.extend_from_slice(&[0; 8]);
+            let value = self.i32_const(ctx, address as i32);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
         if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
@@ -2202,7 +2649,15 @@ impl<'s> FunctionLowering<'s> {
             let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
             let operands = self.operands(ctx, op)?;
             let kind = compare.kind(ctx);
-            let value = if let Some(inner) = optional_inner(ctx, mir_ty)
+            let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
+            let value = if inner.deref(ctx).is::<perry_mir::types::NumberStringType>() {
+                let equal = self.number_string_equal(ctx, mir_ty, operands[0], operands[1])?;
+                match kind {
+                    CompareKind::Eq => equal,
+                    CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![equal]),
+                    _ => bail!("narrow number | string before ordered comparisons"),
+                }
+            } else if let Some(inner) = optional_inner(ctx, mir_ty)
                 && repr(ctx, inner)? == Repr::F64
             {
                 // Strict equality on `number | undefined`: undefined equals only undefined.
@@ -2210,7 +2665,7 @@ impl<'s> FunctionLowering<'s> {
                 let bits_a = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![a]);
                 let bits_b = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![b]);
                 let same = self.num(ctx, NumOpcode::I64Eq, vec![bits_a, bits_b]);
-                let undefined = self.is_undefined(ctx, a, inner)?;
+                let undefined = self.is_absent(ctx, a, mir_ty)?;
                 let both = self.num(ctx, NumOpcode::I32And, vec![same, undefined]);
                 let equal = self.num(ctx, NumOpcode::F64Eq, vec![a, b]);
                 let eq = self.num(ctx, NumOpcode::I32Or, vec![both, equal]);
@@ -2221,10 +2676,46 @@ impl<'s> FunctionLowering<'s> {
                 }
             } else if mir_ty.deref(ctx).is::<StringType>()
                 || optional_inner(ctx, mir_ty).is_some_and(|t| t.deref(ctx).is::<StringType>())
+                || mir_ty.deref(ctx).is::<perry_mir::types::BigIntType>()
+                || optional_inner(ctx, mir_ty)
+                    .is_some_and(|t| t.deref(ctx).is::<perry_mir::types::BigIntType>())
             {
-                let order = self
-                    .runtime(ctx, Runtime::StringCompare, operands)
-                    .expect("order");
+                let join = if optional_inner(ctx, mir_ty).is_some() {
+                    let a = self.is_absent(ctx, operands[0], mir_ty)?;
+                    let b = self.is_absent(ctx, operands[1], mir_ty)?;
+                    let either = self.num(ctx, NumOpcode::I32Or, vec![a, b]);
+                    let same = self.num(ctx, NumOpcode::I32Eq, operands.clone());
+                    let sentinel_order = self.num(ctx, NumOpcode::I32Eqz, vec![same]);
+                    let i32 = i32_type(ctx);
+                    let join = self.new_block(ctx, vec![i32]);
+                    let defined = self.new_block(ctx, vec![]);
+                    self.cond_br(ctx, either, (join, vec![sentinel_order]), (defined, vec![]));
+                    self.block = defined;
+                    Some(join)
+                } else {
+                    None
+                };
+                let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
+                let order = if inner.deref(ctx).is::<perry_mir::types::BigIntType>() {
+                    self.call(
+                        ctx,
+                        "std_bigint_compare",
+                        &[W::I32, W::I32],
+                        &[W::I32],
+                        operands,
+                    )
+                    .expect("order")
+                } else {
+                    self.runtime(ctx, Runtime::StringCompare, operands)
+                        .expect("order")
+                };
+                let order = if let Some(join) = join {
+                    self.br(ctx, join, vec![order]);
+                    self.block = join;
+                    join.deref(ctx).get_argument(0)
+                } else {
+                    order
+                };
                 let zero = self.i32_const(ctx, 0);
                 let opcode = match kind {
                     CompareKind::Lt => NumOpcode::I32LtS,
@@ -2300,8 +2791,20 @@ impl<'s> FunctionLowering<'s> {
             if self.throws {
                 values.push(self.i32_const(ctx, 0));
             }
+            self.leave_roots(ctx);
             let ret = ReturnOp::new(ctx, values).get_operation();
             self.insert(ctx, ret);
+            return Ok(());
+        }
+        if let Some(call) = Operation::get_op::<perry_mir::foreign::ForeignOp>(op, ctx) {
+            match call.phase(ctx) {
+                perry_mir::foreign::Phase::Call | perry_mir::foreign::Phase::Start => {
+                    self.foreign_call(ctx, op, &call.binding(ctx))?
+                }
+                perry_mir::foreign::Phase::Finish => {
+                    self.foreign_finish(ctx, op, &call.binding(ctx))?
+                }
+            }
             return Ok(());
         }
         if let Some(call) = Operation::get_op::<MirCallOp>(op, ctx) {
@@ -2352,9 +2855,13 @@ impl<'s> FunctionLowering<'s> {
             let shape = *self.state.shapes.entry(name).or_insert(next_shape);
             let operands = self.operands(ctx, op)?;
             let size = self.i32_const(ctx, 8 + 8 * fields.len() as i32);
-            let object = self
-                .runtime(ctx, Runtime::Alloc, vec![size])
-                .expect("address");
+            let object = if let Some(&offset) = self.frame_slots.get(&op) {
+                let base = self.local_frame.expect("frame storage");
+                let offset = self.i32_const(ctx, offset as i32);
+                self.num(ctx, NumOpcode::I32Add, vec![base, offset])
+            } else {
+                self.record_storage(ctx, record_ty, size)?
+            };
             let shape = self.i32_const(ctx, shape);
             self.store(ctx, MemKind::I32, object, 0, shape);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
@@ -2386,9 +2893,7 @@ impl<'s> FunctionLowering<'s> {
             let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
             let capacity = self.i32_const(ctx, operands.len() as i32);
-            let array = self
-                .runtime(ctx, Runtime::ArrayNew, vec![capacity])
-                .expect("array");
+            let array = self.new_array(ctx, capacity, element)?;
             if !operands.is_empty() {
                 let data = self.load(ctx, MemKind::I32, array, layout::DATA);
                 for (index, value) in operands.iter().enumerate() {
@@ -2410,7 +2915,13 @@ impl<'s> FunctionLowering<'s> {
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
             let kind = slot_kind(ctx, element)?;
             let operands = self.operands(ctx, op)?;
-            self.push(ctx, operands[0], operands[1], kind);
+            self.push(
+                ctx,
+                operands[0],
+                operands[1],
+                kind,
+                repr(ctx, element)? == Repr::Ref,
+            );
             return Ok(());
         }
         if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
@@ -2426,7 +2937,13 @@ impl<'s> FunctionLowering<'s> {
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
             let address = self.slot_address(ctx, data, slot);
             let loaded = self.load(ctx, kind, address, 0);
-            let undefined = self.undefined(ctx, element)?;
+            let target = op.deref(ctx).get_result(0).get_type(ctx);
+            let loaded = if optional_inner(ctx, element).is_some() {
+                self.optional_cast(ctx, loaded, element, target)?
+            } else {
+                loaded
+            };
+            let undefined = self.undefined(ctx, target)?;
             let value = self.select(ctx, ok, loaded, undefined);
             self.define(ctx, op, value);
             return Ok(());
@@ -2456,51 +2973,63 @@ impl<'s> FunctionLowering<'s> {
             };
             let hole = self.num(ctx, NumOpcode::I32Eqz, vec![append]);
             self.throw_if(ctx, hole, ErrorKind::RangeError);
-            self.push(ctx, array, value, kind);
+            self.push(ctx, array, value, kind, repr(ctx, element)? == Repr::Ref);
             self.br(ctx, done, vec![]);
             self.block = done;
             return Ok(());
         }
-        if let Some(undefined) = Operation::get_op::<UndefinedOp>(op, ctx) {
-            let ty = undefined.get_result(ctx).get_type(ctx);
-            let inner = optional_inner(ctx, ty).ok_or_else(|| anyhow!("optional"))?;
-            let value = self.undefined(ctx, inner)?;
+        if let Some(null) = Operation::get_op::<NullOp>(op, ctx) {
+            let value = self.null(ctx, null.get_result(ctx).get_type(ctx))?;
             self.define(ctx, op, value);
             return Ok(());
         }
-        if Operation::get_op::<WrapOp>(op, ctx).is_some() {
+        if let Some(undefined) = Operation::get_op::<UndefinedOp>(op, ctx) {
+            let value = self.undefined(ctx, undefined.get_result(ctx).get_type(ctx))?;
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<WrapOp>(op, ctx).is_some()
+            || Operation::get_op::<perry_mir::views::AggregateViewOp>(op, ctx).is_some()
+        {
             let value = self.operands(ctx, op)?[0];
             self.define(ctx, op, value);
             return Ok(());
         }
-        if Operation::get_op::<IsUndefinedOp>(op, ctx).is_some() {
+        if Operation::get_op::<OptionalCastOp>(op, ctx).is_some() {
+            let source = op.deref(ctx).get_operand(0).get_type(ctx);
+            let target = op.deref(ctx).get_result(0).get_type(ctx);
+            let value = self.operand(ctx, op, 0)?;
+            let value = self.optional_cast(ctx, value, source, target)?;
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<IsUndefinedOp>(op, ctx).is_some()
+            || Operation::get_op::<IsNullOp>(op, ctx).is_some()
+        {
             let mir = op.deref(ctx).get_operand(0);
-            let inner =
-                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
             let value = self.mapped(ctx, mir)?;
-            let result = self.is_undefined(ctx, value, inner)?;
+            let null = Operation::get_op::<IsNullOp>(op, ctx).is_some();
+            let result = self.absence_test(ctx, value, mir.get_type(ctx), null)?;
             self.define(ctx, op, result);
             return Ok(());
         }
         if Operation::get_op::<ToNumberOp>(op, ctx).is_some() {
             let mir = op.deref(ctx).get_operand(0);
-            let inner =
-                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
             let value = self.mapped(ctx, mir)?;
-            let undefined = self.is_undefined(ctx, value, inner)?;
+            let undefined = self.absence_test(ctx, value, mir.get_type(ctx), false)?;
+            let null = self.absence_test(ctx, value, mir.get_type(ctx), true)?;
             let nan = self.f64_const(ctx, f64::NAN);
-            let result = self.select(ctx, undefined, nan, value);
+            let zero = self.f64_const(ctx, 0.0);
+            let number = self.select(ctx, null, zero, value);
+            let result = self.select(ctx, undefined, nan, number);
             self.define(ctx, op, result);
             return Ok(());
         }
         if Operation::get_op::<UnwrapOp>(op, ctx).is_some() {
             let mir = op.deref(ctx).get_operand(0);
-            let inner =
-                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
             let value = self.mapped(ctx, mir)?;
-            let undefined = self.is_undefined(ctx, value, inner)?;
-            self.throw_if(ctx, undefined, ErrorKind::TypeError);
-            // The defined value has the same representation.
+            let absent = self.is_absent(ctx, value, mir.get_type(ctx))?;
+            self.throw_if(ctx, absent, ErrorKind::TypeError);
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -2525,19 +3054,21 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<StringLenOp>(op, ctx).is_some() {
             let string = self.operands(ctx, op)?[0];
-            let value = self.load(ctx, MemKind::I32, string, perry_runtime::string::UTF16);
+            let value = self.load(ctx, MemKind::I32, string, perry_runtime::string::SCALARS);
             self.define(ctx, op, value);
             return Ok(());
         }
         if Operation::get_op::<ToStringOp>(op, ctx).is_some() {
             let mir = op.deref(ctx).get_operand(0);
-            let inner =
-                optional_inner(ctx, mir.get_type(ctx)).ok_or_else(|| anyhow!("optional"))?;
             let value = self.mapped(ctx, mir)?;
-            let undefined = self.is_undefined(ctx, value, inner)?;
-            let text = self.state.data.string("undefined");
-            let text = self.i32_const(ctx, text as i32);
-            let result = self.select(ctx, undefined, text, value);
+            let undefined = self.absence_test(ctx, value, mir.get_type(ctx), false)?;
+            let null = self.absence_test(ctx, value, mir.get_type(ctx), true)?;
+            let undefined_text = self.state.data.string("undefined");
+            let null_text = self.state.data.string("null");
+            let undefined_text = self.i32_const(ctx, undefined_text as i32);
+            let null_text = self.i32_const(ctx, null_text as i32);
+            let text = self.select(ctx, null, null_text, value);
+            let result = self.select(ctx, undefined, undefined_text, text);
             self.define(ctx, op, result);
             return Ok(());
         }
@@ -2551,18 +3082,49 @@ impl<'s> FunctionLowering<'s> {
                 Combinator::AllSettled => "perry_promise_all_settled",
             };
             let inputs = self.operand(ctx, op, 0)?;
-            let promise = self
-                .call(ctx, name, &[W::I32], &[W::I32], vec![inputs])
-                .expect("promise");
+            let promise = if self.state.collectible {
+                let array = TypedHandle::<ArrayType>::from_handle(
+                    op.deref(ctx).get_operand(0).get_type(ctx),
+                    ctx,
+                )?;
+                let element = array.deref(ctx).element();
+                let payload = TypedHandle::<PromiseType>::from_handle(element, ctx)?
+                    .deref(ctx)
+                    .value();
+                let references = self.i32_const(ctx, i32::from(repr(ctx, payload)? == Repr::Ref));
+                let mode = self.i32_const(
+                    ctx,
+                    match combinator.combinator(ctx) {
+                        Combinator::All => 0,
+                        Combinator::Race => 1,
+                        Combinator::AllSettled => 2,
+                    },
+                );
+                self.call(
+                    ctx,
+                    "perry_promise_combine_collectible",
+                    &[W::I32, W::I32, W::I32],
+                    &[W::I32],
+                    vec![mode, inputs, references],
+                )
+                .expect("promise")
+            } else {
+                self.call(ctx, name, &[W::I32], &[W::I32], vec![inputs])
+                    .expect("promise")
+            };
             self.define(ctx, op, promise);
             return Ok(());
         }
         if Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some() {
             let value = self.operand(ctx, op, 0)?;
             let bits = self.slot_bits(ctx, value);
-            let promise = self
-                .runtime(ctx, Runtime::PromiseNew, vec![])
-                .expect("promise");
+            let payload = TypedHandle::<PromiseType>::from_handle(
+                op.deref(ctx).get_result(0).get_type(ctx),
+                ctx,
+            )?
+            .deref(ctx)
+            .value();
+            let promise = self.new_promise(ctx, payload)?;
             self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
             self.define(ctx, op, promise);
             return Ok(());
@@ -2586,8 +3148,19 @@ impl<'s> FunctionLowering<'s> {
                     let ty = op.deref(ctx).get_result(0).get_type(ctx);
                     let inner = optional_inner(ctx, ty).expect("optional result");
                     let loaded = self.load(ctx, slot_kind(ctx, inner)?, promise, VALUE);
-                    let undefined = self.undefined(ctx, inner)?;
+                    let undefined = self.undefined(ctx, ty)?;
                     if field == SettledField::Value {
+                        let source = TypedHandle::<SettledType>::from_handle(
+                            op.deref(ctx).get_operand(0).get_type(ctx),
+                            ctx,
+                        )?
+                        .deref(ctx)
+                        .value();
+                        let loaded = if optional_inner(ctx, source).is_some() {
+                            self.optional_cast(ctx, loaded, source, ty)?
+                        } else {
+                            loaded
+                        };
                         self.select(ctx, fulfilled, loaded, undefined)
                     } else {
                         self.select(ctx, fulfilled, undefined, loaded)
@@ -2619,9 +3192,13 @@ impl<'s> FunctionLowering<'s> {
             let status = self
                 .runtime(ctx, Runtime::ExceptionRaise, vec![exception])
                 .expect("status");
-            let promise = self
-                .runtime(ctx, Runtime::PromiseNew, vec![])
-                .expect("promise");
+            let payload = TypedHandle::<PromiseType>::from_handle(
+                op.deref(ctx).get_result(0).get_type(ctx),
+                ctx,
+            )?
+            .deref(ctx)
+            .value();
+            let promise = self.new_promise(ctx, payload)?;
             self.runtime(ctx, Runtime::PromiseReject, vec![promise, status]);
             self.define(ctx, op, promise);
             return Ok(());

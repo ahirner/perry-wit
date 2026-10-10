@@ -1,10 +1,5 @@
-//! String methods with ECMAScript (UTF-16 code unit) indices over UTF-8 strings.
-//!
-//! Positions convert to byte offsets by scanning, with a direct path for ASCII strings
-//! (`utf16 == len`). A position inside a surrogate pair rounds to the scalar boundary before
-//! it, so no lone surrogate arises. The conformance domain is BMP scalars, where a scalar is
-//! one code unit and every result matches Node; surrogate halves (WTF-8) are out of scope.
-use crate::runtime::{bytes, from_bytes, from_static, utf16_length};
+//! UTF-8 string methods indexed by Unicode scalar values.
+use crate::runtime::{bytes, from_static, scalars_length};
 
 /// ECMAScript `ToIntegerOrInfinity`, saturated to `i64`.
 pub(crate) fn integer(value: f64) -> i64 {
@@ -33,34 +28,26 @@ fn clamp(value: f64, len: u64) -> u64 {
     integer(value).clamp(0, len as i64) as u64
 }
 
-/// Byte offset of UTF-16 position `position` (at most the length).
-fn offset(text: &str, ascii: bool, position: u64) -> usize {
-    if ascii {
-        return (position as usize).min(text.len());
+fn offset(view: &View, position: u64) -> usize {
+    // SAFETY: view holds a live string and the runtime clamps the scalar position.
+    unsafe {
+        crate::runtime::string_offset(view.string, position.min(u32::MAX as u64) as u32) as usize
     }
-    let mut units = 0u64;
-    for (index, scalar) in text.char_indices() {
-        let width = scalar.len_utf16() as u64;
-        if units + width > position {
-            return index;
-        }
-        units += width;
-    }
-    text.len()
 }
 
-/// UTF-16 position of byte offset `offset` (a scalar boundary).
+/// Scalar position of byte offset `offset` (a scalar boundary).
 fn position(text: &str, ascii: bool, offset: usize) -> u64 {
     if ascii {
         offset as u64
     } else {
-        u64::from(utf16_length(&text.as_bytes()[..offset]))
+        u64::from(scalars_length(&text.as_bytes()[..offset]))
     }
 }
 
 struct View {
+    string: *mut u8,
     text: &'static str,
-    units: u64,
+    scalars: u64,
     ascii: bool,
 }
 
@@ -68,11 +55,12 @@ fn view(string: *mut u8) -> View {
     // SAFETY: compiled code passes strings of valid UTF-8.
     let bytes = unsafe { bytes(string) };
     let text = unsafe { core::str::from_utf8_unchecked(bytes) };
-    let units = u64::from(utf16_length(bytes));
+    let scalars = u64::from(unsafe { *(string.add(4) as *const u32) });
     View {
+        string,
         text,
-        units,
-        ascii: units == text.len() as u64,
+        scalars,
+        ascii: scalars == text.len() as u64,
     }
 }
 
@@ -80,9 +68,64 @@ fn substring(view: &View, start: u64, end: u64) -> *mut u8 {
     if start >= end {
         return from_static("");
     }
-    let from = offset(view.text, view.ascii, start);
-    let to = offset(view.text, view.ascii, end);
-    from_bytes(&view.text.as_bytes()[from..to])
+    let from = offset(view, start);
+    let to = offset(view, end);
+    unsafe { crate::runtime::string_view(view.string, from as u32, to as u32) }
+}
+
+/// Split into immutable views, retaining the source payload through each view.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut u8 {
+    let view = view(string);
+    let separator = self::view(separator).text;
+    let text = view.text;
+    let chunks = || {
+        let mut start = 0;
+        let mut finished = false;
+        core::iter::from_fn(move || {
+            if finished {
+                return None;
+            }
+            let end = if separator.is_empty() {
+                if start == text.len() {
+                    return None;
+                }
+                start
+                    + text
+                        .get(start..)
+                        .unwrap_or("")
+                        .chars()
+                        .next()
+                        .expect("scalar")
+                        .len_utf8()
+            } else if let Some(found) = find(tail(text, start), separator.as_bytes()) {
+                start + found
+            } else {
+                finished = true;
+                text.len()
+            };
+            let range = (start, end);
+            start = end + separator.len();
+            Some(range)
+        })
+    };
+    let (array, slots) = crate::runtime::array_storage(chunks().count());
+    for (slot, (start, end)) in slots.iter_mut().zip(chunks()) {
+        // SAFETY: valid UTF-8 separators and scalar iteration produce source byte boundaries.
+        *slot =
+            unsafe { crate::runtime::string_view(view.string, start as u32, end as u32) } as u64;
+    }
+    array
+}
+
+/// Scalar index access; invalid, fractional and out-of-range indices yield undefined.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_string_index(string: *mut u8, index: f64) -> *mut u8 {
+    let view = view(string);
+    if !(index >= 0.0 && index < view.scalars as f64 && libm::trunc(index) == index) {
+        return core::ptr::null_mut();
+    }
+    std_string_char_at(view.string, index)
 }
 
 /// `s.charAt(position)`.
@@ -90,45 +133,39 @@ fn substring(view: &View, start: u64, end: u64) -> *mut u8 {
 pub extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *mut u8 {
     let view = view(string);
     let position = integer(position);
-    if position < 0 || position as u64 >= view.units {
+    if position < 0 || position as u64 >= view.scalars {
         return from_static("");
     }
     let position = position as u64;
     if view.ascii {
-        return substring(&view, position, position + 1);
+        return ascii_character(view.text.as_bytes()[position as usize]);
     }
-    let from = offset(view.text, false, position);
-    let scalar = view
-        .text
-        .get(from..)
-        .and_then(|rest| rest.chars().next())
-        .unwrap_or('\0');
-    if scalar.len_utf16() == 2 {
-        // Half of a surrogate pair.
-        return from_static("\u{FFFD}");
-    }
-    from_bytes(&view.text.as_bytes()[from..from + scalar.len_utf8()])
+    substring(&view, position, position + 1)
 }
 
-/// `s.charCodeAt(position)`: the UTF-16 code unit, or `NaN`.
+/// The scalar at `position`, or undefined outside the string.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_char_code_at(string: *mut u8, position: f64) -> f64 {
+pub extern "C" fn std_string_code_point_at(string: *mut u8, position: f64) -> f64 {
     let view = view(string);
     let position = integer(position);
-    if position < 0 || position as u64 >= view.units {
-        return f64::NAN;
+    if position < 0 || position as u64 >= view.scalars {
+        return f64::from_bits(crate::runtime::UNDEFINED_BITS);
     }
     view.text
-        .encode_utf16()
-        .nth(position as usize)
-        .map_or(f64::NAN, f64::from)
+        .get(offset(&view, position as u64)..)
+        .expect("scalar offset")
+        .chars()
+        .next()
+        .map_or(f64::from_bits(crate::runtime::UNDEFINED_BITS), |c| {
+            f64::from(c as u32)
+        })
 }
 
 /// `s.slice(start, end)` (pass `+Infinity` for a missing end).
 #[unsafe(no_mangle)]
 pub extern "C" fn std_string_slice(string: *mut u8, start: f64, end: f64) -> *mut u8 {
     let view = view(string);
-    let (start, end) = (relative(start, view.units), relative(end, view.units));
+    let (start, end) = (relative(start, view.scalars), relative(end, view.scalars));
     substring(&view, start, end)
 }
 
@@ -136,7 +173,7 @@ pub extern "C" fn std_string_slice(string: *mut u8, start: f64, end: f64) -> *mu
 #[unsafe(no_mangle)]
 pub extern "C" fn std_string_substring(string: *mut u8, start: f64, end: f64) -> *mut u8 {
     let view = view(string);
-    let (a, b) = (clamp(start, view.units), clamp(end, view.units));
+    let (a, b) = (clamp(start, view.scalars), clamp(end, view.scalars));
     substring(&view, a.min(b), a.max(b))
 }
 
@@ -145,8 +182,8 @@ pub extern "C" fn std_string_substring(string: *mut u8, start: f64, end: f64) ->
 pub extern "C" fn std_string_index_of(string: *mut u8, needle: *mut u8, position: f64) -> f64 {
     let view = view(string);
     let needle = self::view(needle).text;
-    let start = clamp(position, view.units);
-    let from = offset(view.text, view.ascii, start);
+    let start = clamp(position, view.scalars);
+    let from = offset(&view, start);
     match find(tail(view.text, from), needle.as_bytes()) {
         Some(found) => position_of(&view, from + found) as f64,
         None => -1.0,
@@ -193,12 +230,12 @@ pub extern "C" fn std_string_last_index_of(string: *mut u8, needle: *mut u8, pos
     let view = view(string);
     let needle = self::view(needle).text;
     let start = if position.is_nan() {
-        view.units
+        view.scalars
     } else {
-        clamp(position, view.units)
+        clamp(position, view.scalars)
     };
     // The match may start at `start` at the latest.
-    let limit = offset(view.text, view.ascii, start);
+    let limit = offset(&view, start);
     let end = (limit + needle.len()).min(view.text.len());
     let mut end = end;
     while !view.text.is_char_boundary(end) {
@@ -215,7 +252,7 @@ pub extern "C" fn std_string_last_index_of(string: *mut u8, needle: *mut u8, pos
 pub extern "C" fn std_string_starts_with(string: *mut u8, needle: *mut u8, position: f64) -> u32 {
     let view = view(string);
     let needle = self::view(needle).text;
-    let from = offset(view.text, view.ascii, clamp(position, view.units));
+    let from = offset(&view, clamp(position, view.scalars));
     u32::from(tail(view.text, from).starts_with(needle.as_bytes()))
 }
 
@@ -224,7 +261,7 @@ pub extern "C" fn std_string_starts_with(string: *mut u8, needle: *mut u8, posit
 pub extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, end: f64) -> u32 {
     let view = view(string);
     let needle = self::view(needle).text;
-    let to = offset(view.text, view.ascii, clamp(end, view.units));
+    let to = offset(&view, clamp(end, view.scalars));
     u32::from(head(view.text, to).ends_with(needle.as_bytes()))
 }
 
@@ -244,14 +281,18 @@ fn space(scalar: char) -> bool {
 }
 
 /// `s.trim()`.
+///
+/// # Safety
+/// `string` is a live immutable UTF-8 string.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
+pub unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
     let view = view(string);
     let trimmed = view.text.trim_matches(space);
     if trimmed.len() == view.text.len() {
         return string;
     }
-    from_bytes(trimmed.as_bytes())
+    let from = trimmed.as_ptr() as usize - view.text.as_ptr() as usize;
+    unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
 }
 
 /// `s.repeat(count)`; a negative or infinite count throws `RangeError`.
@@ -277,4 +318,75 @@ pub extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut u8 {
     }
     // SAFETY: repeated valid UTF-8.
     unsafe { crate::runtime::adopt(data, total as u32) }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AsciiString {
+    len: u32,
+    scalars: u32,
+    data: *const u8,
+    buffer: *const u8,
+    owner: *const u8,
+    offset: u32,
+    cursor_scalar: u32,
+    cursor_byte: u32,
+}
+struct AsciiStrings([AsciiString; 128]);
+// SAFETY: ASCII strings never update a position cursor or their immutable payload.
+unsafe impl Sync for AsciiStrings {}
+const ASCII: [u8; 128] = {
+    let mut bytes = [0; 128];
+    let mut index = 0;
+    while index < 128 {
+        bytes[index] = index as u8;
+        index += 1;
+    }
+    bytes
+};
+static ASCII_BYTES: [u8; 128] = ASCII;
+static ASCII_STRINGS: AsciiStrings = {
+    let mut strings = [AsciiString {
+        len: 1,
+        scalars: 1,
+        data: core::ptr::null(),
+        buffer: core::ptr::null(),
+        owner: core::ptr::null(),
+        offset: 0,
+        cursor_scalar: 0,
+        cursor_byte: 0,
+    }; 128];
+    let mut index = 0;
+    while index < 128 {
+        // SAFETY: all positions name bytes of the static ASCII table.
+        strings[index].data = unsafe { ASCII_BYTES.as_ptr().add(index) };
+        index += 1;
+    }
+    AsciiStrings(strings)
+};
+fn ascii_character(byte: u8) -> *mut u8 {
+    (&raw const ASCII_STRINGS.0[byte as usize])
+        .cast_mut()
+        .cast()
+}
+
+/// `String.fromCodePoint(value)`: one Unicode scalar; surrogate code points are rejected.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
+    if value < 0.0 || value > 0x10ffff as f64 || value != value as u32 as f64 {
+        crate::runtime::raise(crate::runtime::RANGE_ERROR, "Invalid Unicode scalar value");
+        return from_static("");
+    }
+    let Some(scalar) = char::from_u32(value as u32) else {
+        crate::runtime::raise(
+            crate::runtime::RANGE_ERROR,
+            "Surrogate code points are outside UTF-8 strings",
+        );
+        return from_static("");
+    };
+    if scalar.is_ascii() {
+        return ascii_character(scalar as u8);
+    }
+    let mut bytes = [0; 4];
+    crate::runtime::from_bytes(scalar.encode_utf8(&mut bytes).as_bytes())
 }

@@ -193,36 +193,38 @@ pub unsafe extern "C" fn time_plain_date_format(input: u32, output: u32, capacit
     }
 }
 
-/// # Safety
-/// Value must be a valid epoch milliseconds number. Part selects 0=year, 1=month(0-indexed), 2=day, 3=weekday(0=Sun..6=Sat).
+/// UTC accessor; invalid times produce NaN.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_date_part(ms: f64, part: u32) -> f64 {
-    if !ms.is_finite() || ms.abs() > 8_640_000_000_000_000.0 {
-        return f64::NAN;
-    }
-    let ms_int = ms as i64;
-    let days = {
-        let a = ms_int;
-        let b = 86_400_000i64;
-        let d = a / b;
-        let r = a % b;
-        let q = if r != 0 && (r < 0) { d - 1 } else { d };
-        match i32::try_from(q) {
-            Ok(days) => days,
-            Err(_) => return f64::NAN,
-        }
-    };
-    let (year, month, day) = datealgo::rd_to_date(days);
-    match part {
-        0 => f64::from(year),
-        1 => f64::from(month - 1),
-        2 => f64::from(day),
-        3 => {
-            let weekday = datealgo::rd_to_weekday(days);
-            f64::from(if weekday == 7 { 0 } else { weekday })
-        }
-        _ => f64::NAN,
-    }
+pub extern "C" fn time_date_part(ms: f64, part: u32) -> f64 {
+    crate::date_part(ms, part)
+}
+
+/// UTC construction with overflowing calendar fields.
+#[unsafe(no_mangle)]
+pub extern "C" fn time_date_utc(
+    year: f64,
+    month: f64,
+    day: f64,
+    hour: f64,
+    minute: f64,
+    second: f64,
+    ms: f64,
+) -> f64 {
+    crate::date_utc([year, month, day, hour, minute, second, ms])
+}
+
+/// Pure setter calculation; compiled code owns and updates the Date object.
+#[unsafe(no_mangle)]
+pub extern "C" fn time_date_set(
+    time: f64,
+    part: u32,
+    count: u32,
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+) -> f64 {
+    crate::date_set(time, part, count as usize, [a, b, c, d])
 }
 
 unsafe fn transform(

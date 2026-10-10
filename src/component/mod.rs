@@ -30,10 +30,12 @@ pub(crate) fn encode_resolved(
     let mut core = core_wasm.to_vec();
     embed_component_metadata(&mut core, resolve, world, StringEncoding::UTF8, false)
         .context("embedding component metadata")?;
-    ComponentEncoder::default()
+    let component = ComponentEncoder::default()
         .module(&core)
         .context("configuring component encoder")?
         .validate(true)
         .encode()
-        .context("encoding component")
+        .context("encoding component")?;
+    crate::audit::validate_guest(&component).context("validating stackless component")?;
+    Ok(component)
 }

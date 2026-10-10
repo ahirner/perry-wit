@@ -2,6 +2,8 @@
 
 mod bind;
 mod http;
+mod imports;
+mod resources;
 mod wit_types;
 
 use crate::{audit, component, link, strip};
@@ -35,6 +37,7 @@ pub struct Compiled {
     pub core: Vec<u8>,
     pub component: Option<Vec<u8>>,
     pub stripped: Option<Vec<u8>>,
+    pub tiers: String,
 }
 
 pub fn compile_file(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
@@ -63,18 +66,54 @@ pub fn compile_for_world(
     world: wit_parser::WorldId,
     componentize: bool,
 ) -> Result<Compiled> {
+    compile_world(source, file_name, resolve, world, componentize, false)
+}
+
+/// Compile a component test with forced safe-point collection and reclaimed-memory poisoning.
+/// Production compilation omits the instrumentation.
+pub fn compile_for_world_with_memory_checks(
+    source: &str,
+    file_name: &str,
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+) -> Result<Compiled> {
+    compile_world(source, file_name, resolve, world, true, true)
+}
+
+fn compile_world(
+    source: &str,
+    file_name: &str,
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    componentize: bool,
+    memory_checks: bool,
+) -> Result<Compiled> {
     audit::audit_no_llvm(include_str!("../../Cargo.lock"))
         .context("LLVM audit verification failed")?;
     if http::is_handler_world(resolve, world) {
-        return http::compile(source, file_name, resolve, componentize);
+        return http::compile(source, file_name, resolve, componentize, memory_checks);
     }
     let ctx = &mut Context::new();
-    let mir = lower(ctx, source, file_name, &wit_types::foreign(resolve))?;
+    let mut foreign = wit_types::foreign(resolve);
+    let mut bindings = imports::bindings(resolve, world, &mut foreign);
+    let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
+    let mir = lower(ctx, source, file_name, &foreign)?;
     let exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::check_main(ctx, &mir, &exports)?;
     let imports = bind::imports(resolve, world);
     let streams = bind::stream_anchor(resolve, world);
-    let core = perry_codegen::compile(ctx, &mir, &Exports::Canonical { exports, imports })?;
+    let tiers = perry_codegen::explain_tiers(ctx, &mir);
+    let core = perry_codegen::compile(
+        ctx,
+        &mir,
+        &Exports::Canonical {
+            memory_checks,
+            exports,
+            imports,
+            bindings,
+            resources,
+        },
+    )?;
     let core = finish(core, streams.as_ref())?;
     let (component, stripped) = if componentize {
         let component = component::encode_resolved(&core, resolve, world)?;
@@ -87,6 +126,7 @@ pub fn compile_for_world(
         core,
         component,
         stripped,
+        tiers,
     })
 }
 
@@ -97,6 +137,19 @@ pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
     let mir = lower(ctx, source, file_name, &Default::default())?;
     finish(perry_codegen::compile(ctx, &mir, &Exports::Raw)?, None)
+}
+
+/// Compile a raw test module with `__perry_gc_debug(flags)` and
+/// `__perry_gc_counter(index)`. Flags enable forced safe-point collection (1) and poisoning
+/// (2). Counters are allocations, collections, live bytes, reserved bytes, transfer-copy
+/// bytes, active pins and active roots. Canonical production components omit these exports.
+pub fn compile_core_with_memory_checks(source: &str, file_name: &str) -> Result<Vec<u8>> {
+    let ctx = &mut Context::new();
+    let mir = lower(ctx, source, file_name, &Default::default())?;
+    finish(
+        perry_codegen::compile(ctx, &mir, &Exports::RawChecked)?,
+        None,
+    )
 }
 
 fn lower(
@@ -115,5 +168,7 @@ fn lower(
 fn finish(core: Vec<u8>, streams: Option<&link::StreamAnchor>) -> Result<Vec<u8>> {
     let core =
         link::link_helpers_with(core, streams).context("linking perry-runtime and helpers")?;
-    link::compact(&core).context("interning core function signatures")
+    let core = link::compact(&core).context("interning core function signatures")?;
+    audit::validate_guest(&core).context("validating stackless core Wasm")?;
+    Ok(core)
 }

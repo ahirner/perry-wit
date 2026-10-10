@@ -24,6 +24,7 @@ pub(crate) mod helper {
         pub fn fetch_method(input: *const u8, len: u32) -> u32;
         pub fn fetch_status_text(input: *const u8, len: u32) -> u32;
         pub fn fetch_url(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u32;
+        pub fn fetch_url_value(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u32;
         pub fn json_measure(input: *const u8, len: u32) -> u64;
         pub fn json_populate(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u64;
     }
@@ -47,6 +48,9 @@ pub(crate) mod helper {
         pub unsafe fn fetch_url(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
             unreachable!("the fetch helper runs in linked modules")
         }
+        pub unsafe fn fetch_url_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
+            unreachable!("the fetch helper runs in linked modules")
+        }
         pub unsafe fn json_measure(_: *const u8, _: u32) -> u64 {
             unreachable!("the JSON helper runs in linked modules")
         }
@@ -57,6 +61,8 @@ pub(crate) mod helper {
     #[cfg(not(target_arch = "wasm32"))]
     pub use host::*;
 }
+
+mod url;
 
 const INVALID: u32 = u32::MAX;
 

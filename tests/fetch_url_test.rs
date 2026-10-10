@@ -2,6 +2,33 @@
 mod url;
 
 #[test]
+fn url_values_preserve_credentials_and_fragments() {
+    let cases = [
+        "HTTP://alice:p@ss@EXAMPLE.com:80/a^b?q=x#é🙂",
+        "https://a:b:c@example.com/p#x y",
+        "https://example.com/path#",
+    ];
+    let output = std::process::Command::new("node")
+        .args([
+            "-e",
+            "for (const u of JSON.parse(process.argv[1])) console.log(new URL(u).href)",
+            &serde_json::to_string(&cases).unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let expected = String::from_utf8(output.stdout).unwrap();
+    for (input, expected) in cases.into_iter().zip(expected.lines()) {
+        let mut bytes = vec![0; input.len() * 4 + 64];
+        let metadata = url::normalize_url(input.as_bytes(), &mut bytes).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&bytes[..metadata[5] as usize]).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn ipv6_compression_and_ipv4_suffix_boundaries_match_node() {
     let mut hosts = Vec::new();
     for start in 0..8 {
