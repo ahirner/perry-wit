@@ -1,9 +1,9 @@
 //! Node differential coverage for the declared HTTP(S) URL surface.
 use anyhow::{Context, Result, ensure};
-use wasmtime::{
-    Engine, Store,
-    component::{Component, Linker},
-};
+use wasmtime::Engine;
+
+#[path = "support/world.rs"]
+mod world;
 
 #[test]
 fn http_urls_match_node_for_construction_mutation_and_serialization() -> Result<()> {
@@ -22,14 +22,9 @@ export function inspect(input: string, base: string): string {
 }
 "#;
     let wit = "package test:url; world urls { export inspect: func(input: string, base: string) -> string; }";
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("url.wit", wit)?;
-    let world = resolve.select_world(&[package], Some("urls"))?;
-    let compiled = perry_wit::compile_for_world(source, "url.ts", &resolve, world, true)?;
+    let component = world::component(wit, "urls", "url.ts", source)?;
     let engine = Engine::default();
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
-    let mut store = Store::new(&engine, ());
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let (mut store, instance) = world::instantiate(&engine, &component)?;
     let inspect = instance.get_typed_func::<(&str, &str), (String,)>(&mut store, "inspect")?;
     let directory = tempfile::tempdir()?;
     let script = directory.path().join("url.mts");

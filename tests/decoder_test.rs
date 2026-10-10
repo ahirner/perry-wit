@@ -1,9 +1,9 @@
 //! Chunk boundaries, error recovery and BOM handling for the declared UTF-8 decoder.
 use anyhow::{Context, Result, ensure};
-use wasmtime::{
-    Engine, Store,
-    component::{Component, Linker},
-};
+use wasmtime::Engine;
+
+#[path = "support/world.rs"]
+mod world;
 
 #[test]
 fn incremental_utf8_matches_node_at_every_byte_boundary() -> Result<()> {
@@ -25,14 +25,9 @@ export function decode(input: Uint8Array, split: number, fatal: boolean, ignore:
 }
 "#;
     let wit = "package test:decoder; world decoder { export decode: func(input: list<u8>, split: f64, fatal: bool, ignore: bool) -> string; }";
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("decoder.wit", wit)?;
-    let world = resolve.select_world(&[package], Some("decoder"))?;
-    let compiled = perry_wit::compile_for_world(source, "decoder.ts", &resolve, world, true)?;
+    let component = world::component(wit, "decoder", "decoder.ts", source)?;
     let engine = Engine::default();
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
-    let mut store = Store::new(&engine, ());
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let (mut store, instance) = world::instantiate(&engine, &component)?;
     let decode =
         instance.get_typed_func::<(&[u8], f64, bool, bool), (String,)>(&mut store, "decode")?;
     let directory = tempfile::tempdir()?;

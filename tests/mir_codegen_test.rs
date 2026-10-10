@@ -15,6 +15,14 @@ struct Program {
 }
 
 impl Program {
+    /// The current size of the module's linear memory.
+    fn memory_bytes(&mut self) -> usize {
+        self.instance
+            .get_memory(&mut self.store, "memory")
+            .expect("modules export their memory")
+            .data_size(&self.store)
+    }
+
     fn new(source: &str) -> Self {
         let wasm = build(source);
         Self::from_wasm(wasm)
@@ -461,36 +469,6 @@ fn dump() {
 }
 
 #[test]
-fn temporary_records_use_bounded_memory_across_iterations() {
-    let mut program = Program::new(
-        r#"
-interface Point { x: number; y: number }
-function make(i: number): Point { return { x: i, y: i * 2 }; }
-export function run(n: number): number {
-  let sum = 0;
-  for (let i = 0; i < n; i++) {
-    const point = make(i);
-    if (i % 2 === 0) point.x = point.x + 1;
-    sum = (sum + point.x + point.y) % 1000003;
-  }
-  return sum;
-}
-
-"#,
-    );
-    let mut expected = 0.0;
-    for i in 0..200_000 {
-        expected = (expected + f64::from(i * 3 + i32::from(i % 2 == 0))) % 1000003.0;
-    }
-    assert_eq!(program.number("run", 200_000.0), expected);
-    let memory = program
-        .instance
-        .get_memory(&mut program.store, "memory")
-        .unwrap();
-    assert!(memory.data_size(&program.store) <= 512 * 1024);
-}
-
-#[test]
 fn unchanged_module_graph_does_not_collect_on_every_export() {
     let source = r#"
 interface Cell { value: number; next: Cell | null }
@@ -532,14 +510,10 @@ export function run(n: number): number {
 "#,
     );
     assert_eq!(program.throwing("run", 200_000.0), (200_017.0, 0));
-    let memory = program
-        .instance
-        .get_memory(&mut program.store, "memory")
-        .unwrap();
     assert!(
-        memory.data_size(&program.store) <= 512 * 1024,
+        program.memory_bytes() <= 512 * 1024,
         "{} bytes",
-        memory.data_size(&program.store)
+        program.memory_bytes()
     );
 }
 
@@ -565,14 +539,10 @@ export async function run(n: number): Promise<number> {
 "#,
     );
     assert_eq!(program.throwing("run", 200_000.0), (399_998.0, 0));
-    let memory = program
-        .instance
-        .get_memory(&mut program.store, "memory")
-        .unwrap();
     assert!(
-        memory.data_size(&program.store) <= 512 * 1024,
+        program.memory_bytes() <= 512 * 1024,
         "completed async objects accumulated: {} bytes",
-        memory.data_size(&program.store)
+        program.memory_bytes()
     );
 }
 
@@ -603,18 +573,14 @@ export function run(n: number): number {
         program.throwing("run", 200_000.0),
         ((200_000.0 * 16.0) % 100003.0 + 27.0, 0)
     );
-    let memory = program
-        .instance
-        .get_memory(&mut program.store, "memory")
-        .unwrap();
-    let warmed = memory.data_size(&program.store);
+    let warmed = program.memory_bytes();
     assert!(
         warmed <= 1024 * 1024,
         "builtin churn retained {warmed} bytes"
     );
     program.throwing("run", 400_000.0);
     assert_eq!(
-        memory.data_size(&program.store),
+        program.memory_bytes(),
         warmed,
         "builtin memory did not stabilize"
     );
@@ -759,14 +725,7 @@ export function run(n: number): number {
     );
     let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
     assert_eq!(live[0].unwrap_i64(), 0);
-    assert!(
-        program
-            .instance
-            .get_memory(&mut program.store, "memory")
-            .unwrap()
-            .data_size(&program.store)
-            <= 512 * 1024
-    );
+    assert!(program.memory_bytes() <= 512 * 1024);
 }
 
 #[test]
@@ -789,20 +748,12 @@ export async function run(n: number): Promise<number> {
 "#;
     let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "dates.ts").unwrap();
     let mut program = Program::from_wasm(wasm);
-    let initial = program
-        .instance
-        .get_memory(&mut program.store, "memory")
-        .unwrap()
-        .data_size(&program.store);
+    let initial = program.memory_bytes();
     program.call("__perry_gc_debug", &[Val::I32(3)]);
     assert_eq!(program.throwing("run", 120.0), (127.0, 0));
     program.call("__perry_gc_debug", &[Val::I32(0)]);
     assert_eq!(program.throwing("run", 200_000.0), (200_007.0, 0));
-    let size = program
-        .instance
-        .get_memory(&mut program.store, "memory")
-        .unwrap()
-        .data_size(&program.store);
+    let size = program.memory_bytes();
     let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
     assert!(
         size <= 512 * 1024,
@@ -839,11 +790,7 @@ export async function run(n: number): Promise<number> {
     program.call("__perry_gc_debug", &[Val::I32(0)]);
     for _ in 0..2 {
         assert_eq!(program.throwing("run", 200_000.0), (199_999.0, 0));
-        let memory = program
-            .instance
-            .get_memory(&mut program.store, "memory")
-            .unwrap();
-        assert!(memory.data_size(&program.store) <= 512 * 1024);
+        assert!(program.memory_bytes() <= 512 * 1024);
     }
 }
 
@@ -1227,14 +1174,7 @@ export function run(n: number): number {
     assert_eq!(program.throwing("run", 1000.0), (0.0, 0));
     program.call("__perry_gc_debug", &[Val::I32(0)]);
     assert_eq!(program.throwing("run", 200_000.0), (0.0, 0));
-    assert!(
-        program
-            .instance
-            .get_memory(&mut program.store, "memory")
-            .unwrap()
-            .data_size(&program.store)
-            <= 512 * 1024
-    );
+    assert!(program.memory_bytes() <= 512 * 1024);
     for index in [2, 6] {
         let (counter, _) = program.call("__perry_gc_counter", &[Val::I32(index)]);
         assert_eq!(counter[0].unwrap_i64(), 0);

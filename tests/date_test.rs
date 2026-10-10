@@ -1,9 +1,9 @@
 //! UTC Date behavior, including alias-visible mutation and calendar rollover.
 use anyhow::{Context, Result, ensure};
-use wasmtime::{
-    Engine, Store,
-    component::{Component, Linker},
-};
+use wasmtime::Engine;
+
+#[path = "support/world.rs"]
+mod world;
 
 #[test]
 fn utc_dates_match_node_through_parsing_mutation_and_invalid_values() -> Result<()> {
@@ -45,14 +45,9 @@ export function inspect(input: string, delta: number): string {
 }
 "#;
     let wit = "package test:dates; world dates { export inspect: func(input: string, delta: f64) -> string; }";
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("date.wit", wit)?;
-    let world = resolve.select_world(&[package], Some("dates"))?;
-    let compiled = perry_wit::compile_for_world(source, "date.ts", &resolve, world, true)?;
+    let component = world::component(wit, "dates", "date.ts", source)?;
     let engine = Engine::default();
-    let component = Component::new(&engine, compiled.stripped.unwrap())?;
-    let mut store = Store::new(&engine, ());
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let (mut store, instance) = world::instantiate(&engine, &component)?;
     let inspect = instance.get_typed_func::<(&str, f64), (String,)>(&mut store, "inspect")?;
     let directory = tempfile::tempdir()?;
     let script = directory.path().join("date.mts");

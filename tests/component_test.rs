@@ -557,65 +557,6 @@ export function decode(text: string): string {
 }
 
 #[test]
-fn finite_variants_round_trip_and_construct_active_payloads() -> Result<()> {
-    let mut component = Instance::compile(
-        r#"
-        package test:variants;
-        world boundary {
-            variant validity { anytime, day(string), until(string) }
-            record packet { values: list<validity>, optional: option<validity> }
-            export inspect: func(value: packet) -> packet;
-            export make: func(day: string) -> validity;
-            export describe: func(value: validity) -> string;
-        }
-    "#,
-        r#"
-        import type { Validity, Packet } from './types/world';
-        export function inspect(value: Packet): Packet { return value; }
-        export function make(day: string): Validity {
-            if (day.length === 0) return { tag: 'anytime' };
-            return { tag: 'day', val: day };
-        }
-        export function describe(value: Validity): string {
-            if (value.tag === 'anytime') return 'always';
-            return value.tag + ':' + value.val;
-        }
-    "#,
-    )?;
-    let variants = vec![
-        Val::Variant("anytime".into(), None),
-        Val::Variant("day".into(), Some(Box::new(Val::String("today".into())))),
-        Val::Variant("until".into(), Some(Box::new(Val::String("later".into())))),
-    ];
-    let packet = record(&[
-        ("values", Val::List(variants.clone())),
-        ("optional", Val::Option(Some(Box::new(variants[2].clone())))),
-    ]);
-    assert_eq!(
-        component.call("inspect", std::slice::from_ref(&packet))?,
-        packet
-    );
-    assert_eq!(
-        component.call("make", &[Val::String("".into())])?,
-        variants[0]
-    );
-    assert_eq!(
-        component.call("make", &[Val::String("today".into())])?,
-        variants[1]
-    );
-    for (value, expected) in variants
-        .into_iter()
-        .zip(["always", "day:today", "until:later"])
-    {
-        assert_eq!(
-            component.call("describe", &[value])?,
-            Val::String(expected.into())
-        );
-    }
-    Ok(())
-}
-
-#[test]
 fn recursive_json_schemas_produce_independent_checked_native_graphs() -> Result<()> {
     let mut component = Instance::compile(
         r#"
@@ -667,14 +608,17 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
         world boundary {
             record point { x: f64, label: string }
             variant value { empty, number(f64), text(string), point(point), bytes(list<u8>) }
+            record packet { values: list<value>, optional: option<value> }
             export echo: func(values: list<value>) -> list<value>;
+            export inspect: func(value: packet) -> packet;
             export make: func(which: u32) -> value;
             export describe: func(value: value) -> string;
         }
         "#,
         r#"
-        import type { Value, WitInput } from './types/world';
+        import type { Packet, Value, WitInput } from './types/world';
         export function echo(values: Value[]): Value[] { return values; }
+        export function inspect(value: Packet): Packet { return value; }
         export function make(which: number): WitInput<Value> {
             if (which === 0) return { tag: 'empty' };
             if (which === 1) return { tag: 'number', val: 42.5 };
@@ -722,6 +666,14 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
             Val::String(expected.into())
         );
     }
+    let packet = record(&[
+        ("values", Val::List(values.clone())),
+        ("optional", Val::Option(Some(Box::new(values[2].clone())))),
+    ]);
+    assert_eq!(
+        component.call("inspect", std::slice::from_ref(&packet))?,
+        packet
+    );
     assert_eq!(
         component.call("echo", &[Val::List(values.clone())])?,
         Val::List(values)

@@ -1,9 +1,9 @@
 //! Literal regex search and tests have bounded compile-time DFAs and no guest allocation.
 use anyhow::{Context, Result, ensure};
-use wasmtime::{
-    Engine, Store,
-    component::{Component, Linker},
-};
+use wasmtime::Engine;
+
+#[path = "support/world.rs"]
+mod world;
 
 #[test]
 fn literal_search_matches_node_over_bmp_text() -> Result<()> {
@@ -48,14 +48,9 @@ fn literal_search_matches_node_over_bmp_text() -> Result<()> {
             "export function inspect(input: string): number {{ const expression = {pattern}; return input.search(expression) * 2 + (expression.test(input) ? 1 : 0); }}"
         );
         let wit = "package test:regex; world regex { export inspect: func(input: string) -> f64; }";
-        let mut resolve = wit_parser::Resolve::default();
-        let package = resolve.push_str("regex.wit", wit)?;
-        let world = resolve.select_world(&[package], Some("regex"))?;
-        let compiled = perry_wit::compile_for_world(&source, "regex.ts", &resolve, world, true)
+        let component = world::component(wit, "regex", "regex.ts", &source)
             .with_context(|| pattern.to_owned())?;
-        let component = Component::new(&engine, compiled.stripped.unwrap())?;
-        let mut store = Store::new(&engine, ());
-        let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+        let (mut store, instance) = world::instantiate(&engine, &component)?;
         let inspect = instance.get_typed_func::<(&str,), (f64,)>(&mut store, "inspect")?;
         std::fs::write(
             &script,
