@@ -6,6 +6,37 @@ Temporal validation source SHA-256: `e4f46f39089fc8e3707a81969cf6671ec66f5b25405
 Keep the modular runtime, talc, precise non-moving collector, stackless P3 callbacks and stream reuse.
 Application correctness, bounded retained memory and maintainability define completion.
 
+## Performance completion
+
+Reference: primary `e83eaf1`; starting implementation: `3c3442a`. Preserve the verified
+semantics, precise collector and P3 ownership rules. Each optimization has its own commit,
+Perry measurements, all 50 conformance contracts, the fixed generated campaign and both
+consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapshots.
+
+0. [x] Freeze a serial debug-build benchmark and consumer baseline.
+1. [ ] Elide root bookkeeping for proven non-collecting calls; emit root-stack stores inline.
+2. [ ] Lower integer remainder inline with IEEE-754 fallback and negative-zero preservation.
+3. [ ] Extend bounded leaf inlining, closed-record argument promotion and scalar replacement.
+4. [ ] Prove indexed accesses and reuse dominating successful optional unwraps.
+5. [ ] Reuse string headers when ownership and liveness permit mutation.
+6. [ ] Grow exclusive unpinned buffers in place with collector-aware metadata updates.
+7. [ ] Port local coalescing, emitter peepholes and async branch-table dispatch.
+8. [ ] Complete workspace, SDK/example, lint and permitted Nix validation on frozen source.
+
+The benchmark harness is `tests/benchmark.rs`; `bench/performance/run.py` runs campaigns.
+Reports include source/tool identities and normal fuel separately from instrumented counters.
+Historical speedups are hypotheses: the existing temporary-record workload already allocates
+no records, and its remainder cost must be measured independently. The reported primary
+append improvement is 149M to 84M fuel. Keep existing baseline files unchanged.
+
+[Starting measurements](bench/performance/reports/00-baseline/summary.json): all 50 contracts,
+400 generated cases, four fixed program seeds, 55 consumer matrix tests and 25 consumer
+benchmark scenarios passed. Temporary records allocate zero objects. Direct calls cost
+231M fuel, remainder 186M, incoming streams 1.221B and string append 775M. HTTP transfer
+partitioning can vary with host scheduling; compare deterministic core workloads separately.
+Consumer median wall times: Node 3.8 ms, AOT 16.7 ms, JIT 268.6 ms. Raw outputs and snapshot
+harness adjustments accompany the report; startup-subtracted estimates are not guest timings.
+
 ## Verified implementation
 
 These checks passed on frozen source. [Application baseline measurements](bench/baseline/completion.json)
