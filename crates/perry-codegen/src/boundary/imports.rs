@@ -123,7 +123,7 @@ impl FunctionLowering<'_> {
         } else {
             import.name.clone()
         };
-        let host = crate::Host::Foreign(import.module, name, params, results.clone());
+        let host = crate::Host::Foreign(import.module.clone(), name, params, results.clone());
         self.state.host.insert(host.clone());
         let result_types = results.iter().map(|flat| flat_type(ctx, *flat)).collect();
         self.commit_resources(ctx);
@@ -191,7 +191,7 @@ impl FunctionLowering<'_> {
         op: Ptr<Operation>,
         binding: &str,
     ) -> Result<()> {
-        let import = self.state.bindings[binding].clone();
+        let import = std::rc::Rc::clone(&self.state.bindings[binding]);
         let transfer = self.operand(ctx, op, 0)?;
         let mir = op.deref(ctx).get_result(0).get_type(ctx);
         let value = if let Some(abi) = &import.result {
@@ -229,16 +229,17 @@ impl FunctionLowering<'_> {
         self.block = result;
         let kind = self.load(ctx, MemKind::I32, transfer, transfer::KIND);
         let area = self.load(ctx, MemKind::I32, transfer, transfer::AREA);
-        let bindings = self.state.foreign_transfers.clone();
-        for (index, binding) in bindings.iter().enumerate() {
+        for index in 0..self.state.foreign_transfers.len() {
+            let import =
+                std::rc::Rc::clone(&self.state.bindings[&self.state.foreign_transfers[index]]);
             let selected = self.new_block(ctx, vec![]);
             let other = self.new_block(ctx, vec![]);
             let index = self.i32_const(ctx, index as i32);
             let matches = self.num(ctx, NumOpcode::I32Eq, vec![kind, index]);
             self.cond_br(ctx, matches, (selected, vec![]), (other, vec![]));
             self.block = selected;
-            if let Some(abi) = self.state.bindings[binding].result.clone() {
-                self.discard_canonical(ctx, &abi, area, 0)?;
+            if let Some(abi) = &import.result {
+                self.discard_canonical(ctx, abi, area, 0)?;
             }
             self.br(ctx, clear, vec![]);
             self.block = other;

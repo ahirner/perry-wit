@@ -35,10 +35,17 @@ impl FunctionBuilder<'_> {
         let Expr::Compare { op, left, right } = condition else {
             return;
         };
-        if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
-            return;
+        match op {
+            CompareOp::Eq => self.variant_equality(left, right, truth),
+            CompareOp::Ne => self.variant_equality(left, right, !truth),
+            _ => {}
         }
-        let (object, tag) = match (&**left, &**right) {
+    }
+
+    /// Record that `left === right` is `equal` when one side is a tag or `typeof` of a
+    /// path and the other a string.
+    pub(super) fn variant_equality(&mut self, left: &Expr, right: &Expr, equal: bool) {
+        let (object, tag) = match (left, right) {
             (
                 Expr::PropertyGet {
                     object, property, ..
@@ -56,11 +63,16 @@ impl FunctionBuilder<'_> {
             _ => return,
         };
         if let Some(path) = path(object) {
-            self.variant_guards
-                .entry(path)
-                .or_default()
-                .push((tag.clone(), truth == matches!(op, CompareOp::Eq)));
+            self.variant_guards.push((path, tag.clone(), equal));
         }
+    }
+
+    /// The guards in effect for `path`: each tag and whether the value equals it.
+    fn guards<'a>(&'a self, path: &'a Path) -> impl Iterator<Item = (&'a str, bool)> + Clone {
+        self.variant_guards
+            .iter()
+            .filter(move |(guarded, _, _)| guarded == path)
+            .map(|(_, tag, equal)| (tag.as_str(), *equal))
     }
 
     pub(super) fn narrow_primitive(
@@ -73,27 +85,36 @@ impl FunctionBuilder<'_> {
         if !ty.deref(ctx).is::<perry_mir::types::NumberStringType>() {
             return Ok(value);
         }
-        let Some(guards) = path(expr).and_then(|path| self.variant_guards.get(&path)) else {
+        let Some(path) = path(expr) else {
             return Ok(value);
         };
-        let tags: Vec<_> = ["number", "string"]
-            .into_iter()
-            .filter(|tag| {
-                guards
-                    .iter()
-                    .all(|(guard, equal)| (*tag == guard) == *equal)
-            })
-            .collect();
-        let [tag] = tags.as_slice() else {
-            return Ok(value);
+        // The single tag the guards admit, and whether a positive guard names it.
+        let (tag, asserted) = {
+            let guards = self.guards(&path);
+            if guards.clone().next().is_none() {
+                return Ok(value);
+            }
+            let tags: Vec<&'static str> = ["number", "string"]
+                .into_iter()
+                .filter(|tag| {
+                    guards
+                        .clone()
+                        .all(|(guard, equal)| (*tag == guard) == equal)
+                })
+                .collect();
+            let [tag] = tags.as_slice() else {
+                return Ok(value);
+            };
+            (
+                *tag,
+                guards.clone().any(|(guard, equal)| equal && guard == *tag),
+            )
         };
         // Negative typeof guards alone do not remove null or undefined.
-        if self.is_optional(ctx, value)
-            && !guards.iter().any(|(guard, equal)| *equal && guard == tag)
-        {
+        if !asserted && self.is_optional(ctx, value) {
             return Ok(value);
         }
-        let result = if *tag == "number" {
+        let result = if tag == "number" {
             FP64Type::get(ctx).into()
         } else {
             StringType::get(ctx).into()
@@ -115,10 +136,9 @@ impl FunctionBuilder<'_> {
         ensure!(field == "val", "variants have tag and val only");
         let variant = TypedHandle::<VariantType>::from_handle(value.get_type(ctx), ctx)?;
         let mut cases = variant.deref(ctx).cases().to_vec();
-        if let Some(path) = path(object)
-            && let Some(guards) = self.variant_guards.get(&path)
-        {
-            cases.retain(|(tag, _)| guards.iter().all(|(guard, equal)| (tag == guard) == *equal));
+        if let Some(path) = path(object) {
+            let guards = self.guards(&path);
+            cases.retain(|(tag, _)| guards.clone().all(|(guard, equal)| (tag == guard) == equal));
         }
         ensure!(
             !cases.is_empty(),

@@ -68,13 +68,13 @@ fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {
         .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|c| c.callee(ctx)))
 }
 
-fn cyclic<N: Copy + Eq + std::hash::Hash>(
+fn cyclic<N: Copy + Eq + std::hash::Hash, S: IntoIterator<Item = N>>(
     nodes: impl IntoIterator<Item = N>,
-    successors: impl Fn(N) -> Vec<N>,
+    successors: impl Fn(N) -> S,
 ) -> bool {
-    fn visit<N: Copy + Eq + std::hash::Hash>(
+    fn visit<N: Copy + Eq + std::hash::Hash, S: IntoIterator<Item = N>>(
         node: N,
-        successors: &impl Fn(N) -> Vec<N>,
+        successors: &impl Fn(N) -> S,
         active: &mut HashSet<N>,
         done: &mut HashSet<N>,
     ) -> bool {
@@ -121,13 +121,16 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                 .collect()
         })
         .collect();
-    let call_graph: Vec<Vec<_>> = bodies
+    let index_of: HashMap<&Identifier, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name, index))
+        .collect();
+    let call_graph: Vec<Vec<usize>> = bodies
         .iter()
         .map(|body| {
             body.iter()
-                .filter_map(|&op| {
-                    callee(ctx, op).and_then(|callee| names.iter().position(|name| *name == callee))
-                })
+                .filter_map(|&op| callee(ctx, op).and_then(|callee| index_of.get(&callee).copied()))
                 .collect()
         })
         .collect();
@@ -137,7 +140,7 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
         .map(|(index, function)| {
             let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
             cyclic(blocks, |block: Ptr<BasicBlock>| block.deref(ctx).succs(ctx))
-                || cyclic([index], |function| call_graph[function].clone())
+                || cyclic([index], |function| call_graph[function].iter().copied())
         })
         .collect();
     loop {

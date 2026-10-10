@@ -558,7 +558,8 @@ struct FunctionBuilder<'s> {
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
     false_guards: HashSet<LocalId>,
-    variant_guards: HashMap<variants::Path, Vec<(String, bool)>>,
+    /// Tag guards in effect, appended as conditions narrow; branches truncate back.
+    variant_guards: Vec<(variants::Path, String, bool)>,
     controls: Vec<Control>,
     handlers: Vec<Handler>,
     finallies: Vec<Finally>,
@@ -665,7 +666,7 @@ impl<'s> FunctionBuilder<'s> {
             locals: HashMap::new(),
             global_slots: HashSet::new(),
             false_guards: HashSet::new(),
-            variant_guards: HashMap::new(),
+            variant_guards: Vec::new(),
             controls: Vec::new(),
             handlers: Vec::new(),
             finallies: Vec::new(),
@@ -1590,7 +1591,7 @@ impl<'s> FunctionBuilder<'s> {
                 then_branch,
                 else_branch,
             } => {
-                let guards = self.variant_guards.clone();
+                let guards = self.variant_guards.len();
                 let test = self.condition(ctx, condition)?;
                 let then = self.new_block(ctx, "then");
                 let join = self.new_block(ctx, "join");
@@ -1605,7 +1606,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.statements(ctx, then_branch)?;
                 let then_reachable = self.reachable(ctx, self.block);
                 self.jump(ctx, join);
-                self.variant_guards = guards.clone();
+                self.variant_guards.truncate(guards);
                 let mut else_reachable = true;
                 if let Some(else_branch) = else_branch {
                     self.switch_to(otherwise);
@@ -1614,7 +1615,7 @@ impl<'s> FunctionBuilder<'s> {
                     else_reachable = self.reachable(ctx, self.block);
                     self.jump(ctx, join);
                 }
-                self.variant_guards = guards;
+                self.variant_guards.truncate(guards);
                 if !then_reachable {
                     self.variant_condition(condition, false);
                 }
@@ -2173,7 +2174,7 @@ impl<'s> FunctionBuilder<'s> {
                 then_expr,
                 else_expr,
             } => {
-                let guards = self.variant_guards.clone();
+                let guards = self.variant_guards.len();
                 let test = self.condition(ctx, condition)?;
                 let then = self.new_block(ctx, "then");
                 let otherwise = self.new_block(ctx, "else");
@@ -2193,13 +2194,13 @@ impl<'s> FunctionBuilder<'s> {
                 self.store(ctx, result, then_value);
                 self.jump(ctx, join);
                 self.switch_to(otherwise);
-                self.variant_guards = guards.clone();
+                self.variant_guards.truncate(guards);
                 self.variant_condition(condition, false);
                 let else_value = self.expression_with(ctx, else_expr, Some(ty))?;
                 let else_value = self.fit(ctx, else_value, ty)?;
                 self.store(ctx, result, else_value);
                 self.jump(ctx, join);
-                self.variant_guards = guards;
+                self.variant_guards.truncate(guards);
                 self.switch_to(join);
                 self.load(ctx, result)?
             }

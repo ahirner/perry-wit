@@ -472,7 +472,8 @@ struct ModuleState {
     host: BTreeSet<Host>,
     /// Interfaces the WIT world imports; `None` when compiling without a world.
     imports: Option<HashSet<String>>,
-    bindings: HashMap<String, boundary::Import>,
+    /// Shared so lowering can hold an import while emitting through the state.
+    bindings: HashMap<String, std::rc::Rc<boundary::Import>>,
     resources: HashMap<u32, boundary::ResourceDefinition>,
     foreign_transfers: Vec<String>,
     /// Async functions in dispatch-kind order.
@@ -543,8 +544,7 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
         bindings: match exports {
             Exports::Canonical { bindings, .. } => bindings
                 .iter()
-                .cloned()
-                .map(|import| (import.binding.clone(), import))
+                .map(|import| (import.binding.clone(), std::rc::Rc::new(import.clone())))
                 .collect(),
             _ => HashMap::new(),
         },

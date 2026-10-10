@@ -57,26 +57,16 @@ impl FunctionBuilder<'_> {
         }
         self.jump(ctx, default);
         self.controls.push(Control::Switch { break_to: done });
-        let guards = self.variant_guards.clone();
+        let guards = self.variant_guards.len();
         let mut fallthrough = false;
         for (index, case) in cases.iter().enumerate() {
-            self.variant_guards = guards.clone();
+            self.variant_guards.truncate(guards);
             if !fallthrough {
                 if let Some(test) = &case.test {
-                    let condition = Expr::Compare {
-                        op: CompareOp::Eq,
-                        left: Box::new(discriminant.clone()),
-                        right: Box::new(test.clone()),
-                    };
-                    self.variant_condition(&condition, true);
+                    self.variant_equality(discriminant, test, true);
                 } else {
                     for test in cases.iter().filter_map(|case| case.test.as_ref()) {
-                        let condition = Expr::Compare {
-                            op: CompareOp::Eq,
-                            left: Box::new(discriminant.clone()),
-                            right: Box::new(test.clone()),
-                        };
-                        self.variant_condition(&condition, false);
+                        self.variant_equality(discriminant, test, false);
                     }
                 }
             }
@@ -85,7 +75,7 @@ impl FunctionBuilder<'_> {
             fallthrough = self.reachable(ctx, self.block);
             self.jump(ctx, blocks.get(index + 1).copied().unwrap_or(done));
         }
-        self.variant_guards = guards;
+        self.variant_guards.truncate(guards);
         self.controls.pop();
         self.switch_to(done);
         Ok(())

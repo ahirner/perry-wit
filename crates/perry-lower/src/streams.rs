@@ -10,7 +10,10 @@ pub(super) fn lower(module: &mut ast::Module) -> Result<()> {
     struct Names(HashSet<String>);
     impl Visit for Names {
         fn visit_ident(&mut self, ident: &ast::Ident) {
-            self.0.insert(ident.sym.to_string());
+            // Only names that could collide with generated loop names.
+            if ident.sym.starts_with("__perry_stream_") {
+                self.0.insert(ident.sym.to_string());
+            }
         }
     }
     let mut names = Names::default();

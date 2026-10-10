@@ -623,7 +623,7 @@ impl<'a> FunctionEmitter<'a> {
 
         // Greedy coloring: function parameters keep locals 0..n; other values take the first
         // local of their type no neighbor holds, preferring a hinted one.
-        let mut color: HashMap<Value, u32> = self.locals.clone();
+        let mut color: HashMap<Value, u32> = std::mem::take(&mut self.locals);
         let mut by_type: HashMap<ValType, Vec<u32>> = HashMap::new();
         for (index, ty) in self.local_types.iter().enumerate() {
             by_type.entry(*ty).or_default().push(index as u32);
@@ -681,10 +681,10 @@ impl<'a> FunctionEmitter<'a> {
             renumber.insert(local, self.local_types.len() as u32);
             self.local_types.push(ty);
         }
-        for (value, local) in color {
-            self.locals
-                .insert(value, renumber.get(&local).copied().unwrap_or(local));
-        }
+        self.locals = color
+            .into_iter()
+            .map(|(value, local)| (value, renumber.get(&local).copied().unwrap_or(local)))
+            .collect();
         Ok(())
     }
 

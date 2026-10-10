@@ -13,7 +13,26 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::MemKind;
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    hash::{Hash, Hasher},
+};
+
+/// Values live across `op`: its operands and what is live after it, except its results.
+/// May repeat an operand that is also live after `op`.
+fn live_across<'a>(
+    ctx: &'a Context,
+    op: Ptr<Operation>,
+    after: &'a HashSet<Value>,
+) -> impl Iterator<Item = Value> + 'a {
+    let results: Vec<Value> = op.deref(ctx).results().collect();
+    let operands: Vec<Value> = op.deref(ctx).operands().collect();
+    after
+        .iter()
+        .copied()
+        .filter(move |value| !results.contains(value))
+        .chain(operands)
+}
 
 pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
     use pliron::{
@@ -351,16 +370,16 @@ impl FunctionLowering<'_> {
         {
             return Ok(None);
         }
-        let mut live = after.clone();
-        for result in op.deref(ctx).results() {
-            live.remove(&result);
-        }
-        live.extend(op.deref(ctx).operands());
-        let mut live: Vec<_> = live
-            .into_iter()
+        let mut live: Vec<Value> = live_across(ctx, op, after)
             .filter(|value| repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
             .collect();
-        live.sort_by_key(|value| format!("{value:?}"));
+        // A fixed hasher orders the roots reproducibly across compilations.
+        live.sort_unstable_by_key(|value| {
+            let mut hasher = std::hash::DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        });
+        live.dedup();
         let values = live
             .into_iter()
             .map(|value| self.mapped(ctx, value))
@@ -389,19 +408,18 @@ impl FunctionLowering<'_> {
         let Some(frame) = &self.frame else {
             return;
         };
-        let mut live = after.clone();
-        for result in op.deref(ctx).results() {
-            live.remove(&result);
-        }
-        live.extend(op.deref(ctx).operands());
+        let operands: Vec<Value> = op.deref(ctx).operands().collect();
+        let results: Vec<Value> = op.deref(ctx).results().collect();
+        let live = |value: &Value| {
+            operands.contains(value) || (after.contains(value) && !results.contains(value))
+        };
         let pointer = frame.frame;
         let mut dead: Vec<_> = frame
             .slots
             .iter()
             .filter_map(|(value, (offset, _))| {
-                (!live.contains(value)
-                    && repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
-                .then_some(*offset)
+                (!live(value) && repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
+                    .then_some(*offset)
             })
             .collect();
         dead.sort_unstable();
