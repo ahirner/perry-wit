@@ -644,7 +644,12 @@ fn execute_function(
         Err(error) => return Outcome::Compile(format!("{error:#}")),
     };
     let mut config = Config::new();
-    config.consume_fuel(true).wasm_component_model_async(true);
+    config
+        .consume_fuel(true)
+        .wasm_component_model_async(true)
+        .wasm_component_model_async_stackful(false)
+        .wasm_component_model_more_async_builtins(false)
+        .wasm_component_model_threading(false);
     let engine = Engine::new(&config).unwrap();
     let bytes = compiled.component.unwrap();
     let component_bytes = bytes.len();

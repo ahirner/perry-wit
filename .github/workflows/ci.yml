@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: 1
+  RUST_TEST_THREADS: 1
+
 jobs:
   flake-checks:
     strategy:
@@ -60,6 +64,10 @@ jobs:
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - run: nix develop -c cargo test --workspace
     - run: nix develop -c cargo run -p perry-conformance -- check
+    - run: |
+        for seed in 0 1 42 20261010; do
+          nix develop --max-jobs 1 --cores 1 -c cargo run -j 1 -p perry-conformance -- check --select ecma.number.arithmetic --seed "$seed" --cases 8 --depth 3
+        done
     - run: nix develop -c cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   build-artifacts:

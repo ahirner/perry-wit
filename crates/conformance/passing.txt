@@ -14,9 +14,11 @@ ecma.object.records
 ecma.date.epoch
 ecma.uint8array.conversion
 web.textencoder.subviews
+web.textdecoder.streaming
 ecma.json.roundtrip
 node.timers.promises.value
 node.timers.promises.observers
+node.timers.promises.lifecycle
 ecma.json.command
 ecma.promise.all
 ecma.date.clock
@@ -43,3 +45,5 @@ wasi.streams.incoming_bytes
 web.fetch.bounded_body
 wasi.http.handler
 ecma.error.values
+web.streams.byob_reader
+web.fetch.bounded_byob_body

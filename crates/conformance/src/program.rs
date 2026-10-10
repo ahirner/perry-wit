@@ -54,6 +54,10 @@ pub enum Number {
     EncodedLength(Box<Text>, Box<Self>, Box<Self>),
     JsonLength(Box<Text>),
     JsonStoredLength(Box<Text>),
+    TypedJson(Box<Self>),
+    ByteAlias(Box<Self>, Box<Self>),
+    ClosedLoop(Box<Self>, u8),
+    Handled(Box<Self>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,8 +117,11 @@ pub enum Form {
     Local,
     Branch,
     Loop,
+    InertException,
     Timer,
     StoredTimer,
+    FirstCompletion,
+    LastCompletion,
     FileRead,
     FileRoundTrip,
     FileMetadata,
@@ -124,13 +131,23 @@ pub enum Form {
 }
 
 impl Form {
-    pub const ALL: [Self; 4] = [Self::Direct, Self::Local, Self::Branch, Self::Loop];
+    pub const ALL: [Self; 7] = [
+        Self::Direct,
+        Self::Local,
+        Self::Branch,
+        Self::Loop,
+        Self::InertException,
+        Self::FirstCompletion,
+        Self::LastCompletion,
+    ];
 
     pub fn is_async(self) -> bool {
         matches!(
             self,
             Self::Timer
                 | Self::StoredTimer
+                | Self::FirstCompletion
+                | Self::LastCompletion
                 | Self::FileRead
                 | Self::FileRoundTrip
                 | Self::FileMetadata
@@ -170,6 +187,16 @@ impl Program {
             Form::FileRoundTrip => format!(
                 "const value = {expression}; const text = JSON.stringify({{text:{fixture},value:value}}); if(text === undefined) {{throw 90;}} await writeFile('roundtrip.json',text); const restored = await readFile('roundtrip.json','utf8'); if(restored !== text) {{throw 92;}}"
             ),
+            Form::FirstCompletion | Form::LastCompletion => {
+                let (first_delay, second_delay) = if self.form == Form::FirstCompletion {
+                    (1, 2)
+                } else {
+                    (2, 1)
+                };
+                format!(
+                    "const input = {expression}; const first = setTimeout({first_delay}, input); const second = setTimeout({second_delay}, input); const all = Promise.all([first, second, first]); const values = await all; const value = values[0] as number; await first; await second;"
+                )
+            }
             Form::Timer => format!("const value = await setTimeout(0, {expression});"),
             Form::StoredTimer => format!(
                 "const pending = setTimeout(0, {expression}); const value = await pending; await pending;"
@@ -182,9 +209,14 @@ impl Program {
             Form::Loop => {
                 format!("let value = 0; for (let i = 0; i < 1; i++) {{ value = {expression}; }}")
             }
+            Form::InertException => {
+                format!("let value = 0; try {{ value = {expression}; }} finally {{ }}")
+            }
         };
         let import = match self.form {
-            Form::Timer | Form::StoredTimer => "import {setTimeout} from 'node:timers/promises';\n",
+            Form::Timer | Form::StoredTimer | Form::FirstCompletion | Form::LastCompletion => {
+                "import {setTimeout} from 'node:timers/promises';\n"
+            }
             Form::FileRead
             | Form::FileRoundTrip
             | Form::FileMetadata
@@ -202,10 +234,37 @@ impl Program {
             "{value:number,trace:number[]}"
         };
         format!(
-            "{import}function mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
+            "{import}{TYPED_HELPERS}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
         )
     }
 }
+
+const TYPED_HELPERS: &str = r#"
+function typedJson(value: number): number {
+    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: value, rows: [1, 2, 3] }));
+    parsed.rows[0] = 4;
+    return parsed.value === null ? 0 : parsed.value;
+}
+function byteAlias(first: number, second: number): number {
+    const bytes = new Uint8Array([first, second]);
+    const alias = bytes.subarray(1);
+    alias[0] = first;
+    return bytes[1] as number;
+}
+function closedLoop(value: number, count: number): number {
+    const state = { value: value, step: 0 };
+    for (let i = 0; i < count; i++) {
+        if (i % 2 === 0) state.value += i;
+        else state.value -= i;
+        state.step++;
+    }
+    return state.value;
+}
+function handled(value: number): number {
+    try { if (value < 0) throw value; return value; }
+    catch (error) { return error as number; }
+}
+"#;
 
 impl Display for Number {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -220,6 +279,10 @@ impl Display for Number {
             Self::Field(a, b) => write!(f, "({{first:{a}, second:{b}}}.first)"),
             Self::Length(value) => write!(f, "({value}.length)"),
             Self::Call(value) => write!(f, "identity({value})"),
+            Self::TypedJson(value) => write!(f, "typedJson({value})"),
+            Self::ByteAlias(a, b) => write!(f, "byteAlias({a}, {b})"),
+            Self::ClosedLoop(value, count) => write!(f, "closedLoop({value}, {count})"),
+            Self::Handled(value) => write!(f, "handled({value})"),
             Self::Math(op, value) => write!(f, "Math.{op}({value})"),
             Self::DateTime(value) => write!(f, "new Date({value}).getTime()"),
             Self::ByteGet(a, b, c, index) => {

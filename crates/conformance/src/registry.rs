@@ -165,7 +165,7 @@ fn expression_contract(
         id,
         description,
         specification: "https://tc39.es/ecma262/",
-        domain: "Typed terminating programs over the IEEE-754 boundary corpus; generated strings restricted to BMP scalars; direct/local/branch/loop metamorphic forms",
+        domain: "Bounded typed functions, control flow, closed aggregates, byte aliases, JSON conversion and exceptions over the IEEE-754 boundary corpus; BMP strings; direct/local/branch/loop/inert-exception forms and overlapping timer completion schedules",
         witnesses: examples
             .into_iter()
             .map(|(partition, expression)| Witness {
@@ -206,6 +206,13 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 ),
                 ("trace", Number::Mark(input())),
                 ("call", Number::Call(input())),
+                ("record-field-update", Number::ClosedLoop(input(), 4)),
+                (
+                    "byte-alias",
+                    Number::ByteAlias(input(), Box::new(Number::Integer(7))),
+                ),
+                ("checked-json", Number::TypedJson(input())),
+                ("handled-throw", Number::Handled(input())),
             ],
         ),
         expression_contract(
