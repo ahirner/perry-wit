@@ -14,9 +14,11 @@ Perry measurements, all 50 conformance contracts, the fixed generated campaign a
 consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapshots.
 
 0. [x] Freeze a serial debug-build benchmark and consumer baseline.
-1. [ ] Elide root bookkeeping for proven non-collecting calls; emit root-stack stores inline
+1. [x] Elide root bookkeeping for proven non-collecting calls; emit root-stack stores inline.
+   [Full campaign](bench/performance/reports/01-roots/summary.json) passes all contracts,
+   four seeds, 55 consumer tests and 25 benchmark scenarios.
+2. [ ] Lower integer remainder inline with IEEE-754 fallback and negative-zero preservation
    (implemented; full campaign pending).
-2. [ ] Lower integer remainder inline with IEEE-754 fallback and negative-zero preservation.
 3. [ ] Extend bounded leaf inlining, closed-record argument promotion and scalar replacement.
 4. [ ] Prove indexed accesses and reuse dominating successful optional unwraps.
 5. [ ] Reuse string headers when ownership and liveness permit mutation.
@@ -40,9 +42,15 @@ harness adjustments accompany the report; startup-subtracted estimates are not g
 
 Root optimization focused checks pass: 28 codegen, three stream and 14 async/import/resource/
 cancellation tests. Direct-call fuel is 24.0M versus 231.0M at baseline; numeric arrays 372.7M
-versus 473.7M; append 632.9M versus 774.9M. Peak memory is unchanged. Root publication counters
+versus 473.7M; append 632.9M versus 774.9M. Core peak memory is unchanged. Root publication counters
 exist only in checked modules; the ordinary descriptor has three words and preserves the
 retained-chunk and 2 MiB-through-64 KiB tests. Collection thresholds are unchanged.
+
+Remainder focused checks pass (30 codegen tests): the scalar loop falls from 186.1M to 35.0M
+fuel, and temporary records from 188.1M to 37.0M, still with zero record allocations. Components
+grow by 48–51 bytes where the fast path is used; other deterministic costs are unchanged.
+The effect audit also accounts for the empty string header allocated when a caught non-error
+value's message is read; forced collection covers this exception path.
 
 ## Verified implementation
 
@@ -188,6 +196,7 @@ Changes stay in this worktree. Use one build job and test thread, including inte
 Use `CARGO_INCREMENTAL=0`; keep pinned Cargo, Nix and documentation toolchains aligned. Debug compiler
 builds embed optimized guest helpers; do not start an additional compiler release build.
 
-Consumer validation is authorized for the isolated `1d65d97` snapshot. Leave its repository and
+Performance validation is authorized for isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapshots;
+the earlier application acceptance used `1d65d97`. Leave its repository and
 development servers untouched. A different consumer snapshot requires fresh approval.
 Stop expanding scope when the completion gates pass.

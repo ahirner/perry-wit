@@ -55,6 +55,7 @@ pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
         || Operation::get_op::<ErrorNewOp>(op, ctx).is_some()
         || Operation::get_op::<RaiseOp>(op, ctx).is_some()
         || Operation::get_op::<CatchOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::exceptions::ExceptionMessageOp>(op, ctx).is_some()
         || Operation::get_op::<IntrinsicOp>(op, ctx)
             .and_then(|i| i.intrinsic(ctx))
             .is_some_and(|i| i.may_allocate())

@@ -1155,3 +1155,77 @@ export function run(n: number): number {
         }
     }
 }
+
+/// `%` takes `i32.rem_s` inline for `i32` operands and `fmod` otherwise; both agree with
+/// ECMAScript (Rust's `f64 %` is `fmod`), bit for bit, including `-0`, NaN and infinities.
+#[test]
+fn remainder_matches_fmod() {
+    let mut program = Program::new(
+        r#"
+export function rem(a: number, b: number): number { return a % b; }
+export function rem7(a: number): number { return a % -7; }
+"#,
+    );
+    let values = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        2.0,
+        -4.0,
+        7.0,
+        -7.0,
+        7.5,
+        -7.5,
+        1e9,
+        -1e9,
+        2147483647.0,
+        -2147483648.0,
+        2147483648.0,
+        -2147483649.0,
+        1e300,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        -f64::from_bits(1),
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+    let same =
+        |got: f64, want: f64| got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan());
+    for a in values {
+        let (got, _) = program.call("rem7", &[Val::F64(a.to_bits())]);
+        let got = got[0].unwrap_f64();
+        assert!(same(got, a % -7.0), "{a} % -7 = {got}");
+        for b in values {
+            let args = [Val::F64(a.to_bits()), Val::F64(b.to_bits())];
+            let (got, _) = program.call("rem", &args);
+            let got = got[0].unwrap_f64();
+            assert!(same(got, a % b), "{a} % {b} = {got}, want {}", a % b);
+        }
+    }
+}
+
+#[test]
+fn non_error_messages_remain_collectible() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+export function run(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    try { throw i; } catch (error) { sum += error.message.length; }
+  }
+  return sum;
+}
+"#,
+        "non-error-message.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.throwing("run", 1000.0), (0.0, 0));
+    for index in [2, 6] {
+        let (counter, _) = program.call("__perry_gc_counter", &[Val::I32(index)]);
+        assert_eq!(counter[0].unwrap_i64(), 0);
+    }
+}

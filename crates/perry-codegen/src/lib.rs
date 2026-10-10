@@ -473,6 +473,16 @@ enum Repr {
     Ref,
 }
 
+/// The value of `value` when it is a constant non-zero `i32` integer, as a divisor.
+fn nonzero_i32_constant(ctx: &Context, value: Value) -> Option<i32> {
+    let op = value.defining_op()?;
+    let constant = Operation::get_op::<ConstantOp>(op, ctx)?;
+    let attr = constant.get_attr_builtin_constant_value(ctx)?;
+    let double = f64::from(attr.downcast_ref::<FPDoubleAttr>()?.clone());
+    let integer = double as i32;
+    (integer != 0 && f64::from(integer) == double).then_some(integer)
+}
+
 fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     let deref = ty.deref(ctx);
     if deref.is::<FP64Type>() {
@@ -1340,6 +1350,52 @@ impl<'s> FunctionLowering<'s> {
 
     fn define(&mut self, ctx: &Context, op: Ptr<Operation>, value: Value) {
         self.values.insert(op.deref(ctx).get_result(0), value);
+    }
+
+    /// ECMAScript `%` on numbers. Operands that are `i32` integers (counters, indices,
+    /// moduli) take `i32.rem_s` inline, signed like the dividend so that `-4 % 2` is `-0`;
+    /// the rest call `fmod`. A constant divisor (`constant`, non-zero) needs no check.
+    fn remainder(
+        &mut self,
+        ctx: &mut Context,
+        operands: Vec<Value>,
+        constant: Option<i32>,
+    ) -> Value {
+        let (dividend, divisor) = (operands[0], operands[1]);
+        let a = self.num(ctx, NumOpcode::I32TruncSatF64S, vec![dividend]);
+        let back = self.num(ctx, NumOpcode::F64ConvertI32S, vec![a]);
+        let mut fast = self.num(ctx, NumOpcode::F64Eq, vec![back, dividend]);
+        let b = match constant {
+            Some(constant) => self.i32_const(ctx, constant),
+            None => {
+                let b = self.num(ctx, NumOpcode::I32TruncSatF64S, vec![divisor]);
+                let back = self.num(ctx, NumOpcode::F64ConvertI32S, vec![b]);
+                let exact = self.num(ctx, NumOpcode::F64Eq, vec![back, divisor]);
+                fast = self.num(ctx, NumOpcode::I32And, vec![fast, exact]);
+                // A zero divisor gives NaN (`fmod`); `i32.rem_s` would trap.
+                let zero = self.num(ctx, NumOpcode::I32Eqz, vec![b]);
+                let nonzero = self.num(ctx, NumOpcode::I32Eqz, vec![zero]);
+                fast = self.num(ctx, NumOpcode::I32And, vec![fast, nonzero]);
+                b
+            }
+        };
+        let f64 = FP64Type::get(ctx).into();
+        let integer = self.new_block(ctx, vec![]);
+        let general = self.new_block(ctx, vec![]);
+        let join = self.new_block(ctx, vec![f64]);
+        self.cond_br(ctx, fast, (integer, vec![]), (general, vec![]));
+        self.block = integer;
+        let rem = self.num(ctx, NumOpcode::I32RemS, vec![a, b]);
+        let rem = self.num(ctx, NumOpcode::F64ConvertI32S, vec![rem]);
+        let rem = self.num(ctx, NumOpcode::F64Copysign, vec![rem, dividend]);
+        self.br(ctx, join, vec![rem]);
+        self.block = general;
+        let rem = self
+            .runtime(ctx, Runtime::F64Rem, vec![dividend, divisor])
+            .expect("result");
+        self.br(ctx, join, vec![rem]);
+        self.block = join;
+        join.deref(ctx).get_argument(0)
     }
 
     // --- exceptions ---------------------------------------------------------------------------
@@ -2653,9 +2709,10 @@ impl<'s> FunctionLowering<'s> {
             let operands = self.operands(ctx, op)?;
             let is_f64 = operands[0].get_type(ctx).deref(ctx).is::<FP64Type>();
             let value = match (binary.kind(ctx), is_f64) {
-                (BinaryKind::Rem, true) => self
-                    .runtime(ctx, Runtime::F64Rem, operands)
-                    .expect("result"),
+                (BinaryKind::Rem, true) => {
+                    let divisor = op.deref(ctx).get_operand(1);
+                    self.remainder(ctx, operands, nonzero_i32_constant(ctx, divisor))
+                }
                 (kind, true) => {
                     let opcode = match kind {
                         BinaryKind::Add => NumOpcode::F64Add,
