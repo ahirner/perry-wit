@@ -240,7 +240,7 @@ fn same_field_names_with_other_types_are_distinct_records() {
 interface Inner { v: number; c: Leaf }
 interface Leaf { v: number }
 interface Outer { v: number; c: Inner }
-function depth(o: Outer): number {
+export function depth(o: Outer): number {
   return o.c.c.v + o.c.v + o.v;
 }
 export function run(n: number): number {
@@ -248,7 +248,7 @@ export function run(n: number): number {
 }
 "#,
     );
-    // Inner and Outer share field names but not field types.
+    // The exported signature keeps both shapes observable after aggregate elimination.
     assert!(printed.contains("shape_c_v {"), "{printed}");
     assert!(printed.contains("shape_c_v_2 {"), "{printed}");
 }
@@ -339,14 +339,16 @@ fn frame_proofs_follow_reference_escape_through_calls() {
     let source = r#"
 interface Cell { value: number }
 let retained: Cell | null = null;
-function read(cell: Cell): number { if (cell.value < 0) return 0; return cell.value; }
-function save(cell: Cell): void { retained = cell; }
-export function local(x: number): number { const cell: Cell = { value: x }; return read(cell); }
-export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell); return x; }
+function read(cell: Cell, n: number): number { if (n < 0) return read(cell, -n); return cell.value; }
+function save(cell: Cell, n: number): void { if (n < 0) { save(cell, -n); return; } retained = cell; }
+export function local(x: number): number { const cell: Cell = { value: x }; return read(cell, x); }
+export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell, x); return x; }
 "#;
     let module = lower_source(ctx, source, "lifetimes.ts").unwrap();
     perry_mir::pipeline::canonicalize(module.get_operation(), ctx).unwrap();
     let printed = module.disp(ctx).to_string();
+    assert!(printed.contains("perry.call read"), "{printed}");
+    assert!(printed.contains("perry.call save"), "{printed}");
     assert!(printed.contains("perry.alloc Frame"), "{printed}");
     assert!(printed.contains("perry.alloc Instance"), "{printed}");
 }

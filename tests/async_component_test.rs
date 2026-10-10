@@ -18,6 +18,7 @@ world timers {
   export label: async func(name: string) -> string;
   export count: async func(n: u32) -> u32;
   export pressure: async func(n: u32) -> u32;
+  export rotate: async func(n: u32) -> f64;
   export completion: async func(fail: bool) -> result<string, string>;
   export adopt: async func(a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:string,fail:bool) -> result<string,string>;
 }
@@ -78,6 +79,17 @@ export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
   return await setTimeout(2, prefix + "!");
 }
+export async function rotate(n: number): Promise<number> {
+  let a = 1; let b = 2; let c = 3;
+  const marker = 'é' + String(n) + '😀';
+  for (let i = 0; i < n; i++) {
+    const old = a; a = b; b = c;
+    c = await later(old + i);
+    if (i % 2 === 0) await setTimeout(1);
+    if (marker[0] !== 'é' || marker[marker.length - 1] !== '😀') throw 1;
+  }
+  return a * 10000 + b * 100 + c;
+}
 export async function count(n: number): Promise<number> {
   let total = 0;
   for (let i = 0; i < n; i++) {
@@ -125,30 +137,37 @@ impl wasmtime::ResourceLimiter for Host {
     }
 }
 
-fn compile() -> Result<Vec<u8>> {
+fn compile(check_memory: bool) -> Result<Vec<u8>> {
     let directory = tempfile::tempdir()?;
     std::fs::write(directory.path().join("world.wit"), WIT)?;
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("timers"))?;
-    let compiled = compile_for_world(SOURCE, "timers.ts", &resolve, world, true)?;
+    let compiled = if check_memory {
+        perry_wit::compiler::compile_for_world_with_memory_checks(
+            SOURCE,
+            "timers.ts",
+            &resolve,
+            world,
+        )?
+    } else {
+        compile_for_world(SOURCE, "timers.ts", &resolve, world, true)?
+    };
     Ok(compiled.stripped.unwrap())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
-    let wasm = compile()?;
+fn engine() -> Result<Engine> {
     let mut config = Config::new();
     config
         .wasm_component_model_async(true)
         .wasm_component_model_async_stackful(false)
         .wasm_component_model_more_async_builtins(false)
         .wasm_component_model_threading(false);
-    let engine = Engine::new(&config)?;
-    let component = Component::new(&engine, &wasm)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    Ok(Engine::new(&config)?)
+}
+
+fn store(engine: &Engine) -> Store<Host> {
     let mut store = Store::new(
-        &engine,
+        engine,
         Host {
             ctx: WasiCtx::builder().build(),
             table: ResourceTable::new(),
@@ -156,6 +175,17 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         },
     );
     store.limiter(|host| host);
+    store
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
+    let wasm = compile(false)?;
+    let engine = engine()?;
+    let component = Component::new(&engine, &wasm)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
     let instance = linker.instantiate_async(&mut store, &component).await?;
 
     let run = instance.get_typed_func::<(f64,), (Observation,)>(&mut store, "run")?;
@@ -252,5 +282,29 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
         "longer async workload grew after warm-up"
     );
     store.assert_concurrent_state_empty();
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cyclic_values_and_text_survive_multiple_host_suspension_states() -> Result<()> {
+    let engine = engine()?;
+    let component = Component::new(&engine, compile(true)?)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let rotate = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "rotate")?;
+    for n in [0, 1, 2, 11] {
+        let (mut a, mut b, mut c) = (1, 2, 3);
+        for i in 0..n {
+            (a, b, c) = (b, c, a + i + 1);
+        }
+        assert_eq!(
+            rotate.call_async(&mut store, (n,)).await?.0,
+            f64::from(a * 10000 + b * 100 + c)
+        );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
     Ok(())
 }

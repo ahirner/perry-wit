@@ -1305,6 +1305,18 @@ impl<'s> FunctionLowering<'s> {
         self.insert(ctx, op);
     }
 
+    /// `br_table`: `targets[index]`, else `default` (blocks without arguments).
+    fn br_table(
+        &mut self,
+        ctx: &mut Context,
+        index: Value,
+        targets: Vec<Ptr<BasicBlock>>,
+        default: Ptr<BasicBlock>,
+    ) {
+        let op = pliron_wasm::control::BrTableOp::new(ctx, index, targets, default).get_operation();
+        self.insert(ctx, op);
+    }
+
     fn cond_br(
         &mut self,
         ctx: &mut Context,

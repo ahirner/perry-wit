@@ -581,3 +581,127 @@ fn regex_lite(text: &str) -> String {
 fn dump_loops() {
     println!("{}", wat(&compile(&loops())));
 }
+
+/// `wasm.br_table`: targets in and out of range (the default), a shared target, and a target
+/// reached from the table and from another branch.
+#[test]
+fn br_table_switches() {
+    let wasm = compile(&format!(
+        r#"
+builtin.module @m {{
+  ^module():
+    builtin.func @pick: builtin.function <({I32}) -> ({I32})> {{
+      ^entry(x: {I32}):
+        two = builtin.constant <builtin.integer <2: i32>> : {I32};
+        big = wasm.num I32GtS x, two : {I32};
+        wasm.cond_br if big ^late() else ^table()
+      ^table():
+        wasm.br_table x [^zero, ^one, ^one, ^late]
+      ^zero():
+        ten = builtin.constant <builtin.integer <10: i32>> : {I32};
+        wasm.return ten
+      ^one():
+        eleven = builtin.constant <builtin.integer <11: i32>> : {I32};
+        wasm.return eleven
+      ^late():
+        twelve = builtin.constant <builtin.integer <12: i32>> : {I32};
+        wasm.return twelve
+    }}
+}}
+"#
+    ));
+    let text = wat(&wasm);
+    assert!(text.contains("br_table"), "{text}");
+    for (x, expected) in [(0, 10), (1, 11), (2, 11), (3, 12), (-1, 12), (7, 12)] {
+        assert_eq!(
+            i32_of(call(&wasm, "pick", &[Val::I32(x)])),
+            expected,
+            "x={x}"
+        );
+    }
+}
+
+#[test]
+fn folded_operands_remain_live_across_calls() {
+    let wasm = compile(&format!(
+        r#"
+builtin.module @m {{
+  ^module():
+    builtin.func @bump: builtin.function <({I32}) -> ({I32})> {{
+      ^entry(n: {I32}):
+        k = builtin.constant <builtin.integer <17: i32>> : {I32};
+        r = wasm.num I32Add n, k : {I32};
+        wasm.return r
+    }};
+    builtin.func @run: builtin.function <({I32}, {I32}) -> ({I32})> {{
+      ^entry(a: {I32}, b: {I32}):
+        product = wasm.num I32Mul a, b : {I32};
+        first = wasm.call bump (a) : {I32};
+        twice = wasm.num I32Add first, first : {I32};
+        second = wasm.call bump (b) : {I32};
+        total = wasm.num I32Add product, twice : {I32};
+        result = wasm.num I32Add total, second : {I32};
+        wasm.return result
+    }}
+}}
+"#
+    ));
+    for (a, b) in [(3, 7), (-9, 11), (0, 42)] {
+        assert_eq!(
+            i32_of(call(&wasm, "run", &[Val::I32(a), Val::I32(b)])),
+            a * b + 2 * a + b + 51
+        );
+    }
+}
+
+#[test]
+fn coalesced_locals_have_unique_debug_names() {
+    let wasm = compile(&loops());
+    let mut checked = 0;
+    for section in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let wasmparser::Payload::CustomSection(section) = section.unwrap()
+            && let wasmparser::KnownCustom::Name(names) = section.as_known()
+        {
+            for subsection in names {
+                if let wasmparser::Name::Local(functions) = subsection.unwrap() {
+                    for function in functions {
+                        let mut seen = std::collections::HashSet::new();
+                        for local in function.unwrap().names {
+                            let local = local.unwrap();
+                            assert!(
+                                seen.insert(local.index),
+                                "duplicate local name index {}",
+                                local.index
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 0);
+}
+
+#[test]
+fn br_table_rejects_missing_defaults_and_target_arguments() {
+    for (targets, argument) in [("", String::new()), ("^dest", format!("value: {I32}"))] {
+        let ctx = &mut Context::new();
+        let source = format!(
+            r#"
+builtin.module @m {{
+  ^module():
+    builtin.func @pick: builtin.function <({I32}) -> ()> {{
+      ^entry(index: {I32}):
+        wasm.br_table index [{targets}]
+      ^dest({argument}):
+        wasm.return
+    }}
+}}
+"#
+        );
+        let module = parse_from_str(spaced(Operation::top_level_parser()), ctx, &source)
+            .unwrap_or_else(|error| panic!("{}", error.disp(ctx)));
+        assert!(verify_operation(module, ctx).is_err());
+    }
+}

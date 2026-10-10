@@ -35,7 +35,10 @@ contain sorted field names and their static types, while literal expressions eva
 order. Named records can be recursive. Unsupported constructs receive compiler diagnostics.
 
 The emitter makes resumed CFGs reducible, structures control flow using dominators, folds single-use
-values into stack expressions and preserves effect order. The linker resolves runtime imports,
+values into stack expressions and preserves effect order. Locals share storage only when their
+emitted live ranges do not overlap, including operands held through folded expressions. Branch
+arguments move simultaneously; peepholes remove redundant branches and form `local.tee`. Async
+state and function-kind dispatch use `br_table`. The linker resolves runtime imports,
 relocates reachable helper functions and reserves their combined stack requirements. Every emitted
 core module and component is validated with thread features, stack switching, stackful component
 async and additional async builtins disabled.
@@ -63,6 +66,8 @@ sentinels let closed records and arrays widen admitted absence states without co
 Strings use Unicode scalar indexing. ASCII character strings are static; a cached scalar cursor
 accelerates sequential non-ASCII indexing. Slices share immutable storage. Append chains reuse
 spare buffer capacity while the left operand is the latest view; retained prefixes remain unchanged.
+When liveness proves the old header unobservable, appends reuse it without assuming exclusive
+ownership of the backing bytes.
 
 Dates preserve identity and alias-visible mutation. Literal regular expressions compile into
 bounded DFA tables; search/test allocate no guest storage. Incremental TextDecoder retains at most
@@ -93,10 +98,16 @@ supported ECMAScript property order. Revivers, replacers and indentation remain 
 Collectible objects use size-class pages, direct page lookup, side mark bits, exact pointer shapes,
 a tracing worklist and lazy sweeping. Ordinary collection is due at
 `max(256 KiB, live bytes after collection)` allocated volume; memory pressure can request an earlier
-collection at a compiled safe point. Helpers allocate without collecting internally. The remaining
-heap-growth and transfer stress acceptance work is tracked in the checklist.
+collection at a compiled safe point. Helpers allocate without collecting internally. Exclusive,
+unpinned buffer payloads can grow without moving through talc; allocation size, page-directory
+coverage, tracing bounds and accounting advance together. Fragmented or pinned storage uses the
+allocate/copy fallback. Shared string backing and active host borrows do not use exclusive resize.
 
 Roots comprise live compiled values, persistent module cells, suspended frames and active operations.
+A three-word root-stack descriptor supports inline publication and index-based marks; a helper grows
+its capacity. Allocation-free calls that cannot collect, suspend or reenter skip publication and GC
+checks. Potentially collecting calls retain caller roots for the whole call. Effect summaries are
+recomputed after MIR transformations.
 Completed operations detach their edges, dead frame slots clear, and recycled scheduler entries clear
 their old references. Views retain their owner. Pins remain until host completion or cancellation
 acknowledgement; one task's cleanup preserves another task's storage.
@@ -111,7 +122,8 @@ reads retain only active requests. A host copy pins its reader until completion 
 acknowledgement. Canonical transfers retain the payload independently of later buffer detachment.
 
 `--explain-tiers` reports allocation decisions. Raw test modules can expose allocation, collection,
-live-byte, reserved-byte, transfer-copy, pin and root counters, plus forced collection and poisoning.
+live-byte, reserved-byte, transfer-copy, pin, root-publication and buffer-growth counters, plus forced
+collection and poisoning. Ordinary execution and instrumented counter runs are measured separately.
 
 ## Boundaries
 

@@ -255,23 +255,20 @@ pub(crate) fn lower(
         b.block = saved;
         targets.push(resume);
     }
-    for (index, target) in targets.iter().enumerate() {
-        let args = if index == 0 {
-            let mut loaded = Vec::new();
-            for param in &params {
-                let (at, access) = b.frame.as_ref().unwrap().slots[param];
-                loaded.push(b.load(ctx, access, frame, at));
-            }
-            loaded
-        } else {
-            vec![]
-        };
-        let expected = b.i32_const(ctx, index as i32);
-        let matches = b.num(ctx, NumOpcode::I32Eq, vec![current, expected]);
-        let next = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, matches, (*target, args), (next, vec![]));
-        b.block = next;
+    // State 0 enters the body with the parameters loaded from the frame.
+    let begin = b.new_block(ctx, vec![]);
+    let saved = std::mem::replace(&mut b.block, begin);
+    let mut loaded = Vec::new();
+    for param in &params {
+        let (at, access) = b.frame.as_ref().unwrap().slots[param];
+        loaded.push(b.load(ctx, access, frame, at));
     }
+    b.br(ctx, targets[0], loaded);
+    b.block = saved;
+    targets[0] = begin;
+    let invalid = b.new_block(ctx, vec![]);
+    b.br_table(ctx, current, targets, invalid);
+    b.block = invalid;
     let unreachable = UnreachableOp::new(ctx).get_operation();
     b.insert(ctx, unreachable);
     b.state.wasm.append_operation(ctx, step.get_operation(), 0);
@@ -311,18 +308,19 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState, kinds: &[Identif
     b.runtime(ctx, Runtime::CombinatorStep, vec![frame]);
     b.br(ctx, header, vec![]);
     b.block = step_function;
-    for (index, name) in kinds.iter().enumerate() {
-        let expected = b.i32_const(ctx, index as i32);
-        let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, expected]);
+    let mut calls = Vec::new();
+    for name in kinds {
         let call_block = b.new_block(ctx, vec![]);
-        let next = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, matches, (call_block, vec![]), (next, vec![]));
-        b.block = call_block;
+        let saved = std::mem::replace(&mut b.block, call_block);
         let call = CallOp::new(ctx, step_name(name), vec![frame], vec![]).get_operation();
         b.insert(ctx, call);
         b.br(ctx, header, vec![]);
-        b.block = next;
+        b.block = saved;
+        calls.push(call_block);
     }
+    let invalid = b.new_block(ctx, vec![]);
+    b.br_table(ctx, kind, calls, invalid);
+    b.block = invalid;
     let unreachable = UnreachableOp::new(ctx).get_operation();
     b.insert(ctx, unreachable);
     b.state

@@ -29,9 +29,13 @@ consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapsho
 5. [x] Reuse string headers when ownership and liveness permit mutation.
    [Full campaign](bench/performance/reports/05-strings/summary.json) passes all contracts,
    four seeds, 55 consumer tests and 25 benchmark scenarios.
-6. [ ] Grow exclusive unpinned buffers in place with collector-aware metadata updates.
+6. [x] Grow exclusive unpinned buffers in place with collector-aware metadata updates.
+   [Full campaign](bench/performance/reports/06-growth/summary.json) passes all contracts,
+   four seeds, 55 consumer tests and 25 benchmark scenarios.
 7. [ ] Port local coalescing, emitter peepholes and async branch-table dispatch.
-8. [ ] Complete workspace, SDK/example, lint and permitted Nix validation on frozen source.
+8. [x] Complete workspace, SDK/example, lint and permitted Nix validation on frozen source.
+   All 234 workspace tests, formatting, strict host/Wasm Clippy, flake evaluation and the
+   Nix WIT/format checks pass. Package checks requiring a release compiler remain excluded.
 
 The benchmark harness is `tests/benchmark.rs`; `bench/performance/run.py` runs campaigns.
 Reports include source/tool identities and normal fuel separately from instrumented counters.
@@ -90,7 +94,18 @@ The final preview reduces HTTP accumulation from 48.2M to 35.0M fuel and 25,427,
 15,990,784 bytes (11 in-place growths, seven fallbacks). Retained-record fuel rises 0.37%
 with unchanged peak memory: interleaved live allocations require copying, and the more general
 allocation path adds a small fixed cost. Growth adds about 1.2 KiB to array/stream components;
-allocation-free components remain small. Collection thresholds are unchanged. Full campaign pending.
+allocation-free components remain small. Collection thresholds are unchanged. The full campaign passed.
+
+Emitter focused checks pass: 13 Wasm dialect tests, 38 codegen tests, real timer suspensions
+with cyclic values and poisoned reclamation, imports, the depth-32 guard, size budgets and stream
+reuse. Coalescing follows emitted liveness, including folded operands; branch arguments retain
+simultaneous assignment. Debug local names remain unique, and malformed branch tables are diagnosed.
+The preview lowers temporary-record fuel from 37.0M to 30.0M, remainder from 35.0M to 28.0M,
+numeric arrays from 187.3M to 175.3M, streams from 461.7M to 453.3M, and append from 167.9M
+to 161.9M. Allocation counts and peak memory are unchanged. Component/core sizes decrease by
+14–643 bytes in the measured workloads; depth-32 compilation remains about 10 ms. Final quality
+checks pass; the full post-commit campaign is pending. Lowering regressions retain exported
+record shapes and recursive calls so optimization cannot erase their test subjects.
 
 ## Verified implementation
 

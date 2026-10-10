@@ -342,7 +342,8 @@ fn insert_guard(
         } else {
             assert!(
                 Operation::get_op::<BrOp>(terminator, ctx).is_some(),
-                "unexpected branch kind"
+                "unexpected branch kind (a wasm.br_table must not target an irreducible loop \
+                 entry; branch to a block that does)"
             );
             let (dest, args) = edges.into_iter().next().unwrap();
             BrOp::new(ctx, dest, args).get_operation()
