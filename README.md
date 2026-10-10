@@ -215,6 +215,9 @@ Component budgets are frozen in [bench/baseline](bench/baseline). Integration te
 allocation churn, retained graphs, stream-buffer reuse and compilation scaling. Conformance scaling
 contracts measure guest fuel for controlled workloads; application timings remain a separate measure.
 Allocator comparisons are in [bench/allocators](bench/allocators).
+For serial consumer campaigns, paired replay and direct component timing, see
+[bench/performance](bench/performance). `--keep-names` retains linked function names for
+Wasmtime guest profiles; normal component output remains stripped.
 
 ## Compilation Pipeline
 

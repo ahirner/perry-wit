@@ -68,6 +68,7 @@ pub(crate) fn drive_name() -> Identifier {
 
 /// MIR values live across some `await` of `function`, in a deterministic order.
 fn live_across_awaits(ctx: &Context, function: &FuncOp) -> Vec<Value> {
+    let order = crate::value_order(ctx, function);
     let blocks: Vec<_> = function.get_region(ctx).deref(ctx).iter(ctx).collect();
     let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
     let transfer = |ctx: &Context, ops: &[Ptr<Operation>], mut live: HashSet<Value>| {
@@ -116,7 +117,7 @@ fn live_across_awaits(ctx: &Context, function: &FuncOp) -> Vec<Value> {
             live.remove(&op.deref(ctx).get_result(0));
             let mut live: Vec<_> = live.into_iter().collect();
             // Order by definition position for deterministic frame layouts.
-            live.sort_by_key(|v| format!("{v:?}"));
+            live.sort_unstable_by_key(|value| order[value]);
             for value in live {
                 if seen.insert(value) {
                     across.push(value);

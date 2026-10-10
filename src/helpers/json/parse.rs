@@ -262,10 +262,12 @@ impl Parser<'_> {
                     byte_length = byte_length
                         .checked_add(run.len() as u32)
                         .ok_or(Error::Capacity)?;
-                    let scalars = run.iter().filter(|&&b| b & 0xC0 != 0x80).count();
-                    scalar_length = scalar_length
-                        .checked_add(scalars as u32)
-                        .ok_or(Error::Capacity)?;
+                    if self.output.stores {
+                        let scalars = run.iter().filter(|&&b| b & 0xC0 != 0x80).count();
+                        scalar_length = scalar_length
+                            .checked_add(scalars as u32)
+                            .ok_or(Error::Capacity)?;
+                    }
                     continue;
                 }
             };

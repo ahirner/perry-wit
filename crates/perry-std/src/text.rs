@@ -74,8 +74,11 @@ fn substring(view: &View, start: u64, end: u64) -> *mut u8 {
 }
 
 /// Split into immutable views, retaining the source payload through each view.
+///
+/// # Safety
+/// Both arguments must be live runtime strings containing valid UTF-8.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut u8 {
+pub unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut u8 {
     let view = view(string);
     let separator = self::view(separator).text;
     let text = view.text;
@@ -111,9 +114,15 @@ pub extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut 
     };
     let (array, slots) = crate::runtime::array_storage(chunks().count());
     for (slot, (start, end)) in slots.iter_mut().zip(chunks()) {
-        // SAFETY: valid UTF-8 separators and scalar iteration produce source byte boundaries.
-        *slot =
-            unsafe { crate::runtime::string_view(view.string, start as u32, end as u32) } as u64;
+        let piece = if start == 0 && end == text.len() {
+            string
+        } else if end - start == 1 && text.as_bytes()[start].is_ascii() {
+            ascii_character(text.as_bytes()[start])
+        } else {
+            // SAFETY: valid separators and scalar iteration produce source byte boundaries.
+            unsafe { crate::runtime::string_view(string, start as u32, end as u32) }
+        };
+        *slot = piece as u64;
     }
     array
 }
@@ -137,10 +146,13 @@ pub extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *mut u8 
         return from_static("");
     }
     let position = position as u64;
-    if view.ascii {
-        return ascii_character(view.text.as_bytes()[position as usize]);
+    let from = offset(&view, position);
+    let first = view.text.as_bytes()[from];
+    if first.is_ascii() {
+        return ascii_character(first);
     }
-    substring(&view, position, position + 1)
+    let to = offset(&view, position + 1);
+    unsafe { crate::runtime::string_view(view.string, from as u32, to as u32) }
 }
 
 /// The scalar at `position`, or undefined outside the string.
@@ -206,6 +218,9 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
+    if let [byte] = needle {
+        return haystack.iter().position(|candidate| candidate == byte);
+    }
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
@@ -214,6 +229,9 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(haystack.len());
+    }
+    if let [byte] = needle {
+        return haystack.iter().rposition(|candidate| candidate == byte);
     }
     haystack
         .windows(needle.len())

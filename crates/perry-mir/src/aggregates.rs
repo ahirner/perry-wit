@@ -9,7 +9,7 @@
 use crate::{
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported},
     control::{BrOp, ReturnOp},
-    exceptions::{CaughtOp, MayThrowInterface},
+    exceptions::CaughtOp,
     heap::{AllocOp, FieldGetOp, FieldSetOp},
     locals::{LoadOp, LocalOp, StoreOp},
     types::RecordType,
@@ -30,7 +30,7 @@ use pliron::{
         rewriter::{IRRewriter, Rewriter},
     },
     linked_list::{ContainsLinkedList, LinkedList},
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
     result::Result,
     r#type::{Typed, TypedHandle},
@@ -81,8 +81,7 @@ fn is_leaf(ctx: &Context, function: &FuncOp) -> Option<usize> {
                 || Operation::get_op::<AwaitOp>(op, ctx).is_some()
                 || Operation::get_op::<TimerOp>(op, ctx).is_some()
                 || Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-                || op_cast::<dyn MayThrowInterface>(Operation::get_op_dyn(op, ctx).as_ref())
-                    .is_some()
+                || crate::intrinsics::may_throw(ctx, op)
                 || op.deref(ctx).num_regions() != 0
         })
     {

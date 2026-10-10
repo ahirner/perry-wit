@@ -32,7 +32,7 @@ consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapsho
 6. [x] Grow exclusive unpinned buffers in place with collector-aware metadata updates.
    [Full campaign](bench/performance/reports/06-growth/summary.json) passes all contracts,
    four seeds, 55 consumer tests and 25 benchmark scenarios.
-7. [ ] Port local coalescing, emitter peepholes and async branch-table dispatch.
+7. [x] Port local coalescing, emitter peepholes and async branch-table dispatch (`c68360b`).
 8. [x] Complete workspace, SDK/example, lint and permitted Nix validation on frozen source.
    All 234 workspace tests, formatting, strict host/Wasm Clippy, flake evaluation and the
    Nix WIT/format checks pass. Package checks requiring a release compiler remain excluded.
@@ -42,6 +42,36 @@ Reports include source/tool identities and normal fuel separately from instrumen
 Historical speedups are hypotheses: the existing temporary-record workload already allocates
 no records, and its remainder cost must be measured independently. The reported primary
 append improvement is 149M to 84M fuel. Keep existing baseline files unchanged.
+
+### Consumer profiling
+
+Starting source: cleaned branch `3c5541f`; approved consumer snapshot: `f655369`.
+Use the debug compiler and preserve the existing baseline reports.
+
+- [x] Preserve linked names for profiling; measure startup-inclusive AOT separately from
+  direct invocation, fuel and cold JIT compilation.
+- [x] Reuse eligible string headers, ASCII characters and intact split results. Inline short
+  literal comparisons and compare other strings by equal eight-byte words.
+- [x] Reduce root publication, JSON measurement, UTF-8 decoding and pinned-buffer lookup work.
+- [x] Omit unreachable functions, inline nonthrowing leaf builtins and preserve deterministic
+  root/frame ordering. Keep the bounded runtime optimized for size.
+- [x] Remove repeated collector page lookups and isolate one-time root initialization.
+  Direct static root storage failed the small-component budget and was fully removed.
+- [x] Walk UTF-8 casing directly and skip unnecessary Unicode property lookups.
+- [x] Initialize collectible payloads once; preserve zeroed new storage and reclaimed-storage poisoning.
+- [x] Profile fresh instances and component reload separately from component execution.
+- [x] Validate the retained source: 245 workspace tests, all 50 contracts, four fixed
+  program seeds, 55 consumer tests, 25 benchmarks, strict host/Wasm Clippy and permitted Nix
+  checks. [Measurements](bench/performance/reports/profile-33-payload-init/summary.json) and
+  [quality evidence](bench/performance/reports/profile-34-validation/summary.json).
+- [x] Reach 2× on directly measured component execution, excluding startup:
+  7.207 → 2.843 ms (2.535×). All 25 scenario outputs match across 15 recorded
+  paired rounds per scenario. [Acceptance evidence](bench/performance/reports/profile-33-payload-init/acceptance.json).
+
+Timing definitions, source identities, rejected trials and reproduction commands are in
+[bench/performance](bench/performance). Separate full-process AOT medians are
+13.530 → 8.617 ms (1.570×). Cold JIT median is 209.7 ms versus 281.4 ms at the
+profiling baseline. The component-execution performance goal is complete.
 
 [Starting measurements](bench/performance/reports/00-baseline/summary.json): all 50 contracts,
 400 generated cases, four fixed program seeds, 55 consumer matrix tests and 25 consumer

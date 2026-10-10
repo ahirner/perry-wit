@@ -12,6 +12,22 @@ use wasmtime::{
 struct Peak(usize);
 
 #[test]
+fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
+    let mut component = Instance::compile(
+        "package test:reachability; world boundary {export run:func()->u32;}",
+        r#"
+        function initial(n:number):number { if(n <= 0) return 7; return initial(n - 1) + 1; }
+        let count = initial(3);
+        export function run():number { return ++count; }
+        export async function unused():Promise<void> { console.log('not in this world'); }
+        "#,
+    )?;
+    assert_eq!(component.call("run", &[])?, Val::U32(11));
+    assert_eq!(component.call("run", &[])?, Val::U32(12));
+    Ok(())
+}
+
+#[test]
 fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
     let mut component = Instance::compile(
         "package test:indirect; world boundary {record input {a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:option<string>,n:u64} export run:func(value:input)->string;}",

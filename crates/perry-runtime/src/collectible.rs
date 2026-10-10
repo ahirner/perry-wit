@@ -3,7 +3,7 @@
 //! repetition stride; byte payloads have no shape. Small objects occupy size-class pages,
 //! with allocation/mark bits beside the payload and free slots swept on demand.
 use alloc::{
-    alloc::{alloc_zeroed, dealloc, handle_alloc_error},
+    alloc::{alloc, dealloc, handle_alloc_error},
     boxed::Box,
     vec::Vec,
 };
@@ -39,7 +39,6 @@ struct Page {
     free: u16,
     sweep_pending: bool,
     poison: bool,
-    index: usize,
     listed: bool,
 }
 
@@ -51,9 +50,9 @@ impl Page {
             cell.next_multiple_of(PAGE)
         };
         let layout = Layout::from_size_align(bytes, PAGE).expect("page layout");
-        // SAFETY: nonzero layout. The allocator is talc in the guest.
-        let memory = NonNull::new(unsafe { alloc_zeroed(layout) })
-            .unwrap_or_else(|| handle_alloc_error(layout));
+        // SAFETY: nonzero layout. Each payload is initialized before allocation publishes it.
+        let memory =
+            NonNull::new(unsafe { alloc(layout) }).unwrap_or_else(|| handle_alloc_error(layout));
         let slots = if cell > MAX_SMALL { 1 } else { PAYLOAD / cell };
         let mut page = Self {
             memory,
@@ -65,7 +64,6 @@ impl Page {
             free: NONE,
             sweep_pending: false,
             poison: cfg!(test),
-            index: 0,
             listed: false,
         };
         for index in (0..slots).rev() {
@@ -112,7 +110,7 @@ impl Page {
         unsafe {
             self.free = (slot as *const u16).read();
             (slot as *mut Header).write(Header { shape, size });
-            ptr::write_bytes(slot.add(HEADER), 0, self.cell - HEADER);
+            ptr::write_bytes(slot.add(HEADER), 0, size);
         }
         self.allocated[index / 64] |= 1 << (index % 64);
         self.marked[index / 64] |= 1 << (index % 64);
@@ -196,7 +194,7 @@ pub struct Counters {
 pub(crate) struct Collector {
     pages: Vec<Option<Box<Page>>>,
     directory: Directory,
-    available: [Vec<usize>; CLASSES],
+    available: [Vec<NonNull<Page>>; CLASSES],
     vacant: Vec<usize>,
     work: Vec<*mut u8>,
     volume: usize,
@@ -249,18 +247,19 @@ impl Collector {
         };
         let class = (cell <= MAX_SMALL).then(|| cell.ilog2() as usize - MIN_CELL.ilog2() as usize);
         let existing = class.and_then(|class| {
-            while let Some(&index) = self.available[class].last() {
-                let page = self.pages[index].as_mut().expect("available page");
+            while let Some(&pointer) = self.available[class].last() {
+                // SAFETY: small pages have stable boxed storage owned until collector drop.
+                let page = unsafe { &mut *pointer.as_ptr() };
                 page.sweep();
                 if page.free != NONE {
-                    return Some(index);
+                    return Some(pointer);
                 }
                 page.listed = false;
                 self.available[class].pop();
             }
             None
         });
-        let index = existing.unwrap_or_else(|| {
+        let mut pointer = existing.unwrap_or_else(|| {
             // Keep allocation metadata below the payload so a large tail block can grow.
             let mut page = if cell > MAX_SMALL {
                 if self.vacant.is_empty() {
@@ -272,40 +271,35 @@ impl Collector {
                 Box::new(Page::new(cell))
             };
             page.poison |= self.poison;
-            let pointer = &mut *page as *mut Page;
+            let pointer = NonNull::from(&mut *page);
             for offset in (0..page.layout.size()).step_by(PAGE) {
                 self.directory
-                    .set(page.memory.as_ptr() as usize + offset, pointer);
+                    .set(page.memory.as_ptr() as usize + offset, pointer.as_ptr());
             }
             self.counters.reserved_bytes += page.layout.size();
-            let index = if let Some(index) = self.vacant.pop() {
+            if let Some(class) = class {
+                self.available[class].push(pointer);
+                page.listed = true;
+            }
+            if let Some(index) = self.vacant.pop() {
                 self.pages[index] = Some(page);
-                index
             } else {
                 self.pages.push(Some(page));
-                self.pages.len() - 1
-            };
-            if let Some(class) = class {
-                self.available[class].push(index);
-                self.pages[index].as_mut().expect("new page").listed = true;
             }
-            self.pages[index].as_mut().expect("new page").index = index;
-            index
+            pointer
         });
         self.volume = self.volume.saturating_add(size);
         self.counters.allocations += 1;
         self.counters.live_bytes += size;
-        self.pages[index]
-            .as_mut()
-            .expect("page")
-            .allocate(size, shape)
+        // SAFETY: the selected page is owned by `pages`; no page references survive allocation.
+        unsafe { pointer.as_mut().allocate(size, shape) }
     }
 
-    /// Whether `pointer` is inside this exact allocation, including interior host pins.
-    pub(crate) fn contains(&self, allocation: *mut u8, pointer: *mut u8) -> bool {
+    /// Payload size at an exact live allocation start.
+    pub(crate) fn allocation_size(&self, allocation: *mut u8) -> Option<usize> {
         let page = self.directory.get(allocation as usize);
         if page.is_null() {
-            return false;
+            return None;
         }
         // SAFETY: the directory refers to stable owned pages; validate the slot before its header.
         let page = unsafe { &*page };
@@ -315,10 +309,9 @@ impl Collector {
             || !offset.is_multiple_of(page.cell)
             || page.allocated[0] & (1 << index) == 0
         {
-            return false;
+            return None;
         }
-        let size = unsafe { (*allocation.sub(HEADER).cast::<Header>()).size };
-        (pointer as usize).wrapping_sub(allocation as usize) < size
+        Some(unsafe { (*allocation.sub(HEADER).cast::<Header>()).size })
     }
 
     /// Enlarge an exclusive payload without collecting or moving it. Newly exposed bytes are zero.
@@ -435,7 +428,7 @@ impl Collector {
         page.release(index);
         if !page.listed {
             let class = page.cell.ilog2() as usize - MIN_CELL.ilog2() as usize;
-            self.available[class].push(page.index);
+            self.available[class].push(NonNull::from(&mut *page));
             page.listed = true;
         }
     }
@@ -569,7 +562,7 @@ impl Collector {
                 page.sweep_pending = true;
                 if page.cell <= MAX_SMALL {
                     let class = page.cell.ilog2() as usize - MIN_CELL.ilog2() as usize;
-                    self.available[class].push(index);
+                    self.available[class].push(NonNull::from(&mut **page));
                     page.listed = true;
                 }
             }
@@ -608,6 +601,23 @@ impl Directory {
 mod tests {
     use super::*;
     const LINK: [u32; 3] = [0, 1, 0];
+
+    #[test]
+    fn fresh_and_recycled_payloads_are_zeroed() {
+        let mut heap = Collector::new();
+        for size in [1, 7, 8, 15, 16, 24, 56, 128, 256, 500, 600, 4096] {
+            for _ in 0..2 {
+                // SAFETY: these opaque allocations are live until collection and hold no pointers.
+                unsafe {
+                    let object = heap.allocate(size, ptr::null());
+                    let bytes = core::slice::from_raw_parts_mut(object, size);
+                    assert!(bytes.iter().all(|&byte| byte == 0));
+                    bytes.fill(0xa5);
+                    heap.collect(&[]);
+                }
+            }
+        }
+    }
 
     #[test]
     fn cycles_survive_and_overwritten_edges_are_reclaimed() {
@@ -700,8 +710,8 @@ mod tests {
             );
             let last = heap.allocate(8, ptr::null());
             array.add(792).cast::<*mut u8>().write(last);
-            assert!(heap.contains(array, array.add(799)));
-            assert!(!heap.contains(array, array.add(800)));
+            assert_eq!(heap.allocation_size(array), Some(800));
+            assert_eq!(heap.allocation_size(array.add(1)), None);
             heap.collect(&[array.add(799)]);
             assert_eq!(heap.counters().live_bytes, 816);
             assert_eq!(array.cast::<*mut u8>().read(), first);

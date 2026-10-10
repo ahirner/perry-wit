@@ -4,6 +4,60 @@ use std::process::Command;
 use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
 #[test]
+fn profiling_names_are_optional_in_cli_components() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir(root.join("wit")).unwrap();
+    fs::write(
+        root.join("wit/world.wit"),
+        "package test:profile; world task {export run:func(input:string)->string;}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("entry.ts"),
+        "export function run(input:string):string{return input + '!';}",
+    )
+    .unwrap();
+    for keep_names in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_perry-wit"));
+        command
+            .current_dir(root)
+            .args(["entry.ts", "-o", "out.wasm"]);
+        if keep_names {
+            command.arg("--keep-names");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let wasm = fs::read(root.join("out.wasm")).unwrap();
+        let mut functions = Vec::new();
+        for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+            if let wasmparser::Payload::CustomSection(section) = payload.unwrap()
+                && section.name() == "name"
+            {
+                for subsection in wasmparser::NameSectionReader::new(section.data_reader()) {
+                    if let wasmparser::Name::Function(names) = subsection.unwrap() {
+                        functions.extend(names.map(|name| name.unwrap().name.to_owned()));
+                    }
+                }
+            }
+        }
+        if keep_names {
+            assert!(functions.iter().any(|name| name == "run"), "{functions:?}");
+            assert!(
+                functions.iter().any(|name| name == "perry_string_concat"),
+                "{functions:?}"
+            );
+        } else {
+            assert!(functions.is_empty());
+        }
+    }
+}
+
+#[test]
 fn disposable_sdk_checks_the_entry_without_rewriting_authored_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

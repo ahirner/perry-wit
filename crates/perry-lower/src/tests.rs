@@ -89,7 +89,7 @@ export function run(x: number): number {
 }
 "#,
     );
-    assert!(printed.contains("perry.string_concat"), "{printed}");
+    assert!(printed.contains("perry.string_append"), "{printed}");
     assert!(printed.contains("perry.convert I32ToF64"), "{printed}");
 }
 

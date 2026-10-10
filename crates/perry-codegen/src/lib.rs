@@ -94,6 +94,7 @@ mod lease;
 mod memory;
 mod regex;
 mod runtime;
+mod string_literals;
 mod temporal;
 mod variants;
 pub use memory::explain_tiers;
@@ -393,6 +394,66 @@ fn function_ops(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
     ops
 }
 
+/// MIR calls name their targets directly; only boundary exports and module initialization
+/// can enter from outside this graph. Preserve source order for deterministic dispatch IDs.
+fn reachable_functions(ctx: &Context, module: &ModuleOp, exports: &Exports) -> Vec<FuncOp> {
+    let functions = module_functions(ctx, module);
+    let indices: HashMap<_, _> = functions
+        .iter()
+        .enumerate()
+        .map(|(index, function)| (function.get_symbol_name(ctx), index))
+        .collect();
+    let mut pending = Vec::new();
+    let mut reachable = HashSet::new();
+    for (index, function) in functions.iter().enumerate() {
+        let name = function.get_symbol_name(ctx);
+        let exported = match exports {
+            Exports::Raw | Exports::RawChecked => is_exported(ctx, function),
+            Exports::Canonical { exports, .. } => exports
+                .iter()
+                .any(|export| export.function == name.as_ref()),
+        };
+        if exported || name.as_ref() == perry_mir::globals::INITIALIZER {
+            reachable.insert(index);
+            pending.push(index);
+        }
+    }
+    while let Some(index) = pending.pop() {
+        for op in function_ops(ctx, &functions[index]) {
+            let callee = Operation::get_op::<MirCallOp>(op, ctx)
+                .map(|call| call.callee(ctx))
+                .or_else(|| Operation::get_op::<AsyncCallOp>(op, ctx).map(|call| call.callee(ctx)));
+            if let Some(callee) = callee
+                && let Some(&index) = indices.get(&callee)
+                && reachable.insert(index)
+            {
+                pending.push(index);
+            }
+        }
+    }
+    functions
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, function)| reachable.contains(&index).then_some(function))
+        .collect()
+}
+
+/// Definition order, independent of arena addresses and allocation history.
+fn value_order(ctx: &Context, function: &FuncOp) -> HashMap<Value, usize> {
+    let mut order = HashMap::new();
+    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+        for value in block.deref(ctx).arguments() {
+            order.insert(value, order.len());
+        }
+        for op in block.deref(ctx).iter(ctx) {
+            for value in op.deref(ctx).results() {
+                order.insert(value, order.len());
+            }
+        }
+    }
+    order
+}
+
 /// Functions that may complete with an exception: those with a throwing op other than a call,
 /// and, to a fixpoint, those calling one of them.
 fn throwing_functions(ctx: &Context, functions: &[FuncOp]) -> HashSet<Identifier> {
@@ -516,7 +577,7 @@ impl ModuleState {
 /// Lower canonicalized MIR (after `perry_mir::pipeline::canonicalize`) to the `wasm` dialect.
 pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(ModuleOp, Vec<u8>)> {
     let name = mir.get_symbol_name(ctx);
-    let functions = module_functions(ctx, mir);
+    let functions = reachable_functions(ctx, mir, exports);
     let async_functions: Vec<Identifier> = functions
         .iter()
         .filter(|f| perry_mir::calls::is_async(ctx, f))
@@ -917,6 +978,7 @@ impl<'s> FunctionLowering<'s> {
                 .reverse_post_order()
                 .collect();
         let live = lease::live_after_ops(ctx, mir);
+        let order = value_order(ctx, mir);
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];
             let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
@@ -926,7 +988,7 @@ impl<'s> FunctionLowering<'s> {
             while index < ops.len() {
                 let op = ops[index];
                 self.clear_dead_frame_slots(ctx, op, &live[&op]);
-                let root_mark = self.safe_point(ctx, op, &live[&op])?;
+                let root_mark = self.safe_point(ctx, op, &live[&op], &order)?;
                 // `op; status = perry.caught`: route the exception of `op` to `status`.
                 let caught = ops
                     .get(index + 1)
@@ -2343,6 +2405,12 @@ impl<'s> FunctionLowering<'s> {
             let mir_ty = op.deref(ctx).get_operand(0).get_type(ctx);
             let operands = self.operands(ctx, op)?;
             let kind = compare.kind(ctx);
+            if mir_ty.deref(ctx).is::<StringType>()
+                && let Some(value) = self.string_literal_comparison(ctx, op, &operands, kind)
+            {
+                self.define(ctx, op, value);
+                return Ok(());
+            }
             let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
             let value = if inner.deref(ctx).is::<perry_mir::types::NumberStringType>() {
                 let equal = self.number_string_equal(ctx, mir_ty, operands[0], operands[1])?;

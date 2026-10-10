@@ -37,7 +37,12 @@ pub(crate) mod helper {
         pub(crate) fn fetch_url_value(input: *const u8, len: u32, output: *mut u8, cap: u32)
         -> u32;
         pub(crate) fn json_measure(input: *const u8, len: u32) -> u64;
-        pub(crate) fn json_populate(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u64;
+        pub(crate) fn json_populate_measured(
+            input: *const u8,
+            len: u32,
+            output: *mut u8,
+            cap: u32,
+        ) -> u64;
     }
 
     /// The fetch helper exists only in linked modules; host builds never call it.
@@ -65,7 +70,12 @@ pub(crate) mod helper {
         pub(crate) unsafe fn json_measure(_: *const u8, _: u32) -> u64 {
             unreachable!("the JSON helper runs in linked modules")
         }
-        pub(crate) unsafe fn json_populate(_: *const u8, _: u32, _: *mut u8, _: u32) -> u64 {
+        pub(crate) unsafe fn json_populate_measured(
+            _: *const u8,
+            _: u32,
+            _: *mut u8,
+            _: u32,
+        ) -> u64 {
             unreachable!("the JSON helper runs in linked modules")
         }
     }

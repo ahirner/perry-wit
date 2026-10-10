@@ -13,10 +13,7 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::MemKind;
-use std::{
-    collections::HashSet,
-    hash::{Hash, Hasher},
-};
+use std::collections::{HashMap, HashSet};
 
 /// Values live across `op`: its operands and what is live after it, except its results.
 /// May repeat an operand that is also live after `op`.
@@ -112,13 +109,17 @@ pub(crate) fn needs_collector(
 }
 
 /// Explain the conservative allocation decisions for the optimized MIR actually emitted.
-pub fn explain_tiers(ctx: &Context, module: &pliron::builtin::ops::ModuleOp) -> String {
+pub fn explain_tiers(
+    ctx: &Context,
+    module: &pliron::builtin::ops::ModuleOp,
+    exports: &crate::Exports,
+) -> String {
     use pliron::{
         builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
         linked_list::ContainsLinkedList,
     };
     use std::fmt::Write;
-    let functions = crate::module_functions(ctx, module);
+    let functions = crate::reachable_functions(ctx, module, exports);
     let summaries = perry_mir::effects::summarize(ctx, &functions);
     let collectible = needs_collector(ctx, &functions, &summaries);
     let tier = if collectible {
@@ -356,6 +357,7 @@ impl FunctionLowering<'_> {
         ctx: &mut Context,
         op: Ptr<Operation>,
         after: &HashSet<Value>,
+        order: &HashMap<Value, usize>,
     ) -> Result<Option<Value>> {
         let collecting_call = Operation::get_op::<CallOp>(op, ctx).is_some_and(|call| {
             self.state
@@ -373,20 +375,30 @@ impl FunctionLowering<'_> {
         let mut live: Vec<Value> = live_across(ctx, op, after)
             .filter(|value| repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
             .collect();
-        // A fixed hasher orders the roots reproducibly across compilations.
-        live.sort_unstable_by_key(|value| {
-            let mut hasher = std::hash::DefaultHasher::new();
-            value.hash(&mut hasher);
-            hasher.finish()
-        });
+        live.sort_unstable_by_key(|value| order[value]);
         live.dedup();
         let values = live
             .into_iter()
             .map(|value| self.mapped(ctx, value))
             .collect::<Result<Vec<_>>>()?;
+        let atomic = self.state.resources.is_empty() && atomic_allocation(ctx, op);
+        let resume = atomic.then(|| {
+            let due = self.runtime(ctx, Runtime::GcDue, vec![]);
+            let collect = self.new_block(ctx, vec![]);
+            let resume = self.new_block(ctx, vec![]);
+            self.cond_br(ctx, due, (collect, vec![]), (resume, vec![]));
+            self.block = collect;
+            resume
+        });
         let mark = (!values.is_empty()).then(|| self.publish_roots(ctx, &values));
         self.runtime_void(ctx, Runtime::GcCheck, vec![]);
         self.drain_resources(ctx);
+        if let Some(resume) = resume {
+            self.end_safe_point(ctx, mark);
+            self.br(ctx, resume, vec![]);
+            self.block = resume;
+            return Ok(None);
+        }
         Ok(mark)
     }
 
@@ -505,4 +517,36 @@ impl FunctionLowering<'_> {
             Ok(self.runtime(ctx, Runtime::ArrayNew, vec![capacity]))
         }
     }
+}
+
+/// These helpers finish without collecting, suspending, or invoking guest/host callbacks.
+/// Keep callers and unclassified operations rooted throughout their execution. Modules
+/// with resource destructors also retain the unconditional resource-drain boundary.
+fn atomic_allocation(ctx: &Context, op: Ptr<Operation>) -> bool {
+    use perry_mir::{
+        collections::*,
+        heap::AllocOp,
+        intrinsics::{Intrinsic, IntrinsicOp},
+    };
+    Operation::get_op::<AllocOp>(op, ctx).is_some()
+        || Operation::get_op::<ArrayNewOp>(op, ctx).is_some()
+        || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
+        || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
+        || Operation::get_op::<StringConcatOp>(op, ctx).is_some()
+        || Operation::get_op::<StringAppendOp>(op, ctx).is_some()
+        || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
+            matches!(
+                op.intrinsic(ctx),
+                Some(
+                    Intrinsic::StringCharAt
+                        | Intrinsic::StringIndex
+                        | Intrinsic::StringSlice
+                        | Intrinsic::StringSubstring
+                        | Intrinsic::StringSplit
+                        | Intrinsic::StringTrim
+                        | Intrinsic::StringLower
+                        | Intrinsic::StringUpper
+                )
+            )
+        })
 }

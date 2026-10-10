@@ -78,6 +78,7 @@ fn scalar_loops_calls_and_remainder() {
 function step(acc: number, i: number): number {
   return (acc + i * 3) % 1000003;
 }
+
 export function run(x: number): number {
   let acc = 0;
   for (let i = 0; i < x; i++) {
@@ -107,6 +108,54 @@ export function run(x: number): number {
         assert_eq!(program.number("run", x), reference(x), "x={x}");
     }
     assert_eq!(program.number("run", 7.5), reference(7.5));
+}
+
+#[test]
+fn unreachable_functions_do_not_add_code_or_host_requirements() {
+    let source = r#"
+function recur(n: number): number { if (n <= 0) return 2; return recur(n - 1) + 1; }
+async function next(n: number): Promise<number> { return recur(n); }
+export async function run(n: number): Promise<number> { return await next(n); }
+"#;
+    let extra = r#"
+function unusedCycle(n: number): number { return unusedOther(n); }
+function unusedOther(n: number): number { return unusedCycle(n); }
+async function unusedFetch(): Promise<string> { return await (await fetch('https://example.test')).text(); }
+function unusedLog(): void { console.log('unreachable'); }
+"#;
+    let core = build(source);
+    assert_eq!(core, build(&format!("{source}{extra}")));
+    let mut program = Program::from_wasm(core);
+    assert_eq!(program.number("run", 5.0), 7.0);
+}
+
+#[test]
+fn linked_function_names_identify_executing_frames() {
+    let mut program = Program::new(
+        "export function spin(n: number): string { let text = ''; while (n > 0) { text += String(n); n--; } return text; }",
+    );
+    program.store.set_fuel(50_000).unwrap();
+    let function = program
+        .instance
+        .get_func(&mut program.store, "spin")
+        .unwrap();
+    let error = function
+        .call(
+            &mut program.store,
+            &[Val::F64(1_000.0_f64.to_bits())],
+            &mut [Val::I32(0)],
+        )
+        .unwrap_err();
+    let trace = error
+        .downcast_ref::<wasmtime::WasmBacktrace>()
+        .expect("fuel trap has guest frames");
+    assert!(
+        trace
+            .frames()
+            .iter()
+            .any(|frame| frame.func_name() == Some("spin")),
+        "{error:#}"
+    );
 }
 
 #[test]
@@ -855,6 +904,9 @@ fn incremental_decoder_copies_only_pending_bytes_and_survives_collection() {
 export async function run(n: number): Promise<number> {
     const decoder = new TextDecoder('utf-8', { fatal: true });
     const alias = decoder;
+    const complete = new Uint8Array([65, 0xc3, 0xa9, 0xf0, 0x9f, 0x99, 0x82]);
+    const stable = decoder.decode(complete);
+    complete.fill(66);
     const head = new Uint8Array([0xf0, 0x9f]);
     const before = decoder.decode(head, { stream: true });
     head.fill(65);
@@ -864,13 +916,13 @@ export async function run(n: number): Promise<number> {
     }
     await Promise.resolve(n);
     const result = alias.decode(new Uint8Array([0x99, 0x82]));
-    return before.length + result.length + result.codePointAt(0);
+    return before.length + result.length + result.codePointAt(0) + (stable === 'Aé🙂' ? 7 : -1);
 }
 "#;
     let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "decoder.ts").unwrap();
     let mut program = Program::from_wasm(wasm);
     program.call("__perry_gc_debug", &[Val::I32(3)]);
-    assert_eq!(program.throwing("run", 120.0), (128579.0, 0));
+    assert_eq!(program.throwing("run", 120.0), (128586.0, 0));
     for counter in [2, 5, 6] {
         let (count, _) = program.call("__perry_gc_counter", &[Val::I32(counter)]);
         assert_eq!(
@@ -1209,6 +1261,56 @@ export function run(n: number): number {
 }
 
 #[test]
+fn compilation_preserves_root_and_async_frame_order() {
+    let source = r#"
+function trimmed(s:string):string { return s.trim(); }
+function upper(s:string):string { return s.toUpperCase(); }
+function lower(s:string):string { return s.toLowerCase(); }
+export async function run(n:number):Promise<number> {
+    const a = trimmed(" A" + n + " ");
+    const b = upper("b" + n);
+    const c = lower("C" + n);
+    const d = await Promise.resolve(a + b);
+    return a.length + b.length + c.length + d.length + 3;
+}
+"#;
+    let compile =
+        || perry_wit::compiler::compile_core_with_memory_checks(source, "root-order.ts").unwrap();
+    let wasm = compile();
+    for _ in 0..16 {
+        assert!(
+            wasm == compile(),
+            "identical source must emit identical Wasm"
+        );
+    }
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1.0), 13.0);
+}
+
+#[test]
+fn nonthrowing_intrinsics_allow_temporary_record_elimination() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+        interface Cell { value: number }
+        function rounded(n:number):Cell { return { value:Math.floor(n) }; }
+        export function run(n:number):number {
+            let sum = 0;
+            for(let i=0;i<n;i++) sum += rounded(i - 0.25).value;
+            return sum;
+        }
+        "#,
+        "intrinsic-leaf.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1000.0), 498_500.0);
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert_eq!(allocations[0].unwrap_i64(), 0);
+}
+
+#[test]
 fn promoted_record_arguments_stay_fresh_when_aliases_can_mutate() {
     let wasm = perry_wit::compiler::compile_core_with_memory_checks(
         r#"
@@ -1453,4 +1555,302 @@ export async function run(n: number): Promise<number> {
             ((a * 10000 + b * 100 + c) as f64, 0)
         );
     }
+}
+
+#[test]
+fn returned_string_builders_reuse_headers_without_mutating_retained_aliases() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+function strip(text: string): string {
+  let result = '';
+  let inSpace = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (ch === ' ') {
+      if (!inSpace && result.length > 0) { result += ' '; inSpace = true; }
+    } else { result += ch; inSpace = false; }
+  }
+  if (result.length > 0 && result.charAt(result.length - 1) === ' ') {
+    result = result.slice(0, result.length - 1);
+  }
+  return result;
+}
+
+export function run(n: number): number {
+  const result = strip(' x '.repeat(n));
+  if (result.charAt(0) !== 'x' || result.charAt(result.length - 1) !== 'x') return -1;
+  return result.length;
+}
+export function aliases(n: number): number {
+  const original = 'é😀' + String(n);
+  let text = original;
+  if (n > 0) text = text + 'x';
+  for (let i = 0; i < 20; i++) text = text + 'z';
+  if (original !== 'é😀' + String(n)) return -1;
+  if (text !== original + (n > 0 ? 'x' : '') + 'z'.repeat(20)) return -2;
+  let built = '';
+  for (let i = 0; i < 20; i++) built += 'é😀';
+  const view = built.slice(0, 3);
+  built += '尾';
+  if (view !== 'é😀é' || view.charAt(1) !== '😀' || built.length !== 41) return -3;
+  return 1;
+}
+"#,
+        "returned-builder.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1000.0), 1999.0);
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert!(allocations[0].unwrap_i64() < 100, "{:?}", allocations);
+    for n in [-1.0, 0.0, 1.0] {
+        assert_eq!(program.number("aliases", n), 1.0);
+    }
+}
+
+#[test]
+fn ascii_characters_in_unicode_text_do_not_allocate() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+export function run(n: number): number {
+  const text = 'é' + 'x'.repeat(n) + '😀';
+  let sum = 0;
+  for (let i = 1; i <= n; i++) {
+    const ch = text.charAt(i);
+    if (ch !== 'x' || ch < 'w' || ch > 'y') return -1;
+    sum += 'é😀xyzx'.indexOf(ch) + 'é😀xyzx'.lastIndexOf(ch);
+  }
+  if (text.charAt(0) !== 'é' || text.charAt(n + 1) !== '😀') return -2;
+  return sum;
+}
+"#,
+        "mixed-text.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1000.0), 7000.0);
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert!(allocations[0].unwrap_i64() < 20, "{allocations:?}");
+}
+
+#[test]
+fn atomic_helpers_publish_roots_only_when_collection_is_due() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+export function run(n: number): number {
+  let text = '';
+  let prefix = '';
+  for (let i = 0; i < n; i++) {
+    if (i === 10) prefix = text;
+    text += 'é😀';
+  }
+  if (prefix !== 'é😀'.repeat(10) || text.charAt(1) !== '😀') return -1;
+  return text.length + prefix.length;
+}
+"#,
+        "atomic-roots.ts",
+    )
+    .unwrap();
+    for flags in [0, 3] {
+        let mut program = Program::from_wasm(wasm.clone());
+        program.call("__perry_gc_debug", &[Val::I32(flags)]);
+        assert_eq!(program.number("run", 30.0), 80.0);
+        let (roots, _) = program.call("__perry_gc_counter", &[Val::I32(7)]);
+        let published = roots[0].unwrap_i64();
+        if flags == 0 {
+            assert!(published < 20, "unnecessary root publications: {published}");
+        } else {
+            assert!(
+                published > 30,
+                "forced safe points must retain roots: {published}"
+            );
+        }
+        let (roots, _) = program.call("__perry_gc_counter", &[Val::I32(6)]);
+        assert_eq!(roots[0].unwrap_i64(), 0);
+    }
+}
+
+#[test]
+fn short_literal_comparisons_preserve_utf8_order_and_boundaries() {
+    let samples = [
+        "",
+        "\0",
+        " ",
+        "a",
+        "aa",
+        "abc",
+        "abcd",
+        "abcde",
+        "abcdef",
+        "abcdefg",
+        "abcdefgh",
+        "abcdefghi",
+        "é",
+        "😀",
+        "é😀",
+        "a\0",
+        "ä",
+    ];
+    let literals = [
+        "", "\0", " ", "a", "abcd", "abcde", "abcdef", "abcdefg", "abcdefgh", "é😀",
+    ];
+    let mut source = format!(
+        "const samples: string[] = {};\n",
+        serde_json::to_string(&samples).unwrap()
+    );
+    for (index, literal) in literals.iter().enumerate() {
+        let literal = serde_json::to_string(literal).unwrap();
+        let operators = ["===", "!==", "<", "<=", ">", ">="];
+        let mut terms = Vec::new();
+        for (position, operator) in operators.iter().enumerate() {
+            terms.push(format!("(s {operator} {literal} ? {} : 0)", 1 << position));
+            terms.push(format!(
+                "({literal} {operator} s ? {} : 0)",
+                1 << (position + 6)
+            ));
+        }
+        source += &format!(
+            "export function compare{index}(n: number): number {{ const s = samples[n]; if (s === undefined) return -1; return {}; }}\n",
+            terms.join(" + ")
+        );
+    }
+    let mut program = Program::new(&source);
+    for (index, literal) in literals.iter().enumerate() {
+        for (position, sample) in samples.iter().enumerate() {
+            let mut expected = 0;
+            for (shift, (a, b)) in [(0, (sample, literal)), (6, (literal, sample))] {
+                for (bit, value) in [a == b, a != b, a < b, a <= b, a > b, a >= b]
+                    .into_iter()
+                    .enumerate()
+                {
+                    expected += i32::from(value) << (shift + bit);
+                }
+            }
+            assert_eq!(
+                program.number(&format!("compare{index}"), position as f64),
+                expected as f64,
+                "{sample:?} against {literal:?}"
+            );
+        }
+        assert_eq!(program.number(&format!("compare{index}"), -1.0), -1.0);
+    }
+}
+
+#[test]
+fn split_reuses_intact_strings_without_mutating_aliases() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+export function run(n: number): number {
+  const text = 'x'.repeat(n);
+  const pieces = text.split('');
+  let total = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    if (pieces[i] !== 'x') return -1;
+    total += 1;
+  }
+  return total;
+}
+export function aliases(n: number): number {
+  let source = 'é😀' + String(n);
+  const pieces = source.split(',');
+  source += '尾';
+  if (pieces.length !== 1 || pieces[0] !== 'é😀' + String(n)) return -1;
+  let piece = pieces[0];
+  if (piece === undefined) return -2;
+  piece += '!';
+  if (pieces[0] !== 'é😀' + String(n) || source !== 'é😀' + String(n) + '尾') return -3;
+  const chars = 'é,x,😀,'.split(',');
+  if (chars.length !== 4 || chars[0] !== 'é' || chars[1] !== 'x' || chars[2] !== '😀' || chars[3] !== '') return -4;
+  if (''.split(',').length !== 1 || ''.split('').length !== 0) return -5;
+  return piece.length;
+}
+"#,
+        "split-sharing.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1000.0), 1000.0);
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert!(allocations[0].unwrap_i64() < 20, "{allocations:?}");
+    assert_eq!(program.number("aliases", 1.0), 4.0);
+}
+
+#[test]
+fn unicode_casing_matches_node_across_contexts_and_scalar_widths() {
+    let mut inputs = [
+        "",
+        "AbC",
+        "Straße",
+        "ﬀﬁﬂ",
+        "İIıi",
+        "ΣΑΣ",
+        "AΣ",
+        "AΣ\u{301}",
+        "AΣ\u{301}A",
+        "a\u{345}Σ",
+        "𐐀𐐨🙂",
+        "\0aΣ\0",
+        "漢É雪",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    for byte in 0..=127 {
+        let scalar = char::from(byte);
+        inputs.extend([
+            format!("A{scalar}Σ"),
+            format!("AΣ{scalar}A"),
+            format!("Σ{scalar}"),
+        ]);
+    }
+    let encoded = serde_json::to_string(&inputs).unwrap();
+    let script = format!(
+        "process.stdout.write(JSON.stringify({encoded}.map(s => [s.toLowerCase(), s.toUpperCase()])))"
+    );
+    let node = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script])
+        .output()
+        .expect("Node supplies independent Unicode casing expectations");
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let expected: Vec<[String; 2]> = serde_json::from_slice(&node.stdout).unwrap();
+    let lower: Vec<&str> = expected.iter().map(|row| row[0].as_str()).collect();
+    let upper: Vec<&str> = expected.iter().map(|row| row[1].as_str()).collect();
+    let lengths: Vec<usize> = expected
+        .iter()
+        .map(|row| row[0].chars().count() + row[1].chars().count())
+        .collect();
+    let source = format!(
+        r#"
+const inputs = {encoded};
+const lower = {};
+const upper = {};
+const lengths = {};
+export function run(n: number): number {{
+    for (let i = 0; i < n; i++) {{
+        const input = inputs[i];
+        if (input === undefined) return -1;
+        const a = input.toLowerCase();
+        const b = input.toUpperCase();
+        if (a !== lower[i] || b !== upper[i]) return i;
+        if (a.length + b.length !== lengths[i]) return i;
+    }}
+    return n;
+}}
+"#,
+        serde_json::to_string(&lower).unwrap(),
+        serde_json::to_string(&upper).unwrap(),
+        serde_json::to_string(&lengths).unwrap(),
+    );
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(&source, "casing.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    assert_eq!(
+        program.number("run", inputs.len() as f64),
+        inputs.len() as f64
+    );
 }

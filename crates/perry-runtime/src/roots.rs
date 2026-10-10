@@ -122,10 +122,13 @@ pub(crate) unsafe fn resize_buffer(
     );
     let roots = roots();
     if !old.is_null() {
-        let pinned = roots
-            .pins
-            .iter()
-            .any(|pin| roots.heap.contains(old, pin.object));
+        let pinned = roots.pins.len() != roots.free_pins.len()
+            && roots.heap.allocation_size(old).is_some_and(|size| {
+                roots
+                    .pins
+                    .iter()
+                    .any(|pin| (pin.object as usize).wrapping_sub(old as usize) < size)
+            });
         if !pinned && unsafe { roots.heap.grow_in_place(old, new_size as usize) } {
             if let Some(metrics) = &mut roots.growth_metrics {
                 metrics.in_place += 1;
@@ -241,10 +244,16 @@ fn roots() -> &'static mut Roots {
     unsafe {
         let state = &mut *ROOTS.0.get();
         if state.is_null() {
-            *state = Box::into_raw(Box::new(Roots::new()));
+            *state = initialize_roots();
         }
         &mut **state
     }
+}
+
+/// Keep the one-time initializer's stack temporaries out of ordinary root lookups.
+#[cold]
+fn initialize_roots() -> *mut Roots {
+    Box::into_raw(Box::new(Roots::new()))
 }
 
 /// Allocate collectible storage without running a collection.
@@ -307,6 +316,15 @@ pub unsafe extern "C" fn perry_gc_check() {
         // SAFETY: the caller established a safe point.
         unsafe { roots.collect() };
     }
+}
+
+/// Test the existing collection policy before publishing roots for an atomic helper.
+/// This function neither allocates nor collects.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_gc_due() -> u32 {
+    // SAFETY: the single guest thread owns the state; an absent heap cannot require GC.
+    let roots = unsafe { (*ROOTS.0.get()).as_ref() };
+    u32::from(roots.is_some_and(|roots| roots.force_collection || roots.heap.due()))
 }
 
 /// Collect at a component return boundary, with output owners pinned for canonical lifting.
@@ -469,6 +487,29 @@ pub extern "C" fn perry_roots_capture(mark: u32) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interior_borrows_prevent_growth_until_release() {
+        // SAFETY: all allocations are opaque, roots stay pinned across collection, and
+        // each resize receives its live allocation size and initialized prefix.
+        unsafe {
+            for offset in [0, 599] {
+                let old = perry_gc_alloc(600, ptr::null());
+                ptr::write_bytes(old, 0x5a, 600);
+                let borrow = perry_gc_pin(old.add(offset));
+                let copy = resize_buffer(old, 600, 800, 600, ptr::null());
+                assert_ne!(copy, old);
+                let copied = perry_gc_pin(copy);
+                roots().collect();
+                assert_eq!(core::slice::from_raw_parts(old, 600), &[0x5a; 600]);
+                assert_eq!(core::slice::from_raw_parts(copy, 600), &[0x5a; 600]);
+                perry_gc_unpin(borrow);
+                perry_gc_unpin(copied);
+                assert_eq!(resize_buffer(copy, 800, 900, 600, ptr::null()), copy);
+                roots().collect();
+            }
+        }
+    }
 
     #[test]
     fn active_pins_survive_other_tasks_and_completed_pins_stop_rooting() {

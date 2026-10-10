@@ -226,20 +226,31 @@ pub unsafe extern "C" fn perry_string_compare(a: *mut u8, b: *mut u8) -> i32 {
     // SAFETY: the caller passes live strings of valid UTF-8.
     let (a, b) = unsafe {
         (
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                (*a).data,
-                (*a).len as usize,
-            )),
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                (*b).data,
-                (*b).len as usize,
-            )),
+            core::slice::from_raw_parts((*a).data, (*a).len as usize),
+            core::slice::from_raw_parts((*b).data, (*b).len as usize),
         )
     };
-    if a.len() == b.len() && a.as_bytes() == b.as_bytes() {
-        return 0;
+    compare_bytes(a, b)
+}
+
+/// Compare whole words, then the earliest differing byte in little-endian memory order.
+fn compare_bytes(a: &[u8], b: &[u8]) -> i32 {
+    let common = a.len().min(b.len());
+    let (a_words, a_tail) = a[..common].as_chunks::<8>();
+    let (b_words, b_tail) = b[..common].as_chunks::<8>();
+    for (&a, &b) in a_words.iter().zip(b_words) {
+        let (a, b) = (u64::from_le_bytes(a), u64::from_le_bytes(b));
+        if a != b {
+            let shift = (a ^ b).trailing_zeros() & !7;
+            return ((a >> shift) & 255) as i32 - ((b >> shift) & 255) as i32;
+        }
     }
-    match a.as_bytes().cmp(b.as_bytes()) {
+    for (&a, &b) in a_tail.iter().zip(b_tail) {
+        if a != b {
+            return i32::from(a) - i32::from(b);
+        }
+    }
+    match a.len().cmp(&b.len()) {
         core::cmp::Ordering::Less => -1,
         core::cmp::Ordering::Equal => 0,
         core::cmp::Ordering::Greater => 1,
@@ -301,5 +312,33 @@ pub unsafe extern "C" fn perry_string_view(string: *mut u8, from: u32, to: u32) 
         (*view).owner = source.owner;
         (*view).offset = source.offset + from;
         view.cast()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_bytes;
+
+    #[test]
+    fn comparison_matches_byte_order_across_lengths_and_alignments() {
+        let original = [b'a'; 80];
+        for offset in 0..8 {
+            for length in 0..40 {
+                let a = &original[offset..offset + length];
+                for other_length in 0..40 {
+                    let mut storage = original;
+                    let b = &mut storage[7 - offset..7 - offset + other_length];
+                    assert_eq!(compare_bytes(a, b).cmp(&0), a.cmp(b));
+                    for index in 0..other_length {
+                        for byte in [0, 1, b'Z', b'b', 127, 128, 255] {
+                            b[index] = byte;
+                            assert_eq!(compare_bytes(a, b).cmp(&0), a.cmp(b));
+                            assert_eq!(compare_bytes(b, a).cmp(&0), (&*b).cmp(a));
+                            b[index] = b'a';
+                        }
+                    }
+                }
+            }
+        }
     }
 }

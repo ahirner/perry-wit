@@ -58,7 +58,7 @@ fn compile_helper(manifest: &Path, output: &Path, helper: &str) {
             "--crate-type=cdylib",
             "--edition=2024",
             "--target=wasm32-unknown-unknown",
-            "-Copt-level=z",
+            "-Copt-level=2",
             "-Cpanic=abort",
             "-Cdebuginfo=0",
             "-Crelocation-model=pic",
@@ -117,9 +117,17 @@ fn compile_cargo_helper(
     if helper == "runtime-collectible" {
         command.args(["--features", "collectible"]);
     }
+    // Keep bounded, allocation-light components small; optimize computation and the
+    // collectible runtime for the loops and application work that need them.
+    let optimization = if helper == "runtime" {
+        "-Copt-level=z"
+    } else {
+        "-Copt-level=2"
+    };
     let status = command
         .args([
             "--",
+            optimization,
             "-Clto=fat",
             "-Clink-arg=--shared",
             "-Clink-arg=--no-entry",

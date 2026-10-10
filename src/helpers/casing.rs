@@ -58,18 +58,34 @@ impl<I: Iterator<Item = char> + Clone> Iterator for CaseMapping<I> {
             && !self
                 .input
                 .clone()
-                .find(|&c| !has_property(c, CASE_IGNORABLE))
-                .is_some_and(|c| has_property(c, CASED))
+                .find(|&c| !is_case_ignorable(c))
+                .is_some_and(is_cased)
         {
             Expansion::FinalSigma(once('ς'))
         } else {
             Expansion::Lower(scalar.to_lowercase())
         };
-        if !has_property(scalar, CASE_IGNORABLE) {
-            self.preceded_by_cased = has_property(scalar, CASED);
+        if !self.upper && !is_case_ignorable(scalar) {
+            self.preceded_by_cased = is_cased(scalar);
         }
         self.expansion = Some(expansion);
         self.expansion.as_mut().and_then(Iterator::next)
+    }
+}
+
+fn is_case_ignorable(scalar: char) -> bool {
+    if scalar.is_ascii() {
+        matches!(scalar, '\'' | '.' | ':' | '^' | '`')
+    } else {
+        has_property(scalar, CASE_IGNORABLE)
+    }
+}
+
+fn is_cased(scalar: char) -> bool {
+    if scalar.is_ascii() {
+        scalar.is_ascii_alphabetic()
+    } else {
+        has_property(scalar, CASED)
     }
 }
 

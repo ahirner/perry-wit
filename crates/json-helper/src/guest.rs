@@ -44,15 +44,10 @@ pub(crate) unsafe extern "C" fn json_populate(
     output: u32,
     capacity: u32,
 ) -> u64 {
-    let (Ok(input), Ok(destination)) = (
-        GuestRange::new(pointer, length),
-        GuestRange::new(output, capacity),
-    ) else {
-        return failure(6, 0);
+    let (input, destination) = match disjoint_ranges(pointer, length, output, capacity) {
+        Ok(ranges) => ranges,
+        Err(error) => return error,
     };
-    if input.overlaps(destination) {
-        return failure(6, 0);
-    }
     // SAFETY: checked bounds and the caller's initialized, immutable input contract.
     let input = unsafe { input.bytes() };
     let input = match str::from_utf8(input) {
@@ -69,6 +64,45 @@ pub(crate) unsafe extern "C" fn json_populate(
     // SAFETY: output is in bounds, disjoint from input, and exclusively guest-owned.
     let destination = unsafe { destination.bytes_mut() };
     outcome(populate(input, destination, output).map(|root| root as usize))
+}
+
+/// Populate an input already validated by `json_measure`, without repeating measurement.
+///
+/// # Safety
+/// The input must be unchanged since a successful `json_measure` call, and capacity must
+/// cover that measured size. Both ranges obey `json_populate`'s ownership contract. Bounds
+/// and disjointness remain checked; malformed-input failure atomicity belongs to the
+/// checked `json_populate` entry point.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn json_populate_measured(
+    pointer: u32,
+    length: u32,
+    output: u32,
+    capacity: u32,
+) -> u64 {
+    let (input, destination) = match disjoint_ranges(pointer, length, output, capacity) {
+        Ok(ranges) => ranges,
+        Err(error) => return error,
+    };
+    // SAFETY: successful measurement establishes UTF-8; the caller preserves the input
+    // and provides exclusive output, whose bounds and disjointness were checked above.
+    let input = unsafe { str::from_utf8_unchecked(input.bytes()) };
+    let destination = unsafe { destination.bytes_mut() };
+    outcome(populate(input, destination, output).map(|root| root as usize))
+}
+
+fn disjoint_ranges(
+    pointer: u32,
+    length: u32,
+    output: u32,
+    capacity: u32,
+) -> Result<(GuestRange, GuestRange), u64> {
+    let input = GuestRange::new(pointer, length).map_err(|_| failure(6, 0))?;
+    let destination = GuestRange::new(output, capacity).map_err(|_| failure(6, 0))?;
+    if input.overlaps(destination) {
+        return Err(failure(6, 0));
+    }
+    Ok((input, destination))
 }
 
 fn outcome(result: Result<usize, Error>) -> u64 {

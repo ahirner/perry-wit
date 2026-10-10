@@ -161,7 +161,8 @@ fn parse_json(text: &[u8]) -> Option<*mut u8> {
             return None;
         }
         let out = alloc(measured as u32);
-        let root = helper::json_populate(text.as_ptr(), text.len() as u32, out, measured as u32);
+        let root =
+            helper::json_populate_measured(text.as_ptr(), text.len() as u32, out, measured as u32);
         (root >> 32 == 0).then_some(root as u32 as usize as *mut u8)
     }
 }

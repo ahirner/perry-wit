@@ -102,18 +102,15 @@ fn compile_world(
     bind::check_main(ctx, &mir, &exports)?;
     let imports = bind::imports(resolve, world);
     let streams = bind::stream_anchor(resolve, world);
-    let tiers = perry_codegen::explain_tiers(ctx, &mir);
-    let core = perry_codegen::compile(
-        ctx,
-        &mir,
-        &Exports::Canonical {
-            memory_checks,
-            exports,
-            imports,
-            bindings,
-            resources,
-        },
-    )?;
+    let exports = Exports::Canonical {
+        memory_checks,
+        exports,
+        imports,
+        bindings,
+        resources,
+    };
+    let tiers = perry_codegen::explain_tiers(ctx, &mir, &exports);
+    let core = perry_codegen::compile(ctx, &mir, &exports)?;
     let core = finish(core, streams.as_ref())?;
     let (component, stripped) = if componentize {
         let component = component::encode_resolved(&core, resolve, world)?;

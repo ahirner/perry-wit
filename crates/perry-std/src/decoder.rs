@@ -42,6 +42,17 @@ impl Decoder {
             self.bom_seen = false;
         }
         self.streaming = stream;
+        if self.length == 0 && core::str::from_utf8(input).is_ok() {
+            let mut remaining = input;
+            if let Some(rest) = remaining.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+                self.emit(&[0xef, 0xbb, 0xbf], &mut output);
+                remaining = rest;
+            }
+            if !remaining.is_empty() {
+                self.emit(remaining, &mut output);
+            }
+            return Ok(());
+        }
         for &byte in input {
             if self.length != 0 {
                 let range = match (self.length, self.pending[0]) {

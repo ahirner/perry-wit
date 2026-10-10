@@ -125,7 +125,7 @@ runtime_functions! {
     FsWriteBytes = "fs_write_bytes" (I32, I32) -> I32;
     FsWriteText = "fs_write_text" (I32, I32) -> I32;
     JsonMeasure = "json_measure" (I32, I32) -> I64;
-    JsonPopulate = "json_populate" (I32, I32, I32, I32) -> I64;
+    JsonPopulate = "json_populate_measured" (I32, I32, I32, I32) -> I64;
     ArrayGrowCollectible = "perry_array_grow_collectible" (I32, I32);
     ArrayNewCollectible = "perry_array_new_collectible" (I32, I32) -> I32;
     CabiRelease = "perry_cabi_release" (I32);
@@ -135,6 +135,7 @@ runtime_functions! {
     GcAlloc = "perry_gc_alloc" (I32, I32) -> I32;
     GcBoundary = "perry_gc_boundary" ();
     GcCheck = "perry_gc_check" ();
+    GcDue = "perry_gc_due" () -> I32;
     GcCounter = "perry_gc_counter" (I32) -> I64;
     GcDebug = "perry_gc_debug" (I32);
     GcGlobal = "perry_gc_global" (I32);

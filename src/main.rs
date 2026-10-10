@@ -29,6 +29,7 @@ fn run() -> Result<()> {
     let mut world_name = None;
     let mut core_only = false;
     let mut explain_tiers = false;
+    let mut keep_names = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -47,6 +48,10 @@ fn run() -> Result<()> {
             }
             "--explain-tiers" => {
                 explain_tiers = true;
+                i += 1;
+            }
+            "--keep-names" => {
+                keep_names = true;
                 i += 1;
             }
             "--core-only" => {
@@ -76,6 +81,7 @@ fn run() -> Result<()> {
                     "      --core-only       Output Core WebAssembly without component encoding"
                 );
                 println!("      --explain-tiers   Explain allocation lifetimes and stream reuse");
+                println!("      --keep-names      Preserve function names for guest profiling");
                 println!("  -h, --help            Print help information");
                 return Ok(());
             }
@@ -134,18 +140,27 @@ fn run() -> Result<()> {
         .as_ref()
         .context("Missing stripped component bytes")?;
 
-    fs::write(&out_file_path, stripped_bytes)?;
+    let output = if keep_names {
+        compiled
+            .component
+            .as_ref()
+            .context("Missing component bytes")?
+    } else {
+        stripped_bytes
+    };
+    fs::write(&out_file_path, output)?;
     println!(
-        "Component built: raw = {} bytes, stripped = {} bytes -> {}",
+        "Component built: raw = {} bytes, stripped = {} bytes, written = {} bytes -> {}",
         compiled.component.as_ref().map(|c| c.len()).unwrap_or(0),
         stripped_bytes.len(),
+        output.len(),
         out_file_path
     );
 
     let mut validator = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
     validator
-        .validate_all(stripped_bytes)
-        .context("Validating stripped component")?;
+        .validate_all(output)
+        .context("Validating component")?;
 
     Ok(())
 }

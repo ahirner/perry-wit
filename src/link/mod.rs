@@ -114,9 +114,21 @@ pub(crate) fn link_helpers_with(
     let mut core_start = None;
     let mut core_elements = Vec::new();
     let mut core_data = Vec::new();
+    let mut core_names = BTreeMap::new();
 
     for payload in Parser::new(0).parse_all(&core_wasm) {
         match payload? {
+            Payload::CustomSection(section) if section.name() == "name" => {
+                let names = wasmparser::NameSectionReader::new(section.data_reader());
+                for subsection in names {
+                    if let wasmparser::Name::Function(names) = subsection? {
+                        for name in names {
+                            let name = name?;
+                            core_names.insert(name.index, name.name);
+                        }
+                    }
+                }
+            }
             Payload::TypeSection(types) => {
                 for ty in types.into_iter_err_on_gc_types() {
                     core_types.push(ty?);
@@ -528,11 +540,11 @@ pub(crate) fn link_helpers_with(
     module.section(&new_types);
 
     let mut new_imports = ImportSection::new();
-    for (module_name, field_name, ty_idx) in external_imports {
+    for (module_name, field_name, ty_idx) in &external_imports {
         new_imports.import(
-            &module_name,
-            &field_name,
-            wasm_encoder::EntityType::Function(ty_idx),
+            module_name,
+            field_name,
+            wasm_encoder::EntityType::Function(*ty_idx),
         );
     }
     if !new_imports.is_empty() {
@@ -752,6 +764,35 @@ pub(crate) fn link_helpers_with(
     if !new_data.is_empty() {
         module.section(&new_data);
     }
+
+    let mut functions = BTreeMap::new();
+    for (index, (_, name, _)) in external_imports.iter().enumerate() {
+        functions.insert(index as u32, name.clone());
+    }
+    for (old, name) in core_names {
+        if let Some(&index) = old_to_new_func_index.get(&old) {
+            functions.insert(index, name.to_owned());
+        }
+    }
+    for prep in &prepared_libs {
+        for (&original, &index) in &prep.helper_defined_indices {
+            if original >= prep.lib.imports.len() as u32 {
+                functions.insert(index, format!("{:?}::{original}", prep.id));
+            }
+        }
+        for (name, original) in &prep.lib.exports {
+            if let Some(&index) = prep.helper_defined_indices.get(original) {
+                functions.insert(index, name.clone());
+            }
+        }
+    }
+    let mut names = wasm_encoder::NameMap::new();
+    for (index, name) in functions {
+        names.append(index, &name);
+    }
+    let mut section = wasm_encoder::NameSection::new();
+    section.functions(&names);
+    module.section(&section);
 
     let result = module.finish();
     if let Err(e) = Validator::new().validate_all(&result) {

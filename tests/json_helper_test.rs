@@ -104,6 +104,15 @@ fn guest_adapter_populates_like_the_host_in_disjoint_memory_without_growing() ->
             let root = guest.populate(INPUT, length, GRAPH, size as u32)?;
             assert_eq!(root >> 32, 0);
             assert_eq!(guest.graph(size), host_graph(input), "{input}");
+            let root = guest
+                .instance
+                .get_typed_func::<(u32, u32, u32, u32), u64>(
+                    &mut guest.store,
+                    "json_populate_measured",
+                )?
+                .call(&mut guest.store, (INPUT, length, GRAPH, size as u32))?;
+            assert_eq!(root >> 32, 0);
+            assert_eq!(guest.graph(size), host_graph(input), "measured {input}");
         }
     }
     assert_eq!(guest.memory.size(&guest.store), 8);
