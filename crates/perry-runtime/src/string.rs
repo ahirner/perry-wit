@@ -98,6 +98,14 @@ pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 
     new(len, scalars_length(bytes), data, ptr::null_mut())
 }
 
+fn append_buffer(len: u32) -> *mut Buffer {
+    let cap = len.saturating_mul(2).max(MIN_BUFFER);
+    let buffer = perry_alloc(cap.checked_add(8).expect("string too long")) as *mut Buffer;
+    // SAFETY: the allocation reserves the header and its capacity; no collection occurs here.
+    unsafe { buffer.write(Buffer { cap, used: len }) };
+    buffer
+}
+
 /// `a + b`.
 ///
 /// # Safety
@@ -108,10 +116,10 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
     // SAFETY: the caller passes live strings; buffers hold `cap` bytes after their header.
     unsafe {
         if (*b).len == 0 {
-            return a as *mut u8;
+            return shared(a);
         }
         if (*a).len == 0 {
-            return b as *mut u8;
+            return shared(b);
         }
         let len = (*a).len.checked_add((*b).len).expect("string too long");
         let scalars = (*a).scalars + (*b).scalars;
@@ -129,13 +137,77 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
                 return new(len, scalars, (*a).data, buffer);
             }
         }
-        let cap = len.saturating_mul(2).max(MIN_BUFFER);
-        let buffer = perry_alloc(8 + cap) as *mut Buffer;
-        buffer.write(Buffer { cap, used: len });
+        let buffer = append_buffer(len);
         let bytes = (buffer as *mut u8).add(8);
         ptr::copy_nonoverlapping((*a).data, bytes, (*a).len as usize);
         ptr::copy_nonoverlapping((*b).data, bytes.add((*a).len as usize), (*b).len as usize);
         new(len, scalars, bytes, buffer)
+    }
+}
+
+/// `string` itself when its header is immutable (no buffer: constants and adopted text),
+/// otherwise a copy of the header. A header with a buffer is only ever reachable from the
+/// value that [perry_string_concat] or [perry_string_append] returned, which is what lets
+/// [perry_string_append] update it in place.
+unsafe fn shared(string: *mut Str) -> *mut u8 {
+    // SAFETY: the caller passes a live string.
+    unsafe {
+        if (*string).buffer.is_null() {
+            return string as *mut u8;
+        }
+        new(
+            (*string).len,
+            (*string).scalars,
+            (*string).data,
+            (*string).buffer,
+        )
+    }
+}
+
+/// `a + b` where `a` is not used afterwards (compiled code proved it, `perry.string_append`):
+/// a header made by concatenation is updated in place instead of allocating a new one, so a
+/// loop of `text = text + x` allocates only when its buffer doubles.
+///
+/// # Safety
+/// Both arguments must be strings. The caller owns `a`'s header exclusively and must not
+/// read its old value afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_append(a: *mut u8, b: *mut u8) -> *mut u8 {
+    let (s, t) = (a as *mut Str, b as *mut Str);
+    // SAFETY: the caller passes live strings; `a` is the caller's to reuse.
+    unsafe {
+        if (*t).len == 0 {
+            return a;
+        }
+        if (*s).buffer.is_null() || (*s).len == 0 {
+            return perry_string_concat(a, b);
+        }
+        let len = (*s).len.checked_add((*t).len).expect("string too long");
+        let buffer = (*s).buffer;
+        let bytes = (buffer as *mut u8).add(8);
+        let at_end = (*s).data.add((*s).len as usize) == bytes.add((*buffer).used as usize);
+        if at_end && (*buffer).cap - (*buffer).used >= (*t).len {
+            ptr::copy_nonoverlapping(
+                (*t).data,
+                bytes.add((*buffer).used as usize),
+                (*t).len as usize,
+            );
+            (*buffer).used += (*t).len;
+        } else {
+            let fresh = append_buffer(len);
+            let bytes = (fresh as *mut u8).add(8);
+            ptr::copy_nonoverlapping((*s).data, bytes, (*s).len as usize);
+            ptr::copy_nonoverlapping((*t).data, bytes.add((*s).len as usize), (*t).len as usize);
+            (*s).data = bytes;
+            (*s).buffer = fresh;
+            (*s).owner = fresh.cast();
+            (*s).offset = 8;
+            (*s).cursor_scalar = 0;
+            (*s).cursor_byte = 0;
+        }
+        (*s).len = len;
+        (*s).scalars += (*t).scalars;
+        a
     }
 }
 

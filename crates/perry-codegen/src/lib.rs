@@ -3150,6 +3150,20 @@ impl<'s> FunctionLowering<'s> {
             self.define(ctx, op, value);
             return Ok(());
         }
+        if Operation::get_op::<perry_mir::collections::StringAppendOp>(op, ctx).is_some() {
+            let args = self.operands(ctx, op)?;
+            let value = self
+                .call(
+                    ctx,
+                    "perry_string_append",
+                    &[W::I32, W::I32],
+                    &[W::I32],
+                    args,
+                )
+                .expect("string");
+            self.define(ctx, op, value);
+            return Ok(());
+        }
         if Operation::get_op::<StringConcatOp>(op, ctx).is_some() {
             let operands = self.operands(ctx, op)?;
             let value = self

@@ -47,6 +47,7 @@ pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
         || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
         || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
         || Operation::get_op::<StringConcatOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::collections::StringAppendOp>(op, ctx).is_some()
         || Operation::get_op::<TimerOp>(op, ctx).is_some()
         || Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some()
         || Operation::get_op::<PromiseRejectedOp>(op, ctx).is_some()

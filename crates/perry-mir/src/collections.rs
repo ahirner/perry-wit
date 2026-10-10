@@ -441,6 +441,56 @@ impl SideEffects for StringConcatOp {
     }
 }
 
+/// `a + b` where `a` is dead afterwards and was made by concatenation or is a constant
+/// (`perry_mir::append::append_in_place`): the runtime may update `a`'s header in place.
+#[pliron_op(
+    name = "perry.string_append",
+    format = "$0 `, ` $1 ` : ` type($0)",
+    interfaces = [
+        NOpdsInterface<2>,
+        OneResultInterface,
+        SameOperandsType,
+        SameResultsType,
+        SameOperandsAndResultType
+    ]
+)]
+pub struct StringAppendOp;
+
+impl StringAppendOp {
+    pub fn new(ctx: &mut Context, lhs: Value, rhs: Value) -> Self {
+        let ty = StringType::get(ctx).into();
+        StringAppendOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![ty],
+                vec![lhs, rhs],
+                vec![],
+                0,
+            ),
+        }
+    }
+}
+
+impl Verify for StringAppendOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        if !is_string(ctx, self.get_result(ctx)) {
+            verify_err!(
+                self.loc(ctx),
+                CollectionErr::NotString("perry.string_append")
+            )?
+        }
+        Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl SideEffects for StringAppendOp {
+    fn has_side_effects(&self, _ctx: &Context) -> bool {
+        true
+    }
+}
+
 /// Length in Unicode scalar values (Perry rejects UTF-16 code-unit operations).
 #[pliron_op(
     name = "perry.string_len",

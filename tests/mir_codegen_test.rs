@@ -1407,3 +1407,78 @@ export function dominated(n: number): number {
         (0.0, status_code(ErrorKind::TypeError))
     );
 }
+
+#[test]
+fn owned_appends_preserve_observers_and_scalar_cursors() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+let escaped = '';
+function keep(value: string): number { escaped = value; return value.length; }
+export function run(n: number): number {
+  let text = '';
+  const saved: string[] = [];
+  for (let i = 0; i < n; i++) {
+    if (i === 10 || i === 100) saved.push(text);
+    if (i === 20) keep(text);
+    text = text + 'é😀x';
+    if (text[text.length - 2] !== '😀') return -1;
+    if (text[text.length - 1] !== 'x') return -2;
+  }
+  if (saved[0].length !== 30 || saved[1].length !== 300 || escaped.length !== 60) return -3;
+  if (saved[0][28] !== '😀' || saved[1][299] !== 'x') return -4;
+  const prefix = text.slice(0, 17);
+  text = text + '尾';
+  if (prefix.length !== 17 || prefix[16] !== '😀') return -5;
+  let self = 'é😀';
+  for (let i = 0; i < 5; i++) self = self + self;
+  if (self.length !== 64 || self[63] !== '😀') return -6;
+  let left = 'é' + '😀';
+  let right = left + '';
+  right = right + 'x';
+  if (left !== 'é😀' || right !== 'é😀x') return -7;
+  let emptyLeft = '' + left;
+  emptyLeft = emptyLeft + 'z';
+  if (left !== 'é😀' || emptyLeft !== 'é😀z') return -8;
+  let merged = '';
+  for (let i = 0; i < 100; i++) {
+    const old = merged;
+    if (i % 2 === 0) merged = merged + 'a';
+    else merged = merged + '😀';
+    if (old.length !== i) return -9;
+  }
+  if (merged.length !== 100 || merged[99] !== '😀') return -10;
+  return text.length;
+}
+"#,
+        "owned-append.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    for n in [1000.0, 2000.0, 1000.0] {
+        assert_eq!(program.throwing("run", n), (3.0 * n + 1.0, 0));
+    }
+}
+
+#[test]
+fn exclusive_utf8_append_keeps_scalar_counts_with_few_allocations() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+export function run(n: number): number {
+  let text = '';
+  for (let i = 0; i < n; i++) text = text + 'é😀x';
+  return text.length;
+}
+"#,
+        "scalar-append.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1000.0), 3000.0);
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert!(
+        allocations[0].unwrap_i64() < 100,
+        "headers should be reused"
+    );
+}
