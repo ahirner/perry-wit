@@ -47,8 +47,9 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinaryOp, CompareOp as MirCompareOp, ConvertOp},
     types::{
         AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
-        JsonType, OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordType,
-        RequestType, ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
+        InstantType, JsonType, OptionalType, PlainDateTimeType, PlainDateType, PromiseType,
+        ReadResultType, ReadableType, ReaderType, RecordType, RequestType, ResponseType,
+        SettledType, StatsType, StringType, WritableType, WriterType,
     },
 };
 use perry_runtime::array as layout;
@@ -92,6 +93,7 @@ mod dates;
 mod lease;
 mod memory;
 mod regex;
+mod temporal;
 mod variants;
 pub use memory::explain_tiers;
 
@@ -483,7 +485,10 @@ fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
             width => bail!("integers of width {width} are not supported"),
         };
     }
-    if deref.is::<DateType>()
+    if deref.is::<InstantType>()
+        || deref.is::<PlainDateType>()
+        || deref.is::<PlainDateTimeType>()
+        || deref.is::<DateType>()
         || deref.is::<RecordType>()
         || deref.is::<perry_mir::types::VariantType>()
         || deref.is::<perry_mir::types::ResourceType>()
@@ -1755,6 +1760,18 @@ impl<'s> FunctionLowering<'s> {
                     .expect("root");
                 Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
             }
+            Intrinsic::InstantFromMs
+            | Intrinsic::InstantFrom
+            | Intrinsic::PlainDateFrom
+            | Intrinsic::PlainDateTimeFrom
+            | Intrinsic::PlainDateAddDays
+            | Intrinsic::PlainDateTimeAddDays
+            | Intrinsic::InstantMs
+            | Intrinsic::PlainDatePart
+            | Intrinsic::PlainDateTimePart
+            | Intrinsic::InstantString
+            | Intrinsic::PlainDateString
+            | Intrinsic::PlainDateTimeString => self.temporal_intrinsic(ctx, intrinsic, args),
             Intrinsic::AbortNew => self.runtime(ctx, Runtime::AbortNew, args),
             Intrinsic::AbortAbort => {
                 let message = self.state.data.string("The operation was aborted");

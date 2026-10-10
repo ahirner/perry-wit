@@ -265,6 +265,18 @@ fn test_typecheck_examples_against_generated_declarations() {
 
     // 2. Copy examples/merge_task.ts to src/merge_task.ts
     fs::copy("examples/merge_task.ts", src_dir.join("index.ts")).unwrap();
+    fs::write(
+        src_dir.join("temporal.ts"),
+        r#"
+function formatTemporal(epoch: number): string {
+    const instant: Temporal.Instant = Temporal.Instant.fromEpochMilliseconds(epoch);
+    const date: Temporal.PlainDate = Temporal.PlainDate.from('2024-02-28').add({ days: 1 });
+    const time: Temporal.PlainDateTime = Temporal.PlainDateTime.from('2024-02-29T12:30');
+    return instant.toJSON() + date.toJSON() + time.toJSON();
+}
+"#,
+    )
+    .unwrap();
 
     let output = std::process::Command::new("tsc")
         .current_dir(&temp_dir)

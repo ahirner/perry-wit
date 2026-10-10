@@ -810,6 +810,43 @@ export async function run(n: number): Promise<number> {
 }
 
 #[test]
+fn temporal_values_survive_collection_and_reclaim_temporary_storage() {
+    let source = r#"
+interface CalendarValues { date: Temporal.PlainDate; time: Temporal.PlainDateTime; }
+let saved: Temporal.Instant = Temporal.Instant.fromEpochMilliseconds(-1);
+export async function run(n: number): Promise<number> {
+    const original = saved;
+    const values: CalendarValues = { date: Temporal.PlainDate.from('2024-02-28'),
+        time: Temporal.PlainDateTime.from('2024-02-28T12:30:00.123456789') };
+    const dates: Temporal.PlainDate[] = [values.date];
+    for (let i = 0; i < n; i++) {
+        saved = Temporal.Instant.fromEpochMilliseconds(i);
+        const next = values.date.add({ days: 1 });
+        if (next.day !== 29 || next.toString() !== '2024-02-29') throw 1;
+        if (saved.toString().length === 0) throw 2;
+    }
+    const settled = await Promise.resolve(saved);
+    if (original.toString().length === 0 || dates[0].day !== 28) throw 3;
+    if (values.time.nanosecond !== 789) throw 4;
+    return settled.epochMilliseconds;
+}
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "temporal.ts").unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.throwing("run", 120.0), (119.0, 0));
+    program.call("__perry_gc_debug", &[Val::I32(0)]);
+    for _ in 0..2 {
+        assert_eq!(program.throwing("run", 200_000.0), (199_999.0, 0));
+        let memory = program
+            .instance
+            .get_memory(&mut program.store, "memory")
+            .unwrap();
+        assert!(memory.data_size(&program.store) <= 512 * 1024);
+    }
+}
+
+#[test]
 fn frame_storage_is_released_on_exception_and_finalizer_paths() {
     let source = r#"
 interface Cell { value: number }

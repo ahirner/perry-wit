@@ -10,8 +10,9 @@ use crate::{
     exceptions::MayThrowInterface,
     types::{
         AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
-        JsonType, OptionalType, PromiseType, ReadResultType, ReadableType, ReaderType, RequestType,
-        ResponseType, StatsType, StringType, WritableType, WriterType,
+        InstantType, JsonType, OptionalType, PlainDateTimeType, PlainDateType, PromiseType,
+        ReadResultType, ReadableType, ReaderType, RequestType, ResponseType, StatsType, StringType,
+        WritableType, WriterType,
     },
 };
 use pliron::{
@@ -76,6 +77,9 @@ pub enum Ty {
     PromiseReadResult,
     Incoming,
     Abort,
+    Instant,
+    PlainDate,
+    PlainDateTime,
     NullReadable,
     PromiseResponse,
 }
@@ -122,6 +126,9 @@ impl Ty {
             Ty::ReadResult => ReadResultType::get(ctx).into(),
             Ty::Incoming => IncomingType::get(ctx).into(),
             Ty::Abort => AbortType::get(ctx).into(),
+            Ty::Instant => InstantType::get(ctx).into(),
+            Ty::PlainDate => PlainDateType::get(ctx).into(),
+            Ty::PlainDateTime => PlainDateTimeType::get(ctx).into(),
             Ty::PromiseReadResult => {
                 let result = ReadResultType::get(ctx).into();
                 PromiseType::get(ctx, result).into()
@@ -218,6 +225,9 @@ impl Ty {
             Ty::ReadResult => deref.is::<ReadResultType>(),
             Ty::Incoming => deref.is::<IncomingType>(),
             Ty::Abort => deref.is::<AbortType>(),
+            Ty::Instant => deref.is::<InstantType>(),
+            Ty::PlainDate => deref.is::<PlainDateType>(),
+            Ty::PlainDateTime => deref.is::<PlainDateTimeType>(),
             Ty::PromiseReadResult => promise_of(&|t| t.deref(ctx).is::<ReadResultType>()),
             Ty::NullReadable => {
                 optional_of(&|t| t.deref(ctx).is::<ReadableType>())
@@ -376,6 +386,19 @@ intrinsics! {
     AbortNew = "abort_new" () -> (Abort);
     AbortAbort = "abort_abort" (Abort) -> (), throws;
     AbortAborted = "abort_aborted" (Abort) -> (Bool);
+    InstantFromMs = "instant_from_ms" (Number) -> (Instant), throws;
+    InstantFrom = "instant_from" (String) -> (Instant), throws;
+    InstantMs = "instant_ms" (Instant) -> (Number), pure;
+    InstantString = "instant_string" (Instant) -> (String), pure;
+    PlainDateFrom = "plain_date_from" (String) -> (PlainDate), throws;
+    PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), throws;
+    PlainDatePart = "plain_date_part" (PlainDate, Number) -> (Number), pure;
+    PlainDateString = "plain_date_string" (PlainDate) -> (String), pure;
+    PlainDateTimeFrom = "plain_date_time_from" (String) -> (PlainDateTime), throws;
+    PlainDateTimeAddDays = "plain_date_time_add_days" (PlainDateTime, Number) -> (PlainDateTime), throws;
+    PlainDateTimePart = "plain_date_time_part" (PlainDateTime, Number) -> (Number), pure;
+    PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure;
+
     // `Error` objects: `cause` (strings only, set at construction) and `name`.
     ExceptionSetCause = "exception_set_cause" (Exception, String) -> ();
     ExceptionCause = "exception_cause" (Exception) -> (OptString);
@@ -470,6 +493,9 @@ impl Intrinsic {
                 | Self::UrlSearchParams
                 | Self::AbortAborted
                 | Self::DateNow
+                | Self::InstantMs
+                | Self::PlainDatePart
+                | Self::PlainDateTimePart
                 | Self::ExitCodeSet
                 | Self::MathFloor
                 | Self::MathCeil

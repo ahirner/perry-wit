@@ -1,3 +1,2 @@
 # Contracts outside the compiler's accepted domain: not run, not pending. One id per line,
 # then `#` and the reason recorded in TODOs.md.
-ecma.temporal.iso # Optional API expansion; deferred until required by a supported application

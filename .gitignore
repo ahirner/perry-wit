@@ -1,6 +1,7 @@
 /target
 /dist
 /artifacts
+.DS_Store
 result*
 
 # Resolved WIT dependencies sourced from the pinned flake

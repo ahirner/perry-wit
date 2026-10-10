@@ -1,13 +1,14 @@
 # MIR completion
 
 Status: acceptance passed for the declared profile within the authorized build policy.
-Baseline revision: `9ac4817`; tested source SHA-256: `b86b87115b19e99cd4405ba7cc4117f32fa1d4a19733f4496ca2303f6e0aa714`.
+Application baseline revision: `9ac4817`; tested source SHA-256: `b86b87115b19e99cd4405ba7cc4117f32fa1d4a19733f4496ca2303f6e0aa714`.
+Temporal validation source SHA-256: `e4f46f39089fc8e3707a81969cf6671ec66f5b254051a66977494a6d10dcfd37`.
 Keep the modular runtime, talc, precise non-moving collector, stackless P3 callbacks and stream reuse.
 Application correctness, bounded retained memory and maintainability define completion.
 
 ## Verified implementation
 
-These checks passed on frozen source. [Completion measurements](bench/baseline/completion.json)
+These checks passed on frozen source. [Application baseline measurements](bench/baseline/completion.json)
 record tool versions, component costs, memory bounds, scaling and consumer results.
 
 - [x] JSON null/missing comparisons, nullable narrowing and required-value checks preserve
@@ -54,6 +55,10 @@ record tool versions, component costs, memory bounds, scaling and consumer resul
   and poisoning cover stream overlap, imports, results and resource borrowing/transfer.
 - [x] Closed checked JSON conversion, native aggregate independence, UTC dates, bounded literal
   regexes, dense arrays, byte operations, strict/incremental UTF-8 decoding and static control flow.
+- [x] ISO Temporal factories, fields, formatting and plain day arithmetic, using the existing time
+  codec and collectible storage. The supported API is listed in [README](README.md#semantics).
+  Values survive forced collection, poisoning and timer suspension; two 200,000-iteration
+  allocation runs stay within 512 KiB. Error construction adds no shared helper data.
 - [x] HTTP(S) URL construction, protocol/credentials/fragment inspection, pathname mutation,
   serialization, linked `searchParams.append`, `encodeURIComponent` and `fetch(URL)`.
 - [x] UTF-8 scalar indexing, ASCII fast paths, shared immutable slices, amortized append,
@@ -79,9 +84,12 @@ record tool versions, component costs, memory bounds, scaling and consumer resul
    Identity/append remain within 10% of baseline. Temporary records, builtin churn and retained
    cycles use 64 KiB in the measured workloads. JSON/application costs are recorded separately;
    unavailable historical comparisons remain unverified.
-2. [x] 205 workspace tests, 49 conformance contracts, SDK/examples, formatting and strict host/Wasm
-   Clippy pass. Four program seeds (`0`, `1`, `42`, `20261010`), eight programs each, depth three
-   pass; shrinking/replay regressions pass. Flake evaluation and WIT checks pass. Full Nix package
+2. [x] 207 workspace tests, all 50 conformance contracts, SDK/examples, formatting and strict host/Wasm
+   Clippy pass. Conformance includes `ecma.temporal.iso`, 400 generated cases and 111 directed
+   witnesses with unchanged source; only this status document changed after validation.
+   The application baseline also passed four program seeds (`0`, `1`, `42`, `20261010`), eight
+   programs each, depth three. Shrinking/replay regressions pass. Flake evaluation and WIT checks
+   passed for the application baseline. Full Nix package
    checks require another compiler release build and remain outside the authorized build policy.
 3. [x] The approved `1d65d97` consumer snapshot passes 96 Node tests and builds twelve application
    components plus seven test components. Its structural matrix passes 55 tests, including all
@@ -131,8 +139,7 @@ reduced reproduction with validation evidence; avoid runtime changes to imitate 
   export is the supported arrangement.
 - Source cancellation across export tasks or beyond the implemented promise timers unless a required
   application uses it. Cancelling another task through a shared signal receives a diagnostic. Safe host/task cancellation remains mandatory for all implemented operations.
-- Temporal (unused by the validated consumer), unused WIT combinations, further escape-analysis
-  expansion and optional optimization.
+- Unused WIT combinations, further escape-analysis expansion and optional optimization.
 - Deeper generated campaigns use existing seed/depth/case controls. No separate general fuzzing
   framework or new memory-management architecture is planned.
 

@@ -350,3 +350,25 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
     assert!(printed.contains("perry.alloc Frame"), "{printed}");
     assert!(printed.contains("perry.alloc Instance"), "{printed}");
 }
+
+/// Temporal factories and options outside the supported ISO subset are rejected.
+#[test]
+fn unsupported_temporal_forms_are_rejected() {
+    for (source, message) in [
+        (
+            "export function f(): string { return Temporal.Now.instant().toString(); }",
+            "Temporal.Now.instant is not supported",
+        ),
+        (
+            "export function f(s: string): string { return Temporal.PlainDate.from(s).add({ months: 1 }).toString(); }",
+            "literal { days }",
+        ),
+        (
+            "export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }",
+            "property hour",
+        ),
+    ] {
+        let error = rejected(source);
+        assert!(error.contains(message), "{source}: {error}");
+    }
+}

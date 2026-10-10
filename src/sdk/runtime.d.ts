@@ -22,6 +22,7 @@ declare namespace Temporal {
     static from(text: string): Instant;
     static fromEpochMilliseconds(milliseconds: number): Instant;
     readonly epochMilliseconds: number;
+    toJSON(): string;
     toString(): string;
   }
   class PlainDateTime {
@@ -38,6 +39,7 @@ declare namespace Temporal {
     readonly microsecond: number;
     readonly nanosecond: number;
     add(duration: { days: number }): PlainDateTime;
+    toJSON(): string;
     toString(): string;
   }
   class PlainDate {
@@ -48,6 +50,7 @@ declare namespace Temporal {
     readonly day: number;
     readonly dayOfWeek: number;
     add(duration: { days: number }): PlainDate;
+    toJSON(): string;
     toString(): string;
   }
 }

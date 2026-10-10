@@ -201,19 +201,19 @@ mod tests {
         }
         let large = perry_alloc(1 << 20);
         unsafe { large.add((1 << 20) - 1).write(1) };
-        let (chunks, dedicated, _) = chunk_counts();
+        let (chunks, dedicated, unused) = chunk_counts();
         assert!(chunks >= 8, "{chunks}");
         assert_eq!(dedicated, 1);
         perry_task_end();
         let (chunks_after, dedicated_after, free) = chunk_counts();
         assert_eq!((chunks_after, dedicated_after), (0, 0));
-        assert_eq!(free, chunks);
+        assert_eq!(free, unused + chunks);
         // The next task reuses the free chunks instead of allocating.
         perry_task_begin();
         for _ in 0..5000 {
             perry_alloc(100);
         }
-        assert_eq!(chunk_counts().2, 0);
+        assert_eq!(chunk_counts(), (chunks, 0, unused));
         perry_task_end();
     }
 

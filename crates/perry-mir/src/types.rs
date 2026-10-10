@@ -418,6 +418,33 @@ pub struct ReaderType;
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub struct ReadResultType;
 
+/// A `Temporal.Instant`: 16 opaque bytes, little-endian `i128` epoch nanoseconds
+/// (the `time-helper` codec).
+#[pliron_type(name = "perry.instant", generate_get = true, format, verifier = "succ")]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct InstantType;
+
+/// A `Temporal.PlainDate`: 16 opaque bytes, an `i32` epoch day and zero nanoseconds.
+#[pliron_type(
+    name = "perry.plain_date",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct PlainDateType;
+
+/// A `Temporal.PlainDateTime`: 16 opaque bytes, an `i32` epoch day and the `u64`
+/// nanosecond of that day.
+#[pliron_type(
+    name = "perry.plain_date_time",
+    generate_get = true,
+    format,
+    verifier = "succ"
+)]
+#[derive(Hash, PartialEq, Eq, Debug)]
+pub struct PlainDateTimeType;
+
 /// An `AbortController` and its `AbortSignal` (one object): aborting rejects the timers that
 /// watch it.
 #[pliron_type(name = "perry.abort", generate_get = true, format, verifier = "succ")]

@@ -442,6 +442,14 @@ impl<'h> Shapes<'h> {
                 }
                 "RegExp" => return Ok(perry_mir::types::RegexType::get(ctx).into()),
                 "Date" => return Ok(perry_mir::types::DateType::get(ctx).into()),
+                "Temporal.Instant" => return Ok(perry_mir::types::InstantType::get(ctx).into()),
+                "Temporal.PlainDate" => {
+                    return Ok(perry_mir::types::PlainDateType::get(ctx).into());
+                }
+                "Temporal.PlainDateTime" => {
+                    return Ok(perry_mir::types::PlainDateTimeType::get(ctx).into());
+                }
+
                 "Headers" => return Ok(perry_mir::types::HeadersType::get(ctx).into()),
                 "Response" => return Ok(perry_mir::types::ResponseType::get(ctx).into()),
                 "Request" => return Ok(perry_mir::types::RequestType::get(ctx).into()),

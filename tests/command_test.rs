@@ -482,3 +482,37 @@ try { await setTimeout(1, 9, { signal: c.signal }); } catch (e) { console.log('p
     );
     Ok(())
 }
+
+/// Temporal factories, arithmetic, fields and catchable range errors.
+#[tokio::test(flavor = "current_thread")]
+async fn temporal_matches_node() -> Result<()> {
+    let run = execute(
+        r#"
+import { setTimeout } from 'node:timers/promises';
+const instant = Temporal.Instant.fromEpochMilliseconds(-1);
+const date = Temporal.PlainDate.from('2024-02-28').add({ days: 1 });
+const dateTime: Temporal.PlainDateTime = Temporal.PlainDateTime.from('2024-02-28T12:30:00.123456789').add({ days: 1 });
+const observed = setTimeout(1, instant);
+await setTimeout(2);
+if ((await observed).epochMilliseconds !== -1) throw 'lost instant';
+if (instant.toJSON() !== instant.toString() || date.toJSON() !== date.toString() || dateTime.toJSON() !== dateTime.toString()) throw 'incorrect ISO serialization';
+console.log(instant.epochMilliseconds, instant.toString() + '|' + date.toString() + '|' + dateTime.toString());
+console.log(date.year, date.month, date.day, date.dayOfWeek, dateTime.hour, dateTime.minute, dateTime.millisecond, dateTime.microsecond, dateTime.nanosecond);
+console.log(Temporal.Instant.from('2024-01-01T00:00:00+01:00').toString(), Temporal.Instant.fromEpochMilliseconds(8640000000000000).toString(), Temporal.Instant.fromEpochMilliseconds(-8640000000000000).toString());
+try { Temporal.PlainDate.from('x'); } catch (e) { if (e instanceof RangeError) console.log('range', e.message.startsWith('Invalid time value for Temporal')); }
+try { date.add({ days: 1.5 }); } catch (e) { if (e instanceof RangeError) console.log('fractional days'); }
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "-1 1969-12-31T23:59:59.999Z|2024-02-29|2024-02-29T12:30:00.123456789
+2024 2 29 4 12 30 123 456 789
+2023-12-31T23:00:00Z +275760-09-13T00:00:00Z -271821-04-20T00:00:00Z
+range true
+fractional days
+"
+    );
+    Ok(())
+}

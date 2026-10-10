@@ -52,6 +52,7 @@ async and additional async builtins disabled.
 | Uint8Array | Mutable byte view retaining its storage owner |
 | bigint | Boxed exact sign/magnitude for WIT s64/u64 transport |
 | Date | Mutable boxed epoch-millisecond value |
+| Temporal | Immutable 16-byte codec payload: epoch nanoseconds for Instant, epoch day plus nanoseconds within the day for plain values |
 | JSON | Immutable parsed graph, distinct from native aggregate storage |
 | optional | The underlying representation plus absence sentinels admitted by its type |
 

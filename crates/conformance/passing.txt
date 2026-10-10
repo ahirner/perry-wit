@@ -12,6 +12,7 @@ ecma.string.operations
 ecma.array.dense
 ecma.object.records
 ecma.date.epoch
+ecma.temporal.iso
 ecma.uint8array.conversion
 web.textencoder.subviews
 web.textdecoder.streaming

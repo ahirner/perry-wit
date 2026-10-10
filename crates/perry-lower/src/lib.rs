@@ -22,6 +22,7 @@ mod modules;
 mod shapes;
 mod source;
 mod streams;
+mod temporal;
 mod url;
 mod variants;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
@@ -57,8 +58,9 @@ use perry_mir::{
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
         AbortType, ArrayType, BytesType, DateType, ExceptionType, HeadersType, IncomingType,
-        JsonType, PromiseType, ReadResultType, ReadableType, ReaderType, RecordType, RequestType,
-        ResponseType, SettledType, StatsType, StringType, WritableType, WriterType,
+        InstantType, JsonType, PlainDateTimeType, PlainDateType, PromiseType, ReadResultType,
+        ReadableType, ReaderType, RecordType, RequestType, ResponseType, SettledType, StatsType,
+        StringType, WritableType, WriterType,
     },
 };
 use pliron::printable::Printable as _;
@@ -373,6 +375,9 @@ enum Kind {
     ReadResult,
     Incoming,
     Abort,
+    Instant,
+    PlainDate,
+    PlainDateTime,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -492,6 +497,12 @@ fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         Ok(Kind::ByobReader)
     } else if ty.is::<ReaderType>() {
         Ok(Kind::Reader)
+    } else if ty.is::<InstantType>() {
+        Ok(Kind::Instant)
+    } else if ty.is::<PlainDateType>() {
+        Ok(Kind::PlainDate)
+    } else if ty.is::<PlainDateTimeType>() {
+        Ok(Kind::PlainDateTime)
     } else if ty.is::<AbortType>() {
         Ok(Kind::Abort)
     } else if ty.is::<IncomingType>() {
@@ -2604,6 +2615,12 @@ impl<'s> FunctionBuilder<'s> {
                         | Kind::ReadResult,
                         name,
                     ) => self.web_member(ctx, value, name, None)?,
+                    (Kind::Instant, "epochMilliseconds") => self
+                        .intrinsic(ctx, Intrinsic::InstantMs, vec![value])
+                        .expect("milliseconds"),
+                    (Kind::PlainDate | Kind::PlainDateTime, field) => {
+                        self.temporal_field(ctx, value, field)?
+                    }
                     (Kind::Abort, "signal") => value,
                     (Kind::Abort, "aborted") => self
                         .intrinsic(ctx, Intrinsic::AbortAborted, vec![value])
@@ -3345,6 +3362,9 @@ impl<'s> FunctionBuilder<'s> {
             ) => {
                 return self.web_member(ctx, receiver, method, Some(args)).map(Some);
             }
+            (Kind::Instant | Kind::PlainDate | Kind::PlainDateTime, _) => {
+                return self.temporal_method(ctx, receiver, method, args);
+            }
             (Kind::Abort, "abort") => {
                 ensure!(args.is_empty(), "abort reasons are not supported yet");
                 self.intrinsic(ctx, Intrinsic::AbortAbort, vec![receiver]);
@@ -3897,6 +3917,25 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn call(&mut self, ctx: &mut Context, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+            && let Expr::PropertyGet {
+                object: namespace,
+                property: class,
+                ..
+            } = &**object
+            && let Expr::PropertyGet {
+                object: global,
+                property: name,
+                ..
+            } = &**namespace
+            && matches!(**global, Expr::GlobalGet(_))
+            && name == "Temporal"
+        {
+            return self.temporal_factory(ctx, class, property, args).map(Some);
+        }
+
         if let Expr::Closure { params, body, .. } = callee
             && let [param] = params.as_slice()
             && param.name == "__perry_obj_iife"
