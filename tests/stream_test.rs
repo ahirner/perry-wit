@@ -1,7 +1,7 @@
 //! `stream<u8>` export arguments as `ReadableStream<Uint8Array>`: reads that keep their chunks
 //! get fresh objects, reads whose chunks die before the next read reuse one buffer (leases,
 //! `perry_codegen::lease`), and both see the same bytes.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
     Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
@@ -235,7 +235,11 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     let small: Vec<u8> = (0..20_000u32).map(|i| (i * 7 + i / 300) as u8).collect();
     let input = StreamReader::new(&mut store, small.clone())?;
     assert_eq!(
-        kept.call_async(&mut store, (input,)).await?.0,
+        kept.call_async(&mut store, (input,))
+            .await
+            .map_err(anyhow::Error::from)
+            .context("retained chunks")?
+            .0,
         weighted(&small)
     );
     // 2 MiB through 64 KiB of memory.

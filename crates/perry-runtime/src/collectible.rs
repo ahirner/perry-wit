@@ -123,7 +123,7 @@ impl Page {
 
 impl Drop for Page {
     fn drop(&mut self) {
-        // SAFETY: this page owns the allocation and retains its original layout.
+        // SAFETY: this page owns the allocation with its current layout.
         unsafe { dealloc(self.memory.as_ptr(), self.layout) };
     }
 }
@@ -165,7 +165,10 @@ impl Directory {
             if self.tables.len() <= high {
                 self.tables.resize_with(high + 1, || None);
             }
-            let table = self.tables[high].get_or_insert_with(|| Box::new([ptr::null_mut(); 1024]));
+            let table = self.tables[high].get_or_insert_with(|| {
+                // SAFETY: all-zero bytes represent null pointers; initialize directly on the heap.
+                unsafe { Box::<[*mut Page; 1024]>::new_zeroed().assume_init() }
+            });
             table[number & 1023] = page;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -258,7 +261,16 @@ impl Collector {
             None
         });
         let index = existing.unwrap_or_else(|| {
-            let mut page = Box::new(Page::new(cell));
+            // Keep allocation metadata below the payload so a large tail block can grow.
+            let mut page = if cell > MAX_SMALL {
+                if self.vacant.is_empty() {
+                    self.pages.reserve(1);
+                }
+                let storage = Box::<Page>::new_uninit();
+                Box::write(storage, Page::new(cell))
+            } else {
+                Box::new(Page::new(cell))
+            };
             page.poison |= self.poison;
             let pointer = &mut *page as *mut Page;
             for offset in (0..page.layout.size()).step_by(PAGE) {
@@ -287,6 +299,95 @@ impl Collector {
             .as_mut()
             .expect("page")
             .allocate(size, shape)
+    }
+
+    /// Whether `pointer` is inside this exact allocation, including interior host pins.
+    pub(crate) fn contains(&self, allocation: *mut u8, pointer: *mut u8) -> bool {
+        let page = self.directory.get(allocation as usize);
+        if page.is_null() {
+            return false;
+        }
+        // SAFETY: the directory refers to stable owned pages; validate the slot before its header.
+        let page = unsafe { &*page };
+        let offset = (allocation as usize).wrapping_sub(page.memory.as_ptr() as usize + HEADER);
+        let index = offset / page.cell;
+        if index >= page.slots
+            || !offset.is_multiple_of(page.cell)
+            || page.allocated[0] & (1 << index) == 0
+        {
+            return false;
+        }
+        let size = unsafe { (*allocation.sub(HEADER).cast::<Header>()).size };
+        (pointer as usize).wrapping_sub(allocation as usize) < size
+    }
+
+    /// Enlarge an exclusive payload without collecting or moving it. Newly exposed bytes are zero.
+    ///
+    /// # Safety
+    /// `object` is the exact start of a live allocation, with no interior aliases or host borrows.
+    /// Its shape remains valid for `size` bytes. Failure preserves its pointer, size and contents.
+    pub unsafe fn grow_in_place(&mut self, object: *mut u8, size: usize) -> bool {
+        let page = self.directory.get(object as usize);
+        if page.is_null() {
+            return false;
+        }
+        let page = unsafe { &mut *page };
+        let offset = (object as usize).wrapping_sub(page.memory.as_ptr() as usize + HEADER);
+        let index = offset / page.cell;
+        if index >= page.slots
+            || !offset.is_multiple_of(page.cell)
+            || page.allocated[0] & (1 << index) == 0
+        {
+            return false;
+        }
+        let header = unsafe { &mut *object.sub(HEADER).cast::<Header>() };
+        let old_size = header.size;
+        if size <= old_size {
+            return size == old_size;
+        }
+        let Some(required) = size.checked_add(HEADER) else {
+            return false;
+        };
+        if page.cell <= MAX_SMALL {
+            if required > page.cell {
+                return false;
+            }
+        } else {
+            let Some(cell) = required.checked_next_multiple_of(core::mem::align_of::<Header>())
+            else {
+                return false;
+            };
+            if cell > page.layout.size() {
+                let Some(bytes) = cell.checked_next_multiple_of(PAGE) else {
+                    return false;
+                };
+                let Ok(layout) = Layout::from_size_align(bytes, PAGE) else {
+                    return false;
+                };
+                #[cfg(all(target_arch = "wasm32", feature = "collectible"))]
+                let grown = unsafe {
+                    crate::ALLOCATOR.grow_in_place(page.memory.as_ptr(), page.layout, bytes)
+                };
+                #[cfg(not(all(target_arch = "wasm32", feature = "collectible")))]
+                let grown = false;
+                if !grown {
+                    return false;
+                }
+                for offset in (page.layout.size()..bytes).step_by(PAGE) {
+                    self.directory
+                        .set(page.memory.as_ptr() as usize + offset, page);
+                }
+                self.counters.reserved_bytes += bytes - page.layout.size();
+                page.layout = layout;
+            }
+            page.cell = cell;
+        }
+        // SAFETY: the old payload survived growth; the new range is owned and unobserved.
+        unsafe { ptr::write_bytes(object.add(old_size), 0, size - old_size) };
+        header.size = size;
+        self.volume = self.volume.saturating_add(size - old_size);
+        self.counters.live_bytes += size - old_size;
+        true
     }
 
     pub fn due(&self) -> bool {
@@ -575,6 +676,36 @@ mod tests {
                 heap.allocate(8, ptr::null());
             }
             assert_eq!(heap.counters().reserved_bytes, after);
+        }
+    }
+    #[test]
+    fn grown_pointer_storage_is_zeroed_traced_and_reclaimed() {
+        const ARRAY: [u32; 3] = [core::mem::size_of::<usize>() as u32, 1, 0];
+        let mut heap = Collector::new();
+        // SAFETY: the exclusive pointer array grows within its allocated page. Each pointer
+        // is initialized before collection; only the explicit interior root remains live.
+        unsafe {
+            let array = heap.allocate(600, ARRAY.as_ptr());
+            let first = heap.allocate(8, ptr::null());
+            array.cast::<*mut u8>().write(first);
+            let reserved = heap.counters().reserved_bytes;
+            assert!(heap.grow_in_place(array, 800));
+            assert_eq!(heap.counters().reserved_bytes, reserved);
+            assert!(
+                core::slice::from_raw_parts(array.add(600), 200)
+                    .iter()
+                    .all(|&byte| byte == 0)
+            );
+            let last = heap.allocate(8, ptr::null());
+            array.add(792).cast::<*mut u8>().write(last);
+            assert!(heap.contains(array, array.add(799)));
+            assert!(!heap.contains(array, array.add(800)));
+            heap.collect(&[array.add(799)]);
+            assert_eq!(heap.counters().live_bytes, 816);
+            assert_eq!(array.cast::<*mut u8>().read(), first);
+            assert_eq!(array.add(792).cast::<*mut u8>().read(), last);
+            heap.collect(&[]);
+            assert_eq!(heap.counters().live_bytes, 0);
         }
     }
 }

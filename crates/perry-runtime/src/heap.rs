@@ -75,7 +75,7 @@ unsafe impl Source for Heap {
 }
 
 /// Single-threaded talc adapter exposing pressure information at compiler safe points.
-pub struct Allocator(talc::cell::TalcCell<Heap, talc::wasm::WasmBinning>);
+pub struct Allocator(core::cell::UnsafeCell<talc::cell::TalcCell<Heap, talc::wasm::WasmBinning>>);
 // SAFETY: components have one guest thread and never use shared-memory atomics.
 unsafe impl Sync for Allocator {}
 impl Default for Allocator {
@@ -88,30 +88,87 @@ impl Allocator {
         const {
             assert!(!cfg!(target_feature = "atomics"));
         }
-        Self(talc::cell::TalcCell::new(Heap::new()))
+        Self(core::cell::UnsafeCell::new(talc::cell::TalcCell::new(
+            Heap::new(),
+        )))
     }
     #[cfg(feature = "collectible")]
     pub fn available(&self) -> usize {
-        let counters = self.0.counters();
+        let counters = unsafe { &*self.0.get() }.counters();
         if counters.heap_count == 0 {
             core::arch::wasm32::memory_size::<0>() * PAGE - (&raw const __heap_base as usize)
         } else {
             counters.available_bytes
         }
     }
+    /// Grow an exclusive allocation without moving it or collecting. Failure preserves its layout.
+    ///
+    /// # Safety
+    /// `pointer` has the supplied allocation layout; `new_size` is a valid, larger layout size.
+    #[cfg(feature = "collectible")]
+    pub unsafe fn grow_in_place(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> bool {
+        // SAFETY: allocator operations are atomic; no other allocator reference is active.
+        unsafe {
+            let talc = (&mut *self.0.get()).get_mut();
+            if talc.try_grow_in_place(pointer, layout, new_size) {
+                return true;
+            }
+            let Some(end) = talc.source.end else {
+                return false;
+            };
+            let Some(memory_end) = core::arch::wasm32::memory_size::<0>().checked_mul(PAGE) else {
+                return false;
+            };
+            if end.as_ptr() as usize != memory_end {
+                return false;
+            }
+            let reserved = talc.reserved(end);
+            let payload_end = pointer as usize + layout.size();
+            let Some(metadata) = (reserved.up_to.as_ptr() as usize).checked_sub(payload_end) else {
+                return false;
+            };
+            // Talc rounds each payload plus its tag to CHUNK_UNIT. An intervening chunk
+            // consumes at least another whole unit, so this bound identifies the final allocation.
+            if !reserved.any || metadata == 0 || metadata > talc::base::CHUNK_UNIT {
+                return false;
+            }
+            let Some(required) = (pointer as usize)
+                .checked_add(new_size)
+                .and_then(|end| end.checked_add(talc::base::CHUNK_UNIT))
+            else {
+                return false;
+            };
+            let pages = required.saturating_sub(memory_end).div_ceil(PAGE);
+            if pages == 0 {
+                return false;
+            }
+            let Some(new_end) = pages
+                .checked_mul(PAGE)
+                .and_then(|growth| memory_end.checked_add(growth))
+            else {
+                return false;
+            };
+            if core::arch::wasm32::memory_grow::<0>(pages) == usize::MAX {
+                return false;
+            }
+            let new_end = new_end as *mut u8;
+            talc.source.end = Some(talc.extend(end, new_end));
+            talc.try_grow_in_place(pointer, layout, new_size)
+        }
+    }
 }
 // SAFETY: allocation/deallocation forward unchanged layouts and pointers to talc.
 unsafe impl core::alloc::GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { self.0.alloc(layout) }
+        unsafe { (&*self.0.get()).alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        unsafe { self.0.alloc_zeroed(layout) }
+        unsafe { (&*self.0.get()).alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { self.0.dealloc(pointer, layout) }
+        unsafe { (&*self.0.get()).dealloc(pointer, layout) }
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        unsafe { self.0.realloc(pointer, layout, size) }
+        unsafe { (&*self.0.get()).realloc(pointer, layout, size) }
     }
 }

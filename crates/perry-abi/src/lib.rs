@@ -66,6 +66,13 @@ mod imports {
     #[link(wasm_import_module = "__perry_helper")]
     unsafe extern "C" {
         pub fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mut u8;
+        pub fn perry_buffer_resize(
+            old: *mut u8,
+            old_size: u32,
+            new_size: u32,
+            initialized: u32,
+            shape: *const u32,
+        ) -> *mut u8;
         pub fn perry_operation_pin(owner: *mut u8) -> u32;
         pub fn perry_operation_unpin(token: u32);
         pub fn perry_promise_new_typed(references: u32) -> *mut u8;
@@ -125,8 +132,8 @@ mod imports {
             perry_promise_reuse,
         },
         region::{
-            perry_alloc, perry_alloc_shaped, perry_cabi_release, perry_operation_pin,
-            perry_operation_unpin, perry_task_current,
+            perry_alloc, perry_alloc_shaped, perry_buffer_resize, perry_cabi_release,
+            perry_operation_pin, perry_operation_unpin, perry_task_current,
         },
         string::{perry_string_offset, perry_string_view},
     };
@@ -401,7 +408,8 @@ pub fn insecure_random_u64() -> u64 {
     unsafe { imports::insecure_random_u64() }
 }
 
-/// A growable byte buffer in the task region: released with the task.
+/// Exclusive growable storage in the module's selected allocation tier.
+/// Exposed immutable views require finishing mutation; host borrows must acknowledge before reserve.
 #[repr(C)]
 pub struct Buffer {
     ptr: *mut u8,
@@ -443,17 +451,27 @@ impl Buffer {
 
     /// Make room for at least `additional` more bytes.
     pub fn reserve(&mut self, additional: usize) {
-        if self.len + additional > self.cap {
-            let cap = (self.cap * 2).max(self.len + additional).max(64);
-            // SAFETY: every instance keeps the same static element shape.
-            let ptr = unsafe { imports::perry_alloc_shaped(cap as u32, self.shape) };
-            if self.len > 0 {
-                // SAFETY: both blocks are live and disjoint.
-                unsafe { ptr::copy_nonoverlapping(self.ptr, ptr, self.len) };
-            }
-            self.ptr = ptr;
-            self.cap = cap;
+        let required = self
+            .len
+            .checked_add(additional)
+            .expect("buffer capacity overflow");
+        if required <= self.cap {
+            return;
         }
+        let cap = self.cap.saturating_mul(2).max(required).max(64);
+        let new_size = u32::try_from(cap).expect("buffer capacity overflow");
+        // SAFETY: Buffer owns this payload exclusively; transfer callers reserve only after
+        // acknowledgement. The fixed shape describes both zero-initialized capacities.
+        self.ptr = unsafe {
+            imports::perry_buffer_resize(
+                self.ptr,
+                self.cap as u32,
+                new_size,
+                self.len as u32,
+                self.shape,
+            )
+        };
+        self.cap = cap;
     }
 
     /// The reserved bytes after the contents, for a host to write into.

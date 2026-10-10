@@ -526,6 +526,9 @@ export function run(n: number): number {
         let module = wasmtime::Module::new(&engine, &checked)?;
         let mut store = Store::new(&engine, ());
         let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+        instance
+            .get_typed_func::<i32, ()>(&mut store, "__perry_gc_debug")?
+            .call(&mut store, 4)?;
         let run = instance.get_func(&mut store, "run").unwrap();
         let mut results = vec![Val::I32(0); run.ty(&store).results().len()];
         run.call(
@@ -535,7 +538,7 @@ export function run(n: number): number {
         )?;
         let counter = instance.get_typed_func::<i32, i64>(&mut store, "__perry_gc_counter")?;
         row.counters = Some(
-            (0..8)
+            (0..11)
                 .map(|i| counter.call(&mut store, i).map(|v| v as u64))
                 .collect::<Result<Vec<_>, _>>()?,
         );

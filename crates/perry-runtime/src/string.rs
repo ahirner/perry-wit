@@ -98,6 +98,7 @@ pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 
     new(len, scalars_length(bytes), data, ptr::null_mut())
 }
 
+#[inline(always)]
 fn append_buffer(len: u32) -> *mut Buffer {
     let cap = len.saturating_mul(2).max(MIN_BUFFER);
     let buffer = perry_alloc(cap.checked_add(8).expect("string too long")) as *mut Buffer;
@@ -115,11 +116,8 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
     let (a, b) = (a as *mut Str, b as *mut Str);
     // SAFETY: the caller passes live strings; buffers hold `cap` bytes after their header.
     unsafe {
-        if (*b).len == 0 {
-            return shared(a);
-        }
-        if (*a).len == 0 {
-            return shared(b);
+        if (*b).len == 0 || (*a).len == 0 {
+            return shared(if (*b).len == 0 { a } else { b });
         }
         let len = (*a).len.checked_add((*b).len).expect("string too long");
         let scalars = (*a).scalars + (*b).scalars;

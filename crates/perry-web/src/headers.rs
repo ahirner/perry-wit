@@ -177,7 +177,7 @@ pub extern "C" fn web_headers_get(h: *mut u8, key: *mut u8) -> *mut u8 {
     let Some(key) = name(b"Headers.get", key) else {
         return core::ptr::null_mut();
     };
-    let mut joined = field_buffer();
+    let mut joined = Buffer::new();
     let mut found = false;
     for (name, value) in headers(h).fields() {
         if name != key {

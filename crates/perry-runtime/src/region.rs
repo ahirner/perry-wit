@@ -150,7 +150,9 @@ pub(crate) fn current() -> &'static mut Task {
 }
 
 fn layout(size: usize) -> Layout {
-    Layout::from_size_align(size, ALIGN).expect("chunk layout")
+    assert!(size <= isize::MAX as usize - (ALIGN - 1), "chunk layout");
+    // SAFETY: ALIGN is a fixed power of two and the rounded size fits isize.
+    unsafe { Layout::from_size_align_unchecked(size, ALIGN) }
 }
 
 fn new_chunk(size: usize, previous: *mut Chunk) -> *mut Chunk {
@@ -593,6 +595,38 @@ pub unsafe extern "C" fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mu
     {
         let _ = shape;
         current().allocate(size as usize)
+    }
+}
+
+/// Grow private helper storage; collectible payloads first attempt non-moving growth.
+///
+/// # Safety
+/// `old` is null or exclusively owned storage of `old_size` bytes. `initialized <= old_size`
+/// bytes are live. No immutable aliases or outstanding host borrows may refer to this buffer.
+/// `shape` describes both capacities; allocation remains atomic with respect to collection.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_buffer_resize(
+    old: *mut u8,
+    old_size: u32,
+    new_size: u32,
+    initialized: u32,
+    shape: *const u32,
+) -> *mut u8 {
+    #[cfg(feature = "collectible")]
+    {
+        unsafe { crate::roots::resize_buffer(old, old_size, new_size, initialized, shape) }
+    }
+    #[cfg(not(feature = "collectible"))]
+    {
+        assert!(
+            initialized <= old_size && old_size <= new_size,
+            "buffer resize bounds"
+        );
+        let new = unsafe { perry_alloc_shaped(new_size, shape) };
+        if initialized != 0 {
+            unsafe { ptr::copy_nonoverlapping(old, new, initialized as usize) };
+        }
+        new
     }
 }
 

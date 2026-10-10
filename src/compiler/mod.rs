@@ -141,8 +141,10 @@ pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
 
 /// Compile a raw test module with `__perry_gc_debug(flags)` and
 /// `__perry_gc_counter(index)`. Flags enable forced safe-point collection (1) and poisoning
-/// (2). Counters are allocations, collections, live bytes, reserved bytes, transfer-copy
-/// bytes, active pins and active roots. Canonical production components omit these exports.
+/// (2), plus buffer-growth counters (4). Counter indices are allocations (0), collections (1),
+/// live bytes (2), reserved bytes (3), transfer-copy bytes (4), active pins (5), active roots (6),
+/// compiled root publications (7), in-place growths (8), copy fallbacks (9), and growth-copy
+/// bytes (10). Canonical production components omit these exports.
 pub fn compile_core_with_memory_checks(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
     let mir = lower(ctx, source, file_name, &Default::default())?;

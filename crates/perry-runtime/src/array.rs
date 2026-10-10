@@ -3,7 +3,7 @@
 //! Layout, read and written inline by compiled code: `len: u32` at 0, `cap: u32` at 4,
 //! `data: u32` at 8. Elements are `f64` or a 32-bit reference in the low half of a slot.
 //! `cap` is never 0, so compiled code may read slot 0 unconditionally (branch-free bounds
-//! checks select the result afterwards). Growth doubles capacity and copies live elements.
+//! checks select the result afterwards). Growth doubles capacity and preserves live elements.
 //! Collectible arrays release old storage through tracing; proven bounded task allocations
 //! retain their storage until task completion.
 use crate::region::perry_alloc;
@@ -102,11 +102,19 @@ pub unsafe extern "C" fn perry_array_grow_collectible(array: *mut u8, references
             .cap
             .checked_mul(2)
             .expect("array capacity overflow");
-        let data = crate::roots::perry_gc_alloc(
+        let data = crate::roots::resize_buffer(
+            (*array).data.cast(),
+            (*array)
+                .cap
+                .checked_mul(SLOT)
+                .expect("array capacity overflow"),
             cap.checked_mul(SLOT).expect("array capacity overflow"),
+            (*array)
+                .len
+                .checked_mul(SLOT)
+                .expect("array length overflow"),
             shape,
         ) as *mut u64;
-        core::ptr::copy_nonoverlapping((*array).data, data, (*array).len as usize);
         (*array).data = data;
         (*array).cap = cap;
     }

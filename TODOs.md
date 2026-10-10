@@ -26,7 +26,9 @@ consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapsho
 4. [x] Prove indexed accesses and reuse dominating successful optional unwraps.
    [Full campaign](bench/performance/reports/04-ranges/summary.json) passes all contracts,
    four seeds, 55 consumer tests and 25 benchmark scenarios.
-5. [ ] Reuse string headers when ownership and liveness permit mutation.
+5. [x] Reuse string headers when ownership and liveness permit mutation.
+   [Full campaign](bench/performance/reports/05-strings/summary.json) passes all contracts,
+   four seeds, 55 consumer tests and 25 benchmark scenarios.
 6. [ ] Grow exclusive unpinned buffers in place with collector-aware metadata updates.
 7. [ ] Port local coalescing, emitter peepholes and async branch-table dispatch.
 8. [ ] Complete workspace, SDK/example, lint and permitted Nix validation on frozen source.
@@ -76,7 +78,19 @@ from 632.9M to 168.0M fuel, 1,000,015 allocations to 17, 74 collections to five,
 to 2,555,904 peak bytes. Retained prefixes and scalar counts survive forced collection.
 The append component grows 412 bytes; non-string core workloads gain about 61 bytes of linked
 runtime cost. Retained-record fuel rises 0.024%, with identical allocation/collection counts
-and peak memory; all size budgets remain satisfied. The full campaign is pending.
+and peak memory. The conformance and consumer campaign passed; stage 6 restores the small-append size gate.
+
+Buffer growth focused checks pass: non-moving expansion crosses directory-table boundaries,
+new pointer storage is zeroed and traced, fragmentation/pins force copying, and denied growth
+preserves existing bytes. Forced collection, cancellation, retained chunks and the 64 KiB
+stream gates pass. Directory tables initialize directly on the heap; fixed-alignment layout
+checks and compact append helpers preserve both frozen small-component size budgets.
+The final preview reduces HTTP accumulation from 48.2M to 35.0M fuel and 25,427,968 to
+15,794,176 peak bytes. Numeric arrays fall from 191.6M to 187.3M fuel and 17,367,040 to
+15,990,784 bytes (11 in-place growths, seven fallbacks). Retained-record fuel rises 0.37%
+with unchanged peak memory: interleaved live allocations require copying, and the more general
+allocation path adds a small fixed cost. Growth adds about 1.2 KiB to array/stream components;
+allocation-free components remain small. Collection thresholds are unchanged. Full campaign pending.
 
 ## Verified implementation
 

@@ -96,6 +96,56 @@ impl Drop for RootStack {
     }
 }
 
+#[derive(Default)]
+struct GrowthMetrics {
+    in_place: u64,
+    fallback: u64,
+    copied: u64,
+}
+
+/// Resize private buffer storage after any host transfer has acknowledged completion.
+///
+/// # Safety
+/// A non-null `old` is an exact live allocation of `old_size` bytes with `initialized` live bytes.
+/// The caller owns it exclusively, with no shared slices or outstanding mutable host borrow.
+/// `shape` remains valid for the new size. No collection occurs inside this helper.
+pub(crate) unsafe fn resize_buffer(
+    old: *mut u8,
+    old_size: u32,
+    new_size: u32,
+    initialized: u32,
+    shape: *const u32,
+) -> *mut u8 {
+    assert!(
+        initialized <= old_size && old_size <= new_size,
+        "buffer resize bounds"
+    );
+    let roots = roots();
+    if !old.is_null() {
+        let pinned = roots
+            .pins
+            .iter()
+            .any(|pin| roots.heap.contains(old, pin.object));
+        if !pinned && unsafe { roots.heap.grow_in_place(old, new_size as usize) } {
+            if let Some(metrics) = &mut roots.growth_metrics {
+                metrics.in_place += 1;
+            }
+            return old;
+        }
+        if let Some(metrics) = &mut roots.growth_metrics {
+            metrics.fallback += 1;
+        }
+    }
+    let new = unsafe { roots.heap.allocate(new_size as usize, shape) };
+    if initialized != 0 {
+        unsafe { ptr::copy_nonoverlapping(old, new, initialized as usize) };
+        if let Some(metrics) = &mut roots.growth_metrics {
+            metrics.copied += u64::from(initialized);
+        }
+    }
+    new
+}
+
 struct Roots {
     heap: Collector,
     stack: RootStack,
@@ -105,6 +155,7 @@ struct Roots {
     snapshot: Vec<*mut u8>,
     globals: Vec<*mut *mut u8>,
     force_collection: bool,
+    growth_metrics: Option<Box<GrowthMetrics>>,
     transfer_copied_bytes: u64,
 }
 
@@ -119,6 +170,7 @@ impl Roots {
             snapshot: Vec::new(),
             globals: Vec::new(),
             force_collection: false,
+            growth_metrics: None,
             transfer_copied_bytes: 0,
         }
     }
@@ -358,16 +410,20 @@ pub fn counters() -> Counters {
     roots().heap.counters()
 }
 
-/// Controls exported only by the instrumented raw-core compiler entry point.
+/// Test controls: force collection (1), poison reclamation (2), enable growth metrics (4).
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_gc_debug(flags: u32) {
     let roots = roots();
     roots.force_collection = flags & 1 != 0;
+    if flags & 4 != 0 && roots.growth_metrics.is_none() {
+        roots.growth_metrics = Some(Box::default());
+    }
     roots.heap.set_poison(flags & 2 != 0);
 }
 
-/// Allocation count, collection count, live bytes, reserved bytes, copied transfer bytes,
-/// active pins and active compiled roots, respectively.
+/// Indices 0–6: allocations, collections, live bytes, reserved bytes, transfer-copy bytes,
+/// active pins and roots. Compiled wrappers supply root publications at 7; indices 8–10
+/// are in-place growths, copy fallbacks and growth-copy bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_gc_counter(index: u32) -> u64 {
     let roots = roots();
@@ -380,6 +436,9 @@ pub extern "C" fn perry_gc_counter(index: u32) -> u64 {
         4 => roots.transfer_copied_bytes,
         5 => roots.pins.iter().filter(|p| !p.object.is_null()).count() as u64,
         6 => u64::from(roots.stack.length),
+        8 => roots.growth_metrics.as_ref().map_or(0, |m| m.in_place),
+        9 => roots.growth_metrics.as_ref().map_or(0, |m| m.fallback),
+        10 => roots.growth_metrics.as_ref().map_or(0, |m| m.copied),
         _ => panic!("unknown memory counter"),
     }
 }
