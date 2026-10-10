@@ -48,9 +48,7 @@ impl FunctionLowering<'_> {
         {
             let aggregate = parameters::record(&import.params);
             let size = self.i32_const(ctx, aggregate.size() as i32);
-            let area = self
-                .runtime(ctx, Runtime::Alloc, vec![size])
-                .expect("arguments");
+            let area = self.alloc(ctx, size);
             for (((abi, mir), value), offset) in import
                 .params
                 .iter()
@@ -74,9 +72,7 @@ impl FunctionLowering<'_> {
             .unwrap_or_default();
         let area = if result_flat.len() > 1 || (import.asynchronous && import.result.is_some()) {
             let size = self.i32_const(ctx, import.result.as_ref().unwrap().size() as i32);
-            let area = self
-                .runtime(ctx, Runtime::Alloc, vec![size])
-                .expect("result area");
+            let area = self.alloc(ctx, size);
             args.push(area);
             params.push(Flat::I32);
             Some(area)
@@ -84,27 +80,11 @@ impl FunctionLowering<'_> {
             None
         };
         let transfer = if import.asynchronous {
-            let owners = self
-                .call(
-                    ctx,
-                    "perry_roots_capture",
-                    &[crate::W::I32],
-                    &[crate::W::I32],
-                    vec![mark],
-                )
-                .expect("owners");
+            let owners = self.runtime(ctx, Runtime::RootsCapture, vec![mark]);
             let size = self.i32_const(ctx, transfer::SIZE as i32);
             let shape = self.pointer_shape(&[transfer::AREA, transfer::OWNERS]);
             let shape = self.i32_const(ctx, shape as i32);
-            let transfer = self
-                .call(
-                    ctx,
-                    "perry_gc_alloc",
-                    &[crate::W::I32; 2],
-                    &[crate::W::I32],
-                    vec![size, shape],
-                )
-                .expect("transfer");
+            let transfer = self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
             let index = if let Some(index) = self
                 .state
                 .foreign_transfers
@@ -147,12 +127,10 @@ impl FunctionLowering<'_> {
         self.state.host.insert(host.clone());
         let result_types = results.iter().map(|flat| flat_type(ctx, *flat)).collect();
         self.commit_resources(ctx);
-        let task = self
-            .call(ctx, "perry_task_current", &[], &[crate::W::I32], vec![])
-            .expect("task");
+        let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
         let call = CallOp::new(ctx, host.symbol(), args, result_types).get_operation();
         self.insert(ctx, call);
-        self.runtime(ctx, Runtime::TaskResume, vec![task]);
+        self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
         self.canonical_borrows = false;
         if let Some(transfer) = transfer {
             self.resource_scope = None;
@@ -169,19 +147,13 @@ impl FunctionLowering<'_> {
             let bits = self.slot_bits(ctx, transfer);
             self.cond_br(ctx, returned, (now, vec![]), (later, vec![]));
             self.block = now;
-            self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
+            self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
             self.br(ctx, done, vec![]);
             self.block = later;
             let four = self.i32_const(ctx, 4);
             let handle = self.num(ctx, NumOpcode::I32ShrU, vec![status, four]);
-            self.call(
-                ctx,
-                "perry_foreign_register",
-                &[crate::W::I32, crate::W::I32, crate::W::I64],
-                &[],
-                vec![handle, promise, bits],
-            );
-            self.runtime(ctx, Runtime::TaskJoin, vec![handle]);
+            self.runtime_void(ctx, Runtime::ForeignRegister, vec![handle, promise, bits]);
+            self.runtime_void(ctx, Runtime::TaskJoin, vec![handle]);
             self.br(ctx, done, vec![]);
             self.block = done;
             self.define(ctx, op, promise);
@@ -206,13 +178,7 @@ impl FunctionLowering<'_> {
         let done = self.new_block(ctx, vec![]);
         self.cond_br(ctx, scope, (release, vec![]), (done, vec![]));
         self.block = release;
-        self.call(
-            ctx,
-            "perry_resource_scope_finish",
-            &[crate::W::I32],
-            &[],
-            vec![scope],
-        );
+        self.runtime_void(ctx, Runtime::ResourceScopeFinish, vec![scope]);
         let zero = self.i32_const(ctx, 0);
         self.store(ctx, MemKind::I32, transfer, transfer::SCOPE, zero);
         self.drain_resources(ctx);
@@ -253,15 +219,7 @@ impl FunctionLowering<'_> {
         let done = self.new_block(ctx, vec![]);
         self.br(ctx, next, vec![]);
         self.block = next;
-        let transfer = self
-            .call(
-                ctx,
-                "perry_foreign_cancelled",
-                &[],
-                &[crate::W::I32],
-                vec![],
-            )
-            .expect("cancelled transfer");
+        let transfer = self.runtime(ctx, Runtime::ForeignCancelled, vec![]);
         self.cond_br(ctx, transfer, (dispose, vec![]), (done, vec![]));
         self.block = dispose;
         let returned = self.load(ctx, MemKind::I32, transfer, transfer::RETURNED);
@@ -316,7 +274,7 @@ impl FunctionLowering<'_> {
                         b.discard_canonical(ctx, element, element_area, 0)
                     })?;
                 }
-                self.call(ctx, "perry_cabi_release", &[crate::W::I32], &[], vec![data]);
+                self.runtime_void(ctx, Runtime::CabiRelease, vec![data]);
             }
             AbiType::Record(fields) => {
                 for ((_, field), at) in fields.iter().zip(abi.field_offsets()) {
@@ -327,7 +285,7 @@ impl FunctionLowering<'_> {
             | AbiType::Result { .. }
             | AbiType::Enum(_)
             | AbiType::Variant(_) => {
-                let tag = self.load(ctx, abi.discriminant().mem_kind().unwrap(), area, offset);
+                let tag = self.load(ctx, abi.discriminant_kind(), area, offset);
                 self.sum_switch(ctx, tag, abi.cases().len(), vec![], |b, ctx, case| {
                     if let Some(payload) = abi.cases()[case] {
                         b.discard_canonical(ctx, payload, area, offset + abi.payload_offset())?;

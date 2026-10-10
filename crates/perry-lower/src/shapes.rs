@@ -571,7 +571,8 @@ impl<'h> Shapes<'h> {
             RecordType::get
         };
         // The first name whose definition matches, or which is still free.
-        for suffix in 1.. {
+        let mut suffix = 1;
+        loop {
             let name = if suffix == 1 {
                 base.clone()
             } else {
@@ -580,8 +581,8 @@ impl<'h> Shapes<'h> {
             if let Ok(record) = get(ctx, identifier(&name)?, Some(fields.clone())) {
                 return Ok(record);
             }
+            suffix += 1;
         }
-        unreachable!()
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.

@@ -2,15 +2,33 @@
 use super::*;
 use perry_mir::optional::{absence, optional_value};
 
+/// A WIT `result` that a source function fills completion-style: a compatible return is
+/// `ok`, a checked throw is `err`.
+#[derive(Clone, Copy)]
+pub(super) struct Completion<'a> {
+    pub(super) result: &'a AbiType,
+    err: Option<&'a AbiType>,
+}
+
 impl AbiType {
     /// An explicit tagged return wins over a compatible success-payload shape.
-    pub(super) fn completion_result(&self, ctx: &Context, mir: Option<TypeHandle>) -> bool {
+    /// This result as a completion-style mapping of a source function returning `mir`,
+    /// unless the source returns an explicit tagged result.
+    pub(super) fn completion(
+        &self,
+        ctx: &Context,
+        mir: Option<TypeHandle>,
+    ) -> Option<Completion<'_>> {
         let Self::Result { ok, err } = self else {
-            return false;
+            return None;
+        };
+        let completion = Completion {
+            result: self,
+            err: err.as_deref(),
         };
         let Some(record) = mir.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
         else {
-            return true;
+            return Some(completion);
         };
         let tagged = record_field(ctx, record, "ok")
             .is_ok_and(|(_, ty)| crate::repr(ctx, ty).is_ok_and(|r| r == crate::Repr::Bool))
@@ -20,7 +38,7 @@ impl AbiType {
             && err
                 .as_ref()
                 .is_none_or(|_| record_field(ctx, record, "error").is_ok());
-        !tagged
+        (!tagged).then_some(completion)
     }
     pub(super) fn is_sum(&self) -> bool {
         matches!(
@@ -36,6 +54,15 @@ impl AbiType {
             Self::Result { ok, err } => vec![ok.as_deref(), err.as_deref()],
             Self::Enum(names) => vec![None; names.len()],
             _ => unreachable!("not a sum"),
+        }
+    }
+
+    /// How the case index is stored in memory.
+    pub(super) fn discriminant_kind(&self) -> MemKind {
+        match self.cases().len() {
+            0..=256 => MemKind::I32U8,
+            257..=65536 => MemKind::I32U16,
+            _ => MemKind::I32,
         }
     }
 
@@ -141,14 +168,11 @@ impl FunctionLowering<'_> {
     pub(super) fn completion_error(
         &mut self,
         ctx: &mut Context,
-        ty: &AbiType,
+        completion: Completion<'_>,
         exception: Value,
     ) -> Result<Option<(TypeHandle, Value)>> {
         use perry_runtime::exception as exception_layout;
-        let AbiType::Result { err, .. } = ty else {
-            unreachable!()
-        };
-        let Some(err) = err.as_deref() else {
+        let Some(err) = completion.err else {
             return Ok(None);
         };
         if let AbiType::Record(fields) = err {
@@ -169,7 +193,7 @@ impl FunctionLowering<'_> {
             let invalid = self.new_block(ctx, vec![]);
             self.cond_br(ctx, matches, (valid, vec![]), (invalid, vec![]));
             self.block = invalid;
-            self.runtime(ctx, Runtime::TaskFree, vec![]);
+            self.task_free(ctx);
             let trap = UnreachableOp::new(ctx).get_operation();
             self.insert(ctx, trap);
             self.block = valid;
@@ -181,18 +205,8 @@ impl FunctionLowering<'_> {
             )
             .map_err(|_| anyhow!("inconsistent completion Error record shape"))?
             .into();
-            let name = self
-                .call(
-                    ctx,
-                    "std_exception_name",
-                    &[crate::W::I32],
-                    &[crate::W::I32],
-                    vec![exception],
-                )
-                .expect("name");
-            let message = self
-                .runtime(ctx, Runtime::ExceptionMessage, vec![exception])
-                .expect("message");
+            let name = self.runtime(ctx, Runtime::StdExceptionName, vec![exception]);
+            let message = self.runtime(ctx, Runtime::ExceptionMessage, vec![exception]);
             let value = self.build_record(
                 ctx,
                 mir,
@@ -239,19 +253,13 @@ impl FunctionLowering<'_> {
         let invalid = self.new_block(ctx, vec![]);
         self.cond_br(ctx, matches, (valid, vec![]), (invalid, vec![]));
         self.block = invalid;
-        self.runtime(ctx, Runtime::TaskFree, vec![]);
+        self.task_free(ctx);
         let trap = UnreachableOp::new(ctx).get_operation();
         self.insert(ctx, trap);
         self.block = valid;
         let value = self.load(ctx, kind, exception, exception_layout::VALUE);
         if self.state.collectible && crate::repr(ctx, mir)? == crate::Repr::Ref {
-            self.call(
-                ctx,
-                "perry_gc_pin",
-                &[crate::W::I32],
-                &[crate::W::I32],
-                vec![value],
-            );
+            self.runtime(ctx, Runtime::GcPin, vec![value]);
         }
         Ok(Some((mir, value)))
     }
@@ -465,7 +473,7 @@ impl FunctionLowering<'_> {
         address: Value,
         offset: u32,
     ) -> Result<Value> {
-        let tag = self.load(ctx, ty.discriminant().mem_kind().unwrap(), address, offset);
+        let tag = self.load(ctx, ty.discriminant_kind(), address, offset);
         let result = crate::wasm_type(ctx, mir)?;
         Ok(
             self.sum_switch(ctx, tag, ty.cases().len(), vec![result], |b, ctx, case| {
@@ -525,9 +533,7 @@ impl FunctionLowering<'_> {
                 for (index, name) in names.iter().enumerate() {
                     let text = self.state.data.string(name);
                     let text = self.i32_const(ctx, text as i32);
-                    let comparison = self
-                        .runtime(ctx, Runtime::StringCompare, vec![value, text])
-                        .expect("comparison");
+                    let comparison = self.runtime(ctx, Runtime::StringCompare, vec![value, text]);
                     let matches = self.num(ctx, NumOpcode::I32Eqz, vec![comparison]);
                     let index = self.i32_const(ctx, index as i32);
                     tag = self.select(ctx, matches, index, tag);
@@ -583,13 +589,7 @@ impl FunctionLowering<'_> {
         offset: u32,
     ) -> Result<()> {
         let tag = self.sum_tag(ctx, ty, mir, value)?;
-        self.store(
-            ctx,
-            ty.discriminant().mem_kind().unwrap(),
-            address,
-            offset,
-            tag,
-        );
+        self.store(ctx, ty.discriminant_kind(), address, offset, tag);
         self.sum_switch(ctx, tag, ty.cases().len(), vec![], |b, ctx, case| {
             if let Some(payload) = ty.cases()[case] {
                 let payload_mir = b.payload_type(ctx, ty, mir, case)?;

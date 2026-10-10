@@ -93,9 +93,11 @@ mod dates;
 mod lease;
 mod memory;
 mod regex;
+mod runtime;
 mod temporal;
 mod variants;
 pub use memory::explain_tiers;
+use runtime::{Runtime, W};
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -265,192 +267,6 @@ pub fn status_code(kind: ErrorKind) -> i32 {
         ErrorKind::RangeError => 2,
         ErrorKind::Value => 4,
         ErrorKind::Exit => 5,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum Runtime {
-    Alloc,
-    ArrayNew,
-    ArrayGrow,
-    F64Rem,
-    TaskEnter,
-    TaskResume,
-    TaskSuspend,
-    TaskFree,
-    TaskJoin,
-    TaskSubtaskEvent,
-    TaskCloseSet,
-    TaskResult,
-    TaskSetResult,
-    ReadyPop,
-    CombinatorStep,
-    SubtaskRegister,
-    PromiseNew,
-    PromiseResolve,
-    PromiseReject,
-    PromiseWait,
-    PromiseRethrow,
-    ExceptionNew,
-    ExceptionRaise,
-    ExceptionCatch,
-    ExceptionMessage,
-    Exit,
-    CabiRealloc,
-    StringAdopt,
-    StringConcat,
-    StringCompare,
-    Print,
-    IoPump,
-    IoEvent,
-    IoClose,
-    ExitCodeSet,
-    CommandOutcome,
-    RejectionText,
-    AbortNew,
-    Abort,
-    AbortAborted,
-    AbortReject,
-    AbortWatch,
-    EnvGet,
-    EnvKeys,
-    PerformanceNow,
-    DateNow,
-    /// `number_format` of the number helper library.
-    NumberFormat,
-    /// Any other runtime or helper function: name, parameters, results.
-    Call(&'static str, &'static [W], &'static [W]),
-}
-
-/// Wasm value types of [Runtime::Call] signatures.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-enum W {
-    I32,
-    I64,
-    F64,
-}
-
-impl Runtime {
-    fn name(self) -> &'static str {
-        match self {
-            Runtime::Alloc => "perry_alloc",
-            Runtime::ArrayNew => "perry_array_new",
-            Runtime::ArrayGrow => "perry_array_grow",
-            Runtime::F64Rem => "perry_f64_rem",
-            Runtime::TaskEnter => "perry_task_enter",
-            Runtime::TaskResume => "perry_task_resume",
-            Runtime::TaskSuspend => "perry_task_suspend",
-            Runtime::TaskFree => "perry_task_free",
-            Runtime::TaskJoin => "perry_task_join",
-            Runtime::TaskSubtaskEvent => "perry_task_subtask_event",
-            Runtime::TaskCloseSet => "perry_task_close_set",
-            Runtime::TaskResult => "perry_task_result",
-            Runtime::TaskSetResult => "perry_task_set_result",
-            Runtime::ReadyPop => "perry_ready_pop",
-            Runtime::CombinatorStep => "perry_combinator_step",
-            Runtime::SubtaskRegister => "perry_subtask_register",
-            Runtime::PromiseNew => "perry_promise_new",
-            Runtime::PromiseResolve => "perry_promise_resolve",
-            Runtime::PromiseReject => "perry_promise_reject",
-            Runtime::PromiseWait => "perry_promise_wait",
-            Runtime::PromiseRethrow => "perry_promise_rethrow",
-            Runtime::ExceptionNew => "perry_exception_new",
-            Runtime::ExceptionRaise => "perry_exception_raise",
-            Runtime::ExceptionCatch => "perry_exception_catch",
-            Runtime::ExceptionMessage => "perry_exception_message",
-            Runtime::Exit => "perry_exit",
-            Runtime::CabiRealloc => "perry_cabi_realloc",
-            Runtime::StringAdopt => "perry_string_adopt",
-            Runtime::StringConcat => "perry_string_concat",
-            Runtime::StringCompare => "perry_string_compare",
-            Runtime::Print => "perry_print",
-            Runtime::IoPump => "perry_io_pump",
-            Runtime::IoEvent => "perry_io_event",
-            Runtime::IoClose => "perry_io_close",
-            Runtime::ExitCodeSet => "perry_exit_code_set",
-            Runtime::CommandOutcome => "perry_command_outcome",
-            Runtime::RejectionText => "perry_rejection_text",
-            Runtime::AbortNew => "perry_abort_new",
-            Runtime::Abort => "perry_abort",
-            Runtime::AbortAborted => "perry_abort_aborted",
-            Runtime::AbortReject => "perry_abort_reject",
-            Runtime::AbortWatch => "perry_abort_watch",
-            Runtime::EnvGet => "perry_env_get",
-            Runtime::EnvKeys => "perry_env_keys",
-            Runtime::PerformanceNow => "perry_performance_now",
-            Runtime::DateNow => "perry_date_now",
-            Runtime::NumberFormat => "number_format",
-            Runtime::Call(name, ..) => name,
-        }
-    }
-
-    fn symbol(self) -> Identifier {
-        let name = self.name();
-        format!("rt_{}", name.strip_prefix("perry_").unwrap_or(name))
-            .try_into()
-            .expect("identifier")
-    }
-
-    /// (parameters, results) as (f64?, count) pairs: all runtime values are i32 or f64.
-    fn signature(self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
-        let i32 = i32_type(ctx);
-        let i64: TypeHandle = IntegerType::get(ctx, 64, Signedness::Signless).into();
-        let f64: TypeHandle = FP64Type::get(ctx).into();
-        match self {
-            Runtime::Alloc | Runtime::ArrayNew => (vec![i32], vec![i32]),
-            Runtime::ArrayGrow => (vec![i32], vec![]),
-            Runtime::F64Rem => (vec![f64, f64], vec![f64]),
-            Runtime::TaskFree | Runtime::TaskCloseSet | Runtime::IoPump => (vec![], vec![]),
-            Runtime::TaskEnter
-            | Runtime::TaskSuspend
-            | Runtime::IoClose
-            | Runtime::EnvKeys
-            | Runtime::TaskResult
-            | Runtime::ReadyPop
-            | Runtime::PromiseNew => (vec![], vec![i32]),
-            Runtime::TaskResume
-            | Runtime::TaskJoin
-            | Runtime::TaskSetResult
-            | Runtime::CombinatorStep => (vec![i32], vec![]),
-            Runtime::TaskSubtaskEvent => (vec![i32, i32], vec![]),
-            Runtime::Print => (vec![i32, i32, i32], vec![]),
-            Runtime::IoEvent => (vec![i32, i32, i32], vec![i32]),
-            Runtime::ExitCodeSet => (vec![f64], vec![]),
-            Runtime::CommandOutcome | Runtime::EnvGet | Runtime::RejectionText => {
-                (vec![i32], vec![i32])
-            }
-            Runtime::AbortAborted => (vec![i32], vec![i32]),
-            Runtime::AbortNew => (vec![], vec![i32]),
-            Runtime::AbortReject => (vec![i32; 2], vec![]),
-            Runtime::Abort => (vec![i32; 3], vec![]),
-            Runtime::AbortWatch => (vec![i32; 3], vec![]),
-            Runtime::PerformanceNow | Runtime::DateNow => (vec![], vec![f64]),
-            Runtime::NumberFormat => (vec![f64, i32], vec![i32]),
-            Runtime::PromiseRethrow
-            | Runtime::ExceptionRaise
-            | Runtime::ExceptionCatch
-            | Runtime::ExceptionMessage => (vec![i32], vec![i32]),
-            Runtime::ExceptionNew => (vec![i32, i32, i64], vec![i32]),
-            Runtime::Exit => (vec![f64], vec![i32]),
-            Runtime::SubtaskRegister => (vec![i32, i32, i64], vec![]),
-            Runtime::PromiseResolve => (vec![i32, i64], vec![]),
-            Runtime::PromiseReject | Runtime::PromiseWait => (vec![i32, i32], vec![]),
-            Runtime::CabiRealloc => (vec![i32; 4], vec![i32]),
-            Runtime::StringAdopt | Runtime::StringConcat | Runtime::StringCompare => {
-                (vec![i32, i32], vec![i32])
-            }
-            Runtime::Call(_, params, results) => {
-                let map = |w: &W| match w {
-                    W::I32 => i32,
-                    W::I64 => i64,
-                    W::F64 => f64,
-                };
-                (
-                    params.iter().map(map).collect(),
-                    results.iter().map(map).collect(),
-                )
-            }
-        }
     }
 }
 
@@ -890,12 +706,12 @@ fn export_wrapper(
     let entry = wrapper.get_entry_block(ctx);
     let args: Vec<_> = entry.deref(ctx).arguments().collect();
     let mut b = FunctionLowering::glue(state, ctx, &wrapper);
-    b.runtime(ctx, Runtime::TaskEnter, vec![]);
+    b.task_enter(ctx);
     b.initialize_module(ctx);
     let call = CallOp::new(ctx, name.clone(), args, results).get_operation();
     b.insert(ctx, call);
     let values: Vec<_> = call.deref(ctx).results().collect();
-    b.runtime(ctx, Runtime::TaskFree, vec![]);
+    b.task_free(ctx);
     let ret = ReturnOp::new(ctx, values).get_operation();
     b.insert(ctx, ret);
     for param in params {
@@ -941,12 +757,12 @@ fn async_export_wrapper(
         .arguments()
         .collect();
     let mut b = FunctionLowering::glue(state, ctx, &wrapper);
-    b.runtime(ctx, Runtime::TaskEnter, vec![]);
+    b.task_enter(ctx);
     b.initialize_module(ctx);
     let call = CallOp::new(ctx, name.clone(), args, vec![i32]).get_operation();
     b.insert(ctx, call);
     let promise = call.deref(ctx).get_result(0);
-    b.runtime(ctx, Runtime::TaskSetResult, vec![promise]);
+    b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
     let drive = CallOp::new(ctx, async_split::drive_name(), vec![], vec![]).get_operation();
     b.insert(ctx, drive);
     let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
@@ -965,7 +781,7 @@ fn async_export_wrapper(
         promise,
         perry_runtime::promise::VALUE,
     );
-    b.runtime(ctx, Runtime::TaskFree, vec![]);
+    b.task_free(ctx);
     let ret = ReturnOp::new(ctx, vec![value, status]).get_operation();
     b.insert(ctx, ret);
     Ok(wrapper)
@@ -1198,7 +1014,10 @@ impl<'s> FunctionLowering<'s> {
         let ty = IntegerType::get(ctx, 32, Signedness::Signless);
         let attr = IntegerAttr::new(
             ty,
-            APInt::from_u64(value as u32 as u64, NonZeroUsize::new(32).unwrap()),
+            APInt::from_u64(
+                value as u32 as u64,
+                const { NonZeroUsize::new(32).unwrap() },
+            ),
         );
         let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
         self.result(ctx, op)
@@ -1206,7 +1025,10 @@ impl<'s> FunctionLowering<'s> {
 
     fn i64_const(&mut self, ctx: &mut Context, value: u64) -> Value {
         let ty = IntegerType::get(ctx, 64, Signedness::Signless);
-        let attr = IntegerAttr::new(ty, APInt::from_u64(value, NonZeroUsize::new(64).unwrap()));
+        let attr = IntegerAttr::new(
+            ty,
+            APInt::from_u64(value, const { NonZeroUsize::new(64).unwrap() }),
+        );
         let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
         self.result(ctx, op)
     }
@@ -1255,9 +1077,7 @@ impl<'s> FunctionLowering<'s> {
         let kind = self.i32_const(ctx, status_code(ErrorKind::Value));
         let tag = self.i32_const(ctx, tag as i32);
         let bits = self.slot_bits(ctx, value);
-        Ok(self
-            .runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, bits])
-            .expect("exception"))
+        Ok(self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, bits]))
     }
 
     fn store(
@@ -1272,32 +1092,38 @@ impl<'s> FunctionLowering<'s> {
         self.insert(ctx, op);
     }
 
-    fn runtime(&mut self, ctx: &mut Context, function: Runtime, args: Vec<Value>) -> Option<Value> {
-        if matches!(function, Runtime::TaskFree) && self.state.collectible {
-            self.call(ctx, "perry_gc_task_leave", &[], &[], vec![]);
-        }
+    /// Call `function` and return its result, if its signature has one: for dispatch tables
+    /// that mix functions with and without a result. Otherwise use [Self::runtime] or
+    /// [Self::runtime_void].
+    fn call_runtime(
+        &mut self,
+        ctx: &mut Context,
+        function: Runtime,
+        args: Vec<Value>,
+    ) -> Option<Value> {
         self.state.runtime.insert(function);
         let (_, results) = function.signature(ctx);
         let op = CallOp::new(ctx, function.symbol(), args, results).get_operation();
         self.insert(ctx, op);
-        let result = op.deref(ctx).results().next();
-        if self.canonical_borrows && matches!(function, Runtime::Alloc) {
-            self.publish_roots(ctx, &[result.expect("allocation")]);
-        }
-        if self.state.collectible {
-            if matches!(function, Runtime::TaskEnter) {
-                if self.state.memory_checks {
-                    let flags = self.i32_const(ctx, 3);
-                    self.call(ctx, "perry_gc_debug", &[W::I32], &[], vec![flags]);
-                }
-                self.call(ctx, "perry_gc_task_enter", &[], &[], vec![]);
-                self.drain_resources(ctx);
-            }
-            if matches!(function, Runtime::TaskFree) {
-                self.call(ctx, "perry_gc_task_end", &[], &[], vec![]);
-            }
-        }
+        op.deref(ctx).results().next()
+    }
+
+    /// Call a runtime function that returns a value.
+    fn runtime(&mut self, ctx: &mut Context, function: Runtime, args: Vec<Value>) -> Value {
+        let Some(result) = self.call_runtime(ctx, function, args) else {
+            panic!("{} returns no value", function.name());
+        };
         result
+    }
+
+    /// Call a runtime function without a result.
+    fn runtime_void(&mut self, ctx: &mut Context, function: Runtime, args: Vec<Value>) {
+        assert!(
+            function.result().is_none(),
+            "the result of {} is discarded",
+            function.name()
+        );
+        self.call_runtime(ctx, function, args);
     }
 
     fn br(&mut self, ctx: &mut Context, dest: Ptr<BasicBlock>, args: Vec<Value>) {
@@ -1405,9 +1231,7 @@ impl<'s> FunctionLowering<'s> {
         let rem = self.num(ctx, NumOpcode::F64Copysign, vec![rem, dividend]);
         self.br(ctx, join, vec![rem]);
         self.block = general;
-        let rem = self
-            .runtime(ctx, Runtime::F64Rem, vec![dividend, divisor])
-            .expect("result");
+        let rem = self.runtime(ctx, Runtime::F64Rem, vec![dividend, divisor]);
         self.br(ctx, join, vec![rem]);
         self.block = join;
         join.deref(ctx).get_argument(0)
@@ -1639,15 +1463,9 @@ impl<'s> FunctionLowering<'s> {
         self.block = grow;
         if self.state.collectible {
             let references = self.i32_const(ctx, i32::from(references));
-            self.call(
-                ctx,
-                "perry_array_grow_collectible",
-                &[W::I32, W::I32],
-                &[],
-                vec![array, references],
-            );
+            self.runtime_void(ctx, Runtime::ArrayGrowCollectible, vec![array, references]);
         } else {
-            self.runtime(ctx, Runtime::ArrayGrow, vec![array]);
+            self.runtime_void(ctx, Runtime::ArrayGrow, vec![array]);
         }
         self.br(ctx, write, vec![]);
         self.block = write;
@@ -1704,18 +1522,14 @@ impl<'s> FunctionLowering<'s> {
                 self.state.uses_io = true;
                 let fd = self.i32_const(ctx, fd);
                 let newline = self.i32_const(ctx, 1);
-                self.runtime(ctx, Runtime::Print, vec![fd, args[0], newline]);
+                self.runtime_void(ctx, Runtime::Print, vec![fd, args[0], newline]);
                 None
             }
             Intrinsic::NumberToString => {
                 let size = self.i32_const(ctx, 40);
-                let data = self
-                    .runtime(ctx, Runtime::Alloc, vec![size])
-                    .expect("number text");
-                let len = self
-                    .runtime(ctx, Runtime::NumberFormat, vec![args[0], data])
-                    .expect("length");
-                self.runtime(ctx, Runtime::StringAdopt, vec![data, len])
+                let data = self.alloc(ctx, size);
+                let len = self.runtime(ctx, Runtime::NumberFormat, vec![args[0], data]);
+                Some(self.runtime(ctx, Runtime::StringAdopt, vec![data, len]))
             }
             Intrinsic::EnvGet | Intrinsic::EnvKeys => {
                 self.needs_import("wasi:cli/environment@0.3.0", "process.env")?;
@@ -1724,18 +1538,18 @@ impl<'s> FunctionLowering<'s> {
                 } else {
                     Runtime::EnvKeys
                 };
-                self.runtime(ctx, function, args)
+                Some(self.runtime(ctx, function, args))
             }
             Intrinsic::PerformanceNow => {
                 self.needs_import(MONOTONIC_CLOCK, "performance.now()")?;
-                self.runtime(ctx, Runtime::PerformanceNow, args)
+                Some(self.runtime(ctx, Runtime::PerformanceNow, args))
             }
             Intrinsic::DateNow => {
                 self.needs_import("wasi:clocks/system-clock@0.3.0", "Date.now()")?;
-                self.runtime(ctx, Runtime::DateNow, args)
+                Some(self.runtime(ctx, Runtime::DateNow, args))
             }
             Intrinsic::ExitCodeSet => {
-                self.runtime(ctx, Runtime::ExitCodeSet, args);
+                self.runtime_void(ctx, Runtime::ExitCodeSet, args);
                 None
             }
             Intrinsic::MathFloor => Some(self.num(ctx, NumOpcode::F64Floor, args)),
@@ -1788,41 +1602,19 @@ impl<'s> FunctionLowering<'s> {
                 let len = self.load(ctx, MemKind::I32, string, LEN);
                 let upper = self.i32_const(ctx, i32::from(intrinsic == Intrinsic::StringUpper));
                 let zero = self.i32_const(ctx, 0);
-                let sig: (&[W], &[W]) = (&[W::I32, W::I32, W::I32, W::I32], &[W::I64]);
-                let measured = self
-                    .call(
-                        ctx,
-                        "str_case_convert",
-                        sig.0,
-                        sig.1,
-                        vec![data, len, zero, upper],
-                    )
-                    .expect("size");
+                let measured =
+                    self.runtime(ctx, Runtime::StrCaseConvert, vec![data, len, zero, upper]);
                 let bytes = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
-                let out = self.runtime(ctx, Runtime::Alloc, vec![bytes]).expect("out");
-                self.call(
-                    ctx,
-                    "str_case_convert",
-                    sig.0,
-                    sig.1,
-                    vec![data, len, out, upper],
-                );
-                self.runtime(ctx, Runtime::StringAdopt, vec![out, bytes])
+                let out = self.alloc(ctx, bytes);
+                self.runtime(ctx, Runtime::StrCaseConvert, vec![data, len, out, upper]);
+                Some(self.runtime(ctx, Runtime::StringAdopt, vec![out, bytes]))
             }
             Intrinsic::JsonParse => {
                 use perry_runtime::string::{DATA, LEN};
                 let string = args[0];
                 let data = self.load(ctx, MemKind::I32, string, DATA);
                 let len = self.load(ctx, MemKind::I32, string, LEN);
-                let measured = self
-                    .call(
-                        ctx,
-                        "json_measure",
-                        &[W::I32, W::I32],
-                        &[W::I64],
-                        vec![data, len],
-                    )
-                    .expect("size");
+                let measured = self.runtime(ctx, Runtime::JsonMeasure, vec![data, len]);
                 let thirty_two = self.i64_const(ctx, 32);
                 let error = self.num(ctx, NumOpcode::I64ShrU, vec![measured, thirty_two]);
                 let error = self.num(ctx, NumOpcode::I32WrapI64, vec![error]);
@@ -1830,23 +1622,14 @@ impl<'s> FunctionLowering<'s> {
                 let valid = self.new_block(ctx, vec![]);
                 self.cond_br(ctx, error, (failed, vec![]), (valid, vec![]));
                 self.block = failed;
-                let status = self
-                    .call(ctx, "std_raise_syntax", &[], &[W::I32], vec![])
-                    .expect("status");
+                let status = self.runtime(ctx, Runtime::StdRaiseSyntax, vec![]);
                 let (target, throw_args) = self.throw_target(ctx, status);
                 self.br(ctx, target, throw_args);
                 self.block = valid;
                 let size = self.num(ctx, NumOpcode::I32WrapI64, vec![measured]);
-                let out = self.runtime(ctx, Runtime::Alloc, vec![size]).expect("out");
-                let populated = self
-                    .call(
-                        ctx,
-                        "json_populate",
-                        &[W::I32, W::I32, W::I32, W::I32],
-                        &[W::I64],
-                        vec![data, len, out, size],
-                    )
-                    .expect("root");
+                let out = self.alloc(ctx, size);
+                let populated =
+                    self.runtime(ctx, Runtime::JsonPopulate, vec![data, len, out, size]);
                 Some(self.num(ctx, NumOpcode::I32WrapI64, vec![populated]))
             }
             Intrinsic::InstantFromMs
@@ -1861,7 +1644,7 @@ impl<'s> FunctionLowering<'s> {
             | Intrinsic::InstantString
             | Intrinsic::PlainDateString
             | Intrinsic::PlainDateTimeString => self.temporal_intrinsic(ctx, intrinsic, args),
-            Intrinsic::AbortNew => self.runtime(ctx, Runtime::AbortNew, args),
+            Intrinsic::AbortNew => Some(self.runtime(ctx, Runtime::AbortNew, args)),
             Intrinsic::AbortAbort => {
                 let message = self.state.data.string("The operation was aborted");
                 let message = self.i32_const(ctx, message as i32);
@@ -1870,9 +1653,12 @@ impl<'s> FunctionLowering<'s> {
                     .data
                     .string("AbortSignal cancellation is limited to the current export task");
                 let scope_error = self.i32_const(ctx, scope_error as i32);
-                self.runtime(ctx, Runtime::Abort, vec![args[0], message, scope_error])
+                {
+                    self.runtime_void(ctx, Runtime::Abort, vec![args[0], message, scope_error]);
+                    None
+                }
             }
-            Intrinsic::AbortAborted => self.runtime(ctx, Runtime::AbortAborted, args),
+            Intrinsic::AbortAborted => Some(self.runtime(ctx, Runtime::AbortAborted, args)),
             Intrinsic::JsonIsUndefined => Some(self.num(ctx, NumOpcode::I32Eqz, args)),
             Intrinsic::ExceptionSetCause => {
                 let (exception, cause) = (args[0], args[1]);
@@ -1898,25 +1684,19 @@ impl<'s> FunctionLowering<'s> {
                     Some(&truth) => truth,
                     None => self.i32_const(ctx, 0),
                 };
-                self.call(
-                    ctx,
-                    "std_json_from_scalar",
-                    &[W::I32, W::I32],
-                    &[W::I32],
-                    vec![kind, truth],
-                )
+                Some(self.runtime(ctx, Runtime::StdJsonFromScalar, vec![kind, truth]))
             }
             Intrinsic::MathRandom => {
                 self.needs_import("wasi:random/insecure@0.3.0", "Math.random()")?;
-                self.call(ctx, "std_math_random", &[], &[W::F64], args)
+                Some(self.runtime(ctx, Runtime::StdMathRandom, args))
             }
             Intrinsic::RandomUuid => {
                 self.needs_import("wasi:random/random@0.3.0", "crypto.randomUUID()")?;
-                self.call(ctx, "std_random_uuid", &[], &[W::I32], args)
+                Some(self.runtime(ctx, Runtime::StdRandomUuid, args))
             }
             Intrinsic::BytesFillRandom => {
                 self.needs_import("wasi:random/random@0.3.0", "crypto.getRandomValues()")?;
-                self.call(ctx, "std_bytes_fill_random", &[W::I32], &[W::I32], args)
+                Some(self.runtime(ctx, Runtime::StdBytesFillRandom, args))
             }
             Intrinsic::JsonSerialize => {
                 bail!("JSON.stringify of parsed JSON values is not supported yet")
@@ -1930,65 +1710,41 @@ impl<'s> FunctionLowering<'s> {
                 self.needs_import(interface, "Writable.toWeb")?;
                 self.state.uses_io = true;
                 let fd = self.i32_const(ctx, fd);
-                self.call(ctx, "web_writable_new", &[W::I32], &[W::I32], vec![fd])
+                Some(self.runtime(ctx, Runtime::WebWritableNew, vec![fd]))
             }
             Intrinsic::WriterWrite => {
                 let leased = self.i32_const(ctx, i32::from(self.state.leased.contains(&op)));
-                self.call(
-                    ctx,
-                    "web_writer_write",
-                    &[W::I32, W::I32, W::I32],
-                    &[W::I32],
-                    vec![args[0], args[1], leased],
-                )
+                Some(self.runtime(ctx, Runtime::WebWriterWrite, vec![args[0], args[1], leased]))
             }
             Intrinsic::Fetch => {
                 self.needs_import("wasi:http/client@0.3.0", "fetch")?;
                 self.needs_import("wasi:http/types@0.3.0", "fetch")?;
                 self.state.uses_fetch = true;
                 self.state.uses_streams = true;
-                self.call(
-                    ctx,
-                    "web_fetch",
-                    &[W::I32, W::I32, W::I32, W::I32, W::I32],
-                    &[W::I32],
-                    args,
-                )
+                Some(self.runtime(ctx, Runtime::WebFetch, args))
             }
             Intrinsic::ServeRequest => {
                 self.needs_import("wasi:http/types@0.3.0", "an HTTP handler")?;
                 self.state.uses_http_server = true;
                 self.state.uses_streams = true;
-                self.call(ctx, "web_serve_request", &[W::F64], &[W::I32], args)
+                Some(self.runtime(ctx, Runtime::WebServeRequest, args))
             }
             Intrinsic::ResponseJson | Intrinsic::RequestJson => {
                 self.state.uses_json_bodies = true;
-                self.call(ctx, "web_body_json", &[W::I32], &[W::I32], args)
+                Some(self.runtime(ctx, Runtime::WebBodyJson, args))
             }
             Intrinsic::ResponseBody | Intrinsic::RequestBody => {
                 self.state.uses_streams = true;
-                self.call(ctx, "web_body_stream", &[W::I32], &[W::I32], args)
+                Some(self.runtime(ctx, Runtime::WebBodyStream, args))
             }
             Intrinsic::ReaderReadByob => {
                 self.state.uses_streams = true;
-                self.call(
-                    ctx,
-                    "web_reader_read_byob",
-                    &[W::I32, W::I32, W::F64],
-                    &[W::I32],
-                    args,
-                )
+                Some(self.runtime(ctx, Runtime::WebReaderReadByob, args))
             }
             Intrinsic::ReaderRead => {
                 self.state.uses_streams = true;
                 let leased = self.i32_const(ctx, i32::from(self.state.leased.contains(&op)));
-                self.call(
-                    ctx,
-                    "web_reader_read",
-                    &[W::I32, W::I32],
-                    &[W::I32],
-                    vec![args[0], leased],
-                )
+                Some(self.runtime(ctx, Runtime::WebReaderRead, vec![args[0], leased]))
             }
             Intrinsic::FsReadText
             | Intrinsic::FsReadBytes
@@ -2002,233 +1758,140 @@ impl<'s> FunctionLowering<'s> {
                 self.needs_import("wasi:filesystem/types@0.3.0", "node:fs")?;
                 self.needs_import("wasi:filesystem/preopens@0.3.0", "node:fs")?;
                 self.state.uses_fs = true;
-                let (name, params): (&'static str, &'static [W]) = match intrinsic {
-                    Intrinsic::FsReadText => ("fs_read_text", &[W::I32]),
-                    Intrinsic::FsReadBytes => ("fs_read_bytes", &[W::I32]),
-                    Intrinsic::FsWriteText => ("fs_write_text", &[W::I32, W::I32]),
-                    Intrinsic::FsWriteBytes => ("fs_write_bytes", &[W::I32, W::I32]),
-                    Intrinsic::FsStat => ("fs_stat", &[W::I32]),
-                    Intrinsic::FsReaddir => ("fs_readdir", &[W::I32]),
-                    Intrinsic::FsMkdir => ("fs_mkdir", &[W::I32]),
-                    Intrinsic::FsUnlink => ("fs_unlink", &[W::I32]),
-                    _ => ("fs_rmdir", &[W::I32]),
+                let function = match intrinsic {
+                    Intrinsic::FsReadText => Runtime::FsReadText,
+                    Intrinsic::FsReadBytes => Runtime::FsReadBytes,
+                    Intrinsic::FsWriteText => Runtime::FsWriteText,
+                    Intrinsic::FsWriteBytes => Runtime::FsWriteBytes,
+                    Intrinsic::FsStat => Runtime::FsStat,
+                    Intrinsic::FsReaddir => Runtime::FsReaddir,
+                    Intrinsic::FsMkdir => Runtime::FsMkdir,
+                    Intrinsic::FsUnlink => Runtime::FsUnlink,
+                    _ => Runtime::FsRmdir,
                 };
-                self.call(ctx, name, params, &[W::I32], args)
+                Some(self.runtime(ctx, function, args))
             }
             other => {
-                let (name, params, results): (&'static str, &'static [W], &'static [W]) =
-                    match other {
-                        Intrinsic::StringCharAt => {
-                            ("std_string_char_at", &[W::I32, W::F64], &[W::I32])
-                        }
-                        Intrinsic::BigIntFromNumber => {
-                            ("std_bigint_from_number", &[W::F64], &[W::I32])
-                        }
-                        Intrinsic::BigIntNegate => ("std_bigint_negate", &[W::I32], &[W::I32]),
-                        Intrinsic::BigIntToNumber => ("std_bigint_to_number", &[W::I32], &[W::F64]),
-                        Intrinsic::BigIntToString => ("std_bigint_to_string", &[W::I32], &[W::I32]),
-                        Intrinsic::StringFromCodePoint => {
-                            ("std_string_from_code_point", &[W::F64], &[W::I32])
-                        }
-                        Intrinsic::StringCodePointAt => {
-                            ("std_string_code_point_at", &[W::I32, W::F64], &[W::F64])
-                        }
-                        Intrinsic::StringIndex => {
-                            ("std_string_index", &[W::I32, W::F64], &[W::I32])
-                        }
-                        Intrinsic::StringSlice => {
-                            ("std_string_slice", &[W::I32, W::F64, W::F64], &[W::I32])
-                        }
-                        Intrinsic::StringSubstring => {
-                            ("std_string_substring", &[W::I32, W::F64, W::F64], &[W::I32])
-                        }
-                        Intrinsic::StringIndexOf => {
-                            ("std_string_index_of", &[W::I32, W::I32, W::F64], &[W::F64])
-                        }
-                        Intrinsic::StringLastIndexOf => (
-                            "std_string_last_index_of",
-                            &[W::I32, W::I32, W::F64],
-                            &[W::F64],
-                        ),
-                        Intrinsic::StringStartsWith => (
-                            "std_string_starts_with",
-                            &[W::I32, W::I32, W::F64],
-                            &[W::I32],
-                        ),
-                        Intrinsic::StringEndsWith => {
-                            ("std_string_ends_with", &[W::I32, W::I32, W::F64], &[W::I32])
-                        }
-                        Intrinsic::StringTrim => ("std_string_trim", &[W::I32], &[W::I32]),
-                        Intrinsic::StringSplit => {
-                            ("std_string_split", &[W::I32, W::I32], &[W::I32])
-                        }
-                        Intrinsic::StringRepeat => {
-                            ("std_string_repeat", &[W::I32, W::F64], &[W::I32])
-                        }
-                        Intrinsic::BytesNew => ("std_bytes_new", &[W::F64], &[W::I32]),
-                        Intrinsic::BytesFromArray => ("std_bytes_from_array", &[W::I32], &[W::I32]),
-                        Intrinsic::BytesBuffer => ("std_bytes_buffer", &[W::I32], &[W::I32]),
-                        Intrinsic::BytesOffset => ("std_bytes_offset", &[W::I32], &[W::F64]),
-                        Intrinsic::BufferLength => ("std_buffer_length", &[W::I32], &[W::F64]),
-                        Intrinsic::BytesFromBuffer => {
-                            ("std_bytes_from_buffer", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::BytesCopy => ("std_bytes_copy", &[W::I32], &[W::I32]),
-                        Intrinsic::BytesGet => ("std_bytes_get", &[W::I32, W::F64], &[W::I64]),
-                        Intrinsic::BytesSet => ("std_bytes_set", &[W::I32, W::F64, W::F64], &[]),
-                        Intrinsic::BytesLength => ("std_bytes_length", &[W::I32], &[W::F64]),
-                        Intrinsic::BytesSubarray => {
-                            ("std_bytes_subarray", &[W::I32, W::F64, W::F64], &[W::I32])
-                        }
-                        Intrinsic::BytesSlice => {
-                            ("std_bytes_slice", &[W::I32, W::F64, W::F64], &[W::I32])
-                        }
-                        Intrinsic::BytesSetFrom => {
-                            ("std_bytes_set_from", &[W::I32, W::I32, W::F64], &[])
-                        }
-                        Intrinsic::BytesFill => {
-                            ("std_bytes_fill", &[W::I32, W::F64, W::F64, W::F64], &[])
-                        }
-                        Intrinsic::TextEncode => ("std_text_encode", &[W::I32], &[W::I32]),
-                        Intrinsic::StringByteInput => {
-                            ("std_string_byte_input", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::UrlNew => ("web_url_new", &[W::I32; 2], &[W::I32]),
-                        Intrinsic::UrlGet => ("web_url_get", &[W::I32, W::F64], &[W::I32]),
-                        Intrinsic::UrlSetPathname => ("web_url_set_pathname", &[W::I32; 2], &[]),
-                        Intrinsic::UrlAppend => ("web_url_append", &[W::I32; 3], &[]),
-                        Intrinsic::EncodeUriComponent => {
-                            ("web_encode_uri_component", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::RegexSearch => {
-                            ("std_regex_search", &[W::I32, W::I32], &[W::F64])
-                        }
-                        Intrinsic::DecoderNew => ("std_decoder_new", &[W::I32, W::I32], &[W::I32]),
-                        Intrinsic::TextDecode => {
-                            ("std_decoder_decode", &[W::I32, W::I32, W::I32], &[W::I32])
-                        }
-                        Intrinsic::JsonMember => ("std_json_member", &[W::I32, W::I32], &[W::I32]),
-                        Intrinsic::JsonKeys => ("std_json_keys", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonIndex => ("std_json_index", &[W::I32, W::F64], &[W::I32]),
-                        Intrinsic::JsonLength => ("std_json_length", &[W::I32], &[W::I64]),
-                        Intrinsic::JsonToNumber => ("std_json_to_number", &[W::I32], &[W::F64]),
-                        Intrinsic::JsonRequireNumber => {
-                            ("std_json_require_number", &[W::I32], &[W::F64])
-                        }
-                        Intrinsic::JsonToString => ("std_json_to_string", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonToBool => ("std_json_to_bool", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonTruthy => ("std_json_truthy", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonTypeOf => ("std_json_type_of", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonRequireObject => ("std_json_require_object", &[W::I32], &[]),
-                        Intrinsic::JsonFirst => ("std_json_first", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonNext => ("std_json_next", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonIsNull => ("std_json_is_null", &[W::I32], &[W::I32]),
-                        Intrinsic::JsonObject => ("std_json_object", &[], &[W::I32]),
-                        Intrinsic::JsonAssign => ("std_json_assign", &[W::I32, W::I32], &[]),
-                        Intrinsic::JsonSet => ("std_json_set", &[W::I32, W::I32, W::I32], &[]),
-                        Intrinsic::JsonFromNumber => ("std_json_from_number", &[W::F64], &[W::I32]),
-                        Intrinsic::JsonFromString => ("std_json_from_string", &[W::I32], &[W::I32]),
-                        Intrinsic::StatsIsFile => ("fs_stats_is_file", &[W::I32], &[W::I32]),
-                        Intrinsic::StatsIsDirectory => {
-                            ("fs_stats_is_directory", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::StatsSize => ("fs_stats_size", &[W::I32], &[W::F64]),
-                        Intrinsic::HeadersNew => ("web_headers_new", &[], &[W::I32]),
-                        Intrinsic::HeadersCopy => ("web_headers_copy", &[W::I32], &[W::I32]),
-                        Intrinsic::HeadersAppend => {
-                            ("web_headers_append", &[W::I32, W::I32, W::I32], &[])
-                        }
-                        Intrinsic::HeadersSet => {
-                            ("web_headers_set", &[W::I32, W::I32, W::I32], &[])
-                        }
-                        Intrinsic::HeadersGet => ("web_headers_get", &[W::I32, W::I32], &[W::I32]),
-                        Intrinsic::HeadersHas => ("web_headers_has", &[W::I32, W::I32], &[W::I32]),
-                        Intrinsic::HeadersDelete => ("web_headers_delete", &[W::I32, W::I32], &[]),
-                        Intrinsic::ResponseNew => (
-                            "web_response_new",
-                            &[W::I32, W::I32, W::F64, W::I32, W::I32],
-                            &[W::I32],
-                        ),
-                        Intrinsic::ResponseStatus => ("web_response_status", &[W::I32], &[W::F64]),
-                        Intrinsic::ResponseStatusText => {
-                            ("web_response_status_text", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::ResponseOk => ("web_response_ok", &[W::I32], &[W::I32]),
-                        Intrinsic::ResponseHeaders => {
-                            ("web_response_headers", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::ResponseBodyUsed | Intrinsic::RequestBodyUsed => {
-                            ("web_body_used", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::ResponseBytes | Intrinsic::RequestBytes => {
-                            ("web_body_bytes", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::ServeBody => ("web_serve_body", &[W::I32], &[W::I32]),
-                        Intrinsic::ServeMethod => ("web_serve_method", &[W::I32], &[W::I32]),
-                        Intrinsic::ServeMethodOther => {
-                            ("web_serve_method_other", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::ServeHasScheme => ("web_serve_has_scheme", &[W::I32], &[W::I32]),
-                        Intrinsic::ServeScheme => ("web_serve_scheme", &[W::I32], &[W::I32]),
-                        Intrinsic::ServeSchemeOther => {
-                            ("web_serve_scheme_other", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::ServeAuthority => ("web_serve_authority", &[W::I32], &[W::I32]),
-                        Intrinsic::ServePath => ("web_serve_path", &[W::I32], &[W::I32]),
-                        Intrinsic::ServeHeaderCount => {
-                            ("web_serve_header_count", &[W::I32], &[W::F64])
-                        }
-                        Intrinsic::ServeHeaderName => {
-                            ("web_serve_header_name", &[W::I32, W::F64], &[W::I32])
-                        }
-                        Intrinsic::ServeHeaderValue => {
-                            ("web_serve_header_value", &[W::I32, W::F64], &[W::I32])
-                        }
-                        Intrinsic::ServeAddHeader => {
-                            ("web_serve_add_header", &[W::I32, W::I32, W::I32], &[])
-                        }
-                        Intrinsic::ServeRespond => {
-                            ("web_serve_respond", &[W::I32, W::F64, W::I32], &[W::F64])
-                        }
-                        Intrinsic::ResponseText | Intrinsic::RequestText => {
-                            ("web_body_text", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::RequestNew => (
-                            "web_request_new",
-                            &[W::I32, W::I32, W::I32, W::I32, W::I32],
-                            &[W::I32],
-                        ),
-                        Intrinsic::RequestMethod => ("web_request_method", &[W::I32], &[W::I32]),
-                        Intrinsic::WritableLocked => ("web_writable_locked", &[W::I32], &[W::I32]),
-                        Intrinsic::WritableGetWriter => {
-                            ("web_writable_get_writer", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::WriterClose => ("web_writer_close", &[W::I32], &[W::I32]),
-                        Intrinsic::WriterReleaseLock => ("web_writer_release_lock", &[W::I32], &[]),
-                        Intrinsic::ReadableLocked => ("web_readable_locked", &[W::I32], &[W::I32]),
-                        Intrinsic::ReadableGetReader | Intrinsic::ReadableGetByobReader => {
-                            ("web_readable_get_reader", &[W::I32], &[W::I32])
-                        }
-                        Intrinsic::ReadableCancel => ("web_readable_cancel", &[W::I32], &[W::I32]),
-                        Intrinsic::ReaderCancel => ("web_reader_cancel", &[W::I32], &[W::I32]),
-                        Intrinsic::ReaderReleaseLock => ("web_reader_release_lock", &[W::I32], &[]),
-                        Intrinsic::ReadDone => ("web_read_done", &[W::I32], &[W::I32]),
-                        Intrinsic::ReadValue => ("web_read_value", &[W::I32], &[W::I32]),
-                        Intrinsic::RequestUrl => ("web_request_url", &[W::I32], &[W::I32]),
-                        Intrinsic::RequestHeaders => ("web_request_headers", &[W::I32], &[W::I32]),
-                        Intrinsic::ExceptionToNumber => {
-                            ("std_exception_to_number", &[W::I32], &[W::F64])
-                        }
-                        Intrinsic::ExceptionName => ("std_exception_name", &[W::I32], &[W::I32]),
-                        Intrinsic::ExceptionToString => {
-                            ("std_exception_to_string", &[W::I32], &[W::I32])
-                        }
-                        _ => unreachable!("lowered above"),
-                    };
-                let result = self.call(ctx, name, params, results, args);
+                let function = match other {
+                    Intrinsic::StringCharAt => Runtime::StdStringCharAt,
+                    Intrinsic::BigIntFromNumber => Runtime::StdBigintFromNumber,
+                    Intrinsic::BigIntNegate => Runtime::StdBigintNegate,
+                    Intrinsic::BigIntToNumber => Runtime::StdBigintToNumber,
+                    Intrinsic::BigIntToString => Runtime::StdBigintToString,
+                    Intrinsic::StringFromCodePoint => Runtime::StdStringFromCodePoint,
+                    Intrinsic::StringCodePointAt => Runtime::StdStringCodePointAt,
+                    Intrinsic::StringIndex => Runtime::StdStringIndex,
+                    Intrinsic::StringSlice => Runtime::StdStringSlice,
+                    Intrinsic::StringSubstring => Runtime::StdStringSubstring,
+                    Intrinsic::StringIndexOf => Runtime::StdStringIndexOf,
+                    Intrinsic::StringLastIndexOf => Runtime::StdStringLastIndexOf,
+                    Intrinsic::StringStartsWith => Runtime::StdStringStartsWith,
+                    Intrinsic::StringEndsWith => Runtime::StdStringEndsWith,
+                    Intrinsic::StringTrim => Runtime::StdStringTrim,
+                    Intrinsic::StringSplit => Runtime::StdStringSplit,
+                    Intrinsic::StringRepeat => Runtime::StdStringRepeat,
+                    Intrinsic::BytesNew => Runtime::StdBytesNew,
+                    Intrinsic::BytesFromArray => Runtime::StdBytesFromArray,
+                    Intrinsic::BytesBuffer => Runtime::StdBytesBuffer,
+                    Intrinsic::BytesOffset => Runtime::StdBytesOffset,
+                    Intrinsic::BufferLength => Runtime::StdBufferLength,
+                    Intrinsic::BytesFromBuffer => Runtime::StdBytesFromBuffer,
+                    Intrinsic::BytesCopy => Runtime::StdBytesCopy,
+                    Intrinsic::BytesGet => Runtime::StdBytesGet,
+                    Intrinsic::BytesSet => Runtime::StdBytesSet,
+                    Intrinsic::BytesLength => Runtime::StdBytesLength,
+                    Intrinsic::BytesSubarray => Runtime::StdBytesSubarray,
+                    Intrinsic::BytesSlice => Runtime::StdBytesSlice,
+                    Intrinsic::BytesSetFrom => Runtime::StdBytesSetFrom,
+                    Intrinsic::BytesFill => Runtime::StdBytesFill,
+                    Intrinsic::TextEncode => Runtime::StdTextEncode,
+                    Intrinsic::StringByteInput => Runtime::StdStringByteInput,
+                    Intrinsic::UrlNew => Runtime::WebUrlNew,
+                    Intrinsic::UrlGet => Runtime::WebUrlGet,
+                    Intrinsic::UrlSetPathname => Runtime::WebUrlSetPathname,
+                    Intrinsic::UrlAppend => Runtime::WebUrlAppend,
+                    Intrinsic::EncodeUriComponent => Runtime::WebEncodeUriComponent,
+                    Intrinsic::RegexSearch => Runtime::StdRegexSearch,
+                    Intrinsic::DecoderNew => Runtime::StdDecoderNew,
+                    Intrinsic::TextDecode => Runtime::StdDecoderDecode,
+                    Intrinsic::JsonMember => Runtime::StdJsonMember,
+                    Intrinsic::JsonKeys => Runtime::StdJsonKeys,
+                    Intrinsic::JsonIndex => Runtime::StdJsonIndex,
+                    Intrinsic::JsonLength => Runtime::StdJsonLength,
+                    Intrinsic::JsonToNumber => Runtime::StdJsonToNumber,
+                    Intrinsic::JsonRequireNumber => Runtime::StdJsonRequireNumber,
+                    Intrinsic::JsonToString => Runtime::StdJsonToString,
+                    Intrinsic::JsonToBool => Runtime::StdJsonToBool,
+                    Intrinsic::JsonTruthy => Runtime::StdJsonTruthy,
+                    Intrinsic::JsonTypeOf => Runtime::StdJsonTypeOf,
+                    Intrinsic::JsonRequireObject => Runtime::StdJsonRequireObject,
+                    Intrinsic::JsonFirst => Runtime::StdJsonFirst,
+                    Intrinsic::JsonNext => Runtime::StdJsonNext,
+                    Intrinsic::JsonIsNull => Runtime::StdJsonIsNull,
+                    Intrinsic::JsonObject => Runtime::StdJsonObject,
+                    Intrinsic::JsonAssign => Runtime::StdJsonAssign,
+                    Intrinsic::JsonSet => Runtime::StdJsonSet,
+                    Intrinsic::JsonFromNumber => Runtime::StdJsonFromNumber,
+                    Intrinsic::JsonFromString => Runtime::StdJsonFromString,
+                    Intrinsic::StatsIsFile => Runtime::FsStatsIsFile,
+                    Intrinsic::StatsIsDirectory => Runtime::FsStatsIsDirectory,
+                    Intrinsic::StatsSize => Runtime::FsStatsSize,
+                    Intrinsic::HeadersNew => Runtime::WebHeadersNew,
+                    Intrinsic::HeadersCopy => Runtime::WebHeadersCopy,
+                    Intrinsic::HeadersAppend => Runtime::WebHeadersAppend,
+                    Intrinsic::HeadersSet => Runtime::WebHeadersSet,
+                    Intrinsic::HeadersGet => Runtime::WebHeadersGet,
+                    Intrinsic::HeadersHas => Runtime::WebHeadersHas,
+                    Intrinsic::HeadersDelete => Runtime::WebHeadersDelete,
+                    Intrinsic::ResponseNew => Runtime::WebResponseNew,
+                    Intrinsic::ResponseStatus => Runtime::WebResponseStatus,
+                    Intrinsic::ResponseStatusText => Runtime::WebResponseStatusText,
+                    Intrinsic::ResponseOk => Runtime::WebResponseOk,
+                    Intrinsic::ResponseHeaders => Runtime::WebResponseHeaders,
+                    Intrinsic::ResponseBodyUsed | Intrinsic::RequestBodyUsed => {
+                        Runtime::WebBodyUsed
+                    }
+                    Intrinsic::ResponseBytes | Intrinsic::RequestBytes => Runtime::WebBodyBytes,
+                    Intrinsic::ServeBody => Runtime::WebServeBody,
+                    Intrinsic::ServeMethod => Runtime::WebServeMethod,
+                    Intrinsic::ServeMethodOther => Runtime::WebServeMethodOther,
+                    Intrinsic::ServeHasScheme => Runtime::WebServeHasScheme,
+                    Intrinsic::ServeScheme => Runtime::WebServeScheme,
+                    Intrinsic::ServeSchemeOther => Runtime::WebServeSchemeOther,
+                    Intrinsic::ServeAuthority => Runtime::WebServeAuthority,
+                    Intrinsic::ServePath => Runtime::WebServePath,
+                    Intrinsic::ServeHeaderCount => Runtime::WebServeHeaderCount,
+                    Intrinsic::ServeHeaderName => Runtime::WebServeHeaderName,
+                    Intrinsic::ServeHeaderValue => Runtime::WebServeHeaderValue,
+                    Intrinsic::ServeAddHeader => Runtime::WebServeAddHeader,
+                    Intrinsic::ServeRespond => Runtime::WebServeRespond,
+                    Intrinsic::ResponseText | Intrinsic::RequestText => Runtime::WebBodyText,
+                    Intrinsic::RequestNew => Runtime::WebRequestNew,
+                    Intrinsic::RequestMethod => Runtime::WebRequestMethod,
+                    Intrinsic::WritableLocked => Runtime::WebWritableLocked,
+                    Intrinsic::WritableGetWriter => Runtime::WebWritableGetWriter,
+                    Intrinsic::WriterClose => Runtime::WebWriterClose,
+                    Intrinsic::WriterReleaseLock => Runtime::WebWriterReleaseLock,
+                    Intrinsic::ReadableLocked => Runtime::WebReadableLocked,
+                    Intrinsic::ReadableGetReader | Intrinsic::ReadableGetByobReader => {
+                        Runtime::WebReadableGetReader
+                    }
+                    Intrinsic::ReadableCancel => Runtime::WebReadableCancel,
+                    Intrinsic::ReaderCancel => Runtime::WebReaderCancel,
+                    Intrinsic::ReaderReleaseLock => Runtime::WebReaderReleaseLock,
+                    Intrinsic::ReadDone => Runtime::WebReadDone,
+                    Intrinsic::ReadValue => Runtime::WebReadValue,
+                    Intrinsic::RequestUrl => Runtime::WebRequestUrl,
+                    Intrinsic::RequestHeaders => Runtime::WebRequestHeaders,
+                    Intrinsic::ExceptionToNumber => Runtime::StdExceptionToNumber,
+                    Intrinsic::ExceptionName => Runtime::StdExceptionName,
+                    Intrinsic::ExceptionToString => Runtime::StdExceptionToString,
+                    _ => unreachable!("lowered above"),
+                };
+                let result = self.call_runtime(ctx, function, args);
                 // Runtime results as `number | undefined` come as bits.
                 result.map(|value| {
-                    if results == [W::I64] {
+                    if function.result() == Some(W::I64) {
                         self.num(ctx, NumOpcode::F64ReinterpretI64, vec![value])
                     } else {
                         value
@@ -2237,9 +1900,7 @@ impl<'s> FunctionLowering<'s> {
             }
         };
         if intrinsic.throws() && !matches!(intrinsic, Intrinsic::JsonParse | Intrinsic::DateIso) {
-            let status = self
-                .call(ctx, "perry_status", &[], &[W::I32], vec![])
-                .expect("status");
+            let status = self.runtime(ctx, Runtime::Status, vec![]);
             self.throw_status_if(ctx, status, status);
         }
         if let Some(mut value) = value {
@@ -2257,18 +1918,6 @@ impl<'s> FunctionLowering<'s> {
         Ok(())
     }
 
-    /// Call a runtime or helper function by name.
-    fn call(
-        &mut self,
-        ctx: &mut Context,
-        name: &'static str,
-        params: &'static [W],
-        results: &'static [W],
-        args: Vec<Value>,
-    ) -> Option<Value> {
-        self.runtime(ctx, Runtime::Call(name, params, results), args)
-    }
-
     // --- JSON.stringify -----------------------------------------------------------------------
 
     /// The text and length of a static string, for raw writer output.
@@ -2282,13 +1931,7 @@ impl<'s> FunctionLowering<'s> {
 
     fn json_raw(&mut self, ctx: &mut Context, writer: Value, text: &str) {
         let (data, len) = self.static_text(ctx, text);
-        self.call(
-            ctx,
-            "std_json_raw",
-            &[W::I32, W::I32, W::I32],
-            &[],
-            vec![writer, data, len],
-        );
+        self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, data, len]);
     }
 
     /// Write `value` of MIR type `ty` (defined) to the JSON writer.
@@ -2323,9 +1966,7 @@ impl<'s> FunctionLowering<'s> {
             drop(deref);
             // Finite numbers in ECMAScript notation (ryu-js); NaN and infinities as null.
             let size = self.i32_const(ctx, 40);
-            let scratch = self
-                .runtime(ctx, Runtime::Alloc, vec![size])
-                .expect("scratch");
+            let scratch = self.alloc(ctx, size);
             let difference = self.num(ctx, NumOpcode::F64Sub, vec![value, value]);
             let zero = self.f64_const(ctx, 0.0);
             let finite = self.num(ctx, NumOpcode::F64Eq, vec![difference, zero]);
@@ -2334,16 +1975,8 @@ impl<'s> FunctionLowering<'s> {
             let join = self.new_block(ctx, vec![]);
             self.cond_br(ctx, finite, (number, vec![]), (null, vec![]));
             self.block = number;
-            let len = self
-                .runtime(ctx, Runtime::NumberFormat, vec![value, scratch])
-                .expect("length");
-            self.call(
-                ctx,
-                "std_json_raw",
-                &[W::I32, W::I32, W::I32],
-                &[],
-                vec![writer, scratch, len],
-            );
+            let len = self.runtime(ctx, Runtime::NumberFormat, vec![value, scratch]);
+            self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, scratch, len]);
             self.br(ctx, join, vec![]);
             self.block = null;
             self.json_raw(ctx, writer, "null");
@@ -2353,13 +1986,7 @@ impl<'s> FunctionLowering<'s> {
         }
         if deref.is::<StringType>() {
             drop(deref);
-            self.call(
-                ctx,
-                "std_json_quote",
-                &[W::I32, W::I32],
-                &[],
-                vec![writer, value],
-            );
+            self.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, value]);
             return Ok(());
         }
         if deref.is::<DateType>() {
@@ -2379,13 +2006,7 @@ impl<'s> FunctionLowering<'s> {
         }
         if deref.is::<JsonType>() {
             drop(deref);
-            self.call(
-                ctx,
-                "std_json_value",
-                &[W::I32, W::I32],
-                &[],
-                vec![writer, value],
-            );
+            self.runtime_void(ctx, Runtime::StdJsonValue, vec![writer, value]);
             return Ok(());
         }
         if deref
@@ -2397,13 +2018,7 @@ impl<'s> FunctionLowering<'s> {
             let (false_data, false_len) = self.static_text(ctx, "false");
             let data = self.select(ctx, value, true_data, false_data);
             let len = self.select(ctx, value, true_len, false_len);
-            self.call(
-                ctx,
-                "std_json_raw",
-                &[W::I32, W::I32, W::I32],
-                &[],
-                vec![writer, data, len],
-            );
+            self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, data, len]);
             return Ok(());
         }
         let container = deref.is::<RecordType>()
@@ -2448,15 +2063,7 @@ impl<'s> FunctionLowering<'s> {
             ('[', ']')
         };
         let bracket = b.i32_const(ctx, open as i32);
-        let opened = b
-            .call(
-                ctx,
-                "std_json_open",
-                &[W::I32, W::I32],
-                &[W::I32],
-                vec![writer, bracket],
-            )
-            .expect("opened");
+        let opened = b.runtime(ctx, Runtime::StdJsonOpen, vec![writer, bracket]);
         let body = b.new_block(ctx, vec![]);
         let done = b.new_block(ctx, vec![]);
         b.cond_br(ctx, opened, (body, vec![]), (done, vec![]));
@@ -2473,7 +2080,7 @@ impl<'s> FunctionLowering<'s> {
                 let kind = slot_kind(ctx, field_ty)?;
                 let slot = b.load(ctx, kind, value, 8 + 8 * index as u32);
                 if tuple {
-                    b.call(ctx, "std_json_item", &[W::I32], &[], vec![writer]);
+                    b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
                     b.json_value(ctx, writer, slot, field_ty)?;
                     continue;
                 }
@@ -2499,13 +2106,7 @@ impl<'s> FunctionLowering<'s> {
                 }
                 b.block = member;
                 let key = b.i32_const(ctx, key as i32);
-                b.call(
-                    ctx,
-                    "std_json_key",
-                    &[W::I32, W::I32],
-                    &[],
-                    vec![writer, key],
-                );
+                b.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
                 b.json_value(ctx, writer, slot, field_ty)?;
                 b.br(ctx, next, vec![]);
                 b.block = next;
@@ -2522,20 +2123,14 @@ impl<'s> FunctionLowering<'s> {
             let len = b.load(ctx, MemKind::I32, value, layout::LEN);
             let data = b.load(ctx, MemKind::I32, value, layout::DATA);
             b.counted_loop(ctx, len, |b, ctx, i| {
-                b.call(ctx, "std_json_item", &[W::I32], &[], vec![writer]);
+                b.runtime_void(ctx, Runtime::StdJsonItem, vec![writer]);
                 let slot = b.slot_address(ctx, data, i);
                 let item = b.load(ctx, kind, slot, 0);
                 b.json_value(ctx, writer, item, element)
             })?;
         }
         let bracket = b.i32_const(ctx, close as i32);
-        b.call(
-            ctx,
-            "std_json_close",
-            &[W::I32, W::I32],
-            &[],
-            vec![writer, bracket],
-        );
+        b.runtime_void(ctx, Runtime::StdJsonClose, vec![writer, bracket]);
         b.br(ctx, done, vec![]);
         b.block = done;
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
@@ -2549,9 +2144,7 @@ impl<'s> FunctionLowering<'s> {
     fn json_stringify(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
         let value = self.operand(ctx, op, 0)?;
         let ty = op.deref(ctx).get_operand(0).get_type(ctx);
-        let writer = self
-            .call(ctx, "std_json_writer", &[], &[W::I32], vec![])
-            .expect("writer");
+        let writer = self.runtime(ctx, Runtime::StdJsonWriter, vec![]);
         let json = ty.deref(ctx).is::<JsonType>();
         let text = if json || optional_inner(ctx, ty).is_some() {
             // A top-level `undefined` stringifies to `undefined`.
@@ -2580,12 +2173,8 @@ impl<'s> FunctionLowering<'s> {
     }
 
     fn json_finish(&mut self, ctx: &mut Context, writer: Value) -> Value {
-        let text = self
-            .call(ctx, "std_json_finish", &[W::I32], &[W::I32], vec![writer])
-            .expect("text");
-        let status = self
-            .call(ctx, "perry_status", &[], &[W::I32], vec![])
-            .expect("status");
+        let text = self.runtime(ctx, Runtime::StdJsonFinish, vec![writer]);
+        let status = self.runtime(ctx, Runtime::Status, vec![]);
         self.throw_status_if(ctx, status, status);
         text
     }
@@ -2643,7 +2232,7 @@ impl<'s> FunctionLowering<'s> {
             };
             let cell = self.i32_const(ctx, address as i32);
             if repr(ctx, ty)? == Repr::Ref {
-                self.call(ctx, "perry_gc_global", &[W::I32], &[], vec![cell]);
+                self.runtime_void(ctx, Runtime::GcGlobal, vec![cell]);
             }
             self.define(ctx, op, cell);
             return Ok(());
@@ -2804,17 +2393,9 @@ impl<'s> FunctionLowering<'s> {
                 };
                 let inner = optional_inner(ctx, mir_ty).unwrap_or(mir_ty);
                 let order = if inner.deref(ctx).is::<perry_mir::types::BigIntType>() {
-                    self.call(
-                        ctx,
-                        "std_bigint_compare",
-                        &[W::I32, W::I32],
-                        &[W::I32],
-                        operands,
-                    )
-                    .expect("order")
+                    self.runtime(ctx, Runtime::StdBigintCompare, operands)
                 } else {
                     self.runtime(ctx, Runtime::StringCompare, operands)
-                        .expect("order")
                 };
                 let order = if let Some(join) = join {
                     self.br(ctx, join, vec![order]);
@@ -2876,17 +2457,17 @@ impl<'s> FunctionLowering<'s> {
         }
         if let Some(cond_br) = Operation::get_op::<MirCondBrOp>(op, ctx) {
             let condition = self.operand(ctx, op, 0)?;
-            let mut arms = Vec::new();
-            for succ in 0..2 {
+            let mut arm = |succ: usize| -> Result<_> {
                 let dest = self.blocks[&op.deref(ctx).get_successor(succ)];
-                let mut args = Vec::new();
-                for v in cond_br.successor_operands(ctx, succ) {
-                    args.push(self.mapped(ctx, v)?);
-                }
-                arms.push((dest, args));
-            }
-            let otherwise = arms.pop().unwrap();
-            let then = arms.pop().unwrap();
+                let args = cond_br
+                    .successor_operands(ctx, succ)
+                    .into_iter()
+                    .map(|v| self.mapped(ctx, v))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((dest, args))
+            };
+            let then = arm(0)?;
+            let otherwise = arm(1)?;
             self.cond_br(ctx, condition, then, otherwise);
             return Ok(());
         }
@@ -3164,23 +2745,13 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<perry_mir::collections::StringAppendOp>(op, ctx).is_some() {
             let args = self.operands(ctx, op)?;
-            let value = self
-                .call(
-                    ctx,
-                    "perry_string_append",
-                    &[W::I32, W::I32],
-                    &[W::I32],
-                    args,
-                )
-                .expect("string");
+            let value = self.runtime(ctx, Runtime::StringAppend, args);
             self.define(ctx, op, value);
             return Ok(());
         }
         if Operation::get_op::<StringConcatOp>(op, ctx).is_some() {
             let operands = self.operands(ctx, op)?;
-            let value = self
-                .runtime(ctx, Runtime::StringConcat, operands)
-                .expect("string");
+            let value = self.runtime(ctx, Runtime::StringConcat, operands);
             self.define(ctx, op, value);
             return Ok(());
         }
@@ -3208,10 +2779,10 @@ impl<'s> FunctionLowering<'s> {
             return self.lower_await(ctx, op);
         }
         if let Some(combinator) = Operation::get_op::<PromiseCombinatorOp>(op, ctx) {
-            let name = match combinator.combinator(ctx) {
-                Combinator::All => "perry_promise_all",
-                Combinator::Race => "perry_promise_race",
-                Combinator::AllSettled => "perry_promise_all_settled",
+            let function = match combinator.combinator(ctx) {
+                Combinator::All => Runtime::PromiseAll,
+                Combinator::Race => Runtime::PromiseRace,
+                Combinator::AllSettled => Runtime::PromiseAllSettled,
             };
             let inputs = self.operand(ctx, op, 0)?;
             let promise = if self.state.collectible {
@@ -3232,17 +2803,13 @@ impl<'s> FunctionLowering<'s> {
                         Combinator::AllSettled => 2,
                     },
                 );
-                self.call(
+                self.runtime(
                     ctx,
-                    "perry_promise_combine_collectible",
-                    &[W::I32, W::I32, W::I32],
-                    &[W::I32],
+                    Runtime::PromiseCombineCollectible,
                     vec![mode, inputs, references],
                 )
-                .expect("promise")
             } else {
-                self.call(ctx, name, &[W::I32], &[W::I32], vec![inputs])
-                    .expect("promise")
+                self.runtime(ctx, function, vec![inputs])
             };
             self.define(ctx, op, promise);
             return Ok(());
@@ -3257,7 +2824,7 @@ impl<'s> FunctionLowering<'s> {
             .deref(ctx)
             .value();
             let promise = self.new_promise(ctx, payload)?;
-            self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
+            self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
             self.define(ctx, op, promise);
             return Ok(());
         }
@@ -3313,17 +2880,13 @@ impl<'s> FunctionLowering<'s> {
             let tag = self.i32_const(ctx, perry_runtime::exception::TAG_STRING as i32);
             let message = self.operand(ctx, op, 0)?;
             let message = self.num(ctx, NumOpcode::I64ExtendI32U, vec![message]);
-            let value = self
-                .runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, message])
-                .expect("exception");
+            let value = self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, message]);
             self.define(ctx, op, value);
             return Ok(());
         }
         if Operation::get_op::<PromiseRejectedOp>(op, ctx).is_some() {
             let exception = self.thrown(ctx, op)?;
-            let status = self
-                .runtime(ctx, Runtime::ExceptionRaise, vec![exception])
-                .expect("status");
+            let status = self.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
             let payload = TypedHandle::<PromiseType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
@@ -3331,23 +2894,19 @@ impl<'s> FunctionLowering<'s> {
             .deref(ctx)
             .value();
             let promise = self.new_promise(ctx, payload)?;
-            self.runtime(ctx, Runtime::PromiseReject, vec![promise, status]);
+            self.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
             self.define(ctx, op, promise);
             return Ok(());
         }
         if Operation::get_op::<RaiseOp>(op, ctx).is_some() {
             let exception = self.thrown(ctx, op)?;
-            let status = self
-                .runtime(ctx, Runtime::ExceptionRaise, vec![exception])
-                .expect("status");
+            let status = self.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
             self.define(ctx, op, status);
             return Ok(());
         }
         if Operation::get_op::<ExitOp>(op, ctx).is_some() {
             let code = self.operand(ctx, op, 0)?;
-            let status = self
-                .runtime(ctx, Runtime::Exit, vec![code])
-                .expect("status");
+            let status = self.runtime(ctx, Runtime::Exit, vec![code]);
             self.define(ctx, op, status);
             return Ok(());
         }
@@ -3359,17 +2918,13 @@ impl<'s> FunctionLowering<'s> {
         }
         if Operation::get_op::<CatchOp>(op, ctx).is_some() {
             let status = self.operand(ctx, op, 0)?;
-            let value = self
-                .runtime(ctx, Runtime::ExceptionCatch, vec![status])
-                .expect("exception");
+            let value = self.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
             self.define(ctx, op, value);
             return Ok(());
         }
         if Operation::get_op::<ExceptionMessageOp>(op, ctx).is_some() {
             let exception = self.operand(ctx, op, 0)?;
-            let value = self
-                .runtime(ctx, Runtime::ExceptionMessage, vec![exception])
-                .expect("message");
+            let value = self.runtime(ctx, Runtime::ExceptionMessage, vec![exception]);
             self.define(ctx, op, value);
             return Ok(());
         }

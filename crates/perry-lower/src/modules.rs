@@ -9,7 +9,7 @@ use std::{
 };
 use swc_common::{DUMMY_SP, GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
-use swc_ecma_visit::{VisitMut, VisitMutWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 type Exports = BTreeMap<String, String>;
 
@@ -49,28 +49,47 @@ pub(crate) fn load(
             path
         };
         let exports = graph.module(&path, initial)?;
-        for (name, binding) in exports {
-            if graph.types.contains(&binding) {
+        // An exported function that nothing else names is renamed in place; one that the
+        // graph also calls, or exports twice, keeps its binding and gets an exported copy.
+        let mut uses = Uses::default();
+        for item in &graph.body {
+            item.visit_with(&mut uses);
+        }
+        let mut exported: HashMap<&str, usize> = HashMap::new();
+        for binding in exports.values() {
+            *exported.entry(binding).or_default() += 1;
+        }
+        let mut renamed = Vec::new();
+        let mut copies = Vec::new();
+        for (name, binding) in &exports {
+            if graph.types.contains(binding) {
                 continue;
             }
-            let index = *graph.functions.get(&binding).with_context(|| {
+            let index = *graph.functions.get(binding).with_context(|| {
                 format!("Component export '{name}' requires a named function declaration")
             })?;
-            let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) =
-                &graph.body[index]
-            else {
-                unreachable!()
+            let ident = ast::Ident::new(name.as_str().into(), DUMMY_SP, SyntaxContext::empty());
+            if uses.0.get(binding) == Some(&1) && exported[binding.as_str()] == 1 {
+                renamed.push((index, ident));
+            } else {
+                copies.push((index, ident));
+            }
+        }
+        for (index, ident) in copies {
+            let mut function = graph.function(index)?.clone();
+            function.ident = ident;
+            graph.body.push(export_function(function));
+        }
+        for (index, ident) in renamed {
+            let item = std::mem::replace(
+                &mut graph.body[index],
+                ast::ModuleItem::Stmt(ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP })),
+            );
+            let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(mut function))) = item else {
+                bail!("module item {index} is not a function declaration");
             };
-            let mut function = function.clone();
-            function.ident = ast::Ident::new(name.into(), DUMMY_SP, SyntaxContext::empty());
-            graph
-                .body
-                .push(ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(
-                    ast::ExportDecl {
-                        span: DUMMY_SP,
-                        decl: ast::Decl::Fn(function),
-                    },
-                )));
+            function.ident = ident;
+            graph.body[index] = export_function(function);
         }
         let mut module = ast::Module {
             body: graph.body,
@@ -149,6 +168,14 @@ struct Graph {
     next_span: u32,
 }
 impl Graph {
+    /// The function declaration recorded at `index` of the body.
+    fn function(&self, index: usize) -> Result<&ast::FnDecl> {
+        match &self.body[index] {
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) => Ok(function),
+            _ => bail!("module item {index} is not a function declaration"),
+        }
+    }
+
     fn dependency(&mut self, parent: &Path, source: &ast::Str) -> Result<PathBuf> {
         let path = resolve(parent, &source.value.to_string_lossy())?;
         if self.loaded.contains_key(&path) {
@@ -470,6 +497,22 @@ impl VisitMut for Rename<'_> {
         }
     }
 }
+fn export_function(function: ast::FnDecl) -> ast::ModuleItem {
+    ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
+        span: DUMMY_SP,
+        decl: ast::Decl::Fn(function),
+    }))
+}
+
+/// How often each identifier occurs, declarations included.
+#[derive(Default)]
+struct Uses(HashMap<String, usize>);
+impl Visit for Uses {
+    fn visit_ident(&mut self, ident: &ast::Ident) {
+        *self.0.entry(ident.sym.to_string()).or_default() += 1;
+    }
+}
+
 struct ClearContexts;
 impl VisitMut for ClearContexts {
     fn visit_mut_syntax_context(&mut self, context: &mut SyntaxContext) {

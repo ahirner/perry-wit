@@ -29,7 +29,7 @@ impl FunctionBuilder<'_> {
             bail!("Temporal.{class}.{factory} takes one argument; options are not supported");
         };
         let arg = self.typed_operand(ctx, arg, input, what)?;
-        Ok(self.intrinsic(ctx, intrinsic, vec![arg]).expect("value"))
+        Ok(self.intrinsic(ctx, intrinsic, vec![arg]))
     }
 
     /// A field of a `PlainDate` or `PlainDateTime` (`time-helper` part numbers).
@@ -59,9 +59,7 @@ impl FunctionBuilder<'_> {
         } else {
             Intrinsic::PlainDateTimePart
         };
-        Ok(self
-            .intrinsic(ctx, intrinsic, vec![value, part])
-            .expect("part"))
+        Ok(self.intrinsic(ctx, intrinsic, vec![value, part]))
     }
 
     pub(super) fn temporal_method(
@@ -82,7 +80,7 @@ impl FunctionBuilder<'_> {
                     Kind::PlainDate => Intrinsic::PlainDateString,
                     _ => Intrinsic::PlainDateTimeString,
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver])
             }
             (Kind::PlainDate | Kind::PlainDateTime, "add") => {
                 let days = match args {
@@ -108,7 +106,7 @@ impl FunctionBuilder<'_> {
                 } else {
                     Intrinsic::PlainDateTimeAddDays
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver, days])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver, days])
             }
             _ => bail!("Temporal method {method} is not supported"),
         })

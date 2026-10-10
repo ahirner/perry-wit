@@ -100,7 +100,6 @@ impl FunctionBuilder<'_> {
             None | Some(Expr::Undefined) => {
                 let zero = self.number(ctx, 0.0);
                 self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
-                    .expect("bytes")
             }
             Some(input) => self.typed_operand(ctx, input, Kind::Bytes, "a Uint8Array")?,
         };
@@ -112,8 +111,6 @@ impl FunctionBuilder<'_> {
             );
             stream = self.condition(ctx, value)?;
         }
-        Ok(self
-            .intrinsic(ctx, Intrinsic::TextDecode, vec![decoder, bytes, stream])
-            .expect("text"))
+        Ok(self.intrinsic(ctx, Intrinsic::TextDecode, vec![decoder, bytes, stream]))
     }
 }

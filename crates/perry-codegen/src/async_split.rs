@@ -181,28 +181,12 @@ pub(crate) fn lower(
             offsets.sort_unstable();
             let shape = b.pointer_shape(&offsets);
             let shape = b.i32_const(ctx, shape as i32);
-            let frame = b
-                .call(
-                    ctx,
-                    "perry_gc_alloc",
-                    &[crate::W::I32, crate::W::I32],
-                    &[crate::W::I32],
-                    vec![size, shape],
-                )
-                .expect("frame");
-            let pin = b
-                .call(
-                    ctx,
-                    "perry_gc_pin",
-                    &[crate::W::I32],
-                    &[crate::W::I32],
-                    vec![frame],
-                )
-                .expect("pin");
+            let frame = b.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
+            let pin = b.runtime(ctx, Runtime::GcPin, vec![frame]);
             b.store(ctx, MemKind::I32, frame, PIN, pin);
             frame
         } else {
-            b.runtime(ctx, Runtime::Alloc, vec![size]).expect("frame")
+            b.alloc(ctx, size)
         };
         let kind_value = b.i32_const(ctx, kind);
         b.store(ctx, MemKind::I32, frame, KIND, kind_value);
@@ -245,7 +229,8 @@ pub(crate) fn lower(
     // Dispatch: state 0 starts with the parameters from the frame; state k resumes await k.
     b.block = dispatch;
     let current = b.load(ctx, MemKind::I32, frame, STATE);
-    let resumes = b.frame.as_ref().unwrap().resumes.clone();
+    // Every await is lowered; the resume targets are complete.
+    let resumes = std::mem::take(&mut b.step_frame_mut().resumes);
     let mut targets = vec![start];
     for take in &resumes {
         let resume = b.new_block(ctx, vec![]);
@@ -260,7 +245,7 @@ pub(crate) fn lower(
     let saved = std::mem::replace(&mut b.block, begin);
     let mut loaded = Vec::new();
     for param in &params {
-        let (at, access) = b.frame.as_ref().unwrap().slots[param];
+        let (at, access) = b.step_frame().slots[param];
         loaded.push(b.load(ctx, access, frame, at));
     }
     b.br(ctx, targets[0], loaded);
@@ -283,7 +268,7 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState, kinds: &[Identif
     let header = b.new_block(ctx, vec![]);
     b.br(ctx, header, vec![]);
     b.block = header;
-    let frame = b.runtime(ctx, Runtime::ReadyPop, vec![]).expect("frame");
+    let frame = b.runtime(ctx, Runtime::ReadyPop, vec![]);
     let idle = b.num(ctx, NumOpcode::I32Eqz, vec![frame]);
     let done = b.new_block(ctx, vec![]);
     let run = b.new_block(ctx, vec![]);
@@ -305,7 +290,7 @@ pub(crate) fn drive(ctx: &mut Context, state: &mut ModuleState, kinds: &[Identif
         (step_function, vec![]),
     );
     b.block = step_combinator;
-    b.runtime(ctx, Runtime::CombinatorStep, vec![frame]);
+    b.runtime_void(ctx, Runtime::CombinatorStep, vec![frame]);
     b.br(ctx, header, vec![]);
     b.block = step_function;
     let mut calls = Vec::new();
@@ -350,14 +335,14 @@ impl FunctionLowering<'_> {
         let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
         self.cond_br(ctx, settled, (take, vec![promise]), (suspend, vec![]));
 
-        let resumes = &mut self.frame.as_mut().unwrap().resumes;
+        let resumes = &mut self.step_frame_mut().resumes;
         resumes.push(take);
         let state = resumes.len() as i32;
         self.block = suspend;
         let state = self.i32_const(ctx, state);
         self.store(ctx, MemKind::I32, frame, STATE, state);
         self.store(ctx, MemKind::I32, frame, AWAITED, promise);
-        self.runtime(ctx, Runtime::PromiseWait, vec![promise, frame]);
+        self.runtime_void(ctx, Runtime::PromiseWait, vec![promise, frame]);
         self.leave_roots(ctx);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
@@ -374,9 +359,7 @@ impl FunctionLowering<'_> {
         let fulfilled = self.new_block(ctx, vec![]);
         self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
         self.block = rethrow;
-        let status = self
-            .runtime(ctx, Runtime::PromiseRethrow, vec![promise])
-            .expect("status");
+        let status = self.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
         let (throw, args) = self.throw_target(ctx, status);
         self.br(ctx, throw, args);
         self.block = fulfilled;
@@ -386,15 +369,25 @@ impl FunctionLowering<'_> {
         Ok(())
     }
 
+    /// The frame of the step function being lowered. Only step functions lower awaits,
+    /// returns through the frame and the frame's throw target.
+    fn step_frame(&self) -> &Frame {
+        self.frame.as_ref().expect("lowering a step function")
+    }
+
+    fn step_frame_mut(&mut self) -> &mut Frame {
+        self.frame.as_mut().expect("lowering a step function")
+    }
+
     /// `return value` in a step function: fulfil the frame's promise.
     pub(crate) fn settle_return(&mut self, ctx: &mut Context, values: Vec<Value>) {
-        let frame = self.frame.as_ref().unwrap().frame;
+        let frame = self.step_frame().frame;
         let promise = self.load(ctx, MemKind::I32, frame, PROMISE);
         let bits = match values.first() {
             Some(value) => self.slot_bits(ctx, *value),
             None => self.i64_const(ctx, 0),
         };
-        self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
+        self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
         self.finish_frame(ctx);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
@@ -402,22 +395,22 @@ impl FunctionLowering<'_> {
 
     fn finish_frame(&mut self, ctx: &mut Context) {
         if self.state.collectible {
-            let frame = self.frame.as_ref().unwrap().frame;
+            let frame = self.step_frame().frame;
             let pin = self.load(ctx, MemKind::I32, frame, PIN);
-            self.call(ctx, "perry_gc_unpin", &[crate::W::I32], &[], vec![pin]);
+            self.runtime_void(ctx, Runtime::GcUnpin, vec![pin]);
         }
         self.leave_roots(ctx);
     }
 
     /// The throw target of a step function: reject the frame's promise.
     pub(crate) fn reject_block(&mut self, ctx: &mut Context) -> Ptr<BasicBlock> {
-        let frame = self.frame.as_ref().unwrap().frame;
+        let frame = self.step_frame().frame;
         let i32 = i32_type(ctx);
         let block = self.new_block(ctx, vec![i32]);
         let saved = std::mem::replace(&mut self.block, block);
         let promise = self.load(ctx, MemKind::I32, frame, PROMISE);
         let status = block.deref(ctx).get_argument(0);
-        self.runtime(ctx, Runtime::PromiseReject, vec![promise, status]);
+        self.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
         self.finish_frame(ctx);
         let ret = ReturnOp::new(ctx, vec![]).get_operation();
         self.insert(ctx, ret);
@@ -454,16 +447,14 @@ impl FunctionLowering<'_> {
             None
         };
         if let Some(signal) = signal {
-            let aborted = self
-                .runtime(ctx, Runtime::AbortAborted, vec![signal])
-                .expect("aborted");
+            let aborted = self.runtime(ctx, Runtime::AbortAborted, vec![signal]);
             let reject = self.new_block(ctx, vec![]);
             let start = self.new_block(ctx, vec![]);
             self.cond_br(ctx, aborted, (reject, vec![]), (start, vec![]));
             self.block = reject;
             let message = self.state.data.string("The operation was aborted");
             let message = self.i32_const(ctx, message as i32);
-            self.runtime(ctx, Runtime::AbortReject, vec![promise, message]);
+            self.runtime_void(ctx, Runtime::AbortReject, vec![promise, message]);
             self.br(ctx, joined, vec![]);
             self.block = start;
         }
@@ -478,15 +469,15 @@ impl FunctionLowering<'_> {
         let later = self.new_block(ctx, vec![]);
         self.cond_br(ctx, returned, (now, vec![]), (later, vec![]));
         self.block = now;
-        self.runtime(ctx, Runtime::PromiseResolve, vec![promise, bits]);
+        self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
         self.br(ctx, joined, vec![]);
         self.block = later;
         let four = self.i32_const(ctx, 4);
         let handle = self.num(ctx, NumOpcode::I32ShrU, vec![status, four]);
-        self.runtime(ctx, Runtime::SubtaskRegister, vec![handle, promise, bits]);
-        self.runtime(ctx, Runtime::TaskJoin, vec![handle]);
+        self.runtime_void(ctx, Runtime::SubtaskRegister, vec![handle, promise, bits]);
+        self.runtime_void(ctx, Runtime::TaskJoin, vec![handle]);
         if let Some(signal) = signal {
-            self.runtime(ctx, Runtime::AbortWatch, vec![signal, handle, promise]);
+            self.runtime_void(ctx, Runtime::AbortWatch, vec![signal, handle, promise]);
         }
         self.br(ctx, joined, vec![]);
         self.block = joined;

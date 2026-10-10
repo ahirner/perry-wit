@@ -22,9 +22,7 @@ impl FunctionLowering<'_> {
         let inverted = self.num(ctx, NumOpcode::I64Sub, vec![zero, raw]);
         let magnitude = self.select(ctx, negative, inverted, raw);
         let size = self.i32_const(ctx, 16);
-        let value = self
-            .runtime(ctx, Runtime::Alloc, vec![size])
-            .expect("integer");
+        let value = self.alloc(ctx, size);
         self.store(ctx, MemKind::I64, value, 0, magnitude);
         self.store(ctx, MemKind::I32, value, 8, negative);
         Ok(value)

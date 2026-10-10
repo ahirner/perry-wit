@@ -1,6 +1,6 @@
 //! Opaque resource lowering and acknowledgement-scoped canonical ownership changes.
 use super::*;
-use crate::{Host, W};
+use crate::Host;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
 use std::collections::HashSet;
 
@@ -82,9 +82,7 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
     let done = b.new_block(ctx, vec![]);
     b.br(ctx, next, vec![]);
     b.block = next;
-    let drop = b
-        .call(ctx, "perry_resource_drop_next", &[], &[W::I64], vec![])
-        .expect("drop");
+    let drop = b.runtime(ctx, Runtime::ResourceDropNext, vec![]);
     let zero = b.i64_const(ctx, 0);
     let present = b.num(ctx, NumOpcode::I64Ne, vec![drop, zero]);
     b.cond_br(ctx, present, (dispatch, vec![]), (done, vec![]));
@@ -121,8 +119,8 @@ impl FunctionLowering<'_> {
         if self.state.resources.is_empty() {
             return;
         }
-        self.call(ctx, "perry_resource_task_return", &[], &[], vec![]);
-        self.call(ctx, "perry_gc_boundary", &[], &[], vec![]);
+        self.runtime_void(ctx, Runtime::ResourceTaskReturn, vec![]);
+        self.runtime_void(ctx, Runtime::GcBoundary, vec![]);
         self.drain_resources(ctx);
     }
     pub(crate) fn drain_resources(&mut self, ctx: &mut Context) {
@@ -163,11 +161,9 @@ impl FunctionLowering<'_> {
                 vec![Flat::I32]
             },
         );
-        let task = self
-            .call(ctx, "perry_task_current", &[], &[W::I32], vec![])
-            .expect("task");
+        let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
         let result = self.host(ctx, host, vec![argument]);
-        self.runtime(ctx, Runtime::TaskResume, vec![task]);
+        self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
         result
     }
 
@@ -179,51 +175,29 @@ impl FunctionLowering<'_> {
     ) {
         assert!(self.resource_scope.is_none());
         if needed {
-            let scope = self
-                .call(ctx, "perry_resource_scope_new", &[], &[W::I32], vec![])
-                .expect("scope");
+            let scope = self.runtime(ctx, Runtime::ResourceScopeNew, vec![]);
             self.resource_scope = Some((scope, roots));
         }
     }
     pub(super) fn commit_resources(&mut self, ctx: &mut Context) {
         if let Some((scope, _)) = self.resource_scope {
-            self.call(
-                ctx,
-                "perry_resource_scope_commit",
-                &[W::I32],
-                &[],
-                vec![scope],
-            );
+            self.runtime_void(ctx, Runtime::ResourceScopeCommit, vec![scope]);
         }
     }
     pub(super) fn finish_resources(&mut self, ctx: &mut Context) {
         if let Some((scope, _)) = self.resource_scope.take() {
-            self.call(
-                ctx,
-                "perry_resource_scope_finish",
-                &[W::I32],
-                &[],
-                vec![scope],
-            );
+            self.runtime_void(ctx, Runtime::ResourceScopeFinish, vec![scope]);
             self.drain_resources(ctx);
         }
     }
     fn resource_status(&mut self, ctx: &mut Context) {
-        let status = self
-            .call(ctx, "perry_status", &[], &[W::I32], vec![])
-            .expect("status");
+        let status = self.runtime(ctx, Runtime::Status, vec![]);
         let failed = self.new_block(ctx, vec![]);
         let normal = self.new_block(ctx, vec![]);
         self.cond_br(ctx, status, (failed, vec![]), (normal, vec![]));
         self.block = failed;
         if let Some((scope, roots)) = self.resource_scope {
-            self.call(
-                ctx,
-                "perry_resource_scope_finish",
-                &[W::I32],
-                &[],
-                vec![scope],
-            );
+            self.runtime_void(ctx, Runtime::ResourceScopeFinish, vec![scope]);
             if let Some(roots) = roots {
                 self.reset_roots(ctx, roots);
             }
@@ -233,7 +207,7 @@ impl FunctionLowering<'_> {
             let (target, args) = self.throw_target(ctx, status);
             self.br(ctx, target, args);
         } else {
-            self.runtime(ctx, Runtime::TaskFree, vec![]);
+            self.task_free(ctx);
             let trap = UnreachableOp::new(ctx).get_operation();
             self.insert(ctx, trap);
         }
@@ -269,15 +243,7 @@ impl FunctionLowering<'_> {
             },
         );
         let key = self.i32_const(ctx, key as i32);
-        Ok(self
-            .call(
-                ctx,
-                "perry_resource_new",
-                &[W::I32; 3],
-                &[W::I32],
-                vec![key, handle, mode],
-            )
-            .expect("owner"))
+        Ok(self.runtime(ctx, Runtime::ResourceNew, vec![key, handle, mode]))
     }
     pub(super) fn lower_resource(
         &mut self,
@@ -290,15 +256,7 @@ impl FunctionLowering<'_> {
         self.check_resource_type(ctx, ty, key)?;
         let (scope, _) = self.resource_scope.expect("canonical resource scope");
         let own = self.i32_const(ctx, i32::from(owned));
-        let handle = self
-            .call(
-                ctx,
-                "perry_resource_lower",
-                &[W::I32; 3],
-                &[W::I32],
-                vec![scope, value, own],
-            )
-            .expect("handle");
+        let handle = self.runtime(ctx, Runtime::ResourceLower, vec![scope, value, own]);
         self.resource_status(ctx);
         Ok(handle)
     }
@@ -320,30 +278,14 @@ impl FunctionLowering<'_> {
                 self.define(ctx, op, value);
             }
             ResourceOperation::Drop => {
-                self.call(ctx, "perry_resource_drop", &[W::I32], &[], vec![value]);
+                self.runtime_void(ctx, Runtime::ResourceDrop, vec![value]);
                 self.resource_status(ctx);
                 self.drain_resources(ctx);
             }
             ResourceOperation::Representation => {
-                let handle = self
-                    .call(
-                        ctx,
-                        "perry_resource_handle",
-                        &[W::I32],
-                        &[W::I32],
-                        vec![value],
-                    )
-                    .expect("handle");
+                let handle = self.runtime(ctx, Runtime::ResourceHandle, vec![value]);
                 self.resource_status(ctx);
-                let rep = self
-                    .call(
-                        ctx,
-                        "perry_resource_is_rep",
-                        &[W::I32],
-                        &[W::I32],
-                        vec![value],
-                    )
-                    .expect("representation");
+                let rep = self.runtime(ctx, Runtime::ResourceIsRep, vec![value]);
                 let lookup = self.new_block(ctx, vec![]);
                 let i32 = i32_type(ctx);
                 let done = self.new_block(ctx, vec![i32]);

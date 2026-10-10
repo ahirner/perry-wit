@@ -43,7 +43,7 @@ impl FunctionLowering<'_> {
             args.push(self.lift_load(ctx, ty, *mir, area, offset)?);
         }
         if self.state.collectible {
-            self.call(ctx, "perry_cabi_release", &[crate::W::I32], &[], vec![area]);
+            self.runtime_void(ctx, Runtime::CabiRelease, vec![area]);
         }
         Ok(args)
     }

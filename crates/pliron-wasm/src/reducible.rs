@@ -196,7 +196,7 @@ fn zero_before(ctx: &mut Context, ty: TypeHandle, mark: Ptr<Operation>) -> Value
             let ty = IntegerType::get(ctx, 64, Signedness::Signless);
             Box::new(IntegerAttr::new(
                 ty,
-                APInt::from_u64(0, NonZeroUsize::new(64).unwrap()),
+                APInt::from_u64(0, const { NonZeroUsize::new(64).unwrap() }),
             ))
         }
         Some(ValType::F32) => Box::new(FPSingleAttr::from(0.0f32)),
@@ -205,7 +205,7 @@ fn zero_before(ctx: &mut Context, ty: TypeHandle, mark: Ptr<Operation>) -> Value
             let ty = IntegerType::get(ctx, 32, Signedness::Signless);
             Box::new(IntegerAttr::new(
                 ty,
-                APInt::from_u64(0, NonZeroUsize::new(32).unwrap()),
+                APInt::from_u64(0, const { NonZeroUsize::new(32).unwrap() }),
             ))
         }
     };
@@ -218,7 +218,7 @@ fn i32_const(ctx: &mut Context, value: u32) -> Ptr<Operation> {
     let ty = IntegerType::get(ctx, 32, Signedness::Signless);
     let attr = IntegerAttr::new(
         ty,
-        APInt::from_u64(value as u64, NonZeroUsize::new(32).unwrap()),
+        APInt::from_u64(value as u64, const { NonZeroUsize::new(32).unwrap() }),
     );
     ConstantOp::new(ctx, Box::new(attr)).get_operation()
 }

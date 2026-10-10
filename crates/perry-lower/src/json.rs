@@ -15,20 +15,14 @@ impl FunctionBuilder<'_> {
                 ctx,
                 boolean,
                 undefined,
-                |b, ctx| {
-                    Ok(b.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![json])
-                        .expect("boolean"))
-                },
+                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![json])),
                 |b, ctx| {
                     let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, scalar));
                     b.choose(
                         ctx,
                         boolean,
                         null,
-                        |b, ctx| {
-                            Ok(b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json])
-                                .expect("boolean"))
-                        },
+                        |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json])),
                         |b, ctx| {
                             let scalar = b.defined(ctx, scalar)?;
                             b.json_scalar_equal(ctx, json, scalar)
@@ -43,9 +37,7 @@ impl FunctionBuilder<'_> {
             Kind::Boolean => "boolean",
             _ => bail!("JSON equality requires a string, number or boolean operand"),
         };
-        let actual = self
-            .intrinsic(ctx, Intrinsic::JsonTypeOf, vec![json])
-            .expect("tag");
+        let actual = self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![json]);
         let expected = self.string(ctx, tag);
         let matches = self.compare(ctx, CompareKind::Eq, actual, expected);
         self.choose(
@@ -131,9 +123,7 @@ impl FunctionBuilder<'_> {
         target: TypeHandle,
     ) -> Result<Value> {
         if target.deref(ctx).is::<perry_mir::types::NumberStringType>() {
-            let tag = self
-                .intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value])
-                .expect("tag");
+            let tag = self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value]);
             let number = self.string(ctx, "number");
             let is_number = self.compare(ctx, CompareKind::Eq, tag, number);
             return self.choose(
@@ -155,11 +145,9 @@ impl FunctionBuilder<'_> {
         if let Ok(variant) = TypedHandle::<perry_mir::types::VariantType>::from_handle(target, ctx)
         {
             let cases = variant.deref(ctx).cases().to_vec();
-            self.intrinsic(ctx, Intrinsic::JsonRequireObject, vec![value]);
+            self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
             let tag_key = self.string(ctx, "tag");
-            let tag = self
-                .intrinsic(ctx, Intrinsic::JsonMember, vec![value, tag_key])
-                .expect("tag");
+            let tag = self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, tag_key]);
             let string = StringType::get(ctx).into();
             let tag = self.fit(ctx, tag, string)?;
             let result = self.entry_slot(ctx, target);
@@ -173,9 +161,7 @@ impl FunctionBuilder<'_> {
                 self.switch_to(active);
                 let payload = if let Some(ty) = payload {
                     let key = self.string(ctx, "val");
-                    let member = self
-                        .intrinsic(ctx, Intrinsic::JsonMember, vec![value, key])
-                        .expect("val");
+                    let member = self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, key]);
                     Some(self.fit(ctx, member, ty)?)
                 } else {
                     None
@@ -204,20 +190,19 @@ impl FunctionBuilder<'_> {
                 .map_err(|_| anyhow!("opaque JSON schema"))?
                 .to_vec();
             let mut element = if tuple {
-                self.intrinsic(ctx, Intrinsic::JsonFirst, vec![value])
+                self.call_intrinsic(ctx, Intrinsic::JsonFirst, vec![value])
             } else {
-                self.intrinsic(ctx, Intrinsic::JsonRequireObject, vec![value]);
+                self.intrinsic_void(ctx, Intrinsic::JsonRequireObject, vec![value]);
                 None
             };
             let mut values = Vec::with_capacity(fields.len());
             for (field, ty) in fields {
                 let member = if let Some(current) = element {
-                    element = self.intrinsic(ctx, Intrinsic::JsonNext, vec![current]);
+                    element = self.call_intrinsic(ctx, Intrinsic::JsonNext, vec![current]);
                     current
                 } else {
                     let name = self.emit_value(ctx, |ctx| StringConstOp::new(ctx, field.as_ref()));
                     self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, name])
-                        .expect("member")
                 };
                 values.push(self.fit(ctx, member, ty)?);
             }
@@ -225,9 +210,7 @@ impl FunctionBuilder<'_> {
         }
         if let Ok(array_type) = TypedHandle::<ArrayType>::from_handle(target, ctx) {
             let element = array_type.deref(ctx).element();
-            let first = self
-                .intrinsic(ctx, Intrinsic::JsonFirst, vec![value])
-                .expect("first");
+            let first = self.intrinsic(ctx, Intrinsic::JsonFirst, vec![value]);
             let json = JsonType::get(ctx).into();
             let cursor = self.entry_slot(ctx, json);
             self.emit(ctx, |ctx| StoreOp::new(ctx, cursor, first));
@@ -239,16 +222,12 @@ impl FunctionBuilder<'_> {
             self.switch_to(header);
             let load = LoadOp::new(ctx, cursor)?;
             let item = self.append_value(ctx, &load);
-            let end = self
-                .intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![item])
-                .expect("end");
+            let end = self.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![item]);
             self.branch(ctx, end, done, body);
             self.switch_to(body);
             let decoded = self.fit(ctx, item, element)?;
             self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, decoded));
-            let next = self
-                .intrinsic(ctx, Intrinsic::JsonNext, vec![item])
-                .expect("next");
+            let next = self.intrinsic(ctx, Intrinsic::JsonNext, vec![item]);
             self.emit(ctx, |ctx| StoreOp::new(ctx, cursor, next));
             self.jump(ctx, header);
             self.switch_to(done);

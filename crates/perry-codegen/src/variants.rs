@@ -1,5 +1,5 @@
 //! Compact finite variants: tag string, traced payload owner, and one eight-byte value slot.
-use crate::{FunctionLowering, Repr, Runtime, W, repr, slot_kind};
+use crate::{FunctionLowering, Repr, Runtime, repr, slot_kind};
 use anyhow::Result;
 use perry_mir::{types::VariantType, variants::admits_payload};
 use pliron::{
@@ -49,9 +49,7 @@ impl FunctionLowering<'_> {
         self.block = strings;
         let a_string = self.load(ctx, MemKind::I32, a, 8);
         let b_string = self.load(ctx, MemKind::I32, b, 8);
-        let order = self
-            .runtime(ctx, Runtime::StringCompare, vec![a_string, b_string])
-            .expect("order");
+        let order = self.runtime(ctx, Runtime::StringCompare, vec![a_string, b_string]);
         let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
         self.br(ctx, done, vec![equal]);
         self.block = done;
@@ -96,17 +94,9 @@ impl FunctionLowering<'_> {
         let object = if self.state.collectible {
             let shape = self.pointer_shape(&[4]);
             let shape = self.i32_const(ctx, shape as i32);
-            self.call(
-                ctx,
-                "perry_gc_alloc",
-                &[W::I32, W::I32],
-                &[W::I32],
-                vec![size, shape],
-            )
-            .expect("variant")
+            self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
         } else {
-            self.runtime(ctx, Runtime::Alloc, vec![size])
-                .expect("variant")
+            self.alloc(ctx, size)
         };
         let text = self.state.data.string(tag);
         let text = self.i32_const(ctx, text as i32);
@@ -133,20 +123,8 @@ impl FunctionLowering<'_> {
         let tag = self.load(ctx, MemKind::I32, value, 0);
         let key = self.state.data.string("\"tag\":");
         let key = self.i32_const(ctx, key as i32);
-        self.call(
-            ctx,
-            "std_json_key",
-            &[W::I32, W::I32],
-            &[],
-            vec![writer, key],
-        );
-        self.call(
-            ctx,
-            "std_json_quote",
-            &[W::I32, W::I32],
-            &[],
-            vec![writer, tag],
-        );
+        self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
+        self.runtime_void(ctx, Runtime::StdJsonQuote, vec![writer, tag]);
         let done = self.new_block(ctx, vec![]);
         for (name, payload) in cases {
             let Some(payload) = payload else {
@@ -154,9 +132,7 @@ impl FunctionLowering<'_> {
             };
             let text = self.state.data.string(&name);
             let text = self.i32_const(ctx, text as i32);
-            let comparison = self
-                .runtime(ctx, Runtime::StringCompare, vec![tag, text])
-                .expect("comparison");
+            let comparison = self.runtime(ctx, Runtime::StringCompare, vec![tag, text]);
             let matches = self.num(ctx, NumOpcode::I32Eqz, vec![comparison]);
             let member = self.new_block(ctx, vec![]);
             let next = self.new_block(ctx, vec![]);
@@ -171,13 +147,7 @@ impl FunctionLowering<'_> {
             }
             let key = self.state.data.string("\"val\":");
             let key = self.i32_const(ctx, key as i32);
-            self.call(
-                ctx,
-                "std_json_key",
-                &[W::I32, W::I32],
-                &[],
-                vec![writer, key],
-            );
+            self.runtime_void(ctx, Runtime::StdJsonKey, vec![writer, key]);
             self.json_value(ctx, writer, slot, payload)?;
             self.br(ctx, done, vec![]);
             self.block = next;
@@ -204,9 +174,7 @@ impl FunctionLowering<'_> {
             }
             let text = self.state.data.string(&name);
             let text = self.i32_const(ctx, text as i32);
-            let comparison = self
-                .runtime(ctx, Runtime::StringCompare, vec![tag, text])
-                .expect("comparison");
+            let comparison = self.runtime(ctx, Runtime::StringCompare, vec![tag, text]);
             let matches = self.num(ctx, NumOpcode::I32Eqz, vec![comparison]);
             admitted = self.num(ctx, NumOpcode::I32Or, vec![admitted, matches]);
             if payload.is_some() {

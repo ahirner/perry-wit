@@ -166,7 +166,7 @@ fn offset_attr(ctx: &mut Context, offset: u32) -> IntegerAttr {
     let i32 = IntegerType::get(ctx, 32, Signedness::Signless);
     IntegerAttr::new(
         i32,
-        APInt::from_u64(offset.into(), NonZeroUsize::new(32).unwrap()),
+        APInt::from_u64(offset.into(), const { NonZeroUsize::new(32).unwrap() }),
     )
 }
 

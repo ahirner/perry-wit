@@ -1,5 +1,5 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
-use crate::{FunctionLowering, Repr, Runtime, W, repr};
+use crate::{FunctionLowering, Repr, Runtime, repr};
 use anyhow::Result;
 use perry_mir::{
     calls::{AsyncCallOp, CallOp},
@@ -21,22 +21,11 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
         op::Op,
     };
     use pliron_wasm::{control::ReturnOp, ops::set_export};
-    for (name, result) in [("perry_gc_debug", None), ("perry_gc_counter", Some(W::I64))] {
-        let params = vec![crate::i32_type(ctx)];
-        let results = result
-            .map(|_| {
-                pliron::builtin::types::IntegerType::get(
-                    ctx,
-                    64,
-                    pliron::builtin::types::Signedness::Signless,
-                )
-                .into()
-            })
-            .into_iter()
-            .collect();
+    for runtime in [Runtime::GcDebug, Runtime::GcCounter] {
+        let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
-        let export = format!("__{name}");
-        let function = FuncOp::new(ctx, export.clone().try_into().expect("counter name"), ty);
+        let export = format!("__{}", runtime.name());
+        let function = FuncOp::new(ctx, export.as_str().try_into().expect("export name"), ty);
         set_export(ctx, &function, &export);
         let mut args: Vec<_> = function
             .get_entry_block(ctx)
@@ -44,27 +33,25 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
             .arguments()
             .collect();
         let mut b = FunctionLowering::glue(state, ctx, &function);
-        let result_types: &'static [W] = if result.is_some() { &[W::I64] } else { &[] };
-        let extra = if result.is_some() {
+        let value = if runtime == Runtime::GcCounter {
+            // Counter 7 counts compiled roots published so far, kept in a data cell.
             let seven = b.i32_const(ctx, 7);
-            let extra = b.num(
+            let compiled = b.num(
                 ctx,
                 pliron_wasm::attrs::NumOpcode::I32Eq,
                 vec![args[0], seven],
             );
             let zero = b.i32_const(ctx, 0);
-            args[0] = b.select(ctx, extra, zero, args[0]);
-            Some(extra)
-        } else {
-            None
-        };
-        let mut value = b.call(ctx, name, &[W::I32], result_types, args);
-        if let Some(extra) = extra {
+            args[0] = b.select(ctx, compiled, zero, args[0]);
+            let counted = b.runtime(ctx, runtime, args);
             let address = b.i32_const(ctx, b.state.root_metrics.expect("checked counter") as i32);
             let count = b.load(ctx, MemKind::I64, address, 0);
-            value = Some(b.select(ctx, extra, count, value.expect("counter")));
-        }
-        let ret = ReturnOp::new(ctx, value.into_iter().collect()).get_operation();
+            vec![b.select(ctx, compiled, count, counted)]
+        } else {
+            b.runtime_void(ctx, runtime, args);
+            vec![]
+        };
+        let ret = ReturnOp::new(ctx, value).get_operation();
         b.insert(ctx, ret);
         b.state
             .wasm
@@ -175,15 +162,7 @@ impl FunctionLowering<'_> {
         if bytes != 0 {
             let size = self.i32_const(ctx, bytes as i32);
             let shape = self.i32_const(ctx, 0);
-            let frame = self
-                .call(
-                    ctx,
-                    "perry_gc_alloc",
-                    &[W::I32, W::I32],
-                    &[W::I32],
-                    vec![size, shape],
-                )
-                .expect("frame");
+            let frame = self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
             self.publish_roots(ctx, &[frame]);
             self.local_frame = Some(frame);
         }
@@ -210,7 +189,7 @@ impl FunctionLowering<'_> {
         self.block = check;
         self.cond_br(ctx, state, (failed, vec![]), (start, vec![]));
         self.block = failed;
-        self.runtime(ctx, Runtime::TaskFree, vec![]);
+        self.task_free(ctx);
         let trap = UnreachableOp::new(ctx).get_operation();
         self.insert(ctx, trap);
         self.block = start;
@@ -240,7 +219,7 @@ impl FunctionLowering<'_> {
         if let Some(stack) = self.root_stack {
             return stack;
         }
-        let runtime = Runtime::Call("perry_roots_state", &[], &[W::I32]);
+        let runtime = Runtime::RootsState;
         self.state.runtime.insert(runtime);
         let ty = crate::i32_type(ctx);
         let call =
@@ -279,7 +258,7 @@ impl FunctionLowering<'_> {
         let grow = self.new_block(ctx, vec![]);
         self.cond_br(ctx, enough, (ready, vec![]), (grow, vec![]));
         self.block = grow;
-        self.call(ctx, "perry_roots_reserve", &[W::I32], &[], vec![count]);
+        self.runtime_void(ctx, Runtime::RootsReserve, vec![count]);
         self.br(ctx, ready, vec![]);
         self.block = ready;
         // Nested calls can relocate backing storage; only the descriptor and indices persist.
@@ -301,6 +280,43 @@ impl FunctionLowering<'_> {
         mark
     }
 
+    /// Enter the current export's task, and with it the collector: the task's scheduler
+    /// roots register, and resources released since the last entry are dropped.
+    pub(super) fn task_enter(&mut self, ctx: &mut Context) -> Value {
+        let task = self.runtime(ctx, Runtime::TaskEnter, vec![]);
+        if self.state.collectible {
+            if self.state.memory_checks {
+                let flags = self.i32_const(ctx, 3);
+                self.runtime_void(ctx, Runtime::GcDebug, vec![flags]);
+            }
+            self.runtime_void(ctx, Runtime::GcTaskEnter, vec![]);
+            self.drain_resources(ctx);
+        }
+        task
+    }
+
+    /// Release the current task's storage; the collector unregisters its roots first and may
+    /// then reclaim an empty instance heap.
+    pub(super) fn task_free(&mut self, ctx: &mut Context) {
+        if self.state.collectible {
+            self.runtime_void(ctx, Runtime::GcTaskLeave, vec![]);
+        }
+        self.runtime_void(ctx, Runtime::TaskFree, vec![]);
+        if self.state.collectible {
+            self.runtime_void(ctx, Runtime::GcTaskEnd, vec![]);
+        }
+    }
+
+    /// Task storage of `size` bytes. While canonical arguments are borrowed, the area is a
+    /// root until the boundary code releases it.
+    pub(super) fn alloc(&mut self, ctx: &mut Context, size: Value) -> Value {
+        let area = self.runtime(ctx, Runtime::Alloc, vec![size]);
+        if self.canonical_borrows {
+            self.publish_roots(ctx, &[area]);
+        }
+        area
+    }
+
     pub(super) fn enter_roots(&mut self, ctx: &mut Context) {
         if self.state.collectible {
             self.root_base = Some(self.root_mark(ctx));
@@ -312,7 +328,7 @@ impl FunctionLowering<'_> {
             self.reset_roots(ctx, base);
         }
         if let Some(frame) = self.local_frame {
-            self.call(ctx, "perry_frame_free", &[W::I32], &[], vec![frame]);
+            self.runtime_void(ctx, Runtime::FrameFree, vec![frame]);
         }
     }
 
@@ -350,7 +366,7 @@ impl FunctionLowering<'_> {
             .map(|value| self.mapped(ctx, value))
             .collect::<Result<Vec<_>>>()?;
         let mark = (!values.is_empty()).then(|| self.publish_roots(ctx, &values));
-        self.call(ctx, "perry_gc_check", &[], &[], vec![]);
+        self.runtime_void(ctx, Runtime::GcCheck, vec![]);
         self.drain_resources(ctx);
         Ok(mark)
     }
@@ -417,19 +433,9 @@ impl FunctionLowering<'_> {
     pub(super) fn new_promise(&mut self, ctx: &mut Context, payload: TypeHandle) -> Result<Value> {
         if self.state.collectible {
             let references = self.i32_const(ctx, i32::from(repr(ctx, payload)? == Repr::Ref));
-            Ok(self
-                .call(
-                    ctx,
-                    "perry_promise_new_collectible",
-                    &[W::I32],
-                    &[W::I32],
-                    vec![references],
-                )
-                .expect("promise"))
+            Ok(self.runtime(ctx, Runtime::PromiseNewCollectible, vec![references]))
         } else {
-            Ok(self
-                .runtime(ctx, Runtime::PromiseNew, vec![])
-                .expect("promise"))
+            Ok(self.runtime(ctx, Runtime::PromiseNew, vec![]))
         }
     }
 
@@ -440,9 +446,7 @@ impl FunctionLowering<'_> {
         size: Value,
     ) -> Result<Value> {
         if !self.state.collectible {
-            return Ok(self
-                .runtime(ctx, Runtime::Alloc, vec![size])
-                .expect("record"));
+            return Ok(self.alloc(ctx, size));
         }
         let shape = if let Some(&shape) = self.state.pointer_maps.get(&ty) {
             shape
@@ -463,15 +467,7 @@ impl FunctionLowering<'_> {
             shape
         };
         let shape = self.i32_const(ctx, shape as i32);
-        Ok(self
-            .call(
-                ctx,
-                "perry_gc_alloc",
-                &[W::I32, W::I32],
-                &[W::I32],
-                vec![size, shape],
-            )
-            .expect("record"))
+        Ok(self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]))
     }
 
     pub(super) fn new_array(
@@ -482,19 +478,13 @@ impl FunctionLowering<'_> {
     ) -> Result<Value> {
         if self.state.collectible {
             let references = self.i32_const(ctx, i32::from(repr(ctx, element)? == Repr::Ref));
-            Ok(self
-                .call(
-                    ctx,
-                    "perry_array_new_collectible",
-                    &[W::I32, W::I32],
-                    &[W::I32],
-                    vec![capacity, references],
-                )
-                .expect("array"))
+            Ok(self.runtime(
+                ctx,
+                Runtime::ArrayNewCollectible,
+                vec![capacity, references],
+            ))
         } else {
-            Ok(self
-                .runtime(ctx, Runtime::ArrayNew, vec![capacity])
-                .expect("array"))
+            Ok(self.runtime(ctx, Runtime::ArrayNew, vec![capacity]))
         }
     }
 }

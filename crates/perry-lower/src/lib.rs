@@ -767,9 +767,7 @@ impl<'s> FunctionBuilder<'s> {
                 None => self.string(ctx, ""),
             };
             let operands = vec![body, text, status, status_text, headers];
-            return Ok(self
-                .intrinsic(ctx, Intrinsic::ResponseNew, operands)
-                .expect("response"));
+            return Ok(self.intrinsic(ctx, Intrinsic::ResponseNew, operands));
         }
         let url = first.context("new Request needs a URL")?;
         let url = self.typed_operand(ctx, url, Kind::String, "a URL string")?;
@@ -778,9 +776,7 @@ impl<'s> FunctionBuilder<'s> {
             None => self.string(ctx, "GET"),
         };
         let operands = vec![url, method, body, text, headers];
-        Ok(self
-            .intrinsic(ctx, Intrinsic::RequestNew, operands)
-            .expect("request"))
+        Ok(self.intrinsic(ctx, Intrinsic::RequestNew, operands))
     }
 
     /// The fields of an init object literal, by name.
@@ -807,18 +803,14 @@ impl<'s> FunctionBuilder<'s> {
                 kind(ctx, value)? == Kind::Headers,
                 "headers init must be an object literal or Headers"
             );
-            return Ok(self
-                .intrinsic(ctx, Intrinsic::HeadersCopy, vec![value])
-                .expect("headers"));
+            return Ok(self.intrinsic(ctx, Intrinsic::HeadersCopy, vec![value]));
         }
         let fields = self.init_fields(init)?;
-        let headers = self
-            .intrinsic(ctx, Intrinsic::HeadersNew, vec![])
-            .expect("headers");
+        let headers = self.intrinsic(ctx, Intrinsic::HeadersNew, vec![]);
         for (name, expr) in fields {
             let name = self.string(ctx, &name);
             let value = self.typed_operand(ctx, expr, Kind::String, "a header value")?;
-            self.intrinsic(ctx, Intrinsic::HeadersAppend, vec![headers, name, value]);
+            self.intrinsic_void(ctx, Intrinsic::HeadersAppend, vec![headers, name, value]);
         }
         Ok(headers)
     }
@@ -837,9 +829,7 @@ impl<'s> FunctionBuilder<'s> {
         let (value, text) = match kind(ctx, value)? {
             Kind::Bytes => (value, false),
             Kind::String => {
-                let encoded = self
-                    .intrinsic(ctx, Intrinsic::TextEncode, vec![value])
-                    .expect("bytes");
+                let encoded = self.intrinsic(ctx, Intrinsic::TextEncode, vec![value]);
                 (encoded, true)
             }
             _ => bail!("bodies are strings and Uint8Arrays yet"),
@@ -872,7 +862,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     Intrinsic::HeadersSet
                 };
-                self.intrinsic(ctx, intrinsic, operands);
+                self.call_intrinsic(ctx, intrinsic, operands);
                 // Both return `undefined`; statements discard it.
                 let number = FP64Type::get(ctx).into();
                 return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
@@ -880,7 +870,7 @@ impl<'s> FunctionBuilder<'s> {
             (Kind::Headers, "delete", true) => {
                 let mut operands = vec![receiver];
                 operands.extend(strings(self, ctx, 1)?);
-                self.intrinsic(ctx, Intrinsic::HeadersDelete, operands);
+                self.intrinsic_void(ctx, Intrinsic::HeadersDelete, operands);
                 let number = FP64Type::get(ctx).into();
                 return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
             }
@@ -921,9 +911,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let (chunk, _) = self.body_init(ctx, Some(chunk))?;
                 let chunk = self.defined(ctx, chunk)?;
-                return Ok(self
-                    .intrinsic(ctx, Intrinsic::WriterWrite, vec![receiver, chunk])
-                    .expect("promise"));
+                return Ok(self.intrinsic(ctx, Intrinsic::WriterWrite, vec![receiver, chunk]));
             }
             (Kind::Writer, "close", true) => (Intrinsic::WriterClose, vec![receiver]),
             (Kind::Readable, "locked", false) => (Intrinsic::ReadableLocked, vec![receiver]),
@@ -943,9 +931,11 @@ impl<'s> FunctionBuilder<'s> {
                             && matches!(fields[0].1, Expr::String(mode) if mode == "byob"),
                         "getReader supports only {{mode: 'byob'}}"
                     );
-                    return Ok(self
-                        .intrinsic(ctx, Intrinsic::ReadableGetByobReader, vec![receiver])
-                        .expect("reader"));
+                    return Ok(self.intrinsic(
+                        ctx,
+                        Intrinsic::ReadableGetByobReader,
+                        vec![receiver],
+                    ));
                 }
             }
             (Kind::Readable, "cancel", true) => (Intrinsic::ReadableCancel, vec![receiver]),
@@ -969,26 +959,24 @@ impl<'s> FunctionBuilder<'s> {
                     "BYOB read supports only {{min}}"
                 );
                 let minimum = self.number_or(ctx, fields.first().map(|(_, value)| *value), 1.0)?;
-                return Ok(self
-                    .intrinsic(
-                        ctx,
-                        Intrinsic::ReaderReadByob,
-                        vec![receiver, view, minimum],
-                    )
-                    .expect("promise"));
+                return Ok(self.intrinsic(
+                    ctx,
+                    Intrinsic::ReaderReadByob,
+                    vec![receiver, view, minimum],
+                ));
             }
             (Kind::Reader | Kind::ByobReader, "cancel", true) => {
                 (Intrinsic::ReaderCancel, vec![receiver])
             }
             (Kind::Reader | Kind::ByobReader, "releaseLock", true) => {
-                self.intrinsic(ctx, Intrinsic::ReaderReleaseLock, vec![receiver]);
+                self.intrinsic_void(ctx, Intrinsic::ReaderReleaseLock, vec![receiver]);
                 let number = FP64Type::get(ctx).into();
                 return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
             }
             (Kind::ReadResult, "done", false) => (Intrinsic::ReadDone, vec![receiver]),
             (Kind::ReadResult, "value", false) => (Intrinsic::ReadValue, vec![receiver]),
             (Kind::Writer, "releaseLock", true) => {
-                self.intrinsic(ctx, Intrinsic::WriterReleaseLock, vec![receiver]);
+                self.intrinsic_void(ctx, Intrinsic::WriterReleaseLock, vec![receiver]);
                 let number = FP64Type::get(ctx).into();
                 return Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)));
             }
@@ -997,7 +985,7 @@ impl<'s> FunctionBuilder<'s> {
         if args.is_some_and(|args| !args.is_empty()) && !matches!(receiver_kind, Kind::Headers) {
             bail!("{name} takes no arguments");
         }
-        Ok(self.intrinsic(ctx, intrinsic, operands).expect("value"))
+        Ok(self.intrinsic(ctx, intrinsic, operands))
     }
 
     /// A `node:fs/promises` function: an operation whose promise settles from host events.
@@ -1055,7 +1043,7 @@ impl<'s> FunctionBuilder<'s> {
                 (intrinsic, vec![path])
             }
         };
-        Ok(self.intrinsic(ctx, intrinsic, operands).expect("promise"))
+        Ok(self.intrinsic(ctx, intrinsic, operands))
     }
 
     /// Results of falling off the end or `return;`: an async function settles `undefined`.
@@ -1391,14 +1379,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             Kind::Number => {
                 let zero = self.number(ctx, 0.0);
-                let absolute = self
-                    .intrinsic(ctx, Intrinsic::MathAbs, vec![value])
-                    .expect("number");
+                let absolute = self.intrinsic(ctx, Intrinsic::MathAbs, vec![value]);
                 Ok(self.compare(ctx, CompareKind::Gt, absolute, zero))
             }
-            Kind::Json => Ok(self
-                .intrinsic(ctx, Intrinsic::JsonTruthy, vec![value])
-                .expect("boolean")),
+            Kind::Json => Ok(self.intrinsic(ctx, Intrinsic::JsonTruthy, vec![value])),
             Kind::BigInt | Kind::NumberString => {
                 bail!("narrow this scalar before testing truthiness")
             }
@@ -1845,9 +1829,7 @@ impl<'s> FunctionBuilder<'s> {
                 let value = self.defined(ctx, value)?;
                 match kind(ctx, value)? {
                     Kind::BigInt => value,
-                    Kind::Number => self
-                        .intrinsic(ctx, Intrinsic::BigIntFromNumber, vec![value])
-                        .expect("bigint"),
+                    Kind::Number => self.intrinsic(ctx, Intrinsic::BigIntFromNumber, vec![value]),
                     _ => bail!(
                         "BigInt conversion requires a number or bigint in the 64-bit transport profile"
                     ),
@@ -1861,7 +1843,6 @@ impl<'s> FunctionBuilder<'s> {
                 );
                 if kind(ctx, value)? == Kind::BigInt {
                     self.intrinsic(ctx, Intrinsic::BigIntToNumber, vec![value])
-                        .expect("number")
                 } else {
                     self.arithmetic(ctx, value)
                 }
@@ -2021,7 +2002,7 @@ impl<'s> FunctionBuilder<'s> {
                             } else {
                                 Intrinsic::JsonIsUndefined
                             };
-                        self.intrinsic(ctx, intrinsic, vec![json]).expect("boolean")
+                        self.intrinsic(ctx, intrinsic, vec![json])
                     } else if self.is_optional(ctx, value) {
                         if matches!(&**left, Expr::Null) || matches!(&**right, Expr::Null) {
                             self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))
@@ -2231,9 +2212,9 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let value = self.arithmetic(ctx, value);
                 match (op, kind(ctx, value)?) {
-                    (UnaryOp::Neg, Kind::BigInt) => self
-                        .intrinsic(ctx, Intrinsic::BigIntNegate, vec![value])
-                        .expect("bigint"),
+                    (UnaryOp::Neg, Kind::BigInt) => {
+                        self.intrinsic(ctx, Intrinsic::BigIntNegate, vec![value])
+                    }
                     (UnaryOp::Neg, Kind::Number) => {
                         // `0 - x` loses the sign of zero; `-1 * x` keeps IEEE negation.
                         let minus_one = self.number(ctx, -1.0);
@@ -2247,7 +2228,6 @@ impl<'s> FunctionBuilder<'s> {
                 let text = self.string_operand(ctx, text)?;
                 let separator = self.string_operand(ctx, separator)?;
                 self.intrinsic(ctx, Intrinsic::StringSplit, vec![text, separator])
-                    .expect("strings")
             }
             Expr::Call { callee, args, .. } => self
                 .call(ctx, callee, args)?
@@ -2267,7 +2247,7 @@ impl<'s> FunctionBuilder<'s> {
                     _ => Intrinsic::MathSqrt,
                 };
                 let value = self.number_operand(ctx, v)?;
-                self.intrinsic(ctx, intrinsic, vec![value]).expect("number")
+                self.intrinsic(ctx, intrinsic, vec![value])
             }
             Expr::MathMin(values) | Expr::MathMax(values) => {
                 let (intrinsic, empty) = if matches!(expr, Expr::MathMin(_)) {
@@ -2278,16 +2258,13 @@ impl<'s> FunctionBuilder<'s> {
                 let mut result = self.number(ctx, empty);
                 for value in values {
                     let value = self.number_operand(ctx, value)?;
-                    result = self
-                        .intrinsic(ctx, intrinsic, vec![result, value])
-                        .expect("number");
+                    result = self.intrinsic(ctx, intrinsic, vec![result, value]);
                 }
                 result
             }
             Expr::Uint8ArrayNew(None) => {
                 let zero = self.number(ctx, 0.0);
                 self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
-                    .expect("bytes")
             }
             Expr::Uint8ArrayNew(Some(arg)) | Expr::Uint8ArrayFrom(arg) => {
                 let number = FP64Type::get(ctx).into();
@@ -2297,23 +2274,20 @@ impl<'s> FunctionBuilder<'s> {
                 let value = self.defined(ctx, value)?;
                 let value = self.arithmetic(ctx, value);
                 match kind(ctx, value)? {
-                    Kind::Number if matches!(expr, Expr::Uint8ArrayNew(_)) => self
-                        .intrinsic(ctx, Intrinsic::BytesNew, vec![value])
-                        .expect("bytes"),
+                    Kind::Number if matches!(expr, Expr::Uint8ArrayNew(_)) => {
+                        self.intrinsic(ctx, Intrinsic::BytesNew, vec![value])
+                    }
                     Kind::Array => {
                         ensure!(
                             value.get_type(ctx) == numbers,
                             "Uint8Array sources must be number arrays"
                         );
                         self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![value])
-                            .expect("bytes")
                     }
-                    Kind::ByteBuffer => self
-                        .intrinsic(ctx, Intrinsic::BytesFromBuffer, vec![value])
-                        .expect("bytes"),
-                    Kind::Bytes => self
-                        .intrinsic(ctx, Intrinsic::BytesCopy, vec![value])
-                        .expect("bytes"),
+                    Kind::ByteBuffer => {
+                        self.intrinsic(ctx, Intrinsic::BytesFromBuffer, vec![value])
+                    }
+                    Kind::Bytes => self.intrinsic(ctx, Intrinsic::BytesCopy, vec![value]),
                     _ => bail!("new Uint8Array takes a length, a number[] or a Uint8Array"),
                 }
             }
@@ -2321,7 +2295,6 @@ impl<'s> FunctionBuilder<'s> {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
                 let index = self.number_operand(ctx, index)?;
                 self.intrinsic(ctx, Intrinsic::BytesGet, vec![bytes, index])
-                    .expect("byte")
             }
             Expr::Uint8ArraySet {
                 array,
@@ -2331,18 +2304,16 @@ impl<'s> FunctionBuilder<'s> {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
                 let index = self.number_operand(ctx, index)?;
                 let value = self.number_operand(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::BytesSet, vec![bytes, index, value]);
+                self.intrinsic_void(ctx, Intrinsic::BytesSet, vec![bytes, index, value]);
                 value
             }
             Expr::Uint8ArrayLength(array) => {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
                 self.intrinsic(ctx, Intrinsic::BytesLength, vec![bytes])
-                    .expect("length")
             }
             Expr::TextEncoderEncode(text) => {
                 let text = self.string_operand(ctx, text)?;
                 self.intrinsic(ctx, Intrinsic::TextEncode, vec![text])
-                    .expect("bytes")
             }
             Expr::TextDecoderNew {
                 label,
@@ -2363,7 +2334,6 @@ impl<'s> FunctionBuilder<'s> {
                     ignore_bom => self.condition(ctx, ignore_bom)?,
                 };
                 self.intrinsic(ctx, Intrinsic::DecoderNew, vec![fatal, ignore_bom])
-                    .expect("decoder")
             }
             Expr::TextDecoderDecode { decoder, input } => {
                 let decoder = self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
@@ -2380,7 +2350,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     Intrinsic::DecoderIgnoreBom
                 };
-                self.intrinsic(ctx, intrinsic, vec![decoder]).expect("flag")
+                self.intrinsic(ctx, intrinsic, vec![decoder])
             }
             Expr::StringFromCharCode(_) | Expr::StringFromCharCodeSpread(_) => {
                 bail!("fromCharCode uses UTF-16 code units; use fromCodePoint")
@@ -2388,18 +2358,15 @@ impl<'s> FunctionBuilder<'s> {
             Expr::StringFromCodePoint(value) => {
                 let value = self.number_operand(ctx, value)?;
                 self.intrinsic(ctx, Intrinsic::StringFromCodePoint, vec![value])
-                    .expect("string")
             }
             Expr::StringCodePointAt { string, index } => {
                 let value = self.string_operand(ctx, string)?;
                 let index = self.number_operand(ctx, index)?;
                 self.intrinsic(ctx, Intrinsic::StringCodePointAt, vec![value, index])
-                    .expect("code point")
             }
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
                 self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-                    .expect("json")
             }
             Expr::JsonStringify(value) => self.stringify(ctx, value)?,
             Expr::JsonStringifyFull(value, replacer, space) => {
@@ -2418,15 +2385,10 @@ impl<'s> FunctionBuilder<'s> {
                 );
                 let text = self.string_operand(ctx, text)?;
                 self.intrinsic(ctx, Intrinsic::JsonParse, vec![text])
-                    .expect("json")
             }
             Expr::JsonStringifyPretty { .. } => bail!("{JSON_CALLBACKS}"),
-            Expr::MathRandom => self
-                .intrinsic(ctx, Intrinsic::MathRandom, vec![])
-                .expect("number"),
-            Expr::CryptoRandomUUID => self
-                .intrinsic(ctx, Intrinsic::RandomUuid, vec![])
-                .expect("uuid"),
+            Expr::MathRandom => self.intrinsic(ctx, Intrinsic::MathRandom, vec![]),
+            Expr::CryptoRandomUUID => self.intrinsic(ctx, Intrinsic::RandomUuid, vec![]),
             Expr::TypeOf(value) => {
                 let value = self.expression(ctx, value)?;
                 self.type_of(ctx, value)?
@@ -2434,11 +2396,10 @@ impl<'s> FunctionBuilder<'s> {
             Expr::EnvGet(name) => {
                 let name = self.string(ctx, name);
                 self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
-                    .expect("value")
             }
-            Expr::ObjectKeys(object) if matches!(**object, Expr::ProcessEnv) => self
-                .intrinsic(ctx, Intrinsic::EnvKeys, vec![])
-                .expect("keys"),
+            Expr::ObjectKeys(object) if matches!(**object, Expr::ProcessEnv) => {
+                self.intrinsic(ctx, Intrinsic::EnvKeys, vec![])
+            }
             Expr::ObjectKeys(object) => {
                 let object = self.expression(ctx, object)?;
                 ensure!(
@@ -2446,14 +2407,9 @@ impl<'s> FunctionBuilder<'s> {
                     "Object.keys requires a JSON snapshot"
                 );
                 self.intrinsic(ctx, Intrinsic::JsonKeys, vec![object])
-                    .expect("keys")
             }
-            Expr::PerformanceNow => self
-                .intrinsic(ctx, Intrinsic::PerformanceNow, vec![])
-                .expect("time"),
-            Expr::DateNow => self
-                .intrinsic(ctx, Intrinsic::DateNow, vec![])
-                .expect("time"),
+            Expr::PerformanceNow => self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![]),
+            Expr::DateNow => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
             Expr::ErrorNew(message) => {
                 let message = match message {
                     Some(message) => self.string_operand(ctx, message)?,
@@ -2559,7 +2515,7 @@ impl<'s> FunctionBuilder<'s> {
                         } else {
                             Intrinsic::DecoderIgnoreBom
                         };
-                        self.intrinsic(ctx, intrinsic, vec![value]).expect("flag")
+                        self.intrinsic(ctx, intrinsic, vec![value])
                     }
                     (Kind::String, "length") => {
                         let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
@@ -2573,25 +2529,24 @@ impl<'s> FunctionBuilder<'s> {
                             ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
                         })
                     }
-                    (Kind::Bytes, "buffer") => self
-                        .intrinsic(ctx, Intrinsic::BytesBuffer, vec![value])
-                        .expect("buffer"),
-                    (Kind::Bytes, "byteOffset") => self
-                        .intrinsic(ctx, Intrinsic::BytesOffset, vec![value])
-                        .expect("offset"),
-                    (Kind::ByteBuffer, "byteLength") => self
-                        .intrinsic(ctx, Intrinsic::BufferLength, vec![value])
-                        .expect("length"),
-                    (Kind::Bytes, "length" | "byteLength") => self
-                        .intrinsic(ctx, Intrinsic::BytesLength, vec![value])
-                        .expect("length"),
-                    (Kind::Json, "length") => self
-                        .intrinsic(ctx, Intrinsic::JsonLength, vec![value])
-                        .expect("length"),
+                    (Kind::Bytes, "buffer") => {
+                        self.intrinsic(ctx, Intrinsic::BytesBuffer, vec![value])
+                    }
+                    (Kind::Bytes, "byteOffset") => {
+                        self.intrinsic(ctx, Intrinsic::BytesOffset, vec![value])
+                    }
+                    (Kind::ByteBuffer, "byteLength") => {
+                        self.intrinsic(ctx, Intrinsic::BufferLength, vec![value])
+                    }
+                    (Kind::Bytes, "length" | "byteLength") => {
+                        self.intrinsic(ctx, Intrinsic::BytesLength, vec![value])
+                    }
+                    (Kind::Json, "length") => {
+                        self.intrinsic(ctx, Intrinsic::JsonLength, vec![value])
+                    }
                     (Kind::Json, name) => {
                         let name = self.string(ctx, name);
                         self.intrinsic(ctx, Intrinsic::JsonMember, vec![value, name])
-                            .expect("member")
                     }
                     (Kind::Settled, field) => {
                         let field = match field {
@@ -2615,25 +2570,23 @@ impl<'s> FunctionBuilder<'s> {
                         | Kind::ReadResult,
                         name,
                     ) => self.web_member(ctx, value, name, None)?,
-                    (Kind::Instant, "epochMilliseconds") => self
-                        .intrinsic(ctx, Intrinsic::InstantMs, vec![value])
-                        .expect("milliseconds"),
+                    (Kind::Instant, "epochMilliseconds") => {
+                        self.intrinsic(ctx, Intrinsic::InstantMs, vec![value])
+                    }
                     (Kind::PlainDate | Kind::PlainDateTime, field) => {
                         self.temporal_field(ctx, value, field)?
                     }
                     (Kind::Abort, "signal") => value,
-                    (Kind::Abort, "aborted") => self
-                        .intrinsic(ctx, Intrinsic::AbortAborted, vec![value])
-                        .expect("aborted"),
-                    (Kind::Stats, "size") => self
-                        .intrinsic(ctx, Intrinsic::StatsSize, vec![value])
-                        .expect("size"),
-                    (Kind::Exception, "cause") => self
-                        .intrinsic(ctx, Intrinsic::ExceptionCause, vec![value])
-                        .expect("cause"),
-                    (Kind::Exception, "name") => self
-                        .intrinsic(ctx, Intrinsic::ExceptionName, vec![value])
-                        .expect("name"),
+                    (Kind::Abort, "aborted") => {
+                        self.intrinsic(ctx, Intrinsic::AbortAborted, vec![value])
+                    }
+                    (Kind::Stats, "size") => self.intrinsic(ctx, Intrinsic::StatsSize, vec![value]),
+                    (Kind::Exception, "cause") => {
+                        self.intrinsic(ctx, Intrinsic::ExceptionCause, vec![value])
+                    }
+                    (Kind::Exception, "name") => {
+                        self.intrinsic(ctx, Intrinsic::ExceptionName, vec![value])
+                    }
                     (Kind::Exception, "message") => {
                         self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
                     }
@@ -2666,7 +2619,6 @@ impl<'s> FunctionBuilder<'s> {
             } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
                 ensure!(args.is_empty(), "new AbortController takes no arguments");
                 self.intrinsic(ctx, Intrinsic::AbortNew, vec![])
-                    .expect("controller")
             }
             Expr::New {
                 class_name, args, ..
@@ -2693,14 +2645,16 @@ impl<'s> FunctionBuilder<'s> {
                 let list = match headers_dynamic {
                     Some(dynamic) => self.headers_init(ctx, Some(dynamic))?,
                     None => {
-                        let list = self
-                            .intrinsic(ctx, Intrinsic::HeadersNew, vec![])
-                            .expect("headers");
+                        let list = self.intrinsic(ctx, Intrinsic::HeadersNew, vec![]);
                         for (name, value) in headers {
                             let name = self.string(ctx, name);
                             let value =
                                 self.typed_operand(ctx, value, Kind::String, "a header value")?;
-                            self.intrinsic(ctx, Intrinsic::HeadersAppend, vec![list, name, value]);
+                            self.intrinsic_void(
+                                ctx,
+                                Intrinsic::HeadersAppend,
+                                vec![list, name, value],
+                            );
                         }
                         list
                     }
@@ -2708,7 +2662,6 @@ impl<'s> FunctionBuilder<'s> {
                 let (body, text) = self.body_init(ctx, Some(body))?;
                 let text = self.boolean(ctx, text);
                 self.intrinsic(ctx, Intrinsic::Fetch, vec![url, method, list, body, text])
-                    .expect("promise")
             }
             Expr::NativeMethodCall {
                 module,
@@ -2725,7 +2678,7 @@ impl<'s> FunctionBuilder<'s> {
                     [Expr::ProcessStderr] => Intrinsic::WritableStderr,
                     _ => bail!("Writable.toWeb supports process.stdout and process.stderr"),
                 };
-                self.intrinsic(ctx, intrinsic, vec![]).expect("stream")
+                self.intrinsic(ctx, intrinsic, vec![])
             }
             Expr::NativeMethodCall {
                 object: Some(object),
@@ -2864,15 +2817,11 @@ impl<'s> FunctionBuilder<'s> {
                 match kind(ctx, array)? {
                     Kind::String => {
                         let index = self.number_operand(ctx, index)?;
-                        return Ok(self
-                            .intrinsic(ctx, Intrinsic::StringIndex, vec![array, index])
-                            .expect("character"));
+                        return Ok(self.intrinsic(ctx, Intrinsic::StringIndex, vec![array, index]));
                     }
                     Kind::Bytes => {
                         let index = self.number_operand(ctx, index)?;
-                        return Ok(self
-                            .intrinsic(ctx, Intrinsic::BytesGet, vec![array, index])
-                            .expect("byte"));
+                        return Ok(self.intrinsic(ctx, Intrinsic::BytesGet, vec![array, index]));
                     }
                     Kind::Json => {
                         let index = self.expression(ctx, index)?;
@@ -2882,9 +2831,7 @@ impl<'s> FunctionBuilder<'s> {
                             Kind::Number => Intrinsic::JsonIndex,
                             _ => bail!("JSON lookup requires a string or number key"),
                         };
-                        return Ok(self
-                            .intrinsic(ctx, intrinsic, vec![array, index])
-                            .expect("json"));
+                        return Ok(self.intrinsic(ctx, intrinsic, vec![array, index]));
                     }
                     Kind::Record => {
                         let field = match &**index {
@@ -3037,7 +2984,7 @@ impl<'s> FunctionBuilder<'s> {
     /// Set the `cause` of a new error: a string (accepted profile).
     fn error_cause(&mut self, ctx: &mut Context, error: Value, cause: &Expr) -> Result<()> {
         let cause = self.typed_operand(ctx, cause, Kind::String, "a string error cause")?;
-        self.intrinsic(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
+        self.intrinsic_void(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
         Ok(())
     }
 
@@ -3053,9 +3000,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         const UNSUPPORTED: &str = "object spread is supported over JSON values (JSON.parse, \
             response.json()) with static keys; computed keys, methods and accessors are not";
-        let object = self
-            .intrinsic(ctx, Intrinsic::JsonObject, vec![])
-            .expect("object");
+        let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
         let is_target = |expr: &Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
         for statement in body {
             match statement {
@@ -3073,7 +3018,7 @@ impl<'s> FunctionBuilder<'s> {
                     let Some(source) = self.json_operand(ctx, source)? else {
                         bail!("{UNSUPPORTED}");
                     };
-                    self.intrinsic(ctx, Intrinsic::JsonAssign, vec![object, source]);
+                    self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
                 }
                 Stmt::Expr(Expr::IndexSet {
                     object: set,
@@ -3085,7 +3030,7 @@ impl<'s> FunctionBuilder<'s> {
                     };
                     let key = self.string(ctx, key);
                     let value = self.json_value(ctx, value)?;
-                    self.intrinsic(ctx, Intrinsic::JsonSet, vec![object, key, value]);
+                    self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
                 }
                 Stmt::Return(Some(result)) if is_target(result) => {}
                 _ => bail!("{UNSUPPORTED}"),
@@ -3110,10 +3055,7 @@ impl<'s> FunctionBuilder<'s> {
             ctx,
             json,
             undefined,
-            |b, ctx| {
-                Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
-                    .expect("json"))
-            },
+            |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])),
             |b, ctx| b.defined(ctx, value),
         )
         .map(Some)
@@ -3123,9 +3065,7 @@ impl<'s> FunctionBuilder<'s> {
     /// or `null` converted to one.
     fn json_value(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
         if matches!(expr, Expr::Null) {
-            return Ok(self
-                .intrinsic(ctx, Intrinsic::JsonNull, vec![])
-                .expect("json"));
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonNull, vec![]));
         }
         let value = self.expression(ctx, expr)?;
         if let Some(json) = self.json_operand(ctx, value)? {
@@ -3140,7 +3080,7 @@ impl<'s> FunctionBuilder<'s> {
                  booleans or null so far"
             ),
         };
-        Ok(self.intrinsic(ctx, intrinsic, vec![value]).expect("json"))
+        Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }
 
     /// `typeof value`, including the active case of a closed primitive union.
@@ -3176,9 +3116,7 @@ impl<'s> FunctionBuilder<'s> {
             Kind::String => "string",
             Kind::Boolean => "boolean",
             Kind::Json => {
-                return Ok(self
-                    .intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value])
-                    .expect("type"));
+                return Ok(self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value]));
             }
             _ => "object",
         };
@@ -3284,9 +3222,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn regex_test(&mut self, ctx: &mut Context, regex: Value, text: Value) -> Value {
-        let index = self
-            .intrinsic(ctx, Intrinsic::RegexSearch, vec![text, regex])
-            .expect("index");
+        let index = self.intrinsic(ctx, Intrinsic::RegexSearch, vec![text, regex]);
         let zero = self.number(ctx, 0.0);
         self.emit_value(ctx, |ctx| {
             MirCompare::new(ctx, CompareKind::Ge, index, zero)
@@ -3315,7 +3251,7 @@ impl<'s> FunctionBuilder<'s> {
                     bail!("string.split requires one string separator");
                 };
                 let separator = self.string_operand(ctx, separator)?;
-                self.intrinsic(ctx, Intrinsic::StringSplit, vec![receiver, separator])
+                self.call_intrinsic(ctx, Intrinsic::StringSplit, vec![receiver, separator])
             }
             (Kind::Regex, "test") => {
                 let [text] = args else {
@@ -3329,7 +3265,7 @@ impl<'s> FunctionBuilder<'s> {
                     bail!("string.search requires one literal regex");
                 };
                 let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
-                self.intrinsic(ctx, Intrinsic::RegexSearch, vec![receiver, regex])
+                self.call_intrinsic(ctx, Intrinsic::RegexSearch, vec![receiver, regex])
             }
             (Kind::Decoder, "decode") => {
                 ensure!(
@@ -3345,7 +3281,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let name = self.string_operand(ctx, name)?;
                 let value = self.string_operand(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::UrlAppend, vec![receiver, name, value]);
+                self.intrinsic_void(ctx, Intrinsic::UrlAppend, vec![receiver, name, value]);
                 let ty = self.void_type(ctx);
                 Some(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
             }
@@ -3367,7 +3303,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::Abort, "abort") => {
                 ensure!(args.is_empty(), "abort reasons are not supported yet");
-                self.intrinsic(ctx, Intrinsic::AbortAbort, vec![receiver]);
+                self.intrinsic_void(ctx, Intrinsic::AbortAbort, vec![receiver]);
                 return Ok(None);
             }
             (Kind::Stats, "isFile" | "isDirectory") => {
@@ -3376,7 +3312,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     Intrinsic::StatsIsDirectory
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver])
             }
             (Kind::String, "charCodeAt") => {
                 bail!("charCodeAt uses UTF-16 code units; use codePointAt with scalar indices")
@@ -3389,7 +3325,7 @@ impl<'s> FunctionBuilder<'s> {
                     ensure!(method != "at", "String.prototype.at is not supported yet");
                     Intrinsic::StringCharAt
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver, position])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver, position])
             }
             (Kind::String, "slice" | "substring") => {
                 let start = self.number_or(ctx, arg(0), 0.0)?;
@@ -3399,7 +3335,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     Intrinsic::StringSubstring
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver, start, end])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver, start, end])
             }
             (Kind::String, "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith") => {
                 let needle = arg(0).context("a search string is required")?;
@@ -3412,14 +3348,12 @@ impl<'s> FunctionBuilder<'s> {
                 let position = self.number_or(ctx, arg(1), default)?;
                 let args = vec![receiver, needle, position];
                 match method {
-                    "indexOf" => self.intrinsic(ctx, Intrinsic::StringIndexOf, args),
-                    "lastIndexOf" => self.intrinsic(ctx, Intrinsic::StringLastIndexOf, args),
-                    "startsWith" => self.intrinsic(ctx, Intrinsic::StringStartsWith, args),
-                    "endsWith" => self.intrinsic(ctx, Intrinsic::StringEndsWith, args),
+                    "indexOf" => self.call_intrinsic(ctx, Intrinsic::StringIndexOf, args),
+                    "lastIndexOf" => self.call_intrinsic(ctx, Intrinsic::StringLastIndexOf, args),
+                    "startsWith" => self.call_intrinsic(ctx, Intrinsic::StringStartsWith, args),
+                    "endsWith" => self.call_intrinsic(ctx, Intrinsic::StringEndsWith, args),
                     _ => {
-                        let found = self
-                            .intrinsic(ctx, Intrinsic::StringIndexOf, args)
-                            .expect("index");
+                        let found = self.intrinsic(ctx, Intrinsic::StringIndexOf, args);
                         let missing = self.number(ctx, -1.0);
                         Some(self.compare(ctx, CompareKind::Ne, found, missing))
                     }
@@ -3434,11 +3368,11 @@ impl<'s> FunctionBuilder<'s> {
                     "toLowerCase" | "toLocaleLowerCase" => Intrinsic::StringLower,
                     _ => Intrinsic::StringUpper,
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver])
             }
             (Kind::String, "repeat") => {
                 let count = self.number_or(ctx, arg(0), 0.0)?;
-                self.intrinsic(ctx, Intrinsic::StringRepeat, vec![receiver, count])
+                self.call_intrinsic(ctx, Intrinsic::StringRepeat, vec![receiver, count])
             }
             (Kind::String, "toString") => Some(receiver),
             (Kind::Bytes, "subarray" | "slice") => {
@@ -3449,7 +3383,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     Intrinsic::BytesSlice
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver, start, end])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver, start, end])
             }
             (Kind::Bytes, "set") => {
                 let source = arg(0).context("set needs a source")?;
@@ -3457,27 +3391,25 @@ impl<'s> FunctionBuilder<'s> {
                 let source = self.defined(ctx, source)?;
                 let source = match kind(ctx, source)? {
                     Kind::Bytes => source,
-                    Kind::Array => self
-                        .intrinsic(ctx, Intrinsic::BytesFromArray, vec![source])
-                        .expect("bytes"),
+                    Kind::Array => self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![source]),
                     _ => bail!("Uint8Array.set needs a Uint8Array or number[] source"),
                 };
                 let offset = self.number_or(ctx, arg(1), 0.0)?;
-                self.intrinsic(ctx, Intrinsic::BytesSetFrom, vec![receiver, source, offset]);
+                self.intrinsic_void(ctx, Intrinsic::BytesSetFrom, vec![receiver, source, offset]);
                 None
             }
             (Kind::Bytes, "fill") => {
                 let value = self.number_or(ctx, arg(0), 0.0)?;
                 let start = self.number_or(ctx, arg(1), 0.0)?;
                 let end = self.number_or(ctx, arg(2), f64::INFINITY)?;
-                self.intrinsic(ctx, Intrinsic::BytesFill, vec![receiver, value, start, end]);
+                self.intrinsic_void(ctx, Intrinsic::BytesFill, vec![receiver, value, start, end]);
                 Some(receiver)
             }
             (Kind::Bytes, "$$cryptoFillRandom") => {
-                self.intrinsic(ctx, Intrinsic::BytesFillRandom, vec![receiver])
+                self.call_intrinsic(ctx, Intrinsic::BytesFillRandom, vec![receiver])
             }
             (Kind::Date, "getTime" | "valueOf") => {
-                self.intrinsic(ctx, Intrinsic::DateTime, vec![receiver])
+                self.call_intrinsic(ctx, Intrinsic::DateTime, vec![receiver])
             }
             (Kind::Date, "toISOString" | "toJSON") => {
                 let intrinsic = if method == "toJSON" {
@@ -3485,7 +3417,7 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     Intrinsic::DateIso
                 };
-                self.intrinsic(ctx, intrinsic, vec![receiver])
+                self.call_intrinsic(ctx, intrinsic, vec![receiver])
             }
             (_, method) => bail!("method {method} is not supported on this type yet"),
         };
@@ -3500,9 +3432,7 @@ impl<'s> FunctionBuilder<'s> {
     /// `undefined` becomes `NaN` or `"undefined"`. Other values pass through.
     fn arithmetic(&mut self, ctx: &mut Context, value: Value) -> Value {
         if value.get_type(ctx).deref(ctx).is::<JsonType>() {
-            return self
-                .intrinsic(ctx, Intrinsic::JsonToNumber, vec![value])
-                .expect("number");
+            return self.intrinsic(ctx, Intrinsic::JsonToNumber, vec![value]);
         }
         let Some(inner) = optional_value(ctx, value.get_type(ctx)) else {
             return value;
@@ -3561,9 +3491,7 @@ impl<'s> FunctionBuilder<'s> {
                 None
             };
             if let Some(convert) = convert {
-                return Ok(self
-                    .intrinsic(ctx, convert, vec![value])
-                    .expect("byte input"));
+                return Ok(self.intrinsic(ctx, convert, vec![value]));
             }
         }
         if ty.deref(ctx).is::<JsonType>() && ty != target {
@@ -3575,9 +3503,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 let null_or_value = |b: &mut Self, ctx: &mut Context| {
                     if states.admits_null() {
-                        let null = b
-                            .intrinsic(ctx, Intrinsic::JsonIsNull, vec![value])
-                            .expect("boolean");
+                        let null = b.intrinsic(ctx, Intrinsic::JsonIsNull, vec![value]);
                         b.choose(
                             ctx,
                             target,
@@ -3590,9 +3516,7 @@ impl<'s> FunctionBuilder<'s> {
                     }
                 };
                 return if states.admits_undefined() {
-                    let undefined = self
-                        .intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![value])
-                        .expect("boolean");
+                    let undefined = self.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![value]);
                     self.choose(
                         ctx,
                         target,
@@ -3613,7 +3537,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 return self.decode_aggregate(ctx, value, target);
             };
-            return Ok(self.intrinsic(ctx, intrinsic, vec![value]).expect("value"));
+            return Ok(self.intrinsic(ctx, intrinsic, vec![value]));
         }
         let thrown = optional_value(ctx, ty).unwrap_or(ty);
         let wanted = optional_value(ctx, target).unwrap_or(target);
@@ -3627,9 +3551,7 @@ impl<'s> FunctionBuilder<'s> {
                 bail!("thrown values can only be used as numbers and strings yet")
             };
             let exception = self.defined(ctx, value)?;
-            let converted = self
-                .intrinsic(ctx, intrinsic, vec![exception])
-                .expect("value");
+            let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
             return self.fit(ctx, converted, target);
         }
         if ty == target {
@@ -3778,7 +3700,10 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
     }
 
-    fn intrinsic(
+    /// Emit `intrinsic` and return its result, if its signature has one: for dispatch
+    /// over intrinsics and methods that may or may not produce a value. Otherwise use
+    /// [Self::intrinsic] or [Self::intrinsic_void].
+    fn call_intrinsic(
         &mut self,
         ctx: &mut Context,
         intrinsic: Intrinsic,
@@ -3787,6 +3712,24 @@ impl<'s> FunctionBuilder<'s> {
         let op = self.emit(ctx, |ctx| IntrinsicOp::new(ctx, intrinsic, args));
         let operation = op.get_operation().deref(ctx);
         (operation.get_num_results() == 1).then(|| operation.get_result(0))
+    }
+
+    /// Emit an intrinsic that returns a value.
+    fn intrinsic(&mut self, ctx: &mut Context, intrinsic: Intrinsic, args: Vec<Value>) -> Value {
+        let Some(result) = self.call_intrinsic(ctx, intrinsic, args) else {
+            panic!("{} returns no value", intrinsic.name());
+        };
+        result
+    }
+
+    /// Emit an intrinsic without a result.
+    fn intrinsic_void(&mut self, ctx: &mut Context, intrinsic: Intrinsic, args: Vec<Value>) {
+        assert!(
+            intrinsic.types().1.is_empty(),
+            "the result of {} is discarded",
+            intrinsic.name()
+        );
+        self.call_intrinsic(ctx, intrinsic, args);
     }
 
     /// Pick `then` or `otherwise` (strings) by `condition`, through a slot.
@@ -3878,13 +3821,9 @@ impl<'s> FunctionBuilder<'s> {
                     },
                 )?
             }
-            Kind::BigInt => self
-                .intrinsic(ctx, Intrinsic::BigIntToString, vec![value])
-                .expect("string"),
+            Kind::BigInt => self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value]),
             Kind::String => value,
-            Kind::Number => self
-                .intrinsic(ctx, Intrinsic::NumberToString, vec![value])
-                .expect("string"),
+            Kind::Number => self.intrinsic(ctx, Intrinsic::NumberToString, vec![value]),
             Kind::Boolean => self.choose_string(
                 ctx,
                 value,
@@ -3957,7 +3896,7 @@ impl<'s> FunctionBuilder<'s> {
                 other => bail!("console.{other} is not supported yet"),
             };
             let line = self.console_line(ctx, args)?;
-            self.intrinsic(ctx, intrinsic, vec![line]);
+            self.call_intrinsic(ctx, intrinsic, vec![line]);
             return Ok(None);
         }
         if let Expr::PropertyGet {
@@ -4004,7 +3943,7 @@ impl<'s> FunctionBuilder<'s> {
                 kind(ctx, code)? == Kind::Number,
                 "process.exitCode must be a number"
             );
-            self.intrinsic(ctx, Intrinsic::ExitCodeSet, vec![code]);
+            self.intrinsic_void(ctx, Intrinsic::ExitCodeSet, vec![code]);
             return Ok(None);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
@@ -4025,7 +3964,7 @@ impl<'s> FunctionBuilder<'s> {
                         let value = self.expression(ctx, arg)?;
                         operands.push(self.defined(ctx, value)?);
                     }
-                    Ok(Some(match self.intrinsic(ctx, *intrinsic, operands) {
+                    Ok(Some(match self.call_intrinsic(ctx, *intrinsic, operands) {
                         Some(value) => value,
                         None => {
                             let number = FP64Type::get(ctx).into();

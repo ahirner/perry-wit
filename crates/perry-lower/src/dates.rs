@@ -10,18 +10,16 @@ impl FunctionBuilder<'_> {
         let (date, part) = match expr {
             Expr::DateNew(args) => {
                 let time = match args.as_slice() {
-                    [] => self
-                        .intrinsic(ctx, Intrinsic::DateNow, vec![])
-                        .expect("time"),
+                    [] => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
                     [value] => {
                         let value = self.expression(ctx, value)?;
                         match kind(ctx, value).ok() {
-                            Some(Kind::String) => self
-                                .intrinsic(ctx, Intrinsic::DateParse, vec![value])
-                                .expect("time"),
-                            Some(Kind::Date) => self
-                                .intrinsic(ctx, Intrinsic::DateTime, vec![value])
-                                .expect("time"),
+                            Some(Kind::String) => {
+                                self.intrinsic(ctx, Intrinsic::DateParse, vec![value])
+                            }
+                            Some(Kind::Date) => {
+                                self.intrinsic(ctx, Intrinsic::DateTime, vec![value])
+                            }
                             _ => {
                                 let value = self.arithmetic(ctx, value);
                                 ensure!(
@@ -34,16 +32,16 @@ impl FunctionBuilder<'_> {
                     }
                     _ => self.date_utc(ctx, args)?,
                 };
-                return Ok(self.intrinsic(ctx, Intrinsic::DateFromTime, vec![time]));
+                return Ok(self.call_intrinsic(ctx, Intrinsic::DateFromTime, vec![time]));
             }
             Expr::DateParse(text) => {
                 let text = self.string_operand(ctx, text)?;
-                return Ok(self.intrinsic(ctx, Intrinsic::DateParse, vec![text]));
+                return Ok(self.call_intrinsic(ctx, Intrinsic::DateParse, vec![text]));
             }
             Expr::DateUtc(args) => return self.date_utc(ctx, args).map(Some),
             Expr::DateGetTime(date) | Expr::DateValueOf(date) => {
                 let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
-                return Ok(self.intrinsic(ctx, Intrinsic::DateTime, vec![date]));
+                return Ok(self.call_intrinsic(ctx, Intrinsic::DateTime, vec![date]));
             }
             Expr::DateToISOString(date) | Expr::DateToJSON(date) => {
                 let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
@@ -52,7 +50,7 @@ impl FunctionBuilder<'_> {
                 } else {
                     Intrinsic::DateIso
                 };
-                return Ok(self.intrinsic(ctx, intrinsic, vec![date]));
+                return Ok(self.call_intrinsic(ctx, intrinsic, vec![date]));
             }
             Expr::DateGetUtcFullYear(date) | Expr::DateGetFullYear(date) => (date, 0),
             Expr::DateGetUtcMonth(date) | Expr::DateGetMonth(date) => (date, 1),
@@ -88,7 +86,7 @@ impl FunctionBuilder<'_> {
         };
         let date = self.typed_operand(ctx, date, Kind::Date, "a Date")?;
         let part = self.number(ctx, part as f64);
-        Ok(self.intrinsic(ctx, Intrinsic::DatePart, vec![date, part]))
+        Ok(self.call_intrinsic(ctx, Intrinsic::DatePart, vec![date, part]))
     }
 
     fn date_utc(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
@@ -106,9 +104,7 @@ impl FunctionBuilder<'_> {
         for arg in args.iter().skip(7) {
             self.expression(ctx, arg)?;
         }
-        Ok(self
-            .intrinsic(ctx, Intrinsic::DateUtc, values)
-            .expect("time"))
+        Ok(self.intrinsic(ctx, Intrinsic::DateUtc, values))
     }
 
     fn date_set(
@@ -133,6 +129,6 @@ impl FunctionBuilder<'_> {
         for arg in args.iter().skip(maximum) {
             self.expression(ctx, arg)?;
         }
-        Ok(self.intrinsic(ctx, Intrinsic::DateSet, values))
+        Ok(self.call_intrinsic(ctx, Intrinsic::DateSet, values))
     }
 }

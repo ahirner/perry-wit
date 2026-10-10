@@ -30,7 +30,8 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     for (byte, class) in classes.iter_mut().enumerate() {
         *class = dfa.byte_classes().get(byte as u8);
     }
-    let class_count = usize::from(*classes.iter().max().unwrap()) + 1;
+    // The alphabet counts one extra class for the end of input.
+    let class_count = dfa.byte_classes().alphabet_len() - 1;
     let mut representatives = vec![0u8; class_count];
     for (byte, &class) in classes.iter().enumerate() {
         representatives[usize::from(class)] = byte as u8;
