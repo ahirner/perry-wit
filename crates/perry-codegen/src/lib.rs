@@ -670,6 +670,8 @@ struct ModuleState {
     /// Generated `JSON.stringify` serializers by MIR type.
     json_serializers: HashMap<TypeHandle, Identifier>,
     collectible: bool,
+    call_effects: HashMap<Identifier, perry_mir::effects::Summary>,
+    root_metrics: Option<u32>,
     memory_checks: bool,
     pointer_maps: HashMap<TypeHandle, u32>,
     globals: HashMap<Identifier, (u32, TypeHandle)>,
@@ -696,7 +698,14 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
     let effects = perry_mir::effects::summarize(ctx, &functions);
     let resource_keys = boundary::resources::used_keys(ctx, &functions);
     let mut state = ModuleState {
-        data: Data::default(),
+        data: Data {
+            bytes: if matches!(exports, Exports::RawChecked) {
+                vec![0; 8]
+            } else {
+                vec![]
+            },
+            ..Data::default()
+        },
         wasm: ModuleOp::new(ctx, name),
         throws: throwing_functions(ctx, &functions),
         runtime: BTreeSet::new(),
@@ -750,6 +759,8 @@ pub fn lower(ctx: &mut Context, mir: &ModuleOp, exports: &Exports) -> Result<(Mo
                 ..
             }
         ),
+        call_effects: effects,
+        root_metrics: matches!(exports, Exports::RawChecked).then_some(DATA_BASE),
         pointer_maps: HashMap::new(),
         globals: HashMap::new(),
         initializer: None,
@@ -966,6 +977,7 @@ struct FunctionLowering<'s> {
     /// The frame, when lowering the step function of an async function.
     frame: Option<async_split::Frame>,
     root_base: Option<Value>,
+    root_stack: Option<Value>,
     local_frame: Option<Value>,
     frame_slots: HashMap<Ptr<Operation>, u32>,
     canonical_borrows: bool,
@@ -988,6 +1000,7 @@ impl<'s> FunctionLowering<'s> {
             landing: None,
             frame: None,
             root_base: None,
+            root_stack: None,
             local_frame: None,
             frame_slots: HashMap::new(),
             canonical_borrows: false,
@@ -1023,8 +1036,13 @@ impl<'s> FunctionLowering<'s> {
         lowering.throws = throws;
         lowering.results = results;
         lowering.map_blocks(ctx, mir, Some(entry))?;
-        lowering.enter_roots(ctx);
+        if lowering.state.call_effects[&mir.get_symbol_name(ctx)].may_collect {
+            lowering.enter_roots(ctx);
+        }
         lowering.prepare_frame_storage(ctx, mir)?;
+        lowering
+            .blocks
+            .insert(mir.get_entry_block(ctx), lowering.block);
         lowering.translate(ctx, mir)?;
         Ok(function)
     }
@@ -1251,13 +1269,7 @@ impl<'s> FunctionLowering<'s> {
         self.insert(ctx, op);
         let result = op.deref(ctx).results().next();
         if self.canonical_borrows && matches!(function, Runtime::Alloc) {
-            self.call(
-                ctx,
-                "perry_roots_push",
-                &[W::I32],
-                &[],
-                vec![result.expect("allocation")],
-            );
+            self.publish_roots(ctx, &[result.expect("allocation")]);
         }
         if self.state.collectible {
             if matches!(function, Runtime::TaskEnter) {

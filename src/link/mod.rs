@@ -192,7 +192,7 @@ pub(crate) fn link_helpers_with(
 
     let collectible = helper_imports
         .iter()
-        .any(|(_, name, _)| *name == "perry_roots_mark");
+        .any(|(_, name, _)| name.starts_with("perry_gc_") || name.starts_with("perry_roots_"));
 
     // 3. Select and prepare helper libraries
     let mut requested_by_lib = BTreeMap::<LibraryId, BTreeSet<String>>::new();

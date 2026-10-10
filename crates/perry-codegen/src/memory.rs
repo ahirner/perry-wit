@@ -5,6 +5,7 @@ use perry_mir::{
     calls::{AsyncCallOp, CallOp},
     types::RecordType,
 };
+use perry_runtime::roots as root_stack;
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
@@ -37,14 +38,32 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
         let export = format!("__{name}");
         let function = FuncOp::new(ctx, export.clone().try_into().expect("counter name"), ty);
         set_export(ctx, &function, &export);
-        let args = function
+        let mut args: Vec<_> = function
             .get_entry_block(ctx)
             .deref(ctx)
             .arguments()
             .collect();
         let mut b = FunctionLowering::glue(state, ctx, &function);
         let result_types: &'static [W] = if result.is_some() { &[W::I64] } else { &[] };
-        let value = b.call(ctx, name, &[W::I32], result_types, args);
+        let extra = if result.is_some() {
+            let seven = b.i32_const(ctx, 7);
+            let extra = b.num(
+                ctx,
+                pliron_wasm::attrs::NumOpcode::I32Eq,
+                vec![args[0], seven],
+            );
+            let zero = b.i32_const(ctx, 0);
+            args[0] = b.select(ctx, extra, zero, args[0]);
+            Some(extra)
+        } else {
+            None
+        };
+        let mut value = b.call(ctx, name, &[W::I32], result_types, args);
+        if let Some(extra) = extra {
+            let address = b.i32_const(ctx, b.state.root_metrics.expect("checked counter") as i32);
+            let count = b.load(ctx, MemKind::I64, address, 0);
+            value = Some(b.select(ctx, extra, count, value.expect("counter")));
+        }
         let ret = ReturnOp::new(ctx, value.into_iter().collect()).get_operation();
         b.insert(ctx, ret);
         b.state
@@ -165,7 +184,7 @@ impl FunctionLowering<'_> {
                     vec![size, shape],
                 )
                 .expect("frame");
-            self.call(ctx, "perry_roots_push", &[W::I32], &[], vec![frame]);
+            self.publish_roots(ctx, &[frame]);
             self.local_frame = Some(frame);
         }
         Ok(())
@@ -216,15 +235,81 @@ impl FunctionLowering<'_> {
         self.block = done;
     }
 
+    fn root_stack(&mut self, ctx: &mut Context) -> Value {
+        use pliron::{linked_list::ContainsLinkedList, op::Op};
+        if let Some(stack) = self.root_stack {
+            return stack;
+        }
+        let runtime = Runtime::Call("perry_roots_state", &[], &[W::I32]);
+        self.state.runtime.insert(runtime);
+        let ty = crate::i32_type(ctx);
+        let call =
+            pliron_wasm::ops::CallOp::new(ctx, runtime.symbol(), vec![], vec![ty]).get_operation();
+        // Late-discovered boundary roots must also dominate every exit and branch.
+        call.insert_at_front(self.region.deref(ctx).get_head().expect("entry"), ctx);
+        let stack = call.deref(ctx).get_result(0);
+        self.root_stack = Some(stack);
+        stack
+    }
+
+    pub(super) fn root_mark(&mut self, ctx: &mut Context) -> Value {
+        let stack = self.root_stack(ctx);
+        self.load(ctx, MemKind::I32, stack, root_stack::LENGTH)
+    }
+
+    pub(super) fn reset_roots(&mut self, ctx: &mut Context, mark: Value) {
+        let stack = self.root_stack(ctx);
+        self.store(ctx, MemKind::I32, stack, root_stack::LENGTH, mark);
+    }
+
+    pub(super) fn publish_roots(&mut self, ctx: &mut Context, values: &[Value]) -> Value {
+        use pliron_wasm::attrs::NumOpcode;
+        let stack = self.root_stack(ctx);
+        let mark = self.load(ctx, MemKind::I32, stack, root_stack::LENGTH);
+        if values.is_empty() {
+            return mark;
+        }
+        let count = u32::try_from(values.len()).expect("root count");
+        assert!(count <= i32::MAX as u32 / 4, "root stack overflow");
+        let count = self.i32_const(ctx, count as i32);
+        let end = self.num(ctx, NumOpcode::I32Add, vec![mark, count]);
+        let capacity = self.load(ctx, MemKind::I32, stack, root_stack::CAPACITY);
+        let enough = self.num(ctx, NumOpcode::I32LeU, vec![end, capacity]);
+        let ready = self.new_block(ctx, vec![]);
+        let grow = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, enough, (ready, vec![]), (grow, vec![]));
+        self.block = grow;
+        self.call(ctx, "perry_roots_reserve", &[W::I32], &[], vec![count]);
+        self.br(ctx, ready, vec![]);
+        self.block = ready;
+        // Nested calls can relocate backing storage; only the descriptor and indices persist.
+        let data = self.load(ctx, MemKind::I32, stack, root_stack::DATA);
+        let two = self.i32_const(ctx, 2);
+        let offset = self.num(ctx, NumOpcode::I32Shl, vec![mark, two]);
+        let base = self.num(ctx, NumOpcode::I32Add, vec![data, offset]);
+        for (index, &value) in values.iter().enumerate() {
+            self.store(ctx, MemKind::I32, base, index as u32 * 4, value);
+        }
+        self.store(ctx, MemKind::I32, stack, root_stack::LENGTH, end);
+        if let Some(address) = self.state.root_metrics {
+            let counter = self.i32_const(ctx, address as i32);
+            let before = self.load(ctx, MemKind::I64, counter, 0);
+            let count = self.i64_const(ctx, values.len() as u64);
+            let total = self.num(ctx, NumOpcode::I64Add, vec![before, count]);
+            self.store(ctx, MemKind::I64, counter, 0, total);
+        }
+        mark
+    }
+
     pub(super) fn enter_roots(&mut self, ctx: &mut Context) {
         if self.state.collectible {
-            self.root_base = self.call(ctx, "perry_roots_mark", &[], &[W::I32], vec![]);
+            self.root_base = Some(self.root_mark(ctx));
         }
     }
 
     pub(super) fn leave_roots(&mut self, ctx: &mut Context) {
         if let Some(base) = self.root_base {
-            self.call(ctx, "perry_roots_reset", &[W::I32], &[], vec![base]);
+            self.reset_roots(ctx, base);
         }
         if let Some(frame) = self.local_frame {
             self.call(ctx, "perry_frame_free", &[W::I32], &[], vec![frame]);
@@ -237,9 +322,15 @@ impl FunctionLowering<'_> {
         op: Ptr<Operation>,
         after: &HashSet<Value>,
     ) -> Result<Option<Value>> {
+        let collecting_call = Operation::get_op::<CallOp>(op, ctx).is_some_and(|call| {
+            self.state
+                .call_effects
+                .get(&call.callee(ctx))
+                .is_none_or(|effect| effect.may_collect)
+        });
         if !self.state.collectible
             || !(perry_mir::effects::allocates(ctx, op)
-                || Operation::get_op::<CallOp>(op, ctx).is_some()
+                || collecting_call
                 || Operation::get_op::<AsyncCallOp>(op, ctx).is_some())
         {
             return Ok(None);
@@ -254,21 +345,19 @@ impl FunctionLowering<'_> {
             .filter(|value| repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
             .collect();
         live.sort_by_key(|value| format!("{value:?}"));
-        let mark = self
-            .call(ctx, "perry_roots_mark", &[], &[W::I32], vec![])
-            .expect("mark");
-        for value in live {
-            let value = self.mapped(ctx, value)?;
-            self.call(ctx, "perry_roots_push", &[W::I32], &[], vec![value]);
-        }
+        let values = live
+            .into_iter()
+            .map(|value| self.mapped(ctx, value))
+            .collect::<Result<Vec<_>>>()?;
+        let mark = (!values.is_empty()).then(|| self.publish_roots(ctx, &values));
         self.call(ctx, "perry_gc_check", &[], &[], vec![]);
         self.drain_resources(ctx);
-        Ok(Some(mark))
+        Ok(mark)
     }
 
     pub(super) fn end_safe_point(&mut self, ctx: &mut Context, mark: Option<Value>) {
         if let Some(mark) = mark {
-            self.call(ctx, "perry_roots_reset", &[W::I32], &[], vec![mark]);
+            self.reset_roots(ctx, mark);
         }
     }
 

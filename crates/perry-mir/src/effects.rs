@@ -28,6 +28,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     pub allocates: bool,
+    /// The compiled body contains a safe point, including those in direct callees.
+    pub may_collect: bool,
+    pub may_suspend: bool,
+    pub may_reenter: bool,
     pub repeated: bool,
     pub unknown_helper_bound: bool,
     /// Parameters returned, captured by an async call, or stored through an aggregate.
@@ -183,6 +187,12 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                     }
                     summary.allocates |=
                         allocates(ctx, op) || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
+                    summary.may_collect |= allocates(ctx, op);
+                    summary.may_suspend |= Operation::get_op::<crate::calls::AwaitOp>(op, ctx)
+                        .is_some()
+                        || Operation::get_op::<AsyncCallOp>(op, ctx).is_some();
+                    summary.may_reenter |=
+                        Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some();
                     summary.unknown_helper_bound |=
                         Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
                             || Operation::get_op::<IntrinsicOp>(op, ctx)
@@ -214,6 +224,9 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                     if let Some(callee) = callee(ctx, op) {
                         if let Some(callee) = summaries.get(&callee) {
                             summary.allocates |= callee.allocates;
+                            summary.may_collect |= callee.may_collect;
+                            summary.may_suspend |= callee.may_suspend;
+                            summary.may_reenter |= callee.may_reenter;
                             summary.repeated |= callee.repeated;
                             summary.unknown_helper_bound |= callee.unknown_helper_bound;
                             for &index in &callee.escapes {
@@ -223,6 +236,9 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                             }
                         } else {
                             summary.allocates = true;
+                            summary.may_collect = true;
+                            summary.may_suspend = true;
+                            summary.may_reenter = true;
                             summary.unknown_helper_bound = true;
                             summary.escapes.extend(dependencies);
                         }
@@ -233,6 +249,8 @@ pub fn summarize(ctx: &Context, functions: &[FuncOp]) -> HashMap<Identifier, Sum
                 }
             }
             summary.allocates |= is_async(ctx, function);
+            summary.may_suspend |= is_async(ctx, function);
+            summary.may_collect |= summary.may_suspend || summary.may_reenter;
             summary.repeated |= loops[index] && summary.allocates;
             if summaries[&names[index]] != summary {
                 summaries.insert(names[index].clone(), summary);

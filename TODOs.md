@@ -14,7 +14,8 @@ Perry measurements, all 50 conformance contracts, the fixed generated campaign a
 consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapshots.
 
 0. [x] Freeze a serial debug-build benchmark and consumer baseline.
-1. [ ] Elide root bookkeeping for proven non-collecting calls; emit root-stack stores inline.
+1. [ ] Elide root bookkeeping for proven non-collecting calls; emit root-stack stores inline
+   (implemented; full campaign pending).
 2. [ ] Lower integer remainder inline with IEEE-754 fallback and negative-zero preservation.
 3. [ ] Extend bounded leaf inlining, closed-record argument promotion and scalar replacement.
 4. [ ] Prove indexed accesses and reuse dominating successful optional unwraps.
@@ -36,6 +37,12 @@ benchmark scenarios passed. Temporary records allocate zero objects. Direct call
 partitioning can vary with host scheduling; compare deterministic core workloads separately.
 Consumer median wall times: Node 3.8 ms, AOT 16.7 ms, JIT 268.6 ms. Raw outputs and snapshot
 harness adjustments accompany the report; startup-subtracted estimates are not guest timings.
+
+Root optimization focused checks pass: 28 codegen, three stream and 14 async/import/resource/
+cancellation tests. Direct-call fuel is 24.0M versus 231.0M at baseline; numeric arrays 372.7M
+versus 473.7M; append 632.9M versus 774.9M. Peak memory is unchanged. Root publication counters
+exist only in checked modules; the ordinary descriptor has three words and preserves the
+retained-chunk and 2 MiB-through-64 KiB tests. Collection thresholds are unchanged.
 
 ## Verified implementation
 

@@ -25,12 +25,10 @@ impl FunctionLowering<'_> {
             "WIT import argument count mismatch"
         );
         let values = self.operands(ctx, op)?;
-        let mark = self
-            .call(ctx, "perry_roots_mark", &[], &[crate::W::I32], vec![])
-            .expect("roots");
+        let mark = self.root_mark(ctx);
         for (mir, value) in operands.iter().zip(&values) {
             if crate::repr(ctx, mir.get_type(ctx))? == crate::Repr::Ref {
-                self.call(ctx, "perry_roots_push", &[crate::W::I32], &[], vec![*value]);
+                self.publish_roots(ctx, &[*value]);
             }
         }
         self.begin_resources(
@@ -128,13 +126,7 @@ impl FunctionLowering<'_> {
                 .map(|(scope, _)| scope)
                 .unwrap_or_else(|| self.i32_const(ctx, 0));
             self.store(ctx, MemKind::I32, transfer, transfer::SCOPE, scope);
-            self.call(
-                ctx,
-                "perry_roots_push",
-                &[crate::W::I32],
-                &[],
-                vec![transfer],
-            );
+            self.publish_roots(ctx, &[transfer]);
             Some(transfer)
         } else {
             None
@@ -205,7 +197,7 @@ impl FunctionLowering<'_> {
             self.define(ctx, op, value);
         }
         self.finish_resources(ctx);
-        self.call(ctx, "perry_roots_reset", &[crate::W::I32], &[], vec![mark]);
+        self.reset_roots(ctx, mark);
         Ok(())
     }
     fn finish_transfer_scope(&mut self, ctx: &mut Context, transfer: Value) {

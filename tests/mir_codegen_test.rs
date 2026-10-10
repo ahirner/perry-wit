@@ -1099,3 +1099,59 @@ export function run(n: number): number {
     let (live, _) = program.call("__perry_gc_counter", &[Val::I32(2)]);
     assert!(live[0].unwrap_i64() < 4096);
 }
+
+#[test]
+fn allocation_free_calls_do_not_collect_or_publish_roots() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+function leaf(n: number): number { if (n < 0) return -n; return n + 1; }
+function step(n: number): number { return leaf(n) + 2; }
+export function run(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += step(i);
+  return sum;
+}
+"#,
+        "no-gc-calls.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1000.0), 502_500.0);
+    for (index, expected) in [(0, 0), (1, 1), (6, 0), (7, 0)] {
+        let (counter, _) = program.call("__perry_gc_counter", &[Val::I32(index)]);
+        assert_eq!(counter[0].unwrap_i64(), expected, "counter {index}");
+    }
+}
+
+#[test]
+fn nested_root_stack_growth_preserves_caller_objects_and_unwinds() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+interface Cell { value: number }
+function read(cell: Cell): number { if (cell.value < 0) return 0; return cell.value; }
+function descend(n: number, fail: boolean): number {
+  const cell = { value: n };
+  if (n === 0) { if (fail) throw new RangeError("bottom"); return read(cell); }
+  try { return descend(n - 1, fail) + read(cell); }
+  catch (e) { return read(cell) + 1000; }
+}
+export function run(n: number): number {
+  const a = descend(n, false);
+  const b = descend(n, true);
+  return a + b;
+}
+"#,
+        "root-stack.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    for n in [64.0, 120.0, 64.0] {
+        assert_eq!(program.number("run", n), n * (n + 1.0) + 1000.0);
+        for index in [2, 5, 6] {
+            let (counter, _) = program.call("__perry_gc_counter", &[Val::I32(index)]);
+            assert_eq!(counter[0].unwrap_i64(), 0, "counter {index}");
+        }
+    }
+}

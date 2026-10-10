@@ -9,9 +9,96 @@ struct Pin {
     task: *mut crate::region::Task,
 }
 
+pub const DATA: u32 = 0;
+pub const LENGTH: u32 = 4;
+pub const CAPACITY: u32 = 8;
+
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    assert!(core::mem::offset_of!(RootStack, data) == DATA as usize);
+    assert!(core::mem::offset_of!(RootStack, length) == LENGTH as usize);
+    assert!(core::mem::offset_of!(RootStack, capacity) == CAPACITY as usize);
+};
+
+/// Stable prefix read by generated Wasm; backing storage is private to the runtime.
+#[repr(C)]
+pub struct RootStack {
+    data: *mut *mut u8,
+    length: u32,
+    capacity: u32,
+}
+
+impl RootStack {
+    const fn new() -> Self {
+        Self {
+            data: ptr::null_mut(),
+            length: 0,
+            capacity: 0,
+        }
+    }
+
+    fn reserve(&mut self, additional: u32) {
+        let required = self
+            .length
+            .checked_add(additional)
+            .expect("root stack overflow");
+        if required <= self.capacity {
+            return;
+        }
+        let capacity = required
+            .checked_next_power_of_two()
+            .expect("root stack overflow")
+            .max(4);
+        assert!(capacity as usize <= isize::MAX as usize / core::mem::size_of::<*mut u8>());
+        let layout =
+            core::alloc::Layout::array::<*mut u8>(capacity as usize).expect("root stack layout");
+        // SAFETY: only this descriptor owns its buffer; reallocation never collects.
+        let data = unsafe {
+            if self.capacity == 0 {
+                alloc::alloc::alloc(layout)
+            } else {
+                let old = core::alloc::Layout::array::<*mut u8>(self.capacity as usize)
+                    .expect("root stack layout");
+                alloc::alloc::realloc(self.data.cast(), old, layout.size())
+            }
+        };
+        if data.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        self.data = data.cast();
+        self.capacity = capacity;
+    }
+
+    fn live(&self) -> &[*mut u8] {
+        if self.length == 0 {
+            return &[];
+        }
+        // SAFETY: generated code and `push` initialize every slot before publishing length.
+        unsafe { core::slice::from_raw_parts(self.data, self.length as usize) }
+    }
+
+    fn push(&mut self, object: *mut u8) {
+        self.reserve(1);
+        // SAFETY: reserve ensured space; no reference into the buffer survives this call.
+        unsafe { self.data.add(self.length as usize).write(object) };
+        self.length += 1;
+    }
+}
+
+impl Drop for RootStack {
+    fn drop(&mut self) {
+        if self.capacity != 0 {
+            let layout = core::alloc::Layout::array::<*mut u8>(self.capacity as usize)
+                .expect("root stack layout");
+            // SAFETY: this descriptor exclusively owns this allocation and its layout.
+            unsafe { alloc::alloc::dealloc(self.data.cast(), layout) };
+        }
+    }
+}
+
 struct Roots {
     heap: Collector,
-    stack: Vec<*mut u8>,
+    stack: RootStack,
     pins: Vec<Pin>,
     tasks: Vec<*mut crate::region::Task>,
     free_pins: Vec<u32>,
@@ -25,7 +112,7 @@ impl Roots {
     const fn new() -> Self {
         Self {
             heap: Collector::new(),
-            stack: Vec::new(),
+            stack: RootStack::new(),
             pins: Vec::new(),
             tasks: Vec::new(),
             free_pins: Vec::new(),
@@ -38,7 +125,7 @@ impl Roots {
 
     unsafe fn collect(&mut self) {
         self.snapshot.clear();
-        self.snapshot.extend_from_slice(&self.stack);
+        self.snapshot.extend_from_slice(self.stack.live());
         // SAFETY: compiled module cells are static, pointer-typed storage.
         self.snapshot
             .extend(self.globals.iter().map(|slot| unsafe { **slot }));
@@ -125,10 +212,22 @@ pub unsafe extern "C" fn perry_frame_free(frame: *mut u8) {
     unsafe { roots().heap.release_frame(frame) };
 }
 
+/// The descriptor stays at one address even when nested calls grow its backing storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_roots_state() -> *mut RootStack {
+    &raw mut roots().stack
+}
+
+/// Grow the root stack without collecting. Generated code publishes slots afterward.
+#[unsafe(no_mangle)]
+pub extern "C" fn perry_roots_reserve(additional: u32) {
+    roots().stack.reserve(additional);
+}
+
 /// The current stack boundary, used to release exactly one generated activation's roots.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_roots_mark() -> u32 {
-    u32::try_from(roots().stack.len()).expect("root stack overflow")
+    roots().stack.length
 }
 
 /// Keep an exact compiled pointer live across calls. Null and static pointers are accepted.
@@ -141,11 +240,8 @@ pub extern "C" fn perry_roots_push(object: *mut u8) {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_roots_reset(mark: u32) {
     let roots = roots();
-    assert!(
-        mark as usize <= roots.stack.len(),
-        "invalid root stack boundary"
-    );
-    roots.stack.truncate(mark as usize);
+    assert!(mark <= roots.stack.length, "invalid root stack boundary");
+    roots.stack.length = mark;
 }
 
 /// Collect at a generated safe point when allocation volume reaches the live-size threshold.
@@ -179,7 +275,7 @@ pub unsafe extern "C" fn perry_gc_boundary() {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_gc_task_end() {
     let roots = roots();
-    if roots.stack.is_empty()
+    if roots.stack.length == 0
         && roots.pins.iter().all(|p| p.object.is_null())
         && roots.tasks.is_empty()
         && (roots.force_collection
@@ -283,7 +379,7 @@ pub extern "C" fn perry_gc_counter(index: u32) -> u64 {
         3 => counters.reserved_bytes as u64,
         4 => roots.transfer_copied_bytes,
         5 => roots.pins.iter().filter(|p| !p.object.is_null()).count() as u64,
-        6 => roots.stack.len() as u64,
+        6 => u64::from(roots.stack.length),
         _ => panic!("unknown memory counter"),
     }
 }
@@ -299,7 +395,7 @@ pub extern "C" fn perry_roots_capture(mark: u32) -> *mut u8 {
     const STRIDE: u32 = core::mem::size_of::<*mut u8>() as u32;
     static SHAPE: [u32; 3] = [STRIDE, 1, 0];
     let roots = roots();
-    let segment = &roots.stack[mark as usize..];
+    let segment = &roots.stack.live()[mark as usize..];
     let bytes = core::mem::size_of_val(segment);
     // SAFETY: exact pointer slots, no internal collection, and disjoint newly allocated storage.
     unsafe {

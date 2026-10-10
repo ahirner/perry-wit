@@ -1314,7 +1314,7 @@ impl FunctionLowering<'_> {
                 let data = self.load(ctx, MemKind::I32, view, 4);
                 let len = self.load(ctx, MemKind::I32, view, 0);
                 if self.canonical_borrows {
-                    self.call(ctx, "perry_roots_push", &[crate::W::I32], &[], vec![data]);
+                    self.publish_roots(ctx, &[data]);
                 } else if self.state.collectible {
                     self.call(
                         ctx,

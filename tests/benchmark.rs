@@ -535,7 +535,7 @@ export function run(n: number): number {
         )?;
         let counter = instance.get_typed_func::<i32, i64>(&mut store, "__perry_gc_counter")?;
         row.counters = Some(
-            (0..7)
+            (0..8)
                 .map(|i| counter.call(&mut store, i).map(|v| v as u64))
                 .collect::<Result<Vec<_>, _>>()?,
         );

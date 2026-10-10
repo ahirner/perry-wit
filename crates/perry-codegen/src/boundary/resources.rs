@@ -225,7 +225,7 @@ impl FunctionLowering<'_> {
                 vec![scope],
             );
             if let Some(roots) = roots {
-                self.call(ctx, "perry_roots_reset", &[W::I32], &[], vec![roots]);
+                self.reset_roots(ctx, roots);
             }
         }
         self.drain_resources(ctx);
