@@ -99,7 +99,7 @@ fn resolve(input: &[u8], base: &[u8]) -> Option<*mut u8> {
 
 /// Construct a URL with an optional base string (null means no base).
 #[unsafe(no_mangle)]
-pub extern "C" fn web_url_new(input: *mut u8, base: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_url_new(input: *mut u8, base: *mut u8) -> *mut u8 {
     let href = if base.is_null() {
         normalize(text(input))
     } else {
@@ -120,7 +120,7 @@ pub extern "C" fn web_url_new(input: *mut u8, base: *mut u8) -> *mut u8 {
 /// Read a declared URL field: href, protocol, pathname, username, password, hash,
 /// search, host, hostname, port or origin.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_url_get(value: *mut u8, field: f64) -> *mut u8 {
+pub(crate) extern "C" fn web_url_get(value: *mut u8, field: f64) -> *mut u8 {
     let href = url(value).href;
     if field == 0.0 {
         return href;
@@ -178,7 +178,7 @@ pub extern "C" fn web_url_get(value: *mut u8, field: f64) -> *mut u8 {
 
 /// Replace the pathname, preserving credentials, query and fragment.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_url_set_pathname(value: *mut u8, pathname: *mut u8) {
+pub(crate) extern "C" fn web_url_set_pathname(value: *mut u8, pathname: *mut u8) {
     let object = url(value);
     let href = text(object.href);
     let p = parts(href);
@@ -244,7 +244,7 @@ fn decode_form(input: &[u8], output: &mut Buffer) {
 
 /// Append through a linked URLSearchParams view, applying form serialization to the query.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_url_append(value: *mut u8, name: *mut u8, item: *mut u8) {
+pub(crate) extern "C" fn web_url_append(value: *mut u8, name: *mut u8, item: *mut u8) {
     let object = url(value);
     let href = text(object.href);
     let p = parts(href);
@@ -272,7 +272,7 @@ pub extern "C" fn web_url_append(value: *mut u8, name: *mut u8, item: *mut u8) {
 
 /// Percent-encode Unicode scalar text with the encodeURIComponent character set.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_encode_uri_component(value: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_encode_uri_component(value: *mut u8) -> *mut u8 {
     let mut output = Buffer::new();
     encode(&mut output, text(value), false);
     view(output.as_slice())

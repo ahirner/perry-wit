@@ -221,7 +221,7 @@ struct Fact {
 }
 
 /// Replace reads proven in bounds with unchecked reads; see the module documentation.
-pub fn prove_bounds(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+pub(crate) fn prove_bounds(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     let mut status = IRStatus::Unchanged;
     for function in functions(root, ctx) {
         let info = Function::new(ctx, &function);

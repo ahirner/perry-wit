@@ -8,7 +8,7 @@ const HEADER: usize = 8;
 ///
 /// # Safety
 /// A non-null `old` is a canonical buffer with at least `old_size` readable bytes.
-pub unsafe fn reallocate(old: *mut u8, old_size: u32, new_size: u32) -> *mut u8 {
+pub(crate) unsafe fn reallocate(old: *mut u8, old_size: u32, new_size: u32) -> *mut u8 {
     if new_size == 0 {
         unsafe { release(old) };
         return HEADER as *mut u8;
@@ -35,7 +35,7 @@ pub unsafe fn reallocate(old: *mut u8, old_size: u32, new_size: u32) -> *mut u8 
 ///
 /// # Safety
 /// `data` came from [reallocate], or is the empty canonical pointer (0 or 8).
-pub unsafe fn release(data: *mut u8) {
+pub(crate) unsafe fn release(data: *mut u8) {
     if data as usize <= HEADER {
         return;
     }

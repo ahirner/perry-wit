@@ -65,56 +65,61 @@ const _: () = {
 mod imports {
     #[link(wasm_import_module = "__perry_helper")]
     unsafe extern "C" {
-        pub fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mut u8;
-        pub fn perry_buffer_resize(
+        pub(crate) fn perry_alloc_shaped(size: u32, shape: *const u32) -> *mut u8;
+        pub(crate) fn perry_buffer_resize(
             old: *mut u8,
             old_size: u32,
             new_size: u32,
             initialized: u32,
             shape: *const u32,
         ) -> *mut u8;
-        pub fn perry_operation_pin(owner: *mut u8) -> u32;
-        pub fn perry_operation_unpin(token: u32);
-        pub fn perry_promise_new_typed(references: u32) -> *mut u8;
-        pub fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8;
-        pub fn perry_alloc(size: u32) -> *mut u8;
-        pub fn perry_cabi_release(data: *mut u8);
-        pub fn perry_string_offset(string: *mut u8, position: u32) -> u32;
-        pub fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
-        pub fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8;
-        pub fn perry_raise(kind: u32, message: *mut u8);
-        pub fn perry_status() -> u32;
-        pub fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
-        pub fn perry_task_current() -> *mut u8;
-        pub fn perry_task_resume(task: *mut u8);
-        pub fn perry_promise_resolve(promise: *mut u8, value: u64);
-        pub fn perry_promise_reject(promise: *mut u8, status: i32);
-        pub fn perry_task_join(waitable: u32);
-        pub fn perry_write_acknowledged(fd: u32, data: *const u8, len: u32, promise: *mut u8);
+        pub(crate) fn perry_operation_pin(owner: *mut u8) -> u32;
+        pub(crate) fn perry_operation_unpin(token: u32);
+        pub(crate) fn perry_promise_new_typed(references: u32) -> *mut u8;
+        pub(crate) fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8;
+        pub(crate) fn perry_alloc(size: u32) -> *mut u8;
+        pub(crate) fn perry_cabi_release(data: *mut u8);
+        pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
+        pub(crate) fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
+        pub(crate) fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8;
+        pub(crate) fn perry_raise(kind: u32, message: *mut u8);
+        pub(crate) fn perry_status() -> u32;
+        pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
+        pub(crate) fn perry_task_current() -> *mut u8;
+        pub(crate) fn perry_task_resume(task: *mut u8);
+        pub(crate) fn perry_promise_resolve(promise: *mut u8, value: u64);
+        pub(crate) fn perry_promise_reject(promise: *mut u8, status: i32);
+        pub(crate) fn perry_task_join(waitable: u32);
+        pub(crate) fn perry_write_acknowledged(
+            fd: u32,
+            data: *const u8,
+            len: u32,
+            promise: *mut u8,
+        );
         /// ECMAScript `Number::toString` of `value` into 40 bytes at `output` (number helper).
-        pub fn number_format(value: f64, output: *mut u8) -> u32;
+        pub(crate) fn number_format(value: f64, output: *mut u8) -> u32;
     }
 
     #[link(wasm_import_module = "$root")]
     unsafe extern "C" {
         #[link_name = "[waitable-join]"]
-        pub fn waitable_join(waitable: u32, set: u32);
+        pub(crate) fn waitable_join(waitable: u32, set: u32);
         #[link_name = "[subtask-drop]"]
-        pub fn subtask_drop(subtask: u32);
+        pub(crate) fn subtask_drop(subtask: u32);
         #[link_name = "[subtask-cancel]"]
-        pub fn subtask_cancel(subtask: u32) -> u32;
+        pub(crate) fn subtask_cancel(subtask: u32) -> u32;
     }
 
     #[link(wasm_import_module = "wasi:random/random@0.3.0")]
     unsafe extern "C" {
         #[link_name = "get-random-u64"]
-        pub fn random_u64() -> u64;
+        pub(crate) fn random_u64() -> u64;
     }
 
     #[link(wasm_import_module = "wasi:random/insecure@0.3.0")]
     unsafe extern "C" {
         #[link_name = "get-insecure-random-u64"]
-        pub fn insecure_random_u64() -> u64;
+        pub(crate) fn insecure_random_u64() -> u64;
     }
 }
 
@@ -122,7 +127,7 @@ mod imports {
 #[allow(clippy::missing_safety_doc)]
 mod imports {
     extern crate std;
-    pub use perry_runtime::{
+    pub(crate) use perry_runtime::{
         array::perry_array_new_typed,
         exception::{perry_raise, perry_status},
         host::{subtask_cancel, subtask_drop, waitable_join},
@@ -138,22 +143,22 @@ mod imports {
         string::{perry_string_offset, perry_string_view},
     };
 
-    pub unsafe fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
+    pub(crate) unsafe fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
         unsafe { perry_runtime::string::perry_string_adopt(data, len) }
     }
-    pub unsafe fn perry_task_resume(task: *mut u8) {
+    pub(crate) unsafe fn perry_task_resume(task: *mut u8) {
         unsafe { perry_runtime::region::perry_task_resume(task.cast()) };
     }
-    pub unsafe fn number_format(value: f64, output: *mut u8) -> u32 {
+    pub(crate) unsafe fn number_format(value: f64, output: *mut u8) -> u32 {
         // Rust's shortest round-trip notation; equal to ECMAScript's for test values.
         let text = std::format!("{value}");
         unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), output, text.len()) };
         text.len() as u32
     }
-    pub unsafe fn random_u64() -> u64 {
+    pub(crate) unsafe fn random_u64() -> u64 {
         0x0123_4567_89ab_cdef
     }
-    pub unsafe fn insecure_random_u64() -> u64 {
+    pub(crate) unsafe fn insecure_random_u64() -> u64 {
         0xfedc_ba98_7654_3210
     }
 }

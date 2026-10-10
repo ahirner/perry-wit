@@ -170,7 +170,7 @@ fn fold_op(ctx: &Context, op: Ptr<Operation>) -> Option<Folded> {
 }
 
 /// Fold every operation of `root`'s functions once; see the module documentation.
-pub fn fold(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+pub(crate) fn fold(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     let mut status = IRStatus::Unchanged;
     let mut changed_branches = false;
     for function in functions(root, ctx) {

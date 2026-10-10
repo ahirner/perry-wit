@@ -14,3 +14,6 @@ collectible = ["talc/counters"]
 [dependencies]
 libm = "0.2"
 talc = { version = "5.1.1", default-features = false }
+
+[lints]
+workspace = true

@@ -193,7 +193,7 @@ pub struct Counters {
 /// Shapes are static arrays `[stride, number_of_offsets, offsets…]`. A zero stride traces
 /// one object; a nonzero stride repeats the offsets across its allocation (array storage).
 /// Offsets identify native pointer fields, never integer or floating-point slots.
-pub struct Collector {
+pub(crate) struct Collector {
     pages: Vec<Option<Box<Page>>>,
     directory: Directory,
     available: [Vec<usize>; CLASSES],
@@ -213,7 +213,7 @@ impl Default for Collector {
 }
 
 impl Collector {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             pages: Vec::new(),
             directory: Directory::new(),
@@ -239,7 +239,7 @@ impl Collector {
     /// # Safety
     /// `shape` is null or a static shape as documented on [Collector]. All described pointer
     /// fields must lie inside each object/repetition and be initialized before collection.
-    pub unsafe fn allocate(&mut self, size: usize, shape: *const u32) -> *mut u8 {
+    pub(crate) unsafe fn allocate(&mut self, size: usize, shape: *const u32) -> *mut u8 {
         let size = size.max(1);
         let required = size.checked_add(HEADER).expect("allocation size overflow");
         let cell = if required <= MAX_SMALL {
@@ -326,7 +326,7 @@ impl Collector {
     /// # Safety
     /// `object` is the exact start of a live allocation, with no interior aliases or host borrows.
     /// Its shape remains valid for `size` bytes. Failure preserves its pointer, size and contents.
-    pub unsafe fn grow_in_place(&mut self, object: *mut u8, size: usize) -> bool {
+    pub(crate) unsafe fn grow_in_place(&mut self, object: *mut u8, size: usize) -> bool {
         let page = self.directory.get(object as usize);
         if page.is_null() {
             return false;
@@ -390,7 +390,7 @@ impl Collector {
         true
     }
 
-    pub fn due(&self) -> bool {
+    pub(crate) fn due(&self) -> bool {
         if self.volume >= self.threshold {
             return true;
         }
@@ -400,11 +400,11 @@ impl Collector {
         }
         false
     }
-    pub fn counters(&self) -> Counters {
+    pub(crate) fn counters(&self) -> Counters {
         self.counters
     }
 
-    pub fn set_poison(&mut self, enabled: bool) {
+    pub(crate) fn set_poison(&mut self, enabled: bool) {
         self.poison = enabled;
         for page in self.pages.iter_mut().flatten() {
             page.poison = enabled || cfg!(test);
@@ -415,7 +415,7 @@ impl Collector {
     ///
     /// # Safety
     /// `object` is an exact allocation pointer with no remaining aliases or retained children.
-    pub unsafe fn release_frame(&mut self, object: *mut u8) {
+    pub(crate) unsafe fn release_frame(&mut self, object: *mut u8) {
         let page = self.directory.get(object as usize);
         assert!(!page.is_null(), "frame has no page");
         let page = unsafe { &mut *page };
@@ -481,12 +481,14 @@ impl Collector {
     /// # Safety
     /// All live pointer fields satisfy their allocation's shape. No unregistered temporary
     /// pointer may be needed after this explicit safe point.
-    pub unsafe fn collect(&mut self, roots: &[*mut u8]) {
+    #[cfg(test)]
+    pub(crate) unsafe fn collect(&mut self, roots: &[*mut u8]) {
         unsafe { self.collect_with(roots, |_| {}) };
     }
 
     /// The exact allocation was marked in this collection. Only valid between marking and sweep.
-    pub fn is_marked(&self, object: *mut u8) -> bool {
+    #[cfg(any(feature = "collectible", not(target_arch = "wasm32")))]
+    pub(crate) fn is_marked(&self, object: *mut u8) -> bool {
         let page = self.directory.get(object as usize);
         if page.is_null() {
             return false;
@@ -505,7 +507,7 @@ impl Collector {
     ///
     /// # Safety
     /// Same shape and root contract as [`Self::collect`].
-    pub unsafe fn collect_with(&mut self, roots: &[*mut u8], finalize: impl FnOnce(&Self)) {
+    pub(crate) unsafe fn collect_with(&mut self, roots: &[*mut u8], finalize: impl FnOnce(&Self)) {
         for page in self.pages.iter_mut().flatten() {
             // Finish a previous sweep before resetting its marks.
             page.sweep();

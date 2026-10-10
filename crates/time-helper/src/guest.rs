@@ -13,7 +13,7 @@ use memory::GuestRange;
 /// # Safety
 /// Input must be initialized immutable guest-owned storage outside helper stack/data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_date_parse(input: u32, length: u32) -> f64 {
+pub(crate) unsafe extern "C" fn time_date_parse(input: u32, length: u32) -> f64 {
     let Ok(input) = GuestRange::new(input, length) else {
         return f64::NAN;
     };
@@ -24,7 +24,7 @@ pub unsafe extern "C" fn time_date_parse(input: u32, length: u32) -> f64 {
 /// # Safety
 /// Output must be exclusively guest-owned outside helper stack/data during this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity: u32) -> u64 {
     // SAFETY: the caller owns output; transform checks its guest-memory range.
     unsafe {
         transform(0, 0, output, capacity, |_, output| {
@@ -37,7 +37,7 @@ pub unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity: u32) -
 /// Input/output must be guest-owned, initialized/exclusive respectively, outside
 /// helper stack/data, and remain valid during this single-threaded call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_instant_parse(input: u32, length: u32, output: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_instant_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; transform checks ranges and overlap.
     unsafe {
         transform(input, length, output, 16, |input, output| {
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn time_instant_parse(input: u32, length: u32, output: u32
 /// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_utc_parse(input: u32, length: u32, output: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_utc_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
         transform(input, length, output, 16, |input, output| {
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn time_utc_parse(input: u32, length: u32, output: u32) ->
 /// # Safety
 /// Output must be exclusively guest-owned outside helper stack/data during this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) -> u64 {
     // SAFETY: no input range; output ownership is the caller's contract.
     unsafe {
         transform(0, 0, output, 16, |_, output| {
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) -> u64 {
 /// # Safety
 /// Input must be initialized immutable guest-owned storage outside helper stack/data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_instant_ms(input: u32) -> f64 {
+pub(crate) unsafe extern "C" fn time_instant_ms(input: u32) -> f64 {
     let Ok(input) = GuestRange::new(input, 16) else {
         return f64::NAN;
     };
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn time_instant_ms(input: u32) -> f64 {
 /// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_instant_format(input: u32, output: u32, capacity: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_instant_format(input: u32, output: u32, capacity: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
         transform(input, 16, output, capacity, |input, output| {
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn time_instant_format(input: u32, output: u32, capacity: 
 /// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_plain_parse(input: u32, length: u32, output: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_plain_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
         transform(input, length, output, 16, |input, output| {
@@ -115,7 +115,7 @@ pub unsafe extern "C" fn time_plain_parse(input: u32, length: u32, output: u32) 
 /// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_plain_date_parse(input: u32, length: u32, output: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_plain_date_parse(input: u32, length: u32, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
         transform(input, length, output, 16, |input, output| {
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn time_plain_date_parse(input: u32, length: u32, output: 
 /// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_plain_add_days(input: u32, days: f64, output: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_plain_add_days(input: u32, days: f64, output: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
         transform(input, 16, output, 16, |input, output| {
@@ -144,7 +144,7 @@ pub unsafe extern "C" fn time_plain_add_days(input: u32, days: f64, output: u32)
 /// # Safety
 /// Input must be initialized immutable guest-owned storage outside helper stack/data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_plain_part(input: u32, part: u32) -> f64 {
+pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32) -> f64 {
     let Ok(input) = GuestRange::new(input, 16) else {
         return f64::NAN;
     };
@@ -172,7 +172,7 @@ pub unsafe extern "C" fn time_plain_part(input: u32, part: u32) -> f64 {
 /// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_plain_format(input: u32, output: u32, capacity: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_plain_format(input: u32, output: u32, capacity: u32) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
         transform(input, 16, output, capacity, |input, output| {
@@ -184,7 +184,11 @@ pub unsafe extern "C" fn time_plain_format(input: u32, output: u32, capacity: u3
 /// # Safety
 /// Same caller-owned, disjoint memory contract as time_instant_parse.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn time_plain_date_format(input: u32, output: u32, capacity: u32) -> u64 {
+pub(crate) unsafe extern "C" fn time_plain_date_format(
+    input: u32,
+    output: u32,
+    capacity: u32,
+) -> u64 {
     // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
     unsafe {
         transform(input, 16, output, capacity, |input, output| {
@@ -195,13 +199,13 @@ pub unsafe extern "C" fn time_plain_date_format(input: u32, output: u32, capacit
 
 /// UTC accessor; invalid times produce NaN.
 #[unsafe(no_mangle)]
-pub extern "C" fn time_date_part(ms: f64, part: u32) -> f64 {
+pub(crate) extern "C" fn time_date_part(ms: f64, part: u32) -> f64 {
     crate::date_part(ms, part)
 }
 
 /// UTC construction with overflowing calendar fields.
 #[unsafe(no_mangle)]
-pub extern "C" fn time_date_utc(
+pub(crate) extern "C" fn time_date_utc(
     year: f64,
     month: f64,
     day: f64,
@@ -215,7 +219,7 @@ pub extern "C" fn time_date_utc(
 
 /// Pure setter calculation; compiled code owns and updates the Date object.
 #[unsafe(no_mangle)]
-pub extern "C" fn time_date_set(
+pub(crate) extern "C" fn time_date_set(
     time: f64,
     part: u32,
     count: u32,

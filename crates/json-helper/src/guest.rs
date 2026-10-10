@@ -17,7 +17,7 @@ use memory::GuestRange;
 /// Nonempty inputs must be initialized guest-owned memory outside the helper's
 /// stack/data, and remain unchanged for this call. The guest must be single-threaded.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn json_measure(pointer: u32, length: u32) -> u64 {
+pub(crate) unsafe extern "C" fn json_measure(pointer: u32, length: u32) -> u64 {
     let Ok(input) = GuestRange::new(pointer, length) else {
         return failure(6, 0);
     };
@@ -38,7 +38,7 @@ pub unsafe extern "C" fn json_measure(pointer: u32, length: u32) -> u64 {
 /// must be initialized and immutable; output must be exclusively writable during
 /// this single-threaded call. Checked disjointness prevents input/output aliasing.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn json_populate(
+pub(crate) unsafe extern "C" fn json_populate(
     pointer: u32,
     length: u32,
     output: u32,

@@ -12,3 +12,6 @@ thiserror = "2"
 [dev-dependencies]
 expect-test = "1"
 regex = "1"
+
+[lints]
+workspace = true

@@ -1653,10 +1653,8 @@ impl<'s> FunctionLowering<'s> {
                     .data
                     .string("AbortSignal cancellation is limited to the current export task");
                 let scope_error = self.i32_const(ctx, scope_error as i32);
-                {
-                    self.runtime_void(ctx, Runtime::Abort, vec![args[0], message, scope_error]);
-                    None
-                }
+                self.runtime_void(ctx, Runtime::Abort, vec![args[0], message, scope_error]);
+                None
             }
             Intrinsic::AbortAborted => Some(self.runtime(ctx, Runtime::AbortAborted, args)),
             Intrinsic::JsonIsUndefined => Some(self.num(ctx, NumOpcode::I32Eqz, args)),

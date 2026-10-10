@@ -19,47 +19,58 @@ pub(crate) mod helper {
     #[cfg(target_arch = "wasm32")]
     #[link(wasm_import_module = "__perry_helper")]
     unsafe extern "C" {
-        pub fn fetch_header_name(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u32;
-        pub fn fetch_header_value(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u32;
-        pub fn fetch_method(input: *const u8, len: u32) -> u32;
-        pub fn fetch_status_text(input: *const u8, len: u32) -> u32;
-        pub fn fetch_url(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u32;
-        pub fn fetch_url_value(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u32;
-        pub fn json_measure(input: *const u8, len: u32) -> u64;
-        pub fn json_populate(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u64;
+        pub(crate) fn fetch_header_name(
+            input: *const u8,
+            len: u32,
+            output: *mut u8,
+            cap: u32,
+        ) -> u32;
+        pub(crate) fn fetch_header_value(
+            input: *const u8,
+            len: u32,
+            output: *mut u8,
+            cap: u32,
+        ) -> u32;
+        pub(crate) fn fetch_method(input: *const u8, len: u32) -> u32;
+        pub(crate) fn fetch_status_text(input: *const u8, len: u32) -> u32;
+        pub(crate) fn fetch_url(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u32;
+        pub(crate) fn fetch_url_value(input: *const u8, len: u32, output: *mut u8, cap: u32)
+        -> u32;
+        pub(crate) fn json_measure(input: *const u8, len: u32) -> u64;
+        pub(crate) fn json_populate(input: *const u8, len: u32, output: *mut u8, cap: u32) -> u64;
     }
 
     /// The fetch helper exists only in linked modules; host builds never call it.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::missing_safety_doc)]
     mod host {
-        pub unsafe fn fetch_header_name(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
+        pub(crate) unsafe fn fetch_header_name(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
             unreachable!("the fetch helper runs in linked modules")
         }
-        pub unsafe fn fetch_header_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
+        pub(crate) unsafe fn fetch_header_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
             unreachable!("the fetch helper runs in linked modules")
         }
-        pub unsafe fn fetch_method(_: *const u8, _: u32) -> u32 {
+        pub(crate) unsafe fn fetch_method(_: *const u8, _: u32) -> u32 {
             unreachable!("the fetch helper runs in linked modules")
         }
-        pub unsafe fn fetch_status_text(_: *const u8, _: u32) -> u32 {
+        pub(crate) unsafe fn fetch_status_text(_: *const u8, _: u32) -> u32 {
             unreachable!("the fetch helper runs in linked modules")
         }
-        pub unsafe fn fetch_url(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
+        pub(crate) unsafe fn fetch_url(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
             unreachable!("the fetch helper runs in linked modules")
         }
-        pub unsafe fn fetch_url_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
+        pub(crate) unsafe fn fetch_url_value(_: *const u8, _: u32, _: *mut u8, _: u32) -> u32 {
             unreachable!("the fetch helper runs in linked modules")
         }
-        pub unsafe fn json_measure(_: *const u8, _: u32) -> u64 {
+        pub(crate) unsafe fn json_measure(_: *const u8, _: u32) -> u64 {
             unreachable!("the JSON helper runs in linked modules")
         }
-        pub unsafe fn json_populate(_: *const u8, _: u32, _: *mut u8, _: u32) -> u64 {
+        pub(crate) unsafe fn json_populate(_: *const u8, _: u32, _: *mut u8, _: u32) -> u64 {
             unreachable!("the JSON helper runs in linked modules")
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    pub use host::*;
+    pub(crate) use host::*;
 }
 
 mod url;

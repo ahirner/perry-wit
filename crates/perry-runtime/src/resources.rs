@@ -16,7 +16,7 @@ enum State {
 }
 
 #[repr(C)]
-pub struct Resource {
+pub(crate) struct Resource {
     kind: u32,
     handle: u32,
     state: State,
@@ -40,7 +40,7 @@ enum Phase {
     Committed,
 }
 
-pub struct Scope {
+pub(crate) struct Scope {
     phase: Phase,
     task: *mut Task,
     movements: Vec<Movement>,
@@ -192,7 +192,7 @@ fn readable(owner: &Resource, task: *mut Task) -> bool {
 
 /// Adopt a canonical handle. Mode: owned (0), borrowed handle (1), borrowed representation (2).
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_resource_new(kind: u32, handle: u32, mode: u32) -> *mut Resource {
+pub(crate) extern "C" fn perry_resource_new(kind: u32, handle: u32, mode: u32) -> *mut Resource {
     let state = match mode {
         0 => State::Owned,
         1 | 2 => State::Borrowed {
@@ -219,14 +219,14 @@ pub extern "C" fn perry_resource_new(kind: u32, handle: u32, mode: u32) -> *mut 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_resource_scope_new() -> *mut Scope {
+pub(crate) extern "C" fn perry_resource_scope_new() -> *mut Scope {
     registry().scope(crate::region::perry_task_current())
 }
 
 /// # Safety
 /// Scope is preparing and owner is a live descriptor of the declared resource kind.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_resource_lower(
+pub(crate) unsafe extern "C" fn perry_resource_lower(
     scope: *mut Scope,
     owner: *mut Resource,
     owned: u32,
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn perry_resource_lower(
 /// # Safety
 /// Owner is a live descriptor; access is checked against its task and ownership state.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_resource_handle(owner: *mut Resource) -> u32 {
+pub(crate) unsafe extern "C" fn perry_resource_handle(owner: *mut Resource) -> u32 {
     let owner = unsafe { &*owner };
     if !readable(owner, crate::region::perry_task_current()) {
         invalid();
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn perry_resource_handle(owner: *mut Resource) -> u32 {
 /// # Safety
 /// Owner is a live descriptor.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_resource_is_rep(owner: *mut Resource) -> u32 {
+pub(crate) unsafe extern "C" fn perry_resource_is_rep(owner: *mut Resource) -> u32 {
     u32::from(matches!(
         unsafe { (*owner).state },
         State::Borrowed {
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn perry_resource_is_rep(owner: *mut Resource) -> u32 {
 /// # Safety
 /// Owner is a live descriptor of the declared kind.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_resource_drop(owner: *mut Resource) {
+pub(crate) unsafe extern "C" fn perry_resource_drop(owner: *mut Resource) {
     let owner = unsafe { &mut *owner };
     if owner.state != State::Owned || owner.borrows != 0 {
         invalid();
@@ -299,7 +299,7 @@ pub unsafe extern "C" fn perry_resource_drop(owner: *mut Resource) {
 /// # Safety
 /// Every argument validated successfully and scope has not been committed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_resource_scope_commit(scope: *mut Scope) {
+pub(crate) unsafe extern "C" fn perry_resource_scope_commit(scope: *mut Scope) {
     let scope_ref = unsafe { &mut *scope };
     assert!(scope_ref.phase == Phase::Preparing);
     for movement in &scope_ref.movements {
@@ -315,13 +315,13 @@ pub unsafe extern "C" fn perry_resource_scope_commit(scope: *mut Scope) {
 /// # Safety
 /// Scope is live; acknowledgement has arrived if it was committed to a host call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_resource_scope_finish(scope: *mut Scope) {
+pub(crate) unsafe extern "C" fn perry_resource_scope_finish(scope: *mut Scope) {
     unsafe { registry().finish(scope) };
 }
 
 /// Zero means no destruction remains; otherwise high bits contain kind+1 and low bits handle.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_resource_drop_next() -> u64 {
+pub(crate) extern "C" fn perry_resource_drop_next() -> u64 {
     registry().drops.pop().map_or(0, |drop| {
         (u64::from(drop.kind) + 1) << 32 | u64::from(drop.handle)
     })
@@ -329,7 +329,7 @@ pub extern "C" fn perry_resource_drop_next() -> u64 {
 
 /// End inbound borrows while host destructors may still be called, before canonical return.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_resource_task_return() {
+pub(crate) extern "C" fn perry_resource_task_return() {
     unsafe { registry().leave(crate::region::perry_task_current()) };
 }
 

@@ -22,13 +22,13 @@ use wasmtime_wasi::{
 };
 
 #[derive(Clone, Copy, Debug)]
-pub enum Kind {
+pub(crate) enum Kind {
     Read,
     Write,
     Directory,
 }
 #[derive(Clone, Copy, Debug)]
-pub enum Behavior {
+pub(crate) enum Behavior {
     Success,
     FinishError,
     BlockData,
@@ -39,7 +39,7 @@ pub enum Behavior {
     EarlyFailure,
 }
 #[derive(Default)]
-pub struct Observations {
+pub(crate) struct Observations {
     pub ready: AtomicBool,
     pub started: AtomicUsize,
     pub cancelled: AtomicUsize,
@@ -208,7 +208,7 @@ impl Drop for Completion {
     }
 }
 
-pub fn install(
+pub(crate) fn install(
     linker: &mut Linker<super::Host>,
     kind: Kind,
     behavior: Behavior,

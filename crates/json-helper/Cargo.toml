@@ -7,3 +7,6 @@ edition = "2024"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+
+[lints]
+workspace = true

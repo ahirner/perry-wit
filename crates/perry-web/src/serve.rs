@@ -20,9 +20,9 @@ mod http {
     #[link(wasm_import_module = "wasi:http/types@0.3.0")]
     unsafe extern "C" {
         #[link_name = "[constructor]fields"]
-        pub fn fields_new() -> u32;
+        pub(super) fn fields_new() -> u32;
         #[link_name = "[method]fields.append"]
-        pub fn fields_append(
+        pub(super) fn fields_append(
             fields: u32,
             name: *const u8,
             nlen: u32,
@@ -31,43 +31,43 @@ mod http {
             result: *mut u8,
         );
         #[link_name = "[method]fields.copy-all"]
-        pub fn fields_copy_all(fields: u32, result: *mut u32);
+        pub(super) fn fields_copy_all(fields: u32, result: *mut u32);
         #[link_name = "[resource-drop]fields"]
-        pub fn fields_drop(fields: u32);
+        pub(super) fn fields_drop(fields: u32);
 
         #[link_name = "[method]request.get-method"]
-        pub fn method(request: u32, result: *mut u8);
+        pub(super) fn method(request: u32, result: *mut u8);
         #[link_name = "[method]request.get-scheme"]
-        pub fn scheme(request: u32, result: *mut u8);
+        pub(super) fn scheme(request: u32, result: *mut u8);
         #[link_name = "[method]request.get-authority"]
-        pub fn authority(request: u32, result: *mut u8);
+        pub(super) fn authority(request: u32, result: *mut u8);
         #[link_name = "[method]request.get-path-with-query"]
-        pub fn path(request: u32, result: *mut u8);
+        pub(super) fn path(request: u32, result: *mut u8);
         #[link_name = "[method]request.get-headers"]
-        pub fn headers(request: u32) -> u32;
+        pub(super) fn headers(request: u32) -> u32;
         #[link_name = "[future-new-0][static]request.consume-body"]
-        pub fn outcome_new() -> u64;
+        pub(super) fn outcome_new() -> u64;
         #[link_name = "[static]request.consume-body"]
-        pub fn consume_body(request: u32, outcome: u32, result: *mut u32);
+        pub(super) fn consume_body(request: u32, outcome: u32, result: *mut u32);
         #[link_name = "[async-lower][future-write-0][static]request.consume-body"]
-        pub fn outcome_write(future: u32, value: *const u8) -> u32;
+        pub(super) fn outcome_write(future: u32, value: *const u8) -> u32;
         #[link_name = "[future-cancel-write-0][static]request.consume-body"]
-        pub fn outcome_cancel(future: u32) -> u32;
+        pub(super) fn outcome_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-writable-0][static]request.consume-body"]
-        pub fn outcome_drop(future: u32);
+        pub(super) fn outcome_drop(future: u32);
         #[link_name = "[async-lower][future-read-2][static]request.consume-body"]
-        pub fn end_read(future: u32, result: *mut u8) -> u32;
+        pub(super) fn end_read(future: u32, result: *mut u8) -> u32;
         #[link_name = "[future-cancel-read-2][static]request.consume-body"]
-        pub fn end_cancel(future: u32) -> u32;
+        pub(super) fn end_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-readable-2][static]request.consume-body"]
-        pub fn end_drop(future: u32);
+        pub(super) fn end_drop(future: u32);
 
         #[link_name = "[future-new-1][static]response.new"]
-        pub fn trailers_new() -> u64;
+        pub(super) fn trailers_new() -> u64;
         #[link_name = "[stream-new-0][static]response.new"]
-        pub fn contents_new() -> u64;
+        pub(super) fn contents_new() -> u64;
         #[link_name = "[static]response.new"]
-        pub fn response_new(
+        pub(super) fn response_new(
             headers: u32,
             has_contents: u32,
             contents: u32,
@@ -75,25 +75,25 @@ mod http {
             result: *mut u32,
         );
         #[link_name = "[method]response.set-status-code"]
-        pub fn set_status(response: u32, status: u32) -> u32;
+        pub(super) fn set_status(response: u32, status: u32) -> u32;
         #[link_name = "[async-lower][stream-write-0][static]response.new"]
-        pub fn contents_write(stream: u32, data: *const u8, len: u32) -> u32;
+        pub(super) fn contents_write(stream: u32, data: *const u8, len: u32) -> u32;
         #[link_name = "[stream-cancel-write-0][static]response.new"]
-        pub fn contents_cancel(stream: u32) -> u32;
+        pub(super) fn contents_cancel(stream: u32) -> u32;
         #[link_name = "[stream-drop-writable-0][static]response.new"]
-        pub fn contents_drop(stream: u32);
+        pub(super) fn contents_drop(stream: u32);
         #[link_name = "[async-lower][future-write-1][static]response.new"]
-        pub fn trailers_write(future: u32, value: *const u8) -> u32;
+        pub(super) fn trailers_write(future: u32, value: *const u8) -> u32;
         #[link_name = "[future-cancel-write-1][static]response.new"]
-        pub fn trailers_cancel(future: u32) -> u32;
+        pub(super) fn trailers_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-writable-1][static]response.new"]
-        pub fn trailers_drop(future: u32);
+        pub(super) fn trailers_drop(future: u32);
         #[link_name = "[async-lower][future-read-2][static]response.new"]
-        pub fn transmit_read(future: u32, result: *mut u8) -> u32;
+        pub(super) fn transmit_read(future: u32, result: *mut u8) -> u32;
         #[link_name = "[future-cancel-read-2][static]response.new"]
-        pub fn transmit_cancel(future: u32) -> u32;
+        pub(super) fn transmit_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-readable-2][static]response.new"]
-        pub fn transmit_drop(future: u32);
+        pub(super) fn transmit_drop(future: u32);
     }
 
     /// `wasi:http` exists in linked modules only; host builds never call it.
@@ -102,7 +102,7 @@ mod http {
     mod host {
         macro_rules! absent {
             ($($name:ident($($arg:ty),*) $(-> $result:ty)?;)*) => {
-                $(pub unsafe fn $name($(_: $arg),*) $(-> $result)? {
+                $(pub(crate) unsafe fn $name($(_: $arg),*) $(-> $result)? {
                     unreachable!("wasi:http runs in linked modules")
                 })*
             };
@@ -141,7 +141,7 @@ mod http {
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    pub use host::*;
+    pub(super) use host::*;
 }
 
 /// Result areas: `result<option<trailers>, error-code>` and friends, the payload at 8.
@@ -238,7 +238,7 @@ fn host_string(area: *const u8, offset: usize) -> *mut u8 {
 
 /// `requestInfo(request)`: read the request's parts and start reading its body.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_request(request: f64) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_request(request: f64) -> *mut u8 {
     let request = request as u32;
     let area = alloc(RESULT_SIZE);
     let op = perry_abi::object!(Serve; method, method_other, scheme, scheme_other, authority, path, headers, body, ended, data, transmitted, zero);
@@ -323,29 +323,29 @@ pub extern "C" fn web_serve_request(request: f64) -> *mut u8 {
 
 /// `await requestBody(incoming)`: the whole body.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_body(s: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_body(s: *mut u8) -> *mut u8 {
     let promise = promise_new();
     drain(serve(s).body, Form::Bytes, promise);
     promise
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_method(s: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_method(s: *mut u8) -> *mut u8 {
     serve(s).method
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_method_other(s: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_method_other(s: *mut u8) -> *mut u8 {
     serve(s).method_other
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_has_scheme(s: *mut u8) -> u32 {
+pub(crate) extern "C" fn web_serve_has_scheme(s: *mut u8) -> u32 {
     u32::from(!serve(s).scheme.is_null())
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_scheme(s: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_scheme(s: *mut u8) -> *mut u8 {
     let scheme = serve(s).scheme;
     if scheme.is_null() {
         from_static("")
@@ -355,22 +355,22 @@ pub extern "C" fn web_serve_scheme(s: *mut u8) -> *mut u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_scheme_other(s: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_scheme_other(s: *mut u8) -> *mut u8 {
     serve(s).scheme_other
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_authority(s: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_authority(s: *mut u8) -> *mut u8 {
     serve(s).authority
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_path(s: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_path(s: *mut u8) -> *mut u8 {
     serve(s).path
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_header_count(s: *mut u8) -> f64 {
+pub(crate) extern "C" fn web_serve_header_count(s: *mut u8) -> f64 {
     f64::from(serve(s).header_count)
 }
 
@@ -384,14 +384,14 @@ fn header(s: *mut u8, index: f64) -> [u32; 4] {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_header_name(s: *mut u8, index: f64) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_header_name(s: *mut u8, index: f64) -> *mut u8 {
     let [data, len, ..] = header(s, index);
     // SAFETY: the host allocated the name in the task region.
     unsafe { perry_abi::adopt(data as usize as *mut u8, len) }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_header_value(s: *mut u8, index: f64) -> *mut u8 {
+pub(crate) extern "C" fn web_serve_header_value(s: *mut u8, index: f64) -> *mut u8 {
     let [.., data, len] = header(s, index);
     bytes_view(len, data as usize as *mut u8)
 }
@@ -401,7 +401,7 @@ pub extern "C" fn web_serve_header_value(s: *mut u8, index: f64) -> *mut u8 {
 /// # Safety
 /// `name` must be a string and `value` a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn web_serve_add_header(s: *mut u8, name: *mut u8, value: *mut u8) {
+pub(crate) unsafe extern "C" fn web_serve_add_header(s: *mut u8, name: *mut u8, value: *mut u8) {
     let s = serve(s);
     // SAFETY: guaranteed by the caller.
     let (name, value) = unsafe { (bytes(name), view_bytes(value)) };
@@ -431,7 +431,7 @@ pub unsafe extern "C" fn web_serve_add_header(s: *mut u8, name: *mut u8, value: 
 /// # Safety
 /// `body` must be a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn web_serve_respond(s: *mut u8, status: f64, body: *mut u8) -> f64 {
+pub(crate) unsafe extern "C" fn web_serve_respond(s: *mut u8, status: f64, body: *mut u8) -> f64 {
     let s = serve(s);
     // SAFETY: guaranteed by the caller; the bytes live in the task region until written.
     let body = unsafe { view_bytes(body) };
@@ -596,7 +596,7 @@ fn ended(s: &mut Serve) {
 /// A callback event of the current task: advance the exchange waiting on `handle`. Returns
 /// 1 if it was one of an exchange.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_event(event: u32, handle: u32, code: u32) -> u32 {
+pub(crate) extern "C" fn web_serve_event(event: u32, handle: u32, code: u32) -> u32 {
     let Some(s) = current() else { return 0 };
     match event {
         perry_abi::EVENT_STREAM_WRITE if s.contents == handle => {
@@ -617,13 +617,13 @@ const EVENT_FUTURE_WRITE: u32 = 5;
 
 /// Whether the current task already returned its response.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_returned() -> u32 {
+pub(crate) extern "C" fn web_serve_returned() -> u32 {
     u32::from(current().is_some_and(|s| s.returned))
 }
 
 /// Note that the current task returned its response.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_mark_returned() {
+pub(crate) extern "C" fn web_serve_mark_returned() {
     if let Some(s) = current() {
         s.returned = true;
     }
@@ -632,14 +632,14 @@ pub extern "C" fn web_serve_mark_returned() {
 /// Whether the current task still writes its response (body, trailers) or waits for its
 /// transmission.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_busy() -> u32 {
+pub(crate) extern "C" fn web_serve_busy() -> u32 {
     u32::from(current().is_some_and(|s| s.contents != 0 || s.trailers != 0 || s.transmit != 0))
 }
 
 /// At the end of the current task: cancel what its exchange still waits for, drop its
 /// handles and forget it.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_serve_close() {
+pub(crate) extern "C" fn web_serve_close() {
     let task = perry_abi::task();
     let mut link: *mut *mut Serve = ops();
     // SAFETY: listed exchanges are live; the handles are theirs.

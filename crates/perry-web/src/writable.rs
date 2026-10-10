@@ -20,7 +20,7 @@ struct Writer {
 
 /// `Writable.toWeb(process.stdout)` (`fd` 0) or `process.stderr` (1).
 #[unsafe(no_mangle)]
-pub extern "C" fn web_writable_new(fd: u32) -> *mut u8 {
+pub(crate) extern "C" fn web_writable_new(fd: u32) -> *mut u8 {
     let stream = alloc(core::mem::size_of::<Writable>() as u32) as *mut Writable;
     // SAFETY: a fresh block.
     unsafe {
@@ -35,14 +35,14 @@ pub extern "C" fn web_writable_new(fd: u32) -> *mut u8 {
 
 /// `stream.locked`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_writable_locked(stream: *mut u8) -> u32 {
+pub(crate) extern "C" fn web_writable_locked(stream: *mut u8) -> u32 {
     // SAFETY: compiled code passes writable streams.
     unsafe { (*(stream as *const Writable)).locked }
 }
 
 /// `stream.getWriter()`; `TypeError` while another writer holds the lock.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_writable_get_writer(stream: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_writable_get_writer(stream: *mut u8) -> *mut u8 {
     let stream = stream as *mut Writable;
     // SAFETY: compiled code passes writable streams.
     unsafe {
@@ -96,7 +96,11 @@ fn bound(writer: *mut u8, promise: *mut u8) -> Option<&'static mut Writable> {
 /// # Safety
 /// `writer` must be a writer and `view` a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn web_writer_write(writer: *mut u8, view: *mut u8, leased: u32) -> *mut u8 {
+pub(crate) unsafe extern "C" fn web_writer_write(
+    writer: *mut u8,
+    view: *mut u8,
+    leased: u32,
+) -> *mut u8 {
     let promise = if leased != 0 {
         // SAFETY: compiled code passes writers.
         let previous = unsafe { &mut (*(writer as *mut Writer)).promise };
@@ -115,7 +119,7 @@ pub unsafe extern "C" fn web_writer_write(writer: *mut u8, view: *mut u8, leased
 /// `writer.close()`: later writes through this stream reject; the console output itself stays
 /// open for other writers, as for Node's stdio.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_writer_close(writer: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_writer_close(writer: *mut u8) -> *mut u8 {
     let promise = promise_new();
     if let Some(stream) = bound(writer, promise) {
         stream.closed = 1;
@@ -126,7 +130,7 @@ pub extern "C" fn web_writer_close(writer: *mut u8) -> *mut u8 {
 
 /// `writer.releaseLock()`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_writer_release_lock(writer: *mut u8) {
+pub(crate) extern "C" fn web_writer_release_lock(writer: *mut u8) {
     let writer = writer as *mut Writer;
     // SAFETY: compiled code passes writers.
     unsafe {

@@ -8,11 +8,11 @@
 
 extern crate alloc;
 
-pub mod abort;
+mod abort;
 pub mod array;
 #[cfg(feature = "collectible")]
 mod buffers;
-pub mod collectible;
+mod collectible;
 pub mod exception;
 pub mod foreign;
 pub mod host;
@@ -20,12 +20,12 @@ pub mod io;
 pub mod promise;
 pub mod region;
 #[cfg(any(feature = "collectible", not(target_arch = "wasm32")))]
-pub mod resources;
+mod resources;
 pub mod roots;
 pub mod string;
 
 #[cfg(target_arch = "wasm32")]
-pub mod heap;
+mod heap;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]

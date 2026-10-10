@@ -18,26 +18,26 @@ mod canon {
     #[link(wasm_import_module = "perry:canon")]
     unsafe extern "C" {
         #[link_name = "[async-lower][stream-read]u8"]
-        pub fn read(stream: u32, buffer: *mut u8, len: u32) -> u32;
+        pub(super) fn read(stream: u32, buffer: *mut u8, len: u32) -> u32;
         #[link_name = "[stream-cancel-read]u8"]
-        pub fn cancel_read(stream: u32) -> u32;
+        pub(super) fn cancel_read(stream: u32) -> u32;
         #[link_name = "[stream-drop-readable]u8"]
-        pub fn drop_readable(stream: u32);
+        pub(super) fn drop_readable(stream: u32);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::missing_safety_doc)]
     mod host {
-        pub unsafe fn read(_: u32, _: *mut u8, _: u32) -> u32 {
+        pub(crate) unsafe fn read(_: u32, _: *mut u8, _: u32) -> u32 {
             unreachable!("streams exist in linked modules")
         }
-        pub unsafe fn cancel_read(_: u32) -> u32 {
+        pub(crate) unsafe fn cancel_read(_: u32) -> u32 {
             unreachable!("streams exist in linked modules")
         }
-        pub unsafe fn drop_readable(_: u32) {}
+        pub(crate) unsafe fn drop_readable(_: u32) {}
     }
     #[cfg(not(target_arch = "wasm32"))]
-    pub use host::*;
+    pub(super) use host::*;
 }
 
 /// Default-reader transfer size. BYOB reads use the destination's remaining capacity.
@@ -164,7 +164,7 @@ fn new_readable(handle: u32, memory: *mut u8, memory_len: u32, completion: u32) 
 /// A stream over the readable end `handle` (an export's `stream<u8>` argument), owned by the
 /// current task: [web_streams_close] drops it at the task's end if the program did not.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_readable_new(handle: u32) -> *mut u8 {
+pub(crate) extern "C" fn web_readable_new(handle: u32) -> *mut u8 {
     new_readable(handle, core::ptr::null_mut(), 0, COMPLETION_NONE) as *mut u8
 }
 
@@ -220,7 +220,7 @@ fn end(stream: &mut Readable) {
 
 /// `stream.locked`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_readable_locked(stream: *mut u8) -> u32 {
+pub(crate) extern "C" fn web_readable_locked(stream: *mut u8) -> u32 {
     readable(stream).locked
 }
 
@@ -252,7 +252,7 @@ fn new_reader(stream: *mut Readable) -> *mut Reader {
 
 /// `stream.getReader()`; `TypeError` while another reader holds the lock.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_readable_get_reader(stream: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_readable_get_reader(stream: *mut u8) -> *mut u8 {
     if readable(stream).locked != 0 {
         perry_abi::raise(TYPE_ERROR, "Invalid state: ReadableStream is locked");
         return core::ptr::null_mut();
@@ -262,7 +262,7 @@ pub extern "C" fn web_readable_get_reader(stream: *mut u8) -> *mut u8 {
 
 /// `stream.cancel()` of an unlocked stream.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_readable_cancel(stream: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_readable_cancel(stream: *mut u8) -> *mut u8 {
     let promise = promise_new();
     let source = readable(stream);
     if source.locked != 0 {
@@ -493,7 +493,7 @@ const COPY_COMPLETED: u32 = 0;
 /// `await reader.read()`. A leased read (the compiler proved that nothing from the previous
 /// read is live) reuses the reader's buffer, promise and result; others get fresh ones.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
+pub(crate) extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
     let r = reader(r);
     let leased = leased != 0;
     let promise = if leased {
@@ -546,7 +546,7 @@ fn unwait(r: *mut Reader) {
 /// A callback event of the current task: complete the copy waiting on `handle`. Returns 1 if
 /// the event was one of a stream read.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_event(event: u32, handle: u32, code: u32) -> u32 {
+pub(crate) extern "C" fn web_event(event: u32, handle: u32, code: u32) -> u32 {
     if event != perry_abi::EVENT_STREAM_READ {
         return 0;
     }
@@ -589,7 +589,7 @@ fn stop_copy(r: &mut Reader) -> u32 {
 
 /// `reader.cancel()`: ends the stream; an outstanding read settles first.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
     let r = reader(r);
     let promise = promise_new();
     if r.released != 0 {
@@ -624,7 +624,7 @@ pub extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
 /// `reader.releaseLock()`: an outstanding read rejects; the stream stays open for a new
 /// reader.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_reader_release_lock(r: *mut u8) {
+pub(crate) extern "C" fn web_reader_release_lock(r: *mut u8) {
     let r = reader(r);
     if r.released != 0 {
         return;
@@ -653,14 +653,14 @@ pub extern "C" fn web_reader_release_lock(r: *mut u8) {
 
 /// `result.done`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_read_done(result: *mut u8) -> u32 {
+pub(crate) extern "C" fn web_read_done(result: *mut u8) -> u32 {
     // SAFETY: compiled code passes read results.
     unsafe { (*(result as *const ReadResult)).done }
 }
 
 /// `result.value`: bytes, or null (`undefined`) after default-reader EOF or BYOB cancellation.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_read_value(result: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_read_value(result: *mut u8) -> *mut u8 {
     // SAFETY: compiled code passes read results.
     unsafe { (*(result as *const ReadResult)).value }
 }
@@ -745,7 +745,7 @@ pub(crate) fn pending_completion(stream: *mut Readable) -> bool {
 
 /// Outstanding read promises owned by this task. Open, unread streams are not work.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_streams_pending() -> u32 {
+pub(crate) extern "C" fn web_streams_pending() -> u32 {
     let task = perry_abi::task();
     let mut reader = lists().waiting;
     let mut pending = 0;
@@ -762,7 +762,7 @@ pub extern "C" fn web_streams_pending() -> u32 {
 /// At the end of the current task: cancel its outstanding copies and drop the streams it
 /// still owns, so no host handle outlives the export call.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_streams_close() {
+pub(crate) extern "C" fn web_streams_close() {
     let task = perry_abi::task();
     let mut r = lists().waiting;
     // SAFETY: listed readers and streams are live.

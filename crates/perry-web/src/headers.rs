@@ -4,7 +4,7 @@ use crate::*;
 /// A header list: 16-byte fields (`name`, `name_len`, `value`, `value_len`) in insertion
 /// order, the layout the fetch helper reads.
 #[repr(C)]
-pub struct Headers {
+pub(crate) struct Headers {
     fields: Buffer,
 }
 
@@ -64,7 +64,7 @@ impl Headers {
 
 /// A new empty header list.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_headers_new() -> *mut u8 {
+pub(crate) extern "C" fn web_headers_new() -> *mut u8 {
     let h = perry_abi::object!(Headers; fields);
     // SAFETY: a fresh block.
     unsafe {
@@ -77,7 +77,7 @@ pub extern "C" fn web_headers_new() -> *mut u8 {
 
 /// A copy of a header list (`new Headers(headers)`, constructor `headers` init).
 #[unsafe(no_mangle)]
-pub extern "C" fn web_headers_copy(source: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_headers_copy(source: *mut u8) -> *mut u8 {
     let copy = web_headers_new();
     headers(copy)
         .fields
@@ -121,7 +121,7 @@ fn value(operation: &[u8], value: *mut u8) -> Option<&'static [u8]> {
 
 /// `headers.append(name, value)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_headers_append(h: *mut u8, key: *mut u8, text: *mut u8) {
+pub(crate) extern "C" fn web_headers_append(h: *mut u8, key: *mut u8, text: *mut u8) {
     let Some(key) = name(b"Headers.append", key) else {
         return;
     };
@@ -133,7 +133,7 @@ pub extern "C" fn web_headers_append(h: *mut u8, key: *mut u8, text: *mut u8) {
 
 /// `headers.set(name, value)`: replaces the first field of `name` and drops the others.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8) {
+pub(crate) extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8) {
     let Some(key) = name(b"Headers.set", key) else {
         return;
     };
@@ -173,7 +173,7 @@ pub extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8) {
 
 /// `headers.get(name)`: the values joined with `, `, as UTF-8; null when absent.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_headers_get(h: *mut u8, key: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_headers_get(h: *mut u8, key: *mut u8) -> *mut u8 {
     let Some(key) = name(b"Headers.get", key) else {
         return core::ptr::null_mut();
     };
@@ -203,7 +203,7 @@ pub extern "C" fn web_headers_get(h: *mut u8, key: *mut u8) -> *mut u8 {
 
 /// `headers.has(name)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_headers_has(h: *mut u8, key: *mut u8) -> u32 {
+pub(crate) extern "C" fn web_headers_has(h: *mut u8, key: *mut u8) -> u32 {
     let Some(key) = name(b"Headers.has", key) else {
         return 0;
     };
@@ -212,7 +212,7 @@ pub extern "C" fn web_headers_has(h: *mut u8, key: *mut u8) -> u32 {
 
 /// `headers.delete(name)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_headers_delete(h: *mut u8, key: *mut u8) {
+pub(crate) extern "C" fn web_headers_delete(h: *mut u8, key: *mut u8) {
     let Some(key) = name(b"Headers.delete", key) else {
         return;
     };

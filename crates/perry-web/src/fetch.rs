@@ -22,9 +22,9 @@ mod http {
     #[link(wasm_import_module = "wasi:http/types@0.3.0")]
     unsafe extern "C" {
         #[link_name = "[constructor]fields"]
-        pub fn fields_new() -> u32;
+        pub(super) fn fields_new() -> u32;
         #[link_name = "[method]fields.append"]
-        pub fn fields_append(
+        pub(super) fn fields_append(
             fields: u32,
             name: *const u8,
             nlen: u32,
@@ -33,16 +33,16 @@ mod http {
             result: *mut u8,
         );
         #[link_name = "[method]fields.copy-all"]
-        pub fn fields_copy_all(fields: u32, result: *mut u32);
+        pub(super) fn fields_copy_all(fields: u32, result: *mut u32);
         #[link_name = "[resource-drop]fields"]
-        pub fn fields_drop(fields: u32);
+        pub(super) fn fields_drop(fields: u32);
 
         #[link_name = "[future-new-1][static]request.new"]
-        pub fn trailers_new() -> u64;
+        pub(super) fn trailers_new() -> u64;
         #[link_name = "[stream-new-0][static]request.new"]
-        pub fn contents_new() -> u64;
+        pub(super) fn contents_new() -> u64;
         #[link_name = "[static]request.new"]
-        pub fn request_new(
+        pub(super) fn request_new(
             headers: u32,
             has_contents: u32,
             contents: u32,
@@ -52,59 +52,65 @@ mod http {
             result: *mut u32,
         );
         #[link_name = "[async-lower][future-write-1][static]request.new"]
-        pub fn trailers_write(future: u32, value: *const u8) -> u32;
+        pub(super) fn trailers_write(future: u32, value: *const u8) -> u32;
         #[link_name = "[future-cancel-write-1][static]request.new"]
-        pub fn trailers_cancel(future: u32) -> u32;
+        pub(super) fn trailers_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-writable-1][static]request.new"]
-        pub fn trailers_drop(future: u32);
+        pub(super) fn trailers_drop(future: u32);
         #[link_name = "[async-lower][stream-write-0][static]request.new"]
-        pub fn contents_write(stream: u32, data: *const u8, len: u32) -> u32;
+        pub(super) fn contents_write(stream: u32, data: *const u8, len: u32) -> u32;
         #[link_name = "[stream-cancel-write-0][static]request.new"]
-        pub fn contents_cancel(stream: u32) -> u32;
+        pub(super) fn contents_cancel(stream: u32) -> u32;
         #[link_name = "[stream-drop-writable-0][static]request.new"]
-        pub fn contents_drop(stream: u32);
+        pub(super) fn contents_drop(stream: u32);
         #[link_name = "[async-lower][future-read-2][static]request.new"]
-        pub fn transmit_read(future: u32, result: *mut u8) -> u32;
+        pub(super) fn transmit_read(future: u32, result: *mut u8) -> u32;
         #[link_name = "[future-cancel-read-2][static]request.new"]
-        pub fn transmit_cancel(future: u32) -> u32;
+        pub(super) fn transmit_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-readable-2][static]request.new"]
-        pub fn transmit_drop(future: u32);
+        pub(super) fn transmit_drop(future: u32);
         #[link_name = "[method]request.set-method"]
-        pub fn set_method(request: u32, tag: u32, other: *const u8, len: u32) -> u32;
+        pub(super) fn set_method(request: u32, tag: u32, other: *const u8, len: u32) -> u32;
         #[link_name = "[method]request.set-scheme"]
-        pub fn set_scheme(request: u32, some: u32, tag: u32, other: *const u8, len: u32) -> u32;
+        pub(super) fn set_scheme(
+            request: u32,
+            some: u32,
+            tag: u32,
+            other: *const u8,
+            len: u32,
+        ) -> u32;
         #[link_name = "[method]request.set-authority"]
-        pub fn set_authority(request: u32, some: u32, text: *const u8, len: u32) -> u32;
+        pub(super) fn set_authority(request: u32, some: u32, text: *const u8, len: u32) -> u32;
         #[link_name = "[method]request.set-path-with-query"]
-        pub fn set_path(request: u32, some: u32, text: *const u8, len: u32) -> u32;
+        pub(super) fn set_path(request: u32, some: u32, text: *const u8, len: u32) -> u32;
 
         #[link_name = "[method]response.get-status-code"]
-        pub fn status(response: u32) -> u32;
+        pub(super) fn status(response: u32) -> u32;
         #[link_name = "[method]response.get-headers"]
-        pub fn headers(response: u32) -> u32;
+        pub(super) fn headers(response: u32) -> u32;
         #[link_name = "[future-new-0][static]response.consume-body"]
-        pub fn outcome_new() -> u64;
+        pub(super) fn outcome_new() -> u64;
         #[link_name = "[static]response.consume-body"]
-        pub fn consume_body(response: u32, outcome: u32, result: *mut u32);
+        pub(super) fn consume_body(response: u32, outcome: u32, result: *mut u32);
         #[link_name = "[async-lower][future-write-0][static]response.consume-body"]
-        pub fn outcome_write(future: u32, value: *const u8) -> u32;
+        pub(super) fn outcome_write(future: u32, value: *const u8) -> u32;
         #[link_name = "[future-cancel-write-0][static]response.consume-body"]
-        pub fn outcome_cancel(future: u32) -> u32;
+        pub(super) fn outcome_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-writable-0][static]response.consume-body"]
-        pub fn outcome_drop(future: u32);
+        pub(super) fn outcome_drop(future: u32);
         #[link_name = "[async-lower][future-read-2][static]response.consume-body"]
-        pub fn end_read(future: u32, result: *mut u8) -> u32;
+        pub(super) fn end_read(future: u32, result: *mut u8) -> u32;
         #[link_name = "[future-cancel-read-2][static]response.consume-body"]
-        pub fn end_cancel(future: u32) -> u32;
+        pub(super) fn end_cancel(future: u32) -> u32;
         #[link_name = "[future-drop-readable-2][static]response.consume-body"]
-        pub fn end_drop(future: u32);
+        pub(super) fn end_drop(future: u32);
     }
 
     #[cfg(target_arch = "wasm32")]
     #[link(wasm_import_module = "wasi:http/client@0.3.0")]
     unsafe extern "C" {
         #[link_name = "[async-lower]send"]
-        pub fn send(request: u32, result: *mut u8) -> u32;
+        pub(super) fn send(request: u32, result: *mut u8) -> u32;
     }
 
     /// `wasi:http` exists in linked modules only; host builds never call it.
@@ -113,7 +119,7 @@ mod http {
     mod host {
         macro_rules! absent {
             ($($name:ident($($arg:ty),*) $(-> $result:ty)?;)*) => {
-                $(pub unsafe fn $name($(_: $arg),*) $(-> $result)? {
+                $(pub(crate) unsafe fn $name($(_: $arg),*) $(-> $result)? {
                     unreachable!("wasi:http runs in linked modules")
                 })*
             };
@@ -153,7 +159,7 @@ mod http {
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    pub use host::*;
+    pub(super) use host::*;
 }
 
 /// `result<option<trailers>, error-code>` and `result<response, error-code>`: the payload at 8.
@@ -210,7 +216,7 @@ const SUBTASK_RETURNED: u32 = 2;
 /// # Safety
 /// `url` and `method` must be strings, `h` a header list and `view` null or a `Uint8Array`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn web_fetch(
+pub(crate) unsafe extern "C" fn web_fetch(
     url: *mut u8,
     method: *mut u8,
     h: *mut u8,
@@ -568,7 +574,7 @@ fn finish_if_idle(op: &mut Fetch) {
 /// A callback event of the current task: advance the fetch waiting on `handle`. Returns 1 if
 /// it was one of a fetch.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_fetch_event(event: u32, handle: u32, code: u32) -> u32 {
+pub(crate) extern "C" fn web_fetch_event(event: u32, handle: u32, code: u32) -> u32 {
     let mut op = *ops();
     // SAFETY: listed operations are live.
     unsafe {
@@ -623,7 +629,7 @@ const EVENT_FUTURE_WRITE: u32 = 5;
 
 /// Unsettled fetch promises and final body reads belonging to the current task.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_fetch_pending() -> u32 {
+pub(crate) extern "C" fn web_fetch_pending() -> u32 {
     let task = perry_abi::task();
     let mut op = *ops();
     let mut pending = 0;
@@ -644,7 +650,7 @@ pub extern "C" fn web_fetch_pending() -> u32 {
 /// At the end of the current task: cancel what its fetches still wait for and drop their
 /// handles.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_fetch_close() {
+pub(crate) extern "C" fn web_fetch_close() {
     let task = perry_abi::task();
     let mut op = *ops();
     // SAFETY: listed operations are live; the handles are theirs.

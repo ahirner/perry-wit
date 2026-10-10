@@ -14,7 +14,7 @@ pub(super) struct Read {
 
 /// `reader.read(view, {min})`: validate first, then transfer the complete buffer.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_reader_read_byob(r: *mut u8, view: *mut u8, minimum: f64) -> *mut u8 {
+pub(super) extern "C" fn web_reader_read_byob(r: *mut u8, view: *mut u8, minimum: f64) -> *mut u8 {
     let r = reader(r);
     let promise = promise_new();
     let reject = |kind, message| {

@@ -10,3 +10,6 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 perry-abi = { path = "../perry-abi" }
+
+[lints]
+workspace = true

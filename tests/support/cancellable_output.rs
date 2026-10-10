@@ -14,13 +14,13 @@ use wasmtime::{
 use wasmtime_wasi::p3::bindings::cli::types::ErrorCode;
 
 #[derive(Clone, Copy, Debug)]
-pub enum BlockAt {
+pub(crate) enum BlockAt {
     Write,
     Completion,
 }
 
 #[derive(Default)]
-pub struct Observations {
+pub(crate) struct Observations {
     pub started: AtomicUsize,
     pub cancelled_writes: AtomicUsize,
     pub cancelled_completions: AtomicUsize,
@@ -91,7 +91,7 @@ impl Drop for Completion {
     }
 }
 
-pub fn install(
+pub(crate) fn install(
     linker: &mut wasmtime::component::Linker<super::Host>,
     interface: &str,
     block_at: BlockAt,

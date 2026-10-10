@@ -8,3 +8,6 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 ryu-js = { version = "1.0.3", features = ["small"] }
+
+[lints]
+workspace = true

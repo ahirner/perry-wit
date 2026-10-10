@@ -14,3 +14,6 @@ anyhow = "1.0"
 swc_ecma_visit = "19.0"
 swc_common = "18.0"
 swc_ecma_transforms_base = "32.0"
+
+[lints]
+workspace = true

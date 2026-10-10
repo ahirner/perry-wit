@@ -2,7 +2,7 @@ use anyhow::Result;
 
 /// Instantiate the compiled worker inside a component whose async entry starts and cancels it.
 /// Wasmtime's host API cannot yet request guest task cancellation; a component caller can.
-pub fn cancellation_caller(worker: &[u8], wait_for_ready: bool) -> Result<Vec<u8>> {
+pub(crate) fn cancellation_caller(worker: &[u8], wait_for_ready: bool) -> Result<Vec<u8>> {
     let printed = wasmprinter::print_bytes(worker)?;
     let prelude = &printed[..printed
         .find("  (core module")

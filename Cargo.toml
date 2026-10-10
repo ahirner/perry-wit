@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 default-run = "perry-wit"
 
+[lints]
+workspace = true
+
 [workspace]
 members = [
     ".",
@@ -21,6 +24,10 @@ members = [
     "crates/perry-web",
     "crates/perry-codegen",
 ]
+
+[workspace.lints.rust]
+# Items are `pub` only where another crate uses them.
+unreachable_pub = "warn"
 
 [workspace.dependencies]
 wasmtime = { version = "=49.0.2", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }

@@ -11,7 +11,7 @@ pub(crate) struct Signal {
 
 /// `new AbortController()`. Scheduler entries root signals while they are watched.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_abort_new() -> *mut u8 {
+pub(crate) extern "C" fn perry_abort_new() -> *mut u8 {
     let signal = region::perry_alloc(core::mem::size_of::<Signal>() as u32).cast::<Signal>();
     // SAFETY: fresh storage; head refers to task-owned scheduler nodes, not collectible objects.
     unsafe {
@@ -28,13 +28,13 @@ pub extern "C" fn perry_abort_new() -> *mut u8 {
 /// # Safety
 /// `signal` is a live signal.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_abort_aborted(signal: *mut u8) -> u32 {
+pub(crate) unsafe extern "C" fn perry_abort_aborted(signal: *mut u8) -> u32 {
     unsafe { (*signal.cast::<Signal>()).aborted }
 }
 
 /// Reject a timer with the accepted default abort reason.
 #[unsafe(no_mangle)]
-pub extern "C" fn perry_abort_reject(promise: *mut u8, message: *mut u8) {
+pub(crate) extern "C" fn perry_abort_reject(promise: *mut u8, message: *mut u8) {
     let error = exception::perry_exception_new(
         exception::ERROR,
         exception::TAG_STRING,
@@ -50,7 +50,7 @@ pub extern "C" fn perry_abort_reject(promise: *mut u8, message: *mut u8) {
 /// # Safety
 /// `signal` is live; `handle` and `promise` identify a newly registered timer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_abort_watch(signal: *mut u8, handle: u32, promise: *mut u8) {
+pub(crate) unsafe extern "C" fn perry_abort_watch(signal: *mut u8, handle: u32, promise: *mut u8) {
     let signal = signal.cast::<Signal>();
     let mut entry = region::current().subtasks;
     unsafe {
@@ -97,7 +97,11 @@ pub(crate) unsafe fn detach(entry: *mut region::Subtask) {
 /// # Safety
 /// `signal` and both error-message strings are live. Watches refer to live scheduler entries.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_abort(signal: *mut u8, message: *mut u8, scope_error: *mut u8) {
+pub(crate) unsafe extern "C" fn perry_abort(
+    signal: *mut u8,
+    message: *mut u8,
+    scope_error: *mut u8,
+) {
     let signal = signal.cast::<Signal>();
     unsafe {
         if (*signal).aborted != 0 {

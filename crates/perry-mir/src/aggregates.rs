@@ -92,7 +92,7 @@ fn is_leaf(ctx: &Context, function: &FuncOp) -> Option<usize> {
 }
 
 /// Inline calls to small leaf functions; see the module documentation.
-pub fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+pub(crate) fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     let functions = functions(root, ctx);
     let mut leaves: HashMap<Identifier, (FuncOp, usize)> = HashMap::new();
     for function in &functions {
@@ -265,7 +265,7 @@ fn read_only_fields(ctx: &Context, parameter: Value) -> Option<Vec<String>> {
 /// write the record while the callee runs: the callee writes no record field, directly or
 /// through a call, and does not await. The caller's record then often no longer escapes, so
 /// `scalar_replace` dissolves it.
-pub fn promote_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+pub(crate) fn promote_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     let functions = functions(root, ctx);
     let writers = writers(ctx, &functions);
     // Direct call sites per callee; callees also called asynchronously are left alone.

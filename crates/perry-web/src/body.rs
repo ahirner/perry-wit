@@ -61,7 +61,7 @@ fn body<'a>(object: *mut u8) -> &'a mut Body {
 
 /// `bodyUsed` of a response or request.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_body_used(object: *mut u8) -> u32 {
+pub(crate) extern "C" fn web_body_used(object: *mut u8) -> u32 {
     let body = body(object);
     // SAFETY: bodies keep their streams.
     body.used | u32::from(!body.stream.is_null() && unsafe { (*body.stream).disturbed } != 0)
@@ -69,7 +69,7 @@ pub extern "C" fn web_body_used(object: *mut u8) -> u32 {
 
 /// `body` of a response or request: its stream, or null without a body.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_body_stream(object: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_body_stream(object: *mut u8) -> *mut u8 {
     let body = body(object);
     if body.stream.is_null() && !body.data.is_null() && body.used == 0 {
         body.stream = snapshot_stream(body.data, body.len);
@@ -114,19 +114,19 @@ fn read(object: *mut u8, form: Form) -> *mut u8 {
 
 /// `await body.bytes()`: a `Uint8Array` of the body.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_body_bytes(object: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_body_bytes(object: *mut u8) -> *mut u8 {
     read(object, Form::Bytes)
 }
 
 /// `await body.text()`: the body decoded as UTF-8 (BOM removed, invalid bytes replaced).
 #[unsafe(no_mangle)]
-pub extern "C" fn web_body_text(object: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_body_text(object: *mut u8) -> *mut u8 {
     read(object, Form::Text)
 }
 
 /// `await body.json()`: the body's text parsed as JSON (`SyntaxError` if it is not).
 #[unsafe(no_mangle)]
-pub extern "C" fn web_body_json(object: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_body_json(object: *mut u8) -> *mut u8 {
     let promise = read(object, Form::Json);
     web_json_settle();
     promise
@@ -135,7 +135,7 @@ pub extern "C" fn web_body_json(object: *mut u8) -> *mut u8 {
 /// Parse the `json()` bodies read to their end since the last call. Compiled code calls
 /// this after each event when the program uses `json()`; stream readers only queue them.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_json_settle() {
+pub(crate) extern "C" fn web_json_settle() {
     take_parsed(settle_json);
 }
 
@@ -186,7 +186,7 @@ fn response<'a>(r: *mut u8) -> &'a Response {
 /// # Safety
 /// `view` must be null or a `Uint8Array`, `status_text` a string and `h` a header list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn web_response_new(
+pub(crate) unsafe extern "C" fn web_response_new(
     view: *mut u8,
     text: u32,
     status: f64,
@@ -232,25 +232,25 @@ pub unsafe extern "C" fn web_response_new(
 
 /// `response.status`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_response_status(r: *mut u8) -> f64 {
+pub(crate) extern "C" fn web_response_status(r: *mut u8) -> f64 {
     response(r).status
 }
 
 /// `response.statusText`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_response_status_text(r: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_response_status_text(r: *mut u8) -> *mut u8 {
     response(r).status_text
 }
 
 /// `response.ok`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_response_ok(r: *mut u8) -> u32 {
+pub(crate) extern "C" fn web_response_ok(r: *mut u8) -> u32 {
     u32::from((200.0..300.0).contains(&response(r).status))
 }
 
 /// `response.headers`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_response_headers(r: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_response_headers(r: *mut u8) -> *mut u8 {
     response(r).headers
 }
 
@@ -277,7 +277,7 @@ const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "DELETE", "", "OPTIONS
 /// # Safety
 /// `url` and `method` must be strings, `view` null or a `Uint8Array`, `h` a header list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn web_request_new(
+pub(crate) unsafe extern "C" fn web_request_new(
     url: *mut u8,
     method: *mut u8,
     view: *mut u8,
@@ -335,18 +335,18 @@ pub unsafe extern "C" fn web_request_new(
 
 /// `request.method`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_request_method(r: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_request_method(r: *mut u8) -> *mut u8 {
     request(r).method
 }
 
 /// `request.url`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_request_url(r: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_request_url(r: *mut u8) -> *mut u8 {
     request(r).url
 }
 
 /// `request.headers`.
 #[unsafe(no_mangle)]
-pub extern "C" fn web_request_headers(r: *mut u8) -> *mut u8 {
+pub(crate) extern "C" fn web_request_headers(r: *mut u8) -> *mut u8 {
     request(r).headers
 }

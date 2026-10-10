@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 /// it (length, comparison, an operand of a concatenation) or passes it, as its only use, to
 /// an owned block argument. Only constants may enter this ownership set without a fresh header. The runtime
 /// preserves bufferless headers and allocates a new one when their text must grow.
-pub fn append_in_place(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+pub(crate) fn append_in_place(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
     use crate::{
         collections::{StringAppendOp, StringConcatOp, StringConstOp, StringLenOp},
         scalar::CompareOp,

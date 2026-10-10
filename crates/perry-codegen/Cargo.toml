@@ -14,3 +14,6 @@ pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b
 pliron-wasm = { path = "../pliron-wasm" }
 
 regex-automata = { version = "0.4", default-features = false, features = ["std", "dfa-build", "syntax", "unicode"] }
+
+[lints]
+workspace = true

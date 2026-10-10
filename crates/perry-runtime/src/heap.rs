@@ -17,13 +17,13 @@ unsafe extern "C" {
 
 /// Claims the initial memory's tail first, then grows and extends.
 #[derive(Debug)]
-pub struct Heap {
+pub(crate) struct Heap {
     end: Option<NonNull<u8>>,
     started: bool,
 }
 
 impl Heap {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             end: None,
             started: false,
@@ -75,7 +75,9 @@ unsafe impl Source for Heap {
 }
 
 /// Single-threaded talc adapter exposing pressure information at compiler safe points.
-pub struct Allocator(core::cell::UnsafeCell<talc::cell::TalcCell<Heap, talc::wasm::WasmBinning>>);
+pub(crate) struct Allocator(
+    core::cell::UnsafeCell<talc::cell::TalcCell<Heap, talc::wasm::WasmBinning>>,
+);
 // SAFETY: components have one guest thread and never use shared-memory atomics.
 unsafe impl Sync for Allocator {}
 impl Default for Allocator {
@@ -84,7 +86,7 @@ impl Default for Allocator {
     }
 }
 impl Allocator {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         const {
             assert!(!cfg!(target_feature = "atomics"));
         }
@@ -93,7 +95,7 @@ impl Allocator {
         )))
     }
     #[cfg(feature = "collectible")]
-    pub fn available(&self) -> usize {
+    pub(crate) fn available(&self) -> usize {
         let counters = unsafe { &*self.0.get() }.counters();
         if counters.heap_count == 0 {
             core::arch::wasm32::memory_size::<0>() * PAGE - (&raw const __heap_base as usize)
@@ -106,7 +108,12 @@ impl Allocator {
     /// # Safety
     /// `pointer` has the supplied allocation layout; `new_size` is a valid, larger layout size.
     #[cfg(feature = "collectible")]
-    pub unsafe fn grow_in_place(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> bool {
+    pub(crate) unsafe fn grow_in_place(
+        &self,
+        pointer: *mut u8,
+        layout: Layout,
+        new_size: usize,
+    ) -> bool {
         // SAFETY: allocator operations are atomic; no other allocator reference is active.
         unsafe {
             let talc = (&mut *self.0.get()).get_mut();
