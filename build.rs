@@ -101,6 +101,8 @@ fn compile_cargo_helper(
         .current_dir(manifest)
         .env("CARGO_ENCODED_RUSTFLAGS", "-Crelocation-model=pic")
         .env_remove("RUSTFLAGS")
+        // Embedded helpers are release builds; incremental compilation would change them.
+        .env_remove("CARGO_INCREMENTAL")
         .args([
             "rustc",
             "--locked",
