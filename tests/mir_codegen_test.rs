@@ -727,7 +727,8 @@ export async function run(n: number): Promise<number> { return await compute(n);
 fn proven_frame_records_reuse_storage_across_calls_and_iterations() {
     let source = r#"
 interface Cell { value: number }
-function inspect(cell: Cell): number {
+export function inspect(cell: Cell): number {
+    if (cell.value < 0) throw new RangeError('negative');
     let result = 0;
     for (let i = 0; i < 3; i++) result = result + cell.value;
     return result;
@@ -1129,7 +1130,7 @@ fn nested_root_stack_growth_preserves_caller_objects_and_unwinds() {
     let wasm = perry_wit::compiler::compile_core_with_memory_checks(
         r#"
 interface Cell { value: number }
-function read(cell: Cell): number { if (cell.value < 0) return 0; return cell.value; }
+export function read(cell: Cell): number { if (cell.value < 0) throw new RangeError('negative'); return cell.value; }
 function descend(n: number, fail: boolean): number {
   const cell = { value: n };
   if (n === 0) { if (fail) throw new RangeError("bottom"); return read(cell); }
@@ -1212,8 +1213,8 @@ fn non_error_messages_remain_collectible() {
         r#"
 export function run(n: number): number {
   let sum = 0;
-  for (let i = 0; i < n; i++) {
-    try { throw i; } catch (error) { sum += error.message.length; }
+  try { throw 0; } catch (error) {
+    for (let i = 0; i < n; i++) sum += error.message.length;
   }
   return sum;
 }
@@ -1224,8 +1225,118 @@ export function run(n: number): number {
     let mut program = Program::from_wasm(wasm);
     program.call("__perry_gc_debug", &[Val::I32(3)]);
     assert_eq!(program.throwing("run", 1000.0), (0.0, 0));
+    program.call("__perry_gc_debug", &[Val::I32(0)]);
+    assert_eq!(program.throwing("run", 200_000.0), (0.0, 0));
+    assert!(
+        program
+            .instance
+            .get_memory(&mut program.store, "memory")
+            .unwrap()
+            .data_size(&program.store)
+            <= 512 * 1024
+    );
     for index in [2, 6] {
         let (counter, _) = program.call("__perry_gc_counter", &[Val::I32(index)]);
         assert_eq!(counter[0].unwrap_i64(), 0);
     }
+}
+
+#[test]
+fn branch_leaf_inlining_preserves_effects_and_caught_throws() {
+    let mut program = Program::new(
+        r#"
+let order = 0;
+function argument(n: number): number { order = order * 10 + n; return n; }
+function branch(a: number, b: number): number {
+  if (a < b) return a * 100 + b;
+  if (a === b) return a + b;
+  return b - a;
+}
+function throwing(n: number): number {
+  if (n < 0) throw new RangeError('negative');
+  return branch(n, n + 1);
+}
+export function run(n: number): number {
+  order = 0;
+  const result = branch(argument(1), argument(2));
+  try { throwing(-n); return -1; }
+  catch (e) { if (!(e instanceof RangeError)) return -2; }
+  return result + order * 1000 + branch(n, n);
+}
+"#,
+    );
+    assert_eq!(program.number("run", 7.0), 12_116.0);
+}
+
+#[test]
+fn promoted_record_arguments_stay_fresh_when_aliases_can_mutate() {
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(
+        r#"
+interface Cell { value: number }
+let saved: Cell = { value: 0 };
+function change(): number { saved.value += 10; return 3; }
+function read(cell: Cell, n: number): number {
+  if (n < 0) return cell.value - n;
+  return cell.value + n;
+}
+function mutated(cell: Cell): number {
+  const before = cell.value;
+  const middle = change();
+  return before + middle + cell.value;
+}
+function escaped(cell: Cell): Cell { saved = cell; return cell; }
+export function run(n: number): number {
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const cell: Cell = { value: i };
+    // A call in a caught region stays a call: promotion can still remove the record.
+    try { sum += read(cell, i); } catch (e) { return -1; }
+  }
+  saved = escaped({ value: 7 });
+  return sum + mutated(saved);
+}
+"#,
+        "promoted-record.ts",
+    )
+    .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    assert_eq!(program.number("run", 1000.0), 999_027.0);
+    let (allocations, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert!(allocations[0].unwrap_i64() < 10);
+}
+
+#[test]
+fn repeated_leaf_calls_keep_a_bounded_compilation_size() {
+    let calls = (0..80)
+        .map(|i| format!("sum += choose(n, {i});"))
+        .collect::<String>();
+    let source = format!(
+        r#"
+function choose(a: number, b: number): number {{
+  if (a < b) return a + b;
+  if (a > b) return a - b;
+  return a * b;
+}}
+export function run(n: number): number {{ let sum = 0; {calls} return sum; }}
+"#
+    );
+    let mut program = Program::new(&source);
+    let expected = (0..80)
+        .map(|i| {
+            let b = i as f64;
+            if 7.0 < b {
+                7.0 + b
+            } else if 7.0 > b {
+                7.0 - b
+            } else {
+                7.0 * b
+            }
+        })
+        .sum::<f64>();
+    assert_eq!(program.number("run", 7.0), expected);
+    assert!(
+        program.wasm.len() < 15_000,
+        "bounded inlining grew the component unexpectedly"
+    );
 }

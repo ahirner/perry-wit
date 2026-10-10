@@ -16,7 +16,13 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
     verify_operation(root, ctx)?;
     crate::aggregates::inline_leaves(root, ctx);
     verify_operation(root, ctx)?;
+    crate::aggregates::promote_arguments(root, ctx);
+    verify_operation(root, ctx)?;
     loop {
+        let folded = crate::fold::fold(root, ctx);
+        if folded == IRStatus::Changed {
+            verify_operation(root, ctx)?;
+        }
         let promoted = crate::aggregates::scalar_replace(root, ctx)?;
         if promoted {
             verify_operation(root, ctx)?;
@@ -31,7 +37,11 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
         if simplified == IRStatus::Changed {
             verify_operation(root, ctx)?;
         }
-        if !promoted && removed == IRStatus::Unchanged && simplified == IRStatus::Unchanged {
+        if !promoted
+            && folded == IRStatus::Unchanged
+            && removed == IRStatus::Unchanged
+            && simplified == IRStatus::Unchanged
+        {
             break;
         }
     }

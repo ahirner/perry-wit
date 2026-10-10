@@ -1096,7 +1096,10 @@ impl<'s> FunctionLowering<'s> {
     /// Translate the ops of every block of `mir` (after [Self::map_blocks]). In a step
     /// function, values kept in the frame are stored where they are defined.
     fn translate(&mut self, ctx: &mut Context, mir: &FuncOp) -> Result<()> {
-        let mir_blocks: Vec<_> = mir.get_region(ctx).deref(ctx).iter(ctx).collect();
+        let mir_blocks: Vec<_> =
+            pliron::graph::traversals::region::DFSTraversal::new(ctx, &mir.get_region(ctx))
+                .reverse_post_order()
+                .collect();
         let live = lease::live_after_ops(ctx, mir);
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];

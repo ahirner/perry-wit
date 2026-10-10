@@ -13,6 +13,7 @@ pub mod collections;
 pub mod control;
 pub mod effects;
 pub mod exceptions;
+mod fold;
 pub mod foreign;
 pub mod globals;
 pub mod heap;

@@ -17,8 +17,9 @@ consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapsho
 1. [x] Elide root bookkeeping for proven non-collecting calls; emit root-stack stores inline.
    [Full campaign](bench/performance/reports/01-roots/summary.json) passes all contracts,
    four seeds, 55 consumer tests and 25 benchmark scenarios.
-2. [ ] Lower integer remainder inline with IEEE-754 fallback and negative-zero preservation
-   (implemented; full campaign pending).
+2. [x] Lower integer remainder inline with IEEE-754 fallback and negative-zero preservation.
+   [Full campaign](bench/performance/reports/02-remainder/summary.json) passes all contracts,
+   four seeds, 55 consumer tests and 25 benchmark scenarios.
 3. [ ] Extend bounded leaf inlining, closed-record argument promotion and scalar replacement.
 4. [ ] Prove indexed accesses and reuse dominating successful optional unwraps.
 5. [ ] Reuse string headers when ownership and liveness permit mutation.
@@ -51,6 +52,13 @@ fuel, and temporary records from 188.1M to 37.0M, still with zero record allocat
 grow by 48–51 bytes where the fast path is used; other deterministic costs are unchanged.
 The effect audit also accounts for the empty string header allocated when a caught non-error
 value's message is read; forced collection covers this exception path.
+
+Aggregate focused checks pass (33 codegen tests). Multi-block leaf inlining keeps the
+256-operation caller budget; read-only record parameters become field snapshots only when
+mutation and reentry are excluded. Direct-call fuel falls from 24.0M to 22.0M and the temporary
+record component shrinks from 12,353 to 4,771 bytes without changing zero-allocation behavior.
+Constant branches remove unreachable blocks before verification; lowering follows CFG order.
+The full post-commit campaign is pending.
 
 ## Verified implementation
 
