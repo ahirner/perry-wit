@@ -1,139 +1,185 @@
 # Architecture
 
-Perry-WIT compiles a static subset of TypeScript to WebAssembly components targeting WASI 0.3. This file describes the compiler as it is. The plan, design decisions D1–D6 and subset rules R1–R8 are in [TODOs.md](TODOs.md).
+Perry-WIT compiles a static subset of TypeScript to WASI 0.3 components. [TODOs.md](TODOs.md)
+records the completion checklist and accepted deviations.
 
 ## Crates
 
-| Crate | Role |
+| Crate | Responsibility |
 |---|---|
-| `perry-wit` (root) | CLI, `compile_*` API, WIT binding (`src/compiler`), linker (`src/link`), component encoding (`src/component`), SDK generation (`src/sdk`) |
-| `crates/perry-lower` | Perry HIR → perry MIR builder |
-| `crates/perry-mir` | The `perry` dialect on pliron: types, ops, verifiers, the canonicalization pipeline |
-| `crates/perry-codegen` | perry MIR → `wasm` dialect, value representations, canonical-ABI export glue (`boundary.rs`) |
-| `crates/pliron-wasm` | The `wasm` dialect and the emitter to core Wasm; free of perry code so it can be published separately |
-| `crates/perry-runtime` | `no_std` runtime linked into every module: allocator, task regions, strings, arrays |
-| `crates/perry-std` | Built-ins on top of the runtime (string methods, `Uint8Array`, JSON, random), linked on demand |
-| `crates/perry-fs` | `node:fs/promises` over `wasi:filesystem`, linked on demand |
-| `crates/perry-web` | `Headers`, `Response`/`Request`, `fetch` over `wasi:http/client`, serving `wasi:http/handler`, `ReadableStream` readers over `stream<u8>`, Web writers over stdout/stderr, linked on demand |
-| `crates/perry-abi` | Runtime services and layouts the on-demand libraries share (no exports of its own) |
-| `crates/*-helper`, `src/helpers` | Computation helpers (JSON, time, number formatting, text, search, URL), linked on demand |
-| `crates/conformance` | Contracts checked against Node.js as the oracle |
+| `perry-wit` | CLI, compilation API, WIT binding, SDK generation, linking and component encoding |
+| `perry-lower` | Static source-module loading and Perry HIR → typed MIR |
+| `perry-mir` | Types, operations, verifiers, effects, escape analysis and optimization |
+| `perry-codegen` | Value representations, stackless async splitting and canonical ABI glue |
+| `pliron-wasm` | Wasm dialect, CFG structuring and core-module emission |
+| `perry-runtime` | Allocation, collection, roots, tasks, promises, strings and arrays |
+| `perry-std` | Built-ins over native values: bytes, JSON, regex tables and decoding |
+| `perry-fs` | Promise-only filesystem operations over WASI |
+| `perry-web` | Fetch, URL, headers, request/response values and byte streams |
+| `perry-abi` | Runtime services and layouts shared by guest libraries |
+| computation helpers | Parsing, Unicode case conversion, search, time and number formatting |
+| `conformance` | Directed contracts, generated programs, shrinking and replay against Node |
 
-## Pipeline
+## Compilation
 
 ```text
-TypeScript ─ perry-parser ─ Perry HIR ─ perry-lower ─ perry MIR
-   ─ canonicalize (mem2reg, DCE, simplify_cfg) ─ perry-codegen ─ wasm dialect
-   ─ pliron-wasm emitter ─ core module (imports "__perry_helper")
-   ─ src/link (relocate runtime + helpers) ─ wit-component ─ component
+Static TypeScript modules → Perry HIR → typed MIR
+    → SSA promotion, bounded inlining, scalar replacement, DCE, CFG simplification
+    → escape/effect summaries and lifetime assignment
+    → Wasm dialect, canonical conversion, async state machines
+    → core Wasm, linked runtime services, component encoding
 ```
 
-- **Builder.** Every TypeScript local becomes a `perry.local` slot, and pliron's `mem2reg` builds SSA from them, so the builder hand-rolls no SSA. Expression types come from operand MIR types. Records are identified by shape (sorted fields and their types). Unsupported constructs fail with a diagnostic; there is no fallback path.
-- **Codegen.** A direct translation from `perry.*` to `wasm.*`, splitting blocks where exceptions and array growth need control flow.
-- **Emitter.**
-  - Makes control flow reducible (`pliron_wasm::reducible`): a cycle with several entries gets one guard block that dispatches on a label. Only resumes inside loops produce such cycles.
-  - Structures the CFG with Ramsey's dominator-tree algorithm ("Beyond Relooper", ICFP 2022).
-  - Folds single-use values into stack trees, keeping effects and traps in order.
-  - Rematerializes constants.
-  - Moves block arguments through the operand stack, so cyclic moves need no temporaries.
-  - Groups locals by type.
-- **Linker.** The runtime and helpers are compiled as position-independent wasm32 libraries by `build.rs`. `src/link` resolves `__perry_helper` imports against their exports, places their data after the module's static data, and reserves a shared stack.
+Locals initially use slots; `mem2reg` builds SSA joins and loop-carried values. Record shapes
+contain sorted field names and their static types, while literal expressions evaluate in source
+order. Named records can be recursive. Unsupported constructs receive compiler diagnostics.
+
+The emitter makes resumed CFGs reducible, structures control flow using dominators, folds single-use
+values into stack expressions and preserves effect order. The linker resolves runtime imports,
+relocates reachable helper functions and reserves their combined stack requirements. Every emitted
+core module and component is validated with thread features, stack switching, stackful component
+async and additional async builtins disabled.
 
 ## Values
 
-| MIR type | Wasm | Notes |
-|---|---|---|
-| `f64` (number) | `f64` | ECMAScript arithmetic; `%` is `fmod` in the runtime |
-| `i1` (boolean) | `i32` | |
-| record, array, string | `i32` address | `0` is null |
-| `T \| undefined` | as `T` | numbers: signalling-NaN payload (`perry_codegen::UNDEFINED_BITS`); references: `0`; booleans: `2` |
-| `Uint8Array` (`perry.bytes`) | `i32` address | a view `{ len, data }`; `subarray` shares the bytes |
-| JSON value (`perry.json`) | `i32` address | a node of the JSON helper's graph; `0` is `undefined` |
-| `Date` (`perry.date`) | `f64` | the time value, held by value |
+| Value | Representation |
+|---|---|
+| number | IEEE-754 `f64` |
+| boolean | `i32` |
+| record | Address of a shape identifier and statically typed eight-byte field slots |
+| dense array | Address of length, capacity and eight-byte element storage |
+| string | Immutable view over UTF-8 bytes, with cached scalar count and owner |
+| Uint8Array | Mutable byte view retaining its storage owner |
+| bigint | Boxed exact sign/magnitude for WIT s64/u64 transport |
+| Date | Mutable boxed epoch-millisecond value |
+| JSON | Immutable parsed graph, distinct from native aggregate storage |
+| optional | The underlying representation plus absence sentinels admitted by its type |
 
-- **Records.** An `i32` shape id followed by 8-byte field slots in sorted field order.
-- **Arrays.** `{ len, cap, data }`, with 8-byte element slots. Capacity is never 0, so a bounds-checked read is branch-free.
-- **Built-ins.** The builder maps the standard library to `perry.intrinsic` services with fixed signatures (`perry_mir::intrinsics`). Codegen lowers them to Wasm instructions (`Math`, `Date` TimeClip), `perry-std` functions (strings with UTF-16 indices, `Uint8Array`, JSON access, random values) or helper libraries (Unicode case mapping, JSON parsing, number and date formatting). Services that may throw leave their status in the task for compiled code to check (`perry_status`). `perry-std` is a library of its own because the linker keeps reachable functions but a library's data segment whole: programs that use none of the built-ins carry none of their messages and tables. It reaches the runtime through `__perry_helper` imports, which the linker resolves between libraries.
-- **JSON.** `JSON.parse` (and `json()` of a body) produces `perry.json` nodes; property and index reads stay JSON values, and a typed use converts them (R6). The JSON helper only parses: numbers convert with a compact correctly rounded parser (`src/helpers/json/number.rs`, checked bit for bit against `core`), and one parser copy serves both the measuring and the storing pass. Parsing and writing JSON values are iterative (at most 128 levels), so their stack use is a fixed bound. `JSON.stringify` of typed values is generated per type: one serializer function per record or array type writes structure and pre-formatted pieces to a runtime writer; JSON values are written by `perry-std`.
-- **Object spreads of JSON values.** `{ ...a, k: v }` over JSON values builds a JSON object of shallow member copies (values are immutable). ECMAScript property order (array-index keys ascending, then creation order; a repeated key keeps its first position and its last value) is applied once per object, when it is first written or spread, so parsed objects with duplicate or numeric keys serialize as in Node.
-- **WIT types in programs.** The parser does not read the SDK's generated declarations, so the compiler passes the world's WIT types to the lowering as HIR types under their SDK names (`src/compiler/wit_types.rs`); imports of those names resolve to them. A variant (`{ tag: "a" } | { tag: "b"; val: T }`) is the record `{ tag, val: T | undefined }`, an option `T | undefined`, and a tuple `[A, B]` the record `{ _0, _1 }`.
-- **HTTP handlers** (`src/compiler/http.rs`). A program for `perry:http-handler` (`wit/http-handler`) is compiled with an adapter written in TypeScript: it is the `wasi:http/handler#handle` export, reads the request through `perry:http-server` services (`perry-web`'s `serve` module: the request's parts at once, its body to the end), calls `handle` with the record and builds the response. The host reads the response body only after `task.return`, so the export returns once and keeps running until the body, its trailers and the transmission are done. A rejection returns `err(internal-error(some(description)))` through the same flat layout (`AbiType::OkHandle`).
-- **`json()` of a body.** A body drained for `json()` is queued rather than parsed by the stream code; `web_json_settle`, which compiled code calls after each event only when the program uses `json()`, parses it. Stream programs therefore do not link the JSON parser.
-- **Errors.** Exception objects are `{ kind, tag, value, cause }`: `Error` objects keep their message in `value` and a string `cause` (or null); `name` follows from `kind`.
-- **Promise combinators.** `Promise.all` and `Promise.race` are runtime frames that wait on every pending input at once; `drive` steps them like async frames.
-- **Strings.** `{ len (UTF-8 bytes), utf16, data, buffer }`.
-  - `utf16` caches the ECMAScript length.
-  - Constants are static objects in the data segment.
-  - Concatenation appends in place to a shared growable buffer while the left operand is that buffer's newest string, so append loops are linear.
+References encode `undefined` as zero and `null` as one, retaining a single-word representation.
+Numbers reserve signalling-NaN payloads and booleans use spare integer values. Stable absence
+sentinels let closed records and arrays widen admitted absence states without copying or losing aliases.
+
+Strings use Unicode scalar indexing. ASCII character strings are static; a cached scalar cursor
+accelerates sequential non-ASCII indexing. Slices share immutable storage. Append chains reuse
+spare buffer capacity while the left operand is the latest view; retained prefixes remain unchanged.
+
+Dates preserve identity and alias-visible mutation. Literal regular expressions compile into
+bounded DFA tables; search/test allocate no guest storage. Incremental TextDecoder retains at most
+three pending bytes, with explicit fatal-error and BOM state.
+
+## JSON
+
+The parser produces immutable JSON nodes. Required scalar conversions check node kinds. Conversion
+into a declared closed record or dense array creates independent native aggregates; one generated
+helper per schema handles recursive types. Absence checks distinguish missing members and null.
+
+Serialization of native aggregates is generated per type. JSON graph traversal and parsing use
+bounded iterative helper stacks. Object spreads copy shallow JSON member nodes and preserve the
+supported ECMAScript property order. Revivers, replacers and indentation remain compile-time errors.
 
 ## Memory
 
-All memory comes from linear memory managed by `perry-runtime`:
+`talc` manages linear memory after static data and helper stacks. The compiler assigns these lifetimes:
 
-- **buffer.** talc 5.1: 1.9 KB of code, with in-place `realloc`. Chosen by measurement in `bench/allocators`. It first claims the rest of the initial memory after the linked data and stack (`__heap_base`, resolved by `src/link`), then grows, so a component whose working set fits runs in a single 64 KiB page.
-- **task.** A region per export call, released in bulk. Its chunks start at 4 KiB and double up to 64 KiB, with a free list per size. Queue nodes, waiters and subtask entries are recycled within the task.
-  - The host's `cabi_realloc` for argument lowering opens the task.
-  - The export adopts it.
-  - `cabi_post_<export>` ends it after the host has lifted the result, so results can point into the region without copies.
-- **Leases** (`perry_codegen::lease`). `reader.read()` and `writer.write()` hand out a promise, a `{ done, value }` and a chunk view per call. When the MIR proves that nothing derived from one call is live when the next call of the same kind runs (and the reader or writer stays inside the function), the call is leased: the runtime reuses one set of objects and one 8 KiB chunk buffer. Otherwise each call gets fresh objects. Writes settle when the host accepted their bytes, so a loop that awaits them keeps one chunk of output. Together, a stream of any length runs in constant memory (`wasi.streams.incoming_bytes`: 4 MiB through 64 KiB).
-- **instance.** The collector (TODOs.md P5.3) is not built. The builder cannot yet express module state (R4), so nothing outlives its task.
+| Tier | Storage policy |
+|---|---|
+| scalar | Eliminate closed aggregates whose fields can stay in SSA |
+| frame | Reuse bounded activation storage for proven nonescaping scalar records |
+| task | Regions for statically bounded task storage and recycled scheduler nodes |
+| instance | Precise non-moving collection for persistent or unproven allocation lifetimes |
+| buffer | Explicit owners for canonical and host-transfer storage |
 
-## Exceptions
+Collectible objects use size-class pages, direct page lookup, side mark bits, exact pointer shapes,
+a tracing worklist and lazy sweeping. Ordinary collection is due at
+`max(256 KiB, live bytes after collection)` allocated volume; memory pressure can request an earlier
+collection at a compiled safe point. Helpers allocate without collecting internally. The remaining
+heap-growth and transfer stress acceptance work is tracked in the checklist.
 
-There are no traps in the subset:
+Roots comprise live compiled values, persistent module cells, suspended frames and active operations.
+Completed operations detach their edges, dead frame slots clear, and recycled scheduler entries clear
+their old references. Views retain their owner. Pins remain until host completion or cancellation
+acknowledgement; one task's cleanup preserves another task's storage.
 
-- `undefined` at a typed use throws a catchable `TypeError`.
-- A write that would leave a hole throws a `RangeError`.
-- A function that may throw returns an extra `i32` status after its results (1 `TypeError`, 2 `RangeError`, 3 `Error`, 4 another thrown value, 5 `process.exit`). Callers branch on it, propagating to the nearest handler or to their own caller.
-- Inside a `try`, the builder follows each throwing op with `perry.caught` and a branch to the handler, so the MIR CFG has the handler edges. Codegen routes that op's exception to a landing block instead of out of the function.
-- `throw value` (`perry.raise`) makes an exception object pending in the task; `catch (e)` (`perry.catch`) takes it, or materializes an `Error` for failures raised without one. A rejected promise keeps the object for its awaiters. Catch bindings support `instanceof`, `.message`, identity and rethrow.
-- `finally` bodies are emitted once per way out: normal end, exception (then rethrow), and every `return`, `break` and `continue` that leaves them.
-- Status 5 (`process.exit`) passes through every handler.
+Stream leases require a liveness proof: a previous read/write result and every derived value must be
+dead before reuse. Otherwise the operation uses collectible storage. Writer close waits for queued
+writes and propagates failures. Async iteration releases the reader and cancels on early exit/errors.
 
-At a component export without an error type, an escaping exception traps; a command reports it on stderr and fails.
+BYOB readers transfer a shared byte-buffer owner without copying its payload. Views retain an owner,
+offset and length; a detached owner invalidates every alias and releases its payload edge. Queued
+reads retain only active requests. A host copy pins its reader until completion or cancellation
+acknowledgement. Canonical transfers retain the payload independently of later buffer detachment.
 
-## Component boundary
+`--explain-tiers` reports allocation decisions. Raw test modules can expose allocation, collection,
+live-byte, reserved-byte, transfer-copy, pin and root counters, plus forced collection and poisoning.
 
-`src/compiler/bind.rs` matches each WIT export with the exported TypeScript function of the SDK's implementation name; extra TypeScript exports stay internal. `perry_codegen::boundary` then emits, per export:
+## Boundaries
 
-- the core function, which lifts flat arguments (or loads them from memory), calls the implementation and lowers the result (flat, or into a return area);
-- `cabi_post_<export>`.
+The selected WIT world supplies function names, types and async effects. SDK type imports resolve to
+these static definitions. Extra source exports stay internal. Static local modules share one typed
+module state; synchronous initialization runs once, with failure/reentrancy checks.
 
-Supported WIT types are `bool`, integers, `f32`, `f64`, `string`, `list<T>` and records; the remaining types follow the plan.
+Finite variants occupy sixteen bytes: a static tag string, one traced owner and one payload slot.
+Tag guards select statically checked payload types; access checks remain valid across alias changes.
 
-An `async func` export must be implemented by an async TypeScript function and uses the callback ABI (see Async).
+Canonical conversion supports scalars, records, lists, tuples, options, enums, finite variants
+and results. WIT s64/u64 use bigint for exact transport. Tagged results use `{ ok: true, value }` or
+`{ ok: false, error }`, omitting absent payloads. An explicit tagged return takes precedence over a
+completion-style payload. Compatible throws become `err`; unsupported mappings receive diagnostics.
+
+Outbound `WitInput<T>` recursively permits strings for byte lists. Lowering uses the string's UTF-8
+pointer and byte length. Canonical inbound strings and byte lists adopt transferable payload storage;
+byte lists remain mutable without aliasing immutable strings. Output owners survive lifting and
+post-return or async acknowledgement.
+
+Named WIT imports use the same conversion routines. Async imports lower to a small MIR wrapper that
+starts a host call, awaits its transfer and lifts the result. The transfer retains argument owners,
+temporary canonical buffers and result areas. Cancellation acknowledges the host before discarding
+returned canonical buffers and clearing transfer owners.
+
+Resource descriptors share ownership state across aliases. Canonical argument preparation is
+transactional: a duplicate move rolls back before invoking the host. Active transfers root borrowed
+owners until completion or cancellation acknowledgement. The collector's resource registry is weak;
+it queues unreachable owned handles after marking. Generated adapters drain that queue at legal
+host-call boundaries, before return and outside collector borrows. Saved inbound borrows expire at
+task completion. Imported resources can pass through exported interfaces using WIT type aliases.
+Declaring one resource interface as both imported and exported is diagnosed because its two resource
+identities need separate source types. Asynchronous module initialization remains incomplete.
 
 ## Async
 
-Stackless state machines on the WASI P3 callback ABI. It uses no Component Model thread builtins and only the builtins of the default `component-model-async` feature.
+Async functions split into a ramp and a resumable step. Calls start eagerly. A settled await continues
+inline; a pending await registers the frame as a waiter. The runtime drives ready frames after P3
+completion events. Promise combinators use the same task queue.
 
-- **Split.** Each async function becomes a ramp and a step function (`perry_codegen::async_split`).
-  - The ramp allocates a frame in the task region, stores the arguments, creates the result promise and runs the step.
-  - The step dispatches on the frame's state: 0 starts the body, `k` resumes after the `k`-th `await`.
-  - Values live across an `await` live in frame slots.
-  - `await` of a settled promise continues inline. Otherwise the frame waits on the promise and the step returns.
-  - `return` fulfils the frame's promise; an exception rejects it.
-- **Runtime.** A promise is `{ state, status, value, waiters }` (`perry_runtime::promise`). Settling queues its waiters on the task's run queue. `drive` runs queued frames, dispatching on the frame's kind.
-- **Timers.** `setTimeout(delay, value)` from `node:timers/promises` is an async-lowered `wasi:clocks/monotonic-clock.wait-for`. A pending call joins the task's waitable set, and its promise settles when the subtask returns.
-- **Exports.**
-  - `[async-lift]<export>` enters the task, stores it with `context.set 0`, lifts the arguments, calls the ramp and finishes.
-  - `finish` drives ready frames and starts writing buffered console output. Once the result promise is settled and the outputs are closed, it calls `task.return` with the lowered value, frees the task and returns `EXIT`. Otherwise it suspends the task and returns `WAIT` on its waitable set.
-  - `[callback][async-lift]<export>` resumes the task from `context.get 0`, then lets the runtime handle the event (a returned subtask, a completed stream write or the output's completion future) and finishes again.
-  - Calls may overlap: every task has its own region, run queue, subtasks and output.
-- **Commands.** Top-level statements become the async function `perry_main`, bound to `wasi:cli/run.run`. Its result is `err` after an uncaught exception (reported on stderr) or with a non-zero `process.exitCode`.
-- **Host services.** Console output, `process.env`, the clocks and the async built-ins are called from `perry-runtime` (`host.rs`, `io.rs`); `src/link` forwards the imports of the runtime functions a program reaches. Codegen checks that the world imports each interface a service needs (`perry.intrinsic`).
-- **Console output.** Per-task buffers drain through one `wasi:cli/stdout` or `stderr` stream each, with async `stream.write`. Output produced while a write is blocked goes to a second buffer. Closing drops the writable end and waits for the host's completion future, so all output is written before the export returns.
+Each export has its own task, waitable set, active host operations and scheduler storage. The callback
+ABI stores that task in `context.set 0`; completion resumes it through `context.get 0`. Once the result
+and required output transfers finish, `task.return` delivers the value and cleanup releases the task.
+Exports and host calls can overlap without requiring component threading.
+
+Unresolved detached timer/import/filesystem/fetch/read work is cancelled at the task boundary and
+reported as a failure. Host cancellation callbacks detach waitables and acknowledge native transfers
+before releasing task storage. A host-cancelled activation is discarded; source `finally` guarantees
+apply to source control flow. Promise timers accept `AbortController.signal`; active watches reuse
+scheduler entries and detach when timers settle. Source cancellation is limited to the current export
+task; attempts to cancel another task through a shared signal throw before cancelling operations.
+Source cancellation options for other builtins are deferred unless required by an application.
+
+## Exceptions
+
+Catchable failures carry an exception status and optional exception object through explicit CFG edges.
+Callers propagate failures to their nearest handler. `finally` runs along normal completion, throws,
+returns and loop exits. A rejected promise retains its exception for repeated observation.
+
+An escaping exception becomes the declared compatible WIT error, traps an export without an error
+mapping, or fails a CLI command after reporting to stderr. Resource exhaustion remains a Wasm trap.
 
 ## Verification
 
-- **Unit tests per crate:**
-  - dialect round-trips and verifiers;
-  - emitter tests executed in wasmtime;
-  - runtime tests on the host.
-- **End to end:**
-  - `tests/mir_codegen_test.rs`: linked core modules with fuel metering;
-  - `tests/component_test.rs`: WIT values through the component model;
-  - `tests/command_test.rs`: commands with console output, environment, exit codes and exceptions;
-  - `tests/builtins_test.rs`: built-in services against values recorded from Node.js;
-  - `tests/async_component_test.rs`: async exports with WASI P3 timers, including overlapping calls.
-- **Conformance:** `cargo run -p perry-conformance -- check`, against Node.js as the oracle, gated by the `passing.txt` ratchet.
+Unit tests check dialect invariants, emission, runtime ownership and pure helpers. Integration tests
+exercise compiled core modules, actual WIT worlds, SDK checking, in-process HTTP, bounded memory,
+stream reuse and suspended calls. Node supplies the oracle for declared shared semantics; astral
+scalar string behavior has explicit Perry expectations.
+
+Generated programs use bounded static types, valid metamorphic forms and replayable seeds. Compiler
+rejection is a failure. Scaling checks compare guest fuel at n and 4n; component budgets use frozen
+source baselines. Final consumer acceptance is recorded separately after its approved run.

@@ -1,17 +1,17 @@
 # perry-wit
 
-**Perry-WIT** compiles static TypeScript ahead-of-time directly into lightweight, high-performance WebAssembly components targeting **WASI 0.3 (Preview 3)**.
+Perry-WIT compiles a static subset of TypeScript to WASI 0.3 WebAssembly components through
+[Perry](https://www.perryts.com) HIR and typed MIR built on [pliron](https://github.com/pliron-org/pliron).
+The linker includes the runtime services each component uses. Small identity and append components
+have frozen size budgets and run with one initial 64 KiB memory page.
 
-Rather than embedding a heavy JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
-[Perry](https://www.perryts.com) HIR and a typed middle IR built on [pliron](https://github.com/pliron-org/pliron) straight to native WebAssembly. A string-processing component is under **3 KB**, including its runtime, with instant startup and memory released in bulk after every call.
+The compiler supports closed typed aggregates, persistent module state, checked JSON conversion,
+UTF-8 strings with Unicode scalar indexing, synchronous and asynchronous WIT calls, and stackless P3
+continuations. Settled awaits resume inline. Collectible storage reclaims unproven allocation lifetimes;
+proven local records and stream buffers can reuse storage.
 
-> **Status: compiler rewrite in progress.** The WAFFLE-based backend has been removed. The MIR pipeline currently covers exports over numbers, booleans, strings, dense arrays and records, with catchable exceptions and linear-time memory. It also covers async functions on the WASI P3 callback ABI with `setTimeout` from `node:timers/promises`, `throw`/`try`/`catch`/`finally`, CLI commands with top-level `await`, `console`, `process.env`, `process.exit` and the clocks, and the core standard library: `Math`, `Date`, string methods, `Uint8Array`, `TextEncoder`/`TextDecoder`, `JSON`, `Promise.all`/`race`/`allSettled`/`resolve`/`reject`, `Error` causes and `crypto` random values, plus `node:fs/promises`, `fetch` over `wasi:http/client`, `Headers`/`Response`/`Request` (with `json()`), object spreads of JSON values, array destructuring, and `ReadableStream`/`WritableStream` over `stream<u8>` and stdio, and HTTP handlers (`wasi:http/handler`). `AbortController` and `Temporal` return with the feature migration in [TODOs.md](TODOs.md) (P6.2). [crates/conformance/passing.txt](crates/conformance/passing.txt) lists the contracts that pass today.
-
-- **WIT-first authoring**: Export typed functions matching a WIT world, or write a standalone CLI command with top-level `await`.
-- **Node-compatible**: Share code seamlessly between Node.js test harnesses and native Wasm components using standard static ESM imports and type definitions.
-- **Hermetic toolchain**: Fully reproducible builds, type generation, and component testing via Nix flakes.
-
-For the pipeline, memory tiers and component boundary, see [ARCHITECTURE.md](ARCHITECTURE.md); for the plan, see [TODOs.md](TODOs.md).
+Implementation is in progress. [TODOs.md](TODOs.md) separates completed work, remaining gaps and accepted
+deviations. Async module initialization and final memory/cancellation acceptance remain incomplete. [ARCHITECTURE.md](ARCHITECTURE.md) describes representations and ownership.
 
 ## Use
 
@@ -21,7 +21,8 @@ For compiler development, enter the pinned development shell:
 nix develop
 ```
 
-This environment supplies Rust, Node.js, TypeScript, Wasmtime, and `wasm-tools`.
+This environment supplies Rust 1.98.1, Wasmtime 49.0.2, Node.js, TypeScript and `wasm-tools`.
+Cargo tests and the Nix CLI share the exact Wasmtime version; the CLI uses hash-pinned upstream binaries.
 - `WASI_WIT_PATH` identifies official WASI 0.3 packages.
 - Application WIT dependencies in `wit/deps` automatically take precedence over ambient packages.
 
@@ -44,7 +45,9 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y \
   --invoke 'run-task("hello world")' dist/merge_task.wasm
 ```
 
-[examples/merge_docs.ts](examples/merge_docs.ts) (`fetch`, `Promise.all`, `json()`, an object spread of JSON values) compiles to a 49,634-byte component (114,105 on the legacy backend); `tests/fetch_test.rs` runs it against a local server.
+[examples/merge_docs.ts](examples/merge_docs.ts) fetches two JSON documents concurrently and returns their
+merged object. Its integration test uses the checked-in `merge-docs` world and an in-process HTTP host,
+including the declared structured error result.
 
 You can also run the examples directly in Node.js without compilation:
 
@@ -58,10 +61,10 @@ Run the standard test suite and linters:
 
 ```sh
 # Run unit and integration tests
-cargo test --workspace
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo test --workspace -j 1 -- --test-threads=1
 
 # Linting and formatting checks
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -j 1 -- -D warnings
 cargo fmt --all -- --check
 
 # Complete Nix flake checks
@@ -112,9 +115,11 @@ wasmtime run -C cache=n -S p3=y -W component-model-async=y --invoke 'run-task("t
 ```
 
 - **Exports**: Exported TypeScript functions not named by the world stay internal, so one source can implement several worlds.
-- **Tasks**: Every export call is one task. Everything it allocates, including its arguments and results, is released in bulk after the host has read the result.
+- **Tasks**: Every export call owns its scheduler and active operations. Precise collection reclaims unreachable values; module state persists across calls. Boundary owners remain live until lifting or transfer acknowledgement.
 - **Async exports**: an `async func` export is implemented by an `async` TypeScript function returning `Promise<T>`.
-- **Not yet migrated**: module-level state and initialization, WIT imports other than `wasi:clocks/monotonic-clock` for timers, and `option`, `result`, `variant`, `enum`, `flags`, `tuple` and resource types at the export boundary. Programs can use the SDK's generated types for records, variants (`{ tag, val }`), options and tuples, as HTTP handlers do.
+- **Canonical values**: Records, dense lists, tuples, options, enums, finite variants and tagged results cross imports and exports. WIT `s64` and `u64` use exact `bigint` transport.
+- **Results**: Explicit `{ ok: true, value }` / `{ ok: false, error }` returns take precedence. Completion-style implementations return the success payload and throw a compatible error payload.
+- **Byte inputs**: Recursive `WitInput<T>` accepts `string | Uint8Array` for outbound `list<u8>`. Strings use their existing UTF-8 storage. Inbound byte lists remain mutable `Uint8Array` values.
 - **Core Wasm Output**: Pass `--core-only` to emit the linked core module without component encoding.
 
 ### CLI Scripts
@@ -200,13 +205,16 @@ All verified capability contracts are declared in [crates/conformance/src/regist
 - An unlisted contract that fails is reported as `pending` and does not fail the campaign.
 - An unlisted contract that passes fails the campaign until it is added, so the list only grows.
 
-[crates/conformance/deferred.txt](crates/conformance/deferred.txt) lists contracts outside the accepted domain, each with the deviation it records; they are not run. The accepted deviations are listed in [TODOs.md](TODOs.md) (P6.2). Status: 45 contracts pass, 4 are deferred and 1 is pending.
+[crates/conformance/deferred.txt](crates/conformance/deferred.txt) lists contracts outside the accepted domain, each with the deviation it records; they are not run. The accepted profile is listed in [TODOs.md](TODOs.md). Campaign reports record the checked source identity and each contract outcome.
 
 Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling.rs](crates/conformance/src/scaling.rs)) bound guest fuel growth between inputs n and 4n.
 
 ## Performance
 
-The legacy benchmark harness was removed with the legacy backend; its last numbers are kept in [TODOs.md](TODOs.md) (P0.2) as the baseline for the migrated stream and HTTP workloads. Today, size and fuel are measured by the scaling contracts, `tests/mir_codegen_test.rs` and `tests/component_test.rs`. Allocator choices are measured in [bench/allocators](bench/allocators).
+Component budgets are frozen in [bench/baseline](bench/baseline). Integration tests exercise bounded
+allocation churn, retained graphs, stream-buffer reuse and compilation scaling. Conformance scaling
+contracts measure guest fuel for controlled workloads; application timings remain a separate measure.
+Allocator comparisons are in [bench/allocators](bench/allocators).
 
 ## Compilation Pipeline
 
@@ -217,7 +225,7 @@ TypeScript ──► Perry HIR ──► perry MIR (pliron)           crates/per
                                  │  mem2reg, DCE, CFG simplification
                                  ▼
                           wasm dialect (pliron)           crates/perry-codegen
-                                 │  + canonical-ABI glue for the WIT world's exports
+                                 │  + canonical-ABI glue for the WIT world
                                  ▼
                      structured core Wasm                 crates/pliron-wasm (emitter)
                                  │  + perry-runtime and helper libraries (PIC, linked)
@@ -232,16 +240,19 @@ TypeScript ──► Perry HIR ──► perry MIR (pliron)           crates/per
 
 ## Semantics
 
-Perry-WIT supports a predictable, strictly typed subset of TypeScript designed for ahead-of-time compilation. The subset rules R1–R8 are in [TODOs.md](TODOs.md) (D4). Currently supported:
+Perry-WIT supports a strictly typed subset of TypeScript designed for ahead-of-time compilation. [TODOs.md](TODOs.md) records the accepted profile and remaining gaps. Currently supported:
 
 - **Numbers** are IEEE doubles with ECMAScript arithmetic, including `%`, `-0` and NaN. WIT integer and `f32` values convert at the boundary.
 - **Records**: interfaces, type literals and object literals with closed shapes. Structurally equal types are the same record, and recursive interfaces are supported.
-- **Arrays** are dense and homogeneous (R8). An out-of-range or non-integral read yields `undefined`. Writing at `length` appends; any other out-of-range write throws a `RangeError`.
-- **Strings** are UTF-8 with an O(1) UTF-16 `.length`. Concatenation in a loop is linear. Index semantics match Node for BMP scalars, the conformance domain; there are no surrogate halves.
+- **Arrays** are dense and homogeneous. An out-of-range or non-integral read yields `undefined`. Writing at `length` appends; any other out-of-range write throws a `RangeError`.
+- **Strings** use UTF-8 storage with a cached Unicode scalar `.length`. Repeated appends reuse spare buffer capacity, giving amortized linear copying for a growing string. Retained prefixes remain immutable. Index semantics match Node for BMP scalars, the differential conformance domain; astral characters count as one scalar and surrogate halves are rejected.
 - **Exceptions**: a `TypeError` from `undefined` at a typed use, or a `RangeError`, is catchable. Nothing in the subset traps, except an exception escaping an export that has no error type.
 - **Control flow**: `if`, loops, `break`/`continue`, `&&`/`||`, `?:`, and direct calls, including recursion.
 - **Async**: `async`/`await` on the WASI 0.3 callback ABI; an `await` of a settled promise continues inline, without a microtask queue. `Promise.all`, `race` and `allSettled`.
+- **Byte streams**: default readers, async iteration and BYOB readers with transferred buffers, offsets, minimum reads and cancellation. Acknowledged writes preserve bounded buffer reuse.
 - **Standard library**: `Math`, `Date` (UTC), string methods, `Uint8Array`, `TextEncoder`/`TextDecoder`, `JSON` (typed `stringify`; no revivers, replacers or indentation), `crypto` random values, `node:timers/promises`, `node:fs/promises` (`readFile`, `writeFile`, `stat`, `readdir`, `mkdir`, `unlink`, `rmdir`), `Headers`, constructed `Response`/`Request` with byte bodies, and `Writable.toWeb(process.stdout)`.
+
+Native-record JSON object key order is determined by the closed schema.
 
 ## Contributing
 
@@ -252,8 +263,8 @@ Before submitting changes, ensure all formatting, lints, tests, and flake checks
 
 ```sh
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets -j 1 -- -D warnings
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo test --workspace -j 1 -- --test-threads=1
 cargo run -p perry-conformance -- check
 nix flake check
 ```
