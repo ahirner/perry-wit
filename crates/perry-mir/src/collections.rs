@@ -223,6 +223,52 @@ impl SideEffects for ArrayGetOp {
     }
 }
 
+/// Read an element at an `i32` index proven in `[0, length)` (P3.5, `perry_mir::ranges`):
+/// the plain element, with no check. Only the range pass creates it.
+#[pliron_op(
+    name = "perry.array_at",
+    format = "$0 `[` $1 `] : ` type($0)",
+    interfaces = [NOpdsInterface<2>, OneResultInterface]
+)]
+pub struct ArrayAtOp;
+
+impl ArrayAtOp {
+    pub fn new(ctx: &mut Context, array: Value, index: Value) -> Result<Self> {
+        let element = element(ctx, array, "perry.array_at")?;
+        Ok(ArrayAtOp {
+            op: Operation::new(
+                ctx,
+                Self::get_concrete_op_info(),
+                vec![element],
+                vec![array, index],
+                vec![],
+                0,
+            ),
+        })
+    }
+}
+
+impl Verify for ArrayAtOp {
+    fn verify(&self, ctx: &Context) -> Result<()> {
+        let op = self.get_operation().deref(ctx);
+        if element(ctx, op.get_operand(0), "perry.array_at")? != self.get_result(ctx).get_type(ctx)
+        {
+            verify_err!(self.loc(ctx), CollectionErr::Element("perry.array_at"))?
+        }
+        if !is_index(ctx, op.get_operand(1)) {
+            verify_err!(self.loc(ctx), CollectionErr::Index("perry.array_at"))?
+        }
+        Ok(())
+    }
+}
+
+#[op_interface_impl]
+impl SideEffects for ArrayAtOp {
+    fn has_side_effects(&self, _ctx: &Context) -> bool {
+        false
+    }
+}
+
 /// Write an element at an index in `[0, length]`; writing at `length` appends.
 /// Any other index throws a catchable `RangeError` instead of creating a hole (subset rule R8).
 #[pliron_op(

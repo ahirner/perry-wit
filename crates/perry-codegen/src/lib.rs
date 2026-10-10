@@ -26,8 +26,8 @@ use perry_mir::{
     attrs::{BinaryKind, CompareKind, ConvertKind, ErrorKind},
     calls::{AsyncCallOp, AwaitOp, CallOp as MirCallOp, TimerOp, is_exported},
     collections::{
-        ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp, StringConstOp,
-        StringLenOp,
+        ArrayAtOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp, StringConcatOp,
+        StringConstOp, StringLenOp,
     },
     control::{BrOp as MirBrOp, CondBrOp as MirCondBrOp, ReturnOp as MirReturnOp},
     exceptions::{
@@ -1731,6 +1731,12 @@ impl<'s> FunctionLowering<'s> {
             Intrinsic::MathTrunc => Some(self.num(ctx, NumOpcode::F64Trunc, args)),
             Intrinsic::MathAbs => Some(self.num(ctx, NumOpcode::F64Abs, args)),
             Intrinsic::MathSqrt => Some(self.num(ctx, NumOpcode::F64Sqrt, args)),
+            Intrinsic::BytesAt => {
+                let data = self.load(ctx, MemKind::I32, args[0], perry_abi::BYTES_DATA as u32);
+                let address = self.num(ctx, NumOpcode::I32Add, vec![data, args[1]]);
+                let byte = self.load(ctx, MemKind::I32U8, address, 0);
+                Some(self.num(ctx, NumOpcode::F64ConvertI32U, vec![byte]))
+            }
             Intrinsic::MathMin => Some(self.num(ctx, NumOpcode::F64Min, args)),
             Intrinsic::MathMax => Some(self.num(ctx, NumOpcode::F64Max, args)),
             Intrinsic::MathRound => {
@@ -2844,6 +2850,7 @@ impl<'s> FunctionLowering<'s> {
             let opcode = match convert.kind(ctx) {
                 ConvertKind::I32ToF64 => NumOpcode::F64ConvertI32S,
                 ConvertKind::F64ToI32 => NumOpcode::I32TruncSatF64S,
+                ConvertKind::F64ToU32 => NumOpcode::I32TruncSatF64U,
             };
             let value = self.num(ctx, opcode, operands);
             self.define(ctx, op, value);
@@ -3034,6 +3041,16 @@ impl<'s> FunctionLowering<'s> {
             };
             let undefined = self.undefined(ctx, target)?;
             let value = self.select(ctx, ok, loaded, undefined);
+            self.define(ctx, op, value);
+            return Ok(());
+        }
+        if Operation::get_op::<ArrayAtOp>(op, ctx).is_some() {
+            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let kind = slot_kind(ctx, element)?;
+            let operands = self.operands(ctx, op)?;
+            let data = self.load(ctx, MemKind::I32, operands[0], layout::DATA);
+            let address = self.slot_address(ctx, data, operands[1]);
+            let value = self.load(ctx, kind, address, 0);
             self.define(ctx, op, value);
             return Ok(());
         }

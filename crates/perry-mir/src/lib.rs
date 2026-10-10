@@ -23,9 +23,11 @@ mod lifetimes;
 pub mod locals;
 pub mod optional;
 pub mod pipeline;
+mod ranges;
 pub mod regex;
 pub mod scalar;
 pub mod types;
+mod unwraps;
 pub mod variants;
 pub mod views;
 

@@ -364,3 +364,43 @@ async fn overlapping_byob_tasks_keep_independent_buffers_under_collection() -> R
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn indexed_reads_recheck_aliases_after_transfer_and_suspension() -> Result<()> {
+    let source = r#"
+async function consume(reader: ReadableStreamBYOBReader, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
+  await reader.read(bytes);
+}
+export async function run(input: ReadableStream<Uint8Array>): Promise<number> {
+  const reader = input.getReader({mode:"byob"});
+  const first = new Uint8Array(8);
+  const alias = first.subarray(0);
+  for (let i = 0; i < first.length; i++) {
+    const pending = consume(reader, alias);
+    if (first[i] !== undefined) throw 1;
+    await pending;
+    if (first[i] !== undefined) throw 2;
+    break;
+  }
+  const second = new Uint8Array(8);
+  const other = second.subarray(0);
+  for (let i = 0; i < second.length; i++) {
+    const pending = reader.read(other);
+    if (second[i] !== undefined) throw 3;
+    await pending;
+    if (second[i] !== undefined) throw 4;
+    break;
+  }
+  await reader.cancel(); reader.releaseLock(); return 7;
+}
+"#;
+    check_typescript(source)?;
+    let (mut store, instance) = instantiate(source, "f64").await?;
+    let run = instance.get_typed_func::<(StreamReader<u8>,), (f64,)>(&mut store, "run")?;
+    for _ in 0..3 {
+        let input = StreamReader::new(&mut store, vec![9u8; 32])?;
+        assert_eq!(run.call_async(&mut store, (input,)).await?.0, 7.0);
+        store.assert_concurrent_state_empty();
+    }
+    Ok(())
+}

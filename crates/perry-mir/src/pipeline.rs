@@ -45,6 +45,17 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
             break;
         }
     }
+    crate::unwraps::reuse(root, ctx);
+    verify_operation(root, ctx)?;
+    if crate::ranges::prove_bounds(root, ctx) == IRStatus::Changed {
+        verify_operation(root, ctx)?;
+        while crate::fold::fold(root, ctx) == IRStatus::Changed {
+            verify_operation(root, ctx)?;
+            dce(root, ctx)?;
+            simplify_cfg(root, ctx)?;
+            verify_operation(root, ctx)?;
+        }
+    }
     crate::lifetimes::assign(root, ctx);
     verify_operation(root, ctx)
 }

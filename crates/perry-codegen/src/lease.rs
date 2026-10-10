@@ -126,6 +126,7 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
                     // Reads and copies.
                     Intrinsic::ReadDone
                     | Intrinsic::BytesLength
+                    | Intrinsic::BytesAt
                     | Intrinsic::BytesGet
                     | Intrinsic::BytesSetFrom
                     | Intrinsic::BytesCopy

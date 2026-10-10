@@ -20,7 +20,9 @@ consumer commands on isolated `f655369f00042c37dc5f5f297050f7ed0085c52e` snapsho
 2. [x] Lower integer remainder inline with IEEE-754 fallback and negative-zero preservation.
    [Full campaign](bench/performance/reports/02-remainder/summary.json) passes all contracts,
    four seeds, 55 consumer tests and 25 benchmark scenarios.
-3. [ ] Extend bounded leaf inlining, closed-record argument promotion and scalar replacement.
+3. [x] Extend bounded leaf inlining, closed-record argument promotion and scalar replacement.
+   [Full campaign](bench/performance/reports/03-aggregates/summary.json) passes all contracts,
+   four seeds, 55 consumer tests and 25 benchmark scenarios.
 4. [ ] Prove indexed accesses and reuse dominating successful optional unwraps.
 5. [ ] Reuse string headers when ownership and liveness permit mutation.
 6. [ ] Grow exclusive unpinned buffers in place with collector-aware metadata updates.
@@ -58,7 +60,14 @@ Aggregate focused checks pass (33 codegen tests). Multi-block leaf inlining keep
 mutation and reentry are excluded. Direct-call fuel falls from 24.0M to 22.0M and the temporary
 record component shrinks from 12,353 to 4,771 bytes without changing zero-allocation behavior.
 Constant branches remove unreachable blocks before verification; lowering follows CFG order.
-The full post-commit campaign is pending.
+The full post-commit campaign passed.
+
+Range/unwrap focused checks pass (35 codegen, nine BYOB and three stream tests). Dominating successful
+unwraps are reused before bounds analysis so identical byte views share one SSA value.
+Incoming-stream fuel falls from 1.221B to 461.7M at 64 KiB; byte indexing from 478.1M to
+333.1M; numeric arrays from 221.6M to 191.6M. Optional elements, invalid indices, caught
+failures, detached aliases and suspension retain their checks. Unchecked byte reads preserve
+stream leases. The full campaign is pending.
 
 ## Verified implementation
 

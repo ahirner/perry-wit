@@ -38,6 +38,8 @@ use thiserror::Error;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ty {
     BigInt,
+    /// A signless i32 index proven in bounds.
+    Index,
     Number,
     Bool,
     String,
@@ -90,6 +92,7 @@ impl Ty {
         let number: TypeHandle = FP64Type::get(ctx).into();
         match self {
             Ty::BigInt => crate::types::BigIntType::get(ctx).into(),
+            Ty::Index => crate::collections::index_type(ctx),
             Ty::Number => number,
             Ty::Bool => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             Ty::String => string,
@@ -186,6 +189,9 @@ impl Ty {
         let number = |t: TypeHandle| t.deref(ctx).is::<FP64Type>();
         match self {
             Ty::BigInt => deref.is::<crate::types::BigIntType>(),
+            Ty::Index => deref
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|i| i.width() == 32 && i.signedness() == Signedness::Signless),
             Ty::Number => deref.is::<FP64Type>(),
             Ty::Bool => deref
                 .downcast_ref::<IntegerType>()
@@ -336,6 +342,7 @@ intrinsics! {
     BytesOffset = "bytes_offset" (Bytes) -> (Number);
     BufferLength = "buffer_length" (ByteBuffer) -> (Number);
     BytesFromBuffer = "bytes_from_buffer" (ByteBuffer) -> (Bytes), throws;
+    BytesAt = "bytes_at" (Bytes, Index) -> (Number), pure;
     BytesGet = "bytes_get" (Bytes, Number) -> (OptNumber);
     BytesSet = "bytes_set" (Bytes, Number, Number) -> ();
     BytesLength = "bytes_length" (Bytes) -> (Number);
@@ -518,6 +525,7 @@ impl Intrinsic {
                 | Self::StringLastIndexOf
                 | Self::StringStartsWith
                 | Self::StringEndsWith
+                | Self::BytesAt
                 | Self::BytesGet
                 | Self::BytesSet
                 | Self::BytesBuffer

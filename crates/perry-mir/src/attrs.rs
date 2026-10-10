@@ -66,6 +66,8 @@ pub enum ConvertKind {
     /// Only inserted by P3.5 for values proven integral and in `i32` range. Runtime failures
     /// in the subset are exceptions, never traps, so this conversion never checks.
     F64ToI32,
+    /// A proven nonnegative integral Wasm32 index.
+    F64ToU32,
 }
 
 /// The ECMAScript error a throwing op raises.

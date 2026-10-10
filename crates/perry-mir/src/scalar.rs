@@ -143,7 +143,9 @@ impl ConvertOp {
         use crate::attrs::ConvertKind;
         let ty = match kind {
             ConvertKind::I32ToF64 => pliron::builtin::types::FP64Type::get(ctx).into(),
-            ConvertKind::F64ToI32 => IntegerType::get(ctx, 32, Signedness::Signless).into(),
+            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
+                IntegerType::get(ctx, 32, Signedness::Signless).into()
+            }
         };
         let op = ConvertOp {
             op: Operation::new(
@@ -186,7 +188,9 @@ impl Verify for ConvertOp {
         };
         let ok = match kind {
             ConvertKind::I32ToF64 => is_i32(input) && is_f64(self.get_result(ctx)),
-            ConvertKind::F64ToI32 => is_f64(input) && is_i32(self.get_result(ctx)),
+            ConvertKind::F64ToI32 | ConvertKind::F64ToU32 => {
+                is_f64(input) && is_i32(self.get_result(ctx))
+            }
         };
         if !ok {
             verify_err!(self.loc(ctx), ConvertErr(kind))?

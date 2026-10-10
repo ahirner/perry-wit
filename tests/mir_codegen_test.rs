@@ -1340,3 +1340,70 @@ export function run(n: number): number {{ let sum = 0; {calls} return sum; }}
         "bounded inlining grew the component unexpectedly"
     );
 }
+
+#[test]
+fn range_proofs_keep_optional_elements_and_invalid_joined_indices() {
+    let mut program = Program::new(
+        r#"
+export function run(n: number): number {
+  const values: (number | null | undefined)[] = [null, undefined, 7];
+  let score = 0;
+  for (let i = 0; i < values.length; i++) {
+    const value = values[i];
+    if (value === null) score += 10;
+    else if (value === undefined) score += 100;
+    else score += value;
+  }
+  const bytes = new Uint8Array([11, 13, 17]);
+  let index = 0;
+  if (n !== 0) index = n;
+  if (index < bytes.length) {
+    const value = bytes[index];
+    if (value === undefined) return score + 1000;
+    return score + value;
+  }
+  return score + 2000;
+}
+"#,
+    );
+    for (index, expected) in [
+        (0.0, 128.0),
+        (-0.0, 128.0),
+        (1.0, 130.0),
+        (-1.0, 1117.0),
+        (0.5, 1117.0),
+        (3.0, 2117.0),
+        (f64::NAN, 2117.0),
+        (f64::INFINITY, 2117.0),
+    ] {
+        assert_eq!(program.number("run", index), expected, "index={index}");
+    }
+}
+
+#[test]
+fn dominating_unwraps_do_not_cross_caught_failure_paths() {
+    let mut program = Program::new(
+        r#"
+interface Cell { x: number }
+export function caught(n: number): number {
+  const cells: Cell[] = [{x:7}]; const value = cells[n]; let sum = 0;
+  try { sum += value.x; } catch (e) { sum += 100; }
+  try { sum += value.x; } catch (e) { sum += 1000; }
+  return sum;
+}
+export function dominated(n: number): number {
+  const cells: Cell[] = [{x:7}]; const value = cells[n];
+  const first = value.x; let sum = first;
+  for (let i=0; i<100; i++) sum += value.x;
+  return sum;
+}
+"#,
+    );
+    assert_eq!(program.number("caught", 0.0), 14.0);
+    assert_eq!(program.number("caught", 1.0), 1100.0);
+    assert_eq!(program.throwing("dominated", 0.0), (707.0, 0));
+    assert_eq!(
+        program.throwing("dominated", 1.0),
+        (0.0, status_code(ErrorKind::TypeError))
+    );
+}
