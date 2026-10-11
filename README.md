@@ -41,9 +41,6 @@ cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 
-# Cold packaging check (copies sources and rebuilds every embedded helper)
-cargo test --test build_artifact_test -- --ignored
-
 # Complete Nix flake checks
 nix flake check
 ```
