@@ -166,12 +166,12 @@ Asynchronous TypeScript functions execute eagerly until they reach an initial su
 Completed tasks store their settlement state and outcome value for repeated observation.
 
 Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue.
-Awaits on already-settled promises advance inline on the stackless state machine. Pending observers of the same promise share one native completion. Its callback resumes those frames in registration order. P3 selects the order between completion events; exact Node microtask interleaving is not guaranteed.
+Awaits on already-settled promises advance inline on the stackless state machine. Pending observers of the same promise share a single native completion whose callback resumes registered frames in registration order. The host runtime determines the scheduling order across distinct completion events.
 
 ### Settlement
 Guest task records maintain explicit settlement states, observer lists, and outcome values in the guest heap. Combinator operations (`all`, `allSettled`, `race`) register as observers on operand tasks and propagate settlements deterministically when dependencies resolve.
 
-Observer links live inside suspended frames or a combinator's input storage. A task list retains pending registrations for GC and cancellation; a handle registry retains native completion owners. Neither structure orders runnable work. Combinators count input settlements and signal once their result is ready, so long dependency chains advance through native events with bounded guest stack usage.
+Observer links live inside suspended frames or a combinator's input storage. A task list retains pending registrations for garbage collection and cancellation, while a handle registry retains native completion owners. Runnable dispatch is driven directly by native host events. Combinators count input settlements and signal once their result is ready, ensuring long dependency chains advance through native events with bounded guest stack usage.
 
 Non-winning branches in a race continue running as background tasks. The runtime verifies that all spawned tasks settle or acknowledge cancellation before the top-level export returns. Attempting to return while unresolved background work remains results in a runtime trap.
 
