@@ -9,6 +9,12 @@
 
 use core::ptr;
 
+pub mod layout;
+// Public because `perry-runtime` compiles this source too and uses the compact counter.
+pub mod utf8;
+/// Unicode scalar count in valid UTF-8, scanning eight bytes at a time.
+pub use utf8::scalars_length_wide as scalars_length;
+
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
@@ -39,17 +45,17 @@ pub const TAG_STRING: u32 = 3;
 /// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
 /// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
 pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
-/// Offset of an array's data address (`perry_runtime::array::DATA`).
-pub const ARRAY_DATA: u32 = 8;
+/// Offset of an array's data address ([layout::array::DATA]).
+pub const ARRAY_DATA: u32 = layout::array::DATA;
 /// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].
 pub const BYTES_DATA: usize = 4;
-/// String layout (`perry_runtime::string`): byte length and data address.
-const STRING_LEN: usize = 0;
-const STRING_DATA: usize = 8;
+/// String layout ([layout::string]): byte length and data address.
+const STRING_LEN: usize = layout::string::LEN as usize;
+const STRING_DATA: usize = layout::string::DATA as usize;
 
 #[cfg(not(target_arch = "wasm32"))]
 const _: () = {
-    use perry_runtime::{array, exception, string};
+    use perry_runtime::exception;
     assert!(exception::TYPE_ERROR == TYPE_ERROR);
     assert!(exception::RANGE_ERROR == RANGE_ERROR);
     assert!(exception::ERROR == ERROR);
@@ -57,8 +63,6 @@ const _: () = {
     assert!(exception::TAG_NUMBER == TAG_NUMBER && exception::TAG_STRING == TAG_STRING);
     assert!(exception::KIND as usize == EXCEPTION_KIND && exception::TAG as usize == EXCEPTION_TAG);
     assert!(exception::VALUE as usize == EXCEPTION_VALUE);
-    assert!(array::DATA == ARRAY_DATA);
-    assert!(string::LEN as usize == STRING_LEN && string::DATA as usize == STRING_DATA);
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -89,12 +93,6 @@ mod imports {
             to: u32,
             scalars: u32,
         );
-        pub(crate) fn perry_string_view_counted(
-            string: *mut u8,
-            from: u32,
-            to: u32,
-            scalars: u32,
-        ) -> *mut u8;
         pub(crate) fn perry_raise(kind: u32, message: *mut u8);
         pub(crate) fn perry_status() -> u32;
         pub(crate) fn perry_promise_reuse(promise: *mut u8) -> *mut u8;
@@ -155,7 +153,7 @@ mod imports {
         },
         string::{
             perry_string_adopt_counted, perry_string_offset, perry_string_view,
-            perry_string_view_counted, perry_string_view_into,
+            perry_string_view_into,
         },
     };
 
@@ -181,6 +179,16 @@ mod imports {
 pub fn alloc(size: u32) -> *mut u8 {
     // SAFETY: a runtime service without preconditions.
     unsafe { imports::perry_alloc(size) }
+}
+
+/// `len` fresh, uninitialized bytes in the task region, exclusively the caller's.
+///
+/// Like every task allocation, the block lives until the task ends; `'static` stands for that.
+pub fn alloc_uninit(len: usize) -> &'static mut [core::mem::MaybeUninit<u8>] {
+    let len32 = u32::try_from(len).expect("allocation size overflow");
+    // SAFETY: a fresh, 8-aligned block of `len` bytes that nothing else references; any
+    // byte pattern (including none) is a valid `MaybeUninit<u8>`.
+    unsafe { core::slice::from_raw_parts_mut(alloc(len32.max(1)).cast(), len) }
 }
 
 /// Release the host pin after a canonical payload is adopted or discarded.
@@ -233,14 +241,6 @@ pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     }
 }
 
-/// A view of byte boundaries in a string, with a previously computed scalar count.
-///
-/// # Safety
-/// The range is valid UTF-8 in `string` and contains exactly `scalars` scalars.
-pub unsafe fn string_view_counted(string: *mut u8, from: u32, to: u32, scalars: u32) -> *mut u8 {
-    unsafe { imports::perry_string_view_counted(string, from, to, scalars) }
-}
-
 /// # Safety
 /// `string` is live; position is a scalar index.
 pub unsafe fn string_offset(string: *mut u8, position: u32) -> u32 {
@@ -250,6 +250,15 @@ pub unsafe fn string_offset(string: *mut u8, position: u32) -> u32 {
 /// `from..to` names valid UTF-8 boundaries within `string`.
 pub unsafe fn string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
     unsafe { imports::perry_string_view(string, from, to) }
+}
+
+/// Initialize a string view in traced caller-owned header storage.
+///
+/// # Safety
+/// `out` has the size, alignment and owner pointer map of the runtime string header;
+/// `from..to` is valid UTF-8 in `string`, containing `scalars` Unicode scalar values.
+pub unsafe fn string_view_into(out: *mut u8, string: *mut u8, from: u32, to: u32, scalars: u32) {
+    unsafe { imports::perry_string_view_into(out, string, from, to, scalars) };
 }
 
 /// The UTF-8 bytes of a string.
@@ -289,9 +298,6 @@ pub fn from_static(text: &'static str) -> *mut u8 {
     // SAFETY: static UTF-8.
     unsafe { adopt(text.as_ptr() as *mut u8, text.len() as u32) }
 }
-
-pub mod utf8;
-pub use utf8::scalars_length_wide as scalars_length;
 
 /// Throw an `Error` of `kind` with `message`: the exception becomes pending, and compiled
 /// code finds its status with `perry_status`.
@@ -530,6 +536,15 @@ impl Buffer {
         // SAFETY: `len` bytes at `ptr` are initialized.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
+
+    /// The contents, for rewriting in place.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // SAFETY: `len` bytes at `ptr` are initialized, and the buffer owns them exclusively.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
 }
 
 impl Default for Buffer {
@@ -537,14 +552,3 @@ impl Default for Buffer {
         Self::new()
     }
 }
-
-/// Initialize a string view in traced caller-owned header storage.
-///
-/// # Safety
-/// `out` has the size, alignment and owner pointer map of the runtime string header;
-/// `from..to` is valid UTF-8 in `string`, containing `scalars` Unicode scalar values.
-pub unsafe fn string_view_into(out: *mut u8, string: *mut u8, from: u32, to: u32, scalars: u32) {
-    unsafe { imports::perry_string_view_into(out, string, from, to, scalars) };
-}
-
-pub mod layout;

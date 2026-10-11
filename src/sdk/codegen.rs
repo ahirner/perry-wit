@@ -56,6 +56,11 @@ fn declaration_id(resolve: &Resolve, mut id: TypeId) -> TypeId {
     id
 }
 
+/// The TypeScript name of a named WIT type, owner-qualified when another declaration shares
+/// its PascalCase name.
+///
+/// Callers pass only named types (declarations, resources, or ids filtered on `name`); an
+/// invented name for an anonymous type would reference a declaration that does not exist.
 pub(crate) fn type_name(resolve: &Resolve, id: TypeId) -> String {
     let id = declaration_id(resolve, id);
     let definition = &resolve.types[id];
@@ -428,10 +433,10 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         let WorldItem::Interface { id, .. } = item else {
             continue;
         };
-        let module = resolve.name_world_key(key);
-        if !emitted.insert(module.clone()) {
+        if !emitted.insert(key) {
             continue;
         }
+        let module = serde_json::Value::String(resolve.name_world_key(key));
         let interface = &resolve.interfaces[*id];
         let mut ids = HashSet::new();
         for id in interface.types.values() {
@@ -452,10 +457,8 @@ pub(crate) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
             .collect();
         names.sort();
         names.dedup();
-        out.push_str(&format!(
-            "declare module {} {{\n",
-            serde_json::to_string(&module).expect("a string always serializes to JSON")
-        ));
+        // A JSON string literal is a valid TypeScript module specifier.
+        out.push_str(&format!("declare module {module} {{\n"));
         for name in &names {
             out.push_str(&format!("  type {name} = import(\"./world\").{name};\n"));
         }

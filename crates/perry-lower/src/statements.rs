@@ -3,15 +3,18 @@ use super::*;
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
-        let mut index = 0;
-        while index < statements.len() {
-            if let Some((id, value)) = self.destructured_element(&statements[index..]) {
-                self.binding(ctx, id, &HirType::Any, Some(value))?;
-                index += 2;
-                continue;
-            }
-            self.statement(ctx, &statements[index])?;
-            index += 1;
+        let mut rest = statements;
+        while let Some((first, tail)) = rest.split_first() {
+            rest = match self.destructured_element(rest) {
+                Some((id, value, after)) => {
+                    self.binding(ctx, id, &HirType::Any, Some(value))?;
+                    after
+                }
+                None => {
+                    self.statement(ctx, first)?;
+                    tail
+                }
+            };
         }
         Ok(())
     }
@@ -19,8 +22,11 @@ impl<'s> FunctionBuilder<'s> {
     /// Array destructuring declares each element as `let e = undefined` and assigns it in
     /// `if (guard) { <iterator pull> } else { e = i < a.length ? a[i] : undefined }`. With a
     /// statically false guard this is `let e = a[i]` (a read that is `undefined` out of
-    /// bounds, R8): the element and its initializer.
-    fn destructured_element(&self, statements: &'s [Stmt]) -> Option<(LocalId, &'s Expr)> {
+    /// bounds, R8): the element, its initializer and the statements after the pair.
+    fn destructured_element(
+        &self,
+        statements: &'s [Stmt],
+    ) -> Option<(LocalId, &'s Expr, &'s [Stmt])> {
         let [
             Stmt::Let {
                 id,
@@ -33,7 +39,7 @@ impl<'s> FunctionBuilder<'s> {
                 else_branch: Some(else_branch),
                 ..
             },
-            ..,
+            after @ ..,
         ] = statements
         else {
             return None;
@@ -56,7 +62,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             other => other,
         };
-        Some((*id, value))
+        Some((*id, value, after))
     }
 
     pub(super) fn statement(&mut self, ctx: &mut Context, statement: &'s Stmt) -> Result<()> {
@@ -78,8 +84,9 @@ impl<'s> FunctionBuilder<'s> {
                 self.callback_return(ctx, value.as_ref())?;
             }
             Stmt::Return(value) => {
-                let mut adopts_promise = false;
-                let mut values = match value {
+                // An async function adopts a returned promise (and its result type) after
+                // the finalizers ran.
+                let (mut values, adopted) = match value {
                     Some(expr) => {
                         let expected = self
                             .results
@@ -87,32 +94,33 @@ impl<'s> FunctionBuilder<'s> {
                             .copied()
                             .context("a void function returns a value")?;
                         let value = self.expression_with(ctx, expr, Some(expected))?;
-                        adopts_promise =
-                            self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>();
-                        vec![if adopts_promise {
-                            value
+                        if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
+                            (Vec::with_capacity(1), Some((value, expected)))
                         } else {
-                            self.fit(ctx, value, expected)?
-                        }]
+                            (vec![self.fit(ctx, value, expected)?], None)
+                        }
                     }
-                    None => self.implicit_results(ctx),
+                    None => (self.implicit_results(ctx), None),
                 };
                 self.run_finallies(ctx, |_| true)?;
                 if self.terminated(ctx) {
                     self.after_terminator(ctx);
                     return Ok(());
                 }
-                if adopts_promise {
+                if let Some((promise, expected)) = adopted {
                     // Returning a promise runs finalizers before adoption; its later rejection
                     // does not enter a catch surrounding the return expression.
                     let handlers = std::mem::take(&mut self.handlers);
-                    let await_ = AwaitOp::new(ctx, values[0])?;
+                    let await_ = AwaitOp::new(ctx, promise)?;
                     let value = self.append_value(ctx, &await_);
-                    values[0] = self.fit(ctx, value, self.results[0])?;
+                    values.push(self.fit(ctx, value, expected)?);
                     self.handlers = handlers;
                 }
                 ensure!(
-                    values.iter().map(|v| v.get_type(ctx)).collect::<Vec<_>>() == self.results,
+                    values
+                        .iter()
+                        .map(|v| v.get_type(ctx))
+                        .eq(self.results.iter().copied()),
                     "return value type differs from the declared result"
                 );
                 self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
@@ -280,7 +288,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let slot = if self.shapes.global_ids.contains(&id) {
             self.shapes.globals.borrow_mut().insert(id, ty);
-            self.global_slot(ctx, id, ty)
+            self.global_slot(ctx, id, ty)?
         } else {
             self.entry_slot(ctx, ty)
         };

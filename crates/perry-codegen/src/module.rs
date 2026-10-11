@@ -104,6 +104,8 @@ pub(crate) struct ModuleState<'e> {
     /// Async functions in dispatch-kind order.
     pub(crate) async_functions: Vec<Identifier>,
     pub(crate) shapes: HashMap<String, i32>,
+    /// Whether typed `JSON.parse` attaches parse sources to values: aggregates then carry a
+    /// source slot, writes to them notify the runtime, and serializers may copy source text.
     pub(crate) json_provenance: bool,
     /// Whether any function writes console output (finish and callbacks then drive it).
     pub(crate) uses_io: bool,
@@ -205,13 +207,7 @@ pub(crate) fn lower(
         foreign_transfers: Vec::new(),
         async_functions,
         shapes: HashMap::new(),
-        json_provenance: functions.iter().any(|f| {
-            crate::analysis::function_ops(ctx, f).iter().any(|&op| {
-                Operation::get_op::<perry_mir::intrinsics::IntrinsicOp>(op, ctx).is_some_and(|op| {
-                    op.intrinsic(ctx) == Some(perry_mir::intrinsics::Intrinsic::JsonReadAttach)
-                })
-            })
-        }),
+        json_provenance: attaches_json_sources(ctx, &functions),
         uses_io: false,
         uses_fs: false,
         uses_streams: false,
@@ -287,6 +283,19 @@ pub(crate) fn lower(
         state.wasm.append_operation(ctx, import.get_operation(), 0);
     }
     Ok((state.wasm, state.data.bytes))
+}
+
+/// Whether any of `functions` attaches a parse source to a decoded value (`JsonReadAttach`).
+fn attaches_json_sources(ctx: &Context, functions: &[FuncOp]) -> bool {
+    functions.iter().any(|function| {
+        crate::analysis::function_ops(ctx, function)
+            .into_iter()
+            .any(|op| {
+                Operation::get_op::<perry_mir::intrinsics::IntrinsicOp>(op, ctx).is_some_and(|op| {
+                    op.intrinsic(ctx) == Some(perry_mir::intrinsics::Intrinsic::JsonReadAttach)
+                })
+            })
+    })
 }
 
 /// Emit the canonical-ABI glue of every WIT export, and `cabi_realloc`.

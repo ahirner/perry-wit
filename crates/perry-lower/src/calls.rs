@@ -106,8 +106,10 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::ExternFuncRef { name, .. } = callee
             && name == "js_process_exit_code_set"
         {
-            ensure!(args.len() == 1, "process.exitCode takes one value");
-            let code = self.expression(ctx, &args[0])?;
+            let [code] = args else {
+                bail!("process.exitCode takes one value");
+            };
+            let code = self.expression(ctx, code)?;
             let code = self.arithmetic(ctx, code);
             ensure!(
                 kind(ctx, code)? == Kind::Number,
@@ -117,7 +119,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(None);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
-            && name == "js_native_module_named_esm_export_value"
+            && name == program::ESM_EXPORT_INIT
         {
             // Module initialization of a named built-in import (`Writable`): nothing to run.
             return Ok(None);
@@ -223,7 +225,9 @@ impl<'s> FunctionBuilder<'s> {
             })
             .collect::<Result<Vec<_>>>()?;
         if signature.is_async {
-            let value = signature.results[0];
+            let &[value] = signature.results.as_slice() else {
+                bail!("async function {name} settles one result");
+            };
             let promise = self.emit_value(ctx, |ctx| {
                 AsyncCallOp::new(ctx, name.clone(), values, value)
             });

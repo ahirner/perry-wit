@@ -5,13 +5,21 @@ use std::collections::HashSet;
 use swc_common::{DUMMY_SP, Span};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
+/// The synthetic method a synchronous `for...of` calls on its source: lowering checks that
+/// the receiver is an array or string and yields it unchanged.
+pub(super) const ITERATION: &str = "$$perryIteration";
+
+/// Prefix of the names a rewritten loop declares; numbered past any source name using it.
+const LOOP_PREFIX: &str = "__perry_loop_";
+
+/// Rewrite every `for...of` and `for await...of` into the indexed or reader loop it means.
 pub(super) fn lower(module: &mut ast::Module) -> Result<()> {
     #[derive(Default)]
     struct Names(HashSet<String>);
     impl Visit for Names {
         fn visit_ident(&mut self, ident: &ast::Ident) {
             // Only names that could collide with generated loop names.
-            if ident.sym.starts_with("__perry_stream_") {
+            if ident.sym.starts_with(LOOP_PREFIX) {
                 self.0.insert(ident.sym.to_string());
             }
         }
@@ -24,10 +32,7 @@ pub(super) fn lower(module: &mut ast::Module) -> Result<()> {
         error: None,
     };
     module.visit_mut_with(&mut lower);
-    match lower.error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    lower.error.map_or(Ok(()), Err)
 }
 
 struct Loops {
@@ -51,7 +56,7 @@ impl Loops {
         let binding = declarator.name;
         let prefix = loop {
             self.next += 1;
-            let prefix = format!("__perry_stream_{}_", self.next);
+            let prefix = format!("{LOOP_PREFIX}{}_", self.next);
             if !self.names.iter().any(|name| name.starts_with(&prefix)) {
                 break prefix;
             }
@@ -77,7 +82,7 @@ impl Loops {
         } else {
             format!(
                 r#"{{
-            const {prefix}items = {prefix}source.$$perryIteration();
+            const {prefix}items = {prefix}source.{ITERATION}();
             for (let {prefix}index = 0; {prefix}index < {prefix}items.length; {prefix}index++) {{
                 const {prefix}item = {prefix}items[{prefix}index];
                 {prefix}body();
@@ -85,7 +90,7 @@ impl Loops {
         }}"#
             )
         };
-        let mut parsed = perry_parser::parse_typescript(&template, "stream-iteration.ts")
+        let mut parsed = perry_parser::parse_typescript(&template, "iteration.ts")
             .map_err(|e| anyhow!("{e:?}"))?;
         struct SyntheticSpans;
         impl VisitMut for SyntheticSpans {
@@ -95,7 +100,7 @@ impl Loops {
         }
         parsed.visit_mut_with(&mut SyntheticSpans);
         let Some(ast::ModuleItem::Stmt(mut statement)) = parsed.body.pop() else {
-            bail!("the stream iteration template is one block statement");
+            bail!("the iteration template is one block statement");
         };
         let mut fill = Fill {
             prefix,
@@ -103,8 +108,10 @@ impl Loops {
             body: Some(*iteration.body),
             binding: Some(binding),
             kind,
+            repeated: false,
         };
         statement.visit_mut_with(&mut fill);
+        fill.check()?;
         Ok(statement)
     }
 }
@@ -123,33 +130,79 @@ impl VisitMut for Loops {
     }
 }
 
+/// Fills a parsed loop template's placeholders (`<prefix>source`, `<prefix>item` and
+/// `<prefix>body()`) with the loop's parts; the user's parts are not revisited.
+/// [Fill::check] rejects a template that misses or repeats a placeholder.
 struct Fill {
     prefix: String,
     source: Option<Box<ast::Expr>>,
     body: Option<ast::Stmt>,
     binding: Option<ast::Pat>,
     kind: ast::VarDeclKind,
+    /// A placeholder appeared after its part was already placed.
+    repeated: bool,
+}
+
+impl Fill {
+    /// Whether `ident` is the template placeholder `<prefix><name>`.
+    fn is_placeholder(&self, ident: &ast::Ident, name: &str) -> bool {
+        ident.sym.strip_prefix(self.prefix.as_str()) == Some(name)
+    }
+
+    /// Every part was placed exactly once.
+    fn check(&self) -> Result<()> {
+        ensure!(
+            !self.repeated
+                && self.source.is_none()
+                && self.body.is_none()
+                && self.binding.is_none(),
+            "the iteration template names each placeholder exactly once"
+        );
+        Ok(())
+    }
 }
 
 impl VisitMut for Fill {
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
-        if matches!(expression, ast::Expr::Ident(id) if id.sym.as_ref() == format!("{}source", self.prefix))
+        if let ast::Expr::Ident(id) = expression
+            && self.is_placeholder(id, "source")
         {
-            *expression = *self.source.take().expect("one source placeholder");
+            match self.source.take() {
+                Some(source) => *expression = *source,
+                None => self.repeated = true,
+            }
         } else {
             expression.visit_mut_children_with(self);
         }
     }
+
     fn visit_mut_var_decl(&mut self, declaration: &mut ast::VarDecl) {
-        if declaration.decls.iter().any(|decl| matches!(&decl.name, ast::Pat::Ident(id) if id.id.sym.as_ref() == format!("{}item", self.prefix))) {
-            declaration.kind = self.kind;
-            declaration.decls[0].name = self.binding.take().expect("one binding placeholder");
-        } else { declaration.visit_mut_children_with(self); }
+        if let Some(item) = declaration.decls.iter_mut().find(
+            |decl| matches!(&decl.name, ast::Pat::Ident(id) if self.is_placeholder(&id.id, "item")),
+        ) {
+            match self.binding.take() {
+                Some(binding) => {
+                    item.name = binding;
+                    declaration.kind = self.kind;
+                }
+                None => self.repeated = true,
+            }
+        } else {
+            declaration.visit_mut_children_with(self);
+        }
     }
+
     fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
-        if matches!(statement, ast::Stmt::Expr(expr) if matches!(&*expr.expr, ast::Expr::Call(call) if matches!(&call.callee, ast::Callee::Expr(callee) if matches!(&**callee, ast::Expr::Ident(id) if id.sym.as_ref() == format!("{}body", self.prefix)))))
+        if let ast::Stmt::Expr(expr) = statement
+            && let ast::Expr::Call(call) = &*expr.expr
+            && let ast::Callee::Expr(callee) = &call.callee
+            && let ast::Expr::Ident(id) = &**callee
+            && self.is_placeholder(id, "body")
         {
-            *statement = self.body.take().expect("one body placeholder");
+            match self.body.take() {
+                Some(body) => *statement = body,
+                None => self.repeated = true,
+            }
         } else {
             statement.visit_mut_children_with(self);
         }

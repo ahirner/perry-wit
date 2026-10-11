@@ -87,20 +87,21 @@ impl RecordType {
         }
         let handle = Type::instantiate(
             RecordType {
-                name: name.clone(),
+                name,
                 fields: None,
                 tuple,
             },
             ctx,
         );
         if let Some(fields) = fields {
+            // `TypedHandle` has no mutable access, so downcast the untyped handle back.
             let mut record = handle.to_handle().deref_mut(ctx);
             let record = record
                 .downcast_mut::<RecordType>()
                 .expect("the handle was instantiated from a RecordType just above");
             match &record.fields {
                 Some(existing) if *existing != fields || record.tuple != tuple => {
-                    input_err_noloc!(RecordErr::Mismatch(name.to_string()))?
+                    input_err_noloc!(RecordErr::Mismatch(record.name.to_string()))?
                 }
                 Some(_) => {}
                 None => record.fields = Some(fields),

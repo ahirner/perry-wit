@@ -16,6 +16,8 @@ pub(super) enum Character {
 }
 
 impl FunctionLowering<'_, '_> {
+    /// Inline comparison of a string with a literal operand: (in)equality with at most eight
+    /// bytes, or ordering against one ASCII byte. `None` leaves the comparison to the runtime.
     pub(super) fn string_literal_comparison(
         &mut self,
         ctx: &mut Context,
@@ -30,7 +32,15 @@ impl FunctionLowering<'_, '_> {
             let Some(literal) = Operation::get_op::<StringConstOp>(definition, ctx) else {
                 continue;
             };
-            let equality = matches!(kind, CompareKind::Eq | CompareKind::Ne);
+            // How `order` (variable minus literal) compares with zero; `None` for (in)equality.
+            let ordering = match (kind, constant == 0) {
+                (CompareKind::Eq | CompareKind::Ne, _) => None,
+                (CompareKind::Lt, false) | (CompareKind::Gt, true) => Some(NumOpcode::I32LtS),
+                (CompareKind::Le, false) | (CompareKind::Ge, true) => Some(NumOpcode::I32LeS),
+                (CompareKind::Gt, false) | (CompareKind::Lt, true) => Some(NumOpcode::I32GtS),
+                (CompareKind::Ge, false) | (CompareKind::Le, true) => Some(NumOpcode::I32GeS),
+            };
+            let equality = ordering.is_none();
             let (bytes, length) = {
                 let text = literal.get_attr_perry_string_value(ctx)?;
                 let text: &str = text.as_ref();
@@ -44,7 +54,7 @@ impl FunctionLowering<'_, '_> {
             let string = operands[1 - constant];
             let size = self.load(ctx, MemKind::I32, string, LEN);
             let expected = self.i32_const(ctx, length as i32);
-            if equality {
+            let Some(opcode) = ordering else {
                 let same_length = self.num(ctx, NumOpcode::I32Eq, vec![size, expected]);
                 let equal = if length == 0 {
                     same_length
@@ -89,7 +99,7 @@ impl FunctionLowering<'_, '_> {
                 } else {
                     equal
                 });
-            }
+            };
             // For a one-byte ASCII literal, UTF-8 byte ordering decides the first scalar.
             // A matching first byte is equal only when the variable also ends there.
             let ty = i32_type(ctx);
@@ -108,13 +118,6 @@ impl FunctionLowering<'_, '_> {
             self.block = join;
             let order = join.deref(ctx).get_argument(0);
             let zero = self.i32_const(ctx, 0);
-            let opcode = match (kind, constant == 0) {
-                (CompareKind::Lt, false) | (CompareKind::Gt, true) => NumOpcode::I32LtS,
-                (CompareKind::Le, false) | (CompareKind::Ge, true) => NumOpcode::I32LeS,
-                (CompareKind::Gt, false) | (CompareKind::Lt, true) => NumOpcode::I32GtS,
-                (CompareKind::Ge, false) | (CompareKind::Le, true) => NumOpcode::I32GeS,
-                (CompareKind::Eq | CompareKind::Ne, _) => unreachable!("equality returned above"),
-            };
             return Some(self.num(ctx, opcode, vec![order, zero]));
         }
         None

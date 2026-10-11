@@ -8,12 +8,12 @@
 //!
 //! - `f64` stays `f64`; `i1` and `i32` become `i32`; records, arrays, strings and promises are
 //!   `i32` addresses.
-//! - `undefined` (R8) is the signalling-NaN bit pattern `perry_abi::UNDEFINED_BITS` for numbers, the null
-//!   address for references and `2` for booleans. Wasm arithmetic only produces quiet NaNs, so
-//!   no computed number can be mistaken for `undefined`; `perry.to_number` canonicalizes
-//!   before arithmetic.
-//! - Records are an `i32` shape id followed by 8-byte field slots in declaration order; arrays
-//!   use the layout in [perry_runtime::array]. Exact layouts are P3.6.
+//! - `undefined` (R8) is the signalling-NaN bit pattern [perry_abi::UNDEFINED_BITS] for
+//!   numbers, the null address for references and `2` for booleans. Wasm arithmetic only
+//!   produces quiet NaNs, so no computed number can be mistaken for `undefined`;
+//!   `perry.to_number` canonicalizes before arithmetic.
+//! - Records are an `i32` shape id and a parse-source word followed by 8-byte field slots in
+//!   declaration order; arrays and variants use the layouts in [perry_abi::layout].
 //! - Unproven and repeated allocations use precise collectible storage. Bounded task storage
 //!   remains available for small synchronous exports and task-owned handle tables.
 //! - Strings are UTF-8 with a cached Unicode scalar count (layout in [perry_runtime::string]);

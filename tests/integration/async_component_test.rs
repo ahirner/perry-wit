@@ -5,7 +5,7 @@ use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
     Engine, Store,
-    component::{Component, ComponentType, Lift, Linker, ResourceTable},
+    component::{Component, ComponentType, Instance, Lift, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
@@ -237,15 +237,20 @@ fn store(engine: &Engine) -> Store<Host> {
     store
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
-    let wasm = compile(false)?;
+/// The timers world instantiated in a fresh store, optionally with memory checks.
+async fn instantiate(check_memory: bool) -> Result<(Store<Host>, Instance)> {
     let engine = async_engine()?;
-    let component = Component::new(&engine, &wasm)?;
+    let component = Component::new(&engine, compile(check_memory)?)?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     let mut store = store(&engine);
     let instance = linker.instantiate_async(&mut store, &component).await?;
+    Ok((store, instance))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
+    let (mut store, instance) = instantiate(false).await?;
 
     let run = instance.get_typed_func::<(f64,), (Observation,)>(&mut store, "run")?;
     let label = instance.get_typed_func::<(&str,), (String,)>(&mut store, "label")?;
@@ -346,12 +351,7 @@ async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cyclic_values_and_text_survive_multiple_host_suspension_states() -> Result<()> {
-    let engine = async_engine()?;
-    let component = Component::new(&engine, compile(true)?)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let mut store = store(&engine);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let (mut store, instance) = instantiate(true).await?;
     let rotate = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "rotate")?;
     for n in [0, 1, 2, 11] {
         let (mut a, mut b, mut c) = (1, 2, 3);
@@ -370,12 +370,7 @@ async fn cyclic_values_and_text_survive_multiple_host_suspension_states() -> Res
 
 #[tokio::test(flavor = "current_thread")]
 async fn native_events_cover_observers_chains_and_combinator_cleanup() -> Result<()> {
-    let engine = async_engine()?;
-    let component = Component::new(&engine, compile(true)?)?;
-    let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
-    let mut store = store(&engine);
-    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let (mut store, instance) = instantiate(true).await?;
     assert!(
         instance
             .get_func(&mut store, "perry-internal-promise")
@@ -396,11 +391,13 @@ async fn native_events_cover_observers_chains_and_combinator_cleanup() -> Result
             chains.call_async(&mut store, (n,)).await?.0,
             f64::from(3 + n * 2)
         );
-        assert_eq!(combinations.call_async(&mut store, ()).await?.0, 13.0);
         assert_eq!(combinator_chains.call_async(&mut store, (n,)).await?.0, 3.0);
-        assert_eq!(reobserve.call_async(&mut store, ()).await?.0, 49.0);
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }
+    assert_eq!(combinations.call_async(&mut store, ()).await?.0, 13.0);
+    assert_eq!(reobserve.call_async(&mut store, ()).await?.0, 49.0);
+    store.assert_concurrent_state_empty();
+    assert!(store.data().table.is_empty());
     Ok(())
 }

@@ -127,7 +127,7 @@ pub(crate) fn export(
         ctx,
         export.result.as_ref().is_some_and(AbiType::has_resources),
         None,
-    );
+    )?;
     let returned = if let Some(completion) = completion {
         let ty = completion.result;
         let payload = mir_results.first().map(|ty| (*ty, values[0]));
@@ -376,7 +376,7 @@ fn async_export(
             ctx,
             export.result.as_ref().is_some_and(AbiType::has_resources),
             None,
-        );
+        )?;
         let mut flat = Vec::new();
         if let Some(outcome) = outcome {
             flat.push(outcome);

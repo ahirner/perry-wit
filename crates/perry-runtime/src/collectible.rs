@@ -68,13 +68,25 @@ struct Header {
 }
 const HEADER: usize = core::mem::size_of::<Header>();
 
+/// One bit per slot; a small page holds at most 64 slots.
+const fn bit(index: usize) -> u64 {
+    1 << index
+}
+const _: () = assert!(PAYLOAD / cell_of(0) <= 64);
+
+/// The bitmap of slots `0..slots`, for `1 <= slots <= 64`.
+const fn all_slots(slots: usize) -> u64 {
+    u64::MAX >> (64 - slots)
+}
+
 struct Page {
     memory: NonNull<u8>,
     layout: Layout,
     cell: usize,
     slots: usize,
-    allocated: [u64; 1],
-    marked: [u64; 1],
+    /// Slot bitmaps: live allocations, marked in the current collection, and free.
+    allocated: u64,
+    marked: u64,
     free: u64,
     sweep_pending: bool,
     poison: bool,
@@ -98,9 +110,9 @@ impl Page {
             layout,
             cell,
             slots,
-            allocated: [0; 1],
-            marked: [0; 1],
-            free: (1u64 << slots) - 1,
+            allocated: 0,
+            marked: 0,
+            free: all_slots(slots),
             sweep_pending: false,
             poison: cfg!(test),
             listed: false,
@@ -125,15 +137,15 @@ impl Page {
                 ptr::write_bytes(slot, 0xdd, self.cell);
             }
         }
-        self.free |= 1 << index;
-        self.allocated[index / 64] &= !(1 << (index % 64));
+        self.free |= bit(index);
+        self.allocated &= !bit(index);
     }
 
     fn sweep(&mut self) {
         if !self.sweep_pending {
             return;
         }
-        let dead = self.allocated[0] & !self.marked[0];
+        let dead = self.allocated & !self.marked;
         if self.poison {
             let mut remaining = dead;
             while remaining != 0 {
@@ -144,7 +156,7 @@ impl Page {
             }
         }
         self.free |= dead;
-        self.allocated[0] &= self.marked[0];
+        self.allocated &= self.marked;
         self.sweep_pending = false;
     }
 
@@ -157,8 +169,8 @@ impl Page {
             (slot as *mut Header).write(Header { shape, size });
             ptr::write_bytes(slot.add(HEADER), 0, size);
         }
-        self.allocated[index / 64] |= 1 << (index % 64);
-        self.marked[index / 64] |= 1 << (index % 64);
+        self.allocated |= bit(index);
+        self.marked |= bit(index);
         // SAFETY: every cell reserves HEADER bytes.
         unsafe { slot.add(HEADER) }
     }
@@ -379,8 +391,8 @@ impl Collector {
     /// [Self::exact_slot] of a currently allocated payload.
     fn allocated_slot(&self, object: *mut u8) -> Option<(*mut Page, usize)> {
         self.exact_slot(object).filter(|&(page, index)| {
-            // SAFETY: as in `exact_slot`; small pages have at most 64 slots.
-            unsafe { (*page).allocated[0] & (1 << index) != 0 }
+            // SAFETY: as in `exact_slot`.
+            unsafe { (*page).allocated & bit(index) != 0 }
         })
     }
 
@@ -467,6 +479,7 @@ impl Collector {
     }
 
     /// Release a proven nonescaping small frame at activation exit, without a heap search.
+    /// Codegen releases each such frame exactly once, so anything else is a compiler bug.
     ///
     /// # Safety
     /// `object` is an exact allocation pointer with no remaining aliases or retained children.
@@ -477,6 +490,7 @@ impl Collector {
         // SAFETY: directory pages are owned by this collector; no other page reference is live.
         let page = unsafe { &mut *page };
         assert!(page.cell <= MAX_SMALL, "frame exceeds small storage");
+        // SAFETY: an allocated slot starts with an initialized header.
         let size = unsafe { object.sub(HEADER).cast::<Header>().read().size };
         self.counters.live_bytes -= size;
         page.release(index);
@@ -502,21 +516,18 @@ impl Collector {
         if index >= page.slots {
             return;
         }
-        let payload = page.slot(index);
-        // SAFETY: only allocated slots may provide an interior owner.
-        if page.allocated[index / 64] & (1 << (index % 64)) == 0 {
+        // Only allocated slots may provide an interior owner, and each is traced once.
+        if page.allocated & bit(index) == 0 || page.marked & bit(index) != 0 {
             return;
         }
+        let payload = page.slot(index);
+        // SAFETY: an allocated slot starts with an initialized header.
         let size = unsafe { (*(payload as *const Header)).size };
         let within = offset - index * page.cell;
         if within < HEADER || within >= HEADER + size {
             return;
         }
-        let (word, bit) = (index / 64, 1 << (index % 64));
-        if page.allocated[word] & bit == 0 || page.marked[word] & bit != 0 {
-            return;
-        }
-        page.marked[word] |= bit;
+        page.marked |= bit(index);
         // SAFETY: the exact pointer lies within this allocated payload.
         self.work.push(unsafe { payload.add(HEADER) });
     }
@@ -538,7 +549,7 @@ impl Collector {
     pub(crate) fn is_marked(&self, object: *mut u8) -> bool {
         self.exact_slot(object).is_some_and(|(page, index)| {
             // SAFETY: directory entries refer to stable, allocated pages.
-            unsafe { (*page).marked[index / 64] & (1 << (index % 64)) != 0 }
+            unsafe { (*page).marked & bit(index) != 0 }
         })
     }
 
@@ -551,7 +562,7 @@ impl Collector {
         for page in self.pages.iter_mut().flatten() {
             // Finish a previous sweep before resetting its marks.
             page.sweep();
-            page.marked.fill(0);
+            page.marked = 0;
         }
         self.work.clear();
         for &root in roots {
@@ -597,7 +608,7 @@ impl Collector {
             let Some(page) = &mut self.pages[index] else {
                 continue;
             };
-            if page.cell > MAX_SMALL && page.marked[0] == 0 {
+            if page.cell > MAX_SMALL && page.marked == 0 {
                 for offset in (0..page.layout.size()).step_by(PAGE) {
                     self.directory
                         .set(page.memory.as_ptr() as usize + offset, ptr::null_mut());

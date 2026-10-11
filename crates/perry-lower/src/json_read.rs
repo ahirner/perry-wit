@@ -12,6 +12,13 @@ const ARRAY: u64 = 5;
 const OBJECT: u64 = 6;
 const NULL: u64 = 1;
 
+/// How `json_read_attach` records a decoded aggregate's source span, as perry-std numbers
+/// the layouts.
+const RECORD_LAYOUT: u64 = 0;
+const ARRAY_LAYOUT: u64 = 1;
+const VARIANT_LAYOUT: u64 = 2;
+const TUPLE_LAYOUT: u64 = 3;
+
 impl<'s> FunctionBuilder<'s> {
     /// `JSON.parse(text)` where a record or array type is expected: decode it in one pass.
     /// None when the target has no generated decoder (the graph path applies).
@@ -22,10 +29,7 @@ impl<'s> FunctionBuilder<'s> {
         target: TypeHandle,
     ) -> Result<Option<Value>> {
         let inner = optional_value(ctx, target).unwrap_or(target);
-        let decodable = TypedHandle::<RecordType>::from_handle(inner, ctx)
-            .is_ok_and(|record| record.deref(ctx).fields().is_ok())
-            || inner.deref(ctx).is::<ArrayType>()
-            || inner.deref(ctx).is::<perry_mir::types::VariantType>()
+        let decodable = has_reader(ctx, inner)
             || inner.deref(ctx).is::<FP64Type>()
             || inner.deref(ctx).is::<StringType>()
             || inner.deref(ctx).is::<perry_mir::types::NumberStringType>()
@@ -41,8 +45,7 @@ impl<'s> FunctionBuilder<'s> {
 
     /// The next value of the reader as `ty`.
     fn read_value(&mut self, ctx: &mut Context, reader: Value, ty: TypeHandle) -> Result<Value> {
-        if let Some(states) = absence(ctx, ty) {
-            let inner = optional_value(ctx, ty).expect("optional");
+        if let Some((inner, states)) = optional_parts(ctx, ty) {
             if !states.admits_null() {
                 // JSON has no `undefined`: a present member is the inner type.
                 let value = self.read_value(ctx, reader, inner)?;
@@ -97,14 +100,10 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        let generated = TypedHandle::<RecordType>::from_handle(ty, ctx)
-            .is_ok_and(|record| record.deref(ctx).fields().is_ok())
-            || ty.deref(ctx).is::<ArrayType>()
-            || ty.deref(ctx).is::<perry_mir::types::VariantType>();
         if self.is_bool_type(ctx, ty) {
             return Ok(self.intrinsic(ctx, Intrinsic::JsonReadBool, vec![reader]));
         }
-        if generated {
+        if has_reader(ctx, ty) {
             let name = self.reader_function(ctx, ty)?;
             let call = CallOp::new(ctx, name, vec![reader], vec![ty]);
             self.append(ctx, &call);
@@ -116,6 +115,8 @@ impl<'s> FunctionBuilder<'s> {
         self.fit(ctx, json, ty)
     }
 
+    /// A variant from an object: the reader matches its tag against the case names, and a
+    /// case's payload is read from `val` (resuming after the object once read).
     fn read_variant(
         &mut self,
         ctx: &mut Context,
@@ -175,7 +176,7 @@ impl<'s> FunctionBuilder<'s> {
                 &["tag"][..]
             };
             let table = self.string(ctx, &encode_keys(fields.iter().copied()));
-            let layout = self.i32(ctx, 2);
+            let layout = self.i32(ctx, VARIANT_LAYOUT);
             self.intrinsic_void(
                 ctx,
                 Intrinsic::JsonReadAttach,
@@ -213,19 +214,18 @@ impl<'s> FunctionBuilder<'s> {
         };
         // Registered before the body is built, so recursive types call themselves.
         self.shapes.readers.borrow_mut().insert(ty, name.clone());
-        let signature = Signature {
-            name: name.clone(),
-            is_async: false,
-            params: vec![perry_mir::types::JsonReaderType::get(ctx).into()],
-            results: vec![ty],
-        };
-        let function_type =
-            FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
+        let reader_type = perry_mir::types::JsonReaderType::get(ctx).into();
+        let function_type = FunctionType::get(ctx, vec![reader_type], vec![ty]);
         let function = FuncOp::new(ctx, name.clone(), function_type);
         self.shapes
             .module
             .append_operation(ctx, function.get_operation(), 0);
-        let reader = function.get_entry_block(ctx).deref(ctx).get_argument(0);
+        let signature = Signature {
+            name,
+            is_async: false,
+            params: vec![reader_type],
+            results: vec![ty],
+        };
         let mut builder = Self::new(
             ctx,
             &function,
@@ -234,21 +234,34 @@ impl<'s> FunctionBuilder<'s> {
             self.shapes,
             self.builtins,
         );
-        if let Ok(variant) = TypedHandle::<perry_mir::types::VariantType>::from_handle(ty, ctx) {
-            let output = builder.read_variant(ctx, reader, variant)?;
-            builder.emit(ctx, |ctx| ReturnOp::new(ctx, vec![output]));
-            remove_unreachable(ctx, builder.region);
-            return Ok(name);
-        }
-        let start = builder.intrinsic(ctx, Intrinsic::JsonReadPosition, vec![reader]);
-        let prior = builder.intrinsic(ctx, Intrinsic::JsonReadTakeError, vec![reader]);
-        let is_record = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
-        let object = is_record.is_some_and(|r| !r.deref(ctx).is_tuple());
-        let table = is_record
+        let reader = builder.entry_block().deref(ctx).get_argument(0);
+        let output = match TypedHandle::<perry_mir::types::VariantType>::from_handle(ty, ctx) {
+            Ok(variant) => builder.read_variant(ctx, reader, variant)?,
+            Err(_) => builder.read_aggregate(ctx, reader, ty)?,
+        };
+        builder.emit(ctx, |ctx| ReturnOp::new(ctx, vec![output]));
+        remove_unreachable(ctx, builder.region);
+        Ok(signature.name)
+    }
+
+    /// The body of a record, tuple or array decoder: the value with its source span attached,
+    /// or a type error when the input is not an object or array.
+    fn read_aggregate(
+        &mut self,
+        ctx: &mut Context,
+        reader: Value,
+        ty: TypeHandle,
+    ) -> Result<Value> {
+        let start = self.intrinsic(ctx, Intrinsic::JsonReadPosition, vec![reader]);
+        let prior = self.intrinsic(ctx, Intrinsic::JsonReadTakeError, vec![reader]);
+        let record = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
+        let tuple = record.is_some_and(|r| r.deref(ctx).is_tuple());
+        let object = record.is_some() && !tuple;
+        let table = record
             .and_then(|record| key_table(ctx, record))
             .unwrap_or_default();
-        let table = builder.string(ctx, &table);
-        let opened = builder.intrinsic(
+        let table = self.string(ctx, &table);
+        let opened = self.intrinsic(
             ctx,
             if object {
                 Intrinsic::JsonReadObject
@@ -257,20 +270,14 @@ impl<'s> FunctionBuilder<'s> {
             },
             vec![reader],
         );
-        let output = builder.choose(
+        let output = self.choose(
             ctx,
             ty,
             opened,
-            |b, ctx| {
-                if let Some(record) = is_record {
-                    if record.deref(ctx).is_tuple() {
-                        b.read_tuple(ctx, reader, record)
-                    } else {
-                        b.read_record(ctx, reader, record, table)
-                    }
-                } else {
-                    b.read_array(ctx, reader, ty)
-                }
+            |b, ctx| match record {
+                Some(record) if tuple => b.read_tuple(ctx, reader, record),
+                Some(record) => b.read_record(ctx, reader, record, table),
+                None => b.read_array(ctx, reader, ty),
             },
             |b, ctx| {
                 let expected = b.i32(ctx, if object { OBJECT } else { ARRAY });
@@ -278,25 +285,45 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(b.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)))
             },
         )?;
-        let layout = builder.i32(
+        let layout = self.i32(
             ctx,
-            if is_record.is_some_and(|r| r.deref(ctx).is_tuple()) {
-                3
-            } else if is_record.is_some() {
-                0
-            } else {
-                1
+            match record {
+                Some(_) if tuple => TUPLE_LAYOUT,
+                Some(_) => RECORD_LAYOUT,
+                None => ARRAY_LAYOUT,
             },
         );
-        builder.intrinsic_void(
+        self.intrinsic_void(
             ctx,
             Intrinsic::JsonReadAttach,
             vec![reader, output, start, table, layout],
         );
-        builder.intrinsic_void(ctx, Intrinsic::JsonReadFail, vec![reader, prior]);
-        builder.emit(ctx, |ctx| ReturnOp::new(ctx, vec![output]));
-        remove_unreachable(ctx, builder.region);
-        Ok(name)
+        self.intrinsic_void(ctx, Intrinsic::JsonReadFail, vec![reader, prior]);
+        Ok(output)
+    }
+
+    /// Initialize a decoded field and its deferred error. A present value replaces the
+    /// missing-field error, so records need no separate presence flag.
+    fn reader_slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> (Value, Value) {
+        let slot = self.entry_slot(ctx, ty);
+        let kind = match missing_value(ctx, ty) {
+            Missing::Undefined => {
+                let undefined = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
+                self.store(ctx, slot, undefined);
+                0
+            }
+            Missing::Json => {
+                let undefined = self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
+                self.store(ctx, slot, undefined);
+                0
+            }
+            Missing::Fails(kind) => kind,
+        };
+        let index_type = IntegerType::get(ctx, 32, Signedness::Signless).into();
+        let error = self.entry_slot(ctx, index_type);
+        let initial = self.i32(ctx, kind);
+        self.store(ctx, error, initial);
+        (slot, error)
     }
 
     /// A record from an object: members dispatch on their index in the record's key table;
@@ -308,40 +335,9 @@ impl<'s> FunctionBuilder<'s> {
         record: TypedHandle<RecordType>,
         table: Value,
     ) -> Result<Value> {
-        let fields = record
-            .deref(ctx)
-            .fields()
-            .map_err(|_| anyhow!("opaque JSON schema"))?
-            .to_vec();
-        let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let fields = field_types(ctx, record)?;
         let index_type = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        // One slot per member, and a flag for members that must be present.
-        let mut slots = Vec::with_capacity(fields.len());
-        for (_, ty) in &fields {
-            let slot = self.entry_slot(ctx, *ty);
-            let seen = match missing_value(ctx, *ty) {
-                Missing::Undefined => {
-                    let undefined = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *ty));
-                    self.store(ctx, slot, undefined);
-                    None
-                }
-                Missing::Json => {
-                    let undefined = self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
-                    self.store(ctx, slot, undefined);
-                    None
-                }
-                Missing::Fails(kind) => {
-                    let seen = self.entry_slot(ctx, boolean);
-                    let no = self.boolean(ctx, false);
-                    self.store(ctx, seen, no);
-                    Some((seen, kind))
-                }
-            };
-            let error = self.entry_slot(ctx, index_type);
-            let zero = self.i32(ctx, 0);
-            self.store(ctx, error, zero);
-            slots.push((slot, seen, error));
-        }
+        let slots: Vec<_> = fields.iter().map(|&ty| self.reader_slot(ctx, ty)).collect();
         let hint = self.entry_slot(ctx, index_type);
         let zero = self.i32(ctx, 0);
         self.store(ctx, hint, zero);
@@ -356,21 +352,17 @@ impl<'s> FunctionBuilder<'s> {
         let dispatch = self.new_block(ctx, "json_dispatch");
         self.branch(ctx, ended, done, dispatch);
         self.switch_to(dispatch);
-        for (index, ((_, ty), (slot, seen, error))) in fields.iter().zip(&slots).enumerate() {
+        for (index, (&ty, &(slot, error))) in fields.iter().zip(&slots).enumerate() {
             let this = self.i32(ctx, index as u64);
             let matches = self.compare(ctx, CompareKind::Eq, found, this);
             let member = self.new_block(ctx, "json_field");
             let next = self.new_block(ctx, "json_field_next");
             self.branch(ctx, matches, member, next);
             self.switch_to(member);
-            let value = self.read_value(ctx, reader, *ty)?;
-            self.store(ctx, *slot, value);
+            let value = self.read_value(ctx, reader, ty)?;
+            self.store(ctx, slot, value);
             let mismatch = self.intrinsic(ctx, Intrinsic::JsonReadTakeError, vec![reader]);
-            self.store(ctx, *error, mismatch);
-            if let Some((seen, _)) = seen {
-                let yes = self.boolean(ctx, true);
-                self.store(ctx, *seen, yes);
-            }
+            self.store(ctx, error, mismatch);
             let following = self.i32(ctx, index as u64 + 1);
             self.store(ctx, hint, following);
             self.jump(ctx, header);
@@ -380,35 +372,12 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, header);
         self.switch_to(done);
         let mut values = Vec::with_capacity(fields.len());
-        for (slot, seen, error) in slots {
+        for (slot, error) in slots {
             let mismatch = self.load(ctx, error)?;
             self.intrinsic_void(ctx, Intrinsic::JsonReadFail, vec![reader, mismatch]);
-            if let Some((seen, kind)) = seen {
-                self.require_seen(ctx, reader, seen, kind)?;
-            }
             values.push(self.load(ctx, slot)?);
         }
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)))
-    }
-
-    /// Throw for a required member or element that never came.
-    fn require_seen(
-        &mut self,
-        ctx: &mut Context,
-        reader: Value,
-        seen: Value,
-        kind: u64,
-    ) -> Result<()> {
-        let present = self.load(ctx, seen)?;
-        let missing = self.new_block(ctx, "json_missing");
-        let present_block = self.new_block(ctx, "json_present");
-        self.branch(ctx, present, present_block, missing);
-        self.switch_to(missing);
-        let kind = self.i32(ctx, kind);
-        self.intrinsic_void(ctx, Intrinsic::JsonReadFail, vec![reader, kind]);
-        self.jump(ctx, present_block);
-        self.switch_to(present_block);
-        Ok(())
     }
 
     /// A tuple from an array: elements by position, extra elements validated and ignored.
@@ -418,37 +387,15 @@ impl<'s> FunctionBuilder<'s> {
         reader: Value,
         record: TypedHandle<RecordType>,
     ) -> Result<Value> {
-        let fields = record
-            .deref(ctx)
-            .fields()
-            .map_err(|_| anyhow!("opaque JSON schema"))?
-            .to_vec();
+        let fields = field_types(ctx, record)?;
         let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
         // Whether the array has ended: `element` must not be asked again after that.
         let ended = self.entry_slot(ctx, boolean);
         let no = self.boolean(ctx, false);
         self.store(ctx, ended, no);
         let mut values = Vec::with_capacity(fields.len());
-        for (_, ty) in &fields {
-            let slot = self.entry_slot(ctx, *ty);
-            let seen = match missing_value(ctx, *ty) {
-                Missing::Undefined => {
-                    let undefined = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *ty));
-                    self.store(ctx, slot, undefined);
-                    None
-                }
-                Missing::Json => {
-                    let undefined = self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]);
-                    self.store(ctx, slot, undefined);
-                    None
-                }
-                Missing::Fails(kind) => {
-                    let seen = self.entry_slot(ctx, boolean);
-                    let no = self.boolean(ctx, false);
-                    self.store(ctx, seen, no);
-                    Some((seen, kind))
-                }
-            };
+        for ty in fields {
+            let (slot, error) = self.reader_slot(ctx, ty);
             let open = self.new_block(ctx, "json_tuple_open");
             let after = self.new_block(ctx, "json_tuple_after");
             let is_ended = self.load(ctx, ended)?;
@@ -463,15 +410,13 @@ impl<'s> FunctionBuilder<'s> {
             self.store(ctx, ended, yes);
             self.jump(ctx, after);
             self.switch_to(element);
-            let value = self.read_value(ctx, reader, *ty)?;
+            let value = self.read_value(ctx, reader, ty)?;
             self.store(ctx, slot, value);
-            if let Some((seen, _)) = seen {
-                let yes = self.boolean(ctx, true);
-                self.store(ctx, seen, yes);
-            }
+            let zero = self.i32(ctx, 0);
+            self.store(ctx, error, zero);
             self.jump(ctx, after);
             self.switch_to(after);
-            values.push((slot, seen));
+            values.push((slot, error));
         }
         // Skip elements beyond the tuple's.
         let rest = self.new_block(ctx, "json_tuple_rest");
@@ -487,10 +432,9 @@ impl<'s> FunctionBuilder<'s> {
         self.jump(ctx, rest);
         self.switch_to(done);
         let mut loaded = Vec::with_capacity(values.len());
-        for (slot, seen) in values {
-            if let Some((seen, kind)) = seen {
-                self.require_seen(ctx, reader, seen, kind)?;
-            }
+        for (slot, error) in values {
+            let missing = self.load(ctx, error)?;
+            self.intrinsic_void(ctx, Intrinsic::JsonReadFail, vec![reader, missing]);
             loaded.push(self.load(ctx, slot)?);
         }
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, loaded)))
@@ -527,6 +471,26 @@ enum Missing {
     Json,
     /// A type error naming the expected kind.
     Fails(u64),
+}
+
+/// Whether `ty` is decoded by a generated reader function: a defined record (or tuple), an
+/// array or a variant.
+fn has_reader(ctx: &Context, ty: TypeHandle) -> bool {
+    TypedHandle::<RecordType>::from_handle(ty, ctx)
+        .is_ok_and(|record| record.deref(ctx).fields().is_ok())
+        || ty.deref(ctx).is::<ArrayType>()
+        || ty.deref(ctx).is::<perry_mir::types::VariantType>()
+}
+
+/// The field types of a defined record, in record order.
+fn field_types(ctx: &Context, record: TypedHandle<RecordType>) -> Result<Vec<TypeHandle>> {
+    Ok(record
+        .deref(ctx)
+        .fields()
+        .map_err(|_| anyhow!("opaque JSON schema"))?
+        .iter()
+        .map(|&(_, ty)| ty)
+        .collect())
 }
 
 fn missing_value(ctx: &Context, ty: TypeHandle) -> Missing {

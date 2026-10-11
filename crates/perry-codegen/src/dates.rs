@@ -1,17 +1,19 @@
 //! Boxed UTC dates and their calendar helper calls.
 use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
+use anyhow::{Result, bail};
 use perry_mir::intrinsics::Intrinsic;
 use pliron::{context::Context, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
 impl FunctionLowering<'_, '_> {
+    /// The value of a `Date` intrinsic; dates are boxed `f64` time values.
     pub(super) fn date_intrinsic(
         &mut self,
         ctx: &mut Context,
         intrinsic: Intrinsic,
         args: Vec<Value>,
-    ) -> Value {
-        match intrinsic {
+    ) -> Result<Value> {
+        Ok(match intrinsic {
             Intrinsic::DateFromTime => {
                 // TimeClip: NaN beyond ±8.64e15 ms, else the integer part, without -0.
                 let t = args[0];
@@ -81,7 +83,7 @@ impl FunctionLowering<'_, '_> {
                 self.block = merged;
                 merged.deref(ctx).get_argument(0)
             }
-            _ => unreachable!("not a date intrinsic"),
-        }
+            other => bail!("{other:?} is not a date intrinsic"),
+        })
     }
 }

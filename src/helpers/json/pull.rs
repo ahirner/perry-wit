@@ -1,44 +1,62 @@
 //! Allocation-free, bounded-depth JSON pull tokenizer over valid UTF-8 input.
+//!
+//! Typed `JSON.parse` in `perry-std` (`json_read`, `json_source`) drives it directly; errors
+//! latch `broken`, after which every read stops so generated decoders unwind.
 #[path = "number.rs"]
-pub(super) mod number;
+mod number;
 const MAX_DEPTH: u32 = 128;
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
-#[derive(Clone)]
-pub struct Cursor<'a> {
-    pub input: &'a [u8],
-    pub len: u32,
-    pub pos: u32,
-    pub depth: u32,
-    pub fresh: u32,
-    pub broken: u32,
+
+/// Position and open-container state of one pass over a JSON text.
+pub(crate) struct Cursor<'a> {
+    pub(crate) input: &'a [u8],
+    pub(crate) len: u32,
+    pub(crate) pos: u32,
+    pub(crate) depth: u32,
+    /// Nonzero right after `open`: the next element or member takes no separator.
+    fresh: u32,
+    /// Nonzero once the text proved malformed (or too deep).
+    pub(crate) broken: u32,
+    /// Bit `d` set: the container at depth `d` is an object.
     objects: [u64; 2],
 }
 impl<'a> Cursor<'a> {
-    pub fn new(text: &'a str) -> Self {
+    /// A cursor at the start of `text`, the UTF-8 bytes of a string.
+    pub(crate) fn new(text: &'a [u8]) -> Self {
+        Self::over(text, 0)
+    }
+
+    /// A fresh cursor over the same (already validated) input, positioned at `pos`.
+    pub(crate) fn at(&self, pos: u32) -> Self {
+        Self::over(self.input, pos)
+    }
+
+    fn over(input: &'a [u8], pos: u32) -> Self {
         Self {
-            input: text.as_bytes(),
-            len: text.len() as u32,
-            pos: 0,
+            input,
+            len: input.len() as u32,
+            pos,
             depth: 0,
             fresh: 0,
             broken: 0,
             objects: [0; 2],
         }
     }
-    pub fn byte(&self, at: u32) -> u8 {
+
+    fn byte(&self, at: u32) -> u8 {
         self.input.get(at as usize).copied().unwrap_or(0)
     }
 
-    pub fn whitespace(&mut self) -> u8 {
+    /// Skip whitespace; returns the next byte, or 0 at the end of the text.
+    pub(crate) fn whitespace(&mut self) -> u8 {
         loop {
             let byte = self.byte(self.pos);
             match byte {
                 b' ' | b'\n' | b'\r' | b'\t' => {
                     self.pos += 1;
                     // Indentation: eight spaces at a time.
-                    while self.len - self.pos >= 8 && self.word(self.pos) == ONES * u64::from(b' ')
-                    {
+                    while word(self.input, self.pos as usize) == Some(ONES * u64::from(b' ')) {
                         self.pos += 8;
                     }
                 }
@@ -47,11 +65,8 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn word(&self, at: u32) -> u64 {
-        u64::from_le_bytes(self.input[at as usize..at as usize + 8].try_into().unwrap())
-    }
-
-    pub fn push(&mut self, object: bool) -> bool {
+    /// Enter a container (`object` or array); false, breaking the text, past [MAX_DEPTH].
+    pub(crate) fn push(&mut self, object: bool) -> bool {
         if self.depth >= MAX_DEPTH {
             self.broken = 1;
             return false;
@@ -66,17 +81,19 @@ impl<'a> Cursor<'a> {
         true
     }
 
-    pub fn in_object(&self) -> bool {
+    fn in_object(&self) -> bool {
         let top = self.depth - 1;
         self.objects[(top / 64) as usize] & (1 << (top % 64)) != 0
     }
 
-    pub fn close(&mut self) {
+    fn close(&mut self) {
         self.pos += 1;
         self.depth -= 1;
     }
 
-    pub fn open(&mut self, bracket: u8) -> u32 {
+    /// Enter the next value when it opens with `bracket`: 1, or 0 after skipping a value
+    /// of another kind (or on a broken text).
+    pub(crate) fn open(&mut self, bracket: u8) -> u32 {
         if self.broken != 0 {
             return 0;
         }
@@ -92,7 +109,8 @@ impl<'a> Cursor<'a> {
         1
     }
 
-    pub fn element(&mut self) -> u32 {
+    /// Advance to the next element of the innermost array: 1, or 0 when it ended.
+    pub(crate) fn element(&mut self) -> u32 {
         if self.broken != 0 {
             return 0;
         }
@@ -120,17 +138,41 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    pub fn skip(&mut self) {
-        let base = self.depth;
-        while self.broken == 0 {
-            if self.enter() || self.after_value(base) {
-                continue;
-            }
-            return;
+    /// Read an object key, leaving the cursor at its value. The flag marks escaped keys.
+    pub(crate) fn member(&mut self) -> Option<(&'a [u8], bool)> {
+        if self.broken != 0 {
+            return None;
         }
+        let next = self.whitespace();
+        if core::mem::take(&mut self.fresh) == 0 {
+            match next {
+                b',' => {
+                    self.pos += 1;
+                }
+                b'}' => {
+                    self.close();
+                    return None;
+                }
+                _ => {
+                    self.broken = 1;
+                    return None;
+                }
+            }
+        } else if next == b'}' {
+            self.close();
+            return None;
+        }
+        self.key()
     }
 
-    pub fn enter(&mut self) -> bool {
+    /// Validate and pass the next value, iteratively: the stack stays bounded.
+    pub(crate) fn skip(&mut self) {
+        let base = self.depth;
+        while self.broken == 0 && (self.enter() || self.after_value(base)) {}
+    }
+
+    /// Pass a scalar, or enter a non-empty container: true when positioned inside one.
+    fn enter(&mut self) -> bool {
         match self.whitespace() {
             bracket @ (b'{' | b'[') => {
                 let object = bracket == b'{';
@@ -144,7 +186,7 @@ impl<'a> Cursor<'a> {
                     return false;
                 }
                 if object {
-                    self.key();
+                    let _ = self.key();
                 }
                 true
             }
@@ -172,14 +214,15 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    pub fn after_value(&mut self, base: u32) -> bool {
+    /// Close containers above `base` that end here: true when another element follows.
+    fn after_value(&mut self, base: u32) -> bool {
         while self.depth > base && self.broken == 0 {
             let object = self.in_object();
             match self.whitespace() {
                 b',' => {
                     self.pos += 1;
                     if object {
-                        self.key();
+                        let _ = self.key();
                     }
                     return true;
                 }
@@ -191,21 +234,25 @@ impl<'a> Cursor<'a> {
         false
     }
 
-    pub fn key(&mut self) {
+    fn key(&mut self) -> Option<(&'a [u8], bool)> {
         if self.whitespace() != b'"' {
             self.broken = 1;
-            return;
+            return None;
         }
         self.pos += 1;
-        self.string();
-        if self.whitespace() != b':' {
+        let start = self.pos as usize;
+        let (escaped, _) = self.string();
+        let end = self.pos as usize - 1;
+        if self.whitespace() != b':' || self.broken != 0 {
             self.broken = 1;
-            return;
+            return None;
         }
         self.pos += 1;
+        Some((&self.input[start..end], escaped))
     }
 
-    pub fn literal(&mut self, word: &[u8]) -> bool {
+    /// Pass `word` (`true`, `false`, `null`), or break the text when it does not follow.
+    pub(crate) fn literal(&mut self, word: &[u8]) -> bool {
         let end = self.pos as usize + word.len();
         if self.input.get(self.pos as usize..end) == Some(word) {
             self.pos = end as u32;
@@ -216,17 +263,15 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    pub fn string(&mut self) -> (bool, u32) {
+    /// Validate string content after its opening quote, through the closing one. Returns
+    /// whether it has escapes, and its count of UTF-8 continuation bytes.
+    pub(crate) fn string(&mut self) -> (bool, u32) {
         let mut escaped = false;
         let mut continuations = 0;
         loop {
             // Eight bytes at a time to the first quote, backslash or control byte.
-            while self.len - self.pos >= 8 {
-                let word = self.word(self.pos);
-                let quote = zero_bytes(word ^ (ONES * u64::from(b'"')));
-                let backslash = zero_bytes(word ^ (ONES * u64::from(b'\\')));
-                let control = word.wrapping_sub(ONES * 0x20) & !word & HIGHS;
-                let special = quote | backslash | control;
+            while let Some(word) = word(self.input, self.pos as usize) {
+                let special = special_bytes(word);
                 // `10xxxxxx`: the high bit set and the next one clear.
                 let continuation = word & HIGHS & !(word << 1);
                 if special != 0 {
@@ -295,22 +340,14 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    pub fn hex(&mut self) -> Option<u32> {
-        let mut value = 0;
-        for _ in 0..4 {
-            let digit = match self.byte(self.pos) {
-                byte @ b'0'..=b'9' => byte - b'0',
-                byte @ b'a'..=b'f' => byte - b'a' + 10,
-                byte @ b'A'..=b'F' => byte - b'A' + 10,
-                _ => return None,
-            };
-            self.pos += 1;
-            value = value * 16 + u32::from(digit);
-        }
+    fn hex(&mut self) -> Option<u32> {
+        let (value, _) = hex4(self.input.get(self.pos as usize..)?)?;
+        self.pos += 4;
         Some(value)
     }
 
-    pub fn number(&mut self) -> f64 {
+    /// Validate and convert the number at the cursor.
+    pub(crate) fn number(&mut self) -> f64 {
         self.scan_number::<true>()
     }
 
@@ -365,7 +402,7 @@ impl<'a> Cursor<'a> {
         number::parse_number(literal)
     }
 
-    pub fn digits(&mut self) {
+    fn digits(&mut self) {
         let start = self.pos;
         while self.byte(self.pos).is_ascii_digit() {
             self.pos += 1;
@@ -374,6 +411,32 @@ impl<'a> Cursor<'a> {
             self.broken = 1;
         }
     }
+}
+
+/// The value of the four hex digits `input` starts with, if it does, and the bytes after them.
+pub(crate) fn hex4(input: &[u8]) -> Option<(u32, &[u8])> {
+    let (digits, rest) = input.split_first_chunk::<4>()?;
+    let value = digits.iter().try_fold(0, |value, &digit| {
+        Some(value * 16 + char::from(digit).to_digit(16)?)
+    })?;
+    Some((value, rest))
+}
+
+/// The eight little-endian bytes of `input` at `at`, if that many remain.
+#[inline(always)]
+pub(crate) fn word(input: &[u8], at: usize) -> Option<u64> {
+    let bytes = input.get(at..)?.first_chunk::<8>()?;
+    Some(u64::from_le_bytes(*bytes))
+}
+
+/// High bit set in the lowest quote, backslash or control byte of `word`: the bytes a JSON
+/// string must escape (bits above the lowest may be spurious).
+#[inline(always)]
+pub(crate) fn special_bytes(word: u64) -> u64 {
+    let quote = zero_bytes(word ^ (ONES * u64::from(b'"')));
+    let backslash = zero_bytes(word ^ (ONES * u64::from(b'\\')));
+    let control = word.wrapping_sub(ONES * 0x20) & !word & HIGHS;
+    quote | backslash | control
 }
 
 /// High bit set in the lowest zero byte of `word` (bits above it may be spurious).

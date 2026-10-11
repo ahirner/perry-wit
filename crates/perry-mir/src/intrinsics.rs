@@ -36,7 +36,7 @@ use thiserror::Error;
 
 /// Operand and result kinds of intrinsic signatures.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Ty {
+pub(crate) enum Ty {
     BigInt,
     /// A signless i32 index proven in bounds.
     Index,
@@ -58,7 +58,6 @@ pub enum Ty {
     SearchParams,
     Json,
     JsonReader,
-    Aggregate,
     Date,
     Decoder,
     Regex,
@@ -91,7 +90,7 @@ pub enum Ty {
 }
 
 impl Ty {
-    pub fn get(self, ctx: &mut Context) -> TypeHandle {
+    fn get(self, ctx: &mut Context) -> TypeHandle {
         let string: TypeHandle = StringType::get(ctx).into();
         let number: TypeHandle = FP64Type::get(ctx).into();
         match self {
@@ -115,7 +114,6 @@ impl Ty {
             Ty::SearchParams => crate::types::SearchParamsType::get(ctx).into(),
             Ty::Json => JsonType::get(ctx).into(),
             Ty::JsonReader => crate::types::JsonReaderType::get(ctx).into(),
-            Ty::Aggregate => panic!("aggregate is an operand-only intrinsic kind"),
             Ty::Regex => crate::types::RegexType::get(ctx).into(),
             Ty::Decoder => crate::types::DecoderType::get(ctx).into(),
             Ty::Date => DateType::get(ctx).into(),
@@ -222,11 +220,6 @@ impl Ty {
             Ty::SearchParams => deref.is::<crate::types::SearchParamsType>(),
             Ty::Json => deref.is::<JsonType>(),
             Ty::JsonReader => deref.is::<crate::types::JsonReaderType>(),
-            Ty::Aggregate => {
-                deref.is::<crate::types::RecordType>()
-                    || deref.is::<crate::types::ArrayType>()
-                    || deref.is::<crate::types::VariantType>()
-            }
             Ty::Regex => deref.is::<crate::types::RegexType>(),
             Ty::Decoder => deref.is::<crate::types::DecoderType>(),
             Ty::Date => deref.is::<DateType>(),
@@ -270,6 +263,38 @@ impl Ty {
     }
 }
 
+/// Operand kinds of intrinsic signatures: a [Ty], or a kind that only constrains operands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Operand {
+    Of(Ty),
+    /// Any record, array or variant; it names no single result type.
+    Aggregate,
+}
+
+impl Operand {
+    fn matches(self, ctx: &Context, ty: TypeHandle) -> bool {
+        match self {
+            Operand::Of(kind) => kind.matches(ctx, ty),
+            Operand::Aggregate => {
+                let deref = ty.deref(ctx);
+                deref.is::<crate::types::RecordType>()
+                    || deref.is::<ArrayType>()
+                    || deref.is::<crate::types::VariantType>()
+            }
+        }
+    }
+}
+
+/// The [Operand] an `intrinsics!` operand name denotes.
+macro_rules! operand {
+    (Aggregate) => {
+        Operand::Aggregate
+    };
+    ($kind:ident) => {
+        Operand::Of(Ty::$kind)
+    };
+}
+
 macro_rules! intrinsics {
     ($($variant:ident = $name:literal ($($operand:ident),*) -> ($($result:ident),*) $(, $flag:ident)*;)*) => {
         /// The services; see each name for the API it implements.
@@ -288,9 +313,9 @@ macro_rules! intrinsics {
             }
 
             /// (operands, results).
-            pub fn types(self) -> (&'static [Ty], &'static [Ty]) {
+            pub(crate) fn types(self) -> (&'static [Operand], &'static [Ty]) {
                 match self {
-                    $(Intrinsic::$variant => (&[$(Ty::$operand),*], &[$(Ty::$result),*]),)*
+                    $(Intrinsic::$variant => (&[$(operand!($operand)),*], &[$(Ty::$result),*]),)*
                 }
             }
 
@@ -560,6 +585,11 @@ impl Intrinsic {
     pub fn throws(self) -> bool {
         self.flags().contains(&"throws")
     }
+
+    /// Whether the service produces a value (all services have at most one result).
+    pub fn has_result(self) -> bool {
+        !self.types().1.is_empty()
+    }
 }
 
 /// Whether `op` may throw: it implements [MayThrowInterface], and for intrinsics the service
@@ -598,7 +628,10 @@ impl IntrinsicOp {
         let op = IntrinsicOp {
             op: Operation::new(ctx, Self::get_concrete_op_info(), results, args, vec![], 0),
         };
-        let name: Identifier = intrinsic.name().try_into().expect("identifier");
+        let name: Identifier = intrinsic
+            .name()
+            .try_into()
+            .expect("intrinsic names are snake_case identifiers");
         op.set_attr_perry_intrinsic(ctx, IdentifierAttr::new(name));
         op
     }
@@ -623,11 +656,11 @@ impl Verify for IntrinsicOp {
         let results: Vec<_> = op.results().map(|v| v.get_type(ctx)).collect();
         drop(op);
         let (ins, outs) = intrinsic.types();
-        let fits = |types: &[TypeHandle], expected: &[Ty]| {
-            types.len() == expected.len()
-                && types.iter().zip(expected).all(|(t, e)| e.matches(ctx, *t))
-        };
-        if !fits(&operands, ins) || !fits(&results, outs) {
+        let operands_fit = operands.len() == ins.len()
+            && operands.iter().zip(ins).all(|(t, e)| e.matches(ctx, *t));
+        let results_fit = results.len() == outs.len()
+            && results.iter().zip(outs).all(|(t, e)| e.matches(ctx, *t));
+        if !operands_fit || !results_fit {
             verify_err!(
                 self.loc(ctx),
                 IntrinsicErr::Signature(intrinsic.name().into())

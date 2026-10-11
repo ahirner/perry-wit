@@ -106,7 +106,7 @@ impl FunctionLowering<'_, '_> {
             | Intrinsic::DatePart
             | Intrinsic::DateSet
             | Intrinsic::DateIso
-            | Intrinsic::DateJson => Some(self.date_intrinsic(ctx, intrinsic, args)),
+            | Intrinsic::DateJson => Some(self.date_intrinsic(ctx, intrinsic, args)?),
             Intrinsic::DecoderFatal | Intrinsic::DecoderIgnoreBom => {
                 let offset = if intrinsic == Intrinsic::DecoderFatal {
                     0

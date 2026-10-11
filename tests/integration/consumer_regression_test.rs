@@ -307,20 +307,25 @@ export function run():number {
 }
 
 #[test]
-fn generic_arguments_do_not_capture_parameter_names() {
+fn generic_interfaces_aliases_and_defaults_resolve_to_concrete_shapes() {
     let source = r#"
 interface Item { n:number }
 interface Pair<Item,Other=Item> { a:Item; b:Other }
+interface Page<T> {items:T[];next:string|null}
+interface Entry<T=string> {value:T}
+type Box<T> = {item:T};
+interface Link<T> {value:T;next:Link<T>|null}
+function size(page:Page<Entry>):number {return page.items[0].value.length;}
+function unbox(box:Box<number>):number {return box.item;}
 export function run():number {
  const value:Pair<string,Item> = {a:'x',b:{n:17}};
  const defaults:Pair<string> = {a:'a',b:'bc'};
- return value.b.n + defaults.b.length;
+ const page:Page<Entry> = {items:[{value:'hello'}],next:null};
+ const link:Link<number> = {value:3,next:null};
+ return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
 }
 "#;
-    assert_eq!(
-        Program::new(source).call("run", &[]).0[0].unwrap_f64(),
-        19.0
-    );
+    assert_eq!(Program::new(source).outcome("run", &[]), (29.0, 0));
 }
 
 #[test]

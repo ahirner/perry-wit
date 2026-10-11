@@ -35,7 +35,7 @@ impl FunctionLowering<'_, '_> {
             ctx,
             import.params.iter().any(AbiType::has_resources),
             Some(mark),
-        );
+        )?;
         self.canonical_borrows = true;
         let mut args = Vec::new();
         let mut params: Vec<_> = import.params.iter().flat_map(AbiType::flat).collect();
@@ -124,10 +124,9 @@ impl FunctionLowering<'_, '_> {
         } else {
             import.name.clone()
         };
-        let result_types = results.iter().map(|flat| flat_type(ctx, *flat)).collect();
         let host = crate::host::Host::Foreign(import.module.clone(), name, params, results);
         self.commit_resources(ctx);
-        let call = self.preserving_task(ctx, |b, ctx| b.call_host(ctx, host, args, result_types));
+        let call = self.preserving_task(ctx, |b, ctx| b.call_host(ctx, host, args));
         self.canonical_borrows = false;
         if let Some(transfer) = transfer {
             self.resource_scope = None;

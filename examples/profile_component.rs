@@ -1,7 +1,7 @@
 //! Phase timings and sampled guest stacks for a JSON-described component invocation.
 //! Run with `cargo run --release --example profile_component -- request.json`.
 //! Compilation is separate; each measured call gets a fresh instance and WASI context.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -19,6 +19,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
 
+/// The invocation to measure, read from the JSON file named on the command line.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Request {
@@ -32,6 +33,7 @@ struct Request {
     profile: bool,
 }
 
+/// One argument of the measured export, by component value kind.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Argument {
@@ -40,6 +42,7 @@ enum Argument {
     U32(u32),
 }
 
+/// Store state: WASI context, sampled guest stacks and linear-memory growth of one instance.
 struct Host {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -113,11 +116,11 @@ async fn main() -> Result<()> {
     });
     let arguments: Vec<_> = request
         .arguments
-        .iter()
+        .into_iter()
         .map(|argument| match argument {
-            Argument::String(value) => Val::String(value.clone()),
-            Argument::Enum(value) => Val::Enum(value.clone()),
-            Argument::U32(value) => Val::U32(*value),
+            Argument::String(value) => Val::String(value),
+            Argument::Enum(value) => Val::Enum(value),
+            Argument::U32(value) => Val::U32(value),
         })
         .collect();
     let mut measurements = Vec::new();
@@ -168,6 +171,7 @@ async fn main() -> Result<()> {
         let start = Instant::now();
         let instance = pre.instantiate_async(&mut store).await?;
         let instantiate_ms = milliseconds(start);
+        // Walk the export path: an interface name, then the function inside it.
         let mut index = None;
         for name in &request.export {
             index = Some(
@@ -178,7 +182,7 @@ async fn main() -> Result<()> {
             );
         }
         let function = instance
-            .get_func(&mut store, index.unwrap())
+            .get_func(&mut store, index.context("export path required")?)
             .context("export is not a function")?;
         let mut results = [Val::Bool(false)];
         let start = Instant::now();
@@ -186,8 +190,8 @@ async fn main() -> Result<()> {
             .call_async(&mut store, &arguments, &mut results)
             .await?;
         let call_ms = milliseconds(start);
-        let Val::String(value) = results.into_iter().next().unwrap() else {
-            anyhow::bail!("expected string result")
+        let [Val::String(value)] = results else {
+            bail!("expected string result")
         };
         if let Some(previous) = &output {
             ensure!(*previous == value, "results changed across fresh instances");
@@ -200,15 +204,32 @@ async fn main() -> Result<()> {
         let start = Instant::now();
         drop((store, pre, linker, component));
         let teardown_ms = milliseconds(start);
-        measurements.push(serde_json::json!({"loadMs":load_ms,"setupMs":setup_ms,"instantiateMs":instantiate_ms,"callMs":call_ms,"teardownMs":teardown_ms,"linearMemoryBytes":linear_bytes}));
+        measurements.push(serde_json::json!({
+            "loadMs": load_ms,
+            "setupMs": setup_ms,
+            "instantiateMs": instantiate_ms,
+            "callMs": call_ms,
+            "teardownMs": teardown_ms,
+            "linearMemoryBytes": linear_bytes,
+        }));
     }
     stop.store(true, Ordering::Relaxed);
     if let Some(ticker) = ticker {
-        ticker.join().expect("epoch ticker");
+        ticker
+            .join()
+            .map_err(|_| anyhow!("epoch ticker panicked"))?;
     }
     println!(
         "{}",
-        serde_json::json!({"engineMs":engine_ms,"compileMs":compile_ms,"samples":measurements,"stacks":stacks,"output":output,"wasmtimeVersion":"49.0.2","instrumented":request.profile})
+        serde_json::json!({
+            "engineMs": engine_ms,
+            "compileMs": compile_ms,
+            "samples": measurements,
+            "stacks": stacks,
+            "output": output,
+            "wasmtimeVersion": "49.0.2",
+            "instrumented": request.profile,
+        })
     );
     Ok(())
 }

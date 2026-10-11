@@ -2,9 +2,10 @@
 //!
 //! Layout, read inline by compiled code: `state: u32` at 0 (`PENDING`, `FULFILLED`,
 //! `REJECTED`), `status: i32` at 4 (the exception code of a rejection), the settled value's
-//! 8-byte slot at 8 (`f64` bits or a 32-bit reference; a rejection's exception object). Compiled code checks `state` before
-//! suspending, so awaiting a settled promise continues inline; otherwise observers share
-//! a private P3 future whose completion dispatches that promise’s registered frames.
+//! 8-byte slot at 8 (`f64` bits or a 32-bit reference; a rejection's exception object).
+//! Compiled code checks `state` before suspending, so awaiting a settled promise continues
+//! inline; otherwise observers share a private P3 future whose completion dispatches that
+//! promise's registered frames.
 use crate::{host, region::current};
 use core::ptr;
 
@@ -17,7 +18,7 @@ pub const FULFILLED: u32 = 1;
 pub const REJECTED: u32 = 2;
 
 #[repr(C)]
-pub(crate) struct Promise {
+struct Promise {
     state: u32,
     status: i32,
     value: u64,
@@ -83,6 +84,7 @@ unsafe fn pending(promise: *mut Promise, references: u32) -> *mut u8 {
     promise.cast()
 }
 
+/// Whether a fulfilled `promise` holds a traced reference rather than number bits.
 pub(crate) unsafe fn has_reference_value(promise: *mut u8) -> bool {
     // SAFETY: caller supplies a live promise.
     unsafe { (*(promise as *const Promise)).references }
@@ -168,12 +170,10 @@ pub(crate) extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     }
 }
 
-/// Embedded observer storage in generated Wasm frames, aligned to eight bytes.
-pub use crate::layout::async_frame::OBSERVER_SIZE;
-
-/// Pending registrations belong to both their promise and their owning task.
+/// Pending registrations belong to both their promise and their owning task. Generated
+/// frames embed one at `layout::async_frame::OBSERVER`, combinators after their header.
 #[repr(C)]
-pub(crate) struct Observer {
+struct Observer {
     frame: *mut u8,
     promise: *mut Promise,
     promise_next: *mut Observer,
@@ -183,8 +183,10 @@ pub(crate) struct Observer {
 }
 
 #[cfg(target_arch = "wasm32")]
-const _: () = assert!(core::mem::size_of::<Observer>() <= OBSERVER_SIZE as usize);
+const _: () =
+    assert!(core::mem::size_of::<Observer>() <= crate::layout::async_frame::OBSERVER_SIZE as usize);
 
+/// The task's intrusive list of active observers, traced as GC roots and drained on cancel.
 pub(crate) struct Observers {
     head: *mut Observer,
 }
@@ -236,15 +238,22 @@ impl Observers {
     }
 }
 
+/// Life cycle of a [Signal]'s native future, from creation to dispatch.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 enum SignalState {
+    /// No native future; the signal may be armed or its owner reused.
     Dormant,
+    /// Read pending, awaiting `fire`.
     Armed,
+    /// Written; the task's waitable set will report the event.
     Signalled,
+    /// The event arrived and the dispatcher is draining observers.
     Dispatching,
+    /// A combinator's frame was handed to the dispatcher.
     Delivered,
 }
+/// What the [Signal]'s owner is, which selects the fan-out of [perry_promise_next].
 #[derive(Clone, Copy)]
 #[repr(u8)]
 enum SignalKind {
@@ -273,29 +282,40 @@ impl Signal {
             state: SignalState::Dormant,
         }
     }
+    /// Open a fresh native future for a dormant signal and start reading it.
     unsafe fn arm(&mut self) {
+        // `assert!` rather than `assert_eq!`: the trap needs no `Debug` formatting code.
+        assert!(
+            self.state == SignalState::Dormant,
+            "only a dormant signal arms"
+        );
         unsafe {
-            assert_eq!(self.state, SignalState::Dormant);
             let pair = host::reaction_new();
             self.readable = pair as u32;
             self.writable = (pair >> 32) as u32;
             self.state = SignalState::Armed;
             current().signals.insert(self);
-            assert_eq!(
-                host::reaction_read(self.readable, ptr::null_mut()),
-                host::BLOCKED
-            );
+            // Nothing was written yet, so the read stays pending until `fire`.
+            let read = host::reaction_read(self.readable, ptr::null_mut());
+            assert!(read == host::BLOCKED, "an unwritten future read blocks");
             crate::io::perry_task_join(self.readable);
         }
     }
+    /// Complete an armed signal's future; its event follows through the waitable set.
     unsafe fn fire(&mut self) {
+        assert!(
+            self.state == SignalState::Armed,
+            "only an armed signal fires"
+        );
         unsafe {
-            assert_eq!(self.state, SignalState::Armed);
             self.state = SignalState::Signalled;
-            assert_eq!(host::reaction_write(self.writable, ptr::null()), 0);
+            // The pending read accepts the unit payload at once.
+            let written = host::reaction_write(self.writable, ptr::null());
+            assert!(written == 0, "the pending read accepts the write at once");
             host::reaction_drop_writable(self.writable);
         }
     }
+    /// Release the native future and unregister the signal, leaving it dormant for reuse.
     unsafe fn close(&mut self) {
         unsafe {
             if self.state == SignalState::Armed {
@@ -306,7 +326,8 @@ impl Signal {
                 host::reaction_cancel_read(self.readable);
             }
             host::reaction_drop_readable(self.readable);
-            current().signals.remove(self.readable);
+            let removed = current().signals.remove(self.readable);
+            assert!(removed, "an open completion is registered");
             self.state = SignalState::Dormant;
         }
     }
@@ -372,7 +393,11 @@ impl Signals {
         }
         ptr::null_mut()
     }
-    unsafe fn remove(&mut self, handle: u32) {
+    /// Unregister the signal reading `handle`; false when none is registered.
+    unsafe fn remove(&mut self, handle: u32) -> bool {
+        if self.len == 0 {
+            return false;
+        }
         unsafe {
             let mut link = self.buckets.add(handle as usize & (self.capacity - 1));
             while !(*link).is_null() {
@@ -380,12 +405,12 @@ impl Signals {
                 if (*signal).readable == handle {
                     *link = (*signal).bucket_next;
                     self.len -= 1;
-                    return;
+                    return true;
                 }
                 link = &mut (*signal).bucket_next;
             }
-            unreachable!("an armed completion is registered");
         }
+        false
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
@@ -403,6 +428,7 @@ impl Signals {
     }
 }
 
+/// Detach a registered observer from both its promise's and its task's list.
 unsafe fn unlink(observer: *mut Observer) {
     unsafe {
         let promise = (*observer).promise;
@@ -431,7 +457,11 @@ pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8, st
     let observer = storage.cast::<Observer>();
     // SAFETY: storage belongs to a suspended frame and has no active registration.
     unsafe {
-        assert_eq!((*promise).state, PENDING);
+        // Compiled code and combinators only wait on pending promises.
+        assert!(
+            (*promise).state == PENDING,
+            "only pending promises are awaited"
+        );
         observer.write(Observer {
             frame,
             promise,
@@ -447,6 +477,8 @@ pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8, st
         }
         (*promise).waiters_tail = observer;
         current().observers.insert(observer);
+        // Combinators count settlements synchronously; generated frames share the signal,
+        // which the first waiter arms.
         if *frame.cast::<u32>() != COMBINATOR_KIND
             && (*promise).signal.state == SignalState::Dormant
         {
@@ -461,6 +493,7 @@ pub(crate) extern "C" fn perry_promise_event(event: u32, handle: u32) -> *mut u8
     if event != host::EVENT_FUTURE_READ {
         return ptr::null_mut();
     }
+    // SAFETY: registered signals live in rooted owners until they close.
     unsafe {
         let signal = current().signals.get(handle);
         if signal.is_null() || (*signal).state != SignalState::Signalled {
@@ -474,6 +507,7 @@ pub(crate) extern "C" fn perry_promise_event(event: u32, handle: u32) -> *mut u8
 /// One observer of this completion, retaining its owner until the fan-out is exhausted.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_promise_next(completion: *mut u8) -> *mut u8 {
+    // SAFETY: `completion` came from [perry_promise_event] and stays registered until closed.
     unsafe {
         let signal = &mut *completion.cast::<Signal>();
         match signal.kind {
@@ -499,6 +533,7 @@ pub(crate) extern "C" fn perry_promise_next(completion: *mut u8) -> *mut u8 {
 
 /// Completed combinators own cancellation of losing operations, including nested awaits.
 pub(crate) fn prepare_cancellation() {
+    // SAFETY: active observers, their frames and promises are live members of this task.
     unsafe {
         current().observers.visit(|observer| {
             let frame = (*observer).frame;
@@ -536,10 +571,12 @@ pub(crate) fn prepare_cancellation() {
     }
 }
 
+/// Whether a settled combinator, marked by [prepare_cancellation], cancels `promise`'s operation.
 pub(crate) unsafe fn cancellation_owned(promise: *mut u8) -> bool {
     unsafe { (*promise.cast::<Promise>()).cancellation_owned }
 }
 
+/// Close every native completion and drop every registration of the current task.
 pub(crate) fn cancel_observers() {
     // SAFETY: signal cancellation acknowledges native reads before their owners are released.
     unsafe {
@@ -586,12 +623,14 @@ fn input(inputs: *mut u8, index: u32) -> *mut Promise {
     }
 }
 
+/// Start a combinator over a snapshot of `inputs`, with observer storage for each pending one.
 fn combine(mode: u32, inputs: *mut u8, collectible: bool, references: bool) -> *mut u8 {
     let result = if collectible {
         perry_promise_new_collectible(u32::from(mode != RACE || references))
     } else {
         perry_promise_new()
     };
+    // SAFETY: compiled code passes an array of promises (layout of crate::array).
     let count = unsafe { *(inputs as *const u32) };
     let snapshot = if collectible {
         crate::array::perry_array_new_collectible(count, 1)
@@ -599,6 +638,7 @@ fn combine(mode: u32, inputs: *mut u8, collectible: bool, references: bool) -> *
         crate::array::perry_array_new(count)
     };
     let mut pending = 0;
+    // SAFETY: the fresh snapshot has capacity for `count` slots.
     unsafe {
         let data = *snapshot.add(crate::array::DATA as usize).cast::<*mut u64>();
         for index in 0..count {
@@ -686,7 +726,11 @@ fn reject_with(result: *mut u8, input: *mut Promise) {
 /// Record bookkeeping without recursively resuming guest code or parent combinators.
 unsafe fn accept_completion(combinator: &mut Combinator, promise: *mut Promise) {
     unsafe {
-        assert!(combinator.remaining != 0);
+        // Each registered input observer completes exactly once.
+        assert!(
+            combinator.remaining != 0,
+            "a combinator input completed twice"
+        );
         combinator.remaining -= 1;
         if (*combinator.result.cast::<Promise>()).state != PENDING {
             release_combinator(combinator);
@@ -700,6 +744,7 @@ unsafe fn accept_completion(combinator: &mut Combinator, promise: *mut Promise) 
     }
 }
 
+/// Remember the first input that decides the result: any for `race`, a rejection for `all`.
 unsafe fn note_completion(combinator: &mut Combinator, promise: *mut Promise) {
     unsafe {
         if combinator.completed.is_null()
@@ -710,10 +755,12 @@ unsafe fn note_completion(combinator: &mut Combinator, promise: *mut Promise) {
     }
 }
 
+/// The result is decided: an input completed it, or every input of `all`/`allSettled` settled.
 fn combinator_ready(combinator: &Combinator) -> bool {
     !combinator.completed.is_null() || (combinator.mode != RACE && combinator.remaining == 0)
 }
 
+/// Unpin a collectible combinator once it settled and no input observer refers to it.
 unsafe fn release_combinator(combinator: &mut Combinator) {
     unsafe {
         if combinator.remaining == 0
@@ -808,8 +855,10 @@ mod tests {
                 }
             }
             let allocations = current().allocations - before;
-            assert_eq!(allocations, 1, "one shared native completion, no per-observer allocations");
-            println!("{count} embedded observers: {allocations} table-buffer allocations, zero reaction-node allocations");
+            assert_eq!(
+                allocations, 1,
+                "one shared native completion, no per-observer allocations"
+            );
             perry_promise_resolve(promise, 7);
             perry_promise_resolve(promise, 8);
             let events = host::mock::completed_reactions();
@@ -819,18 +868,30 @@ mod tests {
             assert!(!completion.is_null());
             assert!(perry_promise_event(host::EVENT_FUTURE_READ, handle).is_null());
             for index in 0..count {
-                assert_eq!(perry_promise_next(completion), unsafe {frames.add(index * stride)});
+                assert_eq!(perry_promise_next(completion), unsafe {
+                    frames.add(index * stride)
+                });
             }
-            assert_ne!(perry_promise_reuse(promise), promise, "active fan-out retains its promise");
+            assert_ne!(
+                perry_promise_reuse(promise),
+                promise,
+                "active fan-out retains its promise"
+            );
             assert!(perry_promise_next(completion).is_null());
             assert!(perry_promise_event(host::EVENT_FUTURE_READ, handle).is_null());
             assert!(current().signals.is_empty());
             assert!(current().observers.is_empty());
             let pending = perry_promise_new();
-            perry_promise_wait(pending, frames, unsafe {frames.add(16)});
+            perry_promise_wait(pending, frames, unsafe { frames.add(16) });
             region::perry_task_cancel();
             assert!(current().observers.is_empty());
-            host::mock::with(|host| assert!(host.reactions.iter().all(|&(readable,writable,_)| !readable && !writable)));
+            host::mock::with(|host| {
+                assert!(
+                    host.reactions
+                        .iter()
+                        .all(|reaction| !reaction.readable && !reaction.writable)
+                )
+            });
             region::perry_task_free();
         });
     }

@@ -39,15 +39,12 @@ pub(crate) enum OptionalErr {
 
 /// The `T` of an optional type, if `ty` is one.
 pub fn optional_value(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
-    TypedHandle::<OptionalType>::from_handle(ty, ctx)
-        .ok()
-        .map(|optional| optional.deref(ctx).value())
+    optional_parts(ctx, ty).map(|(value, _)| value)
 }
 
+/// The absence states (`null`, `undefined` or both) of an optional type, if `ty` is one.
 pub fn absence(ctx: &Context, ty: TypeHandle) -> Option<Absence> {
-    TypedHandle::<OptionalType>::from_handle(ty, ctx)
-        .ok()
-        .map(|optional| optional.deref(ctx).absence())
+    optional_parts(ctx, ty).map(|(_, states)| states)
 }
 
 /// The value type and absence states of an optional type, in one lookup.

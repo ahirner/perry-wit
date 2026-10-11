@@ -215,38 +215,36 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Call a canonical built-in or host import that returns one value. Results follow from
-    /// [Host::signature], so a mismatch is a bug at the call site.
+    /// [Host::signature], so a mismatch is a bug at the call site, like [Self::runtime].
     pub(crate) fn host(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) -> Value {
-        let (_, results) = host.signature(ctx);
+        let call = self.call_host(ctx, host, args);
+        let call = call.deref(ctx);
         assert_eq!(
-            results.len(),
+            call.get_num_results(),
             1,
-            "{} does not return one value; call it with host_void",
-            host.symbol()
+            "a host import called for its value returns exactly one; others use host_void"
         );
-        let call = self.call_host(ctx, host, args, results);
-        call.deref(ctx).get_result(0)
+        call.get_result(0)
     }
 
     /// Call a canonical built-in or host import without a result.
     pub(crate) fn host_void(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) {
-        let (_, results) = host.signature(ctx);
-        assert!(
-            results.is_empty(),
-            "the result of {} is discarded",
-            host.symbol()
+        let call = self.call_host(ctx, host, args);
+        assert_eq!(
+            call.deref(ctx).get_num_results(),
+            0,
+            "a host import called for its effect returns nothing"
         );
-        self.call_host(ctx, host, args, results);
     }
 
-    /// Call a host import with the result types its caller derived; see [Self::host].
+    /// Call a canonical built-in or host import with the results of its [Host::signature].
     pub(crate) fn call_host(
         &mut self,
         ctx: &mut Context,
         host: Host,
         args: Vec<Value>,
-        results: Vec<TypeHandle>,
     ) -> Ptr<Operation> {
+        let (_, results) = host.signature(ctx);
         let symbol = host.symbol();
         self.state.host.insert(host);
         let call = CallOp::new(ctx, symbol, args, results).get_operation();

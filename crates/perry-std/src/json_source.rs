@@ -1,208 +1,211 @@
 //! Source spans retained by typed JSON aggregates and consumed by their serializers.
-use crate::json::*;
-use crate::json_read::{Reader, lookup, pull, reader, unescape};
+//!
+//! A decoded record, array or variant keeps the span of text it came from. `JSON.stringify`
+//! of it writes the members its type does not declare straight from that span, and repeats a
+//! subtree's earlier serialization while nothing in the document changed.
+use crate::json::{
+    MAX_DEPTH, array_index, quote, quote_contents, std_json_close, std_json_item, std_json_number,
+    std_json_open, writer as json_writer,
+};
+use crate::json_read::{Reader, decode_string, lookup, pull, reader, table_key, unescape};
 use crate::runtime::{Buffer, bytes};
 use core::{mem, ptr, slice};
 
+/// The text span behind one decoded aggregate, and what the program changed since.
+///
+/// Only [std_json_read_attach] creates sources, from a reader and a key table string, so the
+/// accessors below may rely on those fields.
 #[repr(C)]
 struct Source {
     document: *mut Reader,
     table: *mut u8,
     start: u32,
     end: u32,
-    additions: Buffer,
     assigned: Buffer,
-    cached: *mut u8,
+    cached: *const u8,
+    cached_len: u32,
     nesting: u32,
-    canonical: bool,
     tuple_written: u32,
     tuple: bool,
 }
 
+impl Source {
+    /// The reader whose input this source spans.
+    fn document(&self) -> &'static mut Reader {
+        reader(self.document.cast())
+    }
+
+    /// The record's key table (see `std_json_read_field`), empty for arrays and tuples.
+    fn table(&self) -> &'static [u8] {
+        // SAFETY: attached sources hold a key table string, which they trace.
+        unsafe { bytes(self.table) }
+    }
+
+    /// The remembered serialization of [std_json_source_remember], if any.
+    fn cached(&self) -> Option<&'static [u8]> {
+        // SAFETY: `cached` is null or the start of `cached_len` immutable bytes of an
+        // allocation this source traces.
+        (!self.cached.is_null())
+            .then(|| unsafe { slice::from_raw_parts(self.cached, self.cached_len as usize) })
+    }
+}
+
+/// The attached source behind a handle compiled code passes, if any.
+///
+/// # Safety
+/// `source` is null or an attached source that no other reference borrows.
+unsafe fn attached<'a>(source: *mut u8) -> Option<&'a mut Source> {
+    // SAFETY: guaranteed by the caller.
+    unsafe { source.cast::<Source>().as_mut() }
+}
+
+/// One object member of a source span: its (decoded) key and where its value starts.
+///
+/// `repr(C)` of pointer-sized words: the key pointer leads (an [Entry] buffer traces it) and
+/// no padding leaves uninitialized bytes, so [entry_bytes] may view entries as bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct Entry {
     key: *const u8,
     key_len: usize,
     pub(super) start: usize,
+    /// Index of the declared field the key names, or `usize::MAX`.
     field: usize,
+    /// Position in serialization order before sorting.
     order: usize,
 }
 
+const _: () = assert!(mem::size_of::<Entry>() == 5 * mem::size_of::<usize>());
+// Task allocations are 8-aligned, so entry buffers are aligned for `Entry`.
+const _: () = assert!(mem::align_of::<Entry>() <= 8);
+
+impl Entry {
+    /// Placeholder of unused fixed-size storage.
+    const EMPTY: Entry = Entry {
+        key: ptr::null(),
+        key_len: 0,
+        start: 0,
+        field: usize::MAX,
+        order: 0,
+    };
+
+    /// A member named `key`, which outlives every use of the entry: the source text, a
+    /// decoded key or a key table, each retained through the document.
+    fn new(key: &'static [u8], start: usize, field: usize, order: usize) -> Self {
+        Self {
+            key: key.as_ptr(),
+            key_len: key.len(),
+            start,
+            field,
+            order,
+        }
+    }
+}
+
+/// The deduplicated members of a source object in serialization order, and a cursor.
 #[repr(C)]
 struct Members {
     document: *mut Reader,
+    /// Complete [Entry] values only; the first `count` are the members.
     entries: Buffer,
     at: usize,
     count: usize,
 }
 
 fn cursor(document: *mut Reader, start: u32) -> pull::Cursor<'static> {
-    // SAFETY: provenance retains the document and its immutable input.
-    let input = unsafe { (*document).cursor.input };
-    let mut cursor = pull::Cursor::new(unsafe { core::str::from_utf8_unchecked(input) });
-    cursor.pos = start;
-    cursor
+    reader(document.cast()).cursor.at(start)
 }
 
-pub(super) fn key_bytes(entry: &Entry) -> &[u8] {
-    // SAFETY: Members traces the immutable source or decoded key allocation.
+pub(super) fn key_bytes(entry: &Entry) -> &'static [u8] {
+    // SAFETY: entries are made by [Entry::new] (or are the empty placeholder) from a key
+    // slice that outlives them.
     unsafe { slice::from_raw_parts(entry.key, entry.key_len) }
 }
 
-fn entries(members: &Members) -> &[Entry] {
-    if members.count == 0 {
-        return &[];
+/// `entries` as bytes, for storing them in a traced buffer.
+fn entry_bytes(entries: &[Entry]) -> &[u8] {
+    // SAFETY: entries are padding-free words (see [Entry]), so every byte is initialized.
+    unsafe { slice::from_raw_parts(entries.as_ptr().cast(), mem::size_of_val(entries)) }
+}
+
+/// The complete entries stored in `buffer`.
+fn stored(buffer: &mut Buffer) -> &mut [Entry] {
+    let bytes = buffer.as_mut_slice();
+    // SAFETY: entry buffers hold only whole entries written by [entry_bytes], in an 8-aligned
+    // task allocation; the exclusive borrow covers exactly those bytes.
+    unsafe {
+        slice::from_raw_parts_mut(
+            bytes.as_mut_ptr().cast(),
+            bytes.len() / mem::size_of::<Entry>(),
+        )
     }
-    // SAFETY: only complete, initialized entries are appended to this aligned buffer.
-    unsafe { slice::from_raw_parts(members.entries.as_slice().as_ptr().cast(), members.count) }
+}
+
+fn entries(members: &mut Members) -> &mut [Entry] {
+    let count = members.count;
+    &mut stored(&mut members.entries)[..count]
 }
 
 fn append(members: &mut Members, entry: Entry) {
-    // SAFETY: Entry consists solely of pointer-sized initialized words, without padding.
-    let bytes =
-        unsafe { slice::from_raw_parts((&entry as *const Entry).cast(), mem::size_of::<Entry>()) };
-    let offset = members.count * mem::size_of::<Entry>();
-    if offset < members.entries.len() {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                members.entries.as_slice().as_ptr().add(offset) as *mut u8,
-                bytes.len(),
-            )
-        };
-    } else {
-        members.entries.extend_from_slice(bytes);
+    let count = members.count;
+    match stored(&mut members.entries).get_mut(count) {
+        Some(slot) => *slot = entry,
+        None => members.entries.extend_from_slice(entry_bytes(&[entry])),
     }
     members.count += 1;
 }
 
-pub(super) fn next_member(r: &mut pull::Cursor<'_>) -> Option<Entry> {
-    if r.broken != 0 {
-        return None;
-    }
-    let next = r.whitespace();
-    if next == b'}' {
-        r.close();
-        return None;
-    }
-    if mem::take(&mut r.fresh) == 0 {
-        if next != b',' {
-            r.broken = 1;
-            return None;
-        }
-        r.pos += 1;
-    }
-    if r.whitespace() != b'"' {
-        r.broken = 1;
-        return None;
-    }
-    r.pos += 1;
-    let start = r.pos;
-    let (escaped, _) = r.string();
-    if r.broken != 0 {
-        return None;
-    }
-    let key = if escaped {
-        unescape(&r.input[start as usize..r.pos as usize - 1])
-    } else {
-        &r.input[start as usize..r.pos.saturating_sub(1) as usize]
-    };
-    let (key, key_len) = (key.as_ptr(), key.len());
-    if r.whitespace() != b':' || r.broken != 0 {
-        r.broken = 1;
-        return None;
-    }
-    r.pos += 1;
+pub(super) fn next_member(r: &mut pull::Cursor<'static>) -> Option<Entry> {
+    let (key, escaped) = r.member()?;
+    let key = if escaped { unescape(key) } else { key };
     r.whitespace();
     let start = r.pos;
     r.skip();
-    Some(Entry {
-        key,
-        key_len,
-        start: start as usize,
-        field: usize::MAX,
-        order: 0,
-    })
+    Some(Entry::new(key, start as usize, usize::MAX, 0))
 }
 
-fn integer_key(key: &[u8]) -> Option<u32> {
-    if key.is_empty() || (key.len() > 1 && key[0] == b'0') {
-        return None;
-    }
-    let mut value = 0u32;
-    for &digit in key {
-        if !digit.is_ascii_digit() {
-            return None;
-        }
-        value = value
-            .checked_mul(10)?
-            .checked_add(u32::from(digit - b'0'))?;
-    }
-    (value != u32::MAX).then_some(value)
-}
-
-fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Members {
+/// The deduplicated members of the source object at `start`; with a key `table`, each
+/// entry notes the declared field it names.
+fn index_object(document: *mut Reader, start: u32, table: Option<&[u8]>) -> Members {
     static SHAPE: [u32; 3] = [mem::size_of::<Entry>() as u32, 1, 0];
-    let out = crate::runtime::object!(Members; document, entries);
-    unsafe {
-        out.write(Members {
-            document,
-            entries: Buffer::with_shape(&SHAPE),
-            at: 0,
-            count: 0,
-        })
+    let mut members = Members {
+        document,
+        // SAFETY: `SHAPE` maps an entry's leading key pointer, and the buffer holds entries.
+        entries: unsafe { Buffer::with_shape(&SHAPE) },
+        at: 0,
+        count: 0,
     };
-    let members = unsafe { &mut *out };
-    let mut pending = [Entry {
-        key: ptr::null(),
-        key_len: 0,
-        start: 0,
-        field: usize::MAX,
-        order: 0,
-    }; 128];
+    let mut pending = [Entry::EMPTY; 128];
     let mut count = 0;
     let mut scan = cursor(document, start);
     scan.open(b'{');
     while let Some(mut entry) = next_member(&mut scan) {
         entry.order = count;
-        let key = key_bytes(&entry);
-        if !table.is_null() {
-            entry.field = lookup(unsafe { bytes(table) }, 0, key) as usize;
+        if let Some(table) = table {
+            entry.field = lookup(table, 0, key_bytes(&entry)) as usize;
         }
         if count < pending.len() {
             pending[count] = entry;
         } else {
             if count == pending.len() {
-                // Entries have no padding and their keys stay live through the document.
-                members.entries.extend_from_slice(unsafe {
-                    slice::from_raw_parts(pending.as_ptr().cast(), mem::size_of_val(&pending))
-                });
+                members.entries.extend_from_slice(entry_bytes(&pending));
                 members.count = count;
             }
-            append(members, entry);
+            append(&mut members, entry);
         }
         count += 1;
     }
     if count <= pending.len() {
         members.count = index_small_object(&mut pending[..count]);
         if members.count != 0 {
-            members.entries.extend_from_slice(unsafe {
-                slice::from_raw_parts(
-                    pending.as_ptr().cast(),
-                    members.count * mem::size_of::<Entry>(),
-                )
-            });
+            members
+                .entries
+                .extend_from_slice(entry_bytes(&pending[..members.count]));
         }
-        return out;
+        return members;
     }
     if members.count > 0 {
-        let items = unsafe {
-            slice::from_raw_parts_mut(
-                members.entries.as_slice().as_ptr() as *mut Entry,
-                members.count,
-            )
-        };
+        let items = entries(&mut members);
         heap_sort(items, |a, b| {
             key_bytes(a).cmp(key_bytes(b)).then(a.order.cmp(&b.order))
         });
@@ -219,7 +222,7 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
         }
         members.count = count;
     }
-    out
+    members
 }
 
 /// A fixed-size index bounds collisions and keeps small objects in insertion order.
@@ -284,7 +287,7 @@ fn sort(members: &mut Members) {
     let entries = unsafe {
         slice::from_raw_parts_mut(members.entries.as_slice().as_ptr() as *mut Entry, count)
     };
-    let order = |entry: &Entry| match integer_key(key_bytes(entry)) {
+    let order = |entry: &Entry| match array_index(key_bytes(entry)) {
         Some(index) => (0, index as usize),
         None => (1, entry.order),
     };
@@ -296,25 +299,35 @@ fn sort(members: &mut Members) {
     }
 }
 
+/// Aggregate kinds of [std_json_read_attach], as `perry-lower` passes them.
+const RECORD_LAYOUT: u32 = 0;
+const ARRAY_LAYOUT: u32 = 1;
+const TUPLE_LAYOUT: u32 = 3;
+
+/// Attach the span from `start` to the reader's position to the decoded `value`, unless the
+/// document is broken or mismatched. `layout` names its kind: a record, an array, a variant
+/// (2) or a tuple record. `table` is the record's key table (see `std_json_read_field`).
+///
+/// # Safety
+/// `value` is null or an aggregate of that kind; `table` is a string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_read_attach(
     r: *mut u8,
     value: *mut u8,
     start: u32,
     table: *mut u8,
-    array: u32,
+    layout: u32,
 ) {
     let document = reader(r);
     if value.is_null() || document.broken != 0 || document.mismatch != 0 {
         return;
     }
     const SIZE: usize = mem::size_of::<Source>();
-    static SHAPE: [u32; 7] = [
+    static SHAPE: [u32; 6] = [
         SIZE as u32,
-        5,
+        4,
         mem::offset_of!(Source, document) as u32,
         mem::offset_of!(Source, table) as u32,
-        mem::offset_of!(Source, additions) as u32,
         mem::offset_of!(Source, assigned) as u32,
         mem::offset_of!(Source, cached) as u32,
     ];
@@ -336,19 +349,18 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
             table,
             start,
             end: document.pos,
-            additions: Buffer::new(),
             assigned: Buffer::new(),
-            cached: ptr::null_mut(),
+            cached: ptr::null(),
+            cached_len: 0,
             nesting: 0,
-            canonical: false,
             tuple_written: 0,
-            tuple: array == 3,
+            tuple: layout == TUPLE_LAYOUT,
         });
         // These are internal headers, independent of the Canonical ABI.
         value
-            .add(match array {
-                0 | 3 => crate::runtime::layout::record::SOURCE,
-                1 => crate::runtime::layout::array::SOURCE,
+            .add(match layout {
+                RECORD_LAYOUT | TUPLE_LAYOUT => crate::runtime::layout::record::SOURCE,
+                ARRAY_LAYOUT => crate::runtime::layout::array::SOURCE,
                 _ => crate::runtime::layout::variant::SOURCE,
             } as usize)
             .cast::<*mut Source>()
@@ -356,31 +368,34 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
     }
 }
 
+/// Note a write to the aggregate behind `source`: the document stops copying raw text, and
+/// an assigned declared `field` (or tuple element `_N`) is serialized even if absent from it.
+///
+/// # Safety
+/// `source` is null or an attached source; `field` is null or a string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_write(source: *mut u8, field: *mut u8) {
     if source.is_null() {
         return;
     }
+    // SAFETY: guaranteed by the caller; a source retains its document.
     let source = unsafe { &mut *source.cast::<Source>() };
     unsafe { (*source.document).dirty = true };
     if field.is_null() {
         return;
     }
+    // SAFETY: guaranteed by the caller.
+    let (key, table) = unsafe { (bytes(field), bytes(source.table)) };
     if source.tuple {
-        let key = unsafe { bytes(field) };
-        if key.first() == Some(&b'_') {
-            let mut index = 0u32;
-            for &digit in &key[1..] {
-                index = index * 10 + u32::from(digit - b'0');
-            }
+        if let Some(index) = key.strip_prefix(b"_").and_then(array_index) {
             source.tuple_written = source.tuple_written.max(index + 1);
         }
         return;
     }
-    if unsafe { bytes(source.table) }.is_empty() {
+    if table.is_empty() {
         return;
     }
-    let index = lookup(unsafe { bytes(source.table) }, 0, unsafe { bytes(field) });
+    let index = lookup(table, 0, key);
     if index < 0 {
         return;
     }
@@ -396,78 +411,89 @@ pub(crate) unsafe extern "C" fn std_json_source_write(source: *mut u8, field: *m
         return;
     }
     source.assigned.extend_from_slice(&index.to_le_bytes());
-    let mut scan = cursor(source.document, source.start);
-    scan.open(b'{');
-    while let Some(entry) = next_member(&mut scan) {
-        if key_bytes(&entry) == unsafe { bytes(field) } {
-            return;
-        }
-    }
-    source.additions.extend_from_slice(&index.to_le_bytes());
 }
 
+/// Begin serializing a source-backed record: its source members merged with the declared
+/// fields assigned since, in property order (see [std_json_source_next]). Null when the
+/// record has no source or no declared keys; the serializer then walks its fields alone.
+///
+/// # Safety
+/// `source` is null or an attached source.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_begin(source: *mut u8) -> *mut u8 {
     if source.is_null() {
         return ptr::null_mut();
     }
-    let source = unsafe { &*source.cast::<Source>() };
-    if unsafe { bytes(source.table) }.is_empty() {
+    // SAFETY: guaranteed by the caller; the table is a string.
+    let (source, table) = unsafe {
+        let source = &*source.cast::<Source>();
+        (source, bytes(source.table))
+    };
+    if table.is_empty() {
         return ptr::null_mut();
     }
-    let members = index_object(source.document, source.start, source.table);
-    let members = unsafe { &mut *members };
-    let table = unsafe { bytes(source.table) };
-    for index in source.additions.as_slice().as_chunks::<4>().0 {
+    let mut members = index_object(source.document, source.start, source.table);
+    let mut order = entries(&members)
+        .iter()
+        .map(|entry| entry.order + 1)
+        .max()
+        .unwrap_or(0);
+    for index in source.assigned.as_slice().as_chunks::<4>().0 {
         let index = u32::from_le_bytes(*index) as usize;
-        let text = crate::json_read::table_key(table, index as u32);
-
+        if entries(&members).iter().any(|entry| entry.field == index) {
+            continue;
+        }
+        let text = table_key(table, index as u32);
         append(
-            members,
+            &mut members,
             Entry {
                 key: text.as_ptr(),
                 key_len: text.len(),
                 start: 0,
                 field: index,
-                order: entries(members)
-                    .iter()
-                    .map(|entry| entry.order + 1)
-                    .max()
-                    .unwrap_or(0),
+                order,
             },
         );
+        order += 1;
     }
-    sort(members);
-    (members as *mut Members).cast()
+    sort(&mut members);
+    let out = crate::runtime::object!(Members; document, entries);
+    unsafe { out.write(members) };
+    out.cast()
 }
 
 fn raw(writer: *mut u8, text: &[u8]) {
     unsafe { std_json_raw(writer, text.as_ptr(), text.len() as u32) };
 }
 
+/// Start an object member named by `entry`'s key.
 fn key(writer: *mut u8, entry: &Entry) {
     std_json_item(writer);
-    let output = crate::json::writer(writer);
+    let output = json_writer(writer);
     if !output.failed {
-        crate::json::quote(&mut output.text, key_bytes(entry));
+        quote(&mut output.text, key_bytes(entry));
+        output.text.push(b':');
     }
-    raw(writer, b":");
 }
 
-#[derive(Clone, Copy)]
+/// Pending work of [compact]: a value to write, or a container to continue.
 enum Frame {
     Value(u32),
-    Object(*mut Members),
+    Object(Members),
+    /// The offset after the previous element (or the bracket), and whether none came yet.
     Array(u32, bool),
 }
 
+/// Write the source value at `start` in canonical `JSON.stringify` form: no whitespace,
+/// decoded escapes, normalized numbers and objects in property order. Iterative, bounded by
+/// the writer's depth limit.
 fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
     let mut stack = [const { mem::MaybeUninit::<Frame>::uninit() }; 129];
     stack[0].write(Frame::Value(start));
     let mut depth = 1;
     while depth > 0 {
         depth -= 1;
-        // Every live stack entry is written before increasing depth; popped entries are Copy.
+        // Every live stack entry is written before increasing depth and moved out once.
         match unsafe { stack[depth].assume_init_read() } {
             Frame::Value(start) => {
                 let mut r = cursor(document, start);
@@ -476,8 +502,8 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                         if std_json_open(writer, b'{' as u32) == 0 {
                             return;
                         }
-                        let members = index_object(document, r.pos, ptr::null_mut());
-                        sort(unsafe { &mut *members });
+                        let mut members = index_object(document, r.pos, ptr::null_mut());
+                        sort(&mut members);
                         stack[depth].write(Frame::Object(members));
                         depth += 1;
                     }
@@ -493,12 +519,12 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                         let start = r.pos;
                         let (escaped, _) = r.string();
                         if escaped {
-                            let output = crate::json::writer(writer);
+                            let output = json_writer(writer);
                             if !output.failed {
                                 output.text.push(b'"');
-                                crate::json_read::decode_string(
+                                decode_string(
                                     &r.input[start as usize..r.pos as usize - 1],
-                                    |bytes| crate::json::quote_contents(&mut output.text, bytes),
+                                    |bytes| quote_contents(&mut output.text, bytes),
                                 );
                                 output.text.push(b'"');
                             }
@@ -529,16 +555,15 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                     _ => raw(writer, b"null"),
                 }
             }
-            Frame::Object(pointer) => {
-                let members = unsafe { &mut *pointer };
-                if members.at == entries(members).len() {
+            Frame::Object(mut members) => {
+                if members.at == entries(&members).len() {
                     std_json_close(writer, b'}' as u32);
                     continue;
                 }
-                let entry = entries(members)[members.at];
+                let entry = entries(&members)[members.at];
                 members.at += 1;
                 key(writer, &entry);
-                stack[depth].write(Frame::Object(pointer));
+                stack[depth].write(Frame::Object(members));
                 stack[depth + 1].write(Frame::Value(entry.start as u32));
                 depth += 2;
             }
@@ -563,6 +588,11 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
     }
 }
 
+/// The next declared field to serialize, writing the undeclared source members before it
+/// directly; -1 at the end. Without `members` it counts `index` up to `count`.
+///
+/// # Safety
+/// `members` is null or from [std_json_source_begin]; `writer` is a JSON writer.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_next(
     members: *mut u8,
@@ -573,6 +603,7 @@ pub(crate) unsafe extern "C" fn std_json_source_next(
     if members.is_null() {
         return if index < count { index as i32 } else { -1 };
     }
+    // SAFETY: guaranteed by the caller.
     let members = unsafe { &mut *members.cast::<Members>() };
     while members.at < entries(members).len() {
         let entry = entries(members)[members.at];
@@ -586,16 +617,23 @@ pub(crate) unsafe extern "C" fn std_json_source_next(
     -1
 }
 
+/// Write the remembered serialization of an unchanged source: 1, or 0 when the caller must
+/// serialize it field by field.
+///
 /// Raw copying is enabled only after observing an identical complete serialization.
 /// The observed nesting preserves the depth bound when a cached root becomes a subtree.
+///
+/// # Safety
+/// `source` is null or an attached source; `writer` is a JSON writer.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *mut u8) -> u32 {
     if source.is_null() {
         return 0;
     }
+    // SAFETY: guaranteed by the caller; a source retains its document.
     let source = unsafe { &*source.cast::<Source>() };
     let document = unsafe { &mut *source.document };
-    let writer = crate::json::writer(writer);
+    let writer = json_writer(writer);
     if document.dirty
         || !document.copy_safe
         || writer.failed
@@ -605,16 +643,10 @@ pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *m
     }
     if !source.cached.is_null() {
         writer.max_depth = writer.max_depth.max(writer.depth + source.nesting);
-        writer
-            .text
-            .extend_from_slice(unsafe { bytes(source.cached) });
-        return 1;
-    }
-    if source.canonical {
-        writer.max_depth = writer.max_depth.max(writer.depth + source.nesting);
-        writer
-            .text
-            .extend_from_slice(&document.input[source.start as usize..source.end as usize]);
+        // SAFETY: the source traces the immutable cached allocation.
+        writer.text.extend_from_slice(unsafe {
+            slice::from_raw_parts(source.cached, source.cached_len as usize)
+        });
         return 1;
     }
     // Bound speculative capacity: source spans can contain arbitrary whitespace.
@@ -624,29 +656,44 @@ pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *m
     0
 }
 
+/// Remember the complete serialization `writer` holds for [std_json_source_copy]: the source
+/// text itself when identical, else the output, within a budget of the input's length.
+///
+/// # Safety
+/// `source` is null or an attached source; `writer` is a JSON writer.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_remember(source: *mut u8, writer: *mut u8) {
     if source.is_null() {
         return;
     }
+    // SAFETY: guaranteed by the caller; a source retains its document.
     let source = unsafe { &mut *source.cast::<Source>() };
     let document = unsafe { &mut *source.document };
-    let writer = crate::json::writer(writer);
+    let writer = json_writer(writer);
     if document.dirty || !document.copy_safe || writer.depth != 0 || writer.failed {
         return;
     }
     let text = writer.text.as_slice();
-    source.nesting = writer.max_depth;
-    source.canonical = text == &document.input[source.start as usize..source.end as usize];
-    // Retain at most one input document's worth of normalized output. The writer's
-    // immutable bytes already belong to the traced heap; only a view is allocated.
-    if !source.canonical && text.len() <= (document.len - document.cached_bytes) as usize {
-        source.cached =
-            unsafe { crate::runtime::adopt(text.as_ptr() as *mut u8, text.len() as u32) };
+    let original = &document.input[source.start as usize..source.end as usize];
+    let cached = if text == original {
+        original
+    } else if text.len() <= (document.len - document.cached_bytes) as usize {
         document.cached_bytes += text.len() as u32;
-    }
+        text
+    } else {
+        return;
+    };
+    // Source traces either immutable backing allocation directly; no string header is needed.
+    source.cached = cached.as_ptr();
+    source.cached_len = cached.len() as u32;
+    source.nesting = writer.max_depth;
 }
 
+/// The serialized length of a tuple: its source elements or the highest one assigned, or
+/// `declared` without a source.
+///
+/// # Safety
+/// `source` is null or an attached source.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_tuple_length(
     source: *mut u8,
@@ -655,6 +702,7 @@ pub(crate) unsafe extern "C" fn std_json_source_tuple_length(
     if source.is_null() {
         return declared;
     }
+    // SAFETY: guaranteed by the caller.
     let source = unsafe { &*source.cast::<Source>() };
     let mut scan = cursor(source.document, source.start);
     scan.open(b'[');
@@ -666,6 +714,10 @@ pub(crate) unsafe extern "C" fn std_json_source_tuple_length(
     length.max(source.tuple_written)
 }
 
+/// Write the source elements of a tuple past its `declared` ones.
+///
+/// # Safety
+/// `source` is null or an attached source; `writer` is a JSON writer.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_tuple_tail(
     source: *mut u8,
@@ -675,6 +727,7 @@ pub(crate) unsafe extern "C" fn std_json_source_tuple_tail(
     if source.is_null() {
         return;
     }
+    // SAFETY: guaranteed by the caller.
     let source = unsafe { &*source.cast::<Source>() };
     let mut scan = cursor(source.document, source.start);
     scan.open(b'[');

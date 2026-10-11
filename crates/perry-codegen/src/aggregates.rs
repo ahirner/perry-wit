@@ -5,6 +5,7 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow};
+use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     attrs::ErrorKind,
     collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp},
@@ -12,7 +13,6 @@ use perry_mir::{
     types::{ArrayType, RecordType},
     variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
 };
-use perry_runtime::array as layout;
 use pliron::{
     builtin::types::FP64Type,
     context::{Context, Ptr},
@@ -38,7 +38,7 @@ impl FunctionLowering<'_, '_> {
         }
         if Operation::get_op::<VariantTagOp>(op, ctx).is_some() {
             let object = self.operand(ctx, op, 0)?;
-            let value = self.load(ctx, MemKind::I32, object, 0);
+            let value = self.load(ctx, MemKind::I32, object, variant::TAG);
             self.define(ctx, op, value);
             return Ok(true);
         }
@@ -67,33 +67,23 @@ impl FunctionLowering<'_, '_> {
             let next_shape = self.state.shapes.len() as i32 + 1;
             let shape = *self.state.shapes.entry(name).or_insert(next_shape);
             let operands = self.operands(ctx, op)?;
-            let size = self.i32_const(ctx, perry_abi::layout::record::field(fields.len()) as i32);
+            let size = self.i32_const(ctx, record::field(fields.len()) as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
-                let base = self.local_frame.expect("frame storage");
+                let base = self
+                    .local_frame
+                    .ok_or_else(|| anyhow!("frame-resident record without frame storage"))?;
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
                 self.record_storage(ctx, record_ty, size)?
             };
             let shape = self.i32_const(ctx, shape);
-            self.store(ctx, MemKind::I32, object, 0, shape);
+            self.store(ctx, MemKind::I32, object, record::SHAPE, shape);
             let empty = self.i32_const(ctx, 0);
-            self.store(
-                ctx,
-                MemKind::I32,
-                object,
-                perry_abi::layout::record::SOURCE,
-                empty,
-            );
+            self.store(ctx, MemKind::I32, object, record::SOURCE, empty);
             for (index, (value, ty)) in operands.into_iter().zip(fields).enumerate() {
                 let kind = slot_kind(ctx, ty)?;
-                self.store(
-                    ctx,
-                    kind,
-                    object,
-                    perry_abi::layout::record::field(index),
-                    value,
-                );
+                self.store(ctx, kind, object, record::field(index), value);
             }
             self.define(ctx, op, object);
             return Ok(true);
@@ -113,15 +103,8 @@ impl FunctionLowering<'_, '_> {
             let kind = slot_kind(ctx, ty)?;
             let operands = self.operands(ctx, op)?;
             if self.state.json_provenance {
-                let source = self.load(
-                    ctx,
-                    MemKind::I32,
-                    operands[0],
-                    perry_abi::layout::record::SOURCE,
-                );
                 let field = self.state.data.string(&set.field(ctx));
-                let field = self.i32_const(ctx, field as i32);
-                self.json_source_write(ctx, source, field);
+                self.json_source_write(ctx, operands[0], record::SOURCE, field);
             }
             self.store(ctx, kind, operands[0], offset, operands[1]);
             return Ok(true);
@@ -209,9 +192,7 @@ impl FunctionLowering<'_, '_> {
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
             if self.state.json_provenance {
-                let source = self.load(ctx, MemKind::I32, array, layout::SOURCE);
-                let field = self.i32_const(ctx, 0);
-                self.json_source_write(ctx, source, field);
+                self.json_source_write(ctx, array, layout::SOURCE, 0);
             }
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
             let address = self.slot_address(ctx, data, i);
@@ -260,7 +241,12 @@ impl FunctionLowering<'_, '_> {
         self.num(ctx, NumOpcode::I32Add, vec![data, offset])
     }
 
-    fn json_source_write(&mut self, ctx: &mut Context, source: Value, field: Value) {
+    /// Tell the runtime that the aggregate `object`, whose parse source sits at `offset`, has
+    /// member `field` changed (an interned field name, or 0 for an array element), so later
+    /// serialization stops copying its source text. Objects without a source skip the call.
+    fn json_source_write(&mut self, ctx: &mut Context, object: Value, offset: u32, field: u32) {
+        let source = self.load(ctx, MemKind::I32, object, offset);
+        let field = self.i32_const(ctx, field as i32);
         let write = self.new_block(ctx, vec![]);
         let done = self.new_block(ctx, vec![]);
         self.cond_br(ctx, source, (write, vec![]), (done, vec![]));
@@ -280,9 +266,7 @@ impl FunctionLowering<'_, '_> {
         references: bool,
     ) {
         if self.state.json_provenance {
-            let source = self.load(ctx, MemKind::I32, array, layout::SOURCE);
-            let field = self.i32_const(ctx, 0);
-            self.json_source_write(ctx, source, field);
+            self.json_source_write(ctx, array, layout::SOURCE, 0);
         }
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
@@ -324,6 +308,6 @@ impl FunctionLowering<'_, '_> {
         let (index, field_ty) = ty
             .field(field)
             .ok_or_else(|| anyhow!("record has no field {field}"))?;
-        Ok((perry_abi::layout::record::field(index), field_ty))
+        Ok((record::field(index), field_ty))
     }
 }

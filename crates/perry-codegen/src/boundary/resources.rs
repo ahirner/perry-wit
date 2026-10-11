@@ -166,13 +166,15 @@ impl FunctionLowering<'_, '_> {
         )
     }
 
+    /// Open the resource scope of one canonical call when `needed`; `roots` is the root mark a
+    /// failed lowering resets to. Scopes do not nest.
     pub(super) fn begin_resources(
         &mut self,
         ctx: &mut Context,
         needed: bool,
         roots: Option<Value>,
-    ) {
-        assert!(
+    ) -> Result<()> {
+        ensure!(
             self.resource_scope.is_none(),
             "resource scopes are not nested; the previous one must end first"
         );
@@ -180,6 +182,7 @@ impl FunctionLowering<'_, '_> {
             let scope = self.runtime(ctx, Runtime::ResourceScopeNew, vec![]);
             self.resource_scope = Some((scope, roots));
         }
+        Ok(())
     }
     pub(super) fn commit_resources(&mut self, ctx: &mut Context) {
         if let Some((scope, _)) = self.resource_scope {
@@ -256,7 +259,9 @@ impl FunctionLowering<'_, '_> {
         value: Value,
     ) -> Result<Value> {
         self.check_resource_type(ctx, ty, key)?;
-        let (scope, _) = self.resource_scope.expect("canonical resource scope");
+        let (scope, _) = self
+            .resource_scope
+            .ok_or_else(|| anyhow!("resource lowered outside a canonical resource scope"))?;
         let own = self.i32_const(ctx, i32::from(owned));
         let handle = self.runtime(ctx, Runtime::ResourceLower, vec![scope, value, own]);
         self.resource_status(ctx);

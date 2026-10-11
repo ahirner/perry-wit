@@ -1,6 +1,9 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
 
+/// The HIR runtime call that initializes a named built-in import (`Writable`).
+pub(super) const ESM_EXPORT_INIT: &str = "js_native_module_named_esm_export_value";
+
 pub(super) struct Signature {
     pub(super) name: Identifier,
     /// `async`: callers start it with `perry.async_call` and get a promise of `results[0]`.
@@ -98,18 +101,13 @@ pub(super) fn build_module(
         );
     }
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
-    // nothing to run; without other statements there is no main function.
-    let init: Vec<Stmt> = hir
-        .init
-        .iter()
-        .filter(|statement| {
-            !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
-                if matches!(&**callee, Expr::ExternFuncRef { name, .. }
-                    if name == "js_native_module_named_esm_export_value"))
-        })
-        .cloned()
-        .collect();
-    if !init.is_empty() {
+    // nothing to run (calls lower it to nothing); without other statements there is no main
+    // function.
+    let has_init = hir.init.iter().any(|statement| {
+        !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
+            if matches!(&**callee, Expr::ExternFuncRef { name, .. } if name == ESM_EXPORT_INIT))
+    });
+    if has_init {
         // Top-level statements (with top-level `await`) form the async main function of a
         // command (`wasi:cli/run`), settling `undefined`.
         let persistent = hir.functions.iter().any(|f| f.is_exported);
@@ -131,7 +129,7 @@ pub(super) fn build_module(
             ctx,
             &signature,
             &[],
-            &init,
+            &hir.init,
             &signatures,
             &shapes,
             &builtins,

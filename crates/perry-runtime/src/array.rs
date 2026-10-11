@@ -1,7 +1,8 @@
 //! Dense arrays with 8-byte element slots.
 //!
 //! Layout, read and written inline by compiled code: `len: u32` at 0, `cap: u32` at 4,
-//! `data: u32` at 8, traced provenance at 12. Elements are `f64` or a 32-bit reference in the low half of a slot.
+//! `data: u32` at 8, traced provenance at 12. Elements are `f64` or a 32-bit reference in
+//! the low half of a slot.
 //! `cap` is never 0, so compiled code may read slot 0 unconditionally (branch-free bounds
 //! checks select the result afterwards). Growth doubles capacity and preserves live elements.
 //! Collectible arrays release old storage through tracing; proven bounded task allocations
@@ -28,6 +29,18 @@ struct Array {
     source: *mut u8,
 }
 
+impl Array {
+    /// An empty array over `cap` slots at `data`, with no provenance.
+    fn empty(cap: u32, data: *mut u64) -> Self {
+        Self {
+            len: 0,
+            cap,
+            data,
+            source: core::ptr::null_mut(),
+        }
+    }
+}
+
 /// A new array with room for at least `capacity` elements and length 0.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
@@ -35,14 +48,7 @@ pub(crate) extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
     let array = perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array;
     let data = perry_alloc(slot_bytes(cap)) as *mut u64;
     // SAFETY: both blocks were just allocated with sufficient size and alignment.
-    unsafe {
-        array.write(Array {
-            len: 0,
-            cap,
-            data,
-            source: core::ptr::null_mut(),
-        })
-    };
+    unsafe { array.write(Array::empty(cap, data)) };
     array as *mut u8
 }
 
@@ -104,12 +110,7 @@ pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: 
         ) as *mut Array;
         let data =
             crate::roots::perry_gc_alloc(slot_bytes(cap), element_shape(references)) as *mut u64;
-        array.write(Array {
-            len: 0,
-            cap,
-            data,
-            source: core::ptr::null_mut(),
-        });
+        array.write(Array::empty(cap, data));
         array as *mut u8
     }
 }

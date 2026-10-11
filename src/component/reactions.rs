@@ -1,6 +1,6 @@
 //! Private unit futures for promise observers. The anchor exists only while the component
 //! encoder resolves canonical future builtins; its synthetic export is removed afterwards.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::convert::Infallible;
 use wasm_encoder::{
     reencode::{self, Reencode, ReencodeComponent},
@@ -8,8 +8,11 @@ use wasm_encoder::{
 };
 use wasmparser::{Parser, Payload, TypeRef};
 
+/// Name of the synthetic export whose `future` result type the runtime's promise signals use;
+/// `perry-runtime` imports the canonical future builtins under this name.
 pub(crate) const ANCHOR: &str = "perry-internal-promise";
 
+/// Whether the core module imports promise-signal future builtins and so needs the anchor.
 pub(crate) fn uses_signals(core: &[u8]) -> Result<bool> {
     for payload in Parser::new(0).parse_all(core) {
         if let Payload::ImportSection(imports) = payload? {
@@ -23,6 +26,8 @@ pub(crate) fn uses_signals(core: &[u8]) -> Result<bool> {
     Ok(false)
 }
 
+/// The core module and world extended by the anchor export: a trapping function returning
+/// `future`, so the component encoder resolves the future builtins the runtime imports.
 pub(crate) fn prepare(
     core: &[u8],
     resolve: &wit_parser::Resolve,
@@ -77,8 +82,11 @@ pub(crate) fn prepare(
     Ok((module.finish(), resolve))
 }
 
+/// Re-encoder appending the anchor function (type, body and export) to a core module.
 struct Anchor {
+    /// Function index the appended anchor receives.
     function: u32,
+    /// Type index of `() -> i32`, set once the type section is copied.
     ty: u32,
 }
 impl Reencode for Anchor {
@@ -126,8 +134,12 @@ impl Reencode for Anchor {
     }
 }
 
+/// Re-encoder dropping the anchor's top-level component export and renumbering the
+/// component functions after it.
 struct Hide {
+    /// Top-level component function index of the removed export.
     removed: u32,
+    /// Component nesting depth; only the outermost component is rewritten.
     depth: usize,
 }
 impl Reencode for Hide {
@@ -158,6 +170,8 @@ impl ReencodeComponent for Hide {
         Ok(())
     }
 }
+
+/// `component` without the anchor export [prepare] added, so hosts never see it.
 pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
     let mut validator = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
     let mut depth = 0;
@@ -172,7 +186,7 @@ pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
         {
             let mut index = validator
                 .types(0)
-                .expect("component types")
+                .context("component exports precede the component's types")?
                 .component_function_count();
             for export in section.clone() {
                 let export = export?;
@@ -189,7 +203,7 @@ pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
     }
     let mut out = Component::new();
     Hide {
-        removed: removed.expect("synthetic promise export"),
+        removed: removed.context("component lacks the synthetic promise export")?,
         depth: 0,
     }
     .parse_component(&mut out, Parser::new(0), component)?;

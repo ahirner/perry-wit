@@ -1,18 +1,24 @@
 //! Immutable UTF-8 strings with cached scalar counts and shared append storage.
 //! Views retain an owner, byte offset and length. The cached data pointer keeps boundary
 //! transfers direct; a scalar-position cursor makes sequential non-ASCII indexing linear.
-use crate::region::perry_alloc;
-use core::ptr;
-
 use crate::layout::string::AppendBuffer as Buffer;
 pub(crate) use crate::layout::string::Header as Str;
 pub use crate::layout::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
+use crate::region::perry_alloc;
+// The bounded runtime favours code size; collectible programs scan bulk JSON text.
+#[cfg(not(feature = "collectible"))]
+use crate::utf8::scalars_length;
+#[cfg(feature = "collectible")]
+use crate::utf8::scalars_length_wide as scalars_length;
+use core::ptr;
 
 const MIN_BUFFER: u32 = 32;
 
 #[cfg(target_arch = "wasm32")]
 const _: () = {
     assert!(core::mem::size_of::<Str>() == SIZE as usize);
+    assert!(core::mem::offset_of!(Str, len) == LEN as usize);
+    assert!(core::mem::offset_of!(Str, scalars) == SCALARS as usize);
     assert!(core::mem::offset_of!(Str, data) == DATA as usize);
     assert!(core::mem::offset_of!(Str, owner) == crate::layout::string::OWNER as usize);
     assert!(core::mem::offset_of!(Str, buffer) == BUFFER as usize);
@@ -20,17 +26,16 @@ const _: () = {
     assert!(core::mem::offset_of!(Str, cursor_byte) == CURSOR_BYTE as usize);
 };
 
-#[cfg(not(feature = "collectible"))]
-use crate::utf8::scalars_length;
-#[cfg(feature = "collectible")]
-use crate::utf8::scalars_length_wide as scalars_length;
-
-fn new(len: u32, scalars: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
+/// Uninitialized header storage whose shape traces only the owner field.
+fn header() -> *mut Str {
     static SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Str, owner) as u32];
     // SAFETY: the only owner field retains the immutable payload allocation.
-    let string = unsafe {
-        crate::region::perry_alloc_shaped(core::mem::size_of::<Str>() as u32, SHAPE.as_ptr())
-    } as *mut Str;
+    unsafe { crate::region::perry_alloc_shaped(core::mem::size_of::<Str>() as u32, SHAPE.as_ptr()) }
+        .cast()
+}
+
+fn new(len: u32, scalars: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
+    let string = header();
     let owner = if buffer.is_null() {
         data
     } else {
@@ -77,10 +82,12 @@ pub(crate) fn from_static(text: &'static str) -> *mut u8 {
 /// # Safety
 /// `data` must point to `len` readable bytes of valid UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
+pub(crate) unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
-    let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
-    new(len, scalars_length(bytes), data, ptr::null_mut())
+    unsafe {
+        let bytes = core::slice::from_raw_parts(data, len as usize);
+        perry_string_adopt_counted(data, len, scalars_length(bytes))
+    }
 }
 
 /// A string over immutable UTF-8 with a scalar count computed by its producer.
@@ -357,35 +364,13 @@ pub unsafe extern "C" fn perry_string_offset(string: *mut u8, position: u32) -> 
 pub unsafe extern "C" fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
     unsafe {
         let source = &*(string as *const Str);
-        let count = scalars_length(core::slice::from_raw_parts(
+        let scalars = scalars_length(core::slice::from_raw_parts(
             source.data.add(from as usize),
             (to - from) as usize,
         ));
-        perry_string_view_counted(string, from, to, count)
-    }
-}
-
-/// A byte-range view with a scalar count computed by its caller.
-///
-/// # Safety
-/// The range is valid UTF-8 in `string`, containing exactly `scalars` Unicode scalars.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_view_counted(
-    string: *mut u8,
-    from: u32,
-    to: u32,
-    scalars: u32,
-) -> *mut u8 {
-    unsafe {
-        let source = &*(string as *const Str);
-        let view = new(
-            to - from,
-            scalars,
-            source.data.add(from as usize),
-            source.buffer,
-        ) as *mut Str;
-        perry_string_view_into(view.cast(), string, from, to, scalars);
-        view.cast()
+        let view = header().cast();
+        perry_string_view_into(view, string, from, to, scalars);
+        view
     }
 }
 

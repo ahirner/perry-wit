@@ -1,3 +1,5 @@
+//! Typed `JSON.parse` decoding (validation, duplicates, variants, limits) and source-backed
+//! `JSON.stringify` of decoded values, with their allocation and fuel bounds.
 use crate::core_program::{Counter, Program};
 
 #[test]
@@ -63,15 +65,16 @@ export function run():number {
 }
 
 #[test]
-fn tagged_payloads_rescan_late_discriminators_and_final_duplicates() {
+fn duplicate_members_validate_only_the_final_typed_value() {
     let source = r#"
 type Result<T> = {tag:'ok';val:T}|{tag:'err';val:string};
 interface Item {n:number}
 interface Envelope {result:Result<Item>}
+interface Row {name:string; inner:Item; extra?:string}
 export function run():number {
- const row:Envelope=JSON.parse('{"result":{"val":{"n":4},"tag":"ok"}}');
- if(row.result.tag !== 'ok') return 1;
- if(row.result.val.n !== 4) return 2;
+ const tagged:Envelope=JSON.parse('{"result":{"val":{"n":4},"tag":"ok"}}');
+ if(tagged.result.tag !== 'ok') return 1;
+ if(tagged.result.val.n !== 4) return 2;
  const duplicate:Envelope=JSON.parse('{"result":{"val":false,"tag":false,"tag":"ok","val":{"n":5}}}');
  if(duplicate.result.tag !== 'ok') return 3;
  if(duplicate.result.val.n !== 5) return 4;
@@ -81,10 +84,17 @@ export function run():number {
  try {const bad:Envelope=JSON.parse('{"result":{"tag":"missing"},"ignored":[1,]}');return 7;}
  catch(e) {if(!e.message.includes('SyntaxError')) return 8;}
  try {const bad:Envelope=JSON.parse('{"result":{"tag":"ok"}}');return 9;} catch(e) {}
- return 0;
+ const row:Row = JSON.parse('{"name":false,"inner":{"n":false},"name":"é🙂","inner":{"n":3}}');
+ if(row.name.length !== 2 || row.inner.n !== 3 || row.extra !== undefined) return 10;
+ try {const bad:Row = JSON.parse('{"name":"ok","inner":{"n":1},"name":false}'); return 11;} catch(e) {}
+ try {const bad:Row = JSON.parse('{"name":false,"inner":{},"ignored":[1,]}'); return 12;} catch(e) {}
+ try {const bad:Row = JSON.parse('{"name":"ok","inner":null}'); return 13;} catch(e) {}
+ try {const bad:Row = JSON.parse('{"name":"ok"}'); return 14;} catch(e) {}
+ const fixed:Row = JSON.parse('{"name":"ok","inner":false,"inner":{"n":4}}');
+ return fixed.inner.n - 4;
 }
 "#;
-    let mut program = Program::checked(source, "variants.ts");
+    let mut program = Program::checked(source, "duplicates.ts");
     program.stress_collection(true);
     assert_eq!(program.outcome("run", &[]), (0.0, 0));
 }
@@ -150,120 +160,40 @@ export function run():number {
 }
 
 #[test]
-fn duplicate_fields_validate_only_the_final_typed_value() {
-    let source = r#"
-interface Inner {n:number}
-interface Row {name:string; inner:Inner; extra?:string}
-export function run():number {
- const row:Row = JSON.parse('{"name":false,"inner":{"n":false},"name":"é🙂","inner":{"n":3}}');
- if(row.name.length !== 2 || row.inner.n !== 3 || row.extra !== undefined) return 1;
- try {const bad:Row = JSON.parse('{"name":"ok","inner":{"n":1},"name":false}'); return 2;} catch(e) {}
- try {const bad:Row = JSON.parse('{"name":false,"inner":{},"ignored":[1,]}'); return 3;} catch(e) {}
- try {const bad:Row = JSON.parse('{"name":"ok","inner":null}'); return 4;} catch(e) {}
- try {const bad:Row = JSON.parse('{"name":"ok"}'); return 5;} catch(e) {}
- const fixed:Row = JSON.parse('{"name":"ok","inner":false,"inner":{"n":4}}');
- return fixed.inner.n - 4;
-}
-"#;
-    assert_eq!(
-        Program::checked(source, "duplicates.ts").outcome("run", &[]),
-        (0.0, 0)
-    );
-}
-
-#[test]
-fn generic_interfaces_aliases_and_defaults_share_concrete_shapes() {
-    let source = r#"
-interface Page<T> {items:T[];next:string|null}
-interface Item<T=string> {value:T}
-type Box<T> = {item:T};
-interface Link<T> {value:T;next:Link<T>|null}
-function size(page:Page<Item>):number {return page.items[0].value.length;}
-function unbox(box:Box<number>):number {return box.item;}
-export function run():number {
- const page:Page<Item> = {items:[{value:'hello'}],next:null};
- const link:Link<number> = {value:3,next:null};
- return size(page)+unbox({item:2})+link.value;
-}
-"#;
-    assert_eq!(Program::new(source).outcome("run", &[]), (10.0, 0));
-}
-
-#[test]
 fn typed_json_fuel_and_allocations_scale_linearly() {
-    let mut rows = Vec::new();
-    for count in [256, 1024] {
-        let text = serde_json::to_string(
-            &(0..count)
-                .map(|i| {
-                    serde_json::json!({
-                        "id": i, "name": "Café 🙂", "price": 12.5,
-                        "unknown": {"nested": [true, false, null, "discarded"]}
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let source = format!(
-            r#"
-interface Row {{id:number;name:string;price:number}}
-export function run():number {{
-  const rows:Row[] = JSON.parse({});
-  let sum = 0;
-  for (let i=0;i<rows.length;i++) sum += rows[i].id + rows[i].name.length;
-  return sum;
-}}
-"#,
-            serde_json::to_string(&text).unwrap()
+    // Pre-optimization baselines; the typed decoder must stay a quarter below them.
+    let cases = [(256, 5_145_844, 521), (1024, 20_639_617, 2059)];
+    let mut fuel = Vec::new();
+    for (count, baseline_fuel, baseline_allocations) in cases {
+        let source = row_benchmark(count);
+        let mut program = Program::from_wasm(
+            perry_wit::compile_core(&source, "json-bench.ts").expect("source compiles"),
         );
-        let started = std::time::Instant::now();
-        let wasm = perry_wit::compile_core(&source, "json-bench.ts").unwrap();
-        let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let bytes = wasm.len();
-        let started = std::time::Instant::now();
-        let mut program = Program::from_wasm(wasm);
-        let jit_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let mut times = Vec::new();
-        let mut fuel = 0;
-        for _ in 0..5 {
-            let started = std::time::Instant::now();
-            let (_, used) = program.call("run", &[]);
-            fuel = used;
-            times.push(started.elapsed().as_secs_f64() * 1000.0);
-        }
-        times.sort_by(f64::total_cmp);
+        // Measure the steady state after one warm-up call.
+        program.call("run", &[]);
+        let (_, used) = program.call("run", &[]);
+        assert!(
+            used < baseline_fuel * 3 / 4,
+            "typed decoder fuel regression: {used} for {count} rows"
+        );
         let mut checked = Program::checked(&source, "json-bench.ts");
         checked.call("run", &[]);
-        let baseline_fuel = if count == 256 { 5_145_844 } else { 20_639_617 };
-        let baseline_allocations = if count == 256 { 521 } else { 2059 };
+        let allocations = checked.counter(Counter::Allocations);
         assert!(
-            fuel < baseline_fuel * 3 / 4,
-            "typed decoder fuel regression"
-        );
-        assert!(
-            checked.counter(Counter::Allocations) < baseline_allocations * 3 / 4,
-            "typed decoder allocation regression"
+            allocations < baseline_allocations * 3 / 4,
+            "typed decoder allocation regression: {allocations} for {count} rows"
         );
         assert_eq!(checked.counter(Counter::LiveBytes), 0);
-        rows.push(
-            serde_json::json!({"rows":count,"input_bytes":text.len(),"core_bytes":bytes,
-            "fuel":fuel,"compile_ms":compile_ms,"jit_ms":jit_ms,"median_ms":times[2],
-            "peak_linear_bytes":program.memory_bytes(),
-            "allocations":checked.counter(Counter::Allocations),
-            "live_bytes":checked.counter(Counter::LiveBytes)}),
-        );
+        fuel.push(used);
     }
     assert!(
-        rows[1]["fuel"].as_u64().unwrap() * 100 < rows[0]["fuel"].as_u64().unwrap() * 425,
-        "quadrupling JSON input must scale linearly"
+        fuel[1] * 100 < fuel[0] * 425,
+        "quadrupling JSON input must scale linearly: {fuel:?}"
     );
-    let report = serde_json::to_string_pretty(&rows).unwrap();
-    println!("{report}");
-    if let Ok(path) = std::env::var("PERRY_JSON_BENCH_REPORT") {
-        std::fs::write(path, report).unwrap();
-    }
 }
 
+/// Opt-in benchmark of the release CLI: prints compile cost, fuel, time and memory per input
+/// size, and writes them to `PERRY_JSON_BENCH_REPORT` when that names a file.
 #[test]
 #[ignore = "release CLI compilation and linear memory comparison"]
 fn typed_json_release_compiler_baseline() {
@@ -279,13 +209,7 @@ fn typed_json_release_compiler_baseline() {
     .unwrap();
     let mut rows = Vec::new();
     for count in [256, 1024] {
-        let text = serde_json::to_string(&(0..count).map(|i| serde_json::json!({"id":i,"name":"Café 🙂","price":12.5,"unknown":{"nested":[true,false,null,"discarded"]}})).collect::<Vec<_>>()).unwrap();
-        let source = format!(
-            r#"interface Row{{id:number;name:string;price:number}}
-export function run():number{{const rows:Row[]=JSON.parse({});let sum=0;for(let i=0;i<rows.length;i++)sum+=rows[i].id+rows[i].name.length;return sum;}}"#,
-            serde_json::to_string(&text).unwrap()
-        );
-        std::fs::write(&input, source).unwrap();
+        std::fs::write(&input, row_benchmark(count)).unwrap();
         let mut costs = Vec::new();
         for sample in 0..5 {
             let started = std::time::Instant::now();
@@ -338,7 +262,15 @@ export function run():number{{const rows:Row[]=JSON.parse({});let sum=0;for(let 
             program.call("cabi_post_run", &result);
         }
         times.sort_by(f64::total_cmp);
-        rows.push(serde_json::json!({"rows":count,"component_bytes":std::fs::metadata(&component).unwrap().len(),"core_bytes":core_bytes,"compile_median_ms":costs[2],"fuel":fuel,"median_ms":times[2],"peak_linear_bytes":program.memory_bytes()}));
+        rows.push(serde_json::json!({
+            "rows": count,
+            "component_bytes": std::fs::metadata(&component).unwrap().len(),
+            "core_bytes": core_bytes,
+            "compile_median_ms": costs[2],
+            "fuel": fuel,
+            "median_ms": times[2],
+            "peak_linear_bytes": program.memory_bytes(),
+        }));
     }
     let report = serde_json::to_string_pretty(&rows).unwrap();
     println!("{report}");
@@ -347,9 +279,36 @@ export function run():number{{const rows:Row[]=JSON.parse({});let sum=0;for(let 
     }
 }
 
+/// Source of the typed `Row[]` decode benchmark over `count` rows, each carrying an unknown
+/// nested field the decoder must skip; `run` returns the sum of ids and name lengths.
+fn row_benchmark(count: u32) -> String {
+    let text = serde_json::to_string(
+        &(0..count)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i, "name": "Café 🙂", "price": 12.5,
+                    "unknown": {"nested": [true, false, null, "discarded"]}
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    format!(
+        r#"
+interface Row {{id:number;name:string;price:number}}
+export function run():number {{
+  const rows:Row[] = JSON.parse({});
+  let sum = 0;
+  for (let i=0;i<rows.length;i++) sum += rows[i].id + rows[i].name.length;
+  return sum;
+}}
+"#,
+        serde_json::to_string(&text).unwrap()
+    )
+}
+
 #[test]
 fn repeated_field_writes_and_serialization_keep_bounded_work() {
-    use crate::core_program::Counter;
     let source = r#"
 interface Item {count:number; label:string; added?:string}
 let retained='';
@@ -382,33 +341,56 @@ export function saved():number {return retained==='é🙂'?1:0;}
 
 #[test]
 fn source_indexes_resolve_collisions_duplicates_and_sort_boundaries() {
-    for count in [0, 1, 16, 28, 29, 32, 33, 80] {
+    // Member counts around the source index's sorting and hashing thresholds.
+    let counts = [0, 1, 16, 28, 29, 32, 33, 54, 80, 128, 129];
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    for count in counts {
         let mut fields: Vec<_> = (0..count).map(|i| format!("\"key{i}\":{i}")).collect();
+        if count > 0 {
+            fields.push("\"\\u006bey0\":9".into());
+        }
         fields.extend([
             "\"2\":2".into(),
             "\"1\":1".into(),
             "\"n\":7".into(),
             "\"\\u006e\":8".into(),
         ]);
-        let input = format!("{{{}}}", fields.join(","));
+        inputs.push(format!("{{{}}}", fields.join(",")));
         let mut expected = vec!["\"1\":1".to_string(), "\"2\":2".into()];
-        expected.extend((0..count).map(|i| format!("\"key{i}\":{i}")));
+        expected.extend((0..count).map(|i| format!("\"key{i}\":{}", if i == 0 { 9 } else { i })));
         expected.push("\"n\":8".into());
-        let expected = format!("{{{}}}", expected.join(","));
-        let source = format!(
-            "export function run():number {{const value:{{n:number}}=JSON.parse({});return JSON.stringify(value)==={} ? 0:1;}}",
-            serde_json::to_string(&input).unwrap(),
-            serde_json::to_string(&expected).unwrap()
-        );
-        let mut program = Program::checked(&source, "source-key-index.ts");
-        program.stress_collection(true);
-        assert_eq!(program.outcome("run", &[]), (0.0, 0));
+        outputs.push(format!("{{{}}}", expected.join(",")));
     }
+    let source = format!(
+        r#"
+const inputs:string[]={};
+const outputs:string[]={};
+export function run():number {{
+ for(let i=0;i<inputs.length;i++) {{
+  const value:{{n:number;key0?:number}}=JSON.parse(inputs[i]);
+  if(JSON.stringify(value)!==outputs[i]) return i+1;
+ }}
+ return 0;
+}}
+"#,
+        serde_json::to_string(&inputs).unwrap(),
+        serde_json::to_string(&outputs).unwrap()
+    );
+    let mut program = Program::checked(&source, "source-key-index.ts");
+    program.stress_collection(true);
+    let (failed, status) = program.outcome("run", &[]);
+    assert_eq!(status, 0);
+    assert_eq!(
+        failed,
+        0.0,
+        "the case with {:?} members",
+        counts.get(failed as usize - 1)
+    );
 }
 
 #[test]
 fn serialization_transfers_buffers_and_avoids_per_number_allocations() {
-    use crate::core_program::Counter;
     let controls: String = (0..32).map(char::from).collect();
     let texts: Vec<_> = (0..17)
         .map(|prefix| format!("{}é漢🙂\"\\{controls}tail", "x".repeat(prefix)))
@@ -487,37 +469,6 @@ export function run():number {{
 }
 
 #[test]
-fn source_member_indexes_handle_large_objects_and_duplicate_escaped_keys() {
-    for count in [32, 33, 54, 128, 129] {
-        let members = (0..count).map(|i| format!("\"key{i}\":{i}"));
-        let text = format!(
-            "{{{},\"\\u006bey0\":9,\"2\":2,\"1\":1}}",
-            members.collect::<Vec<_>>().join(",")
-        );
-        let expected = format!(
-            "{{\"1\":1,\"2\":2,{}}}",
-            (0..count)
-                .map(|i| format!("\"key{i}\":{}", if i == 0 { 9 } else { i }))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let source = format!(
-            r#"
-export function run():number {{
- const value:{{key0:number}}=JSON.parse({});
- return JSON.stringify(value)==={} ? 0 : 1;
-}}
-"#,
-            serde_json::to_string(&text).unwrap(),
-            serde_json::to_string(&expected).unwrap()
-        );
-        let mut program = Program::checked(&source, "source-index.ts");
-        program.stress_collection(true);
-        assert_eq!(program.outcome("run", &[]), (0.0, 0), "{count} members");
-    }
-}
-
-#[test]
 fn typed_key_tables_handle_unicode_and_overwritten_errors() {
     let mut keys: Vec<_> = (0..40).map(|index| format!("field{index}")).collect();
     keys.extend(["é🙂".into(), "".into()]);
@@ -557,7 +508,7 @@ fn typed_key_tables_handle_unicode_and_overwritten_errors() {
 
 #[test]
 fn source_serialization_allocations_scale_with_output() {
-    let mut measurements = Vec::new();
+    let mut allocations = Vec::new();
     for count in [16, 88] {
         let row: serde_json::Value = serde_json::from_str(&format!(
             "{{\"n\":1,{}}}",
@@ -577,29 +528,23 @@ export function parse():number {{ const rows:Row[]=JSON.parse({input});return ro
 export function write():number {{ const rows:Row[]=JSON.parse({input});let size=0;for(const row of rows)size+=JSON.stringify(row).length;return size; }}
 "#
         );
+        // Two instances of one module: the difference is what serialization allocates.
         let mut parse = Program::checked(&source, "serialization-allocations.ts");
         let mut write = Program::from_wasm(parse.wasm.clone());
         assert_eq!(parse.call("parse", &[]).0[0].unwrap_f64(), count as f64);
-        let (value, fuel) = write.call("write", &[]);
-        assert_eq!(value[0].unwrap_f64(), expected as f64);
-        let allocations = write.counter(Counter::Allocations) - parse.counter(Counter::Allocations);
+        assert_eq!(write.call("write", &[]).0[0].unwrap_f64(), expected as f64);
         assert_eq!(write.counter(Counter::LiveBytes), 0);
-        measurements.push(serde_json::json!({"rows":count,"serialization_allocations":allocations,"total_allocations":write.counter(Counter::Allocations),"fuel":fuel,"peak_linear_bytes":write.memory_bytes()}));
+        allocations.push(write.counter(Counter::Allocations) - parse.counter(Counter::Allocations));
     }
+    // 5.5 times the rows may cost at most 6 times the allocations.
     assert!(
-        measurements[1]["serialization_allocations"]
-            .as_i64()
-            .unwrap()
-            <= measurements[0]["serialization_allocations"]
-                .as_i64()
-                .unwrap()
-                * 6
+        allocations[1] <= allocations[0] * 6,
+        "serialization allocations grew from {} to {}",
+        allocations[0],
+        allocations[1]
     );
-    println!("{}", serde_json::to_string_pretty(&measurements).unwrap());
-    if let Ok(path) = std::env::var("PERRY_JSON_SERIALIZE_REPORT") {
-        std::fs::write(path, serde_json::to_string_pretty(&measurements).unwrap()).unwrap();
-    }
 }
+
 #[test]
 fn source_escapes_stream_without_temporary_strings() {
     let decoded = "a\u{0}\u{1}\u{8}\u{c}\n\r\t\"\\/é🙂\u{2028}z";

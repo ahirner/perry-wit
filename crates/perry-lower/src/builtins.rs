@@ -14,14 +14,14 @@ impl<'s> FunctionBuilder<'s> {
         method: &str,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        if method == "$$perryIteration" && matches!(object, Expr::UrlSearchParamsNew(_)) {
+        if method == streams::ITERATION && matches!(object, Expr::UrlSearchParamsNew(_)) {
             bail!(
                 "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
             );
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        if method == "$$perryIteration" {
+        if method == streams::ITERATION {
             ensure!(
                 matches!(kind(ctx, receiver)?, Kind::Array | Kind::String),
                 "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
@@ -43,23 +43,7 @@ impl<'s> FunctionBuilder<'s> {
             method
         };
         let value = match (kind(ctx, receiver)?, method) {
-            (Kind::Array, "push") => {
-                let element = self.array_element(ctx, receiver)?;
-                let values = args
-                    .iter()
-                    .map(|argument| {
-                        let value = self.expression_with(ctx, argument, Some(element))?;
-                        self.fit(ctx, value, element)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                for value in values {
-                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, receiver, value));
-                }
-                let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, receiver));
-                Some(self.emit_value(ctx, |ctx| {
-                    ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
-                }))
-            }
+            (Kind::Array, "push") => Some(self.push_values(ctx, receiver, args)?),
             (Kind::Array, "map" | "filter") => {
                 let [callback] = args else {
                     bail!("array.{method} requires one static callback")
@@ -67,17 +51,12 @@ impl<'s> FunctionBuilder<'s> {
                 Some(self.array_transform(ctx, receiver, callback, method == "filter")?)
             }
             (Kind::Array, "includes" | "indexOf") => {
-                ensure!(
-                    (1..=2).contains(&args.len()),
-                    "array.{method} requires a value and optional starting index"
-                );
-                Some(self.array_search(
-                    ctx,
-                    receiver,
-                    &args[0],
-                    args.get(1),
-                    method == "includes",
-                )?)
+                let (value, from_index) = match args {
+                    [value] => (value, None),
+                    [value, from_index] => (value, Some(from_index)),
+                    _ => bail!("array.{method} requires a value and optional starting index"),
+                };
+                Some(self.array_search(ctx, receiver, value, from_index, method == "includes")?)
             }
             (Kind::String, "split") => {
                 let [separator] = args else {
@@ -308,11 +287,15 @@ impl<'s> FunctionBuilder<'s> {
                 .literal_fields(class_name)
                 .is_some_and(|names| names == ["cause"]) =>
             {
-                &args[0]
+                args.first()
             }
-            Expr::Object(fields) if fields.len() == 1 && fields[0].0 == "cause" => &fields[0].1,
-            _ => bail!("error options must be a literal {{ cause }}"),
-        };
+            Expr::Object(fields) => match fields.as_slice() {
+                [(name, cause)] if name == "cause" => Some(cause),
+                _ => None,
+            },
+            _ => None,
+        }
+        .context("error options must be a literal { cause }")?;
         self.error_with_cause(ctx, kind, message, cause)
     }
 

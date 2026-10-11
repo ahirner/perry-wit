@@ -493,10 +493,8 @@ impl<'h> Shapes<'h> {
                 return self.generic(ctx, name, &[]);
             }
             ensure!(
-                interface.type_params.is_empty()
-                    && interface.extends.is_empty()
-                    && interface.methods.is_empty(),
-                "interface {name}: generics, extends and methods are not supported yet"
+                interface.extends.is_empty() && interface.methods.is_empty(),
+                "interface {name}: inheritance and methods are not supported yet"
             );
             let fields = interface
                 .properties
@@ -509,10 +507,6 @@ impl<'h> Shapes<'h> {
             if !alias.type_params.is_empty() {
                 return self.generic(ctx, name, &[]);
             }
-            ensure!(
-                alias.type_params.is_empty(),
-                "generic type alias {name} is not supported yet"
-            );
             return self.value_type(ctx, &alias.ty);
         }
         bail!("type {name} is not supported by the MIR backend yet")

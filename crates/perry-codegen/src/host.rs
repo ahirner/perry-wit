@@ -23,35 +23,30 @@ pub(crate) enum Host {
 impl Host {
     /// The symbol of the import in the compiled module.
     pub(crate) fn symbol(&self) -> Identifier {
-        let name = match self {
+        match self {
             Host::Foreign(module, name, _, _) => {
-                // Hex-encode `module#name`: import names may contain any character.
+                // Hex-encode `module#name`: import names may contain any character, and
+                // sanitizing alone could map two imports to one symbol.
                 const HEX: &[u8; 16] = b"0123456789abcdef";
-                let mut symbol = String::from("host_foreign_");
+                let mut hex = String::new();
                 for byte in module
                     .bytes()
                     .chain(std::iter::once(b'#'))
                     .chain(name.bytes())
                 {
-                    symbol.push(char::from(HEX[usize::from(byte >> 4)]));
-                    symbol.push(char::from(HEX[usize::from(byte & 0xF)]));
+                    hex.push(char::from(HEX[usize::from(byte >> 4)]));
+                    hex.push(char::from(HEX[usize::from(byte & 0xF)]));
                 }
-                symbol
+                symbol("host_foreign_", &hex)
             }
-            Host::ContextGet0 => "host_context_get_0".to_string(),
-            Host::ContextSet0 => "host_context_set_0".to_string(),
-            Host::TaskCancel => "host_task_cancel".to_string(),
-            Host::WaitFor => "host_wait_for".to_string(),
+            Host::ContextGet0 => pliron::ident!("host_context_get_0"),
+            Host::ContextSet0 => pliron::ident!("host_context_set_0"),
+            Host::TaskCancel => pliron::ident!("host_task_cancel"),
+            Host::WaitFor => pliron::ident!("host_wait_for"),
             Host::TaskReturn(module, function, _) => {
-                format!(
-                    "host_task_return_{}_{}",
-                    symbol_part(module),
-                    symbol_part(function)
-                )
+                symbol("host_task_return_", &format!("{module}_{function}"))
             }
-        };
-        Identifier::try_new(name)
-            .expect("host symbols are a letter prefix and ASCII alphanumerics or underscores")
+        }
     }
 
     /// Import module and field.
@@ -97,10 +92,16 @@ impl Host {
     }
 }
 
-/// `name` with every character outside ASCII alphanumerics replaced by `_`, for use inside a
-/// symbol.
-pub(crate) fn symbol_part(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+/// The symbol `prefix` followed by `name`, with every character of `name` outside ASCII
+/// alphanumerics replaced by `_`. Distinct names may share a symbol.
+pub(crate) fn symbol(prefix: &'static str, name: &str) -> Identifier {
+    let mut text = String::with_capacity(prefix.len() + name.len());
+    text.push_str(prefix);
+    text.extend(
+        name.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }),
+    );
+    Identifier::try_new(text).expect(
+        "an identifier prefix followed by ASCII alphanumerics and underscores is an identifier",
+    )
 }

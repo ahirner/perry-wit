@@ -209,7 +209,21 @@ pub mod mock {
         block_next: bool,
         pending: Option<(usize, *const u8, u32)>,
         joined: Vec<(u32, u32)>,
-        pub(crate) reactions: Vec<(bool, bool, bool)>,
+        pub(crate) reactions: Vec<Reaction>,
+    }
+
+    /// A promise-reaction future: which ends are still open, and whether it was written.
+    pub(crate) struct Reaction {
+        pub(crate) readable: bool,
+        pub(crate) writable: bool,
+        written: bool,
+    }
+
+    /// Reaction futures use one handle for both ends, numbered from here.
+    const FIRST_REACTION: u32 = 1000;
+
+    fn reaction(host: &mut Host, handle: u32) -> &mut Reaction {
+        &mut host.reactions[(handle - FIRST_REACTION) as usize]
     }
 
     pub(crate) fn with<R>(access: impl FnOnce(&mut Host) -> R) -> R {
@@ -232,8 +246,12 @@ pub mod mock {
     }
     pub(crate) unsafe fn reaction_new() -> u64 {
         with(|host| {
-            let handle = 1000 + host.reactions.len() as u32;
-            host.reactions.push((true, true, false));
+            let handle = FIRST_REACTION + host.reactions.len() as u32;
+            host.reactions.push(Reaction {
+                readable: true,
+                writable: true,
+                written: false,
+            });
             u64::from(handle) | (u64::from(handle) << 32)
         })
     }
@@ -241,26 +259,26 @@ pub mod mock {
         super::BLOCKED
     }
     pub(crate) unsafe fn reaction_write(handle: u32, _: *const u8) -> u32 {
-        with(|host| host.reactions[(handle - 1000) as usize].2 = true);
-        0
+        with(|host| reaction(host, handle).written = true);
+        COMPLETED
     }
     pub(crate) unsafe fn reaction_drop_readable(handle: u32) {
-        with(|host| host.reactions[(handle - 1000) as usize].0 = false);
+        with(|host| reaction(host, handle).readable = false);
     }
     pub(crate) unsafe fn reaction_drop_writable(handle: u32) {
-        with(|host| host.reactions[(handle - 1000) as usize].1 = false);
+        with(|host| reaction(host, handle).writable = false);
     }
     pub(crate) unsafe fn reaction_cancel_read(_: u32) -> u32 {
-        0
+        COMPLETED
     }
+    /// Handles of written reactions whose reader has not consumed them yet.
     #[cfg(test)]
     pub(crate) fn completed_reactions() -> Vec<u32> {
         with(|host| {
-            host.reactions
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &(readable, _, done))| {
-                    (readable && done).then_some(1000 + i as u32)
+            (FIRST_REACTION..)
+                .zip(&host.reactions)
+                .filter_map(|(handle, reaction)| {
+                    (reaction.readable && reaction.written).then_some(handle)
                 })
                 .collect()
         })

@@ -33,6 +33,8 @@ pub(super) const EXIT_STATUS: u64 = 5;
 
 pub(super) struct FunctionBuilder<'s> {
     pub(super) region: Ptr<pliron::region::Region>,
+    /// The region's entry block, where slots are allocated so they dominate every use.
+    entry: Ptr<BasicBlock>,
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
     pub(super) locals: HashMap<LocalId, Value>,
@@ -71,7 +73,9 @@ impl<'s> FunctionBuilder<'s> {
             "closures capturing activation-local values are unsupported: {}",
             function.name
         );
-        let signature = &signatures[&function.id];
+        let signature = signatures
+            .get(&function.id)
+            .with_context(|| format!("no signature for function {}", function.name))?;
         let params: Vec<LocalId> = function.params.iter().map(|p| p.id).collect();
         Self::lower_body(
             ctx,
@@ -84,7 +88,6 @@ impl<'s> FunctionBuilder<'s> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn lower_body(
         ctx: &mut Context,
         signature: &Signature,
@@ -96,8 +99,6 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<FuncOp> {
         let ty = FunctionType::get(ctx, signature.params.clone(), signature.results.clone());
         let func = FuncOp::new(ctx, signature.name.clone(), ty);
-        let entry = func.get_entry_block(ctx);
-        let region = func.get_operation().deref(ctx).get_region(0);
         let mut builder = Self::new(ctx, &func, signature, signatures, shapes, builtins);
         let mut globals: Vec<_> = shapes
             .globals
@@ -107,11 +108,11 @@ impl<'s> FunctionBuilder<'s> {
             .collect();
         globals.sort_by_key(|(id, _)| *id);
         for (id, ty) in globals {
-            let slot = builder.global_slot(ctx, id, ty);
+            let slot = builder.global_slot(ctx, id, ty)?;
             builder.locals.insert(id, slot);
         }
         for (index, param) in params.iter().enumerate() {
-            let value = entry.deref(ctx).get_argument(index);
+            let value = builder.entry.deref(ctx).get_argument(index);
             let slot = builder.slot(ctx, value.get_type(ctx));
             builder.store(ctx, slot, value);
             builder.locals.insert(*param, slot);
@@ -121,7 +122,7 @@ impl<'s> FunctionBuilder<'s> {
             let values = builder.implicit_results(ctx);
             builder.emit(ctx, |ctx| ReturnOp::new(ctx, values));
         }
-        remove_unreachable(ctx, region);
+        remove_unreachable(ctx, builder.region);
         Ok(func)
     }
 
@@ -137,6 +138,7 @@ impl<'s> FunctionBuilder<'s> {
         let region = func.get_operation().deref(ctx).get_region(0);
         Self {
             region,
+            entry,
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
             locals: HashMap::new(),
@@ -353,26 +355,27 @@ impl<'s> FunctionBuilder<'s> {
     /// A slot inserted at the start of the entry block, dominating every use.
     pub(super) fn entry_slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
         let op = LocalOp::new(ctx, ty);
-        let entry = self.entry_block(ctx);
-        let mut at_entry = IRInserter::<DummyListener>::new_at_block_start(entry);
+        let mut at_entry = IRInserter::<DummyListener>::new_at_block_start(self.entry);
         at_entry.append_op(ctx, &op);
         op.get_result(ctx)
     }
 
-    pub(super) fn entry_block(&self, ctx: &Context) -> Ptr<BasicBlock> {
-        self.region
-            .deref(ctx)
-            .get_head()
-            .expect("a function region starts with its entry block")
+    /// The region's entry block, cached at construction.
+    pub(super) fn entry_block(&self) -> Ptr<BasicBlock> {
+        self.entry
     }
 
     /// The slot of module binding `id`, shared by every function that reads or writes it.
-    pub(super) fn global_slot(&mut self, ctx: &mut Context, id: LocalId, ty: TypeHandle) -> Value {
-        let name = Identifier::try_new(format!("global_{id}"))
-            .expect("`global_` and a decimal local id form an identifier");
+    pub(super) fn global_slot(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        ty: TypeHandle,
+    ) -> Result<Value> {
+        let name = identifier(&format!("global_{id}"))?;
         let slot = self.emit_value(ctx, |ctx| perry_mir::globals::GlobalOp::new(ctx, name, ty));
         self.global_slots.insert(slot);
-        slot
+        Ok(slot)
     }
 
     pub(super) fn slot_type(&self, ctx: &Context, slot: Value) -> Result<TypeHandle> {
@@ -428,7 +431,7 @@ impl<'s> FunctionBuilder<'s> {
         args: Vec<Value>,
     ) {
         assert!(
-            intrinsic.types().1.is_empty(),
+            !intrinsic.has_result(),
             "the result of {} is discarded",
             intrinsic.name()
         );
@@ -478,8 +481,11 @@ impl<'s> FunctionBuilder<'s> {
 /// to); they would break dominance of the values they use.
 pub(super) fn remove_unreachable(ctx: &mut Context, region: Ptr<pliron::region::Region>) {
     let blocks: Vec<_> = region.deref(ctx).iter(ctx).collect();
-    let mut reached = HashSet::from([blocks[0]]);
-    let mut stack = vec![blocks[0]];
+    let Some(&entry) = blocks.first() else {
+        return;
+    };
+    let mut reached = HashSet::from([entry]);
+    let mut stack = vec![entry];
     while let Some(block) = stack.pop() {
         for succ in block.deref(ctx).succs(ctx) {
             if reached.insert(succ) {

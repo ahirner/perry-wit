@@ -264,9 +264,9 @@ pub(crate) fn flat_type(ctx: &mut Context, flat: Flat) -> TypeHandle {
     }
 }
 
+/// Symbol of a canonical-ABI glue function named after a WIT item.
 fn identifier(name: &str) -> Identifier {
-    Identifier::try_new(format!("wit_{}", crate::host::symbol_part(name)))
-        .expect("a letter prefix and ASCII alphanumerics or underscores form an identifier")
+    crate::host::symbol("wit_", name)
 }
 
 fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> {

@@ -3,7 +3,7 @@ use super::*;
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
-        let entry = self.entry_block(ctx);
+        let entry = self.entry_block();
         let mut seen = HashSet::new();
         let mut pending = vec![block];
         while let Some(block) = pending.pop() {
@@ -39,8 +39,9 @@ impl<'s> FunctionBuilder<'s> {
             .collect();
         let default = cases
             .iter()
-            .position(|case| case.test.is_none())
-            .map_or(done, |index| blocks[index]);
+            .zip(&blocks)
+            .find(|(case, _)| case.test.is_none())
+            .map_or(done, |(_, &block)| block);
         ensure!(
             cases.iter().filter(|case| case.test.is_none()).count() <= 1,
             "switch has more than one default"
@@ -59,7 +60,7 @@ impl<'s> FunctionBuilder<'s> {
         self.controls.push(Control::Switch { break_to: done });
         let guards = self.variant_guards.len();
         let mut fallthrough = false;
-        for (index, case) in cases.iter().enumerate() {
+        for (index, (case, &block)) in cases.iter().zip(&blocks).enumerate() {
             self.variant_guards.truncate(guards);
             if !fallthrough {
                 if let Some(test) = &case.test {
@@ -70,7 +71,7 @@ impl<'s> FunctionBuilder<'s> {
                     }
                 }
             }
-            self.switch_to(blocks[index]);
+            self.switch_to(block);
             self.statements(ctx, &case.body)?;
             fallthrough = self.reachable(ctx, self.block);
             self.jump(ctx, blocks.get(index + 1).copied().unwrap_or(done));
@@ -104,17 +105,18 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         leaving: impl Fn(&Finally) -> bool,
     ) -> Result<()> {
-        let pending: Vec<usize> = self
+        let pending: Vec<(usize, Finally<'s>)> = self
             .finallies
             .iter()
+            .copied()
             .enumerate()
             .filter(|(_, f)| leaving(f))
-            .map(|(index, _)| index)
             .collect();
-        for index in pending.into_iter().rev() {
-            let handlers = self.handlers.split_off(self.finallies[index].handlers);
+        for (index, finally) in pending.into_iter().rev() {
+            // Lower the body with this `finally` and everything inside it inactive.
+            let handlers = self.handlers.split_off(finally.handlers);
             let finallies = self.finallies.split_off(index);
-            let lowered = self.statements(ctx, finallies[0].body);
+            let lowered = self.statements(ctx, finally.body);
             self.handlers.extend(handlers);
             self.finallies.extend(finallies);
             lowered?;
@@ -245,13 +247,12 @@ impl<'s> FunctionBuilder<'s> {
 
         self.switch_to(header);
         match condition {
-            Some(Expr::Bool(true)) => self.jump(ctx, body_block),
+            None | Some(Expr::Bool(true)) => self.jump(ctx, body_block),
             Some(Expr::Bool(false)) => self.jump(ctx, exit),
             Some(condition) => {
                 let condition = self.condition(ctx, condition)?;
                 self.branch(ctx, condition, body_block, exit);
             }
-            None => self.jump(ctx, body_block),
         }
 
         self.switch_to(body_block);

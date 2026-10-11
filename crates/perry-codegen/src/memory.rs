@@ -44,16 +44,9 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::Module
     for runtime in [Runtime::GcDebug, Runtime::GcCounter] {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
-        let export = format!("__{}", runtime.name());
-        let function = FuncOp::new(
-            ctx,
-            export
-                .as_str()
-                .try_into()
-                .expect("`__` and a runtime name form an identifier"),
-            ty,
-        );
-        set_export(ctx, &function, &export);
+        let export = crate::host::symbol("__", runtime.name());
+        let function = FuncOp::new(ctx, export.clone(), ty);
+        set_export(ctx, &function, export.as_ref());
         let mut args: Vec<_> = function
             .get_entry_block(ctx)
             .deref(ctx)
