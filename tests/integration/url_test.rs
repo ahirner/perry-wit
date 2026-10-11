@@ -2,8 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use wasmtime::Engine;
 
-#[path = "support/world.rs"]
-mod world;
+use crate::world;
 
 #[test]
 fn http_urls_match_node_for_construction_mutation_and_serialization() -> Result<()> {

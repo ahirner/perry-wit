@@ -2,8 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use wasmtime::Engine;
 
-#[path = "support/world.rs"]
-mod world;
+use crate::world;
 
 #[test]
 fn utc_dates_match_node_through_parsing_mutation_and_invalid_values() -> Result<()> {

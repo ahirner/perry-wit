@@ -9,8 +9,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView, p3::bindings::Command};
 
-#[path = "support/output_capture.rs"]
-mod output_capture;
+use crate::output_capture;
 use output_capture::MemoryOutput;
 
 const WIT: &str = "package test:command; world command { include wasi:cli/command@0.3.0; }";
@@ -262,6 +261,9 @@ console.log(JSON.stringify(a), JSON.stringify(JSON.parse('{"4294967295":1,"42949
 const merged = { ...a.x, ...JSON.parse('{"z":2}'), count: 3, ok: true };
 const z: number = merged.z;
 console.log(JSON.stringify(merged), z, typeof merged.count);
+let order = 0;
+const ordered = { ...JSON.parse('{}'), first: (order = order + 1), second: (order = order + 1), nil: null };
+console.log(JSON.stringify(ordered), order);
 const r = new Response('{"k":[1,2.5e-3]}');
 const parsed = await r.json();
 console.log(JSON.stringify(parsed), r.bodyUsed);
@@ -279,6 +281,7 @@ console.log(JSON.stringify(numeric));
         r#"{"0":"h","1":"é","2":[1],"b":false,"x":"y","n":null}
 {"1":true,"2":[1],"b":3,"x":{"10":"t","z":null}} {"0":4,"4294967294":2,"4294967295":1,"01":3}
 {"10":"t","z":2,"count":3,"ok":true} 2 number
+{"first":1,"second":2,"nil":null} 2
 {"k":[1,0.0025]} true
 rejected
 {"0":1,"v":2} true

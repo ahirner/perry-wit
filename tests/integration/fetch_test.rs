@@ -10,9 +10,7 @@ use wasmtime::{
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
-#[allow(dead_code)]
-#[path = "support/http_fixture.rs"]
-mod http_fixture;
+use crate::http_fixture;
 
 const WIT: &str = r#"
 package test:fetch;

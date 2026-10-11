@@ -15,6 +15,36 @@ struct Packet {
 }
 
 #[test]
+fn module_binding_guards_preserve_initialization_and_write_effects() -> Result<()> {
+    let component = crate::world::component(
+        "package test:initialization; world app { export run: func() -> f64; }",
+        "app",
+        "initialization.ts",
+        r#"
+        let effects = 0;
+        const failures = probe();
+        let cell: number | undefined = undefined;
+        function value(): number { effects++; return 3; }
+        function probe(): number {
+            let failures = 0;
+            try { const observed = cell; } catch { failures++; }
+            try { cell = value(); } catch { failures++; }
+            return failures;
+        }
+        export function run(): number {
+            const absent = cell === undefined;
+            return (cell = 5, failures * 100 + effects * 10 + (absent ? 1 : 0) + cell);
+        }
+        "#,
+    )?;
+    let (mut store, instance) = crate::world::instantiate(&Engine::default(), &component)?;
+    let run = instance.get_typed_func::<(), (f64,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, ())?.0, 216.0);
+    assert_eq!(run.call(&mut store, ())?.0, 215.0);
+    Ok(())
+}
+
+#[test]
 fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()> {
     let mut resolve = wit_parser::Resolve::default();
     let package = resolve.push_str(

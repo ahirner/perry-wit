@@ -1,9 +1,7 @@
 //! Collector-aware non-moving growth, exercised through the actual linked Wasm allocator.
+use crate::link;
 use anyhow::Result;
 use wasmtime::{Engine, Instance, Memory, Module, Store};
-#[allow(dead_code, unused_imports)]
-#[path = "../src/link/mod.rs"]
-mod link;
 
 struct Heap {
     store: Store<()>,

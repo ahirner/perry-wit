@@ -794,6 +794,34 @@ impl<'s> FunctionBuilder<'s> {
         }
     }
 
+    fn fetch(&mut self, ctx: &mut Context, args: &[Expr]) -> Result<Value> {
+        ensure!(
+            (1..=2).contains(&args.len()),
+            "fetch takes a URL and optional init"
+        );
+        let url = self.url_string(ctx, &args[0])?;
+        let fields = self.init_fields(args.get(1))?;
+        for (name, _) in &fields {
+            ensure!(
+                matches!(name.as_str(), "method" | "headers" | "body"),
+                "fetch init field {name} is not supported yet"
+            );
+        }
+        let field = |name: &str| fields.iter().find(|(n, _)| n == name).map(|(_, e)| *e);
+        let method = match field("method") {
+            Some(method) => self.typed_operand(ctx, method, Kind::String, "a method string")?,
+            None => self.string(ctx, "GET"),
+        };
+        let headers = self.headers_init(ctx, field("headers"))?;
+        let (body, text) = self.body_init(ctx, field("body"))?;
+        let text = self.boolean(ctx, text);
+        Ok(self.intrinsic(
+            ctx,
+            Intrinsic::Fetch,
+            vec![url, method, headers, body, text],
+        ))
+    }
+
     /// A header list from an init: absent, an object literal of string values, or `Headers`.
     fn headers_init(&mut self, ctx: &mut Context, init: Option<&Expr>) -> Result<Value> {
         if let Some(expr) = init
@@ -1786,6 +1814,13 @@ impl<'s> FunctionBuilder<'s> {
         expr: &Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if let Expr::Sequence(parts) = expr {
+            let (last, effects) = parts.split_last().context("empty sequence expression")?;
+            for effect in effects {
+                self.effect(ctx, effect)?;
+            }
+            return self.expression_with(ctx, last, expected);
+        }
         if let Some(value) = self.date_expression(ctx, expr)? {
             return Ok(value);
         }
@@ -2990,9 +3025,9 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// An object literal with spreads, which Perry HIR lowers to a source-ordered IIFE over
-    /// `{}` (`__o`): `js_object_assign_one(__o, source)` per spread and `__o[key] = value`
-    /// per static member. Over JSON values it builds a JSON object; typed records do not
-    /// spread yet.
+    /// `{}`: `js_object_literal_spread` copies each spread and `js_object_literal_define`
+    /// defines each static member. Over JSON values it builds a JSON object; typed records
+    /// do not spread yet.
     fn object_spread(
         &mut self,
         ctx: &mut Context,
@@ -3005,9 +3040,19 @@ impl<'s> FunctionBuilder<'s> {
         let is_target = |expr: &Expr| matches!(expr, Expr::LocalGet(id) if *id == target);
         for statement in body {
             match statement {
+                Stmt::Let {
+                    id,
+                    init: Some(value),
+                    ..
+                } => {
+                    let value = self.json_value(ctx, value)?;
+                    let slot = self.entry_slot(ctx, value.get_type(ctx));
+                    self.store(ctx, slot, value);
+                    self.locals.insert(*id, slot);
+                }
                 Stmt::Expr(Expr::Call { callee, args, .. })
                     if matches!(&**callee, Expr::ExternFuncRef { name, .. }
-                        if name == "js_object_assign_one")
+                        if name == "js_object_literal_spread")
                         && args.len() == 2
                         && is_target(&args[0]) =>
                 {
@@ -3021,16 +3066,17 @@ impl<'s> FunctionBuilder<'s> {
                     };
                     self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
                 }
-                Stmt::Expr(Expr::IndexSet {
-                    object: set,
-                    index,
-                    value,
-                }) if is_target(set) => {
-                    let Expr::String(key) = &**index else {
+                Stmt::Expr(Expr::Call { callee, args, .. })
+                    if matches!(&**callee, Expr::ExternFuncRef { name, .. }
+                        if name == "js_object_literal_define")
+                        && args.len() == 3
+                        && is_target(&args[0]) =>
+                {
+                    let Expr::String(key) = &args[1] else {
                         bail!("{UNSUPPORTED}");
                     };
                     let key = self.string(ctx, key);
-                    let value = self.json_value(ctx, value)?;
+                    let value = self.json_value(ctx, &args[2])?;
                     self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
                 }
                 Stmt::Return(Some(result)) if is_target(result) => {}
@@ -3857,6 +3903,21 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn call(&mut self, ctx: &mut Context, callee: &Expr, args: &[Expr]) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee {
+            use perry_hir::tdz_check::{TDZ_CHECK, TDZ_CHECK_THEN};
+            match (name.as_str(), args) {
+                (TDZ_CHECK, [Expr::LocalGet(id), Expr::String(_)]) => {
+                    self.load(ctx, self.local(*id)?)?;
+                    return Ok(None);
+                }
+                (TDZ_CHECK_THEN, [Expr::LocalGet(id), Expr::String(_), value]) => {
+                    let value = self.expression(ctx, value)?;
+                    self.load(ctx, self.local(*id)?)?;
+                    return Ok(Some(value));
+                }
+                _ => {}
+            }
+        }
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
@@ -3889,8 +3950,11 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
-            && matches!(**object, Expr::GlobalGet(_))
+            && matches!(**object, Expr::GlobalGet(0))
         {
+            if property == "fetch" {
+                return self.fetch(ctx, args).map(Some);
+            }
             let intrinsic = match property.as_str() {
                 "log" | "info" | "debug" => Intrinsic::PrintOut,
                 "error" | "warn" => Intrinsic::PrintErr,

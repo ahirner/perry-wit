@@ -2,8 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use wasmtime::Engine;
 
-#[path = "support/world.rs"]
-mod world;
+use crate::world;
 
 #[test]
 fn incremental_utf8_matches_node_at_every_byte_boundary() -> Result<()> {

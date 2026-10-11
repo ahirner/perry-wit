@@ -271,8 +271,7 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
     Ok(())
 }
 
-#[path = "support/output_capture.rs"]
-mod output_capture;
+use crate::output_capture;
 
 #[tokio::test(flavor = "current_thread")]
 async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {

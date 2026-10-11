@@ -57,8 +57,8 @@ impl WasiHttpHooks for Documents {
         }
         let body = match request.uri().path() {
             "/doc1.json" if self.invalid => "invalid JSON",
-            "/doc1.json" => include_str!("../examples/doc1.json"),
-            "/doc2.json" => include_str!("../examples/doc2.json"),
+            "/doc1.json" => include_str!("../../examples/doc1.json"),
+            "/doc2.json" => include_str!("../../examples/doc2.json"),
             path => panic!("unexpected example request {path}"),
         };
         let started = self.started.clone();
@@ -158,7 +158,7 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
     let (resolve, package) = perry_wit::component::wit::resolve_wit(std::path::Path::new("wit"))?;
     let world = resolve.select_world(&[package], Some("merge-docs"))?;
     let compiled = perry_wit::compile_for_world(
-        include_str!("../examples/merge_docs.ts"),
+        include_str!("../../examples/merge_docs.ts"),
         "examples/merge_docs.ts",
         &resolve,
         world,
@@ -192,10 +192,10 @@ async fn checked_in_merge_docs_overlaps_fetches_and_returns_declared_errors() ->
     .await??;
     let actual: serde_json::Value = serde_json::from_str(&result.expect("merged documents"))?;
     let mut expected: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(include_str!("../examples/doc1.json"))?;
+        serde_json::from_str(include_str!("../../examples/doc1.json"))?;
     expected.extend(serde_json::from_str::<
         serde_json::Map<String, serde_json::Value>,
-    >(include_str!("../examples/doc2.json"))?);
+    >(include_str!("../../examples/doc2.json"))?);
     assert_eq!(actual, serde_json::Value::Object(expected));
     assert_eq!(store.data().documents.started.load(Ordering::SeqCst), 2);
     assert!(

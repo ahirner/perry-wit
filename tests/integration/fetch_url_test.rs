@@ -1,4 +1,4 @@
-#[path = "../src/helpers/fetch/url.rs"]
+#[path = "../../src/helpers/fetch/url.rs"]
 mod url;
 
 #[test]

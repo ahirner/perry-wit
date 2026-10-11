@@ -1,0 +1,45 @@
+//! Functional integration tests share one executable. Compilation timing, benchmarks,
+//! and cold packaging retain separate entry points.
+
+#[path = "../support/cancellation_caller.rs"]
+mod cancellation;
+#[allow(dead_code)]
+#[path = "../support/http_fixture.rs"]
+mod http_fixture;
+#[allow(dead_code, unused_imports)]
+#[path = "../../src/link/mod.rs"]
+mod link;
+#[path = "../support/output_capture.rs"]
+mod output_capture;
+#[path = "../support/world.rs"]
+mod world;
+
+mod async_component_test;
+mod builtins_test;
+mod byob_test;
+mod cancellation_test;
+mod command_test;
+mod component_budget_test;
+mod component_test;
+mod consumer_regression_test;
+mod date_test;
+mod decoder_test;
+mod examples_test;
+mod fetch_cancellation_test;
+mod fetch_test;
+mod fetch_url_test;
+mod http_handler_test;
+mod import_test;
+mod io_cancellation_test;
+mod json_helper_test;
+mod memory_growth_test;
+mod mir_codegen_test;
+mod module_test;
+mod regex_test;
+mod resource_test;
+mod sdk_regression_test;
+mod sdk_test;
+mod stream_test;
+mod time_helper_test;
+mod url_test;
+mod wit_resolution_test;

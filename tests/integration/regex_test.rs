@@ -2,8 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use wasmtime::Engine;
 
-#[path = "support/world.rs"]
-mod world;
+use crate::world;
 
 #[test]
 fn literal_search_matches_node_over_bmp_text() -> Result<()> {

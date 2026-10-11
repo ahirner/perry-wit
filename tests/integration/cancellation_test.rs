@@ -9,7 +9,7 @@ use wasmtime::{
     component::{Component, Linker},
 };
 
-#[path = "support/cancellation_composition.rs"]
+#[path = "../support/cancellation_composition.rs"]
 mod composition;
 
 const CALLER: &str = r#"(module

@@ -8,11 +8,10 @@ use wasmtime::{
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxView, WasiView};
 
 use std::sync::atomic::Ordering;
-#[path = "support/cancellable_output.rs"]
+#[path = "../support/cancellable_output.rs"]
 mod cancellable_output;
-#[path = "support/cancellation_caller.rs"]
-mod cancellation;
-#[path = "support/filesystem_transfers.rs"]
+use crate::cancellation;
+#[path = "../support/filesystem_transfers.rs"]
 mod transfers;
 
 struct Host {

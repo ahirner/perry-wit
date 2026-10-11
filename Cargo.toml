@@ -9,23 +9,23 @@ workspace = true
 
 [workspace]
 members = [
-    ".",
-    "crates/search-helper",
-    "crates/text-helper",
-    "crates/fetch-helper",
-    "crates/json-helper",
-    "crates/number-helper",
-    "crates/time-helper",
-    "crates/conformance",
-    "crates/perry-mir",
-    "crates/perry-lower",
-    "crates/pliron-wasm",
-    "crates/perry-runtime",
-    "crates/perry-abi",
-    "crates/perry-std",
-    "crates/perry-fs",
-    "crates/perry-web",
-    "crates/perry-codegen",
+  ".",
+  "crates/search-helper",
+  "crates/text-helper",
+  "crates/fetch-helper",
+  "crates/json-helper",
+  "crates/number-helper",
+  "crates/time-helper",
+  "crates/conformance",
+  "crates/perry-mir",
+  "crates/perry-lower",
+  "crates/pliron-wasm",
+  "crates/perry-runtime",
+  "crates/perry-abi",
+  "crates/perry-std",
+  "crates/perry-fs",
+  "crates/perry-web",
+  "crates/perry-codegen",
 ]
 
 [workspace.lints.rust]
@@ -33,6 +33,8 @@ members = [
 unreachable_pub = "warn"
 
 [workspace.dependencies]
+perry-parser = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa" }
+perry-hir = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa" }
 wasmtime = { version = "=49.0.2", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
 wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p3"] }
 wasmtime-wasi-http = { version = "=49.0.2", default-features = false, features = ["p3", "default-send-request"] }
@@ -55,7 +57,7 @@ perry-codegen = { path = "crates/perry-codegen" }
 perry-lower = { path = "crates/perry-lower" }
 perry-mir = { path = "crates/perry-mir" }
 pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
-perry-parser = { git = "https://github.com/PerryTS/perry", rev = "9e29f59d435ee08df161ef460ee6f204fb381d4f" }
+perry-parser.workspace = true
 wasm-encoder = { version = "0.261", features = ["wasmparser"] }
 wasmparser = "0.261"
 wit-parser = { version = "0.261" }

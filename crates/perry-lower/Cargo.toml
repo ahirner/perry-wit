@@ -7,13 +7,13 @@ description = "Perry HIR to perry-mir builder (TODOs.md P2.2)"
 
 [dependencies]
 perry-mir = { path = "../perry-mir" }
-perry-parser = { git = "https://github.com/PerryTS/perry", rev = "9e29f59d435ee08df161ef460ee6f204fb381d4f" }
-perry-hir = { git = "https://github.com/PerryTS/perry", rev = "9e29f59d435ee08df161ef460ee6f204fb381d4f" }
+perry-parser.workspace = true
+perry-hir.workspace = true
 pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
 anyhow = "1.0"
-swc_ecma_visit = "19.0"
-swc_common = "18.0"
-swc_ecma_transforms_base = "32.0"
+swc_ecma_visit = "29.0"
+swc_common = "26.0"
+swc_ecma_transforms_base = "49.0"
 
 [lints]
 workspace = true

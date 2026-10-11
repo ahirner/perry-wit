@@ -5,10 +5,7 @@ use wasmtime::{
     Val, ValType,
 };
 
-// The linker is compiled into this test crate; only its helper placement is exercised.
-#[allow(dead_code, unused_imports)]
-#[path = "../src/link/mod.rs"]
-mod link;
+use crate::link;
 use link::libraries;
 
 const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm"));

@@ -4,7 +4,7 @@ use wasmtime::{
     Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
     component::{Component, Instance, Linker, StreamReader},
 };
-#[path = "support/p3_input.rs"]
+#[path = "../support/p3_input.rs"]
 mod input;
 
 async fn instantiate(source: &str, result: &str) -> Result<(Store<StoreLimits>, Instance)> {

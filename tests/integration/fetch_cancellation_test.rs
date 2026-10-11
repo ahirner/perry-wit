@@ -20,8 +20,7 @@ use wasmtime_wasi_http::{
     Error, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
 };
 
-#[path = "support/cancellation_caller.rs"]
-mod cancellation;
+use crate::cancellation;
 
 #[derive(Clone, Copy, Debug)]
 enum Phase {
