@@ -491,6 +491,42 @@ export function run():number {{
 }
 
 #[test]
+fn source_serialization_stack_handles_mixed_depth_and_siblings() {
+    let mut nested = "0".to_string();
+    for depth in 0..127 {
+        nested = if depth % 2 == 0 {
+            format!("[false,{nested},null]")
+        } else {
+            format!(r#"{{"1":1,"next":{nested},"tail":"é🙂"}}"#)
+        };
+    }
+    let object = format!(r#"{{"n":1,"before":[],"deep":{nested},"after":{{"1":1,"2":2}}}}"#);
+    let text = serde_json::to_string(&object).unwrap();
+    let changed = serde_json::to_string(&object.replacen(r#""n":1"#, r#""n":2"#, 1)).unwrap();
+    let source = format!(
+        r#"
+interface Row {{n:number}}
+export function run():number {{
+ const row:Row=JSON.parse({text});
+ try {{JSON.stringify([row]);return 1;}}catch(e){{}}
+ if(JSON.stringify(row)!=={text})return 2;
+ row.n=2;
+ if(JSON.stringify(row)!=={changed})return 3;
+ const next:Row=JSON.parse('{{"n":3,"tail":[{{"2":2,"1":1}},false]}}');
+ if(JSON.stringify(next)!=='{{"n":3,"tail":[{{"1":1,"2":2}},false]}}')return 4;
+ return 0;
+}}
+"#
+    );
+    let mut program = Program::checked(&source, "source-stack.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("run", &[]), (0.0, 0));
+        assert_eq!(program.counter(Counter::LiveBytes), 0);
+    }
+}
+
+#[test]
 fn typed_key_tables_handle_unicode_and_overwritten_errors() {
     let mut keys: Vec<_> = (0..40).map(|index| format!("field{index}")).collect();
     keys.extend(["é🙂".into(), "".into(), "x".repeat(260)]);
@@ -531,6 +567,7 @@ fn typed_key_tables_handle_unicode_and_overwritten_errors() {
 #[test]
 fn source_serialization_allocations_scale_with_output() {
     let mut allocations = Vec::new();
+    let mut measurements = Vec::new();
     for count in [16, 88] {
         let row: serde_json::Value = serde_json::from_str(&format!(
             "{{\"n\":1,{}}}",
@@ -553,10 +590,26 @@ export function write():number {{ const rows:Row[]=JSON.parse({input});let size=
         // Two instances of one module: the difference is what serialization allocates.
         let mut parse = Program::checked(&source, "serialization-allocations.ts");
         let mut write = Program::from_wasm(parse.wasm.clone());
-        assert_eq!(parse.call("parse", &[]).0[0].unwrap_f64(), count as f64);
-        assert_eq!(write.call("write", &[]).0[0].unwrap_f64(), expected as f64);
+        let (parsed, parse_fuel) = parse.call("parse", &[]);
+        let (written, write_fuel) = write.call("write", &[]);
+        assert_eq!(parsed[0].unwrap_f64(), count as f64);
+        assert_eq!(written[0].unwrap_f64(), expected as f64);
         assert_eq!(write.counter(Counter::LiveBytes), 0);
+        let serialization_fuel = write_fuel - parse_fuel;
+        assert!(
+            serialization_fuel < count as u64 * 150_000,
+            "54-field serialization fuel regression: {serialization_fuel} for {count} rows"
+        );
         allocations.push(write.counter(Counter::Allocations) - parse.counter(Counter::Allocations));
+        measurements.push(serde_json::json!({
+            "rows": count, "serializationFuel": serialization_fuel,
+            "serializationAllocations": allocations.last().unwrap(),
+            "totalAllocations": write.counter(Counter::Allocations),
+            "peakLinearBytes": write.memory_bytes(),
+        }));
+    }
+    if let Ok(path) = std::env::var("PERRY_JSON_SERIALIZE_REPORT") {
+        std::fs::write(path, serde_json::to_string_pretty(&measurements).unwrap()).unwrap();
     }
     // 5.5 times the rows may cost at most 6 times the allocations.
     assert!(

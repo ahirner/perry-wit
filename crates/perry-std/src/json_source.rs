@@ -9,6 +9,7 @@ use crate::json::{
 };
 use crate::json_read::{Reader, decode_string, lookup, pull, reader, table_key, unescape};
 use crate::runtime::{Buffer, bytes};
+use arrayvec::ArrayVec;
 use core::{mem, ptr, slice};
 use perry_abi::layout::json_source;
 
@@ -81,15 +82,6 @@ const _: () = assert!(mem::size_of::<Entry>() == 5 * mem::size_of::<usize>());
 const _: () = assert!(mem::align_of::<Entry>() <= 8);
 
 impl Entry {
-    /// Placeholder of unused fixed-size storage.
-    const EMPTY: Entry = Entry {
-        key: ptr::null(),
-        key_len: 0,
-        start: 0,
-        field: usize::MAX,
-        order: 0,
-    };
-
     /// A member named `key`, which outlives every use of the entry: the source text, a
     /// decoded key or a key table, each retained through the document.
     fn new(key: &'static [u8], start: usize, field: usize, order: usize) -> Self {
@@ -183,7 +175,7 @@ fn index_object(document: *mut Reader, start: u32, table: Option<&[u8]>) -> Memb
         at: 0,
         count: 0,
     };
-    let mut pending = [Entry::EMPTY; 128];
+    let mut pending = ArrayVec::<Entry, 128>::new();
     let mut count = 0;
     let mut scan = cursor(document, start);
     scan.open(b'{');
@@ -192,8 +184,8 @@ fn index_object(document: *mut Reader, start: u32, table: Option<&[u8]>) -> Memb
         if let Some(table) = table {
             entry.field = lookup(table, 0, key_bytes(&entry)) as usize;
         }
-        if count < pending.len() {
-            pending[count] = entry;
+        if count < pending.capacity() {
+            pending.push(entry);
         } else {
             if count == pending.len() {
                 members.entries.extend_from_slice(entry_bytes(&pending));
@@ -203,8 +195,8 @@ fn index_object(document: *mut Reader, start: u32, table: Option<&[u8]>) -> Memb
         }
         count += 1;
     }
-    if count <= pending.len() {
-        members.count = index_small_object(&mut pending[..count]);
+    if count <= pending.capacity() {
+        members.count = index_small_object(&mut pending);
         if members.count != 0 {
             members
                 .entries
@@ -477,12 +469,10 @@ enum Frame {
 /// decoded escapes, normalized numbers and objects in property order. Iterative, bounded by
 /// the writer's depth limit.
 fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
-    let mut stack = [const { None }; MAX_DEPTH as usize + 1];
-    stack[0] = Some(Frame::Value(start));
-    let mut depth = 1;
-    while depth > 0 {
-        depth -= 1;
-        match stack[depth].take().expect("pending serialization frame") {
+    let mut stack = ArrayVec::<Frame, { MAX_DEPTH as usize + 1 }>::new();
+    stack.push(Frame::Value(start));
+    while let Some(frame) = stack.pop() {
+        match frame {
             Frame::Value(start) => {
                 let mut r = cursor(document, start);
                 match r.whitespace() {
@@ -492,15 +482,13 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                         }
                         let mut members = index_object(document, r.pos, None);
                         sort(&mut members);
-                        stack[depth] = Some(Frame::Object(members));
-                        depth += 1;
+                        stack.push(Frame::Object(members));
                     }
                     b'[' => {
                         if std_json_open(writer, b'[' as u32) == 0 {
                             return;
                         }
-                        stack[depth] = Some(Frame::Array(r.pos + 1, true));
-                        depth += 1;
+                        stack.push(Frame::Array(r.pos + 1, true));
                     }
                     b'"' => {
                         r.pos += 1;
@@ -552,9 +540,8 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                 let entry = entries(&mut members)[at];
                 members.at += 1;
                 key(writer, &entry);
-                stack[depth] = Some(Frame::Object(members));
-                stack[depth + 1] = Some(Frame::Value(entry.start as u32));
-                depth += 2;
+                stack.push(Frame::Object(members));
+                stack.push(Frame::Value(entry.start as u32));
             }
             Frame::Array(pos, first) => {
                 let mut r = cursor(document, pos);
@@ -569,9 +556,8 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                 let start = r.pos;
                 r.skip();
                 std_json_item(writer);
-                stack[depth] = Some(Frame::Array(r.pos, false));
-                stack[depth + 1] = Some(Frame::Value(start));
-                depth += 2;
+                stack.push(Frame::Array(r.pos, false));
+                stack.push(Frame::Value(start));
             }
         }
     }

@@ -1543,6 +1543,7 @@ version = "0.1.0"
 name = "perry-std"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "libm",
  "perry-abi",
 ]
