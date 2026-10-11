@@ -11,10 +11,6 @@ on:
 permissions:
   contents: read
 
-env:
-  CARGO_BUILD_JOBS: 1
-  RUST_TEST_THREADS: 1
-
 jobs:
   flake-checks:
     strategy:
@@ -42,7 +38,7 @@ jobs:
     - run: nix --version
     - run: nix flake check -L --keep-going
     - run: nix flake show
-    - run: nix develop -L -c echo built
+    - run: nix develop -c cargo fmt --all -- --check
 
   conformance-and-tests:
     runs-on: ubuntu-latest
@@ -62,13 +58,17 @@ jobs:
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - run: nix develop -c cargo test --workspace
-    - run: nix develop -c cargo run -p perry-conformance -- check
+    - run: nix develop -c cargo test --workspace --locked
+    - run: nix develop -c cargo test -p perry-runtime --all-features --locked
+    - run: nix develop -c cargo test --locked --test build_artifact_test -- --ignored
+    - run: nix develop -c cargo run --locked -p perry-conformance -- check
     - run: |
+        nix develop -c bash -euo pipefail <<'CHECKS'
         for seed in 0 1 42 20261010; do
-          nix develop --max-jobs 1 --cores 1 -c cargo run -j 1 -p perry-conformance -- check --select ecma.number.arithmetic --seed "$seed" --cases 8 --depth 3
+          cargo run --locked -p perry-conformance -- check --select ecma.number.arithmetic --seed "$seed" --cases 8 --depth 3
         done
-    - run: nix develop -c cargo clippy --workspace --all-targets --all-features -- -D warnings
+        CHECKS
+    - run: nix develop -c cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   build-artifacts:
     strategy:

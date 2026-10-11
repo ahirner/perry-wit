@@ -88,7 +88,7 @@
         '';
 
         authoredSourceFilter = path: type:
-          !(builtins.elem (baseNameOf path) [ ".perry" "node_modules" "target" "dist" "result" ])
+          !(builtins.elem (baseNameOf path) [ ".perry" ".direnv" ".env" "node_modules" "target" "dist" "result" ])
           && pkgs.lib.cleanSourceFilter path type;
 
         # Common source filter for Rust crate builds
@@ -101,6 +101,7 @@
           (pkgs.lib.hasSuffix ".json" path) ||
           (pkgs.lib.hasSuffix ".toml" path) ||
           (pkgs.lib.hasSuffix ".lock" path) ||
+          (path == toString ./src/helpers/undefined.txt) ||
           (craneLib.filterCargoSources path type));
 
         src = pkgs.lib.cleanSourceWith {
@@ -132,7 +133,7 @@
           nativeBuildInputs = with pkgs; [ pkg-config ];
           postInstall = ''
             mkdir -p "$out/lib/perry-wit-helpers"
-            for f in runtime.wasm std.wasm fs.wasm web.wasm search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
+            for f in runtime.wasm runtime-collectible.wasm std.wasm fs.wasm web.wasm search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
               wasm_file=$(find target -name "$f" -print -quit)
               if [ -n "$wasm_file" ]; then
                 cp "$wasm_file" "$out/lib/perry-wit-helpers/"
@@ -291,6 +292,8 @@
           WASI_WIT_PATH = wasiP3Wit;
 
           shellHook = ''
+            export CARGO_TARGET_DIR="$PWD/target"
+            export PERRY_HELPER_TARGET_DIR="$CARGO_TARGET_DIR/embedded-helpers"
             if [ -d wit ] && [ ! -e wit/deps ]; then
               ln -sfn "${wasiP3Wit}" wit/deps
             fi

@@ -187,13 +187,18 @@ pub use mock::*;
 #[allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 pub mod mock {
     extern crate std;
-    use std::{cell::RefCell, vec::Vec};
+    use std::vec::Vec;
 
-    std::thread_local! {
-        pub static WRITTEN: RefCell<[Vec<u8>; 2]> = const { RefCell::new([Vec::new(), Vec::new()]) };
-        pub static BLOCK_NEXT: RefCell<bool> = const { RefCell::new(false) };
-        pub static PENDING: RefCell<Option<(usize, *const u8, u32)>> = const { RefCell::new(None) };
-        pub static JOINED: RefCell<Vec<(u32, u32)>> = const { RefCell::new(Vec::new()) };
+    #[derive(Default)]
+    pub(crate) struct Host {
+        pub(crate) written: [Vec<u8>; 2],
+        block_next: bool,
+        pending: Option<(usize, *const u8, u32)>,
+        joined: Vec<(u32, u32)>,
+    }
+
+    pub(crate) fn with<R>(access: impl FnOnce(&mut Host) -> R) -> R {
+        crate::instance::native::with(|instance| access(&mut instance.host.borrow_mut()))
     }
     pub const LIMIT: u32 = 5;
 
@@ -202,7 +207,7 @@ pub mod mock {
     }
     pub unsafe fn waitable_set_drop(_: u32) {}
     pub unsafe fn waitable_join(waitable: u32, set: u32) {
-        JOINED.with(|j| j.borrow_mut().push((waitable, set)));
+        with(|host| host.joined.push((waitable, set)));
     }
     pub unsafe fn subtask_drop(_: u32) {}
     pub unsafe fn subtask_cancel(_: u32) -> u32 {
@@ -226,14 +231,12 @@ pub mod mock {
 
     /// Complete the blocked write; returns the copy result for the event.
     pub fn complete_pending() -> Option<(u32, u32)> {
-        PENDING
-            .with(|p| p.borrow_mut().take())
-            .map(|(fd, data, len)| {
-                let len = len.min(LIMIT);
-                let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-                WRITTEN.with(|w| w.borrow_mut()[fd].extend_from_slice(bytes));
-                (10 + fd as u32 * 2 + 1, len << 4)
-            })
+        with(|host| host.pending.take()).map(|(fd, data, len)| {
+            let len = len.min(LIMIT);
+            let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+            with(|host| host.written[fd].extend_from_slice(bytes));
+            (10 + fd as u32 * 2 + 1, len << 4)
+        })
     }
 
     pub mod output {
@@ -245,18 +248,17 @@ pub mod mock {
             20 + fd as u32
         }
         pub fn write(fd: usize, _: u32, data: *const u8, len: u32) -> u32 {
-            let block = BLOCK_NEXT.with(|b| {
-                let mut b = b.borrow_mut();
-                *b = !*b;
-                !*b
+            let block = with(|host| {
+                host.block_next = !host.block_next;
+                !host.block_next
             });
             if block {
-                PENDING.with(|p| *p.borrow_mut() = Some((fd, data, len)));
+                with(|host| host.pending = Some((fd, data, len)));
                 return super::super::BLOCKED;
             }
             let len = len.min(LIMIT);
             let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-            WRITTEN.with(|w| w.borrow_mut()[fd].extend_from_slice(bytes));
+            with(|host| host.written[fd].extend_from_slice(bytes));
             len << 4
         }
         pub fn drop_writer(_: usize, _: u32) {}
@@ -265,7 +267,7 @@ pub mod mock {
         }
         pub fn drop_future(_: usize, _: u32) {}
         pub fn cancel_write(_: usize, _: u32) {
-            PENDING.with(|p| *p.borrow_mut() = None);
+            with(|host| host.pending = None);
         }
         pub fn cancel_read(_: usize, _: u32) {}
     }

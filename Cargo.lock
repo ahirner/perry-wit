@@ -1416,6 +1416,10 @@ version = "0.5.1654"
 source = "git+https://github.com/PerryTS/perry?rev=9e29f59d435ee08df161ef460ee6f204fb381d4f#9e29f59d435ee08df161ef460ee6f204fb381d4f"
 
 [[package]]
+name = "perry-fetch-helper"
+version = "0.1.0"
+
+[[package]]
 name = "perry-fs"
 version = "0.1.0"
 dependencies = [
@@ -1500,12 +1504,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-search-helper"
+version = "0.1.0"
+
+[[package]]
 name = "perry-std"
 version = "0.1.0"
 dependencies = [
  "libm",
  "perry-abi",
 ]
+
+[[package]]
+name = "perry-text-helper"
+version = "0.1.0"
 
 [[package]]
 name = "perry-time-helper"

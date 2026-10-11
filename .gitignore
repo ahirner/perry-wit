@@ -2,6 +2,8 @@
 /dist
 /artifacts
 .DS_Store
+.direnv/
+.env
 result*
 
 # Resolved WIT dependencies sourced from the pinned flake

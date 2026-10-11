@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
 /// Finds the first matching scalar position of needle in haystack starting at or after start_scalar.
 /// Returns the matching scalar index as f64, or -1.0 if not found.
@@ -31,20 +31,18 @@ pub extern "C" fn str_find_substring(
     let mut byte_offset: usize = 0;
 
     while byte_offset < h_len {
-        if current_scalar >= start_scalar {
-            if h_len - byte_offset >= n_len {
-                let mut matches = true;
-                let mut i = 0;
-                while i < n_len {
-                    if unsafe { *h_ptr.add(byte_offset + i) != *n_ptr.add(i) } {
-                        matches = false;
-                        break;
-                    }
-                    i += 1;
+        if current_scalar >= start_scalar && h_len - byte_offset >= n_len {
+            let mut matches = true;
+            let mut i = 0;
+            while i < n_len {
+                if unsafe { *h_ptr.add(byte_offset + i) != *n_ptr.add(i) } {
+                    matches = false;
+                    break;
                 }
-                if matches {
-                    return current_scalar as f64;
-                }
+                i += 1;
+            }
+            if matches {
+                return current_scalar as f64;
             }
         }
 
@@ -116,6 +114,7 @@ fn count_scalars(haystack_ptr: u32, haystack_byte_len: u32) -> u32 {
     count
 }
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()

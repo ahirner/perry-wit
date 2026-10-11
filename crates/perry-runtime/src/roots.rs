@@ -1,8 +1,11 @@
 //! Precise roots at generated safe points. Callers keep a stack segment while a callee can
 //! collect; suspended operations use independent pin tokens until acknowledgement.
 use crate::collectible::{Collector, Counters};
+use crate::instance::instance_state;
 use alloc::{boxed::Box, vec::Vec};
-use core::{cell::UnsafeCell, ptr};
+#[cfg(target_arch = "wasm32")]
+use core::cell::UnsafeCell;
+use core::ptr;
 
 struct Pin {
     object: *mut u8,
@@ -149,7 +152,7 @@ pub(crate) unsafe fn resize_buffer(
     new
 }
 
-struct Roots {
+pub(crate) struct Roots {
     heap: Collector,
     stack: RootStack,
     pins: Vec<Pin>,
@@ -233,27 +236,26 @@ impl Roots {
     }
 }
 
-struct Global(UnsafeCell<*mut Roots>);
+#[cfg(target_arch = "wasm32")]
+struct Global(UnsafeCell<Option<Box<Roots>>>);
 // SAFETY: component instances are single-threaded; no borrow crosses a runtime entry point.
+#[cfg(target_arch = "wasm32")]
 unsafe impl Sync for Global {}
-static ROOTS: Global = Global(UnsafeCell::new(ptr::null_mut()));
+instance_state!(ROOTS, roots_state, roots, Option<Box<Roots>>, None);
 
 #[allow(clippy::mut_from_ref)]
 fn roots() -> &'static mut Roots {
     // SAFETY: called synchronously on the component instance's only guest thread.
     unsafe {
-        let state = &mut *ROOTS.0.get();
-        if state.is_null() {
-            *state = initialize_roots();
-        }
-        &mut **state
+        let state = &mut *roots_state();
+        state.get_or_insert_with(initialize_roots)
     }
 }
 
 /// Keep the one-time initializer's stack temporaries out of ordinary root lookups.
 #[cold]
-fn initialize_roots() -> *mut Roots {
-    Box::into_raw(Box::new(Roots::new()))
+fn initialize_roots() -> Box<Roots> {
+    Box::new(Roots::new())
 }
 
 /// Allocate collectible storage without running a collection.
@@ -323,7 +325,7 @@ pub unsafe extern "C" fn perry_gc_check() {
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_gc_due() -> u32 {
     // SAFETY: the single guest thread owns the state; an absent heap cannot require GC.
-    let roots = unsafe { (*ROOTS.0.get()).as_ref() };
+    let roots = unsafe { (*roots_state()).as_ref() };
     u32::from(roots.is_some_and(|roots| roots.force_collection || roots.heap.due()))
 }
 
@@ -490,48 +492,52 @@ mod tests {
 
     #[test]
     fn interior_borrows_prevent_growth_until_release() {
-        // SAFETY: all allocations are opaque, roots stay pinned across collection, and
-        // each resize receives its live allocation size and initialized prefix.
-        unsafe {
-            for offset in [0, 599] {
-                let old = perry_gc_alloc(600, ptr::null());
-                ptr::write_bytes(old, 0x5a, 600);
-                let borrow = perry_gc_pin(old.add(offset));
-                let copy = resize_buffer(old, 600, 800, 600, ptr::null());
-                assert_ne!(copy, old);
-                let copied = perry_gc_pin(copy);
-                roots().collect();
-                assert_eq!(core::slice::from_raw_parts(old, 600), &[0x5a; 600]);
-                assert_eq!(core::slice::from_raw_parts(copy, 600), &[0x5a; 600]);
-                perry_gc_unpin(borrow);
-                perry_gc_unpin(copied);
-                assert_eq!(resize_buffer(copy, 800, 900, 600, ptr::null()), copy);
-                roots().collect();
+        crate::RuntimeInstance::default().enter(|| {
+            // SAFETY: all allocations are opaque, roots stay pinned across collection, and
+            // each resize receives its live allocation size and initialized prefix.
+            unsafe {
+                for offset in [0, 599] {
+                    let old = perry_gc_alloc(600, ptr::null());
+                    ptr::write_bytes(old, 0x5a, 600);
+                    let borrow = perry_gc_pin(old.add(offset));
+                    let copy = resize_buffer(old, 600, 800, 600, ptr::null());
+                    assert_ne!(copy, old);
+                    let copied = perry_gc_pin(copy);
+                    roots().collect();
+                    assert_eq!(core::slice::from_raw_parts(old, 600), &[0x5a; 600]);
+                    assert_eq!(core::slice::from_raw_parts(copy, 600), &[0x5a; 600]);
+                    perry_gc_unpin(borrow);
+                    perry_gc_unpin(copied);
+                    assert_eq!(resize_buffer(copy, 800, 900, 600, ptr::null()), copy);
+                    roots().collect();
+                }
             }
-        }
+        });
     }
 
     #[test]
     fn active_pins_survive_other_tasks_and_completed_pins_stop_rooting() {
-        let mut roots = Roots::new();
-        // SAFETY: no object has pointer fields; only registered roots are used after collect.
-        unsafe {
-            let first = roots.heap.allocate(128, ptr::null());
-            let second = roots.heap.allocate(256, ptr::null());
-            let pin_first = roots.pin(first);
-            let pin_second = roots.pin(second);
-            roots.collect();
-            assert_eq!(roots.heap.counters().live_bytes, 384);
-            roots.unpin(pin_first);
-            roots.collect();
-            assert_eq!(roots.heap.counters().live_bytes, 256);
-            assert!(roots.snapshot.is_empty());
-            let next = roots.heap.allocate(128, ptr::null());
-            assert_eq!(roots.pin(next), pin_first);
-            roots.unpin(pin_first);
-            roots.unpin(pin_second);
-            roots.collect();
-            assert_eq!(roots.heap.counters().live_bytes, 0);
-        }
+        crate::RuntimeInstance::default().enter(|| {
+            let mut roots = Roots::new();
+            // SAFETY: no object has pointer fields; only registered roots are used after collect.
+            unsafe {
+                let first = roots.heap.allocate(128, ptr::null());
+                let second = roots.heap.allocate(256, ptr::null());
+                let pin_first = roots.pin(first);
+                let pin_second = roots.pin(second);
+                roots.collect();
+                assert_eq!(roots.heap.counters().live_bytes, 384);
+                roots.unpin(pin_first);
+                roots.collect();
+                assert_eq!(roots.heap.counters().live_bytes, 256);
+                assert!(roots.snapshot.is_empty());
+                let next = roots.heap.allocate(128, ptr::null());
+                assert_eq!(roots.pin(next), pin_first);
+                roots.unpin(pin_first);
+                roots.unpin(pin_second);
+                roots.collect();
+                assert_eq!(roots.heap.counters().live_bytes, 0);
+            }
+        });
     }
 }

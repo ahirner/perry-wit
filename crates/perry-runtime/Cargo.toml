@@ -5,9 +5,6 @@ edition = "2024"
 publish = false
 description = "Runtime linked into perry-wit components built by the MIR backend (TODOs.md P5)"
 
-[lib]
-crate-type = ["rlib", "cdylib"]
-
 [features]
 collectible = ["talc/counters"]
 

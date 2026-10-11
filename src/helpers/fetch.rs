@@ -1,4 +1,5 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
+#![cfg(any(target_arch = "wasm32", test))]
 
 #[path = "fetch/url.rs"]
 mod url;
@@ -158,7 +159,9 @@ pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32)
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn fetch_url_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
-    borrow(input, length, output, capacity, |input, output| Ok(url::normalize_url(input, output)?[5]))
+    borrow(input, length, output, capacity, |input, output| {
+        Ok(url::normalize_url(input, output)?[5])
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -585,6 +588,10 @@ mod tests {
             assert!(normalize(input.as_bytes(), &mut [0; 512]).is_err());
         }
         let mut output = [0; 512];
+        let input = b"https://user:pass@example.com/#fragment";
+        let metadata = url::normalize_url(input, &mut output).unwrap();
+        assert_eq!(&output[..metadata[5] as usize], input);
+        assert!(normalize(input, &mut output).is_err());
         let length = decode(b"\xef\xbb\xbfhi\xf0\x9f\x99\x82\xe2\x82X\xff", &mut output).unwrap();
         assert_eq!(core::str::from_utf8(&output[..length]).unwrap(), "hi🙂�X�");
     }

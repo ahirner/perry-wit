@@ -13,8 +13,10 @@
 use crate::{
     exception::{EXIT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING},
     host::{self, BLOCKED, DROPPED, EVENT_FUTURE_READ, EVENT_STREAM_WRITE},
+    instance::instance_state,
     region::current,
 };
+#[cfg(target_arch = "wasm32")]
 use core::cell::UnsafeCell;
 
 /// A growable byte buffer in the task region: released with the task, so a component that
@@ -451,19 +453,27 @@ pub extern "C" fn perry_task_close_set() {
     }
 }
 
-struct Process {
+pub(crate) struct Process {
     exit_code: i32,
 }
 
+impl Process {
+    pub(crate) const fn new() -> Self {
+        Self { exit_code: 0 }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 struct Global(UnsafeCell<Process>);
 // SAFETY: one instance runs one thread.
+#[cfg(target_arch = "wasm32")]
 unsafe impl Sync for Global {}
-static PROCESS: Global = Global(UnsafeCell::new(Process { exit_code: 0 }));
+instance_state!(PROCESS, process_state, process, Process, Process::new());
 
 #[allow(clippy::mut_from_ref)]
 fn process() -> &'static mut Process {
     // SAFETY: single-threaded; no reference outlives one entry point.
-    unsafe { &mut *PROCESS.0.get() }
+    unsafe { &mut *process_state() }
 }
 
 fn exit_code(code: f64) -> i32 {

@@ -1,8 +1,10 @@
 //! Opaque resource owners and transactional canonical transfers. Only active transfers root
 //! descriptors; the registry is weak and queues host destruction after marking has finished.
-use crate::{collectible::Collector, region::Task};
+use crate::{collectible::Collector, instance::instance_state, region::Task};
 use alloc::{boxed::Box, vec::Vec};
-use core::{cell::UnsafeCell, ptr};
+#[cfg(target_arch = "wasm32")]
+use core::cell::UnsafeCell;
+use core::ptr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -46,14 +48,18 @@ pub(crate) struct Scope {
     movements: Vec<Movement>,
 }
 
-struct Registry {
+pub(crate) struct Registry {
     descriptors: Vec<*mut Resource>,
-    scopes: Vec<*mut Scope>,
+    #[expect(
+        clippy::vec_box,
+        reason = "ABI scope pointers must survive vector growth"
+    )]
+    scopes: Vec<Box<Scope>>,
     drops: Vec<DropHandle>,
 }
 
 impl Registry {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             descriptors: Vec::new(),
             scopes: Vec::new(),
@@ -62,9 +68,7 @@ impl Registry {
     }
 
     unsafe fn trace(&self, roots: &mut Vec<*mut u8>) {
-        for &scope in &self.scopes {
-            // SAFETY: registered scopes remain allocated until finish.
-            let scope = unsafe { &*scope };
+        for scope in &self.scopes {
             for movement in &scope.movements {
                 match *movement {
                     Movement::Move(owner) if scope.phase == Phase::Preparing => {
@@ -105,9 +109,7 @@ impl Registry {
 
     unsafe fn leave(&mut self, task: *mut Task) {
         assert!(
-            self.scopes
-                .iter()
-                .all(|&scope| unsafe { (*scope).task != task }),
+            self.scopes.iter().all(|scope| scope.task != task),
             "resource transfer lacks acknowledgement"
         );
         for &owner in &self.descriptors {
@@ -134,23 +136,23 @@ impl Registry {
     }
 
     fn scope(&mut self, task: *mut Task) -> *mut Scope {
-        let scope = Box::into_raw(Box::new(Scope {
+        let mut scope = Box::new(Scope {
             phase: Phase::Preparing,
             task,
             movements: Vec::new(),
-        }));
+        });
+        let pointer = ptr::from_mut(&mut *scope);
         self.scopes.push(scope);
-        scope
+        pointer
     }
 
     unsafe fn finish(&mut self, scope: *mut Scope) {
         let index = self
             .scopes
             .iter()
-            .position(|&active| active == scope)
+            .position(|active| ptr::eq(&**active, scope))
             .expect("transfer finished twice");
-        self.scopes.swap_remove(index);
-        let scope = unsafe { Box::from_raw(scope) };
+        let scope = self.scopes.swap_remove(index);
         for movement in scope.movements {
             match movement {
                 Movement::Move(owner) if scope.phase == Phase::Preparing => unsafe {
@@ -163,13 +165,21 @@ impl Registry {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 struct Global(UnsafeCell<Registry>);
 // SAFETY: one guest thread; no borrow crosses a host call or allocation safe point.
+#[cfg(target_arch = "wasm32")]
 unsafe impl Sync for Global {}
-static REGISTRY: Global = Global(UnsafeCell::new(Registry::new()));
+instance_state!(
+    REGISTRY,
+    registry_state,
+    registry,
+    Registry,
+    Registry::new()
+);
 #[allow(clippy::mut_from_ref)]
 fn registry() -> &'static mut Registry {
-    unsafe { &mut *REGISTRY.0.get() }
+    unsafe { &mut *registry_state() }
 }
 
 pub(crate) unsafe fn trace(roots: &mut Vec<*mut u8>) {
@@ -340,75 +350,77 @@ mod tests {
 
     #[test]
     fn resource_transfers_rollback_pin_and_expire_exactly_once() {
-        let task = perry_task_enter();
-        perry_gc_task_enter();
-        perry_gc_debug(3);
-        let owner = perry_resource_new(2, 71, 0);
-        let pin = perry_gc_pin(owner.cast());
-        // A duplicate own argument fails without consuming the earlier alias.
-        unsafe {
-            let scope = perry_resource_scope_new();
-            assert_eq!(perry_resource_lower(scope, owner, 1), 71);
-            perry_resource_lower(scope, owner, 1);
-            assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
-            perry_resource_scope_finish(scope);
-            assert_eq!(perry_resource_handle(owner), 71);
-            assert_eq!(perry_status(), 0);
-            // A borrowed host call keeps the owner live after its last compiled reference dies.
-            let scope = perry_resource_scope_new();
-            perry_resource_lower(scope, owner, 0);
-            perry_resource_scope_commit(scope);
-            perry_gc_unpin(pin);
-            perry_gc_check();
-            perry_resource_drop(owner);
-            assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
-            assert_eq!(perry_resource_drop_next(), 0);
-            perry_resource_scope_finish(scope);
-            perry_gc_check();
-            assert_eq!(perry_resource_drop_next(), 3u64 << 32 | 71);
-            perry_gc_check();
-            assert_eq!(perry_resource_drop_next(), 0);
-            // Ownership transfer invalidates every local alias and suppresses GC destruction.
-            let moved = perry_resource_new(2, 72, 0);
-            let pin = perry_gc_pin(moved.cast());
-            let scope = perry_resource_scope_new();
-            perry_resource_lower(scope, moved, 1);
-            perry_resource_scope_commit(scope);
-            perry_resource_handle(moved);
-            assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
-            perry_gc_unpin(pin);
-            perry_gc_check();
-            perry_resource_scope_finish(scope);
-            assert_eq!(perry_resource_drop_next(), 0);
-            // End of the lending task invalidates saved borrowed aliases, even when pinned.
-            let borrowed = perry_resource_new(3, 81, 1);
-            let representation = perry_resource_new(4, 91, 2);
-            let other = {
-                perry_task_suspend();
-                perry_task_enter()
-            };
+        crate::RuntimeInstance::default().enter(|| {
+            let task = perry_task_enter();
             perry_gc_task_enter();
-            let pin_borrow = perry_gc_pin(borrowed.cast());
-            let pin_rep = perry_gc_pin(representation.cast());
-            perry_resource_handle(borrowed);
-            assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
-            perry_task_resume(task);
-            perry_gc_task_leave();
-            perry_task_free();
-            assert_eq!(perry_resource_drop_next(), 4u64 << 32 | 81);
-            assert_eq!(perry_resource_drop_next(), 0);
-            perry_task_resume(other);
-            perry_resource_handle(borrowed);
-            assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
-            perry_resource_handle(representation);
-            assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
-            perry_gc_unpin(pin_borrow);
-            perry_gc_unpin(pin_rep);
-            perry_gc_task_leave();
-            perry_task_free();
-            perry_gc_task_end();
-            assert_eq!(perry_resource_drop_next(), 0);
-        }
-        perry_gc_debug(0);
+            perry_gc_debug(3);
+            let owner = perry_resource_new(2, 71, 0);
+            let pin = perry_gc_pin(owner.cast());
+            // A duplicate own argument fails without consuming the earlier alias.
+            unsafe {
+                let scope = perry_resource_scope_new();
+                assert_eq!(perry_resource_lower(scope, owner, 1), 71);
+                perry_resource_lower(scope, owner, 1);
+                assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
+                perry_resource_scope_finish(scope);
+                assert_eq!(perry_resource_handle(owner), 71);
+                assert_eq!(perry_status(), 0);
+                // A borrowed host call keeps the owner live after its last compiled reference dies.
+                let scope = perry_resource_scope_new();
+                perry_resource_lower(scope, owner, 0);
+                perry_resource_scope_commit(scope);
+                perry_gc_unpin(pin);
+                perry_gc_check();
+                perry_resource_drop(owner);
+                assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
+                assert_eq!(perry_resource_drop_next(), 0);
+                perry_resource_scope_finish(scope);
+                perry_gc_check();
+                assert_eq!(perry_resource_drop_next(), 3u64 << 32 | 71);
+                perry_gc_check();
+                assert_eq!(perry_resource_drop_next(), 0);
+                // Ownership transfer invalidates every local alias and suppresses GC destruction.
+                let moved = perry_resource_new(2, 72, 0);
+                let pin = perry_gc_pin(moved.cast());
+                let scope = perry_resource_scope_new();
+                perry_resource_lower(scope, moved, 1);
+                perry_resource_scope_commit(scope);
+                perry_resource_handle(moved);
+                assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
+                perry_gc_unpin(pin);
+                perry_gc_check();
+                perry_resource_scope_finish(scope);
+                assert_eq!(perry_resource_drop_next(), 0);
+                // End of the lending task invalidates saved borrowed aliases, even when pinned.
+                let borrowed = perry_resource_new(3, 81, 1);
+                let representation = perry_resource_new(4, 91, 2);
+                let other = {
+                    perry_task_suspend();
+                    perry_task_enter()
+                };
+                perry_gc_task_enter();
+                let pin_borrow = perry_gc_pin(borrowed.cast());
+                let pin_rep = perry_gc_pin(representation.cast());
+                perry_resource_handle(borrowed);
+                assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
+                perry_task_resume(task);
+                perry_gc_task_leave();
+                perry_task_free();
+                assert_eq!(perry_resource_drop_next(), 4u64 << 32 | 81);
+                assert_eq!(perry_resource_drop_next(), 0);
+                perry_task_resume(other);
+                perry_resource_handle(borrowed);
+                assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
+                perry_resource_handle(representation);
+                assert_eq!(perry_status(), crate::exception::TYPE_ERROR);
+                perry_gc_unpin(pin_borrow);
+                perry_gc_unpin(pin_rep);
+                perry_gc_task_leave();
+                perry_task_free();
+                perry_gc_task_end();
+                assert_eq!(perry_resource_drop_next(), 0);
+            }
+            perry_gc_debug(0);
+        });
     }
 }

@@ -1,0 +1,10 @@
+[package]
+name = "perry-text-helper"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "../../src/helpers/text.rs"
+
+[lints]
+workspace = true

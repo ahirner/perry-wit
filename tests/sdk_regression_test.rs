@@ -173,11 +173,8 @@ fn cli_and_sdk_reject_colliding_implementation_names() {
 #[test]
 fn generated_contract_checks_the_selected_implementation_module() {
     for custom in [false, true] {
-        let root = std::env::temp_dir().join(format!(
-            "perry-sdk-contract-{}-{custom}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
         fs::create_dir_all(root.join("wit")).unwrap();
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
@@ -231,13 +228,13 @@ fn generated_contract_checks_the_selected_implementation_module() {
                 assert!(String::from_utf8_lossy(&output.stdout).contains("runTask"));
             }
         }
-        fs::remove_dir_all(root).unwrap();
     }
 }
 
 #[test]
 fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
-    let root = std::env::temp_dir().join(format!("perry-sdk-identities-{}", std::process::id()));
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_path_buf();
     fs::create_dir_all(root.join("wit")).unwrap();
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
@@ -284,13 +281,12 @@ fn same_named_types_in_distinct_interfaces_retain_their_shapes() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn cli_generates_a_checked_sdk_with_default_relative_paths() {
-    let root = std::env::temp_dir().join(format!("perry-sdk-cli-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_path_buf();
     fs::create_dir_all(root.join("wit")).unwrap();
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
@@ -325,12 +321,12 @@ fn cli_generates_a_checked_sdk_with_default_relative_paths() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
-    let root = std::env::temp_dir().join(format!("perry-sdk-composites-{}", std::process::id()));
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_path_buf();
     fs::create_dir_all(root.join("wit")).unwrap();
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
@@ -376,7 +372,6 @@ fn named_composite_aliases_and_nested_types_pass_strict_declaration_checking() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

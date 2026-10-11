@@ -693,8 +693,8 @@ mod tests {
 
     #[test]
     fn test_generate_declarations_with_complex_types() {
-        let tmp = std::env::temp_dir().join("perry_wit_test_types_wit");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let directory = tempfile::tempdir().unwrap();
+        let tmp = directory.path().to_path_buf();
         std::fs::create_dir_all(&tmp).unwrap();
 
         let wit_code = r#"
@@ -743,7 +743,5 @@ world complex-processor {
         assert!(dts.contains(
             "export declare function process(data: Payload, stat: Status): OutputResult;"
         ));
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

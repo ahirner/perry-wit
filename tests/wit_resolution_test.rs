@@ -4,8 +4,8 @@ use perry_wit::component::wit::resolve_wit;
 
 #[test]
 fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
-    let root = std::env::temp_dir().join(format!("perry-wit-resolution-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_path_buf();
     fs::create_dir_all(root.join("deps")).unwrap();
     fs::write(
         root.join("world.wit"),
@@ -58,5 +58,4 @@ fn local_dependencies_are_combined_with_missing_ambient_wasi_packages() {
             .count(),
         1
     );
-    fs::remove_dir_all(root).unwrap();
 }

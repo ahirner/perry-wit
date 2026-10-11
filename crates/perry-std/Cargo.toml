@@ -5,9 +5,6 @@ edition = "2024"
 publish = false
 description = "Built-ins (strings, Uint8Array, JSON, random) linked into perry-wit components on demand"
 
-[lib]
-crate-type = ["rlib", "cdylib"]
-
 [dependencies]
 libm = "0.2"
 perry-abi = { path = "../perry-abi" }

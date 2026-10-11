@@ -11,8 +11,12 @@
 //! early; the export adopts it with [perry_task_enter]. Synchronous exports end the task in
 //! their post-return function, after the host has lifted the results, so arguments and results
 //! live in the region and are released with everything else.
+use crate::instance::instance_state;
+#[cfg(target_arch = "wasm32")]
 use alloc::alloc::{Layout, alloc, dealloc};
-use core::{cell::UnsafeCell, ptr};
+#[cfg(target_arch = "wasm32")]
+use core::cell::UnsafeCell;
+use core::ptr;
 
 /// Size of the largest standard chunk, including its header. A task's chunks start at
 /// [MIN_CHUNK] and double up to this size, so a task that allocates little claims little
@@ -119,24 +123,44 @@ impl Task {
     }
 }
 
-struct Runtime {
+pub(crate) struct Runtime {
     current: *mut Task,
     free: [*mut Chunk; CLASSES],
 }
 
+impl Runtime {
+    pub(crate) const fn new() -> Self {
+        Self {
+            current: ptr::null_mut(),
+            free: [ptr::null_mut(); CLASSES],
+        }
+    }
+}
+
+/// Native allocations have an owner even when an instance is dropped with suspended tasks.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(crate) struct NativeStorage {
+    #[expect(
+        clippy::vec_box,
+        reason = "ABI task pointers must survive vector growth"
+    )]
+    tasks: Vec<Box<Task>>,
+    chunks: Vec<Box<[u64]>>,
+}
+
+#[cfg(target_arch = "wasm32")]
 struct Global(UnsafeCell<Runtime>);
 // SAFETY: one instance runs one thread (the callback ABI has no shared-memory threads).
+#[cfg(target_arch = "wasm32")]
 unsafe impl Sync for Global {}
 
-static RUNTIME: Global = Global(UnsafeCell::new(Runtime {
-    current: ptr::null_mut(),
-    free: [ptr::null_mut(); CLASSES],
-}));
+instance_state!(RUNTIME, runtime_state, runtime, Runtime, Runtime::new());
 
 #[allow(clippy::mut_from_ref)]
 fn runtime() -> &'static mut Runtime {
     // SAFETY: single-threaded; no reference outlives one runtime entry point.
-    unsafe { &mut *RUNTIME.0.get() }
+    unsafe { &mut *runtime_state() }
 }
 
 /// The running task. Compiled code only allocates while a task is current.
@@ -149,6 +173,7 @@ pub(crate) fn current() -> &'static mut Task {
     unsafe { &mut *task }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn layout(size: usize) -> Layout {
     assert!(size <= isize::MAX as usize - (ALIGN - 1), "chunk layout");
     // SAFETY: ALIGN is a fixed power of two and the rounded size fits isize.
@@ -157,7 +182,15 @@ fn layout(size: usize) -> Layout {
 
 fn new_chunk(size: usize, previous: *mut Chunk) -> *mut Chunk {
     // SAFETY: the layout has non-zero size.
+    #[cfg(target_arch = "wasm32")]
     let chunk = unsafe { alloc(layout(size)) } as *mut Chunk;
+    #[cfg(not(target_arch = "wasm32"))]
+    let chunk = crate::instance::native::with(|instance| {
+        let mut memory = vec![0u64; size.div_ceil(ALIGN)].into_boxed_slice();
+        let pointer = memory.as_mut_ptr().cast::<Chunk>();
+        instance.storage.borrow_mut().chunks.push(memory);
+        pointer
+    });
     if chunk.is_null() {
         out_of_memory();
     }
@@ -167,34 +200,45 @@ fn new_chunk(size: usize, previous: *mut Chunk) -> *mut Chunk {
 }
 
 fn new_task() -> *mut Task {
-    // SAFETY: the layout has non-zero size.
-    let task = unsafe { alloc(Layout::new::<Task>()) } as *mut Task;
-    if task.is_null() {
-        out_of_memory();
-    }
-    // SAFETY: freshly allocated.
-    unsafe {
-        task.write(Task {
-            chunk: ptr::null_mut(),
-            large: ptr::null_mut(),
-            cursor: 0,
-            end: 0,
-            class: 0,
-            ready_head: ptr::null_mut(),
-            ready_tail: ptr::null_mut(),
-            spare_nodes: ptr::null_mut(),
-            spare_subtasks: ptr::null_mut(),
-            subtasks: ptr::null_mut(),
-            cancelled: ptr::null_mut(),
-            set: 0,
-            result: ptr::null_mut(),
-            exception: ptr::null_mut(),
-            outputs: [crate::io::Output::new(), crate::io::Output::new()],
-            outcome: None,
-            status: 0,
-        })
+    let value = Task {
+        chunk: ptr::null_mut(),
+        large: ptr::null_mut(),
+        cursor: 0,
+        end: 0,
+        class: 0,
+        ready_head: ptr::null_mut(),
+        ready_tail: ptr::null_mut(),
+        spare_nodes: ptr::null_mut(),
+        spare_subtasks: ptr::null_mut(),
+        subtasks: ptr::null_mut(),
+        cancelled: ptr::null_mut(),
+        set: 0,
+        result: ptr::null_mut(),
+        exception: ptr::null_mut(),
+        outputs: [crate::io::Output::new(), crate::io::Output::new()],
+        outcome: None,
+        status: 0,
     };
-    task
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY: the layout has non-zero size.
+        let task = unsafe { alloc(Layout::new::<Task>()) } as *mut Task;
+        if task.is_null() {
+            out_of_memory();
+        }
+        // SAFETY: freshly allocated.
+        unsafe { task.write(value) };
+        task
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::instance::native::with(|instance| {
+            let mut task = Box::new(value);
+            let pointer = ptr::from_mut(&mut *task);
+            instance.storage.borrow_mut().tasks.push(task);
+            pointer
+        })
+    }
 }
 
 impl Task {
@@ -306,7 +350,7 @@ pub extern "C" fn perry_task_current() -> *mut Task {
 /// Make `task` current again (callback entry).
 ///
 /// # Safety
-/// `task` must come from [perry_task_enter] and not be freed.
+/// `task` must come from [perry_task_enter] in the active instance and not be freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_task_resume(task: *mut Task) {
     runtime().current = task;
@@ -343,10 +387,28 @@ pub extern "C" fn perry_task_free() {
         let mut large = (*task).large;
         while !large.is_null() {
             let previous = (*large).previous;
+            #[cfg(target_arch = "wasm32")]
             dealloc(large as *mut u8, layout((*large).size));
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::instance::native::with(|instance| {
+                instance
+                    .storage
+                    .borrow_mut()
+                    .chunks
+                    .retain(|memory| memory.as_ptr().cast::<Chunk>() != large);
+            });
             large = previous;
         }
+        #[cfg(target_arch = "wasm32")]
         dealloc(task as *mut u8, Layout::new::<Task>());
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::instance::native::with(|instance| {
+            instance
+                .storage
+                .borrow_mut()
+                .tasks
+                .retain(|owned| !ptr::eq(&**owned, task));
+        });
     }
     runtime.current = ptr::null_mut();
 }

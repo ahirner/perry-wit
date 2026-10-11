@@ -1,9 +1,56 @@
 use std::{fs, path::PathBuf, process::Command};
 
+const HELPERS: &[(&str, &[u8])] = &[
+    (
+        "search",
+        include_bytes!(concat!(env!("OUT_DIR"), "/search.wasm")),
+    ),
+    (
+        "text",
+        include_bytes!(concat!(env!("OUT_DIR"), "/text.wasm")),
+    ),
+    (
+        "fetch",
+        include_bytes!(concat!(env!("OUT_DIR"), "/fetch.wasm")),
+    ),
+    (
+        "json",
+        include_bytes!(concat!(env!("OUT_DIR"), "/json.wasm")),
+    ),
+    (
+        "time",
+        include_bytes!(concat!(env!("OUT_DIR"), "/time.wasm")),
+    ),
+    (
+        "number",
+        include_bytes!(concat!(env!("OUT_DIR"), "/number.wasm")),
+    ),
+    (
+        "runtime",
+        include_bytes!(concat!(env!("OUT_DIR"), "/runtime.wasm")),
+    ),
+    (
+        "runtime-collectible",
+        include_bytes!(concat!(env!("OUT_DIR"), "/runtime-collectible.wasm")),
+    ),
+    ("std", include_bytes!(concat!(env!("OUT_DIR"), "/std.wasm"))),
+    ("fs", include_bytes!(concat!(env!("OUT_DIR"), "/fs.wasm"))),
+    ("web", include_bytes!(concat!(env!("OUT_DIR"), "/web.wasm"))),
+];
+
 #[test]
+fn embedded_helpers_are_valid() {
+    for (name, bytes) in HELPERS {
+        assert!(wasmparser::Parser::is_core_wasm(bytes), "{name}");
+        wasmparser::Validator::new().validate_all(bytes).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "cold packaging build; run explicitly in the Nix environment"]
 fn compute_helpers_are_built_and_sources_are_watched() {
-    let scratch = std::env::temp_dir().join(format!("perry-build-artifact-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&scratch);
+    let directory = tempfile::tempdir().unwrap();
+    let scratch = directory.path();
     fs::create_dir_all(scratch.join("out")).unwrap();
     fs::create_dir_all(scratch.join("src/helpers")).unwrap();
 
@@ -21,7 +68,7 @@ fn compute_helpers_are_built_and_sources_are_watched() {
             }
         }
     }
-    for source in ["Cargo.toml", "Cargo.lock"] {
+    for source in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
         fs::copy(repo_root.join(source), scratch.join(source)).unwrap();
     }
     for source in ["src/lib.rs", "src/main.rs"] {
@@ -92,38 +139,58 @@ fn compute_helpers_are_built_and_sources_are_watched() {
         deps_dir.display()
     );
 
-    let output = Command::new(&script)
+    let mut command = Command::new(&script);
+    command
         .env("OUT_DIR", scratch.join("out"))
-        .env("CARGO_MANIFEST_DIR", &scratch)
+        .env("CARGO_MANIFEST_DIR", scratch)
         .env("RUSTC", &rustc_bin)
-        .output()
-        .unwrap();
+        .env_remove("PERRY_HELPER_TARGET_DIR");
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "build-script failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for helper in ["search", "text", "fetch", "json", "time"] {
+    for (helper, _) in HELPERS {
         let bytes = fs::read(scratch.join(format!("out/{helper}.wasm"))).unwrap();
         assert!(wasmparser::Parser::is_core_wasm(&bytes));
+        wasmparser::Validator::new().validate_all(&bytes).unwrap();
     }
     for source in [
         "src/helpers",
-        "src/helpers/search.rs",
-        "src/helpers/text.rs",
-        "src/helpers/fetch.rs",
+        "crates/search-helper",
+        "crates/text-helper",
+        "crates/fetch-helper",
+        "crates/json-helper",
+        "crates/time-helper",
+        "crates/number-helper",
+        "crates/perry-abi",
+        "crates/perry-runtime",
+        "crates/perry-std",
+        "crates/perry-fs",
+        "crates/perry-web",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
     ] {
-        assert!(stdout.lines().any(
-            |line| line == format!("cargo:rerun-if-changed={}", scratch.join(source).display())
-        ));
-    }
-    for source in ["crates/json-helper", "crates/time-helper", "Cargo.lock"] {
         assert!(
             stdout
                 .lines()
                 .any(|line| line == format!("cargo:rerun-if-changed={source}"))
         );
     }
-    fs::remove_dir_all(scratch).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "cargo:rerun-if-env-changed=PERRY_HELPER_TARGET_DIR")
+    );
+
+    let output = command.output().unwrap();
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{diagnostics}");
+    assert!(
+        !diagnostics.contains("Compiling "),
+        "unchanged helpers rebuilt: {diagnostics}"
+    );
 }

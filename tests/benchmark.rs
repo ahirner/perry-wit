@@ -1,7 +1,7 @@
 //! The benchmark baseline (`TODOs.md` P0.2), one command:
 //!
 //! ```text
-//! cargo test -j1 --test benchmark -- --ignored --nocapture --test-threads=1
+//! cargo test --test benchmark -- --ignored --nocapture
 //! ```
 //!
 //! It prints a Markdown table: component bytes (stripped), guest fuel per call and guest
@@ -606,7 +606,7 @@ fn examples() -> Result<Vec<Row>> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "serial performance campaign; run explicitly"]
+#[ignore = "performance campaign; run explicitly"]
 async fn benchmark_baseline() -> Result<()> {
     let mut rows = components().await?;
     rows.extend(microbenchmarks()?);

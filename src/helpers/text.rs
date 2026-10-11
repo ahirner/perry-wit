@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
 mod case_properties;
 mod casing;
@@ -90,7 +90,7 @@ pub extern "C" fn str_from_code_point(code_point: f64, out_ptr: u32) -> u32 {
         return u32::MAX;
     }
     // Reject surrogates (0xD800..=0xDFFF)
-    if cp >= 0xD800 && cp <= 0xDFFF {
+    if (0xD800..=0xDFFF).contains(&cp) {
         return u32::MAX;
     }
 
@@ -435,6 +435,7 @@ fn count_scalars(haystack_ptr: u32, haystack_byte_len: u32) -> u32 {
     count
 }
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()

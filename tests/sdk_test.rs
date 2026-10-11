@@ -7,7 +7,8 @@ use perry_wit::sdk::{SdkOptions, generate_sdk_files};
 
 #[test]
 fn command_contract_accepts_scripts_and_validates_explicit_run_exports() {
-    let temp_dir = std::env::temp_dir().join(format!("perry-sdk-command-{}", std::process::id()));
+    let directory = tempfile::tempdir().unwrap();
+    let temp_dir = directory.path().to_path_buf();
     fs::create_dir_all(temp_dir.join("src")).unwrap();
     generate_sdk_files(&SdkOptions {
         wit_dir: PathBuf::from("wit"),
@@ -64,13 +65,12 @@ fn command_contract_accepts_scripts_and_validates_explicit_run_exports() {
             String::from_utf8_lossy(&output.stdout)
         );
     }
-    fs::remove_dir_all(temp_dir).unwrap();
 }
 
 #[test]
 fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
-    let temp_dir = std::env::temp_dir().join(format!("perry-sdk-async-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&temp_dir);
+    let directory = tempfile::tempdir().unwrap();
+    let temp_dir = directory.path().to_path_buf();
     fs::create_dir_all(temp_dir.join("src")).unwrap();
     fs::create_dir_all(temp_dir.join("wit")).unwrap();
     fs::write(
@@ -118,7 +118,6 @@ fn generated_contract_accepts_resolved_async_results_and_rejects_wrong_types() {
             String::from_utf8_lossy(&output.stdout)
         );
     }
-    fs::remove_dir_all(temp_dir).unwrap();
 }
 
 #[test]
@@ -200,8 +199,8 @@ fn result_contract_accepts_completion_or_explicit_result_implementations() {
 
 #[test]
 fn test_generate_sdk_files_for_merge_task() {
-    let temp_dir = std::env::temp_dir().join("perry_sdk_test_merge_task");
-    let _ = fs::remove_dir_all(&temp_dir);
+    let directory = tempfile::tempdir().unwrap();
+    let temp_dir = directory.path().to_path_buf();
     fs::create_dir_all(&temp_dir).unwrap();
 
     let options = SdkOptions {
@@ -247,8 +246,8 @@ fn test_generate_sdk_files_for_merge_task() {
 
 #[test]
 fn test_typecheck_examples_against_generated_declarations() {
-    let temp_dir = std::env::temp_dir().join("perry_sdk_typecheck_suite");
-    let _ = fs::remove_dir_all(&temp_dir);
+    let directory = tempfile::tempdir().unwrap();
+    let temp_dir = directory.path().to_path_buf();
     let src_dir = temp_dir.join("src");
     fs::create_dir_all(&src_dir).unwrap();
 

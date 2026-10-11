@@ -5,9 +5,6 @@ edition = "2024"
 publish = false
 description = "Fetch API values (Headers, Response, Request), linked into perry-wit components on demand"
 
-[lib]
-crate-type = ["rlib", "cdylib"]
-
 [dependencies]
 perry-abi = { path = "../perry-abi" }
 

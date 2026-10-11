@@ -2,16 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$ROOT_DIR"
-
-# Re-enter through the pinned toolchain when called outside its development shell.
-if [[ -z "${WASI_WIT_PATH:-}" ]]; then
-  exec nix develop -c bash "$SCRIPT_DIR/build.sh"
-fi
+cd "$SCRIPT_DIR/.."
 
 mkdir -p dist
-cargo run --release --bin perry-wit -- examples/merge_docs.ts \
+cargo run --bin perry-wit -- examples/merge_docs.ts \
   --world merge-docs -o dist/perry_merge_docs.wasm
-cargo run --release --bin perry-wit -- examples/merge_task.ts \
+cargo run --bin perry-wit -- examples/merge_task.ts \
   --world task-runner -o dist/perry_merge_task.wasm

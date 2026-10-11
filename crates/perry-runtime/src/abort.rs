@@ -143,71 +143,73 @@ mod tests {
 
     #[test]
     fn completed_and_cancelled_timers_release_signal_edges() {
-        region::perry_task_enter();
-        roots::perry_gc_task_enter();
-        roots::perry_gc_debug(3);
-        let signal = perry_abort_new();
-        let pin = roots::perry_gc_pin(signal);
-        // SAFETY: the signal is pinned; pending timer payloads belong to the scheduler roots.
-        unsafe {
-            roots::perry_gc_boundary();
-            let retained = roots::counters().live_bytes;
-            for handle in 1..=2000 {
-                let value = region::perry_alloc(1024);
-                value.write(73);
-                let promise = promise::perry_promise_new_typed(1);
-                region::perry_subtask_register(handle, promise, value as usize as u64);
-                perry_abort_watch(signal, handle, promise);
-                roots::perry_gc_check();
-                assert_eq!(value.read(), 73, "pending timer lost its payload");
-                assert_eq!(region::perry_subtask_done(handle), 1);
-                roots::perry_gc_check();
-                assert_eq!(roots::counters().live_bytes, retained);
-            }
-            assert!((*signal.cast::<Signal>()).head.is_null());
-
-            let caller = region::perry_task_current();
-            region::perry_task_suspend();
-            let other = region::perry_task_enter();
+        crate::RuntimeInstance::default().enter(|| {
+            region::perry_task_enter();
             roots::perry_gc_task_enter();
-            let pending = promise::perry_promise_new_typed(0);
-            region::perry_subtask_register(2001, pending, 7);
-            perry_abort_watch(signal, 2001, pending);
-            roots::perry_gc_check();
-            region::perry_task_resume(caller);
-            let scope_error = crate::string::from_static(
-                "AbortSignal cancellation is limited to the current export task",
-            );
-            perry_abort(signal, scope_error, scope_error);
-            assert_eq!(exception::perry_status(), exception::TYPE_ERROR);
-            assert_eq!(perry_abort_aborted(signal), 0);
-            region::current().exception = ptr::null_mut();
-            region::perry_task_resume(other);
-            assert_eq!(region::perry_task_cancel(), 1);
-            roots::perry_gc_task_leave();
-            region::perry_task_free();
-            region::perry_task_resume(caller);
-            roots::perry_gc_check();
-            assert!((*signal.cast::<Signal>()).head.is_null());
-            assert_eq!(roots::counters().live_bytes, retained);
+            roots::perry_gc_debug(3);
+            let signal = perry_abort_new();
+            let pin = roots::perry_gc_pin(signal);
+            // SAFETY: the signal is pinned; pending timer payloads belong to the scheduler roots.
+            unsafe {
+                roots::perry_gc_boundary();
+                let retained = roots::counters().live_bytes;
+                for handle in 1..=2000 {
+                    let value = region::perry_alloc(1024);
+                    value.write(73);
+                    let promise = promise::perry_promise_new_typed(1);
+                    region::perry_subtask_register(handle, promise, value as usize as u64);
+                    perry_abort_watch(signal, handle, promise);
+                    roots::perry_gc_check();
+                    assert_eq!(value.read(), 73, "pending timer lost its payload");
+                    assert_eq!(region::perry_subtask_done(handle), 1);
+                    roots::perry_gc_check();
+                    assert_eq!(roots::counters().live_bytes, retained);
+                }
+                assert!((*signal.cast::<Signal>()).head.is_null());
 
-            let promise = promise::perry_promise_new_typed(0);
-            let settled = roots::perry_gc_pin(promise);
-            region::perry_subtask_register(2001, promise, 17);
-            perry_abort_watch(signal, 2001, promise);
-            let message = crate::string::from_static("The operation was aborted");
-            perry_abort(signal, message, message);
-            perry_abort(signal, message, message);
-            assert_eq!(promise.cast::<u32>().read(), promise::REJECTED);
-            assert_eq!(perry_abort_aborted(signal), 1);
-            assert!((*signal.cast::<Signal>()).head.is_null());
-            assert_eq!(region::perry_subtask_done(2001), 0);
-            roots::perry_gc_unpin(settled);
-            roots::perry_gc_unpin(pin);
-            roots::perry_gc_task_leave();
-            region::perry_task_free();
-            roots::perry_gc_boundary();
-            roots::perry_gc_debug(0);
-        }
+                let caller = region::perry_task_current();
+                region::perry_task_suspend();
+                let other = region::perry_task_enter();
+                roots::perry_gc_task_enter();
+                let pending = promise::perry_promise_new_typed(0);
+                region::perry_subtask_register(2001, pending, 7);
+                perry_abort_watch(signal, 2001, pending);
+                roots::perry_gc_check();
+                region::perry_task_resume(caller);
+                let scope_error = crate::string::from_static(
+                    "AbortSignal cancellation is limited to the current export task",
+                );
+                perry_abort(signal, scope_error, scope_error);
+                assert_eq!(exception::perry_status(), exception::TYPE_ERROR);
+                assert_eq!(perry_abort_aborted(signal), 0);
+                region::current().exception = ptr::null_mut();
+                region::perry_task_resume(other);
+                assert_eq!(region::perry_task_cancel(), 1);
+                roots::perry_gc_task_leave();
+                region::perry_task_free();
+                region::perry_task_resume(caller);
+                roots::perry_gc_check();
+                assert!((*signal.cast::<Signal>()).head.is_null());
+                assert_eq!(roots::counters().live_bytes, retained);
+
+                let promise = promise::perry_promise_new_typed(0);
+                let settled = roots::perry_gc_pin(promise);
+                region::perry_subtask_register(2001, promise, 17);
+                perry_abort_watch(signal, 2001, promise);
+                let message = crate::string::from_static("The operation was aborted");
+                perry_abort(signal, message, message);
+                perry_abort(signal, message, message);
+                assert_eq!(promise.cast::<u32>().read(), promise::REJECTED);
+                assert_eq!(perry_abort_aborted(signal), 1);
+                assert!((*signal.cast::<Signal>()).head.is_null());
+                assert_eq!(region::perry_subtask_done(2001), 0);
+                roots::perry_gc_unpin(settled);
+                roots::perry_gc_unpin(pin);
+                roots::perry_gc_task_leave();
+                region::perry_task_free();
+                roots::perry_gc_boundary();
+                roots::perry_gc_debug(0);
+            }
+        });
     }
 }
