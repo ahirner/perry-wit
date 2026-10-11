@@ -1,198 +1,239 @@
-# Architecture
+# Perry-WIT Architecture
 
-Perry-WIT compiles a static subset of TypeScript to WASI 0.3 components. [TODOs.md](TODOs.md)
-records the completion checklist and accepted deviations.
+Perry-WIT compiles static TypeScript directly to WebAssembly components targeting WASI 0.3 (Preview 3) through Perry HIR and pliron typed MIR.
 
-## Crates
+## Principles
 
-| Crate | Responsibility |
-|---|---|
-| `perry-wit` | CLI, compilation API, WIT binding, SDK generation, linking and component encoding |
-| `perry-lower` | Static source-module loading and Perry HIR → typed MIR |
-| `perry-mir` | Types, operations, verifiers, effects, escape analysis and optimization |
-| `perry-codegen` | Value representations, stackless async splitting and canonical ABI glue |
-| `pliron-wasm` | Wasm dialect, CFG structuring and core-module emission |
-| `perry-runtime` | Allocation, collection, roots, tasks, promises, strings and arrays |
-| `perry-std` | Built-ins over native values: bytes, JSON, regex tables and decoding |
-| `perry-fs` | Promise-only filesystem operations over WASI |
-| `perry-web` | Fetch, URL, headers, request/response values and byte streams |
-| `perry-abi` | Runtime services and layouts shared by guest libraries |
-| computation helpers | Parsing, Unicode case conversion, search, time and number formatting |
-| `conformance` | Directed contracts, generated programs, shrinking and replay against Node |
+1. **Ahead-of-Time Execution**
+   TypeScript operations compile directly into native WebAssembly instructions. Primitive local variables map to SSA values and block parameters. Compound aggregates and retained objects live in managed guest memory.
 
-## Compilation
+2. **Static Source Contracts**
+   Binding-aware validation rejects unsupported dynamic JavaScript patterns while the AST retains full contextual information for precise diagnostics. Lightweight runtime checks handle data-dependent array bounds and finite variant tags.
+
+3. **Direct Intermediate Representation Lowering**
+   Control flow constructs (branches, loops, exception paths, function calls, and suspension points) share a unified lowering and validation pipeline. Typed capability plans link source validation directly to canonical imports and runtime signatures.
+
+4. **Native Concurrency**
+   Suspension, resumption, and asynchronous transfers are managed by the host via WASI 0.3 Component Model primitives. Guest task records and observer lists maintain Promise identity, repeated observation, and combinator settlements. Continuations are scheduled directly by native P3 wakeups.
+
+5. **Authoritative WIT**
+   Pinned official WASI definitions specify built-in platform capabilities, while application WIT files define internal interfaces. The SDK and compiler share unified export conventions, ensuring helper names do not leak into host protocols.
+
+6. **Unified Guest Heap**
+   Pure algorithms rely on compact Rust helpers compiled directly into the guest module. Dynamic allocations, root frames, canonical scratch buffers, and suspended task states follow an explicit, single-heap ownership model managed by `talc`.
+
+7. **Reproducible Evidence**
+   Nix flakes pin all toolchain versions, compilers, and interface definitions. Differential testing against Node.js establishes source-level equivalence. Controlled WASI 0.3 hosts verify canonical ABI compliance, stackless coroutine suspension, resource lifetimes, and cleanup.
+
+## Lowering
+
+The compiler layers cooperate to transform high-level TypeScript into validated WASI 0.3 WebAssembly components:
 
 ```text
-Static TypeScript modules → Perry HIR → typed MIR
-    → SSA promotion, bounded inlining, scalar replacement, DCE, CFG simplification
-    → escape/effect summaries and lifetime assignment
-    → Wasm dialect, canonical conversion, async state machines
-    → core Wasm, linked runtime services, component encoding
+┌─────────────────────────────────────────────────────────────┐
+│                     Compiler Frontend                       │
+│    ESM Loader  •  Source AST  •  Static Source Validation   │
+│    WIT Import Binding (bind_source)  •  Command Adapter     │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                     Perry HIR Lowering                      │
+│    Lexical Scopes  •  Guarded Initializer  •  Control Flow  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                     Contract Resolution                     │
+│    Signature Checks  •  WIT World Match  •  Suspension Check│
+│    Canonical ABI Plans  •  Scratch Buffer Layouts           │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                      pliron MIR Engine                      │
+│   Block Joins  •  Exception Paths  •  Root Frame Tracking   │
+│                                                             │
+│   ┌─────────────────────────┐     ┌───────────────────────┐ │
+│   │    Runtime Builders     │     │  Linked Guest Helpers │ │
+│   │     Task Schedulers     │     │ Pure Rust Wasm (JSON, │ │
+│   │     Stream Readers      │◄────┤ Time, Text, Search)   │ │
+│   │        Host I/O         │     │ (Relocated Bytecode)  │ │
+│   └─────────────────────────┘     └───────────────────────┘ │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                       Code Generation                       │
+│    Dominator Tree Structuring  •  Reducible Control Flow    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                  Component Model Encoding                   │
+│    Canonical ABI Adapters  •  Resolved WIT  •  Encoder      │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Locals initially use slots; `mem2reg` builds SSA joins and loop-carried values. Record shapes
-contain sorted field names and their static types, while literal expressions evaluate in source
-order. Named records can be recursive. Unsupported constructs receive compiler diagnostics.
+### 1. Source Analysis
 
-The emitter makes resumed CFGs reducible, structures control flow using dominators, folds single-use
-values into stack expressions and preserves effect order. Locals share storage only when their
-emitted live ranges do not overlap, including operands held through folded expressions. Branch
-arguments move simultaneously; peepholes remove redundant branches and form `local.tee`. Async
-state and function-kind dispatch use `br_table`. The linker resolves runtime imports,
-relocates reachable helper functions and reserves their combined stack requirements. Every emitted
-core module and component is validated with thread features, stack switching, stackful component
-async and additional async builtins disabled.
+The frontend resolves local static ESM dependencies and validates TypeScript AST constructs. Lexical binding analysis distinguishes global built-ins from shadowed local identifiers. Static validation enforces read-only execution constraints and preserves operand evaluation order.
 
-## Values
+Before lowering to Perry HIR, the compiler interacts with the resolved WIT world:
+- **Binding WIT Imports**: Resolves Component Model import specifiers (`import { ... } from "pkg:interface"`) against the WIT world and rewrites AST bindings before standard import syntax is erased.
+- **Command Adapter Synthesis**: When targeting a world exporting `wasi:cli/run@0.3.0` and no explicit runner function exists, the compiler injects a command runner export wrapping top-level statements.
+- **AST Contract Checks**: Validates that source export declarations match the shapes required by the target world.
 
-| Value | Representation |
-|---|---|
-| number | IEEE-754 `f64` |
-| boolean | `i32` |
-| record | Address of a shape identifier and statically typed eight-byte field slots |
-| dense array | Address of length, capacity and eight-byte element storage |
-| string | Immutable view over UTF-8 bytes, with cached scalar count and owner |
-| Uint8Array | Mutable byte view retaining its storage owner |
-| bigint | Boxed exact sign/magnitude for WIT s64/u64 transport |
-| Date | Mutable boxed epoch-millisecond value |
-| Temporal | Immutable 16-byte codec payload: epoch nanoseconds for Instant, epoch day plus nanoseconds within the day for plain values |
-| JSON | Immutable parsed graph, distinct from native aggregate storage |
-| optional | The underlying representation plus absence sentinels admitted by its type |
+### 2. Perry HIR Lowering
 
-References encode `undefined` as zero and `null` as one, retaining a single-word representation.
-Numbers reserve signalling-NaN payloads and booleans use spare integer values. Stable absence
-sentinels let closed records and arrays widen admitted absence states without copying or losing aliases.
+The normalized AST lowers into Perry HIR:
+- Top-level module statements are extracted into a guarded initializer that executes once before any public export call.
+- Retained module-scope bindings persist across subsequent invocations.
+- Function declarations, expressions, and control flow structure into high-level intermediate representation.
 
-Strings use Unicode scalar indexing. ASCII character strings are static; a cached scalar cursor
-accelerates sequential non-ASCII indexing. Slices share immutable storage. Append chains reuse
-spare buffer capacity while the left operand is the latest view; retained prefixes remain unchanged.
-When liveness proves the old header unobservable, appends reuse it without assuming exclusive
-ownership of the backing bytes.
+### 3. Contract Resolution
 
-Dates preserve identity and alias-visible mutation. Literal regular expressions compile into
-bounded DFA tables; search/test allocate no guest storage. Incremental TextDecoder retains at most
-three pending bytes, with explicit fatal-error and BOM state.
+Before SSA lowering, the compiler reconciles Perry HIR against the resolved WIT world:
+- **Signatures**: Validates function signatures, argument counts, and return types. Verifies that functions containing suspension points (I/O, timers, streams) are declared `async func` in WIT.
+- **Capability Plans**: Links native operations (filesystem, HTTP, clock, random, process) to canonical import signatures.
+- **Canonical ABI Layouts**: Derives scratch buffer sizes, return area offsets, and variant tag layouts required by Canonical ABI lowering.
 
-## JSON
+### 4. Typed MIR Lowering
 
-The parser produces immutable JSON nodes. Required scalar conversions check node kinds. Conversion
-into a declared closed record or dense array creates independent native aggregates; one generated
-helper per schema handles recursive types. Absence checks distinguish missing members and null.
+Perry HIR lowers into typed SSA intermediate representation built on pliron:
+- Every local variable initializes as a slot, converted into SSA values and block arguments via `mem2reg`.
+- Branch joins and loop headers pass mutable local state through SSA block parameters.
+- Exception unwinding uses shared catch and finally dispatch paths to guarantee consistent cleanup order.
+- References to heap objects are tracked in root frames linked across asynchronous suspension points.
 
-Serialization of native aggregates is generated per type. JSON graph traversal and parsing use
-bounded iterative helper stacks. Object spreads copy shallow JSON member nodes and preserve the
-supported ECMAScript property order. Revivers, replacers and indentation remain compile-time errors.
+Function invocations, native capability calls, and Promise observations follow explicit ownership conventions:
+
+- **Function Invocations**: Caller frames preserve root ownership of pointer arguments, while callees receive borrowed references and return fresh allocation ownership.
+- **Capability Calls**: Outbound linear memory buffers pin across the host boundary. Opaque resource handles transfer through transactional descriptor scopes.
+- **Promise Observations**: Settled asynchronous tasks retain a single outcome for repeated observation ([Liskov & Shrira 1988], §3). Observing continuations borrow the retained value without cloning its heap graph.
+
+Runtime builders assemble scheduling hooks, combinators, scalar capabilities, process context, and date codecs. Referenced pure Rust guest helpers link into the module's shared memory.
+
+### 5. Code Generation
+
+The code generator translates typed MIR into WebAssembly instructions:
+
+- Reducible control flow structures into valid WebAssembly blocks, loops, and branches using Ramsey's dominator-tree algorithm ([Ramsey 2022]).
+- **Operand Stack Scheduling**: Single-use values defined in the same block as their user fold into expression trees evaluated on the operand stack when effect and trap ordering permits. Constants rematerialize at use sites. Other live values and used block parameters occupy WebAssembly locals, with locals reused across non-overlapping live ranges.
+- **Canonical ABI Marshalling**: Synthesizes boundary stubs directly around compiled entry points according to the [Canonical ABI]. Inbound values lift from flat registers into typed guest objects, while outbound values lower into caller return areas.
+
+The resulting core WebAssembly module can be emitted directly for low-level embedding or unit testing.
+
+### 6. Component Encoding
+
+The component wrapper binds native WASI 0.3 imports, generates canonical ABI adapters, embeds resolved WIT metadata, and invokes the component encoder to emit a validated WASI 0.3 component.
+
+Interface glue implements the [Canonical ABI] around exported entry points:
+
+- **Synchronous Exports**: Emits flat Canonical ABI entry points, lifts arguments, invokes the MIR body, lowers results, and provides `cabi_post_<export>`.
+- **Asynchronous Exports**: Synthesizes the stackless WASI 0.3 callback trio: `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`.
+- **Memory Allocation**: Exposes `cabi_realloc`, binding Canonical ABI dynamic allocations directly to the guest `talc` allocator.
 
 ## Memory
 
-`talc` manages linear memory after static data and helper stacks. The compiler assigns these lifetimes:
+Perry-WIT manages all heap-allocated objects in a single, non-moving guest memory space managed by `talc`.
 
-| Tier | Storage policy |
-|---|---|
-| scalar | Eliminate closed aggregates whose fields can stay in SSA |
-| frame | Reuse bounded activation storage for proven nonescaping scalar records |
-| task | Regions for statically bounded task storage and recycled scheduler nodes |
-| instance | Precise non-moving collection for persistent or unproven allocation lifetimes |
-| buffer | Explicit owners for canonical and host-transfer storage |
+### Text
+Strings are stored as validated UTF-8 byte sequences using Unicode scalar indexing. Lone surrogates and UTF-16 code-unit operations are rejected at compile time. External text entering through Canonical ABI boundaries, JSON, or `TextDecoder` undergoes strict UTF-8 validation. Binary payloads remain intact as raw byte views without intermediate transcoding. Repeated appends reuse spare buffer capacity for amortized linear copying.
 
-Collectible objects use size-class pages, direct page lookup, side mark bits, exact pointer shapes,
-a tracing worklist and lazy sweeping. Ordinary collection is due at
-`max(256 KiB, live bytes after collection)` allocated volume; memory pressure can request an earlier
-collection at a compiled safe point. Helpers allocate without collecting internally. Exclusive,
-unpinned buffer payloads can grow without moving through talc; allocation size, page-directory
-coverage, tracing bounds and accounting advance together. Fragmented or pinned storage uses the
-allocate/copy fallback. Shared string backing and active host borrows do not use exclusive resize.
+### Heap
+Records, dictionaries, finite unions, JSON trees, byte views, and Promise outcomes share a unified managed heap.
 
-Roots comprise live compiled values, persistent module cells, suspended frames and active operations.
-A three-word root-stack descriptor supports inline publication and index-based marks; a helper grows
-its capacity. Allocation-free calls that cannot collect, suspend or reenter skip publication and GC
-checks. Potentially collecting calls retain caller roots for the whole call. Effect summaries are
-recomputed after MIR transformations.
-Completed operations detach their edges, dead frame slots clear, and recycled scheduler entries clear
-their old references. Views retain their owner. Pins remain until host completion or cancellation
-acknowledgement; one task's cleanup preserves another task's storage.
+Linear memory partitions into explicit lifetime tiers:
+- **Static**: Initialized data segments, embedded helper code, and immutable string constants.
+- **Rooted**: Dynamic guest objects, records, and arrays managed via size-class pages, mark-sweep tracing, and root descriptors.
+- **Pinned**: In-flight host I/O buffers and Canonical ABI scratch areas held until host acknowledgement.
+- **Ephemeral**: Stack-allocated scalar frames and immediate operands.
 
-Stream leases require a liveness proof: a previous read/write result and every derived value must be
-dead before reuse. Otherwise the operation uses collectible storage. Writer close waits for queued
-writes and propagates failures. Async iteration releases the reader and cancels on early exit/errors.
+Loop-level garbage collection traces active root frames and coalesces dead allocations. Canonical import scratch buffers use dedicated root scopes, keeping buffers valid while concurrent tasks allocate and collect.
 
-BYOB readers transfer a shared byte-buffer owner without copying its payload. Views retain an owner,
-offset and length; a detached owner invalidates every alias and releases its payload edge. Queued
-reads retain only active requests. A host copy pins its reader until completion or cancellation
-acknowledgement. Canonical transfers retain the payload independently of later buffer detachment.
+Canonical values follow a schema-guided ownership model for outgoing arguments, incoming results, and exported results. The collector traverses the WIT type layout across strings, byte buffers, nested lists, records, tuples, options, results, and variants. Incoming return areas are initialized and rooted before the host populates them. Outgoing graphs are rooted before adapters suspend or transfer ownership. A return-area address alone does not imply ownership of referenced allocations.
 
-`--explain-tiers` reports allocation decisions. Raw test modules can expose allocation, collection,
-live-byte, reserved-byte, transfer-copy, pin, root-publication and buffer-growth counters, plus forced
-collection and poisoning. Ordinary execution and instrumented counter runs are measured separately.
+Export adapters manage the lifecycle of both the returned source graph and canonical scratch storage. The export adapter transfers ownership to the callback, ensuring raw ABI values never outlive their owner. Storage is released only after `task.return` consumes the result, or after all operations acknowledge cancellation. Subsequent invocations verify that ownership slots are empty before dispatching new calls.
 
-## Boundaries
+### Scopes
+Component instances isolate runtime state within dedicated `RuntimeInstance` contexts. Each instance owns its task scheduler, root frame descriptors, resource tables, and process context.
 
-The selected WIT world supplies function names, types and async effects. SDK type imports resolve to
-these static definitions. Extra source exports stay internal. Static local modules share one typed
-module state; synchronous initialization runs once, with failure/reentrancy checks.
+Module-level bindings and cached process context persist for the lifetime of the component instance. Per-call temporary objects are reclaimed by the canonical post-return hook after results transfer to the caller. Instances can alternate on a single thread or execute concurrently across threads. Dropping an instance cleanly releases all associated guest allocations and active tasks.
 
-Finite variants occupy sixteen bytes: a static tag string, one traced owner and one payload slot.
-Tag guards select statically checked payload types; access checks remain valid across alias changes.
+Pure Rust guest helpers validate buffer boundaries before borrowing guest memory. Their minimal unsafe boundaries remain isolated from pure logic and introduce no auxiliary heap allocators.
 
-Canonical conversion supports scalars, records, lists, tuples, options, enums, finite variants
-and results. WIT s64/u64 use bigint for exact transport. Tagged results use `{ ok: true, value }` or
-`{ ok: false, error }`, omitting absent payloads. An explicit tagged return takes precedence over a
-completion-style payload. Compatible throws become `err`; unsupported mappings receive diagnostics.
+## Concurrency
 
-Outbound `WitInput<T>` recursively permits strings for byte lists. Lowering uses the string's UTF-8
-pointer and byte length. Canonical inbound strings and byte lists adopt transferable payload storage;
-byte lists remain mutable without aliasing immutable strings. Output owners survive lifting and
-post-return or async acknowledgement.
+Asynchronous TypeScript functions execute eagerly until they reach an initial suspension point.
 
-Named WIT imports use the same conversion routines. Async imports lower to a small MIR wrapper that
-starts a host call, awaits its transfer and lifts the result. The transfer retains argument owners,
-temporary canonical buffers and result areas. Cancellation acknowledges the host before discarding
-returned canonical buffers and clearing transfer owners.
+### Execution
+Completed tasks store their settlement state and outcome value for repeated observation.
 
-Resource descriptors share ownership state across aliases. Canonical argument preparation is
-transactional: a duplicate move rolls back before invoking the host. Active transfers root borrowed
-owners until completion or cancellation acknowledgement. The collector's resource registry is weak;
-it queues unreachable owned handles after marking. Generated adapters drain that queue at legal
-host-call boundaries, before return and outside collector borrows. Saved inbound borrows expire at
-task completion. Imported resources can pass through exported interfaces using WIT type aliases.
-Declaring one resource interface as both imported and exported is diagnosed because its two resource
-identities need separate source types. Asynchronous module initialization remains incomplete.
+Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue.
+Awaits on already-settled promises advance inline on the stackless state machine when uncontended, yielding to the host only when competing work can make progress.
+This avoids redundant host context switches for already-resolved promises and eliminates unneeded host polling.
 
-## Async
+### Settlement
+Guest task records maintain explicit settlement states, observer lists, and outcome values in the guest heap. Combinator operations (`all`, `allSettled`, `race`) register as observers on operand tasks and propagate settlements deterministically when dependencies resolve.
 
-Async functions split into a ramp and a resumable step. Calls start eagerly. A settled await continues
-inline; a pending await registers the frame as a waiter. The runtime drives ready frames after P3
-completion events. Promise combinators use the same task queue.
+Non-winning branches in a race continue running as background tasks. The runtime verifies that all spawned tasks settle or acknowledge cancellation before the top-level export returns. Attempting to return while unresolved background work remains results in a runtime trap.
 
-Each export has its own task, waitable set, active host operations and scheduler storage. The callback
-ABI stores that task in `context.set 0`; completion resumes it through `context.get 0`. Once the result
-and required output transfers finish, `task.return` delivers the value and cleanup releases the task.
-Exports and host calls can overlap without requiring component threading.
+### Streams
+Readable stream readers decouple public read promises from underlying native transfer completion:
+- Releasing a reader lock rejects pending read promises while preserving native buffer state. Subsequent readers receive previously buffered chunks.
+- Explicit cancellation retains the native transfer owner until host acknowledgement arrives.
+- Request and response body consumption methods pull data incrementally through this same streaming pipeline.
+- Asynchronous iteration loops (`for await`) over byte streams lower into locked reader calls with structured cleanup. Early loop termination explicitly cancels the stream and releases the lock, while loop exceptions take precedence over cancellation errors.
 
-Unresolved detached timer/import/filesystem/fetch/read work is cancelled at the task boundary and
-reported as a failure. Host cancellation callbacks detach waitables and acknowledge native transfers
-before releasing task storage. A host-cancelled activation is discarded; source `finally` guarantees
-apply to source control flow. Promise timers accept `AbortController.signal`; active watches reuse
-scheduler entries and detach when timers settle. Source cancellation is limited to the current export
-task; attempts to cancel another task through a shared signal throw before cancelling operations.
-Source cancellation options for other builtins are deferred unless required by an application.
+### Host Resource Integration
 
-## Exceptions
+Host resources—open file descriptors, network sockets, timers—are tracked via host resource tables. The guest runtime maintains valid handles across asynchronous suspensions. Cancellation retains in-flight operation owners until the host acknowledges completion; integration tests verify that transfer buffers, completion futures, and resource-table entries are released across repeated calls.
 
-Catchable failures carry an exception status and optional exception object through explicit CFG edges.
-Callers propagate failures to their nearest handler. `finally` runs along normal completion, throws,
-returns and loop exits. A rejected promise retains its exception for repeated observation.
+In the Wasmtime hosts used for verification, a [Store](https://docs.wasmtime.dev/api/wasmtime/struct.Store.html) owns instance state and host data, including the resource table. An unhandled trap exits guest execution without running source-level `finally` handlers. Store disposal is a separate lifecycle step: dropping the store releases its owned instance state and host data, with resource cleanup determined by the destructors of the host objects it owns.
 
-An escaping exception becomes the declared compatible WIT error, traps an export without an error
-mapping, or fails a CLI command after reporting to stderr. Resource exhaustion remains a Wasm trap.
+## Linked Helpers
+
+Complex algorithmic operations—including JSON serialization, date calculations, text transformations, and HTTP header decoding—are implemented in freestanding Rust helper crates.
+
+### Bytecode Embedding
+Helper libraries compile to standalone `wasm32-unknown-unknown` binaries without allocators or system runtimes. The resulting bytecode artifacts embed directly into the compiler binary during build time, removing any runtime dependency on Rust or LLVM.
+
+### Capability Pruning
+When compiling a user component, the compiler scans AST capability requirements to identify only the helper functions actually referenced by the program. Unreferenced helper functions and unused data sections are pruned completely.
+
+### Static Relocation
+During code generation, the compiler relocates helper functions, signatures, and element tables directly into the target WebAssembly module. Instructions are re-encoded to target local function indices, allowing pure helper routines to execute with zero call overhead.
+
+### Memory Placement
+Static data segments required by helper routines are placed contiguously above user static data within the guest module's primary linear memory. When a helper requires call-frame scratch space, it shares a bounded stack reservation with the guest instance. This preserves the single-heap ownership model without introducing auxiliary memory allocators.
 
 ## Verification
 
-Unit tests check dialect invariants, emission, runtime ownership and pure helpers. Integration tests
-exercise compiled core modules, actual WIT worlds, SDK checking, in-process HTTP, bounded memory,
-stream reuse and suspended calls. Node supplies the oracle for declared shared semantics; astral
-scalar string behavior has explicit Perry expectations.
+```text
+  Ordinary TypeScript ──────────── Node execution
+          │                            │
+          │       compare supported    │
+          │       source behavior      │
+          ▼                            │
+     Perry compiler                    │
+          │                            │
+          ▼                            │
+      Component ────────────── observable results
+          │
+          ▼
+  Controlled Wasmtime host
+  • exact imports/exports and canonical types
+  • gated concurrency, cancellation, and completion
+  • native resource tables and memory limits
+```
 
-Generated programs use bounded static types, valid metamorphic forms and replayable seeds. Compiler
-rejection is a failure. Scaling checks compare guest fuel at n and 4n; component budgets use frozen
-source baselines. Final consumer acceptance is recorded separately after its approved run.
+Verification rests on two complementary boundaries:
+
+1. **Source Equivalence**: Conformance fixtures run under both Node.js and compiled WASI 0.3 components. These checks compare evaluation order, lexical scope, runtime values, exception unwinding, and standard library behaviors.
+2. **Host Integration**: Controlled Wasmtime hosts verify Canonical ABI marshalling, stackless coroutine suspension, cancellation signal propagation, fuel scaling bounds, and deterministic resource cleanup across serial invocations.
+
+## References
+
+- **[Liskov & Shrira 1988]**: B. Liskov, L. Shrira. *Promises: Linguistic Support for Efficient Asynchronous Procedure Calls in Distributed Systems*. ACM PLDI, pp. 260–267, 1988.
+- **[Ramsey 2022]**: N. Ramsey. *Beyond Relooper: Recursive Translation of Unstructured Control Flow to Structured Control Flow (Functional Pearl)*. Proceedings of the ACM on Programming Languages 6(ICFP), 2022.
+- **[Canonical ABI]**: WebAssembly Community Group. *Canonical ABI Explainer*. WebAssembly/component-model, living design document.
+
+[Liskov & Shrira 1988]: https://doi.org/10.1145/53990.54016
+[Ramsey 2022]: https://doi.org/10.1145/3547621
+[Canonical ABI]: https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md
