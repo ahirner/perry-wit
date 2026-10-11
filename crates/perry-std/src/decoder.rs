@@ -42,18 +42,33 @@ impl Decoder {
             self.bom_seen = false;
         }
         self.streaming = stream;
-        if self.length == 0 && core::str::from_utf8(input).is_ok() {
-            let mut remaining = input;
-            if let Some(rest) = remaining.strip_prefix(&[0xef, 0xbb, 0xbf]) {
-                self.emit(&[0xef, 0xbb, 0xbf], &mut output);
-                remaining = rest;
+        let mut rest = input;
+        loop {
+            // Between sequences, a valid run is emitted as one part; the byte loop below
+            // handles pending sequences, invalid bytes and a split final sequence.
+            if self.length == 0 {
+                let valid = match core::str::from_utf8(rest) {
+                    Ok(_) => rest.len(),
+                    Err(error) => error.valid_up_to(),
+                };
+                if valid != 0 {
+                    let mut run = &rest[..valid];
+                    if !self.bom_seen {
+                        self.bom_seen = true;
+                        if self.ignore_bom == 0 && run.starts_with(&[0xef, 0xbb, 0xbf]) {
+                            run = &run[3..];
+                        }
+                    }
+                    if !run.is_empty() {
+                        output(run);
+                    }
+                    rest = &rest[valid..];
+                }
             }
-            if !remaining.is_empty() {
-                self.emit(remaining, &mut output);
-            }
-            return Ok(());
-        }
-        for &byte in input {
+            let Some((&byte, tail)) = rest.split_first() else {
+                break;
+            };
+            rest = tail;
             if self.length != 0 {
                 let range = match (self.length, self.pending[0]) {
                     (1, 0xe0) => 0xa0..=0xbf,
@@ -160,4 +175,53 @@ pub unsafe extern "C" fn std_decoder_decode(
     });
     // SAFETY: the transducer emits complete valid Unicode scalars only.
     unsafe { runtime::adopt(data, length) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bulk_runs_preserve_replacement_bom_and_chunk_boundaries() {
+        for input in [
+            &b"\xef\xbb\xbfabc\xc3\xa9\xf0\x9f\x99\x82xyz"[..],
+            &b"abc\xffdef\xe0\x80\x80ghi\xf0\x9f"[..],
+            &b"\xef\xbb\xbf\xef\xbb\xbf"[..],
+            &b"abc\xed\xa0\x80def\xc3z"[..],
+            &b""[..],
+        ] {
+            for ignore_bom in [0, 1] {
+                for split in 0..=input.len() {
+                    let mut decoder = Decoder {
+                        fatal: 0,
+                        ignore_bom,
+                        streaming: false,
+                        bom_seen: false,
+                        pending: [0; 4],
+                        length: 0,
+                    };
+                    let mut output = Vec::new();
+                    decoder
+                        .transcode(&input[..split], true, |part| output.extend_from_slice(part))
+                        .unwrap();
+                    decoder
+                        .transcode(&input[split..], false, |part| {
+                            output.extend_from_slice(part)
+                        })
+                        .unwrap();
+                    let expected = String::from_utf8_lossy(input);
+                    let expected = if ignore_bom == 0 {
+                        expected.strip_prefix('\u{feff}').unwrap_or(&expected)
+                    } else {
+                        &expected
+                    };
+                    assert_eq!(
+                        output,
+                        expected.as_bytes(),
+                        "split={split}, ignore_bom={ignore_bom}"
+                    );
+                }
+            }
+        }
+    }
 }

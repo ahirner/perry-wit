@@ -15,6 +15,7 @@ pub mod collections;
 pub mod control;
 pub mod effects;
 pub mod exceptions;
+mod fast_paths;
 mod fold;
 pub mod foreign;
 pub mod globals;

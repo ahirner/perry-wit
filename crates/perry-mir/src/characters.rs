@@ -55,8 +55,10 @@ pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatu
         let candidates: Vec<_> = body
             .into_iter()
             .filter(|&op| {
-                Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))
-                    == Some(Intrinsic::StringCharAt)
+                matches!(
+                    Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx)),
+                    Some(Intrinsic::StringCharAt | Intrinsic::StringCharAtIndex)
+                )
             })
             .collect();
         for op in candidates {
@@ -73,7 +75,15 @@ pub(crate) fn scalar_replace(root: Ptr<Operation>, ctx: &mut Context) -> IRStatu
             }
             users.sort_unstable_by_key(|user| order[user]);
             let args = op.deref(ctx).operands().collect();
-            let scalar = IntrinsicOp::new(ctx, Intrinsic::StringScalarAt, args).get_operation();
+            let intrinsic = Operation::get_op::<IntrinsicOp>(op, ctx)
+                .unwrap()
+                .intrinsic(ctx);
+            let kind = if intrinsic == Some(Intrinsic::StringCharAtIndex) {
+                Intrinsic::StringScalarAtIndex
+            } else {
+                Intrinsic::StringScalarAt
+            };
+            let scalar = IntrinsicOp::new(ctx, kind, args).get_operation();
             scalar.insert_before(ctx, op);
             let scalar = scalar.deref(ctx).get_result(0);
             for user in users {

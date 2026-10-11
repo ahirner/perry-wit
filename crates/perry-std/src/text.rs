@@ -223,28 +223,63 @@ fn head(text: &str, to: usize) -> &[u8] {
     text.as_bytes().get(..to).unwrap_or(&[])
 }
 
+/// Whether `needle` occurs at `start` of `haystack` (which has room for it). An inline loop:
+/// slice equality would call `memcmp` at every candidate position.
+fn matches_at(haystack: &[u8], start: usize, needle: &[u8]) -> bool {
+    let mut index = 0;
+    while index < needle.len() {
+        if haystack[start + index] != needle[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// First occurrence: a scan for the needle's first byte, then a check of the rest.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
+    let Some(&first) = needle.first() else {
         return Some(0);
+    };
+    let last = haystack.len().checked_sub(needle.len())?;
+    let mut start = 0;
+    while let Some(found) = byte_position(&haystack[start..=last], first) {
+        if matches_at(haystack, start + found, needle) {
+            return Some(start + found);
+        }
+        start += found + 1;
     }
-    if let [byte] = needle {
-        return haystack.iter().position(|candidate| candidate == byte);
+    None
+}
+
+/// The first position of `byte`, eight bytes per step while none of them matches.
+fn byte_position(bytes: &[u8], byte: u8) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    let pattern = ONES * u64::from(byte);
+    let mut index = 0;
+    while index + 8 <= bytes.len() {
+        let word = u64::from_le_bytes(bytes[index..index + 8].try_into().expect("eight bytes"));
+        let difference = word ^ pattern;
+        // Nonzero exactly when some byte of `difference` is zero, i.e. matches `byte`.
+        if difference.wrapping_sub(ONES) & !difference & (ONES << 7) != 0 {
+            break;
+        }
+        index += 8;
     }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    bytes[index..]
+        .iter()
+        .position(|&candidate| candidate == byte)
+        .map(|found| index + found)
 }
 
 fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
+    let Some(&first) = needle.first() else {
         return Some(haystack.len());
-    }
-    if let [byte] = needle {
-        return haystack.iter().rposition(|candidate| candidate == byte);
-    }
-    haystack
-        .windows(needle.len())
-        .rposition(|window| window == needle)
+    };
+    let last = haystack.len().checked_sub(needle.len())?;
+    (0..=last)
+        .rev()
+        .find(|&start| haystack[start] == first && matches_at(haystack, start, needle))
 }
 
 fn position_of(view: &View, offset: usize) -> u64 {
@@ -391,6 +426,12 @@ static ASCII_STRINGS: AsciiStrings = {
     }
     AsciiStrings(strings)
 };
+/// Static ASCII headers used by compiled character reads.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_ascii_strings() -> *const u8 {
+    (&raw const ASCII_STRINGS.0).cast()
+}
+
 fn ascii_character(byte: u8) -> *mut u8 {
     (&raw const ASCII_STRINGS.0[byte as usize])
         .cast_mut()
@@ -416,4 +457,39 @@ pub extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     }
     let mut bytes = [0; 4];
     crate::runtime::from_bytes(scalar.encode_utf8(&mut bytes).as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find, rfind};
+
+    #[test]
+    fn substring_search_matches_byte_windows_at_word_boundaries() {
+        let haystack = "aé🙂aaaaaaaaabaaaaaaaab\0last".as_bytes();
+        for start in 0..=haystack.len() {
+            for end in start..=haystack.len() {
+                let slice = &haystack[start..end];
+                for needle in [
+                    b"".as_slice(),
+                    b"a",
+                    b"aaaab",
+                    "🙂".as_bytes(),
+                    b"last",
+                    b"\0",
+                    b"absent",
+                ] {
+                    let (first, last) = if needle.is_empty() {
+                        (Some(0), Some(slice.len()))
+                    } else {
+                        (
+                            slice.windows(needle.len()).position(|part| part == needle),
+                            slice.windows(needle.len()).rposition(|part| part == needle),
+                        )
+                    };
+                    assert_eq!(find(slice, needle), first);
+                    assert_eq!(rfind(slice, needle), last);
+                }
+            }
+        }
+    }
 }

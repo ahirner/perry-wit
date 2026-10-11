@@ -17,8 +17,48 @@ const PAGE: usize = 1024;
 // payload would force the allocator to skip almost another page for every small page.
 const PAYLOAD: usize = PAGE - 64;
 const MAX_SMALL: usize = PAGE / 2;
-const MIN_CELL: usize = 2 * core::mem::size_of::<usize>();
-const CLASSES: usize = MAX_SMALL.ilog2() as usize - MIN_CELL.ilog2() as usize + 1;
+/// Powers of two and their three-quarter midpoints, including the object header.
+/// Eight-byte alignment is preserved while common 32-byte payloads fit 48-byte cells.
+const CLASSES: usize = 11;
+
+/// One entry per eight-byte requirement; derived at compile time from the cell layout.
+/// The small table avoids bit-width arithmetic in every allocation and release.
+#[cfg(feature = "collectible")]
+const CLASS_FOR_SIZE: [u8; MAX_SMALL / 8] = {
+    let mut classes = [0; MAX_SMALL / 8];
+    let mut index = 0;
+    let mut class = 0;
+    while index < classes.len() {
+        while cell_of(class) < (index + 1) * 8 {
+            class += 1;
+        }
+        classes[index] = class as u8;
+        index += 1;
+    }
+    classes
+};
+
+#[cfg(feature = "collectible")]
+fn class_of(required: usize) -> usize {
+    usize::from(CLASS_FOR_SIZE[(required - 1) / 8])
+}
+
+// The bounded runtime shares these definitions but must not carry collectible lookup data.
+#[cfg(not(feature = "collectible"))]
+fn class_of(required: usize) -> usize {
+    let power = required.max(16).next_power_of_two();
+    let rank = power.trailing_zeros() as usize - 4;
+    2 * rank - usize::from(rank > 0 && required <= power / 4 * 3)
+}
+
+const fn cell_of(class: usize) -> usize {
+    if class.is_multiple_of(2) {
+        16 << (class / 2)
+    } else {
+        24 << (class / 2)
+    }
+}
+
 const NONE: u16 = u16::MAX;
 const MIN_THRESHOLD: usize = 256 * 1024;
 
@@ -240,12 +280,15 @@ impl Collector {
     pub(crate) unsafe fn allocate(&mut self, size: usize, shape: *const u32) -> *mut u8 {
         let size = size.max(1);
         let required = size.checked_add(HEADER).expect("allocation size overflow");
-        let cell = if required <= MAX_SMALL {
-            required.next_power_of_two().max(MIN_CELL)
+        let (class, cell) = if required <= MAX_SMALL {
+            let class = class_of(required);
+            (Some(class), cell_of(class))
         } else {
-            required.next_multiple_of(core::mem::align_of::<Header>())
+            (
+                None,
+                required.next_multiple_of(core::mem::align_of::<Header>()),
+            )
         };
-        let class = (cell <= MAX_SMALL).then(|| cell.ilog2() as usize - MIN_CELL.ilog2() as usize);
         let existing = class.and_then(|class| {
             while let Some(&pointer) = self.available[class].last() {
                 // SAFETY: small pages have stable boxed storage owned until collector drop.
@@ -427,7 +470,7 @@ impl Collector {
         self.counters.live_bytes -= size;
         page.release(index);
         if !page.listed {
-            let class = page.cell.ilog2() as usize - MIN_CELL.ilog2() as usize;
+            let class = class_of(page.cell);
             self.available[class].push(NonNull::from(&mut *page));
             page.listed = true;
         }
@@ -561,7 +604,7 @@ impl Collector {
             } else {
                 page.sweep_pending = true;
                 if page.cell <= MAX_SMALL {
-                    let class = page.cell.ilog2() as usize - MIN_CELL.ilog2() as usize;
+                    let class = class_of(page.cell);
                     self.available[class].push(NonNull::from(&mut **page));
                     page.listed = true;
                 }
@@ -601,6 +644,39 @@ impl Directory {
 mod tests {
     use super::*;
     const LINK: [u32; 3] = [0, 1, 0];
+
+    #[test]
+    fn midpoint_classes_preserve_alignment_and_trace_recycled_slots() {
+        for required in 1..=MAX_SMALL {
+            let class = class_of(required);
+            let cell = cell_of(class);
+            assert!(cell >= required && cell.is_multiple_of(8));
+            assert!(class == 0 || cell_of(class - 1) < required);
+        }
+        let mut heap = Collector::new();
+        let mut roots = Vec::new();
+        unsafe {
+            for class in 1..CLASSES {
+                let size = cell_of(class) - HEADER;
+                for _ in 0..100 {
+                    let child = heap.allocate(8, ptr::null());
+                    let parent = heap.allocate(size, LINK.as_ptr());
+                    assert_eq!(parent as usize % 8, 0);
+                    parent.cast::<*mut u8>().write(child);
+                    roots.push(parent);
+                }
+            }
+            heap.collect(&roots);
+            for parent in roots {
+                assert!(
+                    heap.allocation_size(parent.cast::<*mut u8>().read())
+                        .is_some()
+                );
+            }
+            heap.collect(&[]);
+            assert_eq!(heap.counters().live_bytes, 0);
+        }
+    }
 
     #[test]
     fn fresh_and_recycled_payloads_are_zeroed() {

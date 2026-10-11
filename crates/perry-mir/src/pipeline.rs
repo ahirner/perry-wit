@@ -62,6 +62,8 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
     verify_operation(root, ctx)?;
     dce(root, ctx)?;
     verify_operation(root, ctx)?;
+    crate::fast_paths::expand(root, ctx);
+    verify_operation(root, ctx)?;
     crate::lifetimes::assign(root, ctx);
     verify_operation(root, ctx)
 }

@@ -3,7 +3,7 @@
 Perry-WIT compiles a static subset of TypeScript to WASI 0.3 WebAssembly components through
 [Perry](https://www.perryts.com) HIR and typed MIR built on [pliron](https://github.com/pliron-org/pliron).
 The linker includes the runtime services each component uses. Small identity and append components
-have frozen size budgets and run with one initial 64 KiB memory page.
+have tested size limits and run with one initial 64 KiB memory page.
 
 The compiler supports closed typed aggregates, persistent module state, checked JSON conversion,
 UTF-8 strings with Unicode scalar indexing, synchronous and asynchronous WIT calls, and stackless P3
@@ -211,12 +211,12 @@ Scaling contracts (`wasi.execution.scaling.*` in [crates/conformance/src/scaling
 
 ## Performance
 
-Component budgets are frozen in [bench/baseline](bench/baseline). Integration tests exercise bounded
+Component size and initial-memory limits are checked in
+[tests/component_budget_test.rs](tests/component_budget_test.rs). Integration tests exercise bounded
 allocation churn, retained graphs, stream-buffer reuse and compilation scaling. Conformance scaling
 contracts measure guest fuel for controlled workloads; application timings remain a separate measure.
-Allocator comparisons are in [bench/allocators](bench/allocators).
-For serial consumer campaigns, paired replay and direct component timing, see
-[bench/performance](bench/performance). `--keep-names` retains linked function names for
+The benchmark harness is [tests/benchmark.rs](tests/benchmark.rs).
+`--keep-names` retains linked function names for
 Wasmtime guest profiles; normal component output remains stripped.
 
 ## Compilation Pipeline

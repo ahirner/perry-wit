@@ -14,6 +14,7 @@ use wasm_encoder::{
 };
 use wasmparser::{ExternalKind, FunctionBody, Parser, Payload, TypeRef, Validator};
 
+mod data_relocations;
 pub(crate) mod libraries;
 mod type_compaction;
 
@@ -499,10 +500,26 @@ pub(crate) fn link_helpers_with(
         }
     }
 
+    let folded: Vec<_> = prepared_libs
+        .iter()
+        .zip(&lib_placements)
+        .map(|(prep, placement)| {
+            data_relocations::fold(
+                &prep.lib,
+                placement.memory_base,
+                placement.table_base,
+                stack_top,
+            )
+        })
+        .collect();
+
     // Helper initialization
     let mut helper_inits = Vec::new();
-    for prep in &prepared_libs {
+    for (prep, folded) in prepared_libs.iter().zip(&folded) {
         for orig in prep.lib.initializers() {
+            if folded.as_ref().is_some_and(|data| data.function == orig) {
+                continue;
+            }
             if let Some(&new_idx) = prep.helper_defined_indices.get(&orig)
                 && !helper_inits.contains(&new_idx)
             {
@@ -752,13 +769,22 @@ pub(crate) fn link_helpers_with(
             }
         }
     }
-    for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
-        for (offset, contents) in &prep.lib.data {
+    for ((prep, placement), folded) in prepared_libs.iter().zip(&lib_placements).zip(&folded) {
+        let mut append = |offset: u32, contents: &[u8]| {
             new_data.active(
                 0,
                 &ConstExpr::i32_const((placement.memory_base + offset) as i32),
                 contents.iter().copied(),
             );
+        };
+        if let Some(folded) = folded {
+            for (offset, contents) in &folded.segments {
+                append(*offset, contents);
+            }
+        } else {
+            for &(offset, contents) in &prep.lib.data {
+                append(offset, contents);
+            }
         }
     }
     if !new_data.is_empty() {

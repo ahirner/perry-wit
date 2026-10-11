@@ -1857,7 +1857,7 @@ export function run(n: number): number {{
 
 #[test]
 fn scalar_characters_preserve_empty_indices_and_unicode_ordering() {
-    let text = "a\0é😀z";
+    let text = "a\0é😀z\u{7f}\u{80}\u{7ff}\u{800}\u{d7ff}\u{e000}\u{ffff}\u{10000}\u{10ffff}";
     let literals = ["", "\0", "a", "b", "é", "Ω", "😀", "😁"];
     let mut source = String::new();
     for (index, literal) in literals.iter().enumerate() {
@@ -1887,10 +1887,13 @@ fn scalar_characters_preserve_empty_indices_and_unicode_ordering() {
         5.0,
         f64::INFINITY,
         f64::NAN,
-    ] {
+    ]
+    .into_iter()
+    .chain((0..text.chars().count()).map(|index| index as f64))
+    {
         let sample = if position.is_nan() {
             Some('a')
-        } else if position.trunc() >= 0.0 && position < 5.0 {
+        } else if position.trunc() >= 0.0 && position < text.chars().count() as f64 {
             text.chars().nth(position as usize)
         } else {
             None

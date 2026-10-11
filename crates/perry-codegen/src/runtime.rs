@@ -233,6 +233,7 @@ runtime_functions! {
     StdRandomUuid = "std_random_uuid" () -> I32;
     StdRegexSearch = "std_regex_search" (I32, I32) -> F64;
     StdStringByteInput = "std_string_byte_input" (I32) -> I32;
+    StdAsciiStrings = "std_ascii_strings" () -> I32;
     StdStringCharAt = "std_string_char_at" (I32, F64) -> I32;
     StdStringCodePointAt = "std_string_code_point_at" (I32, F64) -> F64;
     StdStringEndsWith = "std_string_ends_with" (I32, I32, F64) -> I32;

@@ -10,6 +10,8 @@ pub const DATA: u32 = 8;
 pub const BUFFER: u32 = 12;
 pub const SIZE: u32 = 32;
 pub const OWNER: u32 = 16;
+pub const CURSOR_SCALAR: u32 = 24;
+pub const CURSOR_BYTE: u32 = 28;
 
 #[repr(C)]
 pub(crate) struct Str {

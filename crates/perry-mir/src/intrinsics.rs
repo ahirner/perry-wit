@@ -324,9 +324,13 @@ intrinsics! {
     DateJson = "date_json" (Date) -> (NullString);
     StringFromCodePoint = "string_from_code_point" (Number) -> (String), throws;
     StringCharAt = "string_char_at" (String, Number) -> (String), pure, atomic;
+    StringCharAtIndex = "string_char_at_index" (String, Index) -> (String), pure, atomic;
+    StringScalarAtIndex = "string_scalar_at_index" (String, Index) -> (Scalar), pure, noalloc;
     StringScalarAt = "string_scalar_at" (String, Number) -> (Scalar), pure, noalloc;
     StringScalarLength = "string_scalar_length" (Scalar) -> (Index), pure, noalloc;
     StringScalarConcat = "string_scalar_concat" (String, Scalar) -> (String), pure, atomic;
+    StringTryAppend = "string_try_append" (String, String) -> (Bool), noalloc;
+    StringScalarTryAppend = "string_scalar_try_append" (String, Scalar) -> (Bool), noalloc;
     StringScalarAppend = "string_scalar_append" (String, Scalar) -> (String), atomic;
     StringCodePointAt = "string_code_point_at" (String, Number) -> (OptNumber), pure, noalloc;
     StringSlice = "string_slice" (String, Number, Number) -> (String), pure, atomic;

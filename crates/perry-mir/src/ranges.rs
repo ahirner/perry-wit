@@ -20,11 +20,14 @@
 //!
 //! The read's result is wrapped back into `T | undefined`; `fold` then removes the
 //! `undefined` tests and coercions of the wrapped value.
+//!
+//! Strings are immutable, so `s.charAt(i)` under a proof of `i < s.length` (a scalar count)
+//! becomes `string_char_at_index` without integrality or range checks.
 use crate::{
     aggregates::{functions, operations},
     attrs::{BinaryKind, CompareKind, ConvertKind},
     calls::{AsyncCallOp, AwaitOp, CallOp},
-    collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp},
+    collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, StringLenOp},
     control::CondBrOp,
     intrinsics::{Intrinsic, IntrinsicOp},
     optional::WrapOp,
@@ -56,12 +59,30 @@ enum Length {
     Array(Value),
     /// A view, and the operation that read its length.
     Bytes(Value, Ptr<Operation>),
+    /// A string's scalar count.
+    String(Value),
+}
+
+/// What an indexed read reads: facts and reads match by kind and object.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Object {
+    Array,
+    Bytes,
+    String,
 }
 
 impl Length {
     fn object(self) -> Value {
         match self {
-            Length::Array(value) | Length::Bytes(value, _) => value,
+            Length::Array(value) | Length::Bytes(value, _) | Length::String(value) => value,
+        }
+    }
+
+    fn kind(self) -> Object {
+        match self {
+            Length::Array(_) => Object::Array,
+            Length::Bytes(..) => Object::Bytes,
+            Length::String(_) => Object::String,
         }
     }
 }
@@ -70,14 +91,16 @@ fn intrinsic(ctx: &Context, op: Ptr<Operation>) -> Option<Intrinsic> {
     Operation::get_op::<IntrinsicOp>(op, ctx).and_then(|i| i.intrinsic(ctx))
 }
 
-/// The length `value` is, if it is one: `array_len` converted to a number, or a view's
-/// `bytes_length`.
+/// Recognize array/string lengths converted to numbers and byte-view lengths.
 fn length(ctx: &Context, value: Value) -> Option<Length> {
     let op = value.defining_op()?;
     if let Some(convert) = Operation::get_op::<ConvertOp>(op, ctx)
         && convert.kind(ctx) == ConvertKind::I32ToF64
     {
         let len = op.deref(ctx).get_operand(0).defining_op()?;
+        if Operation::get_op::<StringLenOp>(len, ctx).is_some() {
+            return Some(Length::String(len.deref(ctx).get_operand(0)));
+        }
         Operation::get_op::<ArrayLenOp>(len, ctx)?;
         return Some(Length::Array(len.deref(ctx).get_operand(0)));
     }
@@ -232,16 +255,21 @@ pub(crate) fn prove_bounds(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus 
         }
         let mut dominance = DomInfo::default();
         for op in operations(ctx, &function) {
-            let (object, index, bytes) = if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
-                let operation = op.deref(ctx);
-                (operation.get_operand(0), operation.get_operand(1), false)
+            let kind = if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+                Object::Array
             } else if intrinsic(ctx, op) == Some(Intrinsic::BytesGet) {
-                let operation = op.deref(ctx);
-                (operation.get_operand(0), operation.get_operand(1), true)
+                Object::Bytes
+            } else if intrinsic(ctx, op) == Some(Intrinsic::StringCharAt) {
+                Object::String
             } else {
                 continue;
             };
-            if !bytes {
+            let (object, index) = {
+                let operation = op.deref(ctx);
+                (operation.get_operand(0), operation.get_operand(1))
+            };
+            let bytes = kind == Object::Bytes;
+            if kind == Object::Array {
                 let array = object.get_type(ctx);
                 let array = array.deref(ctx);
                 let element = array
@@ -257,7 +285,7 @@ pub(crate) fn prove_bounds(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus 
             }
             let block = op.deref(ctx).get_parent_block().expect("in a block");
             let proven = facts
-                .get(&(object, index, bytes))
+                .get(&(object, index, kind))
                 .into_iter()
                 .flatten()
                 .any(|fact| {
@@ -266,7 +294,7 @@ pub(crate) fn prove_bounds(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus 
                         && (!bytes || stays_attached(ctx, &info, fact, block))
                 });
             if proven {
-                unchecked(ctx, op, object, index, bytes);
+                unchecked(ctx, op, object, index, kind);
                 status = IRStatus::Changed;
             }
         }
@@ -278,7 +306,7 @@ fn facts(
     ctx: &Context,
     info: &Function,
     counts: &HashSet<Value>,
-) -> HashMap<(Value, Value, bool), Vec<Fact>> {
+) -> HashMap<(Value, Value, Object), Vec<Fact>> {
     let mut facts = HashMap::new();
     for &block in &info.blocks {
         let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
@@ -318,7 +346,7 @@ fn facts(
             continue;
         };
         facts
-            .entry((length.object(), index, matches!(length, Length::Bytes(..))))
+            .entry((length.object(), index, length.kind()))
             .or_insert_with(Vec::new)
             .push(Fact {
                 branch: block,
@@ -359,12 +387,23 @@ fn stays_attached(ctx: &Context, info: &Function, fact: &Fact, block: Ptr<BasicB
         .all(|&on_path| on_path.deref(ctx).iter(ctx).all(|op| !may_detach(ctx, op)))
 }
 
-/// Turn the checked read `op` into an unchecked one, wrapped back into `T | undefined`.
-fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value, bytes: bool) {
+/// Turn the checked read `op` into an unchecked one, wrapped back into `T | undefined`
+/// (a character is a plain string).
+fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value, kind: Object) {
     let convert = ConvertOp::new(ctx, ConvertKind::F64ToU32, index).get_operation();
     convert.insert_before(ctx, op);
     let index = convert.deref(ctx).get_result(0);
-    let read = if bytes {
+    if kind == Object::String {
+        let read = IntrinsicOp::new(ctx, Intrinsic::StringCharAtIndex, vec![object, index])
+            .get_operation();
+        read.insert_before(ctx, op);
+        let character = read.deref(ctx).get_result(0);
+        let result = op.deref(ctx).get_result(0);
+        result.replace_all_uses_with(ctx, &character);
+        Operation::erase(op, ctx);
+        return;
+    }
+    let read = if kind == Object::Bytes {
         IntrinsicOp::new(ctx, Intrinsic::BytesAt, vec![object, index]).get_operation()
     } else {
         ArrayAtOp::new(ctx, object, index)
@@ -380,4 +419,26 @@ fn unchecked(ctx: &mut Context, op: Ptr<Operation>, object: Value, index: Value,
     let result = op.deref(ctx).get_result(0);
     result.replace_all_uses_with(ctx, &wrapped);
     Operation::erase(op, ctx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pliron::{
+        builtin::{
+            attributes::IntegerAttr,
+            types::{IntegerType, Signedness},
+        },
+        utils::apint::{APInt, bw},
+    };
+
+    #[test]
+    fn converted_integer_constant_is_not_a_length() {
+        let ctx = &mut Context::new();
+        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
+        let attr = IntegerAttr::new(ty, APInt::from_u64(3, bw(32)));
+        let integer = ConstantOp::new(ctx, Box::new(attr)).get_result(ctx);
+        let number = ConvertOp::new(ctx, ConvertKind::I32ToF64, integer).get_result(ctx);
+        assert!(length(ctx, number).is_none());
+    }
 }

@@ -94,7 +94,7 @@ mod lease;
 mod memory;
 mod regex;
 mod runtime;
-mod string_literals;
+mod strings;
 mod temporal;
 mod variants;
 pub use memory::explain_tiers;
@@ -863,6 +863,7 @@ struct FunctionLowering<'s> {
     landing: Option<(Ptr<BasicBlock>, Vec<TypeHandle>)>,
     /// The frame, when lowering the step function of an async function.
     frame: Option<async_split::Frame>,
+    ascii_strings: Option<Value>,
     root_base: Option<Value>,
     root_stack: Option<Value>,
     local_frame: Option<Value>,
@@ -886,6 +887,7 @@ impl<'s> FunctionLowering<'s> {
             throw_block: None,
             landing: None,
             frame: None,
+            ascii_strings: None,
             root_base: None,
             root_stack: None,
             local_frame: None,
@@ -1671,6 +1673,30 @@ impl<'s> FunctionLowering<'s> {
                 self.runtime(ctx, Runtime::StrCaseConvert, vec![data, len, out, upper]);
                 Some(self.runtime(ctx, Runtime::StringAdopt, vec![out, bytes]))
             }
+            Intrinsic::StringCharAtIndex | Intrinsic::StringScalarAtIndex => {
+                let representation = if intrinsic == Intrinsic::StringCharAtIndex {
+                    strings::Character::String
+                } else {
+                    strings::Character::Scalar
+                };
+                Some(self.char_at_index(ctx, args[0], args[1], representation))
+            }
+            Intrinsic::StringCharAt | Intrinsic::StringScalarAt => {
+                let representation = if intrinsic == Intrinsic::StringCharAt {
+                    strings::Character::String
+                } else {
+                    strings::Character::Scalar
+                };
+                Some(self.char_at(ctx, args[0], args[1], representation))
+            }
+            Intrinsic::StringTryAppend | Intrinsic::StringScalarTryAppend => {
+                let representation = if intrinsic == Intrinsic::StringTryAppend {
+                    strings::Character::String
+                } else {
+                    strings::Character::Scalar
+                };
+                Some(self.try_string_append(ctx, args[0], args[1], representation))
+            }
             Intrinsic::StringScalarLength => {
                 let zero = self.i32_const(ctx, 0);
                 Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))
@@ -1837,8 +1863,6 @@ impl<'s> FunctionLowering<'s> {
             }
             other => {
                 let function = match other {
-                    Intrinsic::StringCharAt => Runtime::StdStringCharAt,
-                    Intrinsic::StringScalarAt => Runtime::StdStringScalarAt,
                     Intrinsic::StringScalarConcat => Runtime::StringScalarConcat,
                     Intrinsic::StringScalarAppend => Runtime::StringScalarAppend,
                     Intrinsic::BigIntFromNumber => Runtime::StdBigintFromNumber,

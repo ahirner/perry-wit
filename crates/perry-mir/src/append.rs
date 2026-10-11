@@ -85,6 +85,7 @@ pub(crate) fn append_in_place(root: Ptr<Operation>, ctx: &mut Context) -> IRStat
                         op.intrinsic(ctx),
                         Some(
                             Intrinsic::StringCharAt
+                                | Intrinsic::StringCharAtIndex
                                 | Intrinsic::StringSlice
                                 | Intrinsic::StringSubstring
                         )
@@ -101,6 +102,7 @@ pub(crate) fn append_in_place(root: Ptr<Operation>, ctx: &mut Context) -> IRStat
                         op.intrinsic(ctx),
                         Some(
                             Intrinsic::StringCharAt
+                                | Intrinsic::StringCharAtIndex
                                 | Intrinsic::StringIndex
                                 | Intrinsic::StringCodePointAt
                                 | Intrinsic::StringSlice
