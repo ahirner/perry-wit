@@ -1,6 +1,6 @@
 //! Source spans retained by typed JSON aggregates and consumed by their serializers.
 use crate::json::*;
-use crate::json_read::{Reader, lookup, pull, reader, std_json_read_string};
+use crate::json_read::{Reader, lookup, pull, reader, unescape};
 use crate::runtime::{Buffer, bytes};
 use core::{mem, ptr, slice};
 
@@ -37,27 +37,12 @@ struct Members {
     count: usize,
 }
 
-fn cursor(document: *mut Reader, start: u32) -> Reader {
+fn cursor(document: *mut Reader, start: u32) -> pull::Cursor<'static> {
     // SAFETY: provenance retains the document and its immutable input.
-    let document = unsafe { &*document };
-    let mut cursor =
-        pull::Cursor::new(unsafe { core::str::from_utf8_unchecked(bytes(document.text)) });
+    let input = unsafe { (*document).cursor.input };
+    let mut cursor = pull::Cursor::new(unsafe { core::str::from_utf8_unchecked(input) });
     cursor.pos = start;
-    Reader {
-        text: document.text,
-        data: document.data,
-        cursor,
-        mismatch: 0,
-        dirty: false,
-        copy_safe: false,
-        payload: u32::MAX,
-        sources: ptr::null_mut(),
-        source_used: 64,
-        strings: ptr::null_mut(),
-        string_used: 64,
-        pooled: false,
-        cached_bytes: 0,
-    }
+    cursor
 }
 
 pub(super) fn key_bytes(entry: &Entry) -> &[u8] {
@@ -92,7 +77,7 @@ fn append(members: &mut Members, entry: Entry) {
     members.count += 1;
 }
 
-pub(super) fn next_member(r: &mut Reader) -> Option<Entry> {
+pub(super) fn next_member(r: &mut pull::Cursor<'_>) -> Option<Entry> {
     if r.broken != 0 {
         return None;
     }
@@ -119,8 +104,7 @@ pub(super) fn next_member(r: &mut Reader) -> Option<Entry> {
         return None;
     }
     let key = if escaped {
-        r.pos = start - 1;
-        unsafe { bytes(std_json_read_string((r as *mut Reader).cast())) }
+        unescape(&r.input[start as usize..r.pos as usize - 1])
     } else {
         &r.input[start as usize..r.pos.saturating_sub(1) as usize]
     };
@@ -509,17 +493,36 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                         let start = r.pos;
                         let (escaped, _) = r.string();
                         if escaped {
-                            r.pos = start - 1;
-                            let value = std_json_read_string((&mut r as *mut Reader).cast());
-                            unsafe { std_json_quote(writer, value) };
+                            let output = crate::json::writer(writer);
+                            if !output.failed {
+                                output.text.push(b'"');
+                                crate::json_read::decode_string(
+                                    &r.input[start as usize..r.pos as usize - 1],
+                                    |bytes| crate::json::quote_contents(&mut output.text, bytes),
+                                );
+                                output.text.push(b'"');
+                            }
                         } else {
                             // The parser already validated this immutable, unescaped string.
                             raw(writer, &r.input[start as usize - 1..r.pos as usize]);
                         }
                     }
                     b'-' | b'0'..=b'9' => {
-                        let value = r.number();
-                        std_json_number(writer, value);
+                        let start = r.pos;
+                        r.skip();
+                        let literal = &r.input[start as usize..r.pos as usize];
+                        let digits = literal.strip_prefix(b"-").unwrap_or(literal);
+                        if digits.len() <= 15
+                            && digits.iter().all(u8::is_ascii_digit)
+                            && literal != b"-0"
+                        {
+                            // These integers are exact in f64 and already use decimal notation.
+                            raw(writer, literal);
+                        } else {
+                            r.pos = start;
+                            let value = r.number();
+                            std_json_number(writer, value);
+                        }
                     }
                     b't' => raw(writer, b"true"),
                     b'f' => raw(writer, b"false"),
@@ -614,6 +617,10 @@ pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *m
             .extend_from_slice(&document.input[source.start as usize..source.end as usize]);
         return 1;
     }
+    // Bound speculative capacity: source spans can contain arbitrary whitespace.
+    writer
+        .text
+        .reserve((source.end - source.start).min(4096) as usize);
     0
 }
 
@@ -652,7 +659,7 @@ pub(crate) unsafe extern "C" fn std_json_source_tuple_length(
     let mut scan = cursor(source.document, source.start);
     scan.open(b'[');
     let mut length = 0;
-    while crate::json_read::std_json_read_element((&mut scan as *mut Reader).cast()) != 0 {
+    while scan.element() != 0 {
         scan.skip();
         length += 1;
     }
@@ -672,7 +679,7 @@ pub(crate) unsafe extern "C" fn std_json_source_tuple_tail(
     let mut scan = cursor(source.document, source.start);
     scan.open(b'[');
     let mut index = 0;
-    while crate::json_read::std_json_read_element((&mut scan as *mut Reader).cast()) != 0 {
+    while scan.element() != 0 {
         scan.whitespace();
         let start = scan.pos;
         scan.skip();

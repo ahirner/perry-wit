@@ -92,6 +92,34 @@ impl<'a> Cursor<'a> {
         1
     }
 
+    pub fn element(&mut self) -> u32 {
+        if self.broken != 0 {
+            return 0;
+        }
+        let next = self.whitespace();
+        if core::mem::take(&mut self.fresh) != 0 {
+            if next == b']' {
+                self.close();
+                return 0;
+            }
+            return 1;
+        }
+        match next {
+            b',' => {
+                self.pos += 1;
+                1
+            }
+            b']' => {
+                self.close();
+                0
+            }
+            _ => {
+                self.broken = 1;
+                0
+            }
+        }
+    }
+
     pub fn skip(&mut self) {
         let base = self.depth;
         while self.broken == 0 {

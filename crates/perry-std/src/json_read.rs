@@ -12,7 +12,7 @@
 //!
 //! The reader keeps its own stack of open containers (bits, at most [MAX_DEPTH]): skipping
 //! is iterative, so the linker can bound the stack of programs that parse JSON.
-use crate::runtime::{ERROR, TYPE_ERROR, adopt, alloc, from_static, raise, string_view_counted};
+use crate::runtime::{ERROR, TYPE_ERROR, adopt, alloc, from_static, raise};
 
 #[allow(unreachable_pub)]
 #[path = "../../../src/helpers/json/pull.rs"]
@@ -38,12 +38,11 @@ const MISMATCH: [&str; 8] = [
     "JSON tag is not a case of the declared variant",
 ];
 
-/// The state of one `JSON.parse`. `text` is traced: it keeps the bytes behind `data` alive,
+/// The state of one `JSON.parse`. `text` is traced: it keeps the cursor's input alive,
 /// and with them every string view the reader hands out.
 #[repr(C)]
 pub(super) struct Reader {
     pub(super) text: *mut u8,
-    pub(super) data: *const u8,
     pub(super) cursor: pull::Cursor<'static>,
     pub(super) mismatch: u32,
     pub(super) dirty: bool,
@@ -53,7 +52,6 @@ pub(super) struct Reader {
     pub(super) source_used: u32,
     pub(super) strings: *mut u8,
     pub(super) string_used: u32,
-    pub(super) pooled: bool,
     pub(super) cached_bytes: u32,
 }
 impl core::ops::Deref for Reader {
@@ -86,7 +84,6 @@ pub(crate) unsafe extern "C" fn std_json_read_begin(text: *mut u8) -> *mut u8 {
     unsafe {
         r.write(Reader {
             text,
-            data: bytes.as_ptr(),
             cursor: pull::Cursor::new(core::str::from_utf8_unchecked(bytes)),
             mismatch: 0,
             dirty: false,
@@ -96,7 +93,6 @@ pub(crate) unsafe extern "C" fn std_json_read_begin(text: *mut u8) -> *mut u8 {
             source_used: 64,
             strings: core::ptr::null_mut(),
             string_used: 64,
-            pooled: true,
             cached_bytes: 0,
         })
     };
@@ -215,37 +211,27 @@ pub(crate) extern "C" fn std_json_read_string(r: *mut u8) -> *mut u8 {
             let end = r.pos - 1;
             let len = end - start;
             return if escaped {
-                r.unescape(start, end)
+                let decoded = unescape(&r.input[start as usize..end as usize]);
+                unsafe { adopt(decoded.as_ptr() as *mut u8, decoded.len() as u32) }
             } else {
                 // SAFETY: valid UTF-8 between quotes of the input text, which `r.text` owns.
                 unsafe {
-                    if r.pooled {
-                        const HEADER: usize =
-                            core::mem::size_of::<crate::runtime::layout::string::Header>();
-                        static SHAPE: [u32; 3] = [
-                            HEADER as u32,
-                            1,
-                            core::mem::offset_of!(crate::runtime::layout::string::Header, owner)
-                                as u32,
-                        ];
-                        if r.string_used == 64 {
-                            r.strings = crate::runtime::alloc_shaped((HEADER * 64) as u32, &SHAPE);
-                            core::ptr::write_bytes(r.strings, 0, HEADER * 64);
-                            r.string_used = 0;
-                        }
-                        let view = r.strings.add(r.string_used as usize * HEADER);
-                        r.string_used += 1;
-                        crate::runtime::string_view_into(
-                            view,
-                            r.text,
-                            start,
-                            end,
-                            len - continuations,
-                        );
-                        view
-                    } else {
-                        string_view_counted(r.text, start, end, len - continuations)
+                    const HEADER: usize =
+                        core::mem::size_of::<crate::runtime::layout::string::Header>();
+                    static SHAPE: [u32; 3] = [
+                        HEADER as u32,
+                        1,
+                        core::mem::offset_of!(crate::runtime::layout::string::Header, owner) as u32,
+                    ];
+                    if r.string_used == 64 {
+                        r.strings = crate::runtime::alloc_shaped((HEADER * 64) as u32, &SHAPE);
+                        core::ptr::write_bytes(r.strings, 0, HEADER * 64);
+                        r.string_used = 0;
                     }
+                    let view = r.strings.add(r.string_used as usize * HEADER);
+                    r.string_used += 1;
+                    crate::runtime::string_view_into(view, r.text, start, end, len - continuations);
+                    view
                 }
             };
         }
@@ -272,32 +258,7 @@ pub(crate) extern "C" fn std_json_read_array(r: *mut u8) -> u32 {
 /// the array ended (or the text is broken).
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_read_element(r: *mut u8) -> u32 {
-    let r = reader(r);
-    if r.broken != 0 {
-        return 0;
-    }
-    let next = r.whitespace();
-    if core::mem::take(&mut r.fresh) != 0 {
-        if next == b']' {
-            r.close();
-            return 0;
-        }
-        return 1;
-    }
-    match next {
-        b',' => {
-            r.pos += 1;
-            1
-        }
-        b']' => {
-            r.close();
-            0
-        }
-        _ => {
-            r.broken = 1;
-            0
-        }
-    }
+    reader(r).element()
 }
 
 /// Advance to the next declared member of the innermost object: the index of its key in
@@ -354,15 +315,13 @@ pub(crate) unsafe extern "C" fn std_json_read_field(r: *mut u8, table: *mut u8, 
         r.pos += 1;
         let found = if escaped {
             // Keys with escapes are rare: compare their decoded text.
-            let key = r.unescape(start, end);
-            // SAFETY: `unescape` returned a string.
-            lookup(table, hint, unsafe { crate::runtime::bytes(key) })
+            lookup(
+                table,
+                hint,
+                unescape(&r.input[start as usize..end as usize]),
+            )
         } else {
-            // SAFETY: the key lies within the input text.
-            let key = unsafe {
-                core::slice::from_raw_parts(r.data.add(start as usize), (end - start) as usize)
-            };
-            lookup(table, hint, key)
+            lookup(table, hint, &r.input[start as usize..end as usize])
         };
         if found >= 0 {
             return found;
@@ -440,63 +399,64 @@ impl Reader {
             raise(TYPE_ERROR, MISMATCH[self.mismatch as usize]);
         }
     }
+}
 
-    fn unescape(&mut self, start: u32, end: u32) -> *mut u8 {
-        // Escapes only shrink: `\uXXXX` (6 bytes) encodes at most 3, a surrogate pair (12) 4.
-        let capacity = end - start;
-        let out = alloc(capacity.max(1));
-        let mut written = 0usize;
-        let mut at = start;
-        let put = |bytes: &[u8], written: &mut usize| {
-            // SAFETY: decoded text never exceeds the escaped text's length.
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), out.add(*written), bytes.len())
-            };
-            *written += bytes.len();
-        };
-        while at < end {
-            let byte = self.byte(at);
-            if byte != b'\\' {
-                let run_end = (at..end).find(|&i| self.byte(i) == b'\\').unwrap_or(end);
-                // SAFETY: within the input text.
-                let run = unsafe {
-                    core::slice::from_raw_parts(self.data.add(at as usize), (run_end - at) as usize)
-                };
-                put(run, &mut written);
-                at = run_end;
-                continue;
-            }
-            let scalar = match self.byte(at + 1) {
-                b'b' => '\u{8}',
-                b'f' => '\u{c}',
-                b'n' => '\n',
-                b'r' => '\r',
-                b't' => '\t',
-                b'u' => {
-                    let quad = |from: u32| {
-                        (from..from + 4).fold(0, |value, i| {
-                            value * 16 + (self.byte(i) as char).to_digit(16).unwrap_or(0)
-                        })
-                    };
-                    let high = quad(at + 2);
-                    let point = if (0xD800..=0xDBFF).contains(&high) {
-                        let low = quad(at + 8);
-                        at += 6;
-                        0x10000 + ((high - 0xD800) << 10) + low - 0xDC00
-                    } else {
-                        high
-                    };
-                    at += 4;
-                    char::from_u32(point).unwrap_or('\u{FFFD}')
-                }
-                other => other as char,
-            };
-            at += 2;
-            let mut buffer = [0; 4];
-            put(scalar.encode_utf8(&mut buffer).as_bytes(), &mut written);
+/// Decode a validated escaped string into task storage for a caller that retains its bytes.
+pub(super) fn unescape(input: &[u8]) -> &'static [u8] {
+    // Escapes only shrink: six bytes encode at most three, a surrogate pair twelve to four.
+    let out = alloc(input.len().max(1) as u32);
+    let mut written = 0;
+    decode_string(input, |bytes| {
+        // SAFETY: decoded text never exceeds the validated input's length.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out.add(written), bytes.len()) };
+        written += bytes.len();
+    });
+    // SAFETY: callers retain the task allocation through a string owner or traced key entry.
+    unsafe { core::slice::from_raw_parts(out, written) }
+}
+
+/// Emit borrowed runs and decoded escapes without constructing a temporary string.
+/// `input` is the validated content between JSON quotes.
+pub(super) fn decode_string(input: &[u8], mut emit: impl FnMut(&[u8])) {
+    let mut at = 0;
+    while at < input.len() {
+        if input[at] != b'\\' {
+            let end = input[at..]
+                .iter()
+                .position(|&byte| byte == b'\\')
+                .map_or(input.len(), |end| at + end);
+            emit(&input[at..end]);
+            at = end;
+            continue;
         }
-        // SAFETY: `written` bytes of valid UTF-8 at `out`, a task-region allocation.
-        unsafe { adopt(out, written as u32) }
+        let scalar = match input[at + 1] {
+            b'b' => '\u{8}',
+            b'f' => '\u{c}',
+            b'n' => '\n',
+            b'r' => '\r',
+            b't' => '\t',
+            b'u' => {
+                let quad = |from: usize| {
+                    input[from..from + 4].iter().fold(0, |value, &digit| {
+                        value * 16 + (digit as char).to_digit(16).expect("validated escape")
+                    })
+                };
+                let high = quad(at + 2);
+                let point = if (0xD800..=0xDBFF).contains(&high) {
+                    let low = quad(at + 8);
+                    at += 6;
+                    0x10000 + ((high - 0xD800) << 10) + low - 0xDC00
+                } else {
+                    high
+                };
+                at += 4;
+                char::from_u32(point).expect("validated scalar")
+            }
+            other => other as char,
+        };
+        at += 2;
+        let mut buffer = [0; 4];
+        emit(scalar.encode_utf8(&mut buffer).as_bytes());
     }
 }
 

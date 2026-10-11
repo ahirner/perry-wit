@@ -1,8 +1,7 @@
 //! Typed `JSON.parse` in one pass: decoders generated per declared type pull values from
 //! perry-std's reader (`json_read`) straight into records and arrays, with no JSON graph.
 //! Members resolve against a static key table per record; undeclared members are skipped
-//! by the reader. Subtrees without a direct reading (variants, untyped `Json` members) are
-//! parsed from their validated text through the graph path.
+//! by the reader. Dynamic `Json` subtrees use the graph path.
 use super::*;
 
 /// Expected kinds, as perry-std `json_read` numbers them for type errors.
@@ -24,7 +23,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         let inner = optional_value(ctx, target).unwrap_or(target);
         let decodable = TypedHandle::<RecordType>::from_handle(inner, ctx)
-            .is_ok_and(|record| key_table(ctx, record).is_some())
+            .is_ok_and(|record| record.deref(ctx).fields().is_ok())
             || inner.deref(ctx).is::<ArrayType>()
             || inner.deref(ctx).is::<perry_mir::types::VariantType>()
             || inner.deref(ctx).is::<FP64Type>()
@@ -99,7 +98,7 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         let generated = TypedHandle::<RecordType>::from_handle(ty, ctx)
-            .is_ok_and(|record| key_table(ctx, record).is_some())
+            .is_ok_and(|record| record.deref(ctx).fields().is_ok())
             || ty.deref(ctx).is::<ArrayType>()
             || ty.deref(ctx).is::<perry_mir::types::VariantType>();
         if self.is_bool_type(ctx, ty) {
@@ -111,7 +110,7 @@ impl<'s> FunctionBuilder<'s> {
             self.append(ctx, &call);
             return Ok(call.get_operation().deref(ctx).get_result(0));
         }
-        // Untyped members and variants: their validated text through the graph path.
+        // Dynamic members use their validated text through the graph path.
         let text = self.intrinsic(ctx, Intrinsic::JsonReadRaw, vec![reader]);
         let json = self.intrinsic(ctx, Intrinsic::JsonParse, vec![text]);
         self.fit(ctx, json, ty)
@@ -171,11 +170,11 @@ impl<'s> FunctionBuilder<'s> {
                 perry_mir::variants::VariantNewOp::new(ctx, variant.into(), &name, payload)
             });
             let fields = if payload.is_some() {
-                vec!["tag", "val"]
+                &["tag", "val"][..]
             } else {
-                vec!["tag"]
+                &["tag"][..]
             };
-            let table = self.string(ctx, &encode_keys(fields.into_iter()));
+            let table = self.string(ctx, &encode_keys(fields.iter().copied()));
             let layout = self.i32(ctx, 2);
             self.intrinsic_void(
                 ctx,
@@ -245,6 +244,10 @@ impl<'s> FunctionBuilder<'s> {
         let prior = builder.intrinsic(ctx, Intrinsic::JsonReadTakeError, vec![reader]);
         let is_record = TypedHandle::<RecordType>::from_handle(ty, ctx).ok();
         let object = is_record.is_some_and(|r| !r.deref(ctx).is_tuple());
+        let table = is_record
+            .and_then(|record| key_table(ctx, record))
+            .unwrap_or_default();
+        let table = builder.string(ctx, &table);
         let opened = builder.intrinsic(
             ctx,
             if object {
@@ -263,7 +266,7 @@ impl<'s> FunctionBuilder<'s> {
                     if record.deref(ctx).is_tuple() {
                         b.read_tuple(ctx, reader, record)
                     } else {
-                        b.read_record(ctx, reader, record)
+                        b.read_record(ctx, reader, record, table)
                     }
                 } else {
                     b.read_array(ctx, reader, ty)
@@ -275,12 +278,6 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(b.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)))
             },
         )?;
-        let table = if let Some(record) = is_record {
-            key_table(ctx, record).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let table = builder.string(ctx, &table);
         let layout = builder.i32(
             ctx,
             if is_record.is_some_and(|r| r.deref(ctx).is_tuple()) {
@@ -309,13 +306,13 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         reader: Value,
         record: TypedHandle<RecordType>,
+        table: Value,
     ) -> Result<Value> {
         let fields = record
             .deref(ctx)
             .fields()
             .map_err(|_| anyhow!("opaque JSON schema"))?
             .to_vec();
-        let table = key_table(ctx, record).expect("checked by the caller");
         let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
         let index_type = IntegerType::get(ctx, 32, Signedness::Signless).into();
         // One slot per member, and a flag for members that must be present.
@@ -348,7 +345,6 @@ impl<'s> FunctionBuilder<'s> {
         let hint = self.entry_slot(ctx, index_type);
         let zero = self.i32(ctx, 0);
         self.store(ctx, hint, zero);
-        let table = self.string(ctx, &table);
         let header = self.new_block(ctx, "json_member");
         let done = self.new_block(ctx, "json_members_done");
         self.jump(ctx, header);
@@ -572,17 +568,20 @@ fn key_table(ctx: &Context, record: TypedHandle<RecordType>) -> Option<String> {
     Some(encode_keys(fields.iter().map(|(name, _)| name.as_str())))
 }
 
-fn encode_keys<'a>(keys: impl Iterator<Item = &'a str>) -> String {
-    let keys: Vec<_> = keys.collect();
-    let digits = |value: usize| (0..5).map(move |i| ((value >> (i * 7)) & 0x7f) as u8);
-    let mut header: Vec<u8> = digits(keys.len()).collect();
+fn encode_keys<'a>(keys: impl ExactSizeIterator<Item = &'a str> + Clone) -> String {
     let mut offset = 5 + 10 * keys.len();
-    for name in &keys {
-        header.extend(digits(name.len()));
-        header.extend(digits(offset));
+    let mut table = String::with_capacity(offset + keys.clone().map(str::len).sum::<usize>());
+    let number = |table: &mut String, value: usize| {
+        for shift in (0..35).step_by(7) {
+            table.push(((value >> shift) & 0x7f) as u8 as char);
+        }
+    };
+    number(&mut table, keys.len());
+    for name in keys.clone() {
+        number(&mut table, name.len());
+        number(&mut table, offset);
         offset += name.len();
     }
-    let mut table = String::from_utf8(header).expect("base-128 digits are UTF-8");
     for name in keys {
         table.push_str(name);
     }

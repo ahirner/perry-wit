@@ -482,8 +482,13 @@ fn unescaped_prefix(bytes: &[u8]) -> usize {
 }
 
 pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     text.push(b'"');
+    quote_contents(text, bytes);
+    text.push(b'"');
+}
+
+pub(super) fn quote_contents(text: &mut Buffer, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut start = 0;
     let mut index = 0;
     while index < bytes.len() {
@@ -515,7 +520,6 @@ pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
         start = index;
     }
     text.extend_from_slice(&bytes[start..]);
-    text.push(b'"');
 }
 
 /// The text written, or null after a failure (with a `TypeError` raised).

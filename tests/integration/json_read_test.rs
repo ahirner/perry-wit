@@ -600,3 +600,54 @@ export function write():number {{ const rows:Row[]=JSON.parse({input});let size=
         std::fs::write(path, serde_json::to_string_pretty(&measurements).unwrap()).unwrap();
     }
 }
+#[test]
+fn source_escapes_stream_without_temporary_strings() {
+    let decoded = "a\u{0}\u{1}\u{8}\u{c}\n\r\t\"\\/é🙂\u{2028}z";
+    let escaped = r#"a\u0000\u0001\b\f\n\r\t\"\\\/\u00e9\ud83d\ude42\u2028z"#;
+    let count = 80;
+    let input = format!(
+        "{{\"n\":1,{}}}",
+        (0..count)
+            .map(|i| format!("\"key{i}\":\"{escaped}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let expected = format!(
+        "{{\"n\":1,{}}}",
+        (0..count)
+            .map(|i| format!("\"key{i}\":{}", serde_json::to_string(decoded).unwrap()))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let source = format!(
+        r#"
+export function run():number {{
+ const value:{{n:number}}=JSON.parse({});
+ return JSON.stringify(value)==={} ? 0 : 1;
+}}
+"#,
+        serde_json::to_string(&input).unwrap(),
+        serde_json::to_string(&expected).unwrap(),
+    );
+    let mut program = Program::checked(&source, "escaped-source.ts");
+    program.stress_collection(true);
+    for _ in 0..3 {
+        let before = program.counter(Counter::Allocations);
+        assert_eq!(program.outcome("run", &[]), (0.0, 0));
+        assert!(program.counter(Counter::Allocations) - before < count);
+        assert_eq!(program.counter(Counter::LiveBytes), 0);
+    }
+}
+
+#[test]
+fn source_number_spans_preserve_canonical_formatting() {
+    let source = r#"
+export function run():number {
+ const value:{n:number}=JSON.parse('{"n":1,"raw":[0,-0,0.0,-0.0,1e999,1e-999,-1e999,999999999999999,-999999999999999,9999999999999999,1e20,1e21,1e-6,1e-7,1.00,-0.1]}');
+ return JSON.stringify(value)==='{"n":1,"raw":[0,0,0,0,null,0,null,999999999999999,-999999999999999,10000000000000000,100000000000000000000,1e+21,0.000001,1e-7,1,-0.1]}' ? 0 : 1;
+}
+"#;
+    let mut program = Program::checked(source, "source-numbers.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
