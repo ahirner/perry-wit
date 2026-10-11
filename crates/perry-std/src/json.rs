@@ -12,15 +12,11 @@
 //! position and its last value) is applied once per object when it is first serialized or
 //! spread ([canonical]). Parsed objects go through the same step, so duplicate and numeric
 //! keys come out as in Node.
-use crate::json_read::pull;
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise, scalars_length};
 
-const NULL: u32 = 1;
-const BOOLEAN: u32 = 2;
-const NUMBER: u32 = 3;
-const STRING: u32 = 4;
-const ARRAY: u32 = 5;
-const OBJECT: u32 = 6;
+pub(super) use perry_abi::json::MAX_DEPTH;
+use perry_abi::json::kind::*;
+
 /// A member a spread set to `undefined`: it hides earlier values and is not serialized.
 const UNDEFINED: u32 = 0;
 /// Word 28 of an object: nonzero once its members are in property order.
@@ -330,9 +326,6 @@ pub(super) struct Writer {
     pub(super) failed: bool,
 }
 
-/// Nesting deeper than this means a cycle (or absurd data): `TypeError`, as for cycles.
-pub(super) const MAX_DEPTH: u32 = 128;
-
 pub(super) fn writer(w: *mut u8) -> &'static mut Writer {
     // SAFETY: compiled code passes writers from [std_json_writer].
     unsafe { &mut *(w as *mut Writer) }
@@ -467,73 +460,15 @@ pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
     quote(&mut w.text, unsafe { crate::runtime::bytes(string) });
 }
 
-/// The length of the leading run of `bytes` that needs no escape, eight bytes at a time.
-fn unescaped_prefix(bytes: &[u8]) -> usize {
-    let mut index = 0;
-    while let Some(word) = pull::word(bytes, index)
-        && pull::special_bytes(word) == 0
-    {
-        index += 8;
-    }
-    while let Some(&byte) = bytes.get(index)
-        && escape(byte).is_none()
-    {
-        index += 1;
-    }
-    index
-}
-
-/// How a JSON string literal writes a byte it must escape.
-enum Escape {
-    /// A two-byte escape such as `\n`.
-    Short(&'static [u8; 2]),
-    /// Another control byte, written `\u00XX`.
-    Control(u8),
-}
-
-/// The escape of `byte` in a JSON string literal, or `None` when it is written as is.
-fn escape(byte: u8) -> Option<Escape> {
-    Some(match byte {
-        b'"' => Escape::Short(br#"\""#),
-        b'\\' => Escape::Short(br"\\"),
-        0x08 => Escape::Short(br"\b"),
-        0x0C => Escape::Short(br"\f"),
-        b'\n' => Escape::Short(br"\n"),
-        b'\r' => Escape::Short(br"\r"),
-        b'\t' => Escape::Short(br"\t"),
-        0..=0x1F => Escape::Control(byte),
-        _ => return None,
-    })
-}
-
-/// Append `bytes` as a JSON string literal, quotes included.
+/// Append a JSON string literal, quotes included.
 pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
     text.push(b'"');
     quote_contents(text, bytes);
     text.push(b'"');
 }
 
-/// Append the escaped contents of a JSON string literal, without its quotes.
-pub(super) fn quote_contents(text: &mut Buffer, mut bytes: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    loop {
-        let (plain, escaped) = bytes.split_at(unescaped_prefix(bytes));
-        text.extend_from_slice(plain);
-        // The prefix ends at a byte that needs an escape, or at the end.
-        let Some((&byte, rest)) = escaped.split_first() else {
-            return;
-        };
-        match escape(byte) {
-            Some(Escape::Short(escape)) => text.extend_from_slice(escape),
-            Some(Escape::Control(byte)) => {
-                text.extend_from_slice(br"\u00");
-                text.push(HEX[usize::from(byte >> 4)]);
-                text.push(HEX[usize::from(byte & 15)]);
-            }
-            None => text.push(byte),
-        }
-        bytes = rest;
-    }
+pub(super) fn quote_contents(text: &mut Buffer, bytes: &[u8]) {
+    perry_abi::json::quote_contents(bytes, |part| text.extend_from_slice(part));
 }
 
 /// The text written, or null after a failure (with a `TypeError` raised).

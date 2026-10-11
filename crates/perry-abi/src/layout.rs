@@ -68,3 +68,20 @@ pub mod async_frame {
     pub const OBSERVER_SIZE: u32 = 32;
     pub const SLOTS: u32 = OBSERVER + OBSERVER_SIZE;
 }
+
+/// Aggregate codes passed by typed JSON decoders when attaching source provenance.
+pub mod json_source {
+    pub const RECORD: u32 = 0;
+    pub const ARRAY: u32 = 1;
+    pub const VARIANT: u32 = 2;
+    pub const TUPLE: u32 = 3;
+
+    pub const fn offset(kind: u32) -> u32 {
+        match kind {
+            RECORD | TUPLE => super::record::SOURCE,
+            ARRAY => super::array::SOURCE,
+            VARIANT => super::variant::SOURCE,
+            _ => panic!("invalid JSON aggregate layout"),
+        }
+    }
+}

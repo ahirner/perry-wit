@@ -17,17 +17,12 @@ use crate::runtime::{
     layout::string::Header as StringHeader, raise, string_view_into,
 };
 use core::ptr;
+use perry_abi::json::kind::*;
+pub(super) use perry_abi::json::{lookup, table_key};
 
 #[path = "../../../src/helpers/json/pull.rs"]
 pub(super) mod pull;
 
-/// Value kinds of [std_json_read_kind], as the graph parser's node kinds.
-const NULL: u32 = 1;
-const BOOLEAN: u32 = 2;
-const NUMBER: u32 = 3;
-const STRING: u32 = 4;
-const ARRAY: u32 = 5;
-const OBJECT: u32 = 6;
 /// Mismatch of a variant tag that names no declared case.
 const VARIANT_TAG: u32 = 7;
 
@@ -95,7 +90,7 @@ const POOL: usize = 64;
 /// # Safety
 /// `shape` is the pointer map of one `size`-byte slot, repeated (`[size, …]`); `chunk` and
 /// `used` form a pool that only this function fills, starting with `used == POOL`.
-unsafe fn pooled_slot(
+pub(super) unsafe fn pooled_slot(
     chunk: &mut *mut u8,
     used: &mut u32,
     size: usize,
@@ -313,46 +308,6 @@ pub(crate) unsafe extern "C" fn std_json_read_field(r: *mut u8, table: *mut u8, 
         r.skip();
     }
     -1
-}
-
-/// The index of `key` in a key table (see [std_json_read_field]), or -1.
-pub(super) fn lookup(table: &[u8], hint: u32, key: &[u8]) -> i32 {
-    let count = table_number(table, 0);
-    // Compare lengths first: they are in the header, the key bytes are not.
-    let matches = |index: u32| {
-        table_number(table, 5 + 10 * index as usize) as usize == key.len()
-            && table_key(table, index) == key
-    };
-    if hint < count && matches(hint) {
-        return hint as i32;
-    }
-    (0..count)
-        .find(|&index| index != hint && matches(index))
-        .map_or(-1, |index| index as i32)
-}
-
-/// The five base-128 digits at `at` (least significant first).
-///
-/// Key tables are static strings the compiler generates (`perry-lower`'s `encode_keys`); a
-/// short one is a compiler bug, so it traps instead of reading as some other table.
-fn table_number(table: &[u8], at: usize) -> u32 {
-    table
-        .get(at..)
-        .and_then(<[u8]>::first_chunk::<5>)
-        .expect("generated key tables hold every header number")
-        .iter()
-        .rev()
-        .fold(0, |value, &digit| (value << 7) | u32::from(digit))
-}
-
-/// The key bytes of entry `index`, which must be below the table's count.
-pub(super) fn table_key(table: &[u8], index: u32) -> &[u8] {
-    let at = 5 + 10 * index as usize;
-    let len = table_number(table, at) as usize;
-    let offset = table_number(table, at + 5) as usize;
-    table
-        .get(offset..offset + len)
-        .expect("generated key table entries lie within the table")
 }
 
 impl Reader {

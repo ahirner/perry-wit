@@ -5,7 +5,7 @@ use crate::{
     runtime::Runtime,
 };
 use anyhow::{Result, anyhow, ensure};
-use perry_abi::layout::{array, record, variant};
+use perry_abi::layout::{array, json_source, record};
 use perry_mir::{
     intrinsics::Intrinsic,
     types::{ArrayType, DateType, ExceptionType, JsonType, OptionalType, RecordType, StringType},
@@ -29,24 +29,15 @@ use pliron_wasm::{
     control::ReturnOp,
     ops::CallOp,
 };
-use std::fmt::Write as _;
 
 /// The member prefix `"name":` of a record field known at compile time, quoted as ECMAScript
 /// `QuoteJSONString` does.
 fn json_key(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 3);
-    out.push('"');
-    for character in name.chars() {
-        match character {
-            '"' => out.push_str(r#"\""#),
-            '\\' => out.push_str(r"\\"),
-            // Writing to a `String` cannot fail.
-            '\0'..='\u{1f}' => _ = write!(out, "\\u{:04x}", character as u32),
-            _ => out.push(character),
-        }
-    }
-    out.push_str("\":");
-    out
+    let mut out = Vec::with_capacity(name.len() + 3);
+    out.push(b'"');
+    perry_abi::json::quote_contents(name.as_bytes(), |part| out.extend_from_slice(part));
+    out.extend_from_slice(b"\":");
+    String::from_utf8(out).expect("JSON quoting preserves UTF-8")
 }
 
 impl FunctionLowering<'_, '_> {
@@ -174,13 +165,13 @@ impl FunctionLowering<'_, '_> {
                 ctx,
                 MemKind::I32,
                 value,
-                if record_type.is_some() {
-                    record::SOURCE
+                json_source::offset(if record_type.is_some() {
+                    json_source::RECORD
                 } else if variant_type.is_some() {
-                    variant::SOURCE
+                    json_source::VARIANT
                 } else {
-                    array::SOURCE
-                },
+                    json_source::ARRAY
+                }),
             );
             let copied = b.runtime(ctx, Runtime::StdJsonSourceCopy, vec![source, writer]);
             let write = b.new_block(ctx, vec![]);

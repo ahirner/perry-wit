@@ -326,7 +326,7 @@ impl Signal {
                 host::reaction_cancel_read(self.readable);
             }
             host::reaction_drop_readable(self.readable);
-            let removed = current().signals.remove(self.readable);
+            let removed = current().signals.remove(self);
             assert!(removed, "an open completion is registered");
             self.state = SignalState::Dormant;
         }
@@ -335,39 +335,38 @@ impl Signal {
 
 /// Handle lookup and GC ownership for native completions; entries have no runnable order.
 pub(crate) struct Signals {
-    buckets: *mut *mut Signal,
-    capacity: usize,
+    buckets: &'static mut [*mut Signal],
     len: usize,
 }
 impl Signals {
     pub(crate) const fn new() -> Self {
         Self {
-            buckets: ptr::null_mut(),
-            capacity: 0,
+            buckets: &mut [],
             len: 0,
         }
     }
     unsafe fn insert_bucket(&mut self, signal: *mut Signal) {
         unsafe {
-            let bucket = (*signal).readable as usize & (self.capacity - 1);
-            (*signal).bucket_next = *self.buckets.add(bucket);
-            *self.buckets.add(bucket) = signal;
+            let bucket = &mut self.buckets[(*signal).readable as usize & (self.buckets.len() - 1)];
+            (*signal).bucket_next = *bucket;
+            *bucket = signal;
             self.len += 1;
         }
     }
     unsafe fn insert(&mut self, signal: *mut Signal) {
         unsafe {
-            if self.len == self.capacity {
+            if self.len == self.buckets.len() {
                 let capacity = (self.len * 2).max(8);
                 let buckets = current()
                     .allocate(capacity * core::mem::size_of::<*mut Signal>())
                     .cast::<*mut Signal>();
                 ptr::write_bytes(buckets, 0, capacity);
+                // The task owns this initialized bucket array until it drops the registry.
+                let buckets = core::slice::from_raw_parts_mut(buckets, capacity);
                 let old = core::mem::replace(&mut self.buckets, buckets);
-                let old_capacity = core::mem::replace(&mut self.capacity, capacity);
                 self.len = 0;
-                for index in 0..old_capacity {
-                    let mut entry = *old.add(index);
+                for &mut head in old {
+                    let mut entry = head;
                     while !entry.is_null() {
                         let next = (*entry).bucket_next;
                         self.insert_bucket(entry);
@@ -378,51 +377,51 @@ impl Signals {
             self.insert_bucket(signal);
         }
     }
-    unsafe fn get(&self, handle: u32) -> *mut Signal {
-        if self.len == 0 {
+    fn get(&self, handle: u32) -> *mut Signal {
+        if self.is_empty() {
             return ptr::null_mut();
         }
-        unsafe {
-            let mut entry = *self.buckets.add(handle as usize & (self.capacity - 1));
-            while !entry.is_null() {
-                if (*entry).readable == handle {
-                    return entry;
-                }
-                entry = (*entry).bucket_next;
+        let mut entry = self.buckets[handle as usize & (self.buckets.len() - 1)];
+        // SAFETY: registered signals belong to live rooted owners until removal.
+        while let Some(signal) = unsafe { entry.as_ref() } {
+            if signal.readable == handle {
+                return entry;
             }
+            entry = signal.bucket_next;
         }
         ptr::null_mut()
     }
-    /// Unregister the signal reading `handle`; false when none is registered.
-    unsafe fn remove(&mut self, handle: u32) -> bool {
-        if self.len == 0 {
+
+    fn remove(&mut self, signal: &Signal) -> bool {
+        if self.is_empty() {
             return false;
         }
-        unsafe {
-            let mut link = self.buckets.add(handle as usize & (self.capacity - 1));
-            while !(*link).is_null() {
-                let signal = *link;
-                if (*signal).readable == handle {
-                    *link = (*signal).bucket_next;
-                    self.len -= 1;
-                    return true;
-                }
-                link = &mut (*signal).bucket_next;
+        let capacity = self.buckets.len();
+        let mut link = &mut self.buckets[signal.readable as usize & (capacity - 1)];
+        while !link.is_null() {
+            if core::ptr::eq(*link, signal) {
+                *link = signal.bucket_next;
+                self.len -= 1;
+                return true;
             }
+            // SAFETY: preceding live nodes are distinct from the signal being closed;
+            // only this registry mutates their bucket links.
+            link = unsafe { &mut (**link).bucket_next };
         }
         false
     }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
-    pub(crate) unsafe fn trace(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
-        unsafe {
-            for index in 0..self.capacity {
-                let mut entry = *self.buckets.add(index);
-                while !entry.is_null() {
-                    roots.push((*entry).owner);
-                    entry = (*entry).bucket_next;
-                }
+
+    pub(crate) fn trace(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
+        for &head in self.buckets.iter() {
+            let mut entry = head;
+            // SAFETY: the registry retains every owner until its event is acknowledged.
+            while let Some(signal) = unsafe { entry.as_ref() } {
+                roots.push(signal.owner);
+                entry = signal.bucket_next;
             }
         }
     }
@@ -580,9 +579,9 @@ pub(crate) unsafe fn cancellation_owned(promise: *mut u8) -> bool {
 pub(crate) fn cancel_observers() {
     // SAFETY: signal cancellation acknowledges native reads before their owners are released.
     unsafe {
-        for bucket in 0..current().signals.capacity {
-            while !(*current().signals.buckets.add(bucket)).is_null() {
-                let signal = *current().signals.buckets.add(bucket);
+        for bucket in 0..current().signals.buckets.len() {
+            while !current().signals.buckets[bucket].is_null() {
+                let signal = current().signals.buckets[bucket];
                 (*signal).close();
             }
         }

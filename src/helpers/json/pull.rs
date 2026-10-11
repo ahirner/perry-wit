@@ -4,7 +4,7 @@
 //! latch `broken`, after which every read stops so generated decoders unwind.
 #[path = "number.rs"]
 mod number;
-const MAX_DEPTH: u32 = 128;
+use perry_abi::json::{MAX_DEPTH, special_bytes, word};
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
 
@@ -420,27 +420,4 @@ pub(crate) fn hex4(input: &[u8]) -> Option<(u32, &[u8])> {
         Some(value * 16 + char::from(digit).to_digit(16)?)
     })?;
     Some((value, rest))
-}
-
-/// The eight little-endian bytes of `input` at `at`, if that many remain.
-#[inline(always)]
-pub(crate) fn word(input: &[u8], at: usize) -> Option<u64> {
-    let bytes = input.get(at..)?.first_chunk::<8>()?;
-    Some(u64::from_le_bytes(*bytes))
-}
-
-/// High bit set in the lowest quote, backslash or control byte of `word`: the bytes a JSON
-/// string must escape (bits above the lowest may be spurious).
-#[inline(always)]
-pub(crate) fn special_bytes(word: u64) -> u64 {
-    let quote = zero_bytes(word ^ (ONES * u64::from(b'"')));
-    let backslash = zero_bytes(word ^ (ONES * u64::from(b'\\')));
-    let control = word.wrapping_sub(ONES * 0x20) & !word & HIGHS;
-    quote | backslash | control
-}
-
-/// High bit set in the lowest zero byte of `word` (bits above it may be spurious).
-#[inline(always)]
-fn zero_bytes(word: u64) -> u64 {
-    word.wrapping_sub(ONES) & !word & HIGHS
 }

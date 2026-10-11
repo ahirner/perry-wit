@@ -1,6 +1,7 @@
 //! Phase timings and sampled guest stacks for a JSON-described component invocation.
 //! Run with `cargo run --release --example profile_component -- request.json`.
 //! Compilation is separate; each measured call gets a fresh instance and WASI context.
+//! Samples share compiled code; `componentCloneMs` measures handle reuse, not artifact loading.
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use std::{
@@ -100,9 +101,6 @@ async fn main() -> Result<()> {
     let start = Instant::now();
     let component = Component::from_file(&engine, &request.component)?;
     let compile_ms = milliseconds(start);
-    let artifact = tempfile::NamedTempFile::new()?;
-    fs::write(artifact.path(), component.serialize()?)?;
-    drop(component);
     let stop = Arc::new(AtomicBool::new(false));
     let ticker = request.profile.then(|| {
         let engine = engine.clone();
@@ -128,9 +126,8 @@ async fn main() -> Result<()> {
     let mut output = None;
     for _ in 0..request.samples {
         let start = Instant::now();
-        // SAFETY: this process just compiled and serialized this private temporary file.
-        let component = unsafe { Component::deserialize_file(&engine, artifact.path())? };
-        let load_ms = milliseconds(start);
+        let component = component.clone();
+        let component_clone_ms = milliseconds(start);
         let start = Instant::now();
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;
@@ -205,7 +202,7 @@ async fn main() -> Result<()> {
         drop((store, pre, linker, component));
         let teardown_ms = milliseconds(start);
         measurements.push(serde_json::json!({
-            "loadMs": load_ms,
+            "componentCloneMs": component_clone_ms,
             "setupMs": setup_ms,
             "instantiateMs": instantiate_ms,
             "callMs": call_ms,

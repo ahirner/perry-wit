@@ -4,20 +4,7 @@
 //! by the reader. Dynamic `Json` subtrees use the graph path.
 use super::*;
 
-/// Expected kinds, as perry-std `json_read` numbers them for type errors.
-const BOOLEAN: u64 = 2;
-const NUMBER: u64 = 3;
-const STRING: u64 = 4;
-const ARRAY: u64 = 5;
-const OBJECT: u64 = 6;
-const NULL: u64 = 1;
-
-/// How `json_read_attach` records a decoded aggregate's source span, as perry-std numbers
-/// the layouts.
-const RECORD_LAYOUT: u64 = 0;
-const ARRAY_LAYOUT: u64 = 1;
-const VARIANT_LAYOUT: u64 = 2;
-const TUPLE_LAYOUT: u64 = 3;
+use perry_abi::{json::kind::*, layout::json_source};
 
 impl<'s> FunctionBuilder<'s> {
     /// `JSON.parse(text)` where a record or array type is expected: decode it in one pass.
@@ -52,7 +39,7 @@ impl<'s> FunctionBuilder<'s> {
                 return self.fit(ctx, value, ty);
             }
             let kind = self.intrinsic(ctx, Intrinsic::JsonReadKind, vec![reader]);
-            let null = self.i32(ctx, NULL);
+            let null = self.i32(ctx, u64::from(NULL));
             let is_null = self.compare(ctx, CompareKind::Eq, kind, null);
             return self.choose(
                 ctx,
@@ -84,7 +71,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         if number_string {
             let kind = self.intrinsic(ctx, Intrinsic::JsonReadKind, vec![reader]);
-            let number = self.i32(ctx, NUMBER);
+            let number = self.i32(ctx, u64::from(NUMBER));
             let is_number = self.compare(ctx, CompareKind::Eq, kind, number);
             return self.choose(
                 ctx,
@@ -158,7 +145,7 @@ impl<'s> FunctionBuilder<'s> {
                         }
                         Missing::Json => Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])),
                         Missing::Fails(kind) => {
-                            let kind = b.i32(ctx, kind);
+                            let kind = b.i32(ctx, u64::from(kind));
                             b.intrinsic_void(ctx, Intrinsic::JsonReadFail, vec![reader, kind]);
                             Ok(b.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)))
                         }
@@ -176,7 +163,7 @@ impl<'s> FunctionBuilder<'s> {
                 &["tag"][..]
             };
             let table = self.string(ctx, &encode_keys(fields.iter().copied()));
-            let layout = self.i32(ctx, VARIANT_LAYOUT);
+            let layout = self.i32(ctx, u64::from(json_source::VARIANT));
             self.intrinsic_void(
                 ctx,
                 Intrinsic::JsonReadAttach,
@@ -280,18 +267,18 @@ impl<'s> FunctionBuilder<'s> {
                 None => b.read_array(ctx, reader, ty),
             },
             |b, ctx| {
-                let expected = b.i32(ctx, if object { OBJECT } else { ARRAY });
+                let expected = b.i32(ctx, u64::from(if object { OBJECT } else { ARRAY }));
                 b.intrinsic_void(ctx, Intrinsic::JsonReadFail, vec![reader, expected]);
                 Ok(b.emit_value(ctx, |ctx| UndefOp::new(ctx, ty)))
             },
         )?;
         let layout = self.i32(
             ctx,
-            match record {
-                Some(_) if tuple => TUPLE_LAYOUT,
-                Some(_) => RECORD_LAYOUT,
-                None => ARRAY_LAYOUT,
-            },
+            u64::from(match record {
+                Some(_) if tuple => json_source::TUPLE,
+                Some(_) => json_source::RECORD,
+                None => json_source::ARRAY,
+            }),
         );
         self.intrinsic_void(
             ctx,
@@ -321,7 +308,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let index_type = IntegerType::get(ctx, 32, Signedness::Signless).into();
         let error = self.entry_slot(ctx, index_type);
-        let initial = self.i32(ctx, kind);
+        let initial = self.i32(ctx, u64::from(kind));
         self.store(ctx, error, initial);
         (slot, error)
     }
@@ -470,7 +457,7 @@ enum Missing {
     /// The JSON `undefined` of an untyped member.
     Json,
     /// A type error naming the expected kind.
-    Fails(u64),
+    Fails(u32),
 }
 
 /// Whether `ty` is decoded by a generated reader function: a defined record (or tuple), an
@@ -533,21 +520,7 @@ fn key_table(ctx: &Context, record: TypedHandle<RecordType>) -> Option<String> {
 }
 
 fn encode_keys<'a>(keys: impl ExactSizeIterator<Item = &'a str> + Clone) -> String {
-    let mut offset = 5 + 10 * keys.len();
-    let mut table = String::with_capacity(offset + keys.clone().map(str::len).sum::<usize>());
-    let number = |table: &mut String, value: usize| {
-        for shift in (0..35).step_by(7) {
-            table.push(((value >> shift) & 0x7f) as u8 as char);
-        }
-    };
-    number(&mut table, keys.len());
-    for name in keys.clone() {
-        number(&mut table, name.len());
-        number(&mut table, offset);
-        offset += name.len();
-    }
-    for name in keys {
-        table.push_str(name);
-    }
+    let mut table = String::with_capacity(perry_abi::json::key_table_len(keys.clone()));
+    perry_abi::json::encode_keys(keys, |text| table.push_str(text));
     table
 }

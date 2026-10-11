@@ -9,6 +9,7 @@
 
 use core::ptr;
 
+pub mod json;
 pub mod layout;
 // Public because `perry-runtime` compiles this source too and uses the compact counter.
 pub mod utf8;
@@ -49,9 +50,6 @@ pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 pub const ARRAY_DATA: u32 = layout::array::DATA;
 /// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].
 pub const BYTES_DATA: usize = 4;
-/// String layout ([layout::string]): byte length and data address.
-const STRING_LEN: usize = layout::string::LEN as usize;
-const STRING_DATA: usize = layout::string::DATA as usize;
 
 #[cfg(not(target_arch = "wasm32"))]
 const _: () = {
@@ -268,9 +266,11 @@ pub unsafe fn string_view_into(out: *mut u8, string: *mut u8, from: u32, to: u32
 pub unsafe fn bytes(string: *mut u8) -> &'static [u8] {
     // SAFETY: guaranteed by the caller; layout of `perry_runtime::string`.
     unsafe {
-        let len = *(string.add(STRING_LEN) as *const u32);
-        let data = *(string.add(STRING_DATA) as *const *const u8);
-        core::slice::from_raw_parts(data, len as usize)
+        let header = &*string.cast::<layout::string::Header>();
+        if header.len == 0 {
+            return &[];
+        }
+        core::slice::from_raw_parts(header.data, header.len as usize)
     }
 }
 
@@ -279,12 +279,9 @@ pub fn from_bytes(bytes: &[u8]) -> *mut u8 {
     if bytes.is_empty() {
         return from_static("");
     }
-    let data = alloc(bytes.len() as u32);
-    // SAFETY: fresh block of `len` bytes, then valid UTF-8 living as long as the task.
-    unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
-        adopt(data, bytes.len() as u32)
-    }
+    let data = alloc_uninit(bytes.len()).write_copy_of_slice(bytes);
+    // SAFETY: copied UTF-8 in task storage; the string takes ownership of the allocation.
+    unsafe { adopt(data.as_mut_ptr(), data.len() as u32) }
 }
 
 mod byte_buffer;

@@ -10,6 +10,7 @@ use crate::json::{
 use crate::json_read::{Reader, decode_string, lookup, pull, reader, table_key, unescape};
 use crate::runtime::{Buffer, bytes};
 use core::{mem, ptr, slice};
+use perry_abi::layout::json_source;
 
 /// The text span behind one decoded aggregate, and what the program changed since.
 ///
@@ -119,7 +120,11 @@ fn cursor(document: *mut Reader, start: u32) -> pull::Cursor<'static> {
 pub(super) fn key_bytes(entry: &Entry) -> &'static [u8] {
     // SAFETY: entries are made by [Entry::new] (or are the empty placeholder) from a key
     // slice that outlives them.
-    unsafe { slice::from_raw_parts(entry.key, entry.key_len) }
+    if entry.key_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(entry.key, entry.key_len) }
+    }
 }
 
 /// `entries` as bytes, for storing them in a traced buffer.
@@ -131,6 +136,9 @@ fn entry_bytes(entries: &[Entry]) -> &[u8] {
 /// The complete entries stored in `buffer`.
 fn stored(buffer: &mut Buffer) -> &mut [Entry] {
     let bytes = buffer.as_mut_slice();
+    if bytes.is_empty() {
+        return &mut [];
+    }
     // SAFETY: entry buffers hold only whole entries written by [entry_bytes], in an 8-aligned
     // task allocation; the exclusive borrow covers exactly those bytes.
     unsafe {
@@ -284,9 +292,7 @@ fn sort(members: &mut Members) {
     if count == 0 {
         return;
     }
-    let entries = unsafe {
-        slice::from_raw_parts_mut(members.entries.as_slice().as_ptr() as *mut Entry, count)
-    };
+    let entries = entries(members);
     let order = |entry: &Entry| match array_index(key_bytes(entry)) {
         Some(index) => (0, index as usize),
         None => (1, entry.order),
@@ -298,11 +304,6 @@ fn sort(members: &mut Members) {
         heap_sort(entries, |a, b| order(a).cmp(&order(b)));
     }
 }
-
-/// Aggregate kinds of [std_json_read_attach], as `perry-lower` passes them.
-const RECORD_LAYOUT: u32 = 0;
-const ARRAY_LAYOUT: u32 = 1;
-const TUPLE_LAYOUT: u32 = 3;
 
 /// Attach the span from `start` to the reader's position to the decoded `value`, unless the
 /// document is broken or mismatched. `layout` names its kind: a record, an array, a variant
@@ -331,18 +332,16 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
         mem::offset_of!(Source, assigned) as u32,
         mem::offset_of!(Source, cached) as u32,
     ];
-    if document.source_used == 64 {
-        document.sources = unsafe { crate::runtime::alloc_shaped((SIZE * 64) as u32, &SHAPE) };
-        unsafe { ptr::write_bytes(document.sources, 0, SIZE * 64) };
-        document.source_used = 0;
-    }
+    // SAFETY: SHAPE traces each Source slot; only this pool initializes those slots.
     let source = unsafe {
-        document
-            .sources
-            .add(document.source_used as usize * SIZE)
-            .cast::<Source>()
+        crate::json_read::pooled_slot(
+            &mut document.sources,
+            &mut document.source_used,
+            SIZE,
+            &SHAPE,
+        )
+        .cast::<Source>()
     };
-    document.source_used += 1;
     unsafe {
         source.write(Source {
             document,
@@ -354,15 +353,11 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
             cached_len: 0,
             nesting: 0,
             tuple_written: 0,
-            tuple: layout == TUPLE_LAYOUT,
+            tuple: layout == json_source::TUPLE,
         });
         // These are internal headers, independent of the Canonical ABI.
         value
-            .add(match layout {
-                RECORD_LAYOUT | TUPLE_LAYOUT => crate::runtime::layout::record::SOURCE,
-                ARRAY_LAYOUT => crate::runtime::layout::array::SOURCE,
-                _ => crate::runtime::layout::variant::SOURCE,
-            } as usize)
+            .add(json_source::offset(layout) as usize)
             .cast::<*mut Source>()
             .write(source);
     }
@@ -375,17 +370,17 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
 /// `source` is null or an attached source; `field` is null or a string.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_write(source: *mut u8, field: *mut u8) {
-    if source.is_null() {
+    // SAFETY: guaranteed by the caller.
+    let Some(source) = (unsafe { attached(source) }) else {
         return;
-    }
-    // SAFETY: guaranteed by the caller; a source retains its document.
-    let source = unsafe { &mut *source.cast::<Source>() };
-    unsafe { (*source.document).dirty = true };
+    };
+    source.document().dirty = true;
     if field.is_null() {
         return;
     }
     // SAFETY: guaranteed by the caller.
-    let (key, table) = unsafe { (bytes(field), bytes(source.table)) };
+    let key = unsafe { bytes(field) };
+    let table = source.table();
     if source.tuple {
         if let Some(index) = key.strip_prefix(b"_").and_then(array_index) {
             source.tuple_written = source.tuple_written.max(index + 1);
@@ -421,39 +416,30 @@ pub(crate) unsafe extern "C" fn std_json_source_write(source: *mut u8, field: *m
 /// `source` is null or an attached source.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_begin(source: *mut u8) -> *mut u8 {
-    if source.is_null() {
+    // SAFETY: guaranteed by the caller.
+    let Some(source) = (unsafe { attached(source) }) else {
         return ptr::null_mut();
-    }
-    // SAFETY: guaranteed by the caller; the table is a string.
-    let (source, table) = unsafe {
-        let source = &*source.cast::<Source>();
-        (source, bytes(source.table))
     };
+    let table = source.table();
     if table.is_empty() {
         return ptr::null_mut();
     }
-    let mut members = index_object(source.document, source.start, source.table);
-    let mut order = entries(&members)
+    let mut members = index_object(source.document, source.start, Some(table));
+    let mut order = entries(&mut members)
         .iter()
         .map(|entry| entry.order + 1)
         .max()
         .unwrap_or(0);
     for index in source.assigned.as_slice().as_chunks::<4>().0 {
         let index = u32::from_le_bytes(*index) as usize;
-        if entries(&members).iter().any(|entry| entry.field == index) {
+        if entries(&mut members)
+            .iter()
+            .any(|entry| entry.field == index)
+        {
             continue;
         }
         let text = table_key(table, index as u32);
-        append(
-            &mut members,
-            Entry {
-                key: text.as_ptr(),
-                key_len: text.len(),
-                start: 0,
-                field: index,
-                order,
-            },
-        );
+        append(&mut members, Entry::new(text, 0, index, order));
         order += 1;
     }
     sort(&mut members);
@@ -463,7 +449,10 @@ pub(crate) unsafe extern "C" fn std_json_source_begin(source: *mut u8) -> *mut u
 }
 
 fn raw(writer: *mut u8, text: &[u8]) {
-    unsafe { std_json_raw(writer, text.as_ptr(), text.len() as u32) };
+    let writer = json_writer(writer);
+    if !writer.failed {
+        writer.text.extend_from_slice(text);
+    }
 }
 
 /// Start an object member named by `entry`'s key.
@@ -488,13 +477,12 @@ enum Frame {
 /// decoded escapes, normalized numbers and objects in property order. Iterative, bounded by
 /// the writer's depth limit.
 fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
-    let mut stack = [const { mem::MaybeUninit::<Frame>::uninit() }; 129];
-    stack[0].write(Frame::Value(start));
+    let mut stack = [const { None }; MAX_DEPTH as usize + 1];
+    stack[0] = Some(Frame::Value(start));
     let mut depth = 1;
     while depth > 0 {
         depth -= 1;
-        // Every live stack entry is written before increasing depth and moved out once.
-        match unsafe { stack[depth].assume_init_read() } {
+        match stack[depth].take().expect("pending serialization frame") {
             Frame::Value(start) => {
                 let mut r = cursor(document, start);
                 match r.whitespace() {
@@ -502,16 +490,16 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                         if std_json_open(writer, b'{' as u32) == 0 {
                             return;
                         }
-                        let mut members = index_object(document, r.pos, ptr::null_mut());
+                        let mut members = index_object(document, r.pos, None);
                         sort(&mut members);
-                        stack[depth].write(Frame::Object(members));
+                        stack[depth] = Some(Frame::Object(members));
                         depth += 1;
                     }
                     b'[' => {
                         if std_json_open(writer, b'[' as u32) == 0 {
                             return;
                         }
-                        stack[depth].write(Frame::Array(r.pos + 1, true));
+                        stack[depth] = Some(Frame::Array(r.pos + 1, true));
                         depth += 1;
                     }
                     b'"' => {
@@ -556,15 +544,16 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                 }
             }
             Frame::Object(mut members) => {
-                if members.at == entries(&members).len() {
+                if members.at == entries(&mut members).len() {
                     std_json_close(writer, b'}' as u32);
                     continue;
                 }
-                let entry = entries(&members)[members.at];
+                let at = members.at;
+                let entry = entries(&mut members)[at];
                 members.at += 1;
                 key(writer, &entry);
-                stack[depth].write(Frame::Object(members));
-                stack[depth + 1].write(Frame::Value(entry.start as u32));
+                stack[depth] = Some(Frame::Object(members));
+                stack[depth + 1] = Some(Frame::Value(entry.start as u32));
                 depth += 2;
             }
             Frame::Array(pos, first) => {
@@ -580,8 +569,8 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                 let start = r.pos;
                 r.skip();
                 std_json_item(writer);
-                stack[depth].write(Frame::Array(r.pos, false));
-                stack[depth + 1].write(Frame::Value(start));
+                stack[depth] = Some(Frame::Array(r.pos, false));
+                stack[depth + 1] = Some(Frame::Value(start));
                 depth += 2;
             }
         }
@@ -606,7 +595,8 @@ pub(crate) unsafe extern "C" fn std_json_source_next(
     // SAFETY: guaranteed by the caller.
     let members = unsafe { &mut *members.cast::<Members>() };
     while members.at < entries(members).len() {
-        let entry = entries(members)[members.at];
+        let at = members.at;
+        let entry = entries(members)[at];
         members.at += 1;
         if entry.field != usize::MAX {
             return entry.field as i32;
@@ -627,12 +617,11 @@ pub(crate) unsafe extern "C" fn std_json_source_next(
 /// `source` is null or an attached source; `writer` is a JSON writer.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *mut u8) -> u32 {
-    if source.is_null() {
+    // SAFETY: guaranteed by the caller.
+    let Some(source) = (unsafe { attached(source) }) else {
         return 0;
-    }
-    // SAFETY: guaranteed by the caller; a source retains its document.
-    let source = unsafe { &*source.cast::<Source>() };
-    let document = unsafe { &mut *source.document };
+    };
+    let document = source.document();
     let writer = json_writer(writer);
     if document.dirty
         || !document.copy_safe
@@ -641,12 +630,9 @@ pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *m
     {
         return 0;
     }
-    if !source.cached.is_null() {
+    if let Some(cached) = source.cached() {
         writer.max_depth = writer.max_depth.max(writer.depth + source.nesting);
-        // SAFETY: the source traces the immutable cached allocation.
-        writer.text.extend_from_slice(unsafe {
-            slice::from_raw_parts(source.cached, source.cached_len as usize)
-        });
+        writer.text.extend_from_slice(cached);
         return 1;
     }
     // Bound speculative capacity: source spans can contain arbitrary whitespace.
@@ -663,12 +649,11 @@ pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *m
 /// `source` is null or an attached source; `writer` is a JSON writer.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_remember(source: *mut u8, writer: *mut u8) {
-    if source.is_null() {
+    // SAFETY: guaranteed by the caller.
+    let Some(source) = (unsafe { attached(source) }) else {
         return;
-    }
-    // SAFETY: guaranteed by the caller; a source retains its document.
-    let source = unsafe { &mut *source.cast::<Source>() };
-    let document = unsafe { &mut *source.document };
+    };
+    let document = source.document();
     let writer = json_writer(writer);
     if document.dirty || !document.copy_safe || writer.depth != 0 || writer.failed {
         return;
@@ -699,11 +684,10 @@ pub(crate) unsafe extern "C" fn std_json_source_tuple_length(
     source: *mut u8,
     declared: u32,
 ) -> u32 {
-    if source.is_null() {
-        return declared;
-    }
     // SAFETY: guaranteed by the caller.
-    let source = unsafe { &*source.cast::<Source>() };
+    let Some(source) = (unsafe { attached(source) }) else {
+        return declared;
+    };
     let mut scan = cursor(source.document, source.start);
     scan.open(b'[');
     let mut length = 0;
@@ -724,11 +708,10 @@ pub(crate) unsafe extern "C" fn std_json_source_tuple_tail(
     writer: *mut u8,
     declared: u32,
 ) {
-    if source.is_null() {
-        return;
-    }
     // SAFETY: guaranteed by the caller.
-    let source = unsafe { &*source.cast::<Source>() };
+    let Some(source) = (unsafe { attached(source) }) else {
+        return;
+    };
     let mut scan = cursor(source.document, source.start);
     scan.open(b'[');
     let mut index = 0;

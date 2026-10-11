@@ -3,6 +3,28 @@
 use crate::core_program::{Counter, Program};
 
 #[test]
+fn compiled_and_parsed_keys_use_canonical_escapes() {
+    let mut source = String::from("export function run():number {\n");
+    for key in (0..32).map(char::from).map(|c| c.to_string()).chain([
+        "\"\\".to_string(),
+        "é🙂".to_string(),
+        "x".repeat(260),
+    ]) {
+        let literal = serde_json::to_string(&key).unwrap();
+        let object = format!("{{{literal}:7}}");
+        let expected = serde_json::to_string(&object).unwrap();
+        source.push_str(&format!(
+            "if(JSON.stringify({object}) !== {expected}) return 1;\n\
+             if(JSON.stringify(JSON.parse({expected})) !== {expected}) return 2;\n"
+        ));
+    }
+    source.push_str("return 0;}");
+    let mut program = Program::checked(&source, "quoted-keys.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
 fn parsed_views_survive_suspension_errors_and_repeated_exports() {
     let source = r#"
 interface Row {name:string;n:number}
@@ -471,7 +493,7 @@ export function run():number {{
 #[test]
 fn typed_key_tables_handle_unicode_and_overwritten_errors() {
     let mut keys: Vec<_> = (0..40).map(|index| format!("field{index}")).collect();
-    keys.extend(["é🙂".into(), "".into()]);
+    keys.extend(["é🙂".into(), "".into(), "x".repeat(260)]);
     let fields = keys
         .iter()
         .map(|key| format!("{}:number", serde_json::to_string(key).unwrap()))
