@@ -20,7 +20,10 @@ const _: () = {
     assert!(core::mem::offset_of!(Str, cursor_byte) == CURSOR_BYTE as usize);
 };
 
+#[cfg(not(feature = "collectible"))]
 use crate::utf8::scalars_length;
+#[cfg(feature = "collectible")]
+use crate::utf8::scalars_length_wide as scalars_length;
 
 fn new(len: u32, scalars: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
     static SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Str, owner) as u32];

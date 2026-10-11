@@ -59,7 +59,6 @@ const fn cell_of(class: usize) -> usize {
     }
 }
 
-const NONE: u16 = u16::MAX;
 const MIN_THRESHOLD: usize = 256 * 1024;
 
 #[repr(C)]
@@ -76,7 +75,7 @@ struct Page {
     slots: usize,
     allocated: [u64; 1],
     marked: [u64; 1],
-    free: u16,
+    free: u64,
     sweep_pending: bool,
     poison: bool,
     listed: bool,
@@ -94,20 +93,21 @@ impl Page {
         let memory =
             NonNull::new(unsafe { alloc(layout) }).unwrap_or_else(|| handle_alloc_error(layout));
         let slots = if cell > MAX_SMALL { 1 } else { PAYLOAD / cell };
-        let mut page = Self {
+        let page = Self {
             memory,
             layout,
             cell,
             slots,
             allocated: [0; 1],
             marked: [0; 1],
-            free: NONE,
+            free: (1u64 << slots) - 1,
             sweep_pending: false,
             poison: cfg!(test),
             listed: false,
         };
-        for index in (0..slots).rev() {
-            page.release(index);
+        if page.poison {
+            // SAFETY: this page exclusively owns its entire fresh allocation.
+            unsafe { ptr::write_bytes(page.memory.as_ptr(), 0xdd, bytes) };
         }
         page
     }
@@ -124,9 +124,8 @@ impl Page {
             if self.poison {
                 ptr::write_bytes(slot, 0xdd, self.cell);
             }
-            (slot as *mut u16).write(self.free);
         }
-        self.free = index as u16;
+        self.free |= 1 << index;
         self.allocated[index / 64] &= !(1 << (index % 64));
     }
 
@@ -134,20 +133,27 @@ impl Page {
         if !self.sweep_pending {
             return;
         }
-        let mut dead = self.allocated[0] & !self.marked[0];
-        while dead != 0 {
-            self.release(dead.trailing_zeros() as usize);
-            dead &= dead - 1;
+        let dead = self.allocated[0] & !self.marked[0];
+        if self.poison {
+            let mut remaining = dead;
+            while remaining != 0 {
+                let slot = self.slot(remaining.trailing_zeros() as usize);
+                // SAFETY: each selected slot is dead and belongs to this page.
+                unsafe { ptr::write_bytes(slot, 0xdd, self.cell) };
+                remaining &= remaining - 1;
+            }
         }
+        self.free |= dead;
+        self.allocated[0] &= self.marked[0];
         self.sweep_pending = false;
     }
 
     fn allocate(&mut self, size: usize, shape: *const u32) -> *mut u8 {
-        let index = usize::from(self.free);
+        let index = self.free.trailing_zeros() as usize;
+        self.free &= self.free - 1;
         let slot = self.slot(index);
         // SAFETY: `free` names a free slot, large enough for header and payload.
         unsafe {
-            self.free = (slot as *const u16).read();
             (slot as *mut Header).write(Header { shape, size });
             ptr::write_bytes(slot.add(HEADER), 0, size);
         }
@@ -306,7 +312,7 @@ impl Collector {
                 // SAFETY: small pages have stable boxed storage owned until collector drop.
                 let page = unsafe { &mut *pointer.as_ptr() };
                 page.sweep();
-                if page.free != NONE {
+                if page.free != 0 {
                     return Some(pointer);
                 }
                 page.listed = false;

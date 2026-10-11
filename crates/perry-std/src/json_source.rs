@@ -170,15 +170,47 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
         })
     };
     let members = unsafe { &mut *out };
+    let mut pending = [Entry {
+        key: ptr::null(),
+        key_len: 0,
+        start: 0,
+        field: usize::MAX,
+        order: 0,
+    }; 128];
+    let mut count = 0;
     let mut scan = cursor(document, start);
     scan.open(b'{');
     while let Some(mut entry) = next_member(&mut scan) {
-        entry.order = members.count;
+        entry.order = count;
         let key = key_bytes(&entry);
         if !table.is_null() {
             entry.field = lookup(unsafe { bytes(table) }, 0, key) as usize;
         }
-        append(members, entry);
+        if count < pending.len() {
+            pending[count] = entry;
+        } else {
+            if count == pending.len() {
+                // Entries have no padding and their keys stay live through the document.
+                members.entries.extend_from_slice(unsafe {
+                    slice::from_raw_parts(pending.as_ptr().cast(), mem::size_of_val(&pending))
+                });
+                members.count = count;
+            }
+            append(members, entry);
+        }
+        count += 1;
+    }
+    if count <= pending.len() {
+        members.count = index_small_object(&mut pending[..count]);
+        if members.count != 0 {
+            members.entries.extend_from_slice(unsafe {
+                slice::from_raw_parts(
+                    pending.as_ptr().cast(),
+                    members.count * mem::size_of::<Entry>(),
+                )
+            });
+        }
+        return out;
     }
     if members.count > 0 {
         let items = unsafe {
@@ -187,10 +219,6 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
                 members.count,
             )
         };
-        if items.len() <= 128 {
-            members.count = index_small_object(items);
-            return out;
-        }
         heap_sort(items, |a, b| {
             key_bytes(a).cmp(key_bytes(b)).then(a.order.cmp(&b.order))
         });
@@ -450,12 +478,13 @@ enum Frame {
 }
 
 fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
-    let mut stack = [Frame::Value(0); 129];
-    stack[0] = Frame::Value(start);
+    let mut stack = [const { mem::MaybeUninit::<Frame>::uninit() }; 129];
+    stack[0].write(Frame::Value(start));
     let mut depth = 1;
     while depth > 0 {
         depth -= 1;
-        match stack[depth] {
+        // Every live stack entry is written before increasing depth; popped entries are Copy.
+        match unsafe { stack[depth].assume_init_read() } {
             Frame::Value(start) => {
                 let mut r = cursor(document, start);
                 match r.whitespace() {
@@ -465,14 +494,14 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                         }
                         let members = index_object(document, r.pos, ptr::null_mut());
                         sort(unsafe { &mut *members });
-                        stack[depth] = Frame::Object(members);
+                        stack[depth].write(Frame::Object(members));
                         depth += 1;
                     }
                     b'[' => {
                         if std_json_open(writer, b'[' as u32) == 0 {
                             return;
                         }
-                        stack[depth] = Frame::Array(r.pos + 1, true);
+                        stack[depth].write(Frame::Array(r.pos + 1, true));
                         depth += 1;
                     }
                     b'"' => {
@@ -506,8 +535,8 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                 let entry = entries(members)[members.at];
                 members.at += 1;
                 key(writer, &entry);
-                stack[depth] = Frame::Object(pointer);
-                stack[depth + 1] = Frame::Value(entry.start as u32);
+                stack[depth].write(Frame::Object(pointer));
+                stack[depth + 1].write(Frame::Value(entry.start as u32));
                 depth += 2;
             }
             Frame::Array(pos, first) => {
@@ -523,8 +552,8 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                 let start = r.pos;
                 r.skip();
                 std_json_item(writer);
-                stack[depth] = Frame::Array(r.pos, false);
-                stack[depth + 1] = Frame::Value(start);
+                stack[depth].write(Frame::Array(r.pos, false));
+                stack[depth + 1].write(Frame::Value(start));
                 depth += 2;
             }
         }

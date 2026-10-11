@@ -516,3 +516,87 @@ export function run():number {{
         assert_eq!(program.outcome("run", &[]), (0.0, 0), "{count} members");
     }
 }
+
+#[test]
+fn typed_key_tables_handle_unicode_and_overwritten_errors() {
+    let mut keys: Vec<_> = (0..40).map(|index| format!("field{index}")).collect();
+    keys.extend(["é🙂".into(), "".into()]);
+    let fields = keys
+        .iter()
+        .map(|key| format!("{}:number", serde_json::to_string(key).unwrap()))
+        .collect::<Vec<_>>()
+        .join(";");
+    let mut members: Vec<_> = keys
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(index, key)| format!("{}:{index}", serde_json::to_string(key).unwrap()))
+        .collect();
+    members.insert(0, "\"field0\":false".into());
+    members.push("\"ignored\":{\"field0\":false}".into());
+    members.push("\"\\u0066ield1\":17".into());
+    let input = serde_json::to_string(&format!("{{{}}}", members.join(","))).unwrap();
+    let checks = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            format!(
+                "if(value[{}]!=={})return 1;",
+                serde_json::to_string(key).unwrap(),
+                if index == 1 { 17 } else { index }
+            )
+        })
+        .collect::<String>();
+    let source = format!(
+        "export function run():number {{const value:{{{fields}}}=JSON.parse({input});{checks}return 0;}}"
+    );
+    let mut program = Program::checked(&source, "typed-key-index.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn source_serialization_allocations_scale_with_output() {
+    let mut measurements = Vec::new();
+    for count in [16, 88] {
+        let row: serde_json::Value = serde_json::from_str(&format!(
+            "{{\"n\":1,{}}}",
+            (0..53)
+                .map(|i| format!("\"extra{i}\":{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+        .unwrap();
+        let rows = vec![row.clone(); count];
+        let input = serde_json::to_string(&serde_json::to_string_pretty(&rows).unwrap()).unwrap();
+        let expected = serde_json::to_string(&row).unwrap().len() * count;
+        let source = format!(
+            r#"
+interface Row {{n:number}}
+export function parse():number {{ const rows:Row[]=JSON.parse({input});return rows.length; }}
+export function write():number {{ const rows:Row[]=JSON.parse({input});let size=0;for(const row of rows)size+=JSON.stringify(row).length;return size; }}
+"#
+        );
+        let mut parse = Program::checked(&source, "serialization-allocations.ts");
+        let mut write = Program::from_wasm(parse.wasm.clone());
+        assert_eq!(parse.call("parse", &[]).0[0].unwrap_f64(), count as f64);
+        let (value, fuel) = write.call("write", &[]);
+        assert_eq!(value[0].unwrap_f64(), expected as f64);
+        let allocations = write.counter(Counter::Allocations) - parse.counter(Counter::Allocations);
+        assert_eq!(write.counter(Counter::LiveBytes), 0);
+        measurements.push(serde_json::json!({"rows":count,"serialization_allocations":allocations,"total_allocations":write.counter(Counter::Allocations),"fuel":fuel,"peak_linear_bytes":write.memory_bytes()}));
+    }
+    assert!(
+        measurements[1]["serialization_allocations"]
+            .as_i64()
+            .unwrap()
+            <= measurements[0]["serialization_allocations"]
+                .as_i64()
+                .unwrap()
+                * 6
+    );
+    println!("{}", serde_json::to_string_pretty(&measurements).unwrap());
+    if let Ok(path) = std::env::var("PERRY_JSON_SERIALIZE_REPORT") {
+        std::fs::write(path, serde_json::to_string_pretty(&measurements).unwrap()).unwrap();
+    }
+}
