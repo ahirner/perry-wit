@@ -3,8 +3,8 @@
 //! Layout, read inline by compiled code: `state: u32` at 0 (`PENDING`, `FULFILLED`,
 //! `REJECTED`), `status: i32` at 4 (the exception code of a rejection), the settled value's
 //! 8-byte slot at 8 (`f64` bits or a 32-bit reference; a rejection's exception object). Compiled code checks `state` before
-//! suspending, so awaiting a settled promise continues inline; otherwise the awaiting frame
-//! arms a private P3 future whose completion resumes that frame.
+//! suspending, so awaiting a settled promise continues inline; otherwise observers share
+//! a private P3 future whose completion dispatches that promise’s registered frames.
 use crate::{host, region::current};
 use core::ptr;
 
@@ -22,6 +22,8 @@ pub(crate) struct Promise {
     status: i32,
     value: u64,
     waiters: *mut Observer,
+    waiters_tail: *mut Observer,
+    signal: Signal,
     owner: *mut u8,
     references: bool,
     cancellation_owned: bool,
@@ -71,6 +73,8 @@ unsafe fn pending(promise: *mut Promise, references: u32) -> *mut u8 {
             status: 0,
             value: 0,
             waiters: ptr::null_mut(),
+            waiters_tail: ptr::null_mut(),
+            signal: Signal::new(promise.cast(), SignalKind::Promise),
             owner: ptr::null_mut(),
             references: references != 0,
             cancellation_owned: false,
@@ -92,7 +96,11 @@ pub extern "C" fn perry_promise_reuse(promise: *mut u8) -> *mut u8 {
     let reusable = promise as *mut Promise;
     // SAFETY: a non-null argument is a live promise of the current task.
     unsafe {
-        if reusable.is_null() || (*reusable).state == PENDING || !(*reusable).waiters.is_null() {
+        if reusable.is_null()
+            || (*reusable).state == PENDING
+            || !(*reusable).waiters.is_null()
+            || (*reusable).signal.state != SignalState::Dormant
+        {
             return perry_promise_new_typed(1);
         }
         (*reusable).state = PENDING;
@@ -119,17 +127,18 @@ fn settle(promise: *mut u8, state: u32, status: i32, value: u64) {
         } else {
             ptr::null_mut()
         };
-        let mut waiter = (*promise).waiters;
-        (*promise).waiters = ptr::null_mut();
-        while !waiter.is_null() {
-            let next = (*waiter).promise_next;
-            (*waiter).promise_next = ptr::null_mut();
-            (*waiter).promise_previous = ptr::null_mut();
-            let result = host::reaction_write((*waiter).writable, ptr::null());
-            assert_eq!(result, 0);
-            host::reaction_drop_writable((*waiter).writable);
-            (*waiter).signalled = true;
-            waiter = next;
+        let mut observer = (*promise).waiters;
+        while !observer.is_null() {
+            let next = (*observer).promise_next;
+            let frame = (*observer).frame;
+            if *frame.cast::<u32>() == COMBINATOR_KIND {
+                unlink(observer);
+                accept_completion(&mut *frame.cast::<Combinator>(), promise);
+            }
+            observer = next;
+        }
+        if !(*promise).waiters.is_null() {
+            (*promise).signal.fire();
         }
     }
 }
@@ -162,29 +171,154 @@ pub(crate) extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
 /// Embedded observer storage in generated Wasm frames, aligned to eight bytes.
 pub use crate::layout::async_frame::OBSERVER_SIZE;
 
-/// Intrusive registrations track ownership, not runnable order. P3 selects completed reads.
+/// Pending registrations belong to both their promise and their owning task.
 #[repr(C)]
 pub(crate) struct Observer {
-    pub(crate) frame: *mut u8,
-    pub(crate) promise: *mut Promise,
+    frame: *mut u8,
+    promise: *mut Promise,
     promise_next: *mut Observer,
     promise_previous: *mut Observer,
-    bucket_next: *mut Observer,
-    readable: u32,
-    writable: u32,
-    signalled: bool,
+    task_next: *mut Observer,
+    task_previous: *mut Observer,
 }
 
 #[cfg(target_arch = "wasm32")]
 const _: () = assert!(core::mem::size_of::<Observer>() <= OBSERVER_SIZE as usize);
 
-#[repr(C)]
 pub(crate) struct Observers {
-    buckets: *mut *mut Observer,
+    head: *mut Observer,
+}
+impl Observers {
+    pub(crate) const fn new() -> Self {
+        Self {
+            head: ptr::null_mut(),
+        }
+    }
+    unsafe fn insert(&mut self, observer: *mut Observer) {
+        unsafe {
+            (*observer).task_next = self.head;
+            if !self.head.is_null() {
+                (*self.head).task_previous = observer;
+            }
+            self.head = observer;
+        }
+    }
+    unsafe fn remove(&mut self, observer: *mut Observer) {
+        unsafe {
+            let previous = (*observer).task_previous;
+            let next = (*observer).task_next;
+            if previous.is_null() {
+                self.head = next;
+            } else {
+                (*previous).task_next = next;
+            }
+            if !next.is_null() {
+                (*next).task_previous = previous;
+            }
+            (*observer).task_previous = ptr::null_mut();
+            (*observer).task_next = ptr::null_mut();
+        }
+    }
+    unsafe fn visit(&self, mut visit: impl FnMut(*mut Observer)) {
+        let mut observer = self.head;
+        while !observer.is_null() {
+            visit(observer);
+            observer = unsafe { (*observer).task_next };
+        }
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.head.is_null()
+    }
+    pub(crate) unsafe fn trace(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
+        unsafe {
+            self.visit(|observer| roots.extend([(*observer).frame, (*observer).promise.cast()]));
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+enum SignalState {
+    Dormant,
+    Armed,
+    Signalled,
+    Dispatching,
+    Delivered,
+}
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum SignalKind {
+    Promise,
+    Combinator,
+}
+
+/// One native completion for a promise's fan-out or a combinator's ready result.
+#[repr(C)]
+struct Signal {
+    owner: *mut u8,
+    bucket_next: *mut Signal,
+    readable: u32,
+    writable: u32,
+    kind: SignalKind,
+    state: SignalState,
+}
+impl Signal {
+    fn new(owner: *mut u8, kind: SignalKind) -> Self {
+        Self {
+            owner,
+            bucket_next: ptr::null_mut(),
+            readable: 0,
+            writable: 0,
+            kind,
+            state: SignalState::Dormant,
+        }
+    }
+    unsafe fn arm(&mut self) {
+        unsafe {
+            assert_eq!(self.state, SignalState::Dormant);
+            let pair = host::reaction_new();
+            self.readable = pair as u32;
+            self.writable = (pair >> 32) as u32;
+            self.state = SignalState::Armed;
+            current().signals.insert(self);
+            assert_eq!(
+                host::reaction_read(self.readable, ptr::null_mut()),
+                host::BLOCKED
+            );
+            crate::io::perry_task_join(self.readable);
+        }
+    }
+    unsafe fn fire(&mut self) {
+        unsafe {
+            assert_eq!(self.state, SignalState::Armed);
+            self.state = SignalState::Signalled;
+            assert_eq!(host::reaction_write(self.writable, ptr::null()), 0);
+            host::reaction_drop_writable(self.writable);
+        }
+    }
+    unsafe fn close(&mut self) {
+        unsafe {
+            if self.state == SignalState::Armed {
+                self.fire();
+            }
+            if self.state == SignalState::Signalled {
+                host::waitable_join(self.readable, 0);
+                host::reaction_cancel_read(self.readable);
+            }
+            host::reaction_drop_readable(self.readable);
+            current().signals.remove(self.readable);
+            self.state = SignalState::Dormant;
+        }
+    }
+}
+
+/// Handle lookup and GC ownership for native completions; entries have no runnable order.
+pub(crate) struct Signals {
+    buckets: *mut *mut Signal,
     capacity: usize,
     len: usize,
 }
-impl Observers {
+impl Signals {
     pub(crate) const fn new() -> Self {
         Self {
             buckets: ptr::null_mut(),
@@ -192,72 +326,76 @@ impl Observers {
             len: 0,
         }
     }
-    unsafe fn visit(&self, mut visit: impl FnMut(*mut Observer)) {
-        for index in 0..self.capacity {
-            let mut entry = unsafe { *self.buckets.add(index) };
-            while !entry.is_null() {
-                visit(entry);
-                entry = unsafe { (*entry).bucket_next };
-            }
-        }
-    }
-    unsafe fn insert_bucket(&mut self, observer: *mut Observer) {
-        let bucket = unsafe { (*observer).readable } as usize & (self.capacity - 1);
+    unsafe fn insert_bucket(&mut self, signal: *mut Signal) {
         unsafe {
-            (*observer).bucket_next = *self.buckets.add(bucket);
-            *self.buckets.add(bucket) = observer;
+            let bucket = (*signal).readable as usize & (self.capacity - 1);
+            (*signal).bucket_next = *self.buckets.add(bucket);
+            *self.buckets.add(bucket) = signal;
+            self.len += 1;
         }
-        self.len += 1;
     }
-    unsafe fn insert(&mut self, observer: *mut Observer) {
-        if self.len == self.capacity {
-            let capacity = (self.len * 2).max(8);
-            let buckets = current()
-                .allocate(capacity * core::mem::size_of::<*mut Observer>())
-                .cast::<*mut Observer>();
-            unsafe { ptr::write_bytes(buckets, 0, capacity) };
-            let old = core::mem::replace(&mut self.buckets, buckets);
-            let old_capacity = core::mem::replace(&mut self.capacity, capacity);
-            self.len = 0;
-            for index in 0..old_capacity {
-                let mut entry = unsafe { *old.add(index) };
-                while !entry.is_null() {
-                    let next = unsafe { (*entry).bucket_next };
-                    unsafe { self.insert_bucket(entry) };
-                    entry = next;
+    unsafe fn insert(&mut self, signal: *mut Signal) {
+        unsafe {
+            if self.len == self.capacity {
+                let capacity = (self.len * 2).max(8);
+                let buckets = current()
+                    .allocate(capacity * core::mem::size_of::<*mut Signal>())
+                    .cast::<*mut Signal>();
+                ptr::write_bytes(buckets, 0, capacity);
+                let old = core::mem::replace(&mut self.buckets, buckets);
+                let old_capacity = core::mem::replace(&mut self.capacity, capacity);
+                self.len = 0;
+                for index in 0..old_capacity {
+                    let mut entry = *old.add(index);
+                    while !entry.is_null() {
+                        let next = (*entry).bucket_next;
+                        self.insert_bucket(entry);
+                        entry = next;
+                    }
                 }
             }
+            self.insert_bucket(signal);
         }
-        unsafe { self.insert_bucket(observer) };
     }
-    unsafe fn remove(&mut self, handle: u32) -> *mut Observer {
+    unsafe fn get(&self, handle: u32) -> *mut Signal {
         if self.len == 0 {
             return ptr::null_mut();
         }
-        let bucket = handle as usize & (self.capacity - 1);
-        let mut link = unsafe { self.buckets.add(bucket) };
         unsafe {
-            while !(*link).is_null() {
-                let observer = *link;
-                if (*observer).readable == handle {
-                    *link = (*observer).bucket_next;
-                    self.len -= 1;
-                    return observer;
+            let mut entry = *self.buckets.add(handle as usize & (self.capacity - 1));
+            while !entry.is_null() {
+                if (*entry).readable == handle {
+                    return entry;
                 }
-                link = &mut (*observer).bucket_next;
+                entry = (*entry).bucket_next;
             }
         }
         ptr::null_mut()
+    }
+    unsafe fn remove(&mut self, handle: u32) {
+        unsafe {
+            let mut link = self.buckets.add(handle as usize & (self.capacity - 1));
+            while !(*link).is_null() {
+                let signal = *link;
+                if (*signal).readable == handle {
+                    *link = (*signal).bucket_next;
+                    self.len -= 1;
+                    return;
+                }
+                link = &mut (*signal).bucket_next;
+            }
+            unreachable!("an armed completion is registered");
+        }
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
     pub(crate) unsafe fn trace(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
-        for index in 0..self.capacity {
-            let mut entry = unsafe { *self.buckets.add(index) };
-            unsafe {
+        unsafe {
+            for index in 0..self.capacity {
+                let mut entry = *self.buckets.add(index);
                 while !entry.is_null() {
-                    roots.extend([(*entry).frame, (*entry).promise.cast()]);
+                    roots.push((*entry).owner);
                     entry = (*entry).bucket_next;
                 }
             }
@@ -265,7 +403,28 @@ impl Observers {
     }
 }
 
-/// Arm one P3 completion event in observer storage owned by the suspended frame.
+unsafe fn unlink(observer: *mut Observer) {
+    unsafe {
+        let promise = (*observer).promise;
+        let previous = (*observer).promise_previous;
+        let next = (*observer).promise_next;
+        if previous.is_null() {
+            (*promise).waiters = next;
+        } else {
+            (*previous).promise_next = next;
+        }
+        if next.is_null() {
+            (*promise).waiters_tail = previous;
+        } else {
+            (*next).promise_previous = previous;
+        }
+        (*observer).promise_next = ptr::null_mut();
+        (*observer).promise_previous = ptr::null_mut();
+        current().observers.remove(observer);
+    }
+}
+
+/// Register a pending await in its frame; observers of one promise share a P3 completion.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8, storage: *mut u8) {
     let promise = promise.cast::<Promise>();
@@ -273,50 +432,68 @@ pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8, st
     // SAFETY: storage belongs to a suspended frame and has no active registration.
     unsafe {
         assert_eq!((*promise).state, PENDING);
-        let pair = host::reaction_new();
         observer.write(Observer {
             frame,
             promise,
-            promise_next: (*promise).waiters,
-            promise_previous: ptr::null_mut(),
-            bucket_next: ptr::null_mut(),
-            readable: pair as u32,
-            writable: (pair >> 32) as u32,
-            signalled: false,
+            promise_next: ptr::null_mut(),
+            promise_previous: (*promise).waiters_tail,
+            task_next: ptr::null_mut(),
+            task_previous: ptr::null_mut(),
         });
-        if !(*promise).waiters.is_null() {
-            (*(*promise).waiters).promise_previous = observer;
+        if (*promise).waiters_tail.is_null() {
+            (*promise).waiters = observer;
+        } else {
+            (*(*promise).waiters_tail).promise_next = observer;
         }
-        (*promise).waiters = observer;
+        (*promise).waiters_tail = observer;
         current().observers.insert(observer);
-        assert_eq!(
-            host::reaction_read((*observer).readable, ptr::null_mut()),
-            host::BLOCKED
-        );
-        crate::io::perry_task_join((*observer).readable);
+        if *frame.cast::<u32>() != COMBINATOR_KIND
+            && (*promise).signal.state == SignalState::Dormant
+        {
+            (*promise).signal.arm();
+        }
     }
 }
 
-/// Consume a P3 future event, returning exactly the frame whose read completed.
+/// Begin the fan-out selected by one native P3 completion event.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_promise_event(event: u32, handle: u32) -> *mut u8 {
     if event != host::EVENT_FUTURE_READ {
         return ptr::null_mut();
     }
-    // SAFETY: registered frames stay rooted until their completion event is consumed.
     unsafe {
-        let observer = current().observers.remove(handle);
-        if observer.is_null() {
+        let signal = current().signals.get(handle);
+        if signal.is_null() || (*signal).state != SignalState::Signalled {
             return ptr::null_mut();
         }
-        assert!((*observer).signalled);
-        host::reaction_drop_readable(handle);
-        let frame = (*observer).frame;
-        if *frame.cast::<u32>() == COMBINATOR_KIND {
-            let combinator = &mut *frame.cast::<Combinator>();
-            combinator.completed = (*observer).promise;
+        (*signal).state = SignalState::Dispatching;
+        signal.cast()
+    }
+}
+
+/// One observer of this completion, retaining its owner until the fan-out is exhausted.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn perry_promise_next(completion: *mut u8) -> *mut u8 {
+    unsafe {
+        let signal = &mut *completion.cast::<Signal>();
+        match signal.kind {
+            SignalKind::Promise => {
+                let promise = signal.owner.cast::<Promise>();
+                let observer = (*promise).waiters;
+                if !observer.is_null() {
+                    let frame = (*observer).frame;
+                    unlink(observer);
+                    return frame;
+                }
+            }
+            SignalKind::Combinator if signal.state == SignalState::Dispatching => {
+                signal.state = SignalState::Delivered;
+                return signal.owner;
+            }
+            SignalKind::Combinator => {}
         }
-        frame
+        signal.close();
+        ptr::null_mut()
     }
 }
 
@@ -364,36 +541,16 @@ pub(crate) unsafe fn cancellation_owned(promise: *mut u8) -> bool {
 }
 
 pub(crate) fn cancel_observers() {
-    // SAFETY: cancellation acknowledges reads before freeing their owning frames.
+    // SAFETY: signal cancellation acknowledges native reads before their owners are released.
     unsafe {
-        for bucket in 0..current().observers.capacity {
-            loop {
-                let observer = *current().observers.buckets.add(bucket);
-                if observer.is_null() {
-                    break;
-                }
-                current().observers.remove((*observer).readable);
-                let promise = (*observer).promise;
-                if !(*observer).signalled {
-                    let previous = (*observer).promise_previous;
-                    let next = (*observer).promise_next;
-                    if previous.is_null() {
-                        (*promise).waiters = next;
-                    } else {
-                        (*previous).promise_next = next;
-                    }
-                    if !next.is_null() {
-                        (*next).promise_previous = previous;
-                    }
-                }
-                if !(*observer).signalled {
-                    assert_eq!(host::reaction_write((*observer).writable, ptr::null()), 0);
-                    host::reaction_drop_writable((*observer).writable);
-                }
-                host::waitable_join((*observer).readable, 0);
-                host::reaction_cancel_read((*observer).readable);
-                host::reaction_drop_readable((*observer).readable);
+        for bucket in 0..current().signals.capacity {
+            while !(*current().signals.buckets.add(bucket)).is_null() {
+                let signal = *current().signals.buckets.add(bucket);
+                (*signal).close();
             }
+        }
+        while !current().observers.head.is_null() {
+            unlink(current().observers.head);
         }
     }
 }
@@ -406,7 +563,7 @@ const RACE: u32 = 1;
 const ALL_SETTLED: u32 = 2;
 
 /// A `Promise.all`/`race`/`allSettled` in progress: a frame (kind first) that waits on every
-/// pending input at once and re-checks whenever one settles.
+/// pending input at once. Settlements update counters; one native event publishes the result.
 #[repr(C)]
 struct Combinator {
     kind: u32,
@@ -416,6 +573,7 @@ struct Combinator {
     remaining: u32,
     initialized: bool,
     completed: *mut Promise,
+    signal: Signal,
     pin: u32,
     references: bool,
 }
@@ -479,6 +637,7 @@ fn combine(mode: u32, inputs: *mut u8, collectible: bool, references: bool) -> *
             remaining: 0,
             initialized: false,
             completed: ptr::null_mut(),
+            signal: Signal::new(frame.cast(), SignalKind::Combinator),
             pin,
             references,
         })
@@ -524,25 +683,58 @@ fn reject_with(result: *mut u8, input: *mut Promise) {
     }
 }
 
-/// Re-check a combinator after an input settled (or on creation).
-///
-/// # Safety
-/// `frame` must be a combinator frame.
+/// Record bookkeeping without recursively resuming guest code or parent combinators.
+unsafe fn accept_completion(combinator: &mut Combinator, promise: *mut Promise) {
+    unsafe {
+        assert!(combinator.remaining != 0);
+        combinator.remaining -= 1;
+        if (*combinator.result.cast::<Promise>()).state != PENDING {
+            release_combinator(combinator);
+            return;
+        }
+        note_completion(combinator, promise);
+        if combinator_ready(combinator) && combinator.signal.state == SignalState::Dormant {
+            combinator.signal.arm();
+            combinator.signal.fire();
+        }
+    }
+}
+
+unsafe fn note_completion(combinator: &mut Combinator, promise: *mut Promise) {
+    unsafe {
+        if combinator.completed.is_null()
+            && (combinator.mode == RACE || (combinator.mode == ALL && (*promise).state == REJECTED))
+        {
+            combinator.completed = promise;
+        }
+    }
+}
+
+fn combinator_ready(combinator: &Combinator) -> bool {
+    !combinator.completed.is_null() || (combinator.mode != RACE && combinator.remaining == 0)
+}
+
+unsafe fn release_combinator(combinator: &mut Combinator) {
+    unsafe {
+        if combinator.remaining == 0
+            && combinator.pin != 0
+            && (*combinator.result.cast::<Promise>()).state != PENDING
+        {
+            crate::roots::perry_gc_unpin(combinator.pin);
+            combinator.pin = 0;
+        }
+    }
+}
+
+/// Initialize a combinator or publish the result selected by its native completion event.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_combinator_step(frame: *mut u8) {
-    let frame = frame as *mut Combinator;
-    // SAFETY: guaranteed by the caller; inputs are live promises of the task.
+    // SAFETY: generated dispatch supplies a live combinator frame, rooted by its signal or pin.
     unsafe {
+        let frame = frame.cast::<Combinator>();
         let combinator = &mut *frame;
-        let count = *(combinator.inputs as *const u32);
-        if combinator.initialized {
-            assert!(combinator.remaining != 0);
-            combinator.remaining -= 1;
-            if (*(combinator.result as *mut Promise)).state == PENDING {
-                settle_combinator(combinator, combinator.completed);
-            }
-            combinator.completed = ptr::null_mut();
-        } else {
+        let count = *combinator.inputs.cast::<u32>();
+        if !combinator.initialized {
             combinator.initialized = true;
             for index in 0..count {
                 let promise = input(combinator.inputs, index);
@@ -554,16 +746,22 @@ pub(crate) extern "C" fn perry_combinator_step(frame: *mut u8) {
                         observers.add(combinator.remaining as usize).cast(),
                     );
                     combinator.remaining += 1;
-                } else if (*(combinator.result as *mut Promise)).state == PENDING {
-                    settle_combinator(combinator, promise);
+                } else {
+                    note_completion(combinator, promise);
                 }
             }
         }
-        let pending = combinator.remaining != 0;
-        if !pending
-            && combinator.mode != RACE
-            && (*(combinator.result as *mut Promise)).state == PENDING
-        {
+        if !combinator_ready(combinator) {
+            return;
+        }
+        if !combinator.completed.is_null() {
+            let completed = combinator.completed;
+            if (*completed).state == REJECTED {
+                reject_with(combinator.result, completed);
+            } else {
+                perry_promise_resolve(combinator.result, (*completed).value);
+            }
+        } else {
             let values = if combinator.pin != 0 {
                 crate::array::perry_array_new_collectible(
                     count,
@@ -572,7 +770,7 @@ pub(crate) extern "C" fn perry_combinator_step(frame: *mut u8) {
             } else {
                 crate::array::perry_array_new(count)
             };
-            let data = *(values.add(crate::array::DATA as usize) as *const *mut u64);
+            let data = *values.add(crate::array::DATA as usize).cast::<*mut u64>();
             for index in 0..count {
                 let promise = input(combinator.inputs, index);
                 *data.add(index as usize) = if combinator.mode == ALL_SETTLED {
@@ -581,24 +779,10 @@ pub(crate) extern "C" fn perry_combinator_step(frame: *mut u8) {
                     (*promise).value
                 };
             }
-            *(values as *mut u32) = count;
+            *values.cast::<u32>() = count;
             perry_promise_resolve(combinator.result, values as usize as u64);
         }
-        let settled = (*(combinator.result as *mut Promise)).state != PENDING;
-        if settled && !pending && combinator.pin != 0 {
-            crate::roots::perry_gc_unpin(combinator.pin);
-            combinator.pin = 0;
-        }
-    }
-}
-
-unsafe fn settle_combinator(combinator: &Combinator, promise: *mut Promise) {
-    unsafe {
-        match ((*promise).state, combinator.mode) {
-            (REJECTED, ALL | RACE) => reject_with(combinator.result, promise),
-            (FULFILLED, RACE) => perry_promise_resolve(combinator.result, (*promise).value),
-            _ => {}
-        }
+        release_combinator(combinator);
     }
 }
 
@@ -608,7 +792,7 @@ mod tests {
     use crate::{RuntimeInstance, region};
 
     #[test]
-    fn embedded_observers_allocate_only_amortized_handle_buckets() {
+    fn shared_completions_allocate_no_per_observer_storage() {
         RuntimeInstance::default().enter(|| {
             region::perry_task_enter();
             let promise = perry_promise_new();
@@ -624,16 +808,23 @@ mod tests {
                 }
             }
             let allocations = current().allocations - before;
-            assert_eq!(allocations, 12, "one table growth per capacity doubling, no per-observer allocations");
+            assert_eq!(allocations, 1, "one shared native completion, no per-observer allocations");
             println!("{count} embedded observers: {allocations} table-buffer allocations, zero reaction-node allocations");
             perry_promise_resolve(promise, 7);
             perry_promise_resolve(promise, 8);
             let events = host::mock::completed_reactions();
-            assert_eq!(events.len(), count);
-            for (index, handle) in events.into_iter().enumerate() {
-                assert_eq!(perry_promise_event(host::EVENT_FUTURE_READ, handle), unsafe {frames.add(index * stride)});
-                assert!(perry_promise_event(host::EVENT_FUTURE_READ, handle).is_null());
+            assert_eq!(events.len(), 1);
+            let handle = events[0];
+            let completion = perry_promise_event(host::EVENT_FUTURE_READ, handle);
+            assert!(!completion.is_null());
+            assert!(perry_promise_event(host::EVENT_FUTURE_READ, handle).is_null());
+            for index in 0..count {
+                assert_eq!(perry_promise_next(completion), unsafe {frames.add(index * stride)});
             }
+            assert_ne!(perry_promise_reuse(promise), promise, "active fan-out retains its promise");
+            assert!(perry_promise_next(completion).is_null());
+            assert!(perry_promise_event(host::EVENT_FUTURE_READ, handle).is_null());
+            assert!(current().signals.is_empty());
             assert!(current().observers.is_empty());
             let pending = perry_promise_new();
             perry_promise_wait(pending, frames, unsafe {frames.add(16)});

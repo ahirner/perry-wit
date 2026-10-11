@@ -76,6 +76,7 @@ runtime_functions! {
     TaskResult = "perry_task_result" () -> I32;
     TaskSetResult = "perry_task_set_result" (I32);
     PromiseEvent = "perry_promise_event" (I32, I32) -> I32;
+    PromiseNext = "perry_promise_next" (I32) -> I32;
     CombinatorStep = "perry_combinator_step" (I32);
     SubtaskRegister = "perry_subtask_register" (I32, I32, I64);
     PromiseNew = "perry_promise_new" () -> I32;
@@ -217,6 +218,7 @@ runtime_functions! {
     StdJsonOpen = "std_json_open" (I32, I32) -> I32;
     StdJsonQuote = "std_json_quote" (I32, I32);
     StdJsonRaw = "std_json_raw" (I32, I32, I32);
+    StdJsonNumber = "std_json_number" (I32, F64);
     StdJsonReadArray = "std_json_read_array" (I32) -> I32;
     StdJsonReadVariant = "std_json_read_variant" (I32, I32) -> I32;
     StdJsonReadPayload = "std_json_read_payload" (I32) -> I32;

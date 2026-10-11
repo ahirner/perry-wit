@@ -493,14 +493,18 @@ fn async_export(
         b.insert(ctx, ret);
         b.block = active;
         let next = b.new_block(ctx, vec![]);
-        let frame = b.runtime(ctx, Runtime::PromiseEvent, vec![event, handle]);
+        let completion = b.runtime(ctx, Runtime::PromiseEvent, vec![event, handle]);
+        let observe = b.new_block(ctx, vec![]);
         let resume = b.new_block(ctx, vec![]);
         let host_event = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, frame, (resume, vec![]), (host_event, vec![]));
+        b.cond_br(ctx, completion, (observe, vec![]), (host_event, vec![]));
+        b.block = observe;
+        let frame = b.runtime(ctx, Runtime::PromiseNext, vec![completion]);
+        b.cond_br(ctx, frame, (resume, vec![]), (next, vec![]));
         b.block = resume;
         let call = CallOp::new(ctx, crate::async_split::RESUME, vec![frame], vec![]);
         b.insert(ctx, call.get_operation());
-        b.br(ctx, next, vec![]);
+        b.br(ctx, observe, vec![]);
         b.block = host_event;
         if b.state.uses_streams {
             // Reads of `stream<u8>`s take their stream events.

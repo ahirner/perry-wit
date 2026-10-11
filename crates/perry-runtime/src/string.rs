@@ -20,10 +20,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Str, cursor_byte) == CURSOR_BYTE as usize);
 };
 
-/// Unicode scalar count in valid UTF-8.
-fn scalars_length(bytes: &[u8]) -> u32 {
-    bytes.iter().map(|&b| u32::from(b & 0xC0 != 0x80)).sum()
-}
+use crate::utf8::scalars_length;
 
 fn new(len: u32, scalars: u32, data: *mut u8, buffer: *mut Buffer) -> *mut u8 {
     static SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Str, owner) as u32];
@@ -81,6 +78,19 @@ pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 
     // SAFETY: guaranteed by the caller.
     let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
     new(len, scalars_length(bytes), data, ptr::null_mut())
+}
+
+/// A string over immutable UTF-8 with a scalar count computed by its producer.
+///
+/// # Safety
+/// `data` contains `len` valid UTF-8 bytes and exactly `scalars` scalars, and outlives the task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_adopt_counted(
+    data: *mut u8,
+    len: u32,
+    scalars: u32,
+) -> *mut u8 {
+    new(len, scalars, data, ptr::null_mut())
 }
 
 #[inline(always)]

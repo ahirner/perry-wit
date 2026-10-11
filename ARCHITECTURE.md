@@ -152,7 +152,7 @@ Canonical values follow a schema-guided ownership model for outgoing arguments, 
 Export adapters manage the lifecycle of both the returned source graph and canonical scratch storage. The export adapter transfers ownership to the callback, ensuring raw ABI values never outlive their owner. Storage is released only after `task.return` consumes the result, or after all operations acknowledge cancellation. Subsequent invocations verify that ownership slots are empty before dispatching new calls.
 
 ### Scopes
-Component instances isolate runtime state within dedicated `RuntimeInstance` contexts. Each instance owns its task scheduler, root frame descriptors, resource tables, and process context.
+Component instances isolate runtime state within dedicated `RuntimeInstance` contexts. Each instance owns its active tasks, root frame descriptors, resource tables, and process context.
 
 Module-level bindings and cached process context persist for the lifetime of the component instance. Per-call temporary objects are reclaimed by the canonical post-return hook after results transfer to the caller. Instances can alternate on a single thread or execute concurrently across threads. Dropping an instance cleanly releases all associated guest allocations and active tasks.
 
@@ -166,11 +166,12 @@ Asynchronous TypeScript functions execute eagerly until they reach an initial su
 Completed tasks store their settlement state and outcome value for repeated observation.
 
 Continuations are scheduled directly through native WASI 0.3 wakeups. The runtime does not maintain a secondary event loop or microtask queue.
-Awaits on already-settled promises advance inline on the stackless state machine when uncontended, yielding to the host only when competing work can make progress.
-This avoids redundant host context switches for already-resolved promises and eliminates unneeded host polling.
+Awaits on already-settled promises advance inline on the stackless state machine. Pending observers of the same promise share one native completion. Its callback resumes those frames in registration order. P3 selects the order between completion events; exact Node microtask interleaving is not guaranteed.
 
 ### Settlement
 Guest task records maintain explicit settlement states, observer lists, and outcome values in the guest heap. Combinator operations (`all`, `allSettled`, `race`) register as observers on operand tasks and propagate settlements deterministically when dependencies resolve.
+
+Observer links live inside suspended frames or a combinator's input storage. A task list retains pending registrations for GC and cancellation; a handle registry retains native completion owners. Neither structure orders runnable work. Combinators count input settlements and signal once their result is ready, so long dependency chains advance through native events with bounded guest stack usage.
 
 Non-winning branches in a race continue running as background tasks. The runtime verifies that all spawned tasks settle or acknowledge cancellation before the top-level export returns. Attempting to return while unresolved background work remains results in a runtime trap.
 

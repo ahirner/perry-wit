@@ -325,11 +325,12 @@ pub(super) struct Writer {
     /// Bit `d` set: the container at depth `d` already has an element.
     started: [u64; 2],
     pub(super) depth: u32,
+    pub(super) max_depth: u32,
     pub(super) failed: bool,
 }
 
 /// Nesting deeper than this means a cycle (or absurd data): `TypeError`, as for cycles.
-const MAX_DEPTH: u32 = 128;
+pub(super) const MAX_DEPTH: u32 = 128;
 
 pub(super) fn writer(w: *mut u8) -> &'static mut Writer {
     // SAFETY: compiled code passes writers from [std_json_writer].
@@ -346,6 +347,7 @@ pub(crate) extern "C" fn std_json_writer() -> *mut u8 {
             text: Buffer::new(),
             started: [0; 2],
             depth: 0,
+            max_depth: 0,
             failed: false,
         })
     };
@@ -362,6 +364,7 @@ pub(crate) extern "C" fn std_json_open(w: *mut u8, bracket: u32) -> u32 {
     }
     w.text.push(bracket as u8);
     w.depth += 1;
+    w.max_depth = w.max_depth.max(w.depth);
     let (word, bit) = (((w.depth - 1) / 64) as usize, (w.depth - 1) % 64);
     w.started[word] &= !(1 << bit);
     1
@@ -423,6 +426,25 @@ pub(crate) unsafe extern "C" fn std_json_raw(w: *mut u8, data: *const u8, len: u
     }
 }
 
+/// Append an ECMAScript number without allocating a per-number scratch object.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_number(w: *mut u8, number: f64) {
+    let w = writer(w);
+    if !w.failed {
+        append_number(&mut w.text, number);
+    }
+}
+
+pub(super) fn append_number(text: &mut Buffer, number: f64) {
+    if number.is_finite() {
+        let mut digits = [0; 40];
+        let len = crate::runtime::number_format(number, &mut digits);
+        text.extend_from_slice(&digits[..len]);
+    } else {
+        text.extend_from_slice(b"null");
+    }
+}
+
 /// Append a string as a JSON string literal (ECMAScript `QuoteJSONString`).
 ///
 /// # Safety
@@ -437,11 +459,39 @@ pub(crate) unsafe extern "C" fn std_json_quote(w: *mut u8, string: *mut u8) {
     quote(&mut w.text, unsafe { crate::runtime::bytes(string) });
 }
 
+fn unescaped_prefix(bytes: &[u8]) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let zero = |word: u64| word.wrapping_sub(ONES) & !word & HIGHS;
+    let mut index = 0;
+    while index + 8 <= bytes.len() {
+        let word = u64::from_le_bytes(bytes[index..index + 8].try_into().unwrap());
+        if (word.wrapping_sub(ONES * 32) & !word & HIGHS)
+            | zero(word ^ (ONES * u64::from(b'"')))
+            | zero(word ^ (ONES * u64::from(b'\\')))
+            != 0
+        {
+            break;
+        }
+        index += 8;
+    }
+    while index < bytes.len() && bytes[index] >= 32 && !matches!(bytes[index], b'"' | b'\\') {
+        index += 1;
+    }
+    index
+}
+
 pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     text.push(b'"');
     let mut start = 0;
-    for (index, &byte) in bytes.iter().enumerate() {
+    let mut index = 0;
+    while index < bytes.len() {
+        index += unescaped_prefix(&bytes[index..]);
+        if index == bytes.len() {
+            break;
+        }
+        let byte = bytes[index];
         let escape: &[u8] = match byte {
             b'"' => br#"\""#,
             b'\\' => br"\\",
@@ -451,7 +501,7 @@ pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
             b'\r' => br"\r",
             b'\t' => br"\t",
             0..=0x1F => &[],
-            _ => continue,
+            _ => unreachable!("the prefix ends at an escape byte"),
         };
         text.extend_from_slice(&bytes[start..index]);
         if escape.is_empty() {
@@ -461,7 +511,8 @@ pub(crate) fn quote(text: &mut Buffer, bytes: &[u8]) {
         } else {
             text.extend_from_slice(escape);
         }
-        start = index + 1;
+        index += 1;
+        start = index;
     }
     text.extend_from_slice(&bytes[start..]);
     text.push(b'"');
@@ -475,7 +526,10 @@ pub(crate) extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
         raise(TYPE_ERROR, "Converting circular structure to JSON");
         return from_static("");
     }
-    crate::runtime::from_bytes(w.text.as_slice())
+    let text = core::mem::take(&mut w.text);
+    let bytes = text.as_slice();
+    // SAFETY: finished UTF-8 output is immutable; the string traces this owned allocation.
+    unsafe { adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
 }
 
 /// `typeof value`.
@@ -531,13 +585,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             NUMBER => {
                 // SAFETY: number nodes hold an f64 at 8.
                 let number = unsafe { *(current.add(8) as *const f64) };
-                if number.is_finite() {
-                    let mut digits = [0u8; 40];
-                    let len = crate::runtime::number_format(number, &mut digits);
-                    text.extend_from_slice(&digits[..len]);
-                } else {
-                    text.extend_from_slice(b"null");
-                }
+                append_number(text, number);
             }
             STRING => quote(text, string_bytes(current)),
             kind @ (ARRAY | OBJECT) => {

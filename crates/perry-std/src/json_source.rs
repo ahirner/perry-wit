@@ -1,7 +1,7 @@
 //! Source spans retained by typed JSON aggregates and consumed by their serializers.
 use crate::json::*;
 use crate::json_read::{Reader, lookup, pull, reader, std_json_read_string};
-use crate::runtime::{Buffer, bytes, number_format};
+use crate::runtime::{Buffer, bytes};
 use core::{mem, ptr, slice};
 
 #[repr(C)]
@@ -13,6 +13,7 @@ struct Source {
     additions: Buffer,
     assigned: Buffer,
     cached: *mut u8,
+    nesting: u32,
     canonical: bool,
     tuple_written: u32,
     tuple: bool,
@@ -186,7 +187,7 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
                 members.count,
             )
         };
-        if items.len() <= 32 {
+        if items.len() <= 128 {
             members.count = index_small_object(items);
             return out;
         }
@@ -211,7 +212,7 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
 
 /// A fixed-size index bounds collisions and keeps small objects in insertion order.
 fn index_small_object(items: &mut [Entry]) -> usize {
-    let mut buckets = [0u8; 64];
+    let mut buckets = [0u8; 256];
     let mut count = 0;
     for read in 0..items.len() {
         let mut entry = items[read];
@@ -326,6 +327,7 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
             additions: Buffer::new(),
             assigned: Buffer::new(),
             cached: ptr::null_mut(),
+            nesting: 0,
             canonical: false,
             tuple_written: 0,
             tuple: array == 3,
@@ -474,18 +476,21 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                         depth += 1;
                     }
                     b'"' => {
-                        let value = std_json_read_string((&mut r as *mut Reader).cast());
-                        unsafe { std_json_quote(writer, value) };
+                        r.pos += 1;
+                        let start = r.pos;
+                        let (escaped, _) = r.string();
+                        if escaped {
+                            r.pos = start - 1;
+                            let value = std_json_read_string((&mut r as *mut Reader).cast());
+                            unsafe { std_json_quote(writer, value) };
+                        } else {
+                            // The parser already validated this immutable, unescaped string.
+                            raw(writer, &r.input[start as usize - 1..r.pos as usize]);
+                        }
                     }
                     b'-' | b'0'..=b'9' => {
                         let value = r.number();
-                        if value.is_finite() {
-                            let mut buffer = [0; 40];
-                            let len = number_format(value, &mut buffer);
-                            raw(writer, &buffer[..len]);
-                        } else {
-                            raw(writer, b"null");
-                        }
+                        std_json_number(writer, value);
                     }
                     b't' => raw(writer, b"true"),
                     b'f' => raw(writer, b"false"),
@@ -550,7 +555,7 @@ pub(crate) unsafe extern "C" fn std_json_source_next(
 }
 
 /// Raw copying is enabled only after observing an identical complete serialization.
-/// Restricting it to the writer root preserves the existing depth bound without a second scan.
+/// The observed nesting preserves the depth bound when a cached root becomes a subtree.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *mut u8) -> u32 {
     if source.is_null() {
@@ -559,16 +564,22 @@ pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *m
     let source = unsafe { &*source.cast::<Source>() };
     let document = unsafe { &mut *source.document };
     let writer = crate::json::writer(writer);
-    if document.dirty || !document.copy_safe || writer.depth != 0 || writer.failed {
+    if document.dirty
+        || !document.copy_safe
+        || writer.failed
+        || writer.depth + source.nesting > MAX_DEPTH
+    {
         return 0;
     }
     if !source.cached.is_null() {
+        writer.max_depth = writer.max_depth.max(writer.depth + source.nesting);
         writer
             .text
             .extend_from_slice(unsafe { bytes(source.cached) });
         return 1;
     }
     if source.canonical {
+        writer.max_depth = writer.max_depth.max(writer.depth + source.nesting);
         writer
             .text
             .extend_from_slice(&document.input[source.start as usize..source.end as usize]);
@@ -589,6 +600,7 @@ pub(crate) unsafe extern "C" fn std_json_source_remember(source: *mut u8, writer
         return;
     }
     let text = writer.text.as_slice();
+    source.nesting = writer.max_depth;
     source.canonical = text == &document.input[source.start as usize..source.end as usize];
     // Retain at most one input document's worth of normalized output. The writer's
     // immutable bytes already belong to the traced heap; only a view is allocated.

@@ -134,11 +134,10 @@ impl Page {
         if !self.sweep_pending {
             return;
         }
-        for index in 0..self.slots {
-            let bit = 1 << (index % 64);
-            if self.allocated[index / 64] & bit != 0 && self.marked[index / 64] & bit == 0 {
-                self.release(index);
-            }
+        let mut dead = self.allocated[0] & !self.marked[0];
+        while dead != 0 {
+            self.release(dead.trailing_zeros() as usize);
+            dead &= dead - 1;
         }
         self.sweep_pending = false;
     }

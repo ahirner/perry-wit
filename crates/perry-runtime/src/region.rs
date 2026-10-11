@@ -62,7 +62,7 @@ pub struct Task {
     end: usize,
     /// Size class of `chunk`.
     class: usize,
-    pub(crate) observers: crate::promise::Observers,
+    pub(crate) signals: crate::promise::Signals,
     spare_subtasks: *mut Subtask,
     pub(crate) subtasks: *mut Subtask,
     cancelled: *mut Subtask,
@@ -81,6 +81,7 @@ pub struct Task {
     /// Status of the last runtime service that threw (`crate::exception::raise`), taken by
     /// compiled code with `perry_status`.
     pub(crate) status: u32,
+    pub(crate) observers: crate::promise::Observers,
 }
 
 impl Task {
@@ -90,6 +91,7 @@ impl Task {
         // SAFETY: active observers belong to this live task.
         unsafe {
             self.observers.trace(roots);
+            self.signals.trace(roots);
             let mut subtask = self.subtasks;
             while !subtask.is_null() {
                 roots.extend([(*subtask).promise, (*subtask).signal.cast()]);
@@ -195,6 +197,7 @@ fn new_task() -> *mut Task {
         end: 0,
         class: 0,
         observers: crate::promise::Observers::new(),
+        signals: crate::promise::Signals::new(),
         spare_subtasks: ptr::null_mut(),
         subtasks: ptr::null_mut(),
         cancelled: ptr::null_mut(),
@@ -330,6 +333,7 @@ pub extern "C" fn perry_task_free() {
         return;
     }
     debug_assert!(current().observers.is_empty());
+    debug_assert!(current().signals.is_empty());
     // SAFETY: every chunk on the task's chains belongs to it; the task was allocated by
     // [new_task].
     unsafe {

@@ -23,6 +23,8 @@ world timers {
   export rotate: async func(n: u32) -> f64;
   export observers: async func(n:u32) -> f64;
   export chains: async func(n:u32) -> f64;
+  export combinator-chains: async func(n:u32) -> f64;
+  export reobserve: async func() -> f64;
   export combinations: async func() -> f64;
   export completion: async func(fail: bool) -> result<string, string>;
   export adopt: async func(a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:string,fail:bool) -> result<string,string>;
@@ -81,6 +83,29 @@ export async function observers(n:number):Promise<number> {
  return total;
 }
 async function link(p:Promise<number>):Promise<number>{return await p+1;}
+export async function combinatorChains(n:number):Promise<number> {
+ let pending=setTimeout(1,3);
+ for(let i=0;i<n;i++)pending=Promise.race([pending]);
+ return await pending;
+}
+async function twice(p:Promise<number>):Promise<number> {
+ const first=await p;
+ const repeated=await p;
+ return await setTimeout(1,first+repeated);
+}
+async function follow(p:Promise<number>,other:Promise<number>):Promise<number> {
+ const first=await p;
+ return first+await other;
+}
+export async function reobserve():Promise<number> {
+ const pending=setTimeout(1,7);
+ const first=twice(pending);
+ const second=follow(pending,first);
+ const values=await Promise.all([first,second,first]);
+ const empty=await Promise.all([] as Promise<number>[]);
+ const settled=await Promise.allSettled([] as Promise<number>[]);
+ return values[0]+values[1]+values[2]+empty.length+settled.length;
+}
 export async function chains(n:number):Promise<number> {
  let pending=setTimeout(1,3);
  for(let i=0;i<n;i++)pending=link(pending);
@@ -358,6 +383,9 @@ async fn native_events_cover_observers_chains_and_combinator_cleanup() -> Result
     );
     let observers = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "observers")?;
     let chains = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "chains")?;
+    let combinator_chains =
+        instance.get_typed_func::<(u32,), (f64,)>(&mut store, "combinator-chains")?;
+    let reobserve = instance.get_typed_func::<(), (f64,)>(&mut store, "reobserve")?;
     let combinations = instance.get_typed_func::<(), (f64,)>(&mut store, "combinations")?;
     for n in [0, 1, 128, 1024] {
         assert_eq!(
@@ -369,6 +397,8 @@ async fn native_events_cover_observers_chains_and_combinator_cleanup() -> Result
             f64::from(3 + n * 2)
         );
         assert_eq!(combinations.call_async(&mut store, ()).await?.0, 13.0);
+        assert_eq!(combinator_chains.call_async(&mut store, (n,)).await?.0, 3.0);
+        assert_eq!(reobserve.call_async(&mut store, ()).await?.0, 49.0);
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }

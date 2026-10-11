@@ -8,8 +8,9 @@
 //!   state: 0 starts the body, `k` resumes after the `k`-th `await`.
 //!
 //! An `await` of a settled promise continues inline. Otherwise the step stores its state,
-//! arms a private P3 future and returns. Settling the promise completes that future; its
-//! host event dispatches the observer frame by kind. Values live across an `await` (backward liveness over the MIR CFG) live in
+//! registers its frame on a shared P3 future and returns. Settling the promise completes
+//! that future; its host event dispatches the registered frames in order. Values live
+//! across an `await` (backward liveness over the MIR CFG) live in
 //! frame slots: they are stored where they are defined and loaded where they are used, so the
 //! resume entries need no SSA repair. `return v` fulfils the frame's promise, and an exception
 //! rejects it with its status.
@@ -259,7 +260,7 @@ pub(crate) fn lower(
     Ok(())
 }
 
-/// Resume the one observer selected by a native P3 completion event.
+/// Resume one frame from the fan-out selected by a native P3 completion event.
 pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
     let i32 = i32_type(ctx);
     let ty = FunctionType::get(ctx, vec![i32], vec![]);

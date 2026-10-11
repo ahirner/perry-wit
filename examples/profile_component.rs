@@ -44,6 +44,23 @@ struct Host {
     ctx: WasiCtx,
     table: ResourceTable,
     stacks: BTreeMap<String, usize>,
+    linear_bytes: usize,
+}
+
+impl wasmtime::ResourceLimiter for Host {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.linear_bytes += desired - current;
+        Ok(true)
+    }
+
+    fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> wasmtime::Result<bool> {
+        Ok(true)
+    }
 }
 
 impl WasiView for Host {
@@ -124,8 +141,10 @@ async fn main() -> Result<()> {
                 ctx: ctx.build(),
                 table: ResourceTable::new(),
                 stacks: BTreeMap::new(),
+                linear_bytes: 0,
             },
         );
+        store.limiter(|host| host);
         if request.profile {
             store.set_epoch_deadline(1);
             store.epoch_deadline_callback(|mut context| {
@@ -177,10 +196,11 @@ async fn main() -> Result<()> {
         for (stack, count) in std::mem::take(&mut store.data_mut().stacks) {
             *stacks.entry(stack).or_default() += count;
         }
+        let linear_bytes = store.data().linear_bytes;
         let start = Instant::now();
         drop((store, pre, linker, component));
         let teardown_ms = milliseconds(start);
-        measurements.push(serde_json::json!({"loadMs":load_ms,"setupMs":setup_ms,"instantiateMs":instantiate_ms,"callMs":call_ms,"teardownMs":teardown_ms}));
+        measurements.push(serde_json::json!({"loadMs":load_ms,"setupMs":setup_ms,"instantiateMs":instantiate_ms,"callMs":call_ms,"teardownMs":teardown_ms,"linearMemoryBytes":linear_bytes}));
     }
     stop.store(true, Ordering::Relaxed);
     if let Some(ticker) = ticker {

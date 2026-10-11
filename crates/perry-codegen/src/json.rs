@@ -87,24 +87,7 @@ impl FunctionLowering<'_, '_> {
         let deref = ty.deref(ctx);
         if deref.is::<FP64Type>() {
             drop(deref);
-            // Finite numbers in ECMAScript notation (ryu-js); NaN and infinities as null.
-            let size = self.i32_const(ctx, 40);
-            let scratch = self.alloc(ctx, size);
-            let difference = self.num(ctx, NumOpcode::F64Sub, vec![value, value]);
-            let zero = self.f64_const(ctx, 0.0);
-            let finite = self.num(ctx, NumOpcode::F64Eq, vec![difference, zero]);
-            let number = self.new_block(ctx, vec![]);
-            let null = self.new_block(ctx, vec![]);
-            let join = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, finite, (number, vec![]), (null, vec![]));
-            self.block = number;
-            let len = self.runtime(ctx, Runtime::NumberFormat, vec![value, scratch]);
-            self.runtime_void(ctx, Runtime::StdJsonRaw, vec![writer, scratch, len]);
-            self.br(ctx, join, vec![]);
-            self.block = null;
-            self.json_raw(ctx, writer, "null");
-            self.br(ctx, join, vec![]);
-            self.block = join;
+            self.runtime_void(ctx, Runtime::StdJsonNumber, vec![writer, value]);
             return Ok(());
         }
         if deref.is::<StringType>() {

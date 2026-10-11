@@ -405,3 +405,114 @@ fn source_indexes_resolve_collisions_duplicates_and_sort_boundaries() {
         assert_eq!(program.outcome("run", &[]), (0.0, 0));
     }
 }
+
+#[test]
+fn serialization_transfers_buffers_and_avoids_per_number_allocations() {
+    use crate::core_program::Counter;
+    let controls: String = (0..32).map(char::from).collect();
+    let texts: Vec<_> = (0..17)
+        .map(|prefix| format!("{}é漢🙂\"\\{controls}tail", "x".repeat(prefix)))
+        .collect();
+    let quoted: Vec<_> = texts
+        .iter()
+        .map(|text| serde_json::to_string(text).unwrap())
+        .collect();
+    let source = format!(
+        r#"
+let saved = '';
+export function strings():number {{
+ const texts:string[]={}; const quoted:string[]={};
+ for(let i=0;i<texts.length;i++){{
+   const value=JSON.stringify(texts[i]);
+   if(value!==quoted[i])return -1;
+   if(i===0)saved=value;
+ }}
+ return saved===quoted[0]?1:0;
+}}
+export function numbers(n:number):number {{
+ const values:number[]=[];
+ for(let i=0;i<n;i++)values.push(i);
+ const text=JSON.stringify(values);
+ if(text[0]!=='[' || text[text.length-1]!==']')return -1;
+ if(JSON.stringify([-0,Infinity,-Infinity,NaN,1e-7,1e21])!=='[0,null,null,null,1e-7,1e+21]')return -2;
+ return n;
+}}
+export function retained():number{{return saved==={}?1:0;}}
+"#,
+        serde_json::to_string(&texts).unwrap(),
+        serde_json::to_string(&quoted).unwrap(),
+        serde_json::to_string(&quoted[0]).unwrap()
+    );
+    let mut program = Program::checked(&source, "json-writer-storage.ts");
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("numbers", 16.0), 16.0);
+    let small = program.counter(Counter::Allocations) - before;
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("numbers", 1024.0), 1024.0);
+    let large = program.counter(Counter::Allocations) - before;
+    assert!(
+        large < small + 64,
+        "number serialization allocations grew from {small} to {large}"
+    );
+    program.stress_collection(true);
+    assert_eq!(program.call("strings", &[]).0[0].unwrap_f64(), 1.0);
+    assert_eq!(program.number("numbers", 1024.0), 1024.0);
+    assert_eq!(program.call("retained", &[]).0[0].unwrap_f64(), 1.0);
+}
+
+#[test]
+fn cached_roots_preserve_nesting_when_serialized_as_subtrees() {
+    let nested = format!("{}0{}", "[".repeat(127), "]".repeat(127));
+    let text = serde_json::to_string(&format!(r#"{{"n":1,"extra":{nested}}}"#)).unwrap();
+    let source = format!(
+        r#"
+interface Item {{n:number}}
+export function run():number {{
+ const row:Item=JSON.parse({text});
+ const cached=JSON.stringify(row);
+ if(JSON.stringify(row)!==cached)return 1;
+ try {{JSON.stringify([row]);return 2;}}catch(e){{}}
+ const short:Item=JSON.parse('{{ "n": 2, "extra": [1] }}');
+ const normalized=JSON.stringify(short);
+ if(JSON.stringify([short])!=='['+normalized+']')return 3;
+ short.n=3;
+ if(JSON.stringify([short])!=='[{{"n":3,"extra":[1]}}]')return 4;
+ return 0;
+}}
+"#
+    );
+    let mut program = Program::checked(&source, "cached-subtree.ts");
+    program.stress_collection(true);
+    assert_eq!(program.outcome("run", &[]), (0.0, 0));
+}
+
+#[test]
+fn source_member_indexes_handle_large_objects_and_duplicate_escaped_keys() {
+    for count in [32, 33, 54, 128, 129] {
+        let members = (0..count).map(|i| format!("\"key{i}\":{i}"));
+        let text = format!(
+            "{{{},\"\\u006bey0\":9,\"2\":2,\"1\":1}}",
+            members.collect::<Vec<_>>().join(",")
+        );
+        let expected = format!(
+            "{{\"1\":1,\"2\":2,{}}}",
+            (0..count)
+                .map(|i| format!("\"key{i}\":{}", if i == 0 { 9 } else { i }))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let source = format!(
+            r#"
+export function run():number {{
+ const value:{{key0:number}}=JSON.parse({});
+ return JSON.stringify(value)==={} ? 0 : 1;
+}}
+"#,
+            serde_json::to_string(&text).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+        let mut program = Program::checked(&source, "source-index.ts");
+        program.stress_collection(true);
+        assert_eq!(program.outcome("run", &[]), (0.0, 0), "{count} members");
+    }
+}

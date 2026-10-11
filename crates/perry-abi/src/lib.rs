@@ -81,7 +81,7 @@ mod imports {
         pub(crate) fn perry_cabi_release(data: *mut u8);
         pub(crate) fn perry_string_offset(string: *mut u8, position: u32) -> u32;
         pub(crate) fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
-        pub(crate) fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8;
+        pub(crate) fn perry_string_adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8;
         pub(crate) fn perry_string_view_into(
             out: *mut u8,
             string: *mut u8,
@@ -154,14 +154,11 @@ mod imports {
             perry_operation_pin, perry_operation_unpin, perry_task_current,
         },
         string::{
-            perry_string_offset, perry_string_view, perry_string_view_counted,
-            perry_string_view_into,
+            perry_string_adopt_counted, perry_string_offset, perry_string_view,
+            perry_string_view_counted, perry_string_view_into,
         },
     };
 
-    pub(crate) unsafe fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 {
-        unsafe { perry_runtime::string::perry_string_adopt(data, len) }
-    }
     pub(crate) unsafe fn perry_task_resume(task: *mut u8) {
         unsafe { perry_runtime::region::perry_task_resume(task.cast()) };
     }
@@ -230,7 +227,10 @@ pub fn unpin(token: u32) {
 /// `data` must point to `len` readable bytes of valid UTF-8.
 pub unsafe fn adopt(data: *mut u8, len: u32) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
-    unsafe { imports::perry_string_adopt(data, len) }
+    unsafe {
+        let bytes = core::slice::from_raw_parts(data, len as usize);
+        imports::perry_string_adopt_counted(data, len, scalars_length(bytes))
+    }
 }
 
 /// A view of byte boundaries in a string, with a previously computed scalar count.
@@ -290,10 +290,8 @@ pub fn from_static(text: &'static str) -> *mut u8 {
     unsafe { adopt(text.as_ptr() as *mut u8, text.len() as u32) }
 }
 
-/// Unicode scalar count in valid UTF-8.
-pub fn scalars_length(bytes: &[u8]) -> u32 {
-    bytes.iter().map(|&b| u32::from(b & 0xC0 != 0x80)).sum()
-}
+pub mod utf8;
+pub use utf8::scalars_length_wide as scalars_length;
 
 /// Throw an `Error` of `kind` with `message`: the exception becomes pending, and compiled
 /// code finds its status with `perry_status`.
