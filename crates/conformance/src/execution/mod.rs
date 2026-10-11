@@ -3,7 +3,7 @@
 //! The parent [Executor] runs the Node oracle and spawns a `worker` process per case; the worker
 //! ([worker]) compiles the case and runs the component under wasmtime.
 use crate::{
-    program::{FIXTURE, INPUTS, WIT},
+    program::{ENV_FIXTURE, FIXTURE, INPUTS, WIT},
     registry::Case,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -109,8 +109,8 @@ impl std::fmt::Debug for Outcome {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
     pub exit: Option<i32>,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
     pub timed_out: bool,
 }
 impl Captured {
@@ -381,7 +381,7 @@ impl Executor {
             Outcome::Command(command(
                 Command::new("node")
                     .arg(&path)
-                    .env("PERRY_CONFORMANCE", "fixture"),
+                    .env("PERRY_CONFORMANCE", ENV_FIXTURE),
                 directory,
                 Duration::from_secs(self.limits.timeout_seconds),
             )?)

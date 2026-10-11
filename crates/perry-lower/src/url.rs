@@ -1,7 +1,7 @@
 //! Lower the declared HTTP(S) URL surface without dynamic property dispatch.
 use super::*;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn url_field(
         &mut self,
         ctx: &mut Context,
@@ -22,7 +22,7 @@ impl FunctionBuilder<'_> {
         Ok(self.intrinsic(ctx, Intrinsic::UrlGet, vec![value, index]))
     }
 
-    pub(super) fn url_string(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+    pub(super) fn url_string(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
         match kind(ctx, value)? {
@@ -35,7 +35,7 @@ impl FunctionBuilder<'_> {
     pub(super) fn url_expression(
         &mut self,
         ctx: &mut Context,
-        expr: &Expr,
+        expr: &'s Expr,
     ) -> Result<Option<Value>> {
         let (value, field) = match expr {
             Expr::UrlGetHref(value)
@@ -80,7 +80,7 @@ impl FunctionBuilder<'_> {
                 let name = self.string_operand(ctx, name)?;
                 let value = self.string_operand(ctx, value)?;
                 self.intrinsic_void(ctx, Intrinsic::UrlAppend, vec![params, name, value]);
-                let ty = self.void_type(ctx);
+                let ty = void_type(ctx);
                 return Ok(Some(
                     self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
                 ));

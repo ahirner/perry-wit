@@ -1,9 +1,9 @@
 //! Expressions: the dispatch over HIR expressions, and locals, literals and member reads.
 use super::*;
-use crate::builtins::JSON_CALLBACKS;
+use crate::builtins::{BytesCreation, JSON_CALLBACKS};
 
-impl FunctionBuilder<'_> {
-    pub(super) fn expression(&mut self, ctx: &mut Context, expr: &Expr) -> Result<Value> {
+impl<'s> FunctionBuilder<'s> {
+    pub(super) fn expression(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         self.expression_with(ctx, expr, None)
     }
 
@@ -12,7 +12,7 @@ impl FunctionBuilder<'_> {
     pub(super) fn expression_with(
         &mut self,
         ctx: &mut Context,
-        expr: &Expr,
+        expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         if let Expr::Sequence(parts) = expr {
@@ -92,22 +92,26 @@ impl FunctionBuilder<'_> {
             Expr::Call { callee, args, .. } => self
                 .call(ctx, callee, args)?
                 .context("a void call has no value")?,
-            Expr::MathFloor(value)
-            | Expr::MathCeil(value)
-            | Expr::MathTrunc(value)
-            | Expr::MathAbs(value)
-            | Expr::MathRound(value)
-            | Expr::MathSqrt(value) => self.math_unary(ctx, expr, value)?,
-            Expr::MathMin(values) | Expr::MathMax(values) => {
-                self.math_extremum(ctx, matches!(expr, Expr::MathMin(_)), values)?
+            Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
+            Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
+            Expr::MathTrunc(value) => self.math_unary(ctx, Intrinsic::MathTrunc, value)?,
+            Expr::MathAbs(value) => self.math_unary(ctx, Intrinsic::MathAbs, value)?,
+            Expr::MathRound(value) => self.math_unary(ctx, Intrinsic::MathRound, value)?,
+            Expr::MathSqrt(value) => self.math_unary(ctx, Intrinsic::MathSqrt, value)?,
+            Expr::MathMin(values) => {
+                self.math_extremum(ctx, Intrinsic::MathMin, f64::INFINITY, values)?
+            }
+            Expr::MathMax(values) => {
+                self.math_extremum(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, values)?
             }
             Expr::Uint8ArrayNew(None) => {
                 let zero = self.number(ctx, 0.0);
                 self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
             }
-            Expr::Uint8ArrayNew(Some(source)) | Expr::Uint8ArrayFrom(source) => {
-                self.bytes_from(ctx, matches!(expr, Expr::Uint8ArrayNew(_)), source)?
+            Expr::Uint8ArrayNew(Some(source)) => {
+                self.bytes_from(ctx, BytesCreation::Construct, source)?
             }
+            Expr::Uint8ArrayFrom(source) => self.bytes_from(ctx, BytesCreation::From, source)?,
             Expr::Uint8ArrayGet { array, index } => {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
                 let index = self.number_operand(ctx, index)?;
@@ -378,7 +382,7 @@ impl FunctionBuilder<'_> {
             } => self.set_index(ctx, object, index, value)?,
             other => bail!(
                 "MIR backend does not support expression {} yet",
-                variant_name(other)
+                crate::node_kind(other)
             ),
         };
         self.narrow_primitive(ctx, expr, value)
@@ -444,7 +448,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `local = value`, fitted to the local's type.
-    fn local_set(&mut self, ctx: &mut Context, id: LocalId, value: &Expr) -> Result<Value> {
+    fn local_set(&mut self, ctx: &mut Context, id: LocalId, value: &'s Expr) -> Result<Value> {
         let slot = self.local(id)?;
         let slot_type = self.slot_type(ctx, slot)?;
         let value = self.expression_with(ctx, value, Some(slot_type))?;
@@ -481,7 +485,7 @@ impl FunctionBuilder<'_> {
     fn property_update(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
+        object: &'s Expr,
         property: &str,
         op: &BinaryOp,
         prefix: bool,
@@ -515,9 +519,9 @@ impl FunctionBuilder<'_> {
     fn conditional(
         &mut self,
         ctx: &mut Context,
-        condition: &Expr,
-        then_expr: &Expr,
-        else_expr: &Expr,
+        condition: &'s Expr,
+        then_expr: &'s Expr,
+        else_expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let guards = self.variant_guards.len();
@@ -552,7 +556,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `await promise` in an async function.
-    fn await_(&mut self, ctx: &mut Context, promise: &Expr) -> Result<Value> {
+    fn await_(&mut self, ctx: &mut Context, promise: &'s Expr) -> Result<Value> {
         ensure!(self.is_async, "await is only valid in async functions");
         let promise = self.expression(ctx, promise)?;
         ensure!(
@@ -564,7 +568,12 @@ impl FunctionBuilder<'_> {
     }
 
     /// `object.property`, by the kind of `object`.
-    fn property_get(&mut self, ctx: &mut Context, object: &Expr, property: &str) -> Result<Value> {
+    fn property_get(
+        &mut self,
+        ctx: &mut Context,
+        object: &'s Expr,
+        property: &str,
+    ) -> Result<Value> {
         let value = self.expression(ctx, object)?;
         // Property access on `undefined` throws TypeError, in ECMAScript and here.
         let value = self.defined(ctx, value)?;
@@ -655,7 +664,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `object[index]` on arrays, strings, bytes, JSON values and records (literal keys).
-    fn index_get(&mut self, ctx: &mut Context, object: &Expr, index: &Expr) -> Result<Value> {
+    fn index_get(&mut self, ctx: &mut Context, object: &'s Expr, index: &'s Expr) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
         match kind(ctx, array)? {
@@ -700,13 +709,4 @@ impl FunctionBuilder<'_> {
             _ => bail!("indexing is only supported on arrays so far"),
         }
     }
-}
-
-/// The variant name of a HIR node, for diagnostics.
-pub(super) fn variant_name(node: &impl std::fmt::Debug) -> String {
-    format!("{node:?}")
-        .split(['(', ' ', '{'])
-        .next()
-        .unwrap_or("?")
-        .to_string()
 }

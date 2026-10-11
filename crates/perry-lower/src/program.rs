@@ -156,7 +156,7 @@ pub(super) fn build_module(
     Ok(module)
 }
 
-pub(super) fn hir_module_name(hir: &HirModule) -> String {
+fn hir_module_name(hir: &HirModule) -> String {
     let name: String = hir
         .name
         .chars()
@@ -170,7 +170,7 @@ pub(super) fn hir_module_name(hir: &HirModule) -> String {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum BuiltinModule {
+enum BuiltinModule {
     Timers,
     Fs,
     Stream,

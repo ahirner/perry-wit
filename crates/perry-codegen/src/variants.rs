@@ -1,5 +1,9 @@
 //! Compact finite variants: tag string, traced payload owner, and one eight-byte value slot.
-use crate::{FunctionLowering, Repr, Runtime, repr, slot_kind};
+use crate::{
+    function::FunctionLowering,
+    repr::{Repr, repr, slot_kind},
+    runtime::Runtime,
+};
 use anyhow::Result;
 use perry_abi::layout::variant;
 use perry_mir::{types::VariantType, variants::admits_payload};
@@ -18,7 +22,7 @@ impl FunctionLowering<'_, '_> {
         a: Value,
         b: Value,
     ) -> Result<Value> {
-        let result_type = crate::i32_type(ctx);
+        let result_type = crate::repr::i32_type(ctx);
         let done = self.new_block(ctx, vec![result_type]);
         if crate::repr::optional_inner(ctx, ty).is_some() {
             let absent_a = self.is_absent(ctx, a, ty)?;
@@ -146,7 +150,7 @@ impl FunctionLowering<'_, '_> {
         let ordered = if self.state.json_provenance {
             let source = self.load(ctx, MemKind::I32, value, perry_abi::layout::variant::SOURCE);
             let members = self.runtime(ctx, Runtime::StdJsonSourceBegin, vec![source]);
-            let i32 = crate::i32_type(ctx);
+            let i32 = crate::repr::i32_type(ctx);
             let header = self.new_block(ctx, vec![i32]);
             let advance = self.new_block(ctx, vec![]);
             let finished = self.new_block(ctx, vec![]);

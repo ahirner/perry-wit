@@ -8,14 +8,14 @@
 //!
 //! - `f64` stays `f64`; `i1` and `i32` become `i32`; records, arrays, strings and promises are
 //!   `i32` addresses.
-//! - `undefined` (R8) is the signalling-NaN bit pattern `UNDEFINED_BITS` for numbers, the null
+//! - `undefined` (R8) is the signalling-NaN bit pattern `perry_abi::UNDEFINED_BITS` for numbers, the null
 //!   address for references and `2` for booleans. Wasm arithmetic only produces quiet NaNs, so
 //!   no computed number can be mistaken for `undefined`; `perry.to_number` canonicalizes
 //!   before arithmetic.
 //! - Records are an `i32` shape id followed by 8-byte field slots in declaration order; arrays
 //!   use the layout in [perry_runtime::array]. Exact layouts are P3.6.
 //! - Unproven and repeated allocations use precise collectible storage. Bounded task storage
-//!   remains available for small synchronous exports and recycled scheduler nodes.
+//!   remains available for small synchronous exports and task-owned handle tables.
 //! - Strings are UTF-8 with a cached Unicode scalar count (layout in [perry_runtime::string]);
 //!   constants are static objects in the data segment.
 //! - Exceptions use the status convention: a function that may throw returns an extra `i32`
@@ -59,13 +59,11 @@ mod variants;
 pub use memory::explain_tiers;
 
 /// Import module of runtime and helper functions, resolved by `perry-wit`'s linker.
-const HELPER_MODULE: &str = "__perry_helper";
+pub const HELPER_MODULE: &str = "__perry_helper";
 /// First address of static data; address 0 stays null (`undefined` for references).
 const DATA_BASE: u32 = 16;
 /// The interface `setTimeout` waits on.
 const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
-/// Bits of `undefined` in a `number | undefined` slot: a signalling NaN.
-const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 /// `undefined` in a `boolean | undefined` slot.
 const UNDEFINED_BOOL: i32 = 2;
 
@@ -73,7 +71,8 @@ const UNDEFINED_BOOL: i32 = 2;
 pub enum Exports {
     /// Every exported TypeScript function under its own name, with the core signature of its
     /// MIR type plus the exception status, as one task per call. An async function's export
-    /// drives it to completion without a host (no imports) and returns its value and status.
+    /// runs through settled awaits and returns its value and status; pending host suspension
+    /// requires component mode.
     /// For tests and inspection.
     Raw,
     /// Raw exports plus test-only GC stress controls and ownership counters.
@@ -129,9 +128,3 @@ pub fn status_code(kind: ErrorKind) -> i32 {
         ErrorKind::Exit => 5,
     }
 }
-
-use function::FunctionLowering;
-use host::Host;
-use module::ModuleState;
-use repr::{Repr, i32_type, repr, slot_kind, wasm_type};
-use runtime::Runtime;

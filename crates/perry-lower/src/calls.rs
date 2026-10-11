@@ -1,12 +1,12 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn call(
         &mut self,
         ctx: &mut Context,
-        callee: &Expr,
-        args: &[Expr],
+        callee: &'s Expr,
+        args: &'s [Expr],
     ) -> Result<Option<Value>> {
         if let Expr::ExternFuncRef { name, .. } = callee {
             use perry_hir::tdz_check::{TDZ_CHECK, TDZ_CHECK_THEN};
@@ -166,15 +166,11 @@ impl FunctionBuilder<'_> {
                 {
                     self.defined(ctx, value)?
                 } else if optional_value(ctx, actual).is_none()
-                    && optional_value(ctx, ty)
-                        .is_some_and(|inner| foreign::accepts_input(ctx, inner, actual))
+                    && let Some((inner, states)) = optional_parts(ctx, ty)
+                    && foreign::accepts_input(ctx, inner, actual)
                 {
-                    let wrapped = perry_mir::types::OptionalType::get_with(
-                        ctx,
-                        actual,
-                        absence(ctx, ty).expect("optional"),
-                    )
-                    .into();
+                    let wrapped =
+                        perry_mir::types::OptionalType::get_with(ctx, actual, states).into();
                     self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, wrapped))
                 } else {
                     self.fit(ctx, value, ty)?
@@ -241,40 +237,39 @@ impl FunctionBuilder<'_> {
 
     /// The array literal given to a promise combinator: plain values among promises of `T`
     /// become promises fulfilled with them, as `Promise.all` treats them.
-    pub(super) fn combinator_inputs(&mut self, ctx: &mut Context, items: &[Expr]) -> Result<Value> {
+    fn combinator_inputs(&mut self, ctx: &mut Context, items: &'s [Expr]) -> Result<Value> {
         // `Promise.reject(e)` takes its settled type from the other inputs: lower it last.
-        let mut lowered: Vec<Option<Value>> = Vec::with_capacity(items.len());
+        let mut inputs = Vec::with_capacity(items.len());
         for item in items {
-            lowered.push(
-                if promise_call(item).is_some_and(|(name, _)| name == "reject") {
-                    None
-                } else {
+            inputs.push(match promise_call(item) {
+                Some(("reject", reason)) => CombinatorInput::Reject(reason),
+                _ => {
                     let value = self.expression(ctx, item)?;
-                    Some(self.defined(ctx, value)?)
-                },
-            );
+                    CombinatorInput::Lowered(self.defined(ctx, value)?)
+                }
+            });
         }
-        let known: Vec<Value> = lowered.iter().flatten().copied().collect();
-        let promised = known.iter().find_map(|value| {
+        let mut known = inputs.iter().filter_map(|input| match input {
+            CombinatorInput::Lowered(value) => Some(*value),
+            CombinatorInput::Reject(_) => None,
+        });
+        let promised = known.clone().find_map(|value| {
             TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx)
                 .ok()
                 .map(|promise| promise.deref(ctx).value())
         });
-        let settled = match promised {
-            Some(settled) => settled,
-            None => match known.first() {
-                Some(first) => first.get_type(ctx),
-                None => self.void_type(ctx),
-            },
+        let settled = match (promised, known.next()) {
+            (Some(settled), _) => settled,
+            (None, Some(first)) => first.get_type(ctx),
+            (None, None) => void_type(ctx),
         };
         let promise: TypeHandle = PromiseType::get(ctx, settled).into();
         let mut values = Vec::with_capacity(items.len());
-        for (item, value) in items.iter().zip(lowered) {
-            values.push(match value {
-                Some(value) => value,
-                None => {
-                    let (name, reason) = promise_call(item).expect("checked");
-                    self.promise_settled(ctx, name, reason, Some(settled))?
+        for input in inputs {
+            values.push(match input {
+                CombinatorInput::Lowered(value) => value,
+                CombinatorInput::Reject(reason) => {
+                    self.promise_settled(ctx, "reject", reason, Some(settled))?
                 }
             });
         }
@@ -293,11 +288,11 @@ impl FunctionBuilder<'_> {
 
     /// `Promise.resolve(value)` (a promise passes through) or `Promise.reject(reason)`, a
     /// promise of `settled` (`undefined` when nothing says).
-    pub(super) fn promise_settled(
+    fn promise_settled(
         &mut self,
         ctx: &mut Context,
         name: &str,
-        value: &Expr,
+        value: &'s Expr,
         settled: Option<TypeHandle>,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
@@ -310,16 +305,17 @@ impl FunctionBuilder<'_> {
         }
         let settled = match settled {
             Some(settled) => settled,
-            None => self.void_type(ctx),
+            None => void_type(ctx),
         };
         Ok(self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, value, settled)))
     }
+}
 
-    /// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
-    pub(super) fn void_type(&self, ctx: &mut Context) -> TypeHandle {
-        let number = FP64Type::get(ctx).into();
-        perry_mir::types::OptionalType::get(ctx, number).into()
-    }
+/// A promise combinator input: lowered in order, or a `Promise.reject(reason)` lowered once
+/// the other inputs decide its settled type.
+enum CombinatorInput<'e> {
+    Lowered(Value),
+    Reject(&'e Expr),
 }
 
 /// `Promise.<name>(argument)`: the name and the argument.

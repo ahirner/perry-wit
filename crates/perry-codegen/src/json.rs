@@ -30,6 +30,7 @@ use pliron_wasm::{
     ops::CallOp,
 };
 
+/// ECMAScript `QuoteJSONString` of a key known at compile time.
 fn quote_json(out: &mut String, text: &str) {
     out.push('"');
     for character in text.chars() {
@@ -113,9 +114,7 @@ impl FunctionLowering<'_, '_> {
         }
         if deref.is::<DateType>() {
             drop(deref);
-            let text = self
-                .date_intrinsic(ctx, Intrinsic::DateJson, vec![value])
-                .expect("date JSON");
+            let text = self.date_intrinsic(ctx, Intrinsic::DateJson, vec![value]);
             let string = StringType::get(ctx).into();
             let nullable =
                 OptionalType::get_with(ctx, string, perry_mir::attrs::Absence::Null).into();
@@ -162,9 +161,8 @@ impl FunctionLowering<'_, '_> {
         if let Some(name) = self.state.json_serializers.get(&ty) {
             return Ok(name.clone());
         }
-        let name: Identifier = format!("json_{}", self.state.json_serializers.len())
-            .try_into()
-            .expect("identifier");
+        let name = Identifier::try_new(format!("json_{}", self.state.json_serializers.len()))
+            .expect("`json_` and a decimal index form an identifier");
         self.state.json_serializers.insert(ty, name.clone());
         let i32 = i32_type(ctx);
         let value_ty = wasm_type(ctx, ty)?;

@@ -1,5 +1,5 @@
 //! Lower array/string iteration and byte-stream async iteration before HIR erases types.
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use std::collections::HashSet;
 use swc_common::{DUMMY_SP, Span};
@@ -40,19 +40,15 @@ impl Loops {
     fn rewrite(&mut self, iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
         let asynchronous = iteration.is_await;
         let ast::ForHead::VarDecl(declaration) = iteration.left else {
-            return Err(anyhow!("iteration requires a const or let binding"));
+            bail!("iteration requires a const or let binding");
         };
-        ensure!(
-            declaration.decls.len() == 1 && declaration.kind != ast::VarDeclKind::Var,
-            "iteration requires one const or let binding"
-        );
+        const ONE_BINDING: &str = "iteration requires one const or let binding";
         let kind = declaration.kind;
-        let binding = declaration
-            .decls
-            .into_iter()
-            .next()
-            .expect("one binding")
-            .name;
+        ensure!(kind != ast::VarDeclKind::Var, ONE_BINDING);
+        let Ok([declarator]) = <[ast::VarDeclarator; 1]>::try_from(declaration.decls) else {
+            bail!(ONE_BINDING);
+        };
+        let binding = declarator.name;
         let prefix = loop {
             self.next += 1;
             let prefix = format!("__perry_stream_{}_", self.next);
@@ -99,7 +95,7 @@ impl Loops {
         }
         parsed.visit_mut_with(&mut SyntheticSpans);
         let Some(ast::ModuleItem::Stmt(mut statement)) = parsed.body.pop() else {
-            unreachable!("block template")
+            bail!("the stream iteration template is one block statement");
         };
         let mut fill = Fill {
             prefix,
@@ -116,21 +112,14 @@ impl Loops {
 impl VisitMut for Loops {
     fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
         statement.visit_mut_children_with(self);
-        if !matches!(statement, ast::Stmt::ForOf(_)) {
-            return;
-        }
-        let ast::Stmt::ForOf(iteration) = std::mem::replace(
-            statement,
-            ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP }),
-        ) else {
-            unreachable!()
-        };
-        match self.rewrite(iteration) {
-            Ok(replacement) => *statement = replacement,
-            Err(error) => {
+        let empty = ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP });
+        *statement = match std::mem::replace(statement, empty) {
+            ast::Stmt::ForOf(iteration) => self.rewrite(iteration).unwrap_or_else(|error| {
                 self.error.get_or_insert(error);
-            }
-        }
+                ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP })
+            }),
+            other => other,
+        };
     }
 }
 

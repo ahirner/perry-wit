@@ -1,14 +1,15 @@
 //! Arrays and records: literals, element and field writes.
 use super::*;
+use crate::coerce::merge_absence;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// `array[index] = value`; computed keys on records are rejected (subset rule R1).
     pub(super) fn set_index(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
-        index: &Expr,
-        value: &Expr,
+        object: &'s Expr,
+        index: &'s Expr,
+        value: &'s Expr,
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
@@ -47,9 +48,9 @@ impl FunctionBuilder<'_> {
     pub(super) fn set_field(
         &mut self,
         ctx: &mut Context,
-        object: &Expr,
+        object: &'s Expr,
         field: &str,
-        value: &Expr,
+        value: &'s Expr,
     ) -> Result<Value> {
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
@@ -77,7 +78,7 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         names: &[&str],
-        args: &[Expr],
+        args: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         if let Some(ty) = expected.map(|ty| optional_value(ctx, ty).unwrap_or(ty))
@@ -154,11 +155,13 @@ impl FunctionBuilder<'_> {
         let operands = positioned.into_iter().map(|(_, value)| value).collect();
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, operands)))
     }
+
+    /// `new C(…)` of a class that Perry HIR made from an object literal.
     pub(super) fn object_literal(
         &mut self,
         ctx: &mut Context,
         class_name: &str,
-        args: &[Expr],
+        args: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let names = self
@@ -171,10 +174,12 @@ impl FunctionBuilder<'_> {
         );
         self.record_literal(ctx, &names, args, expected)
     }
+
+    /// `[…]`, with the element type from `expected` or from the items.
     pub(super) fn array_literal(
         &mut self,
         ctx: &mut Context,
-        items: &[Expr],
+        items: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let element = match expected.map(|ty| {
@@ -204,7 +209,7 @@ impl FunctionBuilder<'_> {
                         optional_value(ctx, ty).unwrap_or(ty) == inner,
                         "array literals must have one element type"
                     );
-                    states = coerce::merge_absence(states, absence(ctx, ty));
+                    states = merge_absence(states, absence(ctx, ty));
                 }
                 states.map_or(inner, |states| {
                     perry_mir::types::OptionalType::get_with(ctx, inner, states).into()
@@ -218,11 +223,12 @@ impl FunctionBuilder<'_> {
             .collect::<Result<_>>()?;
         Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
     }
+
     pub(super) fn array_push(
         &mut self,
         ctx: &mut Context,
         array_id: LocalId,
-        value: &Expr,
+        value: &'s Expr,
     ) -> Result<Value> {
         let slot = self.local(array_id)?;
         let array = self.load(ctx, slot)?;

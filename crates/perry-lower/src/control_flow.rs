@@ -1,9 +1,9 @@
 //! Structured source control flow expressed as ordinary typed MIR blocks.
 use super::*;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
-        let entry = self.region.deref(ctx).iter(ctx).next().expect("entry");
+        let entry = self.entry_block(ctx);
         let mut seen = HashSet::new();
         let mut pending = vec![block];
         while let Some(block) = pending.pop() {
@@ -20,8 +20,8 @@ impl FunctionBuilder<'_> {
     pub(super) fn switch(
         &mut self,
         ctx: &mut Context,
-        discriminant: &Expr,
-        cases: &[perry_hir::ir::SwitchCase],
+        discriminant: &'s Expr,
+        cases: &'s [perry_hir::ir::SwitchCase],
     ) -> Result<()> {
         let value = self.expression(ctx, discriminant)?;
         let ty = value.get_type(ctx);
@@ -82,7 +82,7 @@ impl FunctionBuilder<'_> {
     }
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// Leave with exception `status`: to the innermost handler, or out of the function. Ends
     /// the current block.
     pub(super) fn propagate(&mut self, ctx: &mut Context, status: Value) {
@@ -114,7 +114,7 @@ impl FunctionBuilder<'_> {
         for index in pending.into_iter().rev() {
             let handlers = self.handlers.split_off(self.finallies[index].handlers);
             let finallies = self.finallies.split_off(index);
-            let lowered = self.statements(ctx, &finallies[0].body);
+            let lowered = self.statements(ctx, finallies[0].body);
             self.handlers.extend(handlers);
             self.finallies.extend(finallies);
             lowered?;
@@ -129,15 +129,15 @@ impl FunctionBuilder<'_> {
     pub(super) fn try_(
         &mut self,
         ctx: &mut Context,
-        body: &[Stmt],
-        catch: Option<&perry_hir::ir::CatchClause>,
-        finally: Option<&[Stmt]>,
+        body: &'s [Stmt],
+        catch: Option<&'s perry_hir::ir::CatchClause>,
+        finally: Option<&'s [Stmt]>,
     ) -> Result<()> {
         let i32 = IntegerType::get(ctx, 32, Signedness::Signless).into();
         let status = self.entry_slot(ctx, i32);
         let join = self.new_block(ctx, "join");
         let outer = Finally {
-            body: finally.map(<[Stmt]>::to_vec).unwrap_or_default(),
+            body: finally.unwrap_or_default(),
             handlers: self.handlers.len(),
             controls: self.controls.len(),
         };
@@ -149,7 +149,7 @@ impl FunctionBuilder<'_> {
             .context("try without catch or finally")?;
 
         if finally.is_some() {
-            self.finallies.push(outer.clone());
+            self.finallies.push(outer);
         }
         self.handlers.push(Handler {
             block: first,
@@ -162,7 +162,7 @@ impl FunctionBuilder<'_> {
         }
         lowered?;
         if !self.terminated(ctx) {
-            self.statements(ctx, &outer.body)?;
+            self.statements(ctx, outer.body)?;
             self.jump(ctx, join);
         }
 
@@ -178,7 +178,7 @@ impl FunctionBuilder<'_> {
                 self.locals.insert(*id, slot);
             }
             if let Some(rethrow) = rethrow_block {
-                self.finallies.push(outer.clone());
+                self.finallies.push(outer);
                 self.handlers.push(Handler {
                     block: rethrow,
                     status,
@@ -191,7 +191,7 @@ impl FunctionBuilder<'_> {
             }
             lowered?;
             if !self.terminated(ctx) {
-                self.statements(ctx, &outer.body)?;
+                self.statements(ctx, outer.body)?;
                 self.jump(ctx, join);
             }
         }
@@ -202,7 +202,7 @@ impl FunctionBuilder<'_> {
             self.pass_exit(ctx, caught);
             // Hold the exception across the cleanup, which may throw and catch its own.
             let exception = self.emit_value(ctx, |ctx| CatchOp::new(ctx, caught));
-            self.statements(ctx, &outer.body)?;
+            self.statements(ctx, outer.body)?;
             if !self.terminated(ctx) {
                 let again = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, exception));
                 self.propagate(ctx, again);
@@ -213,7 +213,7 @@ impl FunctionBuilder<'_> {
     }
 
     /// `process.exit` unwinds through handlers without running them.
-    pub(super) fn pass_exit(&mut self, ctx: &mut Context, status: Value) {
+    fn pass_exit(&mut self, ctx: &mut Context, status: Value) {
         let exit = self.i32(ctx, EXIT_STATUS);
         let exiting = self.compare(ctx, CompareKind::Eq, status, exit);
         let leave = self.new_block(ctx, "exit");
@@ -228,10 +228,10 @@ impl FunctionBuilder<'_> {
     pub(super) fn loop_(
         &mut self,
         ctx: &mut Context,
-        init: Option<&Stmt>,
-        condition: Option<&Expr>,
-        update: Option<&Expr>,
-        body: &[Stmt],
+        init: Option<&'s Stmt>,
+        condition: Option<&'s Expr>,
+        update: Option<&'s Expr>,
+        body: &'s [Stmt],
         body_first: bool,
     ) -> Result<()> {
         if let Some(init) = init {

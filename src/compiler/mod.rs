@@ -160,7 +160,7 @@ fn lower(
     file_name: &str,
     foreign: &std::collections::HashMap<String, perry_lower::hir::Type>,
 ) -> Result<pliron::builtin::ops::ModuleOp> {
-    let mir = perry_lower::lower_source_with(ctx, source, file_name, foreign)?;
+    let mir = perry_lower::lower_source(ctx, source, file_name, foreign)?;
     perry_mir::pipeline::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow!("{}", error.disp(ctx)))
         .context("optimizing MIR")?;

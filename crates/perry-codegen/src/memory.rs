@@ -1,5 +1,9 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
-use crate::{FunctionLowering, Repr, Runtime, repr};
+use crate::{
+    function::FunctionLowering,
+    repr::{Repr, repr},
+    runtime::Runtime,
+};
 use anyhow::Result;
 use perry_mir::{
     calls::{AsyncCallOp, CallOp},
@@ -31,7 +35,7 @@ fn live_across<'a>(
         .chain(operands)
 }
 
-pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
+pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::ModuleState) {
     use pliron::{
         builtin::{op_interfaces::SingleBlockRegionInterface, ops::FuncOp, types::FunctionType},
         op::Op,
@@ -41,7 +45,14 @@ pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::ModuleState) {
         let (params, results) = runtime.signature(ctx);
         let ty = FunctionType::get(ctx, params, results);
         let export = format!("__{}", runtime.name());
-        let function = FuncOp::new(ctx, export.as_str().try_into().expect("export name"), ty);
+        let function = FuncOp::new(
+            ctx,
+            export
+                .as_str()
+                .try_into()
+                .expect("`__` and a runtime name form an identifier"),
+            ty,
+        );
         set_export(ctx, &function, &export);
         let mut args: Vec<_> = function
             .get_entry_block(ctx)
@@ -217,7 +228,7 @@ impl FunctionLowering<'_, '_> {
         self.store(ctx, MemKind::I32, cell, 0, one);
         let throws = self.state.throws.contains(&function);
         let results = if throws {
-            vec![crate::i32_type(ctx)]
+            vec![crate::repr::i32_type(ctx)]
         } else {
             vec![]
         };
@@ -441,10 +452,7 @@ impl FunctionLowering<'_, '_> {
         if offsets.is_empty() {
             return 0;
         }
-        while !self.state.data.bytes.len().is_multiple_of(4) {
-            self.state.data.bytes.push(0);
-        }
-        let address = crate::DATA_BASE + self.state.data.bytes.len() as u32;
+        let address = self.state.data.align(4);
         for word in [0, offsets.len() as u32]
             .into_iter()
             .chain(offsets.iter().copied())

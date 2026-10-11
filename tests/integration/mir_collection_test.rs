@@ -615,3 +615,31 @@ export function run(n: number): number {
         assert_eq!(program.counter(Counter::Roots), 0);
     }
 }
+
+#[test]
+fn in_module_awaits_preserve_cyclic_loop_values_under_forced_collection() {
+    let source = r#"
+async function step(n: number): Promise<number> { return await Promise.resolve(n + 1); }
+export async function run(n: number): Promise<number> {
+  let a = 1; let b = 2; let c = 3;
+  const marker = 'é' + String(n) + '😀';
+  for (let i = 0; i < n; i++) {
+    const old = a; a = b; b = c; c = await step(old + i);
+    if (marker[0] !== 'é' || marker[marker.length - 1] !== '😀') throw 1;
+  }
+  return a * 10000 + b * 100 + c;
+}
+"#;
+    let mut program = Program::checked(source, "async-dispatch.ts");
+    program.stress_collection(true);
+    for n in [0, 1, 2, 3, 19, 100] {
+        let (mut a, mut b, mut c) = (1, 2, 3);
+        for i in 0..n {
+            (a, b, c) = (b, c, a + i + 1);
+        }
+        assert_eq!(
+            program.throwing("run", f64::from(n)),
+            (f64::from(a * 10000 + b * 100 + c), 0)
+        );
+    }
+}

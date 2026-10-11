@@ -1,5 +1,5 @@
 //! Inline string comparisons, character reads and owned single-byte appends.
-use crate::{FunctionLowering, Runtime, i32_type};
+use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
 use perry_mir::{attrs::CompareKind, collections::StringConstOp};
 use perry_runtime::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
 use pliron::{
@@ -113,7 +113,7 @@ impl FunctionLowering<'_, '_> {
                 (CompareKind::Le, false) | (CompareKind::Ge, true) => NumOpcode::I32LeS,
                 (CompareKind::Gt, false) | (CompareKind::Lt, true) => NumOpcode::I32GtS,
                 (CompareKind::Ge, false) | (CompareKind::Le, true) => NumOpcode::I32GeS,
-                _ => unreachable!(),
+                (CompareKind::Eq | CompareKind::Ne, _) => unreachable!("equality returned above"),
             };
             return Some(self.num(ctx, opcode, vec![order, zero]));
         }
@@ -164,7 +164,7 @@ impl FunctionLowering<'_, '_> {
         valid: Value,
         representation: Character,
     ) -> Value {
-        let i32 = crate::i32_type(ctx);
+        let i32 = crate::repr::i32_type(ctx);
         let join = self.new_block(ctx, vec![i32]);
         let inline = self.new_block(ctx, vec![]);
         let call = self.new_block(ctx, vec![]);
@@ -292,7 +292,7 @@ impl FunctionLowering<'_, '_> {
         b: Value,
         representation: Character,
     ) -> Value {
-        let i32 = crate::i32_type(ctx);
+        let i32 = crate::repr::i32_type(ctx);
         let join = self.new_block(ctx, vec![i32]);
         let buffered = self.new_block(ctx, vec![]);
         let inline = self.new_block(ctx, vec![]);

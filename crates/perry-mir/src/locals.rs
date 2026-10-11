@@ -28,7 +28,7 @@ use pliron::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum LocalErr {
+pub(crate) enum LocalErr {
     #[error("{0} expects a perry.slot operand")]
     NotSlot(&'static str),
     #[error("{0} value type differs from the slot's type")]

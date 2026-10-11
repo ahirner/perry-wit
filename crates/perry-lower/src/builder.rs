@@ -20,9 +20,9 @@ pub(super) struct Handler {
 }
 
 /// An enclosing `finally`, run inline before `return`, `break` and `continue` leave it.
-#[derive(Clone)]
-pub(super) struct Finally {
-    pub(super) body: Vec<Stmt>,
+#[derive(Clone, Copy)]
+pub(super) struct Finally<'s> {
+    pub(super) body: &'s [Stmt],
     /// `handlers.len()` and `controls.len()` outside the `try`.
     pub(super) handlers: usize,
     pub(super) controls: usize,
@@ -45,7 +45,7 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) controls: Vec<Control>,
     pub(super) callback_returns: Vec<array_methods::CallbackReturn>,
     pub(super) handlers: Vec<Handler>,
-    pub(super) finallies: Vec<Finally>,
+    pub(super) finallies: Vec<Finally<'s>>,
     pub(super) signatures: &'s HashMap<FuncId, Signature>,
     pub(super) shapes: &'s Shapes<'s>,
     /// Imported built-ins by local name.
@@ -58,7 +58,7 @@ pub(super) struct FunctionBuilder<'s> {
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn lower(
         ctx: &mut Context,
-        function: &Function,
+        function: &'s Function,
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
@@ -89,7 +89,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         signature: &Signature,
         params: &[LocalId],
-        body: &[Stmt],
+        body: &'s [Stmt],
         signatures: &'s HashMap<FuncId, Signature>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<String, Builtin>,
@@ -107,15 +107,8 @@ impl<'s> FunctionBuilder<'s> {
             .collect();
         globals.sort_by_key(|(id, _)| *id);
         for (id, ty) in globals {
-            let slot = builder.emit_value(ctx, |ctx| {
-                perry_mir::globals::GlobalOp::new(
-                    ctx,
-                    format!("global_{id}").try_into().expect("global name"),
-                    ty,
-                )
-            });
+            let slot = builder.global_slot(ctx, id, ty);
             builder.locals.insert(id, slot);
-            builder.global_slots.insert(slot);
         }
         for (index, param) in params.iter().enumerate() {
             let value = entry.deref(ctx).get_argument(index);
@@ -164,7 +157,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// Results of falling off the end or `return;`: an async function settles `undefined`.
     pub(super) fn implicit_results(&mut self, ctx: &mut Context) -> Vec<Value> {
         self.results
@@ -254,7 +247,8 @@ impl FunctionBuilder<'_> {
 
     pub(super) fn new_block(&mut self, ctx: &mut Context, label: &str) -> Ptr<BasicBlock> {
         self.labels += 1;
-        let name = Identifier::try_from(format!("{label}{}", self.labels)).expect("label");
+        let name = Identifier::try_from(format!("{label}{}", self.labels))
+            .expect("block labels are identifiers followed by a counter");
         let block = BasicBlock::new(ctx, Some(name), vec![]);
         block.insert_at_back(self.region, ctx);
         block
@@ -358,11 +352,27 @@ impl FunctionBuilder<'_> {
 
     /// A slot inserted at the start of the entry block, dominating every use.
     pub(super) fn entry_slot(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
-        let entry = self.region.deref(ctx).get_head().expect("entry block");
         let op = LocalOp::new(ctx, ty);
+        let entry = self.entry_block(ctx);
         let mut at_entry = IRInserter::<DummyListener>::new_at_block_start(entry);
         at_entry.append_op(ctx, &op);
         op.get_result(ctx)
+    }
+
+    pub(super) fn entry_block(&self, ctx: &Context) -> Ptr<BasicBlock> {
+        self.region
+            .deref(ctx)
+            .get_head()
+            .expect("a function region starts with its entry block")
+    }
+
+    /// The slot of module binding `id`, shared by every function that reads or writes it.
+    pub(super) fn global_slot(&mut self, ctx: &mut Context, id: LocalId, ty: TypeHandle) -> Value {
+        let name = Identifier::try_new(format!("global_{id}"))
+            .expect("`global_` and a decimal local id form an identifier");
+        let slot = self.emit_value(ctx, |ctx| perry_mir::globals::GlobalOp::new(ctx, name, ty));
+        self.global_slots.insert(slot);
+        slot
     }
 
     pub(super) fn slot_type(&self, ctx: &Context, slot: Value) -> Result<TypeHandle> {

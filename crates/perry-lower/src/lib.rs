@@ -7,7 +7,7 @@
 //!   recursive type inference;
 //! - tiers stay `Unassigned` and layouts abstract; later passes decide them.
 //!
-//! [lower_source_with] runs the source passes (module graph, validation, stream rewriting),
+//! [lower_source] runs the source passes (module graph, validation, stream rewriting),
 //! Perry's HIR lowering, and then [program] over the HIR. Each function body is lowered by a
 //! [builder::FunctionBuilder], whose methods are spread over the modules below by topic.
 //! Unsupported constructs are rejected with a diagnostic.
@@ -22,6 +22,7 @@ mod dates;
 mod decoder;
 mod expressions;
 mod foreign;
+mod host;
 mod json;
 mod json_read;
 mod modules;
@@ -34,7 +35,6 @@ mod streams;
 mod temporal;
 mod url;
 mod variants;
-mod web;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_hir::{
     ir::{
@@ -63,7 +63,7 @@ use perry_mir::{
     locals::{LoadOp, LocalOp, StoreOp, UndefOp},
     optional::{
         IsNullOp, IsUndefinedOp, NullOp, OptionalCastOp, ToNumberOp, ToStringOp, UndefinedOp,
-        UnwrapOp, WrapOp, absence, optional_value,
+        UnwrapOp, WrapOp, absence, optional_parts, optional_value,
     },
     scalar::{BinaryOp as MirBinary, CompareOp as MirCompare, ConvertOp},
     types::{
@@ -103,7 +103,7 @@ pub mod hir {
     pub use perry_hir::types::{FunctionType, ObjectType, PropertyInfo, Type};
 }
 use builder::{Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, remove_unreachable};
-use coerce::{Kind, kind};
+use coerce::{Kind, kind, void_type};
 use program::{Builtin, Signature};
 
 /// The function holding a module's top-level statements, if it has any.
@@ -111,7 +111,7 @@ pub const MAIN: &str = "perry_main";
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with
 /// `foreign` types by SDK name: WIT types the program imports from its generated declarations.
-pub fn lower_source_with(
+pub fn lower_source(
     ctx: &mut Context,
     source: &str,
     file: &str,
@@ -131,6 +131,15 @@ pub fn lower_source_with(
         .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
         .collect();
     program::build_module(ctx, &hir, foreign, inferred)
+}
+
+/// The variant name of a HIR node, for diagnostics about unsupported constructs.
+fn node_kind(node: &impl std::fmt::Debug) -> String {
+    format!("{node:?}")
+        .split(['(', ' ', '{'])
+        .next()
+        .unwrap_or("?")
+        .to_string()
 }
 
 #[cfg(test)]

@@ -214,19 +214,57 @@ impl FunctionLowering<'_, '_> {
         operands.into_iter().map(|v| self.mapped(ctx, v)).collect()
     }
 
-    /// Call a canonical built-in or host import.
-    pub(crate) fn host(
+    /// Call a canonical built-in or host import that returns one value. Results follow from
+    /// [Host::signature], so a mismatch is a bug at the call site.
+    pub(crate) fn host(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) -> Value {
+        let (_, results) = host.signature(ctx);
+        assert_eq!(
+            results.len(),
+            1,
+            "{} does not return one value; call it with host_void",
+            host.symbol()
+        );
+        let call = self.call_host(ctx, host, args, results);
+        call.deref(ctx).get_result(0)
+    }
+
+    /// Call a canonical built-in or host import without a result.
+    pub(crate) fn host_void(&mut self, ctx: &mut Context, host: Host, args: Vec<Value>) {
+        let (_, results) = host.signature(ctx);
+        assert!(
+            results.is_empty(),
+            "the result of {} is discarded",
+            host.symbol()
+        );
+        self.call_host(ctx, host, args, results);
+    }
+
+    /// Call a host import with the result types its caller derived; see [Self::host].
+    pub(crate) fn call_host(
         &mut self,
         ctx: &mut Context,
         host: Host,
         args: Vec<Value>,
-    ) -> Option<Value> {
-        let (_, results) = host.signature(ctx);
+        results: Vec<TypeHandle>,
+    ) -> Ptr<Operation> {
         let symbol = host.symbol();
         self.state.host.insert(host);
-        let op = CallOp::new(ctx, symbol, args, results).get_operation();
-        self.insert(ctx, op);
-        op.deref(ctx).results().next()
+        let call = CallOp::new(ctx, symbol, args, results).get_operation();
+        self.insert(ctx, call);
+        call
+    }
+
+    /// Emit `call` between saving and resuming the current task, as calls that may switch
+    /// tasks (host imports and canonical resource built-ins) require.
+    pub(crate) fn preserving_task<T>(
+        &mut self,
+        ctx: &mut Context,
+        call: impl FnOnce(&mut Self, &mut Context) -> T,
+    ) -> T {
+        let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
+        let result = call(self, ctx);
+        self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
+        result
     }
 
     pub(crate) fn define(&mut self, ctx: &Context, op: Ptr<Operation>, value: Value) {

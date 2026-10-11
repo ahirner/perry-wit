@@ -5,12 +5,14 @@ use anyhow::{Result, anyhow};
 use http_body_util::{BodyExt, Full};
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
-    AsContextMut, Config, Engine, Store,
+    AsContextMut, Store,
     component::{Accessor, Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p3::{Request, bindings::Service, bindings::http::types::ErrorCode};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
+
+use crate::engine::async_engine;
 
 struct Host {
     ctx: WasiCtx,
@@ -111,9 +113,7 @@ async fn handlers_serve_exchanges_and_report_exceptions() -> Result<()> {
     let (resolve, package) = resolve_wit(&wit)?;
     let world = resolve.select_world(&[package], Some("handler"))?;
     let compiled = compile_for_world(SOURCE, "handler.ts", &resolve, world, true)?;
-    let mut config = Config::new();
-    config.wasm_component_model_async(true);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = Component::new(&engine, compiled.stripped.unwrap())?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;

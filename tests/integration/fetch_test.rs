@@ -4,13 +4,13 @@
 use anyhow::Result;
 use perry_wit::{compile_for_world, component::wit::resolve_wit};
 use wasmtime::{
-    Config, Engine, Store,
+    Store,
     component::{Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
-use crate::http_fixture;
+use crate::{engine::async_engine, http_fixture};
 
 const WIT: &str = r#"
 package test:fetch;
@@ -84,9 +84,7 @@ async fn run(source: &str, server: &http_fixture::HttpFixture) -> Result<String>
     let (resolve, package) = resolve_wit(directory.path())?;
     let world = resolve.select_world(&[package], Some("fetch"))?;
     let compiled = compile_for_world(source, "fetch.ts", &resolve, world, true)?;
-    let mut config = Config::new();
-    config.wasm_component_model_async(true);
-    let engine = Engine::new(&config)?;
+    let engine = async_engine()?;
     let component = wasmtime::component::Component::new(&engine, compiled.stripped.unwrap())?;
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;

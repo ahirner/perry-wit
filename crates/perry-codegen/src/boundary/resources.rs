@@ -1,6 +1,6 @@
 //! Opaque resource lowering and acknowledgement-scoped canonical ownership changes.
 use super::*;
-use crate::Host;
+use crate::host::Host;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
 use std::collections::HashSet;
 
@@ -100,7 +100,7 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
         let other = b.new_block(ctx, vec![]);
         b.cond_br(ctx, matches, (selected, vec![]), (other, vec![]));
         b.block = selected;
-        b.resource_host(ctx, resource.key, "drop", handle);
+        b.resource_drop(ctx, resource.key, handle);
         b.br(ctx, next, vec![]);
         b.block = other;
     }
@@ -133,33 +133,37 @@ impl FunctionLowering<'_, '_> {
         self.insert(ctx, call);
     }
 
-    fn resource_host(
+    /// Call `[resource-new]` or `[resource-rep]` of resource `key`.
+    fn resource_value(
         &mut self,
         ctx: &mut Context,
         key: u32,
         operation: &str,
         argument: Value,
-    ) -> Option<Value> {
+    ) -> Value {
+        let host = self.resource_builtin(key, operation, vec![Flat::I32]);
+        self.preserving_task(ctx, |b, ctx| b.host(ctx, host, vec![argument]))
+    }
+
+    /// Call `[resource-drop]` of resource `key`.
+    fn resource_drop(&mut self, ctx: &mut Context, key: u32, handle: Value) {
+        let host = self.resource_builtin(key, "drop", vec![]);
+        self.preserving_task(ctx, |b, ctx| b.host_void(ctx, host, vec![handle]));
+    }
+
+    fn resource_builtin(&self, key: u32, operation: &str, results: Vec<Flat>) -> Host {
         let resource = &self.state.resources[&key];
         let module = if resource.exported {
             format!("[export]{}", resource.module)
         } else {
             resource.module.clone()
         };
-        let host = Host::Foreign(
+        Host::Foreign(
             module,
             format!("[resource-{operation}]{}", resource.name),
             vec![Flat::I32],
-            if operation == "drop" {
-                vec![]
-            } else {
-                vec![Flat::I32]
-            },
-        );
-        let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
-        let result = self.host(ctx, host, vec![argument]);
-        self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
-        result
+            results,
+        )
     }
 
     pub(super) fn begin_resources(
@@ -168,7 +172,10 @@ impl FunctionLowering<'_, '_> {
         needed: bool,
         roots: Option<Value>,
     ) {
-        assert!(self.resource_scope.is_none());
+        assert!(
+            self.resource_scope.is_none(),
+            "resource scopes are not nested; the previous one must end first"
+        );
         if needed {
             let scope = self.runtime(ctx, Runtime::ResourceScopeNew, vec![]);
             self.resource_scope = Some((scope, roots));
@@ -267,7 +274,7 @@ impl FunctionLowering<'_, '_> {
         match operation {
             ResourceOperation::New => {
                 let handle = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![value]);
-                let handle = self.resource_host(ctx, key, "new", handle).expect("handle");
+                let handle = self.resource_value(ctx, key, "new", handle);
                 let ty = op.deref(ctx).get_result(0).get_type(ctx);
                 let value = self.lift_resource(ctx, key, true, ty, handle)?;
                 self.define(ctx, op, value);
@@ -286,9 +293,7 @@ impl FunctionLowering<'_, '_> {
                 let done = self.new_block(ctx, vec![i32]);
                 self.cond_br(ctx, rep, (done, vec![handle]), (lookup, vec![]));
                 self.block = lookup;
-                let representation = self
-                    .resource_host(ctx, key, "rep", handle)
-                    .expect("representation");
+                let representation = self.resource_value(ctx, key, "rep", handle);
                 self.br(ctx, done, vec![representation]);
                 self.block = done;
                 let value = done.deref(ctx).get_argument(0);
@@ -299,6 +304,6 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
     pub(super) fn discard_resource(&mut self, ctx: &mut Context, key: u32, raw: Value) {
-        self.resource_host(ctx, key, "drop", raw);
+        self.resource_drop(ctx, key, raw);
     }
 }

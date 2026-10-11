@@ -13,7 +13,12 @@
 //! frame slots: they are stored where they are defined and loaded where they are used, so the
 //! resume entries need no SSA repair. `return v` fulfils the frame's promise, and an exception
 //! rejects it with its status.
-use crate::{FunctionLowering, ModuleState, Runtime, i32_type, slot_kind, wasm_type};
+use crate::{
+    function::FunctionLowering,
+    module::ModuleState,
+    repr::{i32_type, slot_kind, wasm_type},
+    runtime::Runtime,
+};
 use anyhow::{Result, anyhow};
 use perry_mir::calls::AwaitOp;
 use perry_runtime::promise as promises;
@@ -168,8 +173,8 @@ pub(crate) fn lower(
         let frame = if b.state.collectible {
             let mut offsets = vec![PROMISE, AWAITED];
             offsets.extend(slots.iter().filter_map(|(value, (offset, _))| {
-                crate::repr(ctx, value.get_type(ctx))
-                    .is_ok_and(|kind| kind == crate::Repr::Ref)
+                crate::repr::repr(ctx, value.get_type(ctx))
+                    .is_ok_and(|kind| kind == crate::repr::Repr::Ref)
                     .then_some(*offset)
             }));
             offsets.sort_unstable();
@@ -451,9 +456,7 @@ impl FunctionLowering<'_, '_> {
             self.br(ctx, joined, vec![]);
             self.block = start;
         }
-        let status = self
-            .host(ctx, crate::Host::WaitFor, vec![nanos])
-            .expect("status");
+        let status = self.host(ctx, crate::host::Host::WaitFor, vec![nanos]);
         let mask = self.i32_const(ctx, 0xF);
         let subtask_state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
         let returned_state = self.i32_const(ctx, 2);

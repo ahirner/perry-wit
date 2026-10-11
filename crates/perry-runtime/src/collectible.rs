@@ -466,20 +466,12 @@ impl Collector {
     /// # Safety
     /// `object` is an exact allocation pointer with no remaining aliases or retained children.
     pub(crate) unsafe fn release_frame(&mut self, object: *mut u8) {
-        let page = self.directory.get(object as usize);
-        assert!(!page.is_null(), "frame has no page");
+        let (page, index) = self
+            .allocated_slot(object)
+            .expect("a released frame starts a live allocation and is released once");
+        // SAFETY: directory pages are owned by this collector; no other page reference is live.
         let page = unsafe { &mut *page };
         assert!(page.cell <= MAX_SMALL, "frame exceeds small storage");
-        let offset = object as usize - page.memory.as_ptr() as usize - HEADER;
-        assert!(
-            offset.is_multiple_of(page.cell),
-            "frame pointer is not an allocation start"
-        );
-        let index = offset / page.cell;
-        assert!(
-            index < page.slots && page.allocated[0] & (1 << index) != 0,
-            "frame released twice"
-        );
         let size = unsafe { object.sub(HEADER).cast::<Header>().read().size };
         self.counters.live_bytes -= size;
         page.release(index);

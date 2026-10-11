@@ -1,7 +1,7 @@
 //! Promises of the current task (design decision D5).
 //!
-//! Layout, read inline by compiled code: `state: u32` at 0 ([PENDING], [FULFILLED],
-//! [REJECTED]), `status: i32` at 4 (the exception code of a rejection), the settled value's
+//! Layout, read inline by compiled code: `state: u32` at 0 (`PENDING`, `FULFILLED`,
+//! `REJECTED`), `status: i32` at 4 (the exception code of a rejection), the settled value's
 //! 8-byte slot at 8 (`f64` bits or a 32-bit reference; a rejection's exception object). Compiled code checks `state` before
 //! suspending, so awaiting a settled promise continues inline; otherwise the awaiting frame
 //! arms a private P3 future whose completion resumes that frame.

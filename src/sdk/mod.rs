@@ -124,7 +124,6 @@ pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult> {
 
     Ok(SdkResult {
         types_path: dts_path,
-
         check_path,
         tsconfig_path: generated_tsconfig,
     })

@@ -30,11 +30,11 @@ impl AbiType {
         else {
             return Some(completion);
         };
-        let tagged = record_field(ctx, record, "ok")
-            .is_ok_and(|(_, ty)| crate::repr(ctx, ty).is_ok_and(|r| r == crate::Repr::Bool))
-            && ok
-                .as_ref()
-                .is_none_or(|_| record_field(ctx, record, "value").is_ok())
+        let tagged = record_field(ctx, record, "ok").is_ok_and(|(_, ty)| {
+            crate::repr::repr(ctx, ty).is_ok_and(|r| r == crate::repr::Repr::Bool)
+        }) && ok
+            .as_ref()
+            .is_none_or(|_| record_field(ctx, record, "value").is_ok())
             && err
                 .as_ref()
                 .is_none_or(|_| record_field(ctx, record, "error").is_ok());
@@ -254,7 +254,7 @@ impl FunctionLowering<'_, '_> {
         self.insert(ctx, trap);
         self.block = valid;
         let value = self.load(ctx, kind, exception, exception_layout::VALUE);
-        if self.state.collectible && crate::repr(ctx, mir)? == crate::Repr::Ref {
+        if self.state.collectible && crate::repr::repr(ctx, mir)? == crate::repr::Repr::Ref {
             self.runtime(ctx, Runtime::GcPin, vec![value]);
         }
         Ok(Some((mir, value)))
@@ -369,7 +369,7 @@ impl FunctionLowering<'_, '_> {
                 for (name, field) in &fields {
                     let value = if name.as_str() == "ok" {
                         ensure!(
-                            crate::repr(ctx, *field)? == crate::Repr::Bool,
+                            crate::repr::repr(ctx, *field)? == crate::repr::Repr::Bool,
                             "result ok field must be boolean"
                         );
                         self.i32_const(ctx, i32::from(case == 0))
@@ -388,7 +388,7 @@ impl FunctionLowering<'_, '_> {
                 }
                 self.build_record(ctx, mir, values)
             }
-            _ => unreachable!(),
+            other => bail!("WIT {other:?} is not a sum type"),
         }
     }
 
@@ -436,7 +436,7 @@ impl FunctionLowering<'_, '_> {
         let raw = (0..layout.len())
             .map(|_| flat.pop().ok_or_else(|| anyhow!("too few flat values")))
             .collect::<Result<Vec<_>>>()?;
-        let result = crate::wasm_type(ctx, mir)?;
+        let result = crate::repr::wasm_type(ctx, mir)?;
         Ok(self.sum_switch(
             ctx,
             raw[0],
@@ -470,7 +470,7 @@ impl FunctionLowering<'_, '_> {
         offset: u32,
     ) -> Result<Value> {
         let tag = self.load(ctx, ty.discriminant_kind(), address, offset);
-        let result = crate::wasm_type(ctx, mir)?;
+        let result = crate::repr::wasm_type(ctx, mir)?;
         Ok(
             self.sum_switch(ctx, tag, ty.cases().len(), vec![result], |b, ctx, case| {
                 let payload = if let Some(payload) = ty.cases()[case] {
@@ -504,7 +504,7 @@ impl FunctionLowering<'_, '_> {
                 let record = self.record_type(ctx, mir)?;
                 let (index, field) = record_field(ctx, record, "ok")?;
                 ensure!(
-                    crate::repr(ctx, field)? == crate::Repr::Bool,
+                    crate::repr::repr(ctx, field)? == crate::repr::Repr::Bool,
                     "result ok field must be boolean"
                 );
                 let ok = self.load(
@@ -521,28 +521,36 @@ impl FunctionLowering<'_, '_> {
                     "variant needs a closed tagged union"
                 );
                 let tag = self.load(ctx, MemKind::I32, value, 0);
-                let names = AbiType::Enum(cases.iter().map(|(name, _)| name.clone()).collect());
-                let field = perry_mir::types::StringType::get(ctx).into();
-                self.sum_tag(ctx, &names, field, tag)?
+                self.string_tag(ctx, cases.iter().map(|(name, _)| name.as_str()), tag)
             }
             AbiType::Enum(names) => {
                 ensure!(
                     mir.deref(ctx).is::<perry_mir::types::StringType>(),
                     "WIT enum needs a string literal union"
                 );
-                let mut tag = self.i32_const(ctx, -1);
-                for (index, name) in names.iter().enumerate() {
-                    let text = self.state.data.string(name);
-                    let text = self.i32_const(ctx, text as i32);
-                    let comparison = self.runtime(ctx, Runtime::StringCompare, vec![value, text]);
-                    let matches = self.num(ctx, NumOpcode::I32Eqz, vec![comparison]);
-                    let index = self.i32_const(ctx, index as i32);
-                    tag = self.select(ctx, matches, index, tag);
-                }
-                tag
+                self.string_tag(ctx, names.iter().map(String::as_str), value)
             }
-            _ => unreachable!(),
+            other => bail!("WIT {other:?} is not a sum type"),
         })
+    }
+
+    /// Index of the first of `names` equal to the string `value`, or -1.
+    fn string_tag<'n>(
+        &mut self,
+        ctx: &mut Context,
+        names: impl Iterator<Item = &'n str>,
+        value: Value,
+    ) -> Value {
+        let mut tag = self.i32_const(ctx, -1);
+        for (index, name) in names.enumerate() {
+            let text = self.state.data.string(name);
+            let text = self.i32_const(ctx, text as i32);
+            let comparison = self.runtime(ctx, Runtime::StringCompare, vec![value, text]);
+            let matches = self.num(ctx, NumOpcode::I32Eqz, vec![comparison]);
+            let index = self.i32_const(ctx, index as i32);
+            tag = self.select(ctx, matches, index, tag);
+        }
+        tag
     }
 
     fn sum_payload(
@@ -558,12 +566,12 @@ impl FunctionLowering<'_, '_> {
         }
         if matches!(ty, AbiType::Variant(_)) {
             let payload = self.payload_type(ctx, ty, mir, case)?;
-            return Ok(self.load(ctx, crate::slot_kind(ctx, payload)?, value, 8));
+            return Ok(self.load(ctx, crate::repr::slot_kind(ctx, payload)?, value, 8));
         }
         let record = self.record_type(ctx, mir)?;
         let name = if case == 0 { "value" } else { "error" };
         let (index, field) = record_field(ctx, record, name)?;
-        let kind = crate::slot_kind(ctx, field)?;
+        let kind = crate::repr::slot_kind(ctx, field)?;
         let value = self.load(ctx, kind, value, perry_abi::layout::record::field(index));
         if !matches!(ty.cases()[case], Some(AbiType::Option(_)))
             && optional_value(ctx, field).is_some()

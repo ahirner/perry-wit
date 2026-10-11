@@ -43,12 +43,11 @@ impl Host {
             Host::TaskCancel => "host_task_cancel".to_string(),
             Host::WaitFor => "host_wait_for".to_string(),
             Host::TaskReturn(module, function, _) => {
-                let clean = |s: &str| -> String {
-                    s.chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                        .collect()
-                };
-                format!("host_task_return_{}_{}", clean(module), clean(function))
+                format!(
+                    "host_task_return_{}_{}",
+                    symbol_part(module),
+                    symbol_part(function)
+                )
             }
         };
         Identifier::try_new(name)
@@ -96,4 +95,12 @@ impl Host {
             ),
         }
     }
+}
+
+/// `name` with every character outside ASCII alphanumerics replaced by `_`, for use inside a
+/// symbol.
+pub(crate) fn symbol_part(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }

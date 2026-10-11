@@ -77,7 +77,7 @@ pub(crate) fn export(
     let throws = b.state.throws.contains(&function.get_symbol_name(ctx));
     let mut call_results = mir_results
         .iter()
-        .map(|t| crate::wasm_type(ctx, *t))
+        .map(|t| crate::repr::wasm_type(ctx, *t))
         .collect::<Result<Vec<_>>>()?;
     if throws {
         call_results.push(i32_type(ctx));
@@ -116,9 +116,9 @@ pub(crate) fn export(
         b.block = normal;
     }
     if b.state.collectible
-        && mir_results
-            .first()
-            .is_some_and(|ty| crate::repr(ctx, *ty).is_ok_and(|r| r == crate::Repr::Ref))
+        && mir_results.first().is_some_and(|ty| {
+            crate::repr::repr(ctx, *ty).is_ok_and(|r| r == crate::repr::Repr::Ref)
+        })
     {
         b.runtime(ctx, Runtime::GcPin, vec![values[0]]);
     }
@@ -215,7 +215,7 @@ fn async_export(
             .unwrap_or_default()
     };
     let indirect = result_flat.len() > MAX_FLAT_PARAMS;
-    let task_return = crate::Host::TaskReturn(
+    let task_return = crate::host::Host::TaskReturn(
         module.clone(),
         wit_name.clone(),
         if indirect {
@@ -340,7 +340,7 @@ fn async_export(
                 if b.state.uses_streams {
                     b.runtime_void(ctx, Runtime::WebStreamsClose, vec![]);
                 }
-                b.host(ctx, task_return.clone(), values);
+                b.host_void(ctx, task_return.clone(), values);
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
                 b.task_free(ctx);
                 let exit = b.i32_const(ctx, EXIT);
@@ -381,7 +381,7 @@ fn async_export(
         if let Some(outcome) = outcome {
             flat.push(outcome);
         } else if let (Some(ty), Some(mir_ty)) = (&export.result, mir_results.first()) {
-            let kind = crate::slot_kind(ctx, *mir_ty)?;
+            let kind = crate::repr::slot_kind(ctx, *mir_ty)?;
             let value = b.load(ctx, kind, promise, perry_runtime::promise::VALUE);
             if indirect {
                 let size = b.i32_const(ctx, ty.size() as i32);
@@ -408,7 +408,7 @@ fn async_export(
             let after = b.new_block(ctx, vec![]);
             b.cond_br(ctx, returned, (after, vec![]), (first, vec![]));
             b.block = first;
-            b.host(ctx, task_return.clone(), std::mem::take(&mut flat));
+            b.host_void(ctx, task_return.clone(), std::mem::take(&mut flat));
             b.runtime_void(ctx, Runtime::WebServeMarkReturned, vec![]);
             b.br(ctx, after, vec![]);
             b.block = after;
@@ -429,7 +429,7 @@ fn async_export(
         b.commit_resources(ctx);
         b.finish_resources(ctx);
         if !b.state.uses_http_server {
-            b.host(ctx, task_return, flat);
+            b.host_void(ctx, task_return, flat);
         }
         b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
         b.task_free(ctx);
@@ -453,7 +453,7 @@ fn async_export(
         let mut b = FunctionLowering::glue(state, ctx, &lift);
         let task = b.task_enter(ctx);
         b.initialize_module(ctx);
-        b.host(ctx, crate::Host::ContextSet0, vec![task]);
+        b.host_void(ctx, crate::host::Host::ContextSet0, vec![task]);
         let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
         let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
         let promise = b.result(ctx, ramp.get_operation());
@@ -478,7 +478,7 @@ fn async_export(
             .collect();
         let (event, handle, subtask_state) = (args[0], args[1], args[2]);
         let mut b = FunctionLowering::glue(state, ctx, &callback);
-        let task = b.host(ctx, crate::Host::ContextGet0, vec![]).expect("task");
+        let task = b.host(ctx, crate::host::Host::ContextGet0, vec![]);
         b.runtime_void(ctx, Runtime::TaskResume, vec![task]);
         let cancellation = b.i32_const(ctx, 6);
         let cancelled = b.num(ctx, NumOpcode::I32Eq, vec![event, cancellation]);
@@ -487,7 +487,7 @@ fn async_export(
         b.cond_br(ctx, cancelled, (abort, vec![]), (active, vec![]));
         b.block = abort;
         b.abort_task(ctx)?;
-        b.host(ctx, crate::Host::TaskCancel, vec![]);
+        b.host_void(ctx, crate::host::Host::TaskCancel, vec![]);
         let exit = b.i32_const(ctx, EXIT);
         let ret = ReturnOp::new(ctx, vec![exit]).get_operation();
         b.insert(ctx, ret);

@@ -10,7 +10,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         intrinsic: Intrinsic,
         args: Vec<Value>,
-    ) -> Option<Value> {
+    ) -> Value {
         match intrinsic {
             Intrinsic::DateFromTime => {
                 // TimeClip: NaN beyond ±8.64e15 ms, else the integer part, without -0.
@@ -26,19 +26,19 @@ impl FunctionLowering<'_, '_> {
                 let size = self.i32_const(ctx, 8);
                 let date = self.alloc(ctx, size);
                 self.store(ctx, MemKind::F64, date, 0, time);
-                Some(date)
+                date
             }
-            Intrinsic::DateTime => Some(self.load(ctx, MemKind::F64, args[0], 0)),
+            Intrinsic::DateTime => self.load(ctx, MemKind::F64, args[0], 0),
             Intrinsic::DateParse => {
                 let data = self.load(ctx, MemKind::I32, args[0], perry_runtime::string::DATA);
                 let len = self.load(ctx, MemKind::I32, args[0], perry_runtime::string::LEN);
-                Some(self.runtime(ctx, Runtime::TimeDateParse, vec![data, len]))
+                self.runtime(ctx, Runtime::TimeDateParse, vec![data, len])
             }
-            Intrinsic::DateUtc => Some(self.runtime(ctx, Runtime::TimeDateUtc, args)),
+            Intrinsic::DateUtc => self.runtime(ctx, Runtime::TimeDateUtc, args),
             Intrinsic::DatePart => {
                 let time = self.load(ctx, MemKind::F64, args[0], 0);
                 let part = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![args[1]]);
-                Some(self.runtime(ctx, Runtime::TimeDatePart, vec![time, part]))
+                self.runtime(ctx, Runtime::TimeDatePart, vec![time, part])
             }
             Intrinsic::DateSet => {
                 let date = args[0];
@@ -49,7 +49,7 @@ impl FunctionLowering<'_, '_> {
                 values.extend_from_slice(&args[3..]);
                 let updated = self.runtime(ctx, Runtime::TimeDateSet, values);
                 self.store(ctx, MemKind::F64, date, 0, updated);
-                Some(updated)
+                updated
             }
             Intrinsic::DateIso | Intrinsic::DateJson => {
                 let size = self.i32_const(ctx, 32);
@@ -79,7 +79,7 @@ impl FunctionLowering<'_, '_> {
                 let text = self.runtime(ctx, Runtime::StringAdopt, vec![out, len]);
                 self.br(ctx, merged, vec![text]);
                 self.block = merged;
-                Some(merged.deref(ctx).get_argument(0))
+                merged.deref(ctx).get_argument(0)
             }
             _ => unreachable!("not a date intrinsic"),
         }

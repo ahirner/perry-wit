@@ -158,11 +158,11 @@ fn completions(statements: &[Stmt]) -> u8 {
     result
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn callback_return(
         &mut self,
         ctx: &mut Context,
-        expression: Option<&Expr>,
+        expression: Option<&'s Expr>,
     ) -> Result<()> {
         let callback = self.callback_returns.last().expect("callback");
         let (done, slot, optional) = (callback.done, callback.slot, callback.optional);
@@ -218,7 +218,7 @@ impl FunctionBuilder<'_> {
     fn array_callback(
         &mut self,
         ctx: &mut Context,
-        callback: &Expr,
+        callback: &'s Expr,
         arguments: &[Value],
     ) -> Result<Value> {
         if let Expr::FuncRef(id) = callback {
@@ -338,7 +338,7 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         array: Value,
-        callback: &Expr,
+        callback: &'s Expr,
         filter: bool,
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
@@ -412,8 +412,8 @@ impl FunctionBuilder<'_> {
         &mut self,
         ctx: &mut Context,
         array: Value,
-        value: &Expr,
-        from: Option<&Expr>,
+        value: &'s Expr,
+        from: Option<&'s Expr>,
         includes: bool,
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
@@ -504,12 +504,12 @@ impl FunctionBuilder<'_> {
     }
 }
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     pub(super) fn array_push_spread(
         &mut self,
         ctx: &mut Context,
-        callee: &Expr,
-        args: &[perry_hir::CallArg],
+        callee: &'s Expr,
+        args: &'s [perry_hir::CallArg],
     ) -> Result<Value> {
         let Expr::PropertyGet {
             object, property, ..

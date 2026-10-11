@@ -76,6 +76,13 @@ impl Data {
         }
         DATA_BASE + self.bytes.len() as u32
     }
+
+    /// Append `bytes` at the next multiple of `alignment` and return their address.
+    pub(crate) fn append(&mut self, alignment: usize, bytes: &[u8]) -> u32 {
+        let address = self.align(alignment);
+        self.bytes.extend_from_slice(bytes);
+        address
+    }
 }
 
 /// What the lowering of a module accumulates across its functions. Configuration borrowed
@@ -228,8 +235,7 @@ pub(crate) fn lower(
         .iter()
         .any(|f| f.get_symbol_name(ctx) == INITIALIZER)
     {
-        let address = state.data.align(1);
-        state.data.bytes.extend_from_slice(&[0; 8]);
+        let address = state.data.append(1, &[0; 8]);
         state.initializer = Some((INITIALIZER, address));
         state.collectible = true;
     }

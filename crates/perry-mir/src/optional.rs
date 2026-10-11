@@ -30,7 +30,7 @@ use pliron::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum OptionalErr {
+pub(crate) enum OptionalErr {
     #[error("{0} expects a perry.optional operand")]
     NotOptional(&'static str),
     #[error("{0} result type does not match its operand")]
@@ -48,6 +48,16 @@ pub fn absence(ctx: &Context, ty: TypeHandle) -> Option<Absence> {
     TypedHandle::<OptionalType>::from_handle(ty, ctx)
         .ok()
         .map(|optional| optional.deref(ctx).absence())
+}
+
+/// The value type and absence states of an optional type, in one lookup.
+pub fn optional_parts(ctx: &Context, ty: TypeHandle) -> Option<(TypeHandle, Absence)> {
+    TypedHandle::<OptionalType>::from_handle(ty, ctx)
+        .ok()
+        .map(|optional| {
+            let optional = optional.deref(ctx);
+            (optional.value(), optional.absence())
+        })
 }
 
 fn operand(op: &dyn Op, ctx: &Context) -> Value {

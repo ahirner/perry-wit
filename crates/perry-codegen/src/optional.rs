@@ -1,11 +1,12 @@
 //! Optional values: the `undefined` and `null` sentinels of each representation, absence
 //! tests and the optional ops.
 use crate::{
-    UNDEFINED_BITS, UNDEFINED_BOOL,
+    UNDEFINED_BOOL,
     function::FunctionLowering,
     repr::{Repr, repr},
 };
 use anyhow::{Result, anyhow, bail};
+use perry_abi::UNDEFINED_BITS;
 use perry_mir::{
     attrs::ErrorKind,
     optional::{

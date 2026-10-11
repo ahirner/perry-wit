@@ -40,7 +40,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-/// Bits of `undefined` in a `number | undefined` slot (`perry_codegen::UNDEFINED_BITS`), the
+/// Bits of `undefined` in a `number | undefined` slot (`perry_abi::UNDEFINED_BITS`), the
 /// value of `Promise<void>`.
 pub(crate) const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 

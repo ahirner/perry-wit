@@ -36,12 +36,12 @@ pub const EXCEPTION_VALUE: usize = 8;
 pub const THROWN_VALUE: u32 = 4;
 pub const TAG_NUMBER: u32 = 1;
 pub const TAG_STRING: u32 = 3;
-/// Bits of `undefined` in a `number | undefined` slot (`perry_codegen::UNDEFINED_BITS`).
+/// Bits of `undefined` in a `number | undefined` slot: a signalling NaN that Wasm arithmetic
+/// never produces. `perry-runtime`, which has no dependencies, keeps its own copy.
 pub const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 /// Offset of an array's data address (`perry_runtime::array::DATA`).
 pub const ARRAY_DATA: u32 = 8;
-/// `Uint8Array` layout (`perry_std::bytes`): byte length and data address.
-pub const BYTES_LEN: usize = 0;
+/// Offset of a `Uint8Array`'s data address in the wasm32 layout of [Bytes].
 pub const BYTES_DATA: usize = 4;
 /// String layout (`perry_runtime::string`): byte length and data address.
 const STRING_LEN: usize = 0;

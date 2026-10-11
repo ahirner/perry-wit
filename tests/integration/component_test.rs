@@ -382,16 +382,15 @@ fn records_strings_lists_and_scalars_cross_the_boundary() -> Result<()> {
 #[test]
 fn repeated_calls_do_not_grow_memory() -> Result<()> {
     let mut component = Instance::new()?;
-    let args = [
-        Val::String("warm".into()),
-        Val::List((0..20_000).map(|i| Val::Float64(f64::from(i))).collect()),
-    ];
+    let numbers = Val::List((0..20_000).map(|i| Val::Float64(f64::from(i))).collect());
+    let warm = [Val::String("warm".into()), numbers.clone()];
     for _ in 0..3 {
-        component.call("describe", &args)?;
+        component.call("describe", &warm)?;
     }
     let before = component.store.data().0;
+    let again = [Val::String("again".into()), numbers];
     for _ in 0..50 {
-        component.call("describe", &args)?;
+        component.call("describe", &again)?;
     }
     assert_eq!(component.store.data().0, before, "memory grew across tasks");
     Ok(())

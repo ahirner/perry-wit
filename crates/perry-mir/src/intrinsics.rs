@@ -543,11 +543,11 @@ impl Intrinsic {
         }
     }
 
-    pub fn may_allocate(self) -> bool {
+    pub(crate) fn may_allocate(self) -> bool {
         self.allocation() != crate::effects::Allocation::None
     }
 
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|i| i.name() == name)
     }
 
@@ -572,7 +572,7 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
 }
 
 #[derive(Debug, Error)]
-pub enum IntrinsicErr {
+pub(crate) enum IntrinsicErr {
     #[error("unknown intrinsic {0}")]
     Unknown(String),
     #[error("intrinsic {0} has the wrong operand or result types")]
@@ -654,7 +654,7 @@ impl MayThrowInterface for IntrinsicOp {
 
 #[derive(Debug, Error)]
 #[error("perry.json_stringify produces a string, or string | undefined for an optional value")]
-pub struct StringifyErr;
+pub(crate) struct StringifyErr;
 
 /// `JSON.stringify(value)` of a typed value: records, arrays, strings, numbers, booleans,
 /// `Uint8Array`s, JSON values and their optionals.
@@ -715,7 +715,7 @@ impl MayThrowInterface for JsonStringifyOp {
 
 #[derive(Debug, Error)]
 #[error("perry.promise_combinator takes an array of promises of one type")]
-pub struct CombinatorErr;
+pub(crate) struct CombinatorErr;
 
 /// How a [PromiseCombinatorOp] settles.
 #[pliron::derive::pliron_attr(name = "perry.combinator", format, verifier = "succ")]
@@ -857,7 +857,7 @@ impl Verify for PromiseResolvedOp {
 
 #[derive(Debug, Error)]
 #[error("perry.settled_field reads a perry.settled value")]
-pub struct SettledErr;
+pub(crate) struct SettledErr;
 
 /// A property of a `Promise.allSettled` result element.
 #[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]

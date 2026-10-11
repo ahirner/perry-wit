@@ -4,7 +4,7 @@
 //! owners remain live through lifting/post-return or async acknowledgement. Results support
 //! explicit tags and checked completion-style returns/throws. Async exports use stackless P3
 //! callbacks; async imports retain a canonical transfer until the host settles it.
-use crate::{FunctionLowering, ModuleState, Runtime, i32_type};
+use crate::{function::FunctionLowering, module::ModuleState, repr::i32_type, runtime::Runtime};
 use anyhow::{Result, anyhow, bail, ensure};
 use perry_mir::types::{ArrayType, RecordType};
 use perry_runtime::{array as layout, string as strings};
@@ -265,11 +265,8 @@ pub(crate) fn flat_type(ctx: &mut Context, flat: Flat) -> TypeHandle {
 }
 
 fn identifier(name: &str) -> Identifier {
-    let sanitized: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    format!("wit_{sanitized}").try_into().expect("identifier")
+    Identifier::try_new(format!("wit_{}", crate::host::symbol_part(name)))
+        .expect("a letter prefix and ASCII alphanumerics or underscores form an identifier")
 }
 
 fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> {
@@ -322,7 +319,7 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Bool => {
                 ensure!(
-                    crate::repr(ctx, mir_ty)? == crate::Repr::Bool,
+                    crate::repr::repr(ctx, mir_ty)? == crate::repr::Repr::Bool,
                     "WIT bool needs a TypeScript boolean"
                 );
                 let zero = self.i32_const(ctx, 0);
@@ -489,7 +486,7 @@ impl FunctionLowering<'_, '_> {
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
             .element();
-        let kind = crate::slot_kind(ctx, element_mir)?;
+        let kind = crate::repr::slot_kind(ctx, element_mir)?;
         let array = self.new_array(ctx, len, element_mir)?;
         let data = self.load(ctx, MemKind::I32, array, layout::DATA);
         let size = element.size() as i32;
@@ -551,7 +548,7 @@ impl FunctionLowering<'_, '_> {
         );
         for (field, value) in values {
             let (index, field_mir) = record_field(ctx, record, field)?;
-            let kind = crate::slot_kind(ctx, field_mir)?;
+            let kind = crate::repr::slot_kind(ctx, field_mir)?;
             self.store(
                 ctx,
                 kind,
@@ -638,7 +635,7 @@ impl FunctionLowering<'_, '_> {
                 let record = self.record_type(ctx, mir_ty)?;
                 for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
                     let (index, field_mir) = record_field(ctx, record, name)?;
-                    let kind = crate::slot_kind(ctx, field_mir)?;
+                    let kind = crate::repr::slot_kind(ctx, field_mir)?;
                     let field =
                         self.load(ctx, kind, value, perry_abi::layout::record::field(index));
                     self.lower_store(ctx, field_ty, field_mir, field, address, offset + at)?;
@@ -688,7 +685,7 @@ impl FunctionLowering<'_, '_> {
             .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
             .deref(ctx)
             .element();
-        let kind = crate::slot_kind(ctx, element_mir)?;
+        let kind = crate::repr::slot_kind(ctx, element_mir)?;
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);
         let data = self.load(ctx, MemKind::I32, value, layout::DATA);
         let stride = self.i32_const(ctx, element.size() as i32);
@@ -765,7 +762,7 @@ impl FunctionLowering<'_, '_> {
                 let record = self.record_type(ctx, mir_ty)?;
                 for (name, field_ty) in fields {
                     let (index, field_mir) = record_field(ctx, record, name)?;
-                    let kind = crate::slot_kind(ctx, field_mir)?;
+                    let kind = crate::repr::slot_kind(ctx, field_mir)?;
                     let field =
                         self.load(ctx, kind, value, perry_abi::layout::record::field(index));
                     self.lower_flat_values(ctx, field_ty, field_mir, field, out)?;

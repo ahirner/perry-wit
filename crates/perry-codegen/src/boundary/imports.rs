@@ -27,7 +27,7 @@ impl FunctionLowering<'_, '_> {
         let values = self.operands(ctx, op)?;
         let mark = self.root_mark(ctx);
         for (mir, value) in operands.iter().zip(&values) {
-            if crate::repr(ctx, mir.get_type(ctx))? == crate::Repr::Ref {
+            if crate::repr::repr(ctx, mir.get_type(ctx))? == crate::repr::Repr::Ref {
                 self.publish_roots(ctx, &[*value]);
             }
         }
@@ -125,14 +125,9 @@ impl FunctionLowering<'_, '_> {
             import.name.clone()
         };
         let result_types = results.iter().map(|flat| flat_type(ctx, *flat)).collect();
-        let host = crate::Host::Foreign(import.module.clone(), name, params, results);
-        let symbol = host.symbol();
-        self.state.host.insert(host);
+        let host = crate::host::Host::Foreign(import.module.clone(), name, params, results);
         self.commit_resources(ctx);
-        let task = self.runtime(ctx, Runtime::TaskCurrent, vec![]);
-        let call = CallOp::new(ctx, symbol, args, result_types).get_operation();
-        self.insert(ctx, call);
-        self.runtime_void(ctx, Runtime::TaskResume, vec![task]);
+        let call = self.preserving_task(ctx, |b, ctx| b.call_host(ctx, host, args, result_types));
         self.canonical_borrows = false;
         if let Some(transfer) = transfer {
             self.resource_scope = None;

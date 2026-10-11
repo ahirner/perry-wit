@@ -13,7 +13,7 @@ const ARRAY: u64 = 5;
 const OBJECT: u64 = 6;
 const NULL: u64 = 1;
 
-impl FunctionBuilder<'_> {
+impl<'s> FunctionBuilder<'s> {
     /// `JSON.parse(text)` where a record or array type is expected: decode it in one pass.
     /// None when the target has no generated decoder (the graph path applies).
     pub(super) fn parse_typed(
@@ -317,7 +317,7 @@ impl FunctionBuilder<'_> {
             .to_vec();
         let table = key_table(ctx, record).expect("checked by the caller");
         let boolean = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let index_type = perry_mir::collections::index_type(ctx);
+        let index_type = IntegerType::get(ctx, 32, Signedness::Signless).into();
         // One slot per member, and a flag for members that must be present.
         let mut slots = Vec::with_capacity(fields.len());
         for (_, ty) in &fields {
