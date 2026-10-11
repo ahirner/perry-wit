@@ -58,6 +58,10 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<()> {
     }
     crate::append::append_in_place(root, ctx);
     verify_operation(root, ctx)?;
+    crate::characters::scalar_replace(root, ctx);
+    verify_operation(root, ctx)?;
+    dce(root, ctx)?;
+    verify_operation(root, ctx)?;
     crate::lifetimes::assign(root, ctx);
     verify_operation(root, ctx)
 }

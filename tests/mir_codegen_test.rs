@@ -1854,3 +1854,117 @@ export function run(n: number): number {{
         inputs.len() as f64
     );
 }
+
+#[test]
+fn scalar_characters_preserve_empty_indices_and_unicode_ordering() {
+    let text = "a\0é😀z";
+    let literals = ["", "\0", "a", "b", "é", "Ω", "😀", "😁"];
+    let mut source = String::new();
+    for (index, literal) in literals.iter().enumerate() {
+        let literal = serde_json::to_string(literal).unwrap();
+        let mut terms = Vec::new();
+        for (bit, operator) in ["===", "!==", "<", "<=", ">", ">="].iter().enumerate() {
+            terms.push(format!("(c {operator} {literal} ? {} : 0)", 1 << bit));
+            terms.push(format!("({literal} {operator} c ? {} : 0)", 1 << (bit + 6)));
+        }
+        source += &format!(
+            "export function check{index}(n: number): number {{ const c = {}.charAt(n); return {} + c.length * 4096; }}\n",
+            serde_json::to_string(text).unwrap(),
+            terms.join(" + ")
+        );
+    }
+    let mut program = Program::new(&source);
+    for position in [
+        f64::NEG_INFINITY,
+        -2.0,
+        -0.5,
+        0.0,
+        0.75,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        f64::INFINITY,
+        f64::NAN,
+    ] {
+        let sample = if position.is_nan() {
+            Some('a')
+        } else if position.trunc() >= 0.0 && position < 5.0 {
+            text.chars().nth(position as usize)
+        } else {
+            None
+        };
+        let sample = sample.map_or_else(String::new, |c| c.to_string());
+        for (index, &literal) in literals.iter().enumerate() {
+            let mut expected = if sample.is_empty() { 0 } else { 4096 };
+            for (shift, (a, b)) in [
+                (0, (sample.as_str(), literal)),
+                (6, (literal, sample.as_str())),
+            ] {
+                for (bit, value) in [a == b, a != b, a < b, a <= b, a > b, a >= b]
+                    .into_iter()
+                    .enumerate()
+                {
+                    expected += i32::from(value) << (shift + bit);
+                }
+            }
+            assert_eq!(
+                program.number(&format!("check{index}"), position),
+                f64::from(expected),
+                "{position} against {literal:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scalar_character_builders_preserve_retained_prefixes_and_async_values() {
+    let source = r#"
+export async function run(n: number): Promise<number> {
+  const input = 'aé😀\0';
+  const prefixes: string[] = [];
+  let output = '';
+  for (let i = 0; i < n; i++) {
+    prefixes.push(output);
+    const c = input.charAt(i % 4);
+    await Promise.resolve(i);
+    output += c;
+    output += input.charAt(-1);
+  }
+  let sum = 0;
+  for (let i = 0; i < prefixes.length; i++) {
+    const prefix = prefixes[i];
+    if (prefix === undefined || prefix.length !== i) throw 1;
+    for (let j = 0; j < prefix.length; j++) {
+      if (prefix.charAt(j) !== input.charAt(j % 4)) throw 2;
+    }
+    sum += prefix.length;
+  }
+  return sum * 1000 + output.length;
+}
+export function build(n: number): number {
+  let output = '';
+  for (let i = 0; i < n; i++) {
+    const c = 'é😀'.charAt(i % 2);
+    if (c !== '') output += c;
+  }
+  return output.length;
+}
+"#;
+    let wasm = perry_wit::compiler::compile_core_with_memory_checks(source, "scalar-characters.ts")
+        .unwrap();
+    let mut program = Program::from_wasm(wasm);
+    program.call("__perry_gc_debug", &[Val::I32(3)]);
+    for n in [0.0, 1.0, 17.0, 80.0] {
+        assert_eq!(
+            program.throwing("run", n),
+            (n * (n - 1.0) / 2.0 * 1000.0 + n, 0)
+        );
+    }
+    program.call("__perry_gc_debug", &[Val::I32(0)]);
+    let (before, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert_eq!(program.number("build", 20_000.0), 20_000.0);
+    let (after, _) = program.call("__perry_gc_counter", &[Val::I32(0)]);
+    assert!(after[0].unwrap_i64() - before[0].unwrap_i64() < 30);
+}

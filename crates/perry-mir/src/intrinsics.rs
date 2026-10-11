@@ -40,6 +40,8 @@ pub enum Ty {
     BigInt,
     /// A signless i32 index proven in bounds.
     Index,
+    /// Unicode scalar value, or -1 for the empty result of charAt. Internal MIR only.
+    Scalar,
     Number,
     Bool,
     String,
@@ -92,7 +94,7 @@ impl Ty {
         let number: TypeHandle = FP64Type::get(ctx).into();
         match self {
             Ty::BigInt => crate::types::BigIntType::get(ctx).into(),
-            Ty::Index => crate::collections::index_type(ctx),
+            Ty::Index | Ty::Scalar => crate::collections::index_type(ctx),
             Ty::Number => number,
             Ty::Bool => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             Ty::String => string,
@@ -189,7 +191,7 @@ impl Ty {
         let number = |t: TypeHandle| t.deref(ctx).is::<FP64Type>();
         match self {
             Ty::BigInt => deref.is::<crate::types::BigIntType>(),
-            Ty::Index => deref
+            Ty::Index | Ty::Scalar => deref
                 .downcast_ref::<IntegerType>()
                 .is_some_and(|i| i.width() == 32 && i.signedness() == Signedness::Signless),
             Ty::Number => deref.is::<FP64Type>(),
@@ -294,74 +296,78 @@ macro_rules! intrinsics {
 intrinsics! {
     BigIntFromNumber = "bigint_from_number" (Number) -> (BigInt), throws;
     BigIntNegate = "bigint_negate" (BigInt) -> (BigInt), pure;
-    BigIntToNumber = "bigint_to_number" (BigInt) -> (Number), pure;
+    BigIntToNumber = "bigint_to_number" (BigInt) -> (Number), pure, noalloc;
     BigIntToString = "bigint_to_string" (BigInt) -> (String), pure;
     PrintOut = "print_out" (String) -> ();
     PrintErr = "print_err" (String) -> ();
     NumberToString = "number_to_string" (Number) -> (String), pure;
     EnvGet = "env_get" (String) -> (OptString);
     EnvKeys = "env_keys" () -> (StringArray);
-    PerformanceNow = "performance_now" () -> (Number);
-    DateNow = "date_now" () -> (Number);
-    ExitCodeSet = "exit_code_set" (Number) -> ();
-    MathFloor = "math_floor" (Number) -> (Number), pure;
-    MathCeil = "math_ceil" (Number) -> (Number), pure;
-    MathTrunc = "math_trunc" (Number) -> (Number), pure;
-    MathAbs = "math_abs" (Number) -> (Number), pure;
-    MathRound = "math_round" (Number) -> (Number), pure;
-    MathSqrt = "math_sqrt" (Number) -> (Number), pure;
-    MathMin = "math_min" (Number, Number) -> (Number), pure;
-    MathMax = "math_max" (Number, Number) -> (Number), pure;
+    PerformanceNow = "performance_now" () -> (Number), noalloc;
+    DateNow = "date_now" () -> (Number), noalloc;
+    ExitCodeSet = "exit_code_set" (Number) -> (), noalloc;
+    MathFloor = "math_floor" (Number) -> (Number), pure, noalloc;
+    MathCeil = "math_ceil" (Number) -> (Number), pure, noalloc;
+    MathTrunc = "math_trunc" (Number) -> (Number), pure, noalloc;
+    MathAbs = "math_abs" (Number) -> (Number), pure, noalloc;
+    MathRound = "math_round" (Number) -> (Number), pure, noalloc;
+    MathSqrt = "math_sqrt" (Number) -> (Number), pure, noalloc;
+    MathMin = "math_min" (Number, Number) -> (Number), pure, noalloc;
+    MathMax = "math_max" (Number, Number) -> (Number), pure, noalloc;
     DateFromTime = "date_from_time" (Number) -> (Date);
-    DateTime = "date_time" (Date) -> (Number);
-    DateParse = "date_parse" (String) -> (Number), pure;
-    DateUtc = "date_utc" (Number, Number, Number, Number, Number, Number, Number) -> (Number), pure;
-    DatePart = "date_part" (Date, Number) -> (Number);
-    DateSet = "date_set" (Date, Number, Number, Number, Number, Number, Number) -> (Number);
+    DateTime = "date_time" (Date) -> (Number), noalloc;
+    DateParse = "date_parse" (String) -> (Number), pure, noalloc;
+    DateUtc = "date_utc" (Number, Number, Number, Number, Number, Number, Number) -> (Number), pure, noalloc;
+    DatePart = "date_part" (Date, Number) -> (Number), noalloc;
+    DateSet = "date_set" (Date, Number, Number, Number, Number, Number, Number) -> (Number), noalloc;
     DateIso = "date_iso" (Date) -> (String), throws;
     DateJson = "date_json" (Date) -> (NullString);
     StringFromCodePoint = "string_from_code_point" (Number) -> (String), throws;
-    StringCharAt = "string_char_at" (String, Number) -> (String), pure;
-    StringCodePointAt = "string_code_point_at" (String, Number) -> (OptNumber), pure;
-    StringSlice = "string_slice" (String, Number, Number) -> (String), pure;
-    StringSubstring = "string_substring" (String, Number, Number) -> (String), pure;
-    StringIndexOf = "string_index_of" (String, String, Number) -> (Number), pure;
-    StringLastIndexOf = "string_last_index_of" (String, String, Number) -> (Number), pure;
-    StringStartsWith = "string_starts_with" (String, String, Number) -> (Bool), pure;
-    StringEndsWith = "string_ends_with" (String, String, Number) -> (Bool), pure;
-    StringTrim = "string_trim" (String) -> (String), pure;
-    StringSplit = "string_split" (String, String) -> (StringArray), pure;
-    StringIndex = "string_index" (String, Number) -> (OptString), pure;
-    StringLower = "string_lower" (String) -> (String), pure;
-    StringUpper = "string_upper" (String) -> (String), pure;
+    StringCharAt = "string_char_at" (String, Number) -> (String), pure, atomic;
+    StringScalarAt = "string_scalar_at" (String, Number) -> (Scalar), pure, noalloc;
+    StringScalarLength = "string_scalar_length" (Scalar) -> (Index), pure, noalloc;
+    StringScalarConcat = "string_scalar_concat" (String, Scalar) -> (String), pure, atomic;
+    StringScalarAppend = "string_scalar_append" (String, Scalar) -> (String), atomic;
+    StringCodePointAt = "string_code_point_at" (String, Number) -> (OptNumber), pure, noalloc;
+    StringSlice = "string_slice" (String, Number, Number) -> (String), pure, atomic;
+    StringSubstring = "string_substring" (String, Number, Number) -> (String), pure, atomic;
+    StringIndexOf = "string_index_of" (String, String, Number) -> (Number), pure, noalloc;
+    StringLastIndexOf = "string_last_index_of" (String, String, Number) -> (Number), pure, noalloc;
+    StringStartsWith = "string_starts_with" (String, String, Number) -> (Bool), pure, noalloc;
+    StringEndsWith = "string_ends_with" (String, String, Number) -> (Bool), pure, noalloc;
+    StringTrim = "string_trim" (String) -> (String), pure, atomic;
+    StringSplit = "string_split" (String, String) -> (StringArray), pure, atomic;
+    StringIndex = "string_index" (String, Number) -> (OptString), pure, atomic;
+    StringLower = "string_lower" (String) -> (String), pure, atomic;
+    StringUpper = "string_upper" (String) -> (String), pure, atomic;
     StringRepeat = "string_repeat" (String, Number) -> (String), throws;
     BytesNew = "bytes_new" (Number) -> (Bytes), throws;
     BytesFromArray = "bytes_from_array" (NumberArray) -> (Bytes);
     BytesCopy = "bytes_copy" (Bytes) -> (Bytes), throws;
-    BytesBuffer = "bytes_buffer" (Bytes) -> (ByteBuffer), pure;
-    BytesOffset = "bytes_offset" (Bytes) -> (Number);
-    BufferLength = "buffer_length" (ByteBuffer) -> (Number);
+    BytesBuffer = "bytes_buffer" (Bytes) -> (ByteBuffer), pure, noalloc;
+    BytesOffset = "bytes_offset" (Bytes) -> (Number), noalloc;
+    BufferLength = "buffer_length" (ByteBuffer) -> (Number), noalloc;
     BytesFromBuffer = "bytes_from_buffer" (ByteBuffer) -> (Bytes), throws;
-    BytesAt = "bytes_at" (Bytes, Index) -> (Number), pure;
-    BytesGet = "bytes_get" (Bytes, Number) -> (OptNumber);
-    BytesSet = "bytes_set" (Bytes, Number, Number) -> ();
-    BytesLength = "bytes_length" (Bytes) -> (Number);
+    BytesAt = "bytes_at" (Bytes, Index) -> (Number), pure, noalloc;
+    BytesGet = "bytes_get" (Bytes, Number) -> (OptNumber), noalloc;
+    BytesSet = "bytes_set" (Bytes, Number, Number) -> (), noalloc;
+    BytesLength = "bytes_length" (Bytes) -> (Number), noalloc;
     BytesSubarray = "bytes_subarray" (Bytes, Number, Number) -> (Bytes), throws;
     BytesSlice = "bytes_slice" (Bytes, Number, Number) -> (Bytes), throws;
     BytesSetFrom = "bytes_set_from" (Bytes, Bytes, Number) -> (), throws;
     BytesFill = "bytes_fill" (Bytes, Number, Number, Number) -> (), throws;
     TextEncode = "text_encode" (String) -> (Bytes);
     StringByteInput = "string_byte_input" (String) -> (ByteInput);
-    BytesByteInput = "bytes_byte_input" (Bytes) -> (ByteInput);
+    BytesByteInput = "bytes_byte_input" (Bytes) -> (ByteInput), noalloc;
     UrlNew = "url_new" (String, OptString) -> (Url), throws;
     UrlGet = "url_get" (Url, Number) -> (String);
     UrlSetPathname = "url_set_pathname" (Url, String) -> ();
-    UrlSearchParams = "url_search_params" (Url) -> (SearchParams), pure;
+    UrlSearchParams = "url_search_params" (Url) -> (SearchParams), pure, noalloc;
     UrlAppend = "url_append" (SearchParams, String, String) -> ();
     EncodeUriComponent = "encode_uri_component" (String) -> (String);
-    DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), pure;
-    DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), pure;
-    RegexSearch = "regex_search" (String, Regex) -> (Number), pure;
+    DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), pure, noalloc;
+    DecoderIgnoreBom = "decoder_ignore_bom" (Decoder) -> (Bool), pure, noalloc;
+    RegexSearch = "regex_search" (String, Regex) -> (Number), pure, noalloc;
     DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder);
     TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), throws;
     JsonParse = "json_parse" (String) -> (Json), throws;
@@ -373,14 +379,14 @@ intrinsics! {
     JsonRequireNumber = "json_require_number" (Json) -> (Number), throws;
     JsonToString = "json_to_string" (Json) -> (String), throws;
     JsonToBool = "json_to_bool" (Json) -> (Bool), throws;
-    JsonTruthy = "json_truthy" (Json) -> (Bool), pure;
-    JsonIsUndefined = "json_is_undefined" (Json) -> (Bool), pure;
-    JsonIsNull = "json_is_null" (Json) -> (Bool), pure;
+    JsonTruthy = "json_truthy" (Json) -> (Bool), pure, noalloc;
+    JsonIsUndefined = "json_is_undefined" (Json) -> (Bool), pure, noalloc;
+    JsonIsNull = "json_is_null" (Json) -> (Bool), pure, noalloc;
     JsonSerialize = "json_serialize" (Json) -> (OptString), throws;
     JsonTypeOf = "json_type_of" (Json) -> (String), pure;
     JsonRequireObject = "json_require_object" (Json) -> (), throws;
     JsonFirst = "json_first" (Json) -> (Json), throws;
-    JsonNext = "json_next" (Json) -> (Json), pure;
+    JsonNext = "json_next" (Json) -> (Json), pure, noalloc;
     // Object literals with spreads over JSON values: `{}`, `...source`, `key: value`.
     JsonObject = "json_object" () -> (Json);
     JsonAssign = "json_assign" (Json, Json) -> ();
@@ -392,27 +398,27 @@ intrinsics! {
     JsonUndefined = "json_undefined" () -> (Json), pure;
     AbortNew = "abort_new" () -> (Abort);
     AbortAbort = "abort_abort" (Abort) -> (), throws;
-    AbortAborted = "abort_aborted" (Abort) -> (Bool);
+    AbortAborted = "abort_aborted" (Abort) -> (Bool), noalloc;
     InstantFromMs = "instant_from_ms" (Number) -> (Instant), throws;
     InstantFrom = "instant_from" (String) -> (Instant), throws;
-    InstantMs = "instant_ms" (Instant) -> (Number), pure;
+    InstantMs = "instant_ms" (Instant) -> (Number), pure, noalloc;
     InstantString = "instant_string" (Instant) -> (String), pure;
     PlainDateFrom = "plain_date_from" (String) -> (PlainDate), throws;
     PlainDateAddDays = "plain_date_add_days" (PlainDate, Number) -> (PlainDate), throws;
-    PlainDatePart = "plain_date_part" (PlainDate, Number) -> (Number), pure;
+    PlainDatePart = "plain_date_part" (PlainDate, Number) -> (Number), pure, noalloc;
     PlainDateString = "plain_date_string" (PlainDate) -> (String), pure;
     PlainDateTimeFrom = "plain_date_time_from" (String) -> (PlainDateTime), throws;
     PlainDateTimeAddDays = "plain_date_time_add_days" (PlainDateTime, Number) -> (PlainDateTime), throws;
-    PlainDateTimePart = "plain_date_time_part" (PlainDateTime, Number) -> (Number), pure;
+    PlainDateTimePart = "plain_date_time_part" (PlainDateTime, Number) -> (Number), pure, noalloc;
     PlainDateTimeString = "plain_date_time_string" (PlainDateTime) -> (String), pure;
 
     // `Error` objects: `cause` (strings only, set at construction) and `name`.
-    ExceptionSetCause = "exception_set_cause" (Exception, String) -> ();
-    ExceptionCause = "exception_cause" (Exception) -> (OptString);
+    ExceptionSetCause = "exception_set_cause" (Exception, String) -> (), noalloc;
+    ExceptionCause = "exception_cause" (Exception) -> (OptString), noalloc;
     ExceptionName = "exception_name" (Exception) -> (String), pure;
-    MathRandom = "math_random" () -> (Number);
+    MathRandom = "math_random" () -> (Number), noalloc;
     RandomUuid = "random_uuid" () -> (String);
-    BytesFillRandom = "bytes_fill_random" (Bytes) -> (Bytes);
+    BytesFillRandom = "bytes_fill_random" (Bytes) -> (Bytes), noalloc;
     ExceptionToNumber = "exception_to_number" (Exception) -> (Number), throws;
     ExceptionToString = "exception_to_string" (Exception) -> (String), throws;
     FsReadText = "fs_read_text" (String) -> (PromiseString);
@@ -424,9 +430,9 @@ intrinsics! {
     FsMkdir = "fs_mkdir" (String) -> (PromiseVoid);
     FsUnlink = "fs_unlink" (String) -> (PromiseVoid);
     FsRmdir = "fs_rmdir" (String) -> (PromiseVoid);
-    StatsIsFile = "stats_is_file" (Stats) -> (Bool), pure;
-    StatsIsDirectory = "stats_is_directory" (Stats) -> (Bool), pure;
-    StatsSize = "stats_size" (Stats) -> (Number), pure;
+    StatsIsFile = "stats_is_file" (Stats) -> (Bool), pure, noalloc;
+    StatsIsDirectory = "stats_is_directory" (Stats) -> (Bool), pure, noalloc;
+    StatsSize = "stats_size" (Stats) -> (Number), pure, noalloc;
     HeadersNew = "headers_new" () -> (Headers);
     HeadersCopy = "headers_copy" (Headers) -> (Headers);
     HeadersAppend = "headers_append" (Headers, String, String) -> (), throws;
@@ -435,19 +441,19 @@ intrinsics! {
     HeadersHas = "headers_has" (Headers, String) -> (Bool), throws;
     HeadersDelete = "headers_delete" (Headers, String) -> (), throws;
     ResponseNew = "response_new" (OptBytes, Bool, Number, String, Headers) -> (Response), throws;
-    ResponseStatus = "response_status" (Response) -> (Number), pure;
-    ResponseStatusText = "response_status_text" (Response) -> (String), pure;
-    ResponseOk = "response_ok" (Response) -> (Bool), pure;
-    ResponseHeaders = "response_headers" (Response) -> (Headers), pure;
-    ResponseBodyUsed = "response_body_used" (Response) -> (Bool);
+    ResponseStatus = "response_status" (Response) -> (Number), pure, noalloc;
+    ResponseStatusText = "response_status_text" (Response) -> (String), pure, noalloc;
+    ResponseOk = "response_ok" (Response) -> (Bool), pure, noalloc;
+    ResponseHeaders = "response_headers" (Response) -> (Headers), pure, noalloc;
+    ResponseBodyUsed = "response_body_used" (Response) -> (Bool), noalloc;
     ResponseBytes = "response_bytes" (Response) -> (PromiseBytes);
     ResponseText = "response_text" (Response) -> (PromiseString);
     ResponseJson = "response_json" (Response) -> (PromiseJson);
     RequestNew = "request_new" (String, String, OptBytes, Bool, Headers) -> (Request), throws;
-    RequestMethod = "request_method" (Request) -> (String), pure;
-    RequestUrl = "request_url" (Request) -> (String), pure;
-    RequestHeaders = "request_headers" (Request) -> (Headers), pure;
-    RequestBodyUsed = "request_body_used" (Request) -> (Bool);
+    RequestMethod = "request_method" (Request) -> (String), pure, noalloc;
+    RequestUrl = "request_url" (Request) -> (String), pure, noalloc;
+    RequestHeaders = "request_headers" (Request) -> (Headers), pure, noalloc;
+    RequestBodyUsed = "request_body_used" (Request) -> (Bool), noalloc;
     RequestBytes = "request_bytes" (Request) -> (PromiseBytes);
     RequestText = "request_text" (Request) -> (PromiseString);
     RequestJson = "request_json" (Request) -> (PromiseJson);
@@ -455,26 +461,26 @@ intrinsics! {
     // resource), its body, then the response's headers and the response.
     ServeRequest = "serve_request" (Number) -> (Incoming);
     ServeBody = "serve_body" (Incoming) -> (PromiseBytes);
-    ServeMethod = "serve_method" (Incoming) -> (String), pure;
-    ServeMethodOther = "serve_method_other" (Incoming) -> (OptString), pure;
-    ServeHasScheme = "serve_has_scheme" (Incoming) -> (Bool), pure;
-    ServeScheme = "serve_scheme" (Incoming) -> (String), pure;
-    ServeSchemeOther = "serve_scheme_other" (Incoming) -> (OptString), pure;
-    ServeAuthority = "serve_authority" (Incoming) -> (OptString), pure;
-    ServePath = "serve_path" (Incoming) -> (OptString), pure;
-    ServeHeaderCount = "serve_header_count" (Incoming) -> (Number), pure;
+    ServeMethod = "serve_method" (Incoming) -> (String), pure, noalloc;
+    ServeMethodOther = "serve_method_other" (Incoming) -> (OptString), pure, noalloc;
+    ServeHasScheme = "serve_has_scheme" (Incoming) -> (Bool), pure, noalloc;
+    ServeScheme = "serve_scheme" (Incoming) -> (String), pure, noalloc;
+    ServeSchemeOther = "serve_scheme_other" (Incoming) -> (OptString), pure, noalloc;
+    ServeAuthority = "serve_authority" (Incoming) -> (OptString), pure, noalloc;
+    ServePath = "serve_path" (Incoming) -> (OptString), pure, noalloc;
+    ServeHeaderCount = "serve_header_count" (Incoming) -> (Number), pure, noalloc;
     ServeHeaderName = "serve_header_name" (Incoming, Number) -> (String), pure;
     ServeHeaderValue = "serve_header_value" (Incoming, Number) -> (Bytes), pure;
     ServeAddHeader = "serve_add_header" (Incoming, String, Bytes) -> (), throws;
     ServeRespond = "serve_respond" (Incoming, Number, Bytes) -> (Number), throws;
     WritableStdout = "writable_stdout" () -> (Writable);
     WritableStderr = "writable_stderr" () -> (Writable);
-    WritableLocked = "writable_locked" (Writable) -> (Bool);
+    WritableLocked = "writable_locked" (Writable) -> (Bool), noalloc;
     WritableGetWriter = "writable_get_writer" (Writable) -> (Writer), throws;
     WriterWrite = "writer_write" (Writer, Bytes) -> (PromiseVoid);
     WriterClose = "writer_close" (Writer) -> (PromiseVoid);
-    WriterReleaseLock = "writer_release_lock" (Writer) -> ();
-    ReadableLocked = "readable_locked" (Readable) -> (Bool);
+    WriterReleaseLock = "writer_release_lock" (Writer) -> (), noalloc;
+    ReadableLocked = "readable_locked" (Readable) -> (Bool), noalloc;
     ReadableGetReader = "readable_get_reader" (Readable) -> (Reader), throws;
     ReadableCancel = "readable_cancel" (Readable) -> (PromiseVoid);
     ReaderRead = "reader_read" (Reader) -> (PromiseReadResult);
@@ -482,90 +488,28 @@ intrinsics! {
     ReaderReadByob = "reader_read_byob" (ByobReader, Bytes, Number) -> (PromiseReadResult);
     ReaderCancel = "reader_cancel" (Reader) -> (PromiseVoid);
     ReaderReleaseLock = "reader_release_lock" (Reader) -> ();
-    ReadDone = "read_done" (ReadResult) -> (Bool), pure;
-    ReadValue = "read_value" (ReadResult) -> (OptBytes), pure;
+    ReadDone = "read_done" (ReadResult) -> (Bool), pure, noalloc;
+    ReadValue = "read_value" (ReadResult) -> (OptBytes), pure, noalloc;
     Fetch = "fetch" (String, String, Headers, OptBytes, Bool) -> (PromiseResponse);
     ResponseBody = "response_body" (Response) -> (NullReadable);
     RequestBody = "request_body" (Request) -> (NullReadable);
 }
 
 impl Intrinsic {
-    /// Conservative allocation effect, including exceptions and hidden helper temporaries.
+    /// Allocation and internal safe-point contract, including hidden temporaries.
+    /// Unclassified helpers remain conservative.
+    pub fn allocation(self) -> crate::effects::Allocation {
+        if self.flags().contains(&"noalloc") {
+            crate::effects::Allocation::None
+        } else if self.flags().contains(&"atomic") {
+            crate::effects::Allocation::Atomic
+        } else {
+            crate::effects::Allocation::Conservative
+        }
+    }
+
     pub fn may_allocate(self) -> bool {
-        !matches!(
-            self,
-            Self::PerformanceNow
-                | Self::BigIntToNumber
-                | Self::BytesByteInput
-                | Self::UrlSearchParams
-                | Self::AbortAborted
-                | Self::DateNow
-                | Self::InstantMs
-                | Self::PlainDatePart
-                | Self::PlainDateTimePart
-                | Self::ExitCodeSet
-                | Self::MathFloor
-                | Self::MathCeil
-                | Self::MathTrunc
-                | Self::MathAbs
-                | Self::MathRound
-                | Self::MathSqrt
-                | Self::MathMin
-                | Self::MathMax
-                | Self::RegexSearch
-                | Self::DecoderFatal
-                | Self::DecoderIgnoreBom
-                | Self::DateTime
-                | Self::DateParse
-                | Self::DateUtc
-                | Self::DatePart
-                | Self::DateSet
-                | Self::StringCodePointAt
-                | Self::StringIndexOf
-                | Self::StringLastIndexOf
-                | Self::StringStartsWith
-                | Self::StringEndsWith
-                | Self::BytesAt
-                | Self::BytesGet
-                | Self::BytesSet
-                | Self::BytesBuffer
-                | Self::BytesOffset
-                | Self::BufferLength
-                | Self::BytesLength
-                | Self::JsonIsUndefined
-                | Self::JsonTruthy
-                | Self::JsonIsNull
-                | Self::JsonNext
-                | Self::ExceptionSetCause
-                | Self::ExceptionCause
-                | Self::MathRandom
-                | Self::BytesFillRandom
-                | Self::StatsIsFile
-                | Self::StatsIsDirectory
-                | Self::StatsSize
-                | Self::ResponseStatus
-                | Self::ResponseStatusText
-                | Self::ResponseOk
-                | Self::ResponseHeaders
-                | Self::ResponseBodyUsed
-                | Self::RequestMethod
-                | Self::RequestUrl
-                | Self::RequestHeaders
-                | Self::RequestBodyUsed
-                | Self::ServeMethod
-                | Self::ServeMethodOther
-                | Self::ServeHasScheme
-                | Self::ServeScheme
-                | Self::ServeSchemeOther
-                | Self::ServeAuthority
-                | Self::ServePath
-                | Self::ServeHeaderCount
-                | Self::WritableLocked
-                | Self::WriterReleaseLock
-                | Self::ReadableLocked
-                | Self::ReadDone
-                | Self::ReadValue
-        )
+        self.allocation() != crate::effects::Allocation::None
     }
 
     pub fn from_name(name: &str) -> Option<Self> {

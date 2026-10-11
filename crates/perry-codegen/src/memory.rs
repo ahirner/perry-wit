@@ -381,7 +381,8 @@ impl FunctionLowering<'_> {
             .into_iter()
             .map(|value| self.mapped(ctx, value))
             .collect::<Result<Vec<_>>>()?;
-        let atomic = self.state.resources.is_empty() && atomic_allocation(ctx, op);
+        let atomic = self.state.resources.is_empty()
+            && perry_mir::effects::allocation(ctx, op) == perry_mir::effects::Allocation::Atomic;
         let resume = atomic.then(|| {
             let due = self.runtime(ctx, Runtime::GcDue, vec![]);
             let collect = self.new_block(ctx, vec![]);
@@ -517,36 +518,4 @@ impl FunctionLowering<'_> {
             Ok(self.runtime(ctx, Runtime::ArrayNew, vec![capacity]))
         }
     }
-}
-
-/// These helpers finish without collecting, suspending, or invoking guest/host callbacks.
-/// Keep callers and unclassified operations rooted throughout their execution. Modules
-/// with resource destructors also retain the unconditional resource-drain boundary.
-fn atomic_allocation(ctx: &Context, op: Ptr<Operation>) -> bool {
-    use perry_mir::{
-        collections::*,
-        heap::AllocOp,
-        intrinsics::{Intrinsic, IntrinsicOp},
-    };
-    Operation::get_op::<AllocOp>(op, ctx).is_some()
-        || Operation::get_op::<ArrayNewOp>(op, ctx).is_some()
-        || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
-        || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
-        || Operation::get_op::<StringConcatOp>(op, ctx).is_some()
-        || Operation::get_op::<StringAppendOp>(op, ctx).is_some()
-        || Operation::get_op::<IntrinsicOp>(op, ctx).is_some_and(|op| {
-            matches!(
-                op.intrinsic(ctx),
-                Some(
-                    Intrinsic::StringCharAt
-                        | Intrinsic::StringIndex
-                        | Intrinsic::StringSlice
-                        | Intrinsic::StringSubstring
-                        | Intrinsic::StringSplit
-                        | Intrinsic::StringTrim
-                        | Intrinsic::StringLower
-                        | Intrinsic::StringUpper
-                )
-            )
-        })
 }

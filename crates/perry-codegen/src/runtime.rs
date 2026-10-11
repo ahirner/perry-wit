@@ -164,6 +164,9 @@ runtime_functions! {
     RootsReserve = "perry_roots_reserve" (I32);
     RootsState = "perry_roots_state" () -> I32;
     Status = "perry_status" () -> I32;
+    StringScalarConcat = "perry_string_scalar_concat" (I32, I32) -> I32;
+    StringScalarAppend = "perry_string_scalar_append" (I32, I32) -> I32;
+    StdStringScalarAt = "std_string_scalar_at" (I32, F64) -> I32;
     StringAppend = "perry_string_append" (I32, I32) -> I32;
     TaskCancel = "perry_task_cancel" () -> I32;
     TaskCurrent = "perry_task_current" () -> I32;

@@ -100,8 +100,9 @@ pub unsafe extern "C" fn perry_string_adopt(data: *mut u8, len: u32) -> *mut u8 
 
 #[inline(always)]
 fn append_buffer(len: u32) -> *mut Buffer {
-    let cap = len.saturating_mul(2).max(MIN_BUFFER);
-    let buffer = perry_alloc(cap.checked_add(8).expect("string too long")) as *mut Buffer;
+    assert!(len <= (u32::MAX - 8) / 2, "string too long");
+    let cap = (len * 2).max(MIN_BUFFER);
+    let buffer = perry_alloc(cap + 8) as *mut Buffer;
     // SAFETY: the allocation reserves the header and its capacity; no collection occurs here.
     unsafe { buffer.write(Buffer { cap, used: len }) };
     buffer
@@ -113,33 +114,13 @@ fn append_buffer(len: u32) -> *mut Buffer {
 /// Both arguments must be strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 {
-    let (a, b) = (a as *mut Str, b as *mut Str);
-    // SAFETY: the caller passes live strings; buffers hold `cap` bytes after their header.
+    // SAFETY: both inputs are live; their headers remain immutable.
     unsafe {
-        if (*b).len == 0 || (*a).len == 0 {
-            return shared(if (*b).len == 0 { a } else { b });
+        let (s, t) = (a as *mut Str, b as *mut Str);
+        if (*t).len == 0 || (*s).len == 0 {
+            return shared(if (*t).len == 0 { s } else { t });
         }
-        let len = (*a).len.checked_add((*b).len).expect("string too long");
-        let scalars = (*a).scalars + (*b).scalars;
-        let buffer = (*a).buffer;
-        if !buffer.is_null() {
-            let bytes = (buffer as *mut u8).add(8);
-            let at_end = (*a).data.add((*a).len as usize) == bytes.add((*buffer).used as usize);
-            if at_end && (*buffer).cap - (*buffer).used >= (*b).len {
-                ptr::copy_nonoverlapping(
-                    (*b).data,
-                    bytes.add((*buffer).used as usize),
-                    (*b).len as usize,
-                );
-                (*buffer).used += (*b).len;
-                return new(len, scalars, (*a).data, buffer);
-            }
-        }
-        let buffer = append_buffer(len);
-        let bytes = (buffer as *mut u8).add(8);
-        ptr::copy_nonoverlapping((*a).data, bytes, (*a).len as usize);
-        ptr::copy_nonoverlapping((*b).data, bytes.add((*a).len as usize), (*b).len as usize);
-        new(len, scalars, bytes, buffer)
+        append_text::<false>(s, t)
     }
 }
 
@@ -147,6 +128,7 @@ pub unsafe extern "C" fn perry_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 
 /// otherwise a copy of the header. A header with a buffer is only ever reachable from the
 /// value that [perry_string_concat] or [perry_string_append] returned, which is what lets
 /// [perry_string_append] update it in place.
+#[inline(always)]
 unsafe fn shared(string: *mut Str) -> *mut u8 {
     // SAFETY: the caller passes a live string.
     unsafe {
@@ -171,42 +153,111 @@ unsafe fn shared(string: *mut Str) -> *mut u8 {
 /// read its old value afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_string_append(a: *mut u8, b: *mut u8) -> *mut u8 {
-    let (s, t) = (a as *mut Str, b as *mut Str);
-    // SAFETY: the caller passes live strings; `a` is the caller's to reuse.
+    // SAFETY: the caller owns a's header; b's payload remains readable until copying finishes.
     unsafe {
+        let (s, t) = (a as *mut Str, b as *mut Str);
         if (*t).len == 0 {
             return a;
         }
         if (*s).buffer.is_null() || (*s).len == 0 {
             return perry_string_concat(a, b);
         }
-        let len = (*s).len.checked_add((*t).len).expect("string too long");
+        append_text::<true>(s, t)
+    }
+}
+
+/// Copy immutable text into append storage. The suffix header is only borrowed, so it may
+/// reside on the caller's stack. No collection occurs during the operation.
+#[inline(always)]
+unsafe fn append_text<const REUSE: bool>(s: *mut Str, suffix: *const Str) -> *mut u8 {
+    unsafe {
+        let len = (*s)
+            .len
+            .checked_add((*suffix).len)
+            .expect("string too long");
+        let scalars = (*s).scalars + (*suffix).scalars;
         let buffer = (*s).buffer;
-        let bytes = (buffer as *mut u8).add(8);
-        let at_end = (*s).data.add((*s).len as usize) == bytes.add((*buffer).used as usize);
-        if at_end && (*buffer).cap - (*buffer).used >= (*t).len {
-            ptr::copy_nonoverlapping(
-                (*t).data,
-                bytes.add((*buffer).used as usize),
-                (*t).len as usize,
-            );
-            (*buffer).used += (*t).len;
-        } else {
-            let fresh = append_buffer(len);
-            let bytes = (fresh as *mut u8).add(8);
-            ptr::copy_nonoverlapping((*s).data, bytes, (*s).len as usize);
-            ptr::copy_nonoverlapping((*t).data, bytes.add((*s).len as usize), (*t).len as usize);
+        if !buffer.is_null() {
+            let bytes = (buffer as *mut u8).add(8);
+            let at_end = (*s).data.add((*s).len as usize) == bytes.add((*buffer).used as usize);
+            if at_end && (*buffer).cap - (*buffer).used >= (*suffix).len {
+                ptr::copy_nonoverlapping(
+                    (*suffix).data,
+                    bytes.add((*buffer).used as usize),
+                    (*suffix).len as usize,
+                );
+                (*buffer).used += (*suffix).len;
+                if REUSE {
+                    (*s).len = len;
+                    (*s).scalars += (*suffix).scalars;
+                    return s.cast();
+                }
+                return new(len, scalars, (*s).data, buffer);
+            }
+        }
+        let fresh = append_buffer(len);
+        let bytes = (fresh as *mut u8).add(8);
+        ptr::copy_nonoverlapping((*s).data, bytes, (*s).len as usize);
+        ptr::copy_nonoverlapping(
+            (*suffix).data,
+            bytes.add((*s).len as usize),
+            (*suffix).len as usize,
+        );
+        if REUSE && !buffer.is_null() {
             (*s).data = bytes;
             (*s).buffer = fresh;
             (*s).owner = fresh.cast();
             (*s).offset = 8;
             (*s).cursor_scalar = 0;
             (*s).cursor_byte = 0;
+            (*s).len = len;
+            (*s).scalars += (*suffix).scalars;
+            s.cast()
+        } else {
+            new(len, scalars, bytes, fresh)
         }
-        (*s).len = len;
-        (*s).scalars += (*t).scalars;
-        a
     }
+}
+
+unsafe fn append_scalar<const REUSE: bool>(string: *mut u8, scalar: i32) -> *mut u8 {
+    unsafe {
+        if scalar < 0 {
+            return if REUSE { string } else { shared(string.cast()) };
+        }
+        // MIR scalar producers establish validity before crossing this runtime boundary.
+        let scalar = char::from_u32_unchecked(scalar as u32);
+        let mut bytes = [0; 4];
+        let len = scalar.encode_utf8(&mut bytes).len() as u32;
+        let suffix = Str {
+            len,
+            scalars: 1,
+            data: bytes.as_mut_ptr(),
+            buffer: ptr::null_mut(),
+            owner: ptr::null_mut(),
+            offset: 0,
+            cursor_scalar: 0,
+            cursor_byte: 0,
+        };
+        append_text::<REUSE>(string.cast(), &suffix)
+    }
+}
+
+/// Concatenate an unboxed MIR character without materializing a temporary string.
+///
+/// # Safety
+/// `string` is live and `scalar` is a Unicode scalar or -1 for empty text.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_scalar_concat(string: *mut u8, scalar: i32) -> *mut u8 {
+    unsafe { append_scalar::<false>(string, scalar) }
+}
+
+/// Append an unboxed MIR character to an exclusively owned string header.
+///
+/// # Safety
+/// `string` obeys `perry_string_append`'s ownership contract; `scalar` is a scalar or -1.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn perry_string_scalar_append(string: *mut u8, scalar: i32) -> *mut u8 {
+    unsafe { append_scalar::<true>(string, scalar) }
 }
 
 /// Compare two strings in Unicode scalar order (the byte order of valid UTF-8):

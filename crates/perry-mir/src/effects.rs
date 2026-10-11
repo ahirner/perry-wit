@@ -38,16 +38,35 @@ pub struct Summary {
     pub escapes: BTreeSet<usize>,
 }
 
+/// Whether an operation allocates, and whether its implementation can observe caller roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Allocation {
+    None,
+    /// The helper completes without collecting, suspending, or invoking callbacks.
+    /// Collection may still occur at the compiled safe point preceding the operation.
+    Atomic,
+    /// Caller roots must remain published throughout the operation.
+    Conservative,
+}
+
 /// Allocation includes hidden temporaries and exception construction inside helpers.
-pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
-    Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
-        || Operation::get_op::<AllocOp>(op, ctx).is_some()
-        || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some()
+pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
+    if let Some(intrinsic) = Operation::get_op::<IntrinsicOp>(op, ctx) {
+        return intrinsic
+            .intrinsic(ctx)
+            .map_or(Allocation::Conservative, |intrinsic| intrinsic.allocation());
+    }
+    if Operation::get_op::<AllocOp>(op, ctx).is_some()
         || Operation::get_op::<ArrayNewOp>(op, ctx).is_some()
         || Operation::get_op::<ArrayPushOp>(op, ctx).is_some()
         || Operation::get_op::<ArraySetOp>(op, ctx).is_some()
         || Operation::get_op::<StringConcatOp>(op, ctx).is_some()
         || Operation::get_op::<crate::collections::StringAppendOp>(op, ctx).is_some()
+    {
+        return Allocation::Atomic;
+    }
+    if Operation::get_op::<crate::foreign::ForeignOp>(op, ctx).is_some()
+        || Operation::get_op::<crate::variants::VariantNewOp>(op, ctx).is_some()
         || Operation::get_op::<TimerOp>(op, ctx).is_some()
         || Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some()
         || Operation::get_op::<PromiseRejectedOp>(op, ctx).is_some()
@@ -57,9 +76,15 @@ pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
         || Operation::get_op::<RaiseOp>(op, ctx).is_some()
         || Operation::get_op::<CatchOp>(op, ctx).is_some()
         || Operation::get_op::<crate::exceptions::ExceptionMessageOp>(op, ctx).is_some()
-        || Operation::get_op::<IntrinsicOp>(op, ctx)
-            .and_then(|i| i.intrinsic(ctx))
-            .is_some_and(|i| i.may_allocate())
+    {
+        Allocation::Conservative
+    } else {
+        Allocation::None
+    }
+}
+
+pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
+    allocation(ctx, op) != Allocation::None
 }
 
 fn callee(ctx: &Context, op: Ptr<Operation>) -> Option<Identifier> {

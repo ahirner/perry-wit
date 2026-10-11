@@ -73,6 +73,23 @@ Timing definitions, source identities, rejected trials and reproduction commands
 13.530 → 8.617 ms (1.570×). Cold JIT median is 209.7 ms versus 281.4 ms at the
 profiling baseline. The component-execution performance goal is complete.
 
+### MIR consolidation
+
+- [x] Keep eligible character reads, comparisons and builder appends in scalar MIR form.
+  Preserve ordinary strings for unsupported or escaping uses and retain append ownership proofs.
+- [x] Centralize allocation contracts in MIR operations and intrinsic declarations. Remove
+  codegen's duplicate atomic-helper whitelist while preserving conservative caller roots.
+- [x] Share append buffer handling and retain the existing small-component size budgets.
+- [x] Preserve or improve direct component execution against `8727f47`: 2.809 → 2.736 ms
+  (1.027×). Unicode builder fuel falls 139.3M → 70.5M; ordinary append falls 121.8M → 120.8M.
+- [x] Pass 247 workspace tests, all 50 contracts, the four fixed program seeds, 55 consumer
+  tests, 25 benchmark scenarios, strict host/Wasm Clippy and permitted Nix checks. All 19
+  rebuilt consumer components match the measured artifacts byte for byte.
+
+[Acceptance evidence](bench/performance/reports/profile-37-scalar-mir/acceptance.json) and
+[quality checks](bench/performance/reports/profile-38-validation/summary.json) record the frozen
+source, debug compiler, direct timings, deterministic fuel and preserved memory budgets.
+
 [Starting measurements](bench/performance/reports/00-baseline/summary.json): all 50 contracts,
 400 generated cases, four fixed program seeds, 55 consumer matrix tests and 25 consumer
 benchmark scenarios passed. Temporary records allocate zero objects. Direct calls cost

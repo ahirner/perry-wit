@@ -155,22 +155,31 @@ pub extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *mut u8 
     unsafe { crate::runtime::string_view(view.string, from as u32, to as u32) }
 }
 
-/// The scalar at `position`, or undefined outside the string.
+/// The scalar at `position`, or -1 for an empty `charAt` result. Internal MIR operation.
 #[unsafe(no_mangle)]
-pub extern "C" fn std_string_code_point_at(string: *mut u8, position: f64) -> f64 {
+pub extern "C" fn std_string_scalar_at(string: *mut u8, position: f64) -> i32 {
     let view = view(string);
     let position = integer(position);
     if position < 0 || position as u64 >= view.scalars {
-        return f64::from_bits(crate::runtime::UNDEFINED_BITS);
+        return -1;
     }
     view.text
         .get(offset(&view, position as u64)..)
         .expect("scalar offset")
         .chars()
         .next()
-        .map_or(f64::from_bits(crate::runtime::UNDEFINED_BITS), |c| {
-            f64::from(c as u32)
-        })
+        .map_or(-1, |c| c as i32)
+}
+
+/// The scalar at `position`, or undefined outside the string.
+#[unsafe(no_mangle)]
+pub extern "C" fn std_string_code_point_at(string: *mut u8, position: f64) -> f64 {
+    let scalar = std_string_scalar_at(string, position);
+    if scalar < 0 {
+        f64::from_bits(crate::runtime::UNDEFINED_BITS)
+    } else {
+        f64::from(scalar)
+    }
 }
 
 /// `s.slice(start, end)` (pass `+Infinity` for a missing end).

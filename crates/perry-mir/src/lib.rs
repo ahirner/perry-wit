@@ -10,6 +10,7 @@ mod aggregates;
 mod append;
 pub mod attrs;
 pub mod calls;
+mod characters;
 pub mod collections;
 pub mod control;
 pub mod effects;

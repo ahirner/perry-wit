@@ -1671,6 +1671,10 @@ impl<'s> FunctionLowering<'s> {
                 self.runtime(ctx, Runtime::StrCaseConvert, vec![data, len, out, upper]);
                 Some(self.runtime(ctx, Runtime::StringAdopt, vec![out, bytes]))
             }
+            Intrinsic::StringScalarLength => {
+                let zero = self.i32_const(ctx, 0);
+                Some(self.num(ctx, NumOpcode::I32GeS, vec![args[0], zero]))
+            }
             Intrinsic::JsonParse => {
                 use perry_runtime::string::{DATA, LEN};
                 let string = args[0];
@@ -1834,6 +1838,9 @@ impl<'s> FunctionLowering<'s> {
             other => {
                 let function = match other {
                     Intrinsic::StringCharAt => Runtime::StdStringCharAt,
+                    Intrinsic::StringScalarAt => Runtime::StdStringScalarAt,
+                    Intrinsic::StringScalarConcat => Runtime::StringScalarConcat,
+                    Intrinsic::StringScalarAppend => Runtime::StringScalarAppend,
                     Intrinsic::BigIntFromNumber => Runtime::StdBigintFromNumber,
                     Intrinsic::BigIntNegate => Runtime::StdBigintNegate,
                     Intrinsic::BigIntToNumber => Runtime::StdBigintToNumber,
