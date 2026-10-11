@@ -37,6 +37,10 @@ wasmtime = { version = "=49.0.2", default-features = false, features = ["craneli
 wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p3"] }
 wasmtime-wasi-http = { version = "=49.0.2", default-features = false, features = ["p3", "default-send-request"] }
 
+[profile.dev]
+# https://github.com/rust-lang/rust/issues/161824
+split-debuginfo = "packed"
+
 [profile.dev.package.perry-hir]
 opt-level = 1
 
