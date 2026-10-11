@@ -183,10 +183,10 @@ export function run():number {
 
 #[test]
 fn typed_json_fuel_and_allocations_scale_linearly() {
-    // Pre-optimization baselines; the typed decoder must stay a quarter below them.
-    let cases = [(256, 5_145_844, 521), (1024, 20_639_617, 2059)];
+    // Preserve pre-cleanup typed parsing fuel; allocations stay below the graph baseline.
+    let cases = [(256, 1_730_000, 521), (1024, 6_900_000, 2059)];
     let mut fuel = Vec::new();
-    for (count, baseline_fuel, baseline_allocations) in cases {
+    for (count, fuel_limit, baseline_allocations) in cases {
         let source = row_benchmark(count);
         let mut program = Program::from_wasm(
             perry_wit::compile_core(&source, "json-bench.ts").expect("source compiles"),
@@ -195,7 +195,7 @@ fn typed_json_fuel_and_allocations_scale_linearly() {
         program.call("run", &[]);
         let (_, used) = program.call("run", &[]);
         assert!(
-            used < baseline_fuel * 3 / 4,
+            used < fuel_limit,
             "typed decoder fuel regression: {used} for {count} rows"
         );
         let mut checked = Program::checked(&source, "json-bench.ts");

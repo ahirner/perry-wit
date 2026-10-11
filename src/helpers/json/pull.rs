@@ -139,15 +139,17 @@ impl<'a> Cursor<'a> {
     }
 
     /// Read an object key, leaving the cursor at its value. The flag marks escaped keys.
+    #[inline]
     pub(crate) fn member(&mut self) -> Option<(&'a [u8], bool)> {
         if self.broken != 0 {
             return None;
         }
-        let next = self.whitespace();
+        let mut next = self.whitespace();
         if core::mem::take(&mut self.fresh) == 0 {
             match next {
                 b',' => {
                     self.pos += 1;
+                    next = self.whitespace();
                 }
                 b'}' => {
                     self.close();
@@ -162,7 +164,7 @@ impl<'a> Cursor<'a> {
             self.close();
             return None;
         }
-        self.key()
+        self.key(next)
     }
 
     /// Validate and pass the next value, iteratively: the stack stays bounded.
@@ -181,12 +183,13 @@ impl<'a> Cursor<'a> {
                 if !self.push(object) {
                     return false;
                 }
-                if self.whitespace() == end {
+                let next = self.whitespace();
+                if next == end {
                     self.close();
                     return false;
                 }
                 if object {
-                    let _ = self.key();
+                    let _ = self.key(next);
                 }
                 true
             }
@@ -222,7 +225,8 @@ impl<'a> Cursor<'a> {
                 b',' => {
                     self.pos += 1;
                     if object {
-                        let _ = self.key();
+                        let next = self.whitespace();
+                        let _ = self.key(next);
                     }
                     return true;
                 }
@@ -234,8 +238,9 @@ impl<'a> Cursor<'a> {
         false
     }
 
-    fn key(&mut self) -> Option<(&'a [u8], bool)> {
-        if self.whitespace() != b'"' {
+    #[inline]
+    fn key(&mut self, next: u8) -> Option<(&'a [u8], bool)> {
+        if next != b'"' {
             self.broken = 1;
             return None;
         }

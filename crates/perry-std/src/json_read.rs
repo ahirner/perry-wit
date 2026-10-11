@@ -324,6 +324,7 @@ impl Reader {
 
     /// The next value's string content; a mismatch records an error. `None` when the value
     /// is not a string or the text is broken.
+    #[inline]
     fn text(&mut self) -> Option<Text> {
         if self.broken != 0 {
             return None;

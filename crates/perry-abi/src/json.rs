@@ -61,13 +61,15 @@ pub fn lookup(table: &[u8], hint: u32, key: &[u8]) -> i32 {
 /// Key tables are static strings the compiler generates (`perry-lower`'s `encode_keys`); a
 /// short one is a compiler bug, so it traps instead of reading as some other table.
 fn table_number(table: &[u8], at: usize) -> u32 {
-    table
+    let &[a, b, c, d, e] = table
         .get(at..)
         .and_then(<[u8]>::first_chunk::<NUMBER_BYTES>)
-        .expect("generated key tables hold every header number")
-        .iter()
-        .rev()
-        .fold(0, |value, &digit| (value << 7) | u32::from(digit))
+        .expect("generated key tables hold every header number");
+    u32::from(a)
+        | (u32::from(b) << 7)
+        | (u32::from(c) << 14)
+        | (u32::from(d) << 21)
+        | (u32::from(e) << 28)
 }
 
 /// The key bytes of entry `index`, which must be below the table's count.
