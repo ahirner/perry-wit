@@ -1,0 +1,16 @@
+[package]
+name = "perry-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Runtime linked into perry-wit components built by the MIR backend (TODOs.md P5)"
+
+[features]
+collectible = ["talc/counters"]
+
+[dependencies]
+libm.workspace = true
+talc = { version = "5.1.1", default-features = false }
+
+[lints]
+workspace = true

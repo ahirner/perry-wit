@@ -10,14 +10,14 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
-pub struct Request {
+pub(super) struct Request {
     pub method: String,
     pub target: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
-pub enum Reply {
+pub(super) enum Reply {
     Body(u16, String),
     WithHeaders(u16, Vec<(String, String)>, String),
     Bytes(u16, Vec<u8>),
@@ -32,7 +32,7 @@ pub enum Reply {
     StallBody,
 }
 
-pub struct HttpFixture {
+pub(super) struct HttpFixture {
     pub address: SocketAddr,
     pub requests: Arc<Mutex<Vec<Request>>>,
     shutdown: Arc<AtomicBool>,
@@ -40,7 +40,7 @@ pub struct HttpFixture {
 }
 
 impl HttpFixture {
-    pub fn new(handler: impl Fn(&Request) -> Reply + Send + Sync + 'static) -> Self {
+    pub(super) fn new(handler: impl Fn(&Request) -> Reply + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let shutdown = Arc::new(AtomicBool::new(false));

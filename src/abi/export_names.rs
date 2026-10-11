@@ -1,8 +1,11 @@
 use wit_parser::{Function, Resolve, World, WorldItem, WorldKey};
 
-use crate::sdk::codegen::to_camel_case;
+use crate::sdk::to_camel_case;
 
-pub fn validate_implementation_names(resolve: &Resolve, world: &World) -> anyhow::Result<()> {
+pub(crate) fn validate_implementation_names(
+    resolve: &Resolve,
+    world: &World,
+) -> anyhow::Result<()> {
     let mut names = std::collections::BTreeMap::new();
     for (key, item) in &world.exports {
         let functions = match item {
@@ -32,7 +35,7 @@ pub fn validate_implementation_names(resolve: &Resolve, world: &World) -> anyhow
     Ok(())
 }
 
-pub fn core_export_name(resolve: &Resolve, key: &WorldKey, function: &Function) -> String {
+pub(crate) fn core_export_name(resolve: &Resolve, key: &WorldKey, function: &Function) -> String {
     format!("{}#{}", resolve.name_world_key(key), function.name)
 }
 
@@ -48,7 +51,7 @@ fn interface_member_name(resolve: &Resolve, key: &WorldKey, function: &Function)
 }
 
 /// Uses an interface prefix for implementation functions, qualifying package collisions.
-pub fn interface_implementation_name(
+pub(crate) fn interface_implementation_name(
     resolve: &Resolve,
     world: &World,
     key: &WorldKey,

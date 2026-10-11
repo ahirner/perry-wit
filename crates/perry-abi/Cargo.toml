@@ -1,0 +1,13 @@
+[package]
+name = "perry-abi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Runtime services and layouts shared by perry-wit helper libraries"
+
+# On the host, the runtime's own functions stand in for the imports of linked modules.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+perry-runtime.workspace = true
+
+[lints]
+workspace = true

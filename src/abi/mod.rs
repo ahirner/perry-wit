@@ -1,6 +1,6 @@
 //! Component contracts shared by the compiler and SDK.
 
-pub mod export_names;
+pub(crate) mod export_names;
 
 pub(crate) fn result_type(
     resolve: &wit_parser::Resolve,

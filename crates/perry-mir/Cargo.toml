@@ -1,0 +1,17 @@
+[package]
+name = "perry-mir"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Typed middle IR for perry-wit, built on pliron (TODOs.md P2)"
+
+[dependencies]
+pliron.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+expect-test = "1"
+regex = "1"
+
+[lints]
+workspace = true

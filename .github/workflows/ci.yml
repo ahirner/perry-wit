@@ -58,9 +58,10 @@ jobs:
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - run: nix develop -c cargo test --workspace
-    - run: nix develop -c cargo run -p perry-conformance -- check
-    - run: nix develop -c cargo clippy --workspace --all-targets --all-features -- -D warnings
+    - run: nix develop -c cargo test --workspace --locked
+    - run: nix develop -c cargo test -p perry-runtime --all-features --locked
+    - run: nix develop -c cargo run --locked -p perry-conformance -- check
+    - run: nix develop -c cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   build-artifacts:
     strategy:

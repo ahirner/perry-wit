@@ -1,14 +1,16 @@
-use super::{
-    Error, Kind, MAX_DEPTH, NODE_BYTES,
-    storage::{Buffer, Measure, Output},
-};
+use super::{Error, Kind, MAX_DEPTH, NODE_BYTES, storage::Storage};
 
 /// Validates a document and computes its exact node/data storage requirement.
 pub fn measure(input: &str) -> Result<usize, Error> {
     let mut parser = Parser {
         input,
         position: 0,
-        output: Measure { length: 0 },
+        output: Storage {
+            bytes: &mut [],
+            length: 0,
+            base: 0,
+            stores: false,
+        },
     };
     parser.document()?;
     Ok(parser.output.length)
@@ -17,43 +19,132 @@ pub fn measure(input: &str) -> Result<usize, Error> {
 /// Writes a validated graph using absolute addresses relative to `base`.
 /// Nodes contain kind, next sibling, payload, first child, count, and member key.
 /// String payloads contain a data address and byte length; offset 16 is scalar length.
+/// Word 28 is zero: the runtime marks objects whose members it has put in property order.
 pub fn populate(input: &str, output: &mut [u8], base: u32) -> Result<u32, Error> {
     let mut parser = Parser {
         input,
         position: 0,
-        output: Buffer {
+        output: Storage {
             bytes: output,
             length: 0,
             base,
+            stores: true,
         },
     };
     let root = parser.document()?;
     parser.output.address(root)
 }
 
-struct Parser<'a, W> {
+struct Parser<'a> {
     input: &'a str,
     position: usize,
-    output: W,
+    output: Storage<'a>,
 }
 
-impl<W: Output> Parser<'_, W> {
+/// An array or object being parsed: its node, the last member linked, the member count and
+/// (objects) the key node of the member being parsed.
+#[derive(Clone, Copy)]
+struct Open {
+    node: usize,
+    previous: Option<usize>,
+    count: u32,
+    key: usize,
+    object: bool,
+}
+
+const CLOSED: Open = Open {
+    node: 0,
+    previous: None,
+    count: 0,
+    key: 0,
+    object: false,
+};
+
+impl Parser<'_> {
+    /// One loop over values with an explicit stack of open containers instead of recursion:
+    /// the frame is fixed, so the linker can bound the stack of programs that parse JSON.
+    /// Nodes are reserved in document order (a container, then each member's key and value).
     fn document(&mut self) -> Result<usize, Error> {
-        let root = self.value(0)?;
-        self.whitespace();
-        if self.position != self.input.len() {
-            return Err(Error::Syntax(self.position));
+        let mut stack = [CLOSED; MAX_DEPTH];
+        let mut depth = 0;
+        loop {
+            let (mut node, opened) = self.value(depth)?;
+            if let Some(object) = opened {
+                let end = if object { b'}' } else { b']' };
+                self.whitespace();
+                if self.peek() != Some(end) {
+                    stack[depth] = Open {
+                        node,
+                        object,
+                        ..CLOSED
+                    };
+                    depth += 1;
+                    if object {
+                        stack[depth - 1].key = self.key()?;
+                    }
+                    continue;
+                }
+                self.position += 1;
+                self.word(node + 20, 0)?;
+            }
+            // `node` is complete: link it into its container, closing containers it ends.
+            loop {
+                let Some(open) = depth.checked_sub(1).map(|top| &mut stack[top]) else {
+                    self.whitespace();
+                    if self.position != self.input.len() {
+                        return Err(Error::Syntax(self.position));
+                    }
+                    return Ok(node);
+                };
+                let open = *open;
+                if open.object {
+                    self.pointer(node + 24, open.key)?;
+                }
+                match open.previous {
+                    Some(previous) => self.pointer(previous + 4, node)?,
+                    None => self.pointer(open.node + 16, node)?,
+                }
+                let count = open.count.checked_add(1).ok_or(Error::Capacity)?;
+                stack[depth - 1].previous = Some(node);
+                stack[depth - 1].count = count;
+                self.whitespace();
+                let end = if open.object { b'}' } else { b']' };
+                if self.peek() == Some(end) {
+                    self.position += 1;
+                    self.word(open.node + 20, count)?;
+                    depth -= 1;
+                    node = open.node;
+                    continue;
+                }
+                self.expect(b',')?;
+                if open.object {
+                    stack[depth - 1].key = self.key()?;
+                }
+                break;
+            }
         }
-        Ok(root)
     }
 
-    fn value(&mut self, depth: usize) -> Result<usize, Error> {
+    /// An object member's key and colon: the key's string node.
+    fn key(&mut self) -> Result<usize, Error> {
+        self.whitespace();
+        let key = self.output.reserve(NODE_BYTES, 8)?;
+        self.string(key)?;
+        self.whitespace();
+        self.expect(b':')?;
+        Ok(key)
+    }
+
+    /// Parse a scalar value, or open an array or object (its kind written, the bracket
+    /// consumed; [Parser::document] parses its members). Returns the node and, for a
+    /// container, whether it is an object.
+    fn value(&mut self, depth: usize) -> Result<(usize, Option<bool>), Error> {
         self.whitespace();
         if depth >= MAX_DEPTH {
             return Err(Error::Depth(self.position));
         }
         let node = self.output.reserve(NODE_BYTES, 8)?;
-        self.pointer(node + 28, 0)?;
+        self.word(node + 28, 0)?;
         match self.peek() {
             Some(b'n') => {
                 self.keyword(b"null")?;
@@ -70,42 +161,7 @@ impl<W: Output> Parser<'_, W> {
                 let object = self.peek() == Some(b'{');
                 self.position += 1;
                 self.word(node, if object { Kind::Object } else { Kind::Array } as u32)?;
-                let end = if object { b'}' } else { b']' };
-                let mut previous = None;
-                let mut count = 0u32;
-                self.whitespace();
-                if self.peek() != Some(end) {
-                    loop {
-                        let key = if object {
-                            self.whitespace();
-                            let key = self.output.reserve(NODE_BYTES, 8)?;
-                            self.string(key)?;
-                            self.whitespace();
-                            self.expect(b':')?;
-                            Some(key)
-                        } else {
-                            None
-                        };
-                        let child = self.value(depth + 1)?;
-                        if let Some(key) = key {
-                            self.pointer(child + 24, key)?;
-                        }
-                        if let Some(previous) = previous {
-                            self.pointer(previous + 4, child)?;
-                        } else {
-                            self.pointer(node + 16, child)?;
-                        }
-                        previous = Some(child);
-                        count = count.checked_add(1).ok_or(Error::Capacity)?;
-                        self.whitespace();
-                        if self.peek() == Some(end) {
-                            break;
-                        }
-                        self.expect(b',')?;
-                    }
-                }
-                self.expect(end)?;
-                self.word(node + 20, count)?;
+                return Ok((node, Some(object)));
             }
             Some(b'-' | b'0'..=b'9') => {
                 let start = self.position;
@@ -128,15 +184,16 @@ impl<W: Output> Parser<'_, W> {
                     }
                     self.digits()?;
                 }
-                let value = self.input[start..self.position]
-                    .parse::<f64>()
-                    .map_err(|_| Error::Syntax(start))?;
                 self.word(node, Kind::Number as u32)?;
-                self.output.write(node + 8, &value.to_le_bytes())?;
+                if self.output.stores {
+                    let literal = &self.input.as_bytes()[start..self.position];
+                    let value = super::number::parse_number(literal);
+                    self.output.write(node + 8, &value.to_le_bytes())?;
+                }
             }
             _ => return Err(Error::Syntax(self.position)),
         }
-        Ok(node)
+        Ok((node, None))
     }
 
     fn string(&mut self, node: usize) -> Result<(), Error> {
@@ -190,12 +247,28 @@ impl<W: Output> Parser<'_, W> {
                 }
                 None | Some(0..=31) => return Err(Error::Syntax(self.position)),
                 Some(_) => {
-                    let scalar = self.input[self.position..]
-                        .chars()
-                        .next()
-                        .ok_or(Error::Syntax(self.position))?;
-                    self.position += scalar.len_utf8();
-                    scalar
+                    // A run of unescaped bytes, copied as is: the input is valid UTF-8.
+                    let bytes = self.input.as_bytes();
+                    let start = self.position;
+                    while bytes
+                        .get(self.position)
+                        .is_some_and(|&b| b >= 0x20 && b != b'"' && b != b'\\')
+                    {
+                        self.position += 1;
+                    }
+                    let run = &bytes[start..self.position];
+                    let destination = self.output.reserve(run.len(), 1)?;
+                    self.output.write(destination, run)?;
+                    byte_length = byte_length
+                        .checked_add(run.len() as u32)
+                        .ok_or(Error::Capacity)?;
+                    if self.output.stores {
+                        let scalars = run.iter().filter(|&&b| b & 0xC0 != 0x80).count();
+                        scalar_length = scalar_length
+                            .checked_add(scalars as u32)
+                            .ok_or(Error::Capacity)?;
+                    }
+                    continue;
                 }
             };
             let mut bytes = [0; 4];
@@ -208,7 +281,7 @@ impl<W: Output> Parser<'_, W> {
             scalar_length = scalar_length.checked_add(1).ok_or(Error::Capacity)?;
         }
         self.word(node, Kind::String as u32)?;
-        self.pointer(node + 28, 0)?;
+        self.word(node + 28, 0)?;
         self.pointer(node + 8, start)?;
         self.word(node + 12, byte_length)?;
         self.word(node + 16, scalar_length)

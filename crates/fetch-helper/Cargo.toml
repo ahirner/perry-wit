@@ -1,0 +1,10 @@
+[package]
+name = "perry-fetch-helper"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "../../src/helpers/fetch.rs"
+
+[lints]
+workspace = true

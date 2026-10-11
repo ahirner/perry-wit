@@ -1,7 +1,9 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
+#![cfg(any(target_arch = "wasm32", test))]
 
 #[path = "fetch/url.rs"]
 mod url;
+#[cfg(test)]
 use url::normalize;
 
 fn header(input: &[u8]) -> Result<u32, ()> {
@@ -156,6 +158,14 @@ pub extern "C" fn fetch_url(input: u32, length: u32, output: u32, capacity: u32)
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
+pub extern "C" fn fetch_url_value(input: u32, length: u32, output: u32, capacity: u32) -> u32 {
+    borrow(input, length, output, capacity, |input, output| {
+        Ok(url::normalize_url(input, output)?[5])
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
 pub extern "C" fn fetch_redirect(
     base: u32,
     base_len: u32,
@@ -292,21 +302,24 @@ impl HeaderInput {
     }
 
     fn ranges(&self) -> impl Iterator<Item = Result<[guest_memory::GuestRange; 2], ()>> {
+        self.records().map(|record| {
+            let [name, name_length, value, value_length] = record_words(record);
+            Ok([
+                guest_memory::GuestRange::new(name, name_length)?,
+                guest_memory::GuestRange::new(value, value_length)?,
+            ])
+        })
+    }
+
+    /// The canonical 16-byte `(name, name length, value, value length)` field records.
+    fn records(&self) -> impl Iterator<Item = &[u8; 16]> {
         // SAFETY: the canonical field list is initialized, immutable, and validated by construction.
-        unsafe { self.fields.bytes() }
-            .chunks_exact(16)
-            .map(|record| {
-                let word = |at| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
-                Ok([
-                    guest_memory::GuestRange::new(word(0), word(4))?,
-                    guest_memory::GuestRange::new(word(8), word(12))?,
-                ])
-            })
+        unsafe { self.fields.bytes() }.as_chunks::<16>().0.iter()
     }
 
     fn fields(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
         self.ranges().map(|ranges| {
-            let [name, value] = ranges.unwrap();
+            let [name, value] = ranges.expect("HeaderInput::new validated every field range");
             // SAFETY: construction validated every initialized input; neither traversal allocates nor suspends.
             unsafe { (name.bytes(), value.bytes()) }
         })
@@ -328,6 +341,15 @@ impl HeaderInput {
         }
         Ok(())
     }
+}
+
+/// The four little-endian words of one canonical header field record.
+#[cfg(target_arch = "wasm32")]
+fn record_words(record: &[u8; 16]) -> [u32; 4] {
+    core::array::from_fn(|word| {
+        let at = word * 4;
+        u32::from_le_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -449,14 +471,10 @@ pub extern "C" fn fetch_header_edit(
         if value_range.overlaps(target) {
             return Err(());
         }
-        // SAFETY: the canonical list is initialized and immutable; target is disjoint.
-        let fields = unsafe { input.fields.bytes() }
-            .chunks_exact(16)
+        let fields = input
+            .records()
             .zip(input.fields())
-            .map(|(record, (key, _))| {
-                let word = |at| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
-                ([word(0), word(4), word(8), word(12)], key)
-            });
+            .map(|(record, (key, _))| (record_words(record), key));
         // SAFETY: all input ranges were validated and output is exclusively borrowed and disjoint.
         edit_headers(
             fields,
@@ -578,6 +596,10 @@ mod tests {
             assert!(normalize(input.as_bytes(), &mut [0; 512]).is_err());
         }
         let mut output = [0; 512];
+        let input = b"https://user:pass@example.com/#fragment";
+        let metadata = url::normalize_url(input, &mut output).unwrap();
+        assert_eq!(&output[..metadata[5] as usize], input);
+        assert!(normalize(input, &mut output).is_err());
         let length = decode(b"\xef\xbb\xbfhi\xf0\x9f\x99\x82\xe2\x82X\xff", &mut output).unwrap();
         assert_eq!(core::str::from_utf8(&output[..length]).unwrap(), "hi🙂�X�");
     }

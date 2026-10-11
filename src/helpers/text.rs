@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
 mod case_properties;
 mod casing;
@@ -90,7 +90,7 @@ pub extern "C" fn str_from_code_point(code_point: f64, out_ptr: u32) -> u32 {
         return u32::MAX;
     }
     // Reject surrogates (0xD800..=0xDFFF)
-    if cp >= 0xD800 && cp <= 0xDFFF {
+    if (0xD800..=0xDFFF).contains(&cp) {
         return u32::MAX;
     }
 
@@ -137,13 +137,19 @@ pub extern "C" fn str_case_convert(
     out_ptr: u32,
     to_upper: u32,
 ) -> u64 {
-    let input = Utf8Scalars {
-        pointer: src_ptr,
-        remaining: src_byte_len,
+    if src_byte_len == 0 {
+        return 0;
+    }
+    // SAFETY: compiled callers supply valid UTF-8 and a separate output allocation.
+    let input = unsafe {
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+            src_ptr as *const u8,
+            src_byte_len as usize,
+        ))
     };
     let mut byte_len = 0u32;
     let mut scalar_len = 0u32;
-    for scalar in casing::mapped_scalars(input, to_upper != 0) {
+    for scalar in casing::mapped_scalars(input.chars(), to_upper != 0) {
         let Some(next_len) = byte_len.checked_add(scalar.len_utf8() as u32) else {
             return u64::MAX;
         };
@@ -151,34 +157,16 @@ pub extern "C" fn str_case_convert(
             let Some(destination) = out_ptr.checked_add(byte_len) else {
                 return u64::MAX;
             };
-            str_from_code_point(scalar as u32 as f64, destination);
+            // SAFETY: measurement reserved the complete output, including this scalar.
+            let output = unsafe {
+                core::slice::from_raw_parts_mut(destination as *mut u8, scalar.len_utf8())
+            };
+            scalar.encode_utf8(output);
         }
         byte_len = next_len;
         scalar_len += 1;
     }
     u64::from(byte_len) | (u64::from(scalar_len) << 32)
-}
-
-#[derive(Clone)]
-struct Utf8Scalars {
-    pointer: u32,
-    remaining: u32,
-}
-
-impl Iterator for Utf8Scalars {
-    type Item = char;
-
-    fn next(&mut self) -> Option<char> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let code_point = str_code_point_at(self.pointer, self.remaining, 0.0);
-        assert!(code_point.is_finite(), "Invalid UTF-8 in string helper");
-        let scalar = char::from_u32(code_point as u32).expect("Valid Unicode scalar");
-        self.pointer += scalar.len_utf8() as u32;
-        self.remaining -= scalar.len_utf8() as u32;
-        Some(scalar)
-    }
 }
 
 /// Returns the number of chunks produced by splitting haystack by sep.
@@ -447,6 +435,7 @@ fn count_scalars(haystack_ptr: u32, haystack_byte_len: u32) -> u32 {
     count
 }
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     core::arch::wasm32::unreachable()

@@ -1,0 +1,19 @@
+[package]
+name = "perry-codegen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Lowers perry MIR to the pliron `wasm` dialect and links the perry runtime (TODOs.md P4)"
+
+[dependencies]
+anyhow.workspace = true
+perry-abi.workspace = true
+perry-mir.workspace = true
+perry-runtime.workspace = true
+pliron.workspace = true
+pliron-wasm = { path = "../pliron-wasm" }
+
+regex-automata = { version = "0.4", default-features = false, features = ["std", "dfa-build", "syntax", "unicode"] }
+
+[lints]
+workspace = true

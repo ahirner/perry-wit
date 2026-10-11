@@ -5,10 +5,11 @@ use crate::{
     strategies,
     transitions::{Action, TimerModel},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,7 +18,7 @@ pub enum ExitStatus {
     Failure,
 }
 impl ExitStatus {
-    pub fn code(self) -> i32 {
+    pub(crate) fn code(self) -> i32 {
         match self {
             Self::Success => 0,
             Self::Failure => 1,
@@ -48,37 +49,51 @@ pub enum Case {
         diagnostic: String,
     },
     Lifecycle(Vec<Action>),
+    /// Calls `run(base)`, `run(base)`, `run(base * factor)` on one instance and bounds fuel growth.
+    Scaling {
+        source: String,
+        base: u32,
+        factor: u32,
+        max_growth: u32,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExpectedOutcome {
+pub(crate) enum ExpectedOutcome {
     EquivalentExecution,
     CompilerRejection,
     InjectedFaultDetection,
+    BoundedGrowth,
 }
 impl Case {
-    pub fn expected_outcome(&self) -> ExpectedOutcome {
+    pub(crate) fn expected_outcome(&self) -> ExpectedOutcome {
         match self {
             Self::Reject { .. } => ExpectedOutcome::CompilerRejection,
             Self::Fault { .. } => ExpectedOutcome::InjectedFaultDetection,
+            Self::Scaling { .. } => ExpectedOutcome::BoundedGrowth,
             _ => ExpectedOutcome::EquivalentExecution,
         }
     }
-    pub fn variants(&self) -> Vec<Self> {
+    /// The case followed by its metamorphic forms, which must observe identically.
+    pub(crate) fn variants(&self) -> Vec<Cow<'_, Self>> {
         if let Self::Program(program) = self
             && program.form == Form::Direct
         {
             Form::ALL
                 .into_iter()
                 .map(|form| {
-                    Self::Program(Program {
-                        expression: program.expression.clone(),
-                        form,
-                    })
+                    if form == Form::Direct {
+                        Cow::Borrowed(self)
+                    } else {
+                        Cow::Owned(Self::Program(Program {
+                            expression: program.expression.clone(),
+                            form,
+                        }))
+                    }
                 })
                 .collect()
         } else {
-            vec![self.clone()]
+            vec![Cow::Borrowed(self)]
         }
     }
     pub fn source(&self) -> String {
@@ -90,10 +105,11 @@ impl Case {
             Self::Lifecycle(actions) => crate::transitions::source(actions),
             Self::Function { source, .. }
             | Self::Command { source, .. }
-            | Self::Reject { source, .. } => source.clone(),
+            | Self::Reject { source, .. }
+            | Self::Scaling { source, .. } => source.clone(),
         }
     }
-    pub fn asynchronous(&self) -> bool {
+    pub(crate) fn asynchronous(&self) -> bool {
         match self {
             Self::Program(program) | Self::Fault { program, .. } => program.form.is_async(),
             Self::Function { asynchronous, .. } => *asynchronous,
@@ -104,26 +120,26 @@ impl Case {
 }
 
 pub struct Witness {
-    pub partition: &'static str,
+    pub(crate) partition: &'static str,
     pub case: Case,
 }
 pub struct Contract {
     pub id: &'static str,
-    pub description: &'static str,
-    pub specification: &'static str,
-    pub domain: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) specification: &'static str,
+    pub(crate) domain: &'static str,
     pub witnesses: Vec<Witness>,
-    pub strategy: BoxedStrategy<Case>,
-    pub check: fn(&Case, &Evidence) -> Result<()>,
+    pub(crate) strategy: BoxedStrategy<Case>,
+    pub(crate) check: fn(&Case, &Evidence) -> Result<()>,
 }
 #[derive(Serialize)]
 pub struct CatalogEntry {
     pub id: &'static str,
-    pub description: &'static str,
-    pub specification: &'static str,
-    pub domain: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) specification: &'static str,
+    pub(crate) domain: &'static str,
     pub partitions: Vec<&'static str>,
-    pub expected_outcomes: Vec<ExpectedOutcome>,
+    pub(crate) expected_outcomes: Vec<ExpectedOutcome>,
 }
 impl Contract {
     pub fn catalog(&self) -> CatalogEntry {
@@ -155,7 +171,7 @@ fn expression_contract(
         id,
         description,
         specification: "https://tc39.es/ecma262/",
-        domain: "Typed terminating programs over the IEEE-754 boundary corpus; generated strings restricted to BMP scalars; direct/local/branch/loop metamorphic forms",
+        domain: "Bounded typed functions, control flow, closed aggregates, byte aliases, JSON conversion and exceptions over the IEEE-754 boundary corpus; BMP strings; direct/local/branch/loop/inert-exception forms and overlapping timer completion schedules",
         witnesses: examples
             .into_iter()
             .map(|(partition, expression)| Witness {
@@ -196,6 +212,13 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 ),
                 ("trace", Number::Mark(input())),
                 ("call", Number::Call(input())),
+                ("record-field-update", Number::ClosedLoop(input(), 4)),
+                (
+                    "byte-alias",
+                    Number::ByteAlias(input(), Box::new(Number::Integer(7))),
+                ),
+                ("checked-json", Number::TypedJson(input())),
+                ("handled-throw", Number::Handled(input())),
             ],
         ),
         expression_contract(
@@ -394,7 +417,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
         contracts
             .iter_mut()
             .find(|c| c.id == id)
-            .unwrap()
+            .with_context(|| format!("regression {partition} names unknown contract {id}"))?
             .witnesses
             .push(Witness {
                 partition,
@@ -499,6 +522,7 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
     contracts.push(crate::fetch::byob_contract());
     contracts.extend(crate::capabilities::contracts());
     contracts.push(crate::handler::contract());
+    contracts.extend(crate::scaling::contracts());
     let mut ids = std::collections::HashSet::new();
     for contract in &contracts {
         ensure!(
@@ -519,6 +543,20 @@ pub fn contracts(depth: u32) -> Result<Vec<Contract>> {
                 contract.id
             );
         }
+    }
+    for id in crate::PASSING
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        ensure!(
+            ids.contains(id.trim()),
+            "passing.txt names unknown contract {id}"
+        );
+    }
+    for (id, reason) in crate::deferrals() {
+        ensure!(ids.contains(id), "deferred.txt names unknown contract {id}");
+        ensure!(!reason.is_empty(), "deferred contract {id} needs a reason");
+        ensure!(!crate::passing(id), "{id} is both passing and deferred");
     }
     Ok(contracts)
 }

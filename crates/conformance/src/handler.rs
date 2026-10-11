@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandlerCase {
-    pub bytes: Vec<u8>,
-    pub status: u16,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) status: u16,
 }
 impl HandlerCase {
-    pub fn source(&self) -> String {
+    pub(crate) fn source(&self) -> String {
         format!(
             r#"
 import type {{PerryHttpHandlerTypesRequest as Request,PerryHttpHandlerTypesResponse as Response}} from './handler-types/world';
@@ -50,7 +50,7 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     );
     Ok(())
 }
-pub fn contract() -> Contract {
+pub(crate) fn contract() -> Contract {
     let case = |bytes, status| Case::Handler(HandlerCase { bytes, status });
     Contract {
         id: "wasi.http.handler",

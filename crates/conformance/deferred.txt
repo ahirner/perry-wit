@@ -1,0 +1,2 @@
+# Contracts outside the compiler's accepted domain: not run, not pending. One id per line,
+# then `#` and the reason for deferral.

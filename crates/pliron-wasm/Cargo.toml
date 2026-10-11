@@ -1,0 +1,23 @@
+[package]
+name = "pliron-wasm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A WebAssembly dialect for pliron and an emitter from SSA control-flow graphs to core Wasm"
+keywords = ["pliron", "webassembly", "compiler", "ir", "ssa"]
+categories = ["compilers", "wasm"]
+# Kept free of perry-specific code so it can be published on its own.
+publish = false
+
+[dependencies]
+pliron.workspace = true
+thiserror.workspace = true
+wasm-encoder.workspace = true
+
+[dev-dependencies]
+wasmparser.workspace = true
+wasmprinter.workspace = true
+wasmtime.workspace = true
+
+[lints]
+workspace = true

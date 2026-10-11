@@ -36,7 +36,7 @@ impl Default for Settings {
     }
 }
 impl Settings {
-    pub fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             (1..=10000).contains(&self.cases),
             "cases must be in 1..=10000"
@@ -55,39 +55,44 @@ impl Settings {
 }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Status {
+enum Status {
     NotRun,
     Running,
     Passed,
     Failed,
+    /// Failed, and not listed in `passing.txt`: the compiler does not cover it yet.
+    /// Does not fail the campaign.
+    Pending,
+    /// Listed in `deferred.txt`: outside the accepted domain; not run.
+    Deferred,
 }
 #[derive(Serialize)]
-pub struct PartitionResult {
-    pub id: &'static str,
-    pub status: Status,
+struct PartitionResult {
+    id: &'static str,
+    status: Status,
 }
 #[derive(Serialize)]
-pub struct ContractResult {
-    pub id: &'static str,
-    pub description: &'static str,
-    pub specification: &'static str,
-    pub domain: &'static str,
-    pub status: Status,
-    pub partitions: Vec<PartitionResult>,
-    pub expected_outcomes: Vec<ExpectedOutcome>,
-    pub generated_cases: u32,
-    pub executions: u32,
-    pub error: Option<String>,
+struct ContractResult {
+    id: &'static str,
+    description: &'static str,
+    specification: &'static str,
+    domain: &'static str,
+    status: Status,
+    partitions: Vec<PartitionResult>,
+    expected_outcomes: Vec<ExpectedOutcome>,
+    generated_cases: u32,
+    executions: u32,
+    error: Option<String>,
 }
 #[derive(Serialize)]
-pub struct Report {
-    pub schema: u32,
-    pub settings: Settings,
-    pub source_sha256: String,
-    pub revision: String,
-    pub versions: serde_json::Value,
-    pub contracts: Vec<ContractResult>,
-    pub source_unchanged: bool,
+struct Report<'a> {
+    schema: u32,
+    settings: &'a Settings,
+    source_sha256: String,
+    revision: String,
+    versions: serde_json::Value,
+    contracts: Vec<ContractResult>,
+    source_unchanged: bool,
 }
 #[derive(Serialize, Deserialize)]
 pub struct ConcreteCase {
@@ -106,14 +111,15 @@ pub struct SavedCase {
     pub versions: serde_json::Value,
 }
 
-pub fn root() -> PathBuf {
+/// The workspace root, where evidence is written under `target/conformance`.
+fn root() -> Result<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
-        .unwrap()
+        .context("workspace root")
 }
 fn identity() -> Result<(String, String)> {
-    let root = root();
+    let root = root()?;
     let output = Command::new("git")
         .current_dir(&root)
         .args([
@@ -181,14 +187,19 @@ fn evaluate(contract: &Contract, case: &Case, executor: &Executor, directory: &P
     Ok(())
 }
 fn save_case(path: &Path, contract: &str, case: Case, settings: &Settings) -> Result<()> {
-    fs::write(path.with_extension("ts"), case.source())?;
+    let source = case.source();
+    fs::write(path.with_extension("ts"), &source)?;
+    // The first variant is the case itself.
     let metamorphic = case
         .variants()
         .into_iter()
         .skip(1)
-        .map(|case| ConcreteCase {
-            source: case.source(),
-            case,
+        .map(|case| {
+            let case = case.into_owned();
+            ConcreteCase {
+                source: case.source(),
+                case,
+            }
         })
         .collect::<Vec<_>>();
     for (index, variant) in metamorphic.iter().enumerate() {
@@ -202,7 +213,7 @@ fn save_case(path: &Path, contract: &str, case: Case, settings: &Settings) -> Re
         path,
         &SavedCase {
             contract: contract.into(),
-            source: case.source(),
+            source,
             metamorphic,
             case,
             settings: settings.clone(),
@@ -221,7 +232,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         "no contracts match {}",
         settings.select
     );
-    let output = root().join("target/conformance");
+    let output = root()?.join("target/conformance");
     fs::create_dir_all(&output)?;
     let directory = tempfile::Builder::new()
         .prefix("run-")
@@ -235,7 +246,7 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
     let (source_sha256, revision) = identity()?;
     let mut report = Report {
         schema: 1,
-        settings: settings.clone(),
+        settings: &settings,
         source_sha256,
         revision,
         versions: versions()?,
@@ -263,11 +274,17 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
             })
             .collect(),
     };
-    let executor = Executor::new(executable, settings.limits.clone());
+    let executor = Executor::new(executable, settings.limits);
     write_json(&output.join("report.json"), &report)?;
     for (index, contract) in contracts.iter().enumerate() {
         let result = &mut report.contracts[index];
         if !contract.id.starts_with(&settings.select) {
+            continue;
+        }
+        if let Some(reason) = crate::deferred(contract.id) {
+            result.status = Status::Deferred;
+            result.error = Some(reason.to_string());
+            eprintln!("{}: deferred ({reason})", contract.id);
             continue;
         }
         result.status = Status::Running;
@@ -298,9 +315,15 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
         }
         if result.status != Status::Failed {
             let attempts = Cell::new(0u32);
+            // Shrinking explains regressions; a pending contract only needs its first failure.
+            let shrink = if crate::passing(contract.id) {
+                settings.shrink_limit
+            } else {
+                0
+            };
             let mut runner = TestRunner::new(Config {
                 cases: settings.cases,
-                max_shrink_iters: settings.shrink_limit,
+                max_shrink_iters: shrink,
                 rng_seed: RngSeed::Fixed(settings.seed),
                 failure_persistence: None,
                 ..Config::default()
@@ -336,6 +359,21 @@ pub fn campaign(settings: Settings, executable: PathBuf) -> Result<PathBuf> {
                 }
             }
         }
+        // The ratchet: listed contracts must pass, and a newly passing one must be listed.
+        match (crate::passing(contract.id), result.status) {
+            (false, Status::Failed) => {
+                result.status = Status::Pending;
+                eprintln!("{}: pending (not in passing.txt)", contract.id);
+            }
+            (false, Status::Passed) => {
+                result.status = Status::Failed;
+                result.error = Some(format!(
+                    "passes but is not listed; add {} to crates/conformance/passing.txt",
+                    contract.id
+                ));
+            }
+            _ => {}
+        }
         if let Some(error) = &result.error {
             eprintln!("{}: {error}", contract.id);
         }
@@ -365,13 +403,13 @@ pub fn replay(path: &Path, executable: PathBuf) -> Result<()> {
         .iter()
         .find(|c| c.id == saved.contract)
         .context("unknown contract in replay")?;
-    let output = root().join("target/conformance");
+    let output = root()?.join("target/conformance");
     fs::create_dir_all(&output)?;
     let directory = tempfile::Builder::new()
         .prefix("replay-")
         .tempdir_in(output)?
         .keep();
-    let executor = Executor::new(executable, saved.settings.limits.clone());
+    let executor = Executor::new(executable, saved.settings.limits);
     let outcome = std::iter::once((&saved.case, &saved.source))
         .chain(saved.metamorphic.iter().map(|v| (&v.case, &v.source)))
         .enumerate()

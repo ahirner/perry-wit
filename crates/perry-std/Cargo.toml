@@ -1,0 +1,13 @@
+[package]
+name = "perry-std"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Built-ins (strings, Uint8Array, JSON, random) linked into perry-wit components on demand"
+
+[dependencies]
+libm.workspace = true
+perry-abi.workspace = true
+
+[lints]
+workspace = true

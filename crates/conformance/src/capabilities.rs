@@ -1,21 +1,27 @@
 //! Concrete standard API domains. Source generation is pure; adapters own all effects.
 use crate::{
     execution::check_equivalence,
+    program::literal,
     registry::{Case, Contract, ExitStatus, Witness},
 };
 use proptest::prelude::*;
 
 fn bytes_function(bytes: Vec<u8>, operation: &str, asynchronous: bool) -> Case {
+    Case::Function {
+        asynchronous,
+        source: bytes_source(&bytes, operation, asynchronous),
+    }
+}
+/// A `run` export applying `operation` to `input`, a `Uint8Array` of `bytes`.
+fn bytes_source(bytes: &[u8], operation: &str, asynchronous: bool) -> String {
     let prefix = if asynchronous { "async " } else { "" };
     let result = if asynchronous {
         "Promise<{value:number,trace:number[]}>"
     } else {
         "{value:number,trace:number[]}"
     };
-    Case::Function {
-        asynchronous,
-        source: format!(
-            r#"
+    format!(
+        r#"
 export {prefix}function run(x:number):{result} {{
   const input=new Uint8Array({bytes});
   const trace:number[]=[];
@@ -23,9 +29,8 @@ export {prefix}function run(x:number):{result} {{
   return {{value:x,trace}};
 }}
 "#,
-            bytes = serde_json::to_string(&bytes).unwrap()
-        ),
-    }
+        bytes = literal(bytes)
+    )
 }
 const SET: &str = r#"
 const destination=new Uint8Array(input.length+4);
@@ -72,11 +77,11 @@ if(!closed)throw 91;
 const errors=Writable.toWeb(process.stderr).getWriter();
 await errors.write(input);await errors.close();errors.releaseLock();
 "#,
-            bytes = serde_json::to_string(&bytes).unwrap()
+            bytes = literal(&bytes)
         ),
     }
 }
-pub fn contracts() -> Vec<Contract> {
+pub(crate) fn contracts() -> Vec<Contract> {
     let mut contracts = Vec::new();
     for (id, description, specification, operation, asynchronous) in [
         (
@@ -168,7 +173,7 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
     throw 98;
 }}
 "#,
-            message = serde_json::to_string(&message).unwrap()
+            message = literal(&message)
         ),
     }
 }
@@ -210,7 +215,7 @@ headers.set('X-Test',' replaced ');
 if(headers.get('x-test')!=='replaced'||!headers.has('X-Test'))throw 92;
 headers.delete('x-test');if(headers.has('X-Test')||headers.get('X-Test')!==null)throw 93;
 "#,
-            text = serde_json::to_string(&text).unwrap()
+            text = literal(&text)
         ),
         false,
     )
@@ -232,16 +237,12 @@ for(let i=0;i<encoded.length;i++){{const byte=encoded[i];if(byte===undefined)thr
     )
 }
 fn additional_contracts() -> Vec<Contract> {
-    let directory = |bytes| {
-        let Case::Function { source, .. } = bytes_function(bytes, DIRECTORY, true) else {
-            unreachable!()
-        };
-        Case::Function {
-            source: format!(
-                "import {{mkdir,writeFile,stat,readdir,unlink,rmdir}} from 'node:fs/promises';\n{source}"
-            ),
-            asynchronous: true,
-        }
+    let directory = |bytes: Vec<u8>| Case::Function {
+        source: format!(
+            "import {{mkdir,writeFile,stat,readdir,unlink,rmdir}} from 'node:fs/promises';\n{}",
+            bytes_source(&bytes, DIRECTORY, true)
+        ),
+        asynchronous: true,
     };
     let decoder = |bytes| bytes_function(bytes, DECODE, false);
     let exit = |direct| Case::Command {

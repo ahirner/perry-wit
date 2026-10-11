@@ -46,12 +46,14 @@ pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
         .map(|package| (resolve, package))
 }
 
-pub(crate) fn resolve_source(source: &str) -> Result<(Resolve, PackageId)> {
-    let main = UnresolvedPackageGroup::parse("compiler-world.wit", source)
-        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+/// Resolve a WIT package given as source, with the ambient WASI packages.
+pub fn resolve_source(name: &str, source: &str) -> Result<(Resolve, PackageId)> {
     let mut resolve = Resolve::new();
-    let package = resolve_packages(main, &mut resolve, &mut Vec::new())?;
-    Ok((resolve, package))
+    let main = UnresolvedPackageGroup::parse(name, source)
+        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+    resolve_packages(main, &mut resolve, &mut Vec::new())
+        .with_context(|| format!("resolving WIT dependencies for {name}"))
+        .map(|package| (resolve, package))
 }
 
 fn resolve_packages(

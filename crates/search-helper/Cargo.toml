@@ -1,0 +1,10 @@
+[package]
+name = "perry-search-helper"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "../../src/helpers/search.rs"
+
+[lints]
+workspace = true

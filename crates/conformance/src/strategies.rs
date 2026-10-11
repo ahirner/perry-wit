@@ -2,7 +2,7 @@
 use crate::program::{Binary, Condition, Math, Number, Text};
 use proptest::prelude::*;
 
-pub fn numbers(depth: u32) -> BoxedStrategy<Number> {
+pub(crate) fn numbers(depth: u32) -> BoxedStrategy<Number> {
     let leaf = prop_oneof![
         Just(Number::Input),
         Just(Number::NegativeZero),
@@ -25,6 +25,10 @@ pub fn numbers(depth: u32) -> BoxedStrategy<Number> {
         1 => (child.clone(),child.clone()).prop_map(|(a,b)| Number::Field(Box::new(a),Box::new(b))),
         1 => text.clone().prop_map(|v| Number::Length(Box::new(v))),
         1 => child.clone().prop_map(|v| Number::Call(Box::new(v))),
+        1 => child.clone().prop_map(|v| Number::TypedJson(Box::new(v))),
+        1 => (child.clone(), child.clone()).prop_map(|(a,b)| Number::ByteAlias(Box::new(a), Box::new(b))),
+        1 => (child.clone(), 0u8..8).prop_map(|(v,n)| Number::ClosedLoop(Box::new(v), n)),
+        1 => child.clone().prop_map(|v| Number::Handled(Box::new(v))),
         1 => (prop::sample::select(vec![Math::Floor,Math::Ceil,Math::Trunc,Math::Abs,Math::Round]),child.clone()).prop_map(|(op,v)| Number::Math(op,Box::new(v))),
         1 => (text.clone(),text.clone(),child.clone()).prop_map(|(a,b,c)| Number::IndexOf(Box::new(a),Box::new(b),Box::new(c))),
         1 => child.clone().prop_map(|v| Number::DateTime(Box::new(v))),
@@ -35,7 +39,7 @@ pub fn numbers(depth: u32) -> BoxedStrategy<Number> {
     ].boxed()
 }
 
-pub fn conditions(depth: u32) -> BoxedStrategy<Condition> {
+pub(crate) fn conditions(depth: u32) -> BoxedStrategy<Condition> {
     let literal = any::<bool>().prop_map(Condition::Literal);
     if depth == 0 {
         return literal.boxed();
@@ -61,7 +65,7 @@ pub fn conditions(depth: u32) -> BoxedStrategy<Condition> {
     .boxed()
 }
 
-pub fn texts(depth: u32) -> BoxedStrategy<Text> {
+pub(crate) fn texts(depth: u32) -> BoxedStrategy<Text> {
     let leaf = prop::sample::select(vec!["", "a", "  abc  ", "é漢", "é", "a\0b", "\n\t"])
         .prop_map(|s| Text::Literal(s.into()))
         .boxed();

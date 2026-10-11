@@ -4,14 +4,65 @@ version = "0.1.0"
 edition = "2024"
 default-run = "perry-wit"
 
+[lints]
+workspace = true
+
 [workspace]
 members = [
-    ".",
-    "crates/json-helper",
-    "crates/number-helper",
-    "crates/time-helper",
-    "crates/conformance",
+  ".",
+  "crates/search-helper",
+  "crates/text-helper",
+  "crates/fetch-helper",
+  "crates/json-helper",
+  "crates/number-helper",
+  "crates/time-helper",
+  "crates/conformance",
+  "crates/perry-mir",
+  "crates/perry-lower",
+  "crates/pliron-wasm",
+  "crates/perry-runtime",
+  "crates/perry-abi",
+  "crates/perry-std",
+  "crates/perry-fs",
+  "crates/perry-web",
+  "crates/perry-codegen",
 ]
+
+[workspace.lints.rust]
+# Items are `pub` only where another crate uses them.
+unreachable_pub = "warn"
+
+[workspace.dependencies]
+anyhow = "1.0"
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+libm = "0.2"
+perry-abi = { path = "crates/perry-abi" }
+perry-hir = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa" }
+perry-mir = { path = "crates/perry-mir" }
+perry-parser = { git = "https://github.com/PerryTS/perry", rev = "a4f3ad2bae84f4ad1c3b180e66c7e0380965acfa" }
+perry-runtime = { path = "crates/perry-runtime" }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
+serde = "1.0"
+serde_json = "1.0"
+tempfile = "3.27.0"
+thiserror = "2"
+tokio = "1"
+wasm-encoder = "0.261"
+wasmparser = "0.261"
+wasmprinter = "0.261.0"
+wasmtime = { version = "=49.0.2", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p3"] }
+wasmtime-wasi-http = { version = "=49.0.2", default-features = false, features = ["p3", "default-send-request"] }
+wit-parser = "0.261"
+
+[profile.dev]
+# https://github.com/rust-lang/rust/issues/161824
+split-debuginfo = "packed"
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.dev.package.perry-hir]
 opt-level = 1
@@ -23,34 +74,32 @@ panic = "abort"
 strip = true
 
 [dependencies]
-perry-parser = { git = "https://github.com/PerryTS/perry" }
-perry-hir = { git = "https://github.com/PerryTS/perry" }
-swc_ecma_visit = "19.0"
-swc_common = "18.0"
-swc_ecma_transforms_base = "32.0"
-wasm-encoder = { version = "0.261", features = ["wasmparser"] }
-wasmparser = "0.261"
-wit-parser = { version = "0.261" }
+perry-codegen = { path = "crates/perry-codegen" }
+perry-lower = { path = "crates/perry-lower" }
+perry-mir.workspace = true
+pliron.workspace = true
+perry-parser.workspace = true
+wasm-encoder = { workspace = true, features = ["wasmparser"] }
+wasmparser.workspace = true
+wit-parser.workspace = true
 wit-component = "0.261"
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 wat = "1.261.0"
-wasmprinter = "0.261.0"
-waffle = "0.3.2"
-regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search", "unicode"] }
 
 [build-dependencies]
-wasmparser = "0.261"
+wasmparser.workspace = true
 
 [dev-dependencies]
-bytes = "1"
-http = "1"
+bytes.workspace = true
+http.workspace = true
 http-body = "1"
-http-body-util = "0.1"
-wasmtime = { version = "49.0.2", default-features = false, features = ["component-model-async", "cranelift", "runtime", "std", "anyhow"] }
-wasmtime-wasi = { version = "49.0.2", default-features = false, features = ["p3"] }
-wasmtime-wasi-http = { version = "49.0.2", default-features = false, features = ["p3", "default-send-request"] }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
-tempfile = "3.27.0"
+http-body-util.workspace = true
+wasmtime = { workspace = true, features = ["component-model-async"] }
+wasmtime-wasi.workspace = true
+wasmtime-wasi-http.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
+tempfile.workspace = true
 perry-json-helper = { path = "crates/json-helper" }
+wasmprinter.workspace = true

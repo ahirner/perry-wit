@@ -30,6 +30,37 @@
             overlays = [ (import rust-overlay) ];
           };
 
+        wasmtimeVersion = "49.0.2";
+        cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        wasmtimeAsset = {
+          aarch64-darwin = { target = "aarch64-macos"; hash = "sha256-6lp5JhyqOYGbhj/YUIeUKM+QVINT4eXPm8vMTnrd8sE="; };
+          x86_64-darwin = { target = "x86_64-macos"; hash = "sha256-skUT7/9qXb6xluKgEJe6YyqLDqFWO6KXraJs6zqgZ9k="; };
+          aarch64-linux = { target = "aarch64-linux"; hash = "sha256-yhSYjG2j2SUSvZw7rWy9BrH1dDtpEannCfGm+jBjfX8="; };
+          x86_64-linux = { target = "x86_64-linux"; hash = "sha256-pNbp46WmD1J893k9Z0xIkwyAwuiXeZW4onXK0yVLkyI="; };
+        }.${system};
+        wasmtimeCli = assert cargoManifest.workspace.dependencies.wasmtime.version == "=${wasmtimeVersion}";
+          pkgs.stdenvNoCC.mkDerivation {
+            pname = "wasmtime";
+            version = wasmtimeVersion;
+            src = pkgs.fetchurl {
+              url = "https://github.com/bytecodealliance/wasmtime/releases/download/v${wasmtimeVersion}/wasmtime-v${wasmtimeVersion}-${wasmtimeAsset.target}.tar.xz";
+              inherit (wasmtimeAsset) hash;
+            };
+            nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc.cc.lib ];
+            dontBuild = true;
+            dontStrip = true;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 wasmtime "$out/bin/wasmtime"
+              runHook postInstall
+            '';
+            doInstallCheck = true;
+            installCheckPhase = ''
+              "$out/bin/wasmtime" --version | grep -F "wasmtime ${wasmtimeVersion}"
+            '';
+          };
+
         toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
@@ -57,7 +88,7 @@
         '';
 
         authoredSourceFilter = path: type:
-          !(builtins.elem (baseNameOf path) [ ".perry" "node_modules" "target" "dist" "result" ])
+          !(builtins.elem (baseNameOf path) [ ".perry" ".direnv" ".env" "node_modules" "target" "dist" "result" ])
           && pkgs.lib.cleanSourceFilter path type;
 
         # Common source filter for Rust crate builds
@@ -70,6 +101,7 @@
           (pkgs.lib.hasSuffix ".json" path) ||
           (pkgs.lib.hasSuffix ".toml" path) ||
           (pkgs.lib.hasSuffix ".lock" path) ||
+          (path == toString ./src/helpers/undefined.txt) ||
           (craneLib.filterCargoSources path type));
 
         src = pkgs.lib.cleanSourceWith {
@@ -91,7 +123,7 @@
           '';
         };
 
-        # Compiler with embedded allocation-free computation helpers
+        # Compiler with the embedded runtime and computation helpers
         perryWitBin = craneLib.buildPackage {
           inherit src cargoArtifacts;
           pname = "perry-wit";
@@ -101,7 +133,7 @@
           nativeBuildInputs = with pkgs; [ pkg-config ];
           postInstall = ''
             mkdir -p "$out/lib/perry-wit-helpers"
-            for f in search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
+            for f in runtime.wasm runtime-collectible.wasm std.wasm fs.wasm web.wasm search.wasm text.wasm fetch.wasm number.wasm json.wasm time.wasm; do
               wasm_file=$(find target -name "$f" -print -quit)
               if [ -n "$wasm_file" ]; then
                 cp "$wasm_file" "$out/lib/perry-wit-helpers/"
@@ -119,32 +151,12 @@
           cp ${perryWitBin}/lib/perry-wit-helpers/*.wasm "$out/lib/"
         '';
 
-        # Example WASIp3 component hermetically compiled using perry-wit CLI and dynamic WASI WIT
-        exampleMergeDocs = pkgs.stdenv.mkDerivation {
-          pname = "example-merge-docs";
-          version = "0.1.0";
-          inherit src;
-          nativeBuildInputs = [ perryWitBin ];
-          buildPhase = ''
-            export WASI_WIT_PATH="${wasiP3Wit}"
-            mkdir -p dist
-            perry-wit examples/merge_docs.ts \
-              --wit wit \
-              --world merge-docs \
-              -o dist/perry_merge_docs.stripped.wasm
-          '';
-          installPhase = ''
-            mkdir -p "$out/lib"
-            cp dist/perry_merge_docs.stripped.wasm "$out/lib/"
-          '';
-        };
-
         # Example task component with canonical WIT exports
         exampleMergeTask = pkgs.stdenv.mkDerivation {
           pname = "example-merge-task";
           version = "0.1.0";
           inherit src;
-          nativeBuildInputs = [ perryWitBin pkgs.wasmtime ];
+          nativeBuildInputs = [ perryWitBin wasmtimeCli ];
           buildPhase = ''
             export HOME="$TMPDIR"
             export WASMTIME_CACHE_ENABLED=false
@@ -196,7 +208,7 @@
         mkSdkShell = { wit ? "wit", world ? null, entry ? "src/index.ts", ... }:
           pkgs.mkShell {
             name = "perry-wit-sdk";
-            packages = [ perryWitBin pkgs.nodejs pkgs.typescript pkgs.wasmtime pkgs.wasm-tools ];
+            packages = [ perryWitBin pkgs.nodejs pkgs.typescript wasmtimeCli pkgs.wasm-tools ];
             WASI_WIT_PATH = wasiP3Wit;
             shellHook = ''
               ${perryWitBin}/bin/perry-wit gen-types --no-tsconfig \
@@ -219,7 +231,7 @@
 
         # Check: Verify template component builds and can be invoked directly
         checkTemplate = pkgs.runCommand "check-template-component" {
-          nativeBuildInputs = [ pkgs.wasmtime ];
+          nativeBuildInputs = [ wasmtimeCli ];
         } ''
           export HOME="$TMPDIR"
           export WASMTIME_CACHE_ENABLED=false
@@ -247,10 +259,10 @@
           default = perryWitBin;
           perry-wit = perryWitBin;
           core-helpers = coreHelpers;
-          example-merge-docs = exampleMergeDocs;
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
           wasi-wit = wasiP3Wit;
+          wasmtime = wasmtimeCli;
         };
 
         lib = {
@@ -262,14 +274,14 @@
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
           };
-          inherit coreHelpers exampleMergeDocs exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
+          inherit coreHelpers exampleMergeTask perryWitBin templateComponent checkTemplate sdkSyncCheck;
         };
 
         devShells.default = pkgs.mkShell {
           name = "perry-wit-dev";
           packages = [
             toolchain
-            pkgs.wasmtime
+            wasmtimeCli
             pkgs.wasm-tools
             pkgs.nodejs
             pkgs.typescript
@@ -280,6 +292,8 @@
           WASI_WIT_PATH = wasiP3Wit;
 
           shellHook = ''
+            export CARGO_TARGET_DIR="$PWD/target"
+            export PERRY_HELPER_TARGET_DIR="$CARGO_TARGET_DIR/embedded-helpers"
             if [ -d wit ] && [ ! -e wit/deps ]; then
               ln -sfn "${wasiP3Wit}" wit/deps
             fi

@@ -3,7 +3,7 @@ use std::fmt::{self, Display};
 
 use serde::{Deserialize, Serialize};
 
-pub const INPUTS: [f64; 24] = [
+pub(crate) const INPUTS: [f64; 24] = [
     -0.0,
     0.0,
     -1.0,
@@ -29,8 +29,8 @@ pub const INPUTS: [f64; 24] = [
     8640000000000001.0,
     -8640000000000001.0,
 ];
-pub const FIXTURE: &str = "é\0abc";
-pub const WIT: &str = "package test:generated; world generated {
+pub(crate) const FIXTURE: &str = "é\0abc";
+pub(crate) const WIT: &str = "package test:generated; world generated {
     record observation { value: f64, trace: list<f64> }
     export run: func(x: f64) -> observation;
 }";
@@ -54,6 +54,10 @@ pub enum Number {
     EncodedLength(Box<Text>, Box<Self>, Box<Self>),
     JsonLength(Box<Text>),
     JsonStoredLength(Box<Text>),
+    TypedJson(Box<Self>),
+    ByteAlias(Box<Self>, Box<Self>),
+    ClosedLoop(Box<Self>, u8),
+    Handled(Box<Self>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,8 +117,11 @@ pub enum Form {
     Local,
     Branch,
     Loop,
+    InertException,
     Timer,
     StoredTimer,
+    FirstCompletion,
+    LastCompletion,
     FileRead,
     FileRoundTrip,
     FileMetadata,
@@ -124,13 +131,24 @@ pub enum Form {
 }
 
 impl Form {
-    pub const ALL: [Self; 4] = [Self::Direct, Self::Local, Self::Branch, Self::Loop];
+    /// The metamorphic forms of a direct program; [Form::Direct] comes first.
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Direct,
+        Self::Local,
+        Self::Branch,
+        Self::Loop,
+        Self::InertException,
+        Self::FirstCompletion,
+        Self::LastCompletion,
+    ];
 
-    pub fn is_async(self) -> bool {
+    pub(crate) fn is_async(self) -> bool {
         matches!(
             self,
             Self::Timer
                 | Self::StoredTimer
+                | Self::FirstCompletion
+                | Self::LastCompletion
                 | Self::FileRead
                 | Self::FileRoundTrip
                 | Self::FileMetadata
@@ -148,9 +166,9 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn source(&self) -> String {
+    pub(crate) fn source(&self) -> String {
         let expression = &self.expression;
-        let fixture = serde_json::to_string(FIXTURE).unwrap();
+        let fixture = literal(FIXTURE);
         let body = match self.form {
             Form::FileByteRoundTrip => format!(
                 "const bytes = new Uint8Array([19,0,255,128,42,20]); const view = bytes.subarray(1,5); const pending = writeFile('view.bin',view); const value = {expression}; await pending; view[0] = 99; const restored = await readFile('view.bin'); if(restored.byteLength !== 4 || restored[0] !== 0 || restored[1] !== 255 || restored[2] !== 128 || restored[3] !== 42 || bytes[1] !== 99) {{throw 95;}} await writeFile('view.bin',view.subarray(2,2)); const empty = await readFile('view.bin'); if(empty.byteLength !== 0) {{throw 96;}}"
@@ -170,6 +188,16 @@ impl Program {
             Form::FileRoundTrip => format!(
                 "const value = {expression}; const text = JSON.stringify({{text:{fixture},value:value}}); if(text === undefined) {{throw 90;}} await writeFile('roundtrip.json',text); const restored = await readFile('roundtrip.json','utf8'); if(restored !== text) {{throw 92;}}"
             ),
+            Form::FirstCompletion | Form::LastCompletion => {
+                let (first_delay, second_delay) = if self.form == Form::FirstCompletion {
+                    (1, 2)
+                } else {
+                    (2, 1)
+                };
+                format!(
+                    "const input = {expression}; const first = setTimeout({first_delay}, input); const second = setTimeout({second_delay}, input); const all = Promise.all([first, second, first]); const values = await all; const value = values[0] as number; await first; await second;"
+                )
+            }
             Form::Timer => format!("const value = await setTimeout(0, {expression});"),
             Form::StoredTimer => format!(
                 "const pending = setTimeout(0, {expression}); const value = await pending; await pending;"
@@ -182,9 +210,14 @@ impl Program {
             Form::Loop => {
                 format!("let value = 0; for (let i = 0; i < 1; i++) {{ value = {expression}; }}")
             }
+            Form::InertException => {
+                format!("let value = 0; try {{ value = {expression}; }} finally {{ }}")
+            }
         };
         let import = match self.form {
-            Form::Timer | Form::StoredTimer => "import {setTimeout} from 'node:timers/promises';\n",
+            Form::Timer | Form::StoredTimer | Form::FirstCompletion | Form::LastCompletion => {
+                "import {setTimeout} from 'node:timers/promises';\n"
+            }
             Form::FileRead
             | Form::FileRoundTrip
             | Form::FileMetadata
@@ -202,10 +235,37 @@ impl Program {
             "{value:number,trace:number[]}"
         };
         format!(
-            "{import}function mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
+            "{import}{TYPED_HELPERS}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
         )
     }
 }
+
+const TYPED_HELPERS: &str = r#"
+function typedJson(value: number): number {
+    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: value, rows: [1, 2, 3] }));
+    parsed.rows[0] = 4;
+    return parsed.value === null ? 0 : parsed.value;
+}
+function byteAlias(first: number, second: number): number {
+    const bytes = new Uint8Array([first, second]);
+    const alias = bytes.subarray(1);
+    alias[0] = first;
+    return bytes[1] as number;
+}
+function closedLoop(value: number, count: number): number {
+    const state = { value: value, step: 0 };
+    for (let i = 0; i < count; i++) {
+        if (i % 2 === 0) state.value += i;
+        else state.value -= i;
+        state.step++;
+    }
+    return state.value;
+}
+function handled(value: number): number {
+    try { if (value < 0) throw value; return value; }
+    catch (error) { return error as number; }
+}
+"#;
 
 impl Display for Number {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -220,6 +280,10 @@ impl Display for Number {
             Self::Field(a, b) => write!(f, "({{first:{a}, second:{b}}}.first)"),
             Self::Length(value) => write!(f, "({value}.length)"),
             Self::Call(value) => write!(f, "identity({value})"),
+            Self::TypedJson(value) => write!(f, "typedJson({value})"),
+            Self::ByteAlias(a, b) => write!(f, "byteAlias({a}, {b})"),
+            Self::ClosedLoop(value, count) => write!(f, "closedLoop({value}, {count})"),
+            Self::Handled(value) => write!(f, "handled({value})"),
             Self::Math(op, value) => write!(f, "Math.{op}({value})"),
             Self::DateTime(value) => write!(f, "new Date({value}).getTime()"),
             Self::ByteGet(a, b, c, index) => {
@@ -270,7 +334,7 @@ impl Display for Condition {
 impl Display for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Literal(value) => f.write_str(&serde_json::to_string(value).unwrap()),
+            Self::Literal(value) => f.write_str(&literal(value)),
             Self::Concat(a, b) => write!(f, "({a} + {b})"),
             Self::Choose(c, a, b) => write!(f, "({c} ? {a} : {b})"),
             Self::Lower(value) => write!(f, "({value}.toLowerCase())"),
@@ -279,4 +343,9 @@ impl Display for Text {
             Self::Slice(value, a, b) => write!(f, "({value}.slice({a}, {b}))"),
         }
     }
+}
+
+/// The JSON text of a string or byte list, which is also its TypeScript literal.
+pub(crate) fn literal(value: &(impl Serialize + ?Sized)) -> String {
+    serde_json::to_string(value).expect("strings and byte lists always serialize to JSON")
 }

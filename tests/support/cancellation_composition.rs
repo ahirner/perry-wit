@@ -1,8 +1,5 @@
 //! Test-only composition of independently encoded application components.
 use anyhow::Result;
-pub(crate) fn compose(callee: &[u8], caller: &[u8]) -> Result<Vec<u8>> {
-    compose_with_interface(callee, caller, None)
-}
 pub(crate) fn compose_with_interface(
     callee: &[u8],
     caller: &[u8],
