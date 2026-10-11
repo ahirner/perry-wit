@@ -139,6 +139,8 @@ jobs:
     - run: nix run -L .#site
     - run: nix develop .#browser -c npm ci --prefix site --ignore-scripts --no-audit --no-fund
     - run: nix develop .#browser -c node site/check-browser.mjs
+      env:
+        DEBUG: pw:browser
     - run: |
         mkdir -p dist
         cp site/dist/downloads/perry-wit.wasm dist/
