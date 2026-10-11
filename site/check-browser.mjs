@@ -62,9 +62,8 @@ try {
       assert(!requests.some(path => /\.wasm$|\/assets\/|\.js$/.test(path)), 'Homepage must load no scripts or compiler');
       assert.equal(await page.locator('.build > li').count(), 3);
       assert.equal(await page.locator('.build details').count(), 0);
-      assert.equal(await page.locator('.build pre').innerText(), 'nix build github:ahirner/perry-wit#perry-wit');
+      assert.equal((await page.locator('.build pre').innerText()).trim(), 'nix build github:ahirner/perry-wit');
       assert.match(await page.locator('.build li').last().innerText(), /Wasm compiler.*the compiler itself/);
-      assert.equal(await page.locator('a[href$="perry-wit-interfaces.tar.gz"]').count(), 0);
       for (const href of await page.locator('.build a').evaluateAll(links => links.map(link => link.getAttribute('href')))) {
         assert((await readFile(join(directory, href))).length > 0, `Missing resource: ${href}`);
       }

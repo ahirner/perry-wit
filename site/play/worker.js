@@ -2,7 +2,7 @@ import { instantiate } from '../.generated/compiler/compiler.js';
 import { imports as compilerImports } from '../.generated/compiler-imports.js';
 import { compilerHost } from './compiler-host.js';
 import * as compilerCli from '@bytecodealliance/preview2-shim/cli';
-import { generate } from '@bytecodealliance/jco/component';
+import { $init as bindgenReady, generate } from '@bytecodealliance/jco-transpile/component';
 import { $init as toolsReady, tools } from '@perry/wasm-tools';
 import * as cli from '@bytecodealliance/preview3-shim/cli';
 import * as clocks from '@bytecodealliance/preview3-shim/clocks';
@@ -73,7 +73,7 @@ self.onmessage = async ({ data }) => {
     send('compiled', { bytes, coreSize: compiled.core.length, allocationReport: compiled.allocationReport, elapsed: performance.now() - started });
     progress('Inspecting component…');
     phase = 'inspect';
-    await toolsReady;
+    await Promise.all([toolsReady, bindgenReady]);
     const generated = await generate(bytes, { name: 'application', instantiation: { tag: 'async' }, noTypescript: true, noNodejsCompat: true, base64Cutoff: 0 });
     send('inspection', { wat: tools.print(bytes), interface: tools.componentWit(bytes) });
     const functions = callableExports(generated, await instantiateComponent(generated));

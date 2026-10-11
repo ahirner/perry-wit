@@ -136,15 +136,14 @@ jobs:
       with:
         name: cybertreiber
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - run: nix build -L .#site --out-link result-site
+    - run: nix run -L .#site
     - run: nix develop .#browser -c npm ci --prefix site --ignore-scripts --no-audit --no-fund
-    - run: nix develop .#browser -c env SITE_OUTPUT=result-site node site/check-browser.mjs
+    - run: nix develop .#browser -c node site/check-browser.mjs
     - run: |
         mkdir -p dist
-        cp result-site/downloads/perry-wit.wasm dist/
-        cp result-site/downloads/compiler.wit dist/
-        cp result-site/downloads/perry-wit-interfaces.tar.gz dist/
-        cp result-site/downloads/compiler.metadata.json dist/
+        cp site/dist/downloads/perry-wit.wasm dist/
+        cp site/dist/downloads/compiler.wit dist/
+        cp site/dist/downloads/compiler.metadata.json dist/
     - uses: actions/upload-artifact@v7
       with:
         name: perry-wit-compiler
@@ -158,7 +157,7 @@ jobs:
     - uses: actions/upload-pages-artifact@v4
       if: github.ref == 'refs/heads/main'
       with:
-        path: result-site
+        path: site/dist
 
   deploy-pages:
     needs: [site, flake-checks, conformance-and-tests]

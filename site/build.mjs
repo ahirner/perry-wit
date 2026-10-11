@@ -4,16 +4,16 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
-import { transpile } from '@bytecodealliance/jco';
+import { transpileBytes } from '@bytecodealliance/jco-transpile';
 import { compilerHost } from './play/compiler-host.js';
 import { compileRequest, decode, packagePrograms } from './play/workspace.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const repository = dirname(root);
 const compiler = process.env.PERRY_COMPILER_WASM;
-if (!compiler) throw new Error('Set PERRY_COMPILER_WASM to the combined wasm32-wasip2 compiler artifact.');
+if (!compiler) throw new Error('Run nix run .#site from the repository root to build the complete site, including its compiler.');
 const rustdoc = process.env.PERRY_RUSTDOC;
-if (!rustdoc) throw new Error('Set PERRY_RUSTDOC to the generated Rust API documentation.');
+if (!rustdoc) throw new Error('Run nix run .#site from the repository root to build the complete site, including Rust API documentation.');
 const metadata = execFileSync('python3', [join(repository, 'scripts/compiler-metadata.py'), compiler], { encoding: 'utf8' });
 const packageVersion = JSON.parse(metadata).version;
 const contract = await readFile(join(repository, 'wit/compiler/world.wit'), 'utf8');
@@ -31,9 +31,9 @@ await mkdir(join(output, 'play/assets/compiler'), { recursive: true });
 await mkdir(join(output, 'downloads'), { recursive: true });
 for (const file of ['index.html', 'style.css', 'play/index.html', 'play/app.js', 'play/workspace.js']) await cp(join(root, file), join(output, file));
 const footer = (await readFile(join(root, 'footer.html'), 'utf8')).trim();
-for (const [page, path] of [['index.html', './'], ['play/index.html', '../']]) {
+for (const page of ['index.html', 'play/index.html']) {
   const html = await readFile(join(output, page), 'utf8');
-  await writeFile(join(output, page), html.replace('<!-- footer -->', footer.replaceAll('{{root}}', path).replaceAll('{{version}}', packageVersion)));
+  await writeFile(join(output, page), html.replace('<!-- footer -->', footer.replaceAll('{{version}}', packageVersion)));
 }
 await cp(compiler, join(output, 'downloads/perry-wit.wasm'));
 await cp(join(repository, 'wit/compiler/world.wit'), join(output, 'downloads/compiler.wit'));
@@ -41,20 +41,14 @@ await writeFile(join(output, 'downloads/compiler.metadata.json'), metadata);
 await cp(rustdoc, join(output, 'rust'), { recursive: true });
 await writeFile(join(output, '.nojekyll'), '');
 
-const bindings = await transpile(await readFile(compiler), { name: 'compiler', instantiation: 'async', base64Cutoff: 0, nodejsCompat: false });
+const bindings = await transpileBytes(await readFile(compiler), { name: 'compiler', instantiation: 'async', base64Cutoff: 0, nodejsCompat: false, noComponentErrorWrapping: false });
 for (const [name, contents] of Object.entries(bindings.files)) {
   const target = join(generated, 'compiler', name);
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, contents);
   if (name.endsWith('.wasm')) await writeFile(join(output, 'play/assets/compiler', name), contents);
-  if (name.endsWith('.d.ts')) {
-    const destination = join(output, 'downloads', name);
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, contents);
-  }
 }
 await writeFile(join(generated, 'compiler-imports.js'), `export const imports = ${JSON.stringify(bindings.imports)};\n`);
-execFileSync('tar', ['-czf', join(output, 'downloads/perry-wit-interfaces.tar.gz'), '-C', join(output, 'downloads'), 'compiler.d.ts', 'interfaces']);
 
 const vendor = dirname(fileURLToPath(import.meta.resolve('@bytecodealliance/jco-transpile/component')));
 for (const name of await readdir(vendor)) if (name.endsWith('.wasm')) await cp(join(vendor, name), join(output, 'play/assets/engine', name));
@@ -87,7 +81,7 @@ for (const program of packagePrograms(exampleFiles)) {
   const files = new Map([...exampleFiles].filter(([name]) => name.startsWith(program.root + '/')));
   const request = compileRequest(files, program.entry, program.wit, program.world);
   const compiled = api.compile(request.program, request.wit, request.options);
-  const generated = await transpile(compiled.component.stripped, { name: 'example', instantiation: 'async', noTypescript: true, nodejsCompat: false });
+  const generated = await transpileBytes(compiled.component.stripped, { name: 'example', instantiation: 'async', emitTypescriptDeclarations: false, nodejsCompat: false, noComponentErrorWrapping: false });
   const exports = generated.exports.filter(([, type]) => type === 'function').map(([name]) => name).sort();
   if (program.export && !exports.includes(program.export)) throw new Error(`${program.id}: default function ${program.export} is not exported`);
   examples.push({ ...program, exports, files: [...files].map(([name, bytes]) => [name, name.endsWith('.wasm') ? [...bytes] : decode(bytes)]) });
@@ -99,7 +93,7 @@ for (const program of packagePrograms(exampleFiles)) {
 }
 await writeFile(join(output, 'play/examples.json'), JSON.stringify(examples));
 
-const packages = ['@bytecodealliance/jco', '@bytecodealliance/jco-transpile', '@bytecodealliance/preview2-shim', '@bytecodealliance/preview3-shim'];
+const packages = ['@bytecodealliance/jco-transpile', '@bytecodealliance/preview2-shim', '@bytecodealliance/preview3-shim'];
 let notices = 'Perry-WIT Wasm compiler and browser runtime distribution\n\n';
 notices += await readFile(join(repository, 'LICENSE'), 'utf8');
 notices += '\nPerry HIR (upstream revision pinned in Cargo.toml)\n';

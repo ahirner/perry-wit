@@ -57,6 +57,7 @@ Compiler API `perry:compiler/api@0.1.0` exposes the same content-based operation
 ```sh
 nix build .#perry-wit-wasm  # result/lib/perry-wit.wasm
 nix build .#site           # static homepage, playground, downloads, sizes.json
+nix run .#site             # build and update site/dist for the existing local preview
 ```
 
 The same compiler component exposes the byte API and `wasi:cli/run`. Its host interface is

@@ -188,7 +188,7 @@
           npmRoot = "site";
           npmDeps = pkgs.fetchNpmDeps {
             src = pkgs.lib.cleanSourceWith { src = ./site; filter = authoredSourceFilter; };
-            hash = "sha256-R1/iO5IMpTTIOC9alj3h7qi9buRAz/V+zcAFp/CbIiI=";
+            hash = "sha256-TtHGWMCM3i57L3BPFptDXSZvDboAWDVkdLC+MiNc9xk=";
           };
           npmFlags = [ "--ignore-scripts" ];
           nativeBuildInputs = [ wasmtimeCli pkgs.python3 pkgs.wasm-tools ];
@@ -324,6 +324,28 @@
           wasmtime = wasmtimeCli;
         };
 
+        apps.site = {
+          type = "app";
+          meta.description = "Build the site and update site/dist for the local preview";
+          program = "${pkgs.writeShellApplication {
+            name = "build-site";
+            runtimeInputs = [ pkgs.rsync ];
+            text = ''
+              if [[ ! -f site/build.mjs || ! -f Cargo.toml ]]; then
+                echo "Run nix run .#site from the Perry-WIT repository root." >&2
+                exit 1
+              fi
+              if [[ -L site/dist ]]; then
+                echo "site/dist must be a directory, not a symlink." >&2
+                exit 1
+              fi
+              mkdir -p site/dist
+              rsync -r --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r ${site}/ site/dist/
+              echo "Built site/dist. Refresh the existing preview to load it."
+            '';
+          }}/bin/build-site";
+        };
+
         lib = {
           inherit buildComponent mkSdkShell;
         };
@@ -376,6 +398,7 @@
     );
   in {
     packages = forAllSystems (system: perSystem.${system}.packages);
+    apps = forAllSystems (system: perSystem.${system}.apps);
     checks = forAllSystems (system: perSystem.${system}.checks);
     devShells = forAllSystems (system: perSystem.${system}.devShells);
     lib = forAllSystems (system: perSystem.${system}.lib);

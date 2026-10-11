@@ -8,7 +8,7 @@
     "test:browser": "node check-browser.mjs"
   },
   "dependencies": {
-    "@bytecodealliance/jco": "1.37.0",
+    "@bytecodealliance/jco-transpile": "0.18.0",
     "@bytecodealliance/preview2-shim": "0.28.0",
     "@bytecodealliance/preview3-shim": "0.9.0"
   },

@@ -60,21 +60,23 @@ Source files stay unchanged on disk. No run operation scrolls the page automatic
 
 # Build
 
-For a local Cargo artifact, run inside `nix develop`:
+From the repository root:
 
 ```sh
-cargo build --release --target wasm32-wasip2 --bin perry-wit
-cargo doc --release --no-deps --lib -p perry-wit
-npm ci --prefix site --ignore-scripts --no-audit --no-fund
-mkdir -p dist
-python3 scripts/compiler-metadata.py "$CARGO_TARGET_DIR/wasm32-wasip2/release/perry-wit.wasm" dist/perry-wit.wasm
-PERRY_COMPILER_WASM="$PWD/dist/perry-wit.wasm" PERRY_RUSTDOC="$CARGO_TARGET_DIR/doc" node site/build.mjs
-node --test site/test/*.test.mjs
-node site/check-api.mjs
+nix run .#site
 ```
 
-The build generates bindings from that compiler component with pinned Jco. The Preview 3
-shim runs generated application components. The compiler uses upstream dependencies and
+This builds the compiler, Rust API documentation, browser bindings, and static pages,
+runs the site unit and compiler parity tests, and replaces `site/dist` with the result.
+Refresh the existing preview afterward. No environment variables or local npm install
+are required. Unchanged Nix artifacts are reused. `nix build .#site` produces the same
+site at `result` without updating the preview directory.
+
+`nix develop` provides tools without building the compiler or documentation. CI uses
+the same `nix run .#site` command, then runs the browser checks.
+
+The build generates bindings from that compiler component with pinned `jco-transpile`.
+The Preview 3 shim runs generated application components. The compiler uses upstream dependencies and
 standard WASI 0.2 imports, with no preopened directories. The browser provides an empty
 environment and captures compiler stdout/stderr in diagnostics. Native callers retain
 upstream environment settings and output. Application imports outside the supported browser
@@ -97,10 +99,9 @@ source inputs. Metadata collection happens after linking, outside library execut
 The site rejects missing or mismatched compiler metadata and checks the extracted WIT
 exports before generating browser bindings. Downloads, bindings, and releases originate
 from this same annotated artifact. `downloads/compiler.metadata.json` records its inspected
-outer metadata. The site also publishes Rust API documentation and the interface declaration
-archive. The script-free BUILD section groups CLI, Rust, and the downloadable compiler component,
-with one Nix build command and WIT as the compiler API reference. Generated JavaScript
-declarations remain in the distribution archive. Distribution notices cover the Wasm compiler
+outer metadata. The site also publishes Rust API documentation. The script-free BUILD section
+groups CLI, Rust, and the downloadable compiler component, with one Nix build command and WIT
+as the compiler API reference. Distribution notices cover the Wasm compiler
 and browser runtime; they are linked beside the Wasm download. Both pages render the same
 footer template with the package version from the verified compiler metadata.
 
@@ -111,7 +112,7 @@ No remote fonts, editor framework, CDN, or service worker is required.
 # Checks
 
 ```sh
-nix develop .#browser -c env SITE_OUTPUT=result node site/check-browser.mjs
+nix develop .#browser -c node site/check-browser.mjs
 ```
 
 Browser checks use Playwright Chromium and WebKit. They route static files from the build
@@ -119,7 +120,7 @@ to an HTTPS repository-path URL in the browser; they do not start or modify a se
 For existing browser installations, set `CHROMIUM_EXECUTABLE` and `WEBKIT_EXECUTABLE`.
 Screenshots are written to `site/test-results/`.
 
-`check-api.mjs` calls anonymous byte-based Wasm exports with host capabilities denied.
+`check-api.mjs` calls anonymous byte-based Wasm exports with no preopened directories.
 Set `PERRY_NATIVE_COMPILER` and `PERRY_COMPILER_WASM` to additionally compare native CLI,
 Wasm CLI, core outputs, and generated SDK bytes. Wasmtime must be on `PATH`.
 
@@ -127,7 +128,7 @@ Wasm CLI, core outputs, and generated SDK bytes. Wasmtime must be on `PATH`.
 
 CI builds and checks the compiler and site on pull requests. Successful `main` builds
 deploy through GitHub Pages artifact/deployment actions. Pages write and OIDC permissions
-are confined to the deployment job. Tags publish the compiler, WIT, and declaration archive.
+are confined to the deployment job. Tags publish the compiler, WIT contract, and inspected metadata.
 
 Set the repository's Pages source to **GitHub Actions** and homepage to
 `https://ahirner.github.io/perry-wit/`. Relative asset URLs also support a future custom

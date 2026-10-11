@@ -1497,7 +1497,6 @@ name = "perry-lower"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "perry-diagnostics",
  "perry-hir",
  "perry-mir",
  "perry-parser",

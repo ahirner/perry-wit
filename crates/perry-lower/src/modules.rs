@@ -184,7 +184,7 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
 }
 
 pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
-    let mut cache = perry_diagnostics::SourceCache::new();
+    let mut cache = Default::default();
     let parsed = parse_typescript_with_cache(source, &format!("{identity}.mts"), &mut cache)
         .with_context(|| format!("Parsing {identity}"))?;
     ensure!(
