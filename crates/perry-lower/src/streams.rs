@@ -81,7 +81,7 @@ impl Loops {
         } else {
             format!(
                 r#"{{
-            const {prefix}items = {prefix}source;
+            const {prefix}items = {prefix}source.$$perryIteration();
             for (let {prefix}index = 0; {prefix}index < {prefix}items.length; {prefix}index++) {{
                 const {prefix}item = {prefix}items[{prefix}index];
                 {prefix}body();

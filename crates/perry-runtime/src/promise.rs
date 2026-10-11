@@ -4,8 +4,8 @@
 //! [REJECTED]), `status: i32` at 4 (the exception code of a rejection), the settled value's
 //! 8-byte slot at 8 (`f64` bits or a 32-bit reference; a rejection's exception object). Compiled code checks `state` before
 //! suspending, so awaiting a settled promise continues inline; otherwise the awaiting frame
-//! becomes a waiter and is queued on the task's ready list when the promise settles.
-use crate::region::{Node, current};
+//! arms a private P3 future whose completion resumes that frame.
+use crate::{host, region::current};
 use core::ptr;
 
 pub const STATE: u32 = 0;
@@ -17,13 +17,14 @@ pub const FULFILLED: u32 = 1;
 pub const REJECTED: u32 = 2;
 
 #[repr(C)]
-struct Promise {
+pub(crate) struct Promise {
     state: u32,
     status: i32,
     value: u64,
-    waiters: *mut Node,
+    waiters: *mut Observer,
     owner: *mut u8,
     references: bool,
+    cancellation_owned: bool,
 }
 
 /// A pending promise in the current task.
@@ -72,6 +73,7 @@ unsafe fn pending(promise: *mut Promise, references: u32) -> *mut u8 {
             waiters: ptr::null_mut(),
             owner: ptr::null_mut(),
             references: references != 0,
+            cancellation_owned: false,
         })
     };
     promise.cast()
@@ -97,13 +99,13 @@ pub extern "C" fn perry_promise_reuse(promise: *mut u8) -> *mut u8 {
         (*reusable).status = 0;
         (*reusable).value = 0;
         (*reusable).owner = ptr::null_mut();
+        (*reusable).cancellation_owned = false;
     }
     promise
 }
 
 fn settle(promise: *mut u8, state: u32, status: i32, value: u64) {
     let promise = promise as *mut Promise;
-    let task = current();
     // SAFETY: compiled code passes live promises of the current task.
     unsafe {
         if (*promise).state != PENDING {
@@ -120,21 +122,26 @@ fn settle(promise: *mut u8, state: u32, status: i32, value: u64) {
         let mut waiter = (*promise).waiters;
         (*promise).waiters = ptr::null_mut();
         while !waiter.is_null() {
-            let next = (*waiter).next;
-            task.push_ready_node(waiter);
+            let next = (*waiter).promise_next;
+            (*waiter).promise_next = ptr::null_mut();
+            (*waiter).promise_previous = ptr::null_mut();
+            let result = host::reaction_write((*waiter).writable, ptr::null());
+            assert_eq!(result, 0);
+            host::reaction_drop_writable((*waiter).writable);
+            (*waiter).signalled = true;
             waiter = next;
         }
     }
 }
 
-/// Fulfil `promise` with the slot bits `value` and queue its waiters.
+/// Fulfil `promise` with the slot bits `value` and signal its observers.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_promise_resolve(promise: *mut u8, value: u64) {
     settle(promise, FULFILLED, 0, value);
 }
 
 /// Reject `promise` with exception code `status`, taking the pending exception object into
-/// its value slot, and queue its waiters.
+/// its value slot, and signal its observers.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_promise_reject(promise: *mut u8, status: i32) {
     let exception = core::mem::replace(&mut current().exception, ptr::null_mut());
@@ -152,22 +159,246 @@ pub(crate) extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     }
 }
 
-/// Queue `frame` when the pending `promise` settles.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8) {
-    let promise = promise as *mut Promise;
-    let node = current().node(frame);
-    // SAFETY: `promise` is live; `node` is ours. Waiters run in registration order.
-    unsafe {
-        let mut link: *mut *mut Node = &mut (*promise).waiters;
-        while !(*link).is_null() {
-            link = &mut (**link).next;
+/// Embedded observer storage in generated Wasm frames, aligned to eight bytes.
+pub use crate::layout::async_frame::OBSERVER_SIZE;
+
+/// Intrusive registrations track ownership, not runnable order. P3 selects completed reads.
+#[repr(C)]
+pub(crate) struct Observer {
+    pub(crate) frame: *mut u8,
+    pub(crate) promise: *mut Promise,
+    promise_next: *mut Observer,
+    promise_previous: *mut Observer,
+    bucket_next: *mut Observer,
+    readable: u32,
+    writable: u32,
+    signalled: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(core::mem::size_of::<Observer>() <= OBSERVER_SIZE as usize);
+
+#[repr(C)]
+pub(crate) struct Observers {
+    buckets: *mut *mut Observer,
+    capacity: usize,
+    len: usize,
+}
+impl Observers {
+    pub(crate) const fn new() -> Self {
+        Self {
+            buckets: ptr::null_mut(),
+            capacity: 0,
+            len: 0,
         }
-        *link = node;
+    }
+    unsafe fn visit(&self, mut visit: impl FnMut(*mut Observer)) {
+        for index in 0..self.capacity {
+            let mut entry = unsafe { *self.buckets.add(index) };
+            while !entry.is_null() {
+                visit(entry);
+                entry = unsafe { (*entry).bucket_next };
+            }
+        }
+    }
+    unsafe fn insert_bucket(&mut self, observer: *mut Observer) {
+        let bucket = unsafe { (*observer).readable } as usize & (self.capacity - 1);
+        unsafe {
+            (*observer).bucket_next = *self.buckets.add(bucket);
+            *self.buckets.add(bucket) = observer;
+        }
+        self.len += 1;
+    }
+    unsafe fn insert(&mut self, observer: *mut Observer) {
+        if self.len == self.capacity {
+            let capacity = (self.len * 2).max(8);
+            let buckets = current()
+                .allocate(capacity * core::mem::size_of::<*mut Observer>())
+                .cast::<*mut Observer>();
+            unsafe { ptr::write_bytes(buckets, 0, capacity) };
+            let old = core::mem::replace(&mut self.buckets, buckets);
+            let old_capacity = core::mem::replace(&mut self.capacity, capacity);
+            self.len = 0;
+            for index in 0..old_capacity {
+                let mut entry = unsafe { *old.add(index) };
+                while !entry.is_null() {
+                    let next = unsafe { (*entry).bucket_next };
+                    unsafe { self.insert_bucket(entry) };
+                    entry = next;
+                }
+            }
+        }
+        unsafe { self.insert_bucket(observer) };
+    }
+    unsafe fn remove(&mut self, handle: u32) -> *mut Observer {
+        if self.len == 0 {
+            return ptr::null_mut();
+        }
+        let bucket = handle as usize & (self.capacity - 1);
+        let mut link = unsafe { self.buckets.add(bucket) };
+        unsafe {
+            while !(*link).is_null() {
+                let observer = *link;
+                if (*observer).readable == handle {
+                    *link = (*observer).bucket_next;
+                    self.len -= 1;
+                    return observer;
+                }
+                link = &mut (*observer).bucket_next;
+            }
+        }
+        ptr::null_mut()
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub(crate) unsafe fn trace(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
+        for index in 0..self.capacity {
+            let mut entry = unsafe { *self.buckets.add(index) };
+            unsafe {
+                while !entry.is_null() {
+                    roots.extend([(*entry).frame, (*entry).promise.cast()]);
+                    entry = (*entry).bucket_next;
+                }
+            }
+        }
     }
 }
 
-/// Frame kind of runtime combinators; `drive` passes such frames to [perry_combinator_step].
+/// Arm one P3 completion event in observer storage owned by the suspended frame.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8, storage: *mut u8) {
+    let promise = promise.cast::<Promise>();
+    let observer = storage.cast::<Observer>();
+    // SAFETY: storage belongs to a suspended frame and has no active registration.
+    unsafe {
+        assert_eq!((*promise).state, PENDING);
+        let pair = host::reaction_new();
+        observer.write(Observer {
+            frame,
+            promise,
+            promise_next: (*promise).waiters,
+            promise_previous: ptr::null_mut(),
+            bucket_next: ptr::null_mut(),
+            readable: pair as u32,
+            writable: (pair >> 32) as u32,
+            signalled: false,
+        });
+        if !(*promise).waiters.is_null() {
+            (*(*promise).waiters).promise_previous = observer;
+        }
+        (*promise).waiters = observer;
+        current().observers.insert(observer);
+        assert_eq!(
+            host::reaction_read((*observer).readable, ptr::null_mut()),
+            host::BLOCKED
+        );
+        crate::io::perry_task_join((*observer).readable);
+    }
+}
+
+/// Consume a P3 future event, returning exactly the frame whose read completed.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn perry_promise_event(event: u32, handle: u32) -> *mut u8 {
+    if event != host::EVENT_FUTURE_READ {
+        return ptr::null_mut();
+    }
+    // SAFETY: registered frames stay rooted until their completion event is consumed.
+    unsafe {
+        let observer = current().observers.remove(handle);
+        if observer.is_null() {
+            return ptr::null_mut();
+        }
+        assert!((*observer).signalled);
+        host::reaction_drop_readable(handle);
+        let frame = (*observer).frame;
+        if *frame.cast::<u32>() == COMBINATOR_KIND {
+            let combinator = &mut *frame.cast::<Combinator>();
+            combinator.completed = (*observer).promise;
+        }
+        frame
+    }
+}
+
+/// Completed combinators own cancellation of losing operations, including nested awaits.
+pub(crate) fn prepare_cancellation() {
+    unsafe {
+        current().observers.visit(|observer| {
+            let frame = (*observer).frame;
+            if *frame.cast::<u32>() == COMBINATOR_KIND
+                && (*(*(frame.cast::<Combinator>())).result.cast::<Promise>()).state != PENDING
+            {
+                (*(*observer).promise).cancellation_owned = true;
+            }
+        });
+        loop {
+            let mut changed = false;
+            current().observers.visit(|observer| {
+                let frame = (*observer).frame;
+                if *frame.cast::<u32>() != COMBINATOR_KIND {
+                    // The generated frame's result promise is the third Wasm32 word.
+                    #[cfg(target_arch = "wasm32")]
+                    let result = *frame
+                        .add(crate::layout::async_frame::PROMISE as usize)
+                        .cast::<*mut Promise>();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let result: *mut Promise = ptr::null_mut();
+                    if !result.is_null()
+                        && (*result).cancellation_owned
+                        && !(*(*observer).promise).cancellation_owned
+                    {
+                        (*(*observer).promise).cancellation_owned = true;
+                        changed = true;
+                    }
+                }
+            });
+            if !changed {
+                break;
+            }
+        }
+    }
+}
+
+pub(crate) unsafe fn cancellation_owned(promise: *mut u8) -> bool {
+    unsafe { (*promise.cast::<Promise>()).cancellation_owned }
+}
+
+pub(crate) fn cancel_observers() {
+    // SAFETY: cancellation acknowledges reads before freeing their owning frames.
+    unsafe {
+        for bucket in 0..current().observers.capacity {
+            loop {
+                let observer = *current().observers.buckets.add(bucket);
+                if observer.is_null() {
+                    break;
+                }
+                current().observers.remove((*observer).readable);
+                let promise = (*observer).promise;
+                if !(*observer).signalled {
+                    let previous = (*observer).promise_previous;
+                    let next = (*observer).promise_next;
+                    if previous.is_null() {
+                        (*promise).waiters = next;
+                    } else {
+                        (*previous).promise_next = next;
+                    }
+                    if !next.is_null() {
+                        (*next).promise_previous = previous;
+                    }
+                }
+                if !(*observer).signalled {
+                    assert_eq!(host::reaction_write((*observer).writable, ptr::null()), 0);
+                    host::reaction_drop_writable((*observer).writable);
+                }
+                host::waitable_join((*observer).readable, 0);
+                host::reaction_cancel_read((*observer).readable);
+                host::reaction_drop_readable((*observer).readable);
+            }
+        }
+    }
+}
+
+/// Frame kind of runtime combinators; the P3 dispatcher passes such frames to [perry_combinator_step].
 pub const COMBINATOR_KIND: u32 = u32::MAX;
 
 const ALL: u32 = 0;
@@ -182,7 +413,9 @@ struct Combinator {
     mode: u32,
     result: *mut u8,
     inputs: *mut u8,
-    registered: u32,
+    remaining: u32,
+    initialized: bool,
+    completed: *mut Promise,
     pin: u32,
     references: bool,
 }
@@ -201,7 +434,24 @@ fn combine(mode: u32, inputs: *mut u8, collectible: bool, references: bool) -> *
     } else {
         perry_promise_new()
     };
-    let size = core::mem::size_of::<Combinator>();
+    let count = unsafe { *(inputs as *const u32) };
+    let snapshot = if collectible {
+        crate::array::perry_array_new_collectible(count, 1)
+    } else {
+        crate::array::perry_array_new(count)
+    };
+    let mut pending = 0;
+    unsafe {
+        let data = *snapshot.add(crate::array::DATA as usize).cast::<*mut u64>();
+        for index in 0..count {
+            let promise = input(inputs, index);
+            *data.add(index as usize) = promise as usize as u64;
+            pending += usize::from((*promise).state == PENDING);
+        }
+        *snapshot.cast::<u32>() = count;
+    }
+    let inputs = snapshot;
+    let size = core::mem::size_of::<Combinator>() + pending * core::mem::size_of::<Observer>();
     let frame = if collectible {
         static SHAPE: [u32; 4] = [
             0,
@@ -226,7 +476,9 @@ fn combine(mode: u32, inputs: *mut u8, collectible: bool, references: bool) -> *
             mode,
             result,
             inputs,
-            registered: 0,
+            remaining: 0,
+            initialized: false,
+            completed: ptr::null_mut(),
             pin,
             references,
         })
@@ -283,63 +535,112 @@ pub(crate) extern "C" fn perry_combinator_step(frame: *mut u8) {
     unsafe {
         let combinator = &mut *frame;
         let count = *(combinator.inputs as *const u32);
-        let pending = (0..count).any(|index| (*input(combinator.inputs, index)).state == PENDING);
-        if (*(combinator.result as *mut Promise)).state == PENDING {
-            for index in 0..count {
-                let promise = input(combinator.inputs, index);
-                match ((*promise).state, combinator.mode) {
-                    (REJECTED, ALL | RACE) => {
-                        reject_with(combinator.result, promise);
-                        break;
-                    }
-                    (FULFILLED, RACE) => {
-                        perry_promise_resolve(combinator.result, (*promise).value);
-                        break;
-                    }
-                    _ => {}
-                }
+        if combinator.initialized {
+            assert!(combinator.remaining != 0);
+            combinator.remaining -= 1;
+            if (*(combinator.result as *mut Promise)).state == PENDING {
+                settle_combinator(combinator, combinator.completed);
             }
-            if !pending
-                && combinator.mode != RACE
-                && (*(combinator.result as *mut Promise)).state == PENDING
-            {
-                let values = if combinator.pin != 0 {
-                    crate::array::perry_array_new_collectible(
-                        count,
-                        u32::from(combinator.mode == ALL_SETTLED || combinator.references),
-                    )
-                } else {
-                    crate::array::perry_array_new(count)
-                };
-                let data = *(values.add(crate::array::DATA as usize) as *const *mut u64);
-                for index in 0..count {
-                    let promise = input(combinator.inputs, index);
-                    *data.add(index as usize) = if combinator.mode == ALL_SETTLED {
-                        promise as usize as u64
-                    } else {
-                        (*promise).value
-                    };
-                }
-                *(values as *mut u32) = count;
-                perry_promise_resolve(combinator.result, values as usize as u64);
-            }
-        }
-        let settled = (*(combinator.result as *mut Promise)).state != PENDING;
-        if settled && (combinator.registered == 0 || !pending) {
-            if combinator.pin != 0 {
-                crate::roots::perry_gc_unpin(combinator.pin);
-                combinator.pin = 0;
-            }
-            return;
-        }
-        if combinator.registered == 0 {
-            combinator.registered = 1;
+            combinator.completed = ptr::null_mut();
+        } else {
+            combinator.initialized = true;
             for index in 0..count {
                 let promise = input(combinator.inputs, index);
                 if (*promise).state == PENDING {
-                    perry_promise_wait(promise as *mut u8, frame as *mut u8);
+                    let observers = frame.add(1).cast::<Observer>();
+                    perry_promise_wait(
+                        promise.cast(),
+                        frame.cast(),
+                        observers.add(combinator.remaining as usize).cast(),
+                    );
+                    combinator.remaining += 1;
+                } else if (*(combinator.result as *mut Promise)).state == PENDING {
+                    settle_combinator(combinator, promise);
                 }
             }
         }
+        let pending = combinator.remaining != 0;
+        if !pending
+            && combinator.mode != RACE
+            && (*(combinator.result as *mut Promise)).state == PENDING
+        {
+            let values = if combinator.pin != 0 {
+                crate::array::perry_array_new_collectible(
+                    count,
+                    u32::from(combinator.mode == ALL_SETTLED || combinator.references),
+                )
+            } else {
+                crate::array::perry_array_new(count)
+            };
+            let data = *(values.add(crate::array::DATA as usize) as *const *mut u64);
+            for index in 0..count {
+                let promise = input(combinator.inputs, index);
+                *data.add(index as usize) = if combinator.mode == ALL_SETTLED {
+                    promise as usize as u64
+                } else {
+                    (*promise).value
+                };
+            }
+            *(values as *mut u32) = count;
+            perry_promise_resolve(combinator.result, values as usize as u64);
+        }
+        let settled = (*(combinator.result as *mut Promise)).state != PENDING;
+        if settled && !pending && combinator.pin != 0 {
+            crate::roots::perry_gc_unpin(combinator.pin);
+            combinator.pin = 0;
+        }
+    }
+}
+
+unsafe fn settle_combinator(combinator: &Combinator, promise: *mut Promise) {
+    unsafe {
+        match ((*promise).state, combinator.mode) {
+            (REJECTED, ALL | RACE) => reject_with(combinator.result, promise),
+            (FULFILLED, RACE) => perry_promise_resolve(combinator.result, (*promise).value),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RuntimeInstance, region};
+
+    #[test]
+    fn embedded_observers_allocate_only_amortized_handle_buckets() {
+        RuntimeInstance::default().enter(|| {
+            region::perry_task_enter();
+            let promise = perry_promise_new();
+            let count = 10_000;
+            let stride = (16 + core::mem::size_of::<Observer>()).next_multiple_of(8);
+            let frames = current().allocate(stride * count);
+            let before = current().allocations;
+            for index in 0..count {
+                unsafe {
+                    let frame = frames.add(index * stride);
+                    frame.cast::<u32>().write(0);
+                    perry_promise_wait(promise, frame, frame.add(16));
+                }
+            }
+            let allocations = current().allocations - before;
+            assert_eq!(allocations, 12, "one table growth per capacity doubling, no per-observer allocations");
+            println!("{count} embedded observers: {allocations} table-buffer allocations, zero reaction-node allocations");
+            perry_promise_resolve(promise, 7);
+            perry_promise_resolve(promise, 8);
+            let events = host::mock::completed_reactions();
+            assert_eq!(events.len(), count);
+            for (index, handle) in events.into_iter().enumerate() {
+                assert_eq!(perry_promise_event(host::EVENT_FUTURE_READ, handle), unsafe {frames.add(index * stride)});
+                assert!(perry_promise_event(host::EVENT_FUTURE_READ, handle).is_null());
+            }
+            assert!(current().observers.is_empty());
+            let pending = perry_promise_new();
+            perry_promise_wait(pending, frames, unsafe {frames.add(16)});
+            region::perry_task_cancel();
+            assert!(current().observers.is_empty());
+            host::mock::with(|host| assert!(host.reactions.iter().all(|&(readable,writable,_)| !readable && !writable)));
+            region::perry_task_free();
+        });
     }
 }

@@ -12,7 +12,13 @@ pub use crate::layout::array::*;
 const MIN_CAPACITY: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
-const _: () = assert!(core::mem::size_of::<Array>() == 16);
+const _: () = {
+    assert!(core::mem::size_of::<Array>() == 16);
+    assert!(core::mem::offset_of!(Array, len) == LEN as usize);
+    assert!(core::mem::offset_of!(Array, cap) == CAP as usize);
+    assert!(core::mem::offset_of!(Array, data) == DATA as usize);
+    assert!(core::mem::offset_of!(Array, source) == SOURCE as usize);
+};
 
 #[repr(C)]
 struct Array {

@@ -4,6 +4,8 @@
 //! replacing them with linked and relocated functions from the embedded `#![no_std]` Rust
 //! libraries: `perry-runtime` and the computation helpers.
 
+pub(crate) mod raw;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};

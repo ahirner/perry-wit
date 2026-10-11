@@ -121,7 +121,7 @@ impl FunctionLowering<'_, '_> {
                 );
                 let field = self.state.data.string(&set.field(ctx));
                 let field = self.i32_const(ctx, field as i32);
-                self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
+                self.json_source_write(ctx, source, field);
             }
             self.store(ctx, kind, operands[0], offset, operands[1]);
             return Ok(true);
@@ -211,7 +211,7 @@ impl FunctionLowering<'_, '_> {
             if self.state.json_provenance {
                 let source = self.load(ctx, MemKind::I32, array, layout::SOURCE);
                 let field = self.i32_const(ctx, 0);
-                self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
+                self.json_source_write(ctx, source, field);
             }
             let data = self.load(ctx, MemKind::I32, array, layout::DATA);
             let address = self.slot_address(ctx, data, i);
@@ -260,6 +260,16 @@ impl FunctionLowering<'_, '_> {
         self.num(ctx, NumOpcode::I32Add, vec![data, offset])
     }
 
+    fn json_source_write(&mut self, ctx: &mut Context, source: Value, field: Value) {
+        let write = self.new_block(ctx, vec![]);
+        let done = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, source, (write, vec![]), (done, vec![]));
+        self.block = write;
+        self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
+        self.br(ctx, done, vec![]);
+        self.block = done;
+    }
+
     /// Append `value` to `array`, growing it through the runtime when full.
     pub(crate) fn push(
         &mut self,
@@ -272,7 +282,7 @@ impl FunctionLowering<'_, '_> {
         if self.state.json_provenance {
             let source = self.load(ctx, MemKind::I32, array, layout::SOURCE);
             let field = self.i32_const(ctx, 0);
-            self.runtime_void(ctx, Runtime::StdJsonSourceWrite, vec![source, field]);
+            self.json_source_write(ctx, source, field);
         }
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);

@@ -245,6 +245,8 @@ impl FunctionBuilder<'_> {
 
         self.switch_to(header);
         match condition {
+            Some(Expr::Bool(true)) => self.jump(ctx, body_block),
+            Some(Expr::Bool(false)) => self.jump(ctx, exit),
             Some(condition) => {
                 let condition = self.condition(ctx, condition)?;
                 self.branch(ctx, condition, body_block, exit);

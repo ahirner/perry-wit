@@ -54,6 +54,7 @@ pub(super) struct Reader {
     pub(super) strings: *mut u8,
     pub(super) string_used: u32,
     pub(super) pooled: bool,
+    pub(super) cached_bytes: u32,
 }
 impl core::ops::Deref for Reader {
     type Target = pull::Cursor<'static>;
@@ -96,6 +97,7 @@ pub(crate) unsafe extern "C" fn std_json_read_begin(text: *mut u8) -> *mut u8 {
             strings: core::ptr::null_mut(),
             string_used: 64,
             pooled: true,
+            cached_bytes: 0,
         })
     };
     r as *mut u8
@@ -218,12 +220,13 @@ pub(crate) extern "C" fn std_json_read_string(r: *mut u8) -> *mut u8 {
                 // SAFETY: valid UTF-8 between quotes of the input text, which `r.text` owns.
                 unsafe {
                     if r.pooled {
-                        const HEADER: usize = (20 + 3 * core::mem::size_of::<usize>())
-                            .next_multiple_of(core::mem::align_of::<usize>());
+                        const HEADER: usize =
+                            core::mem::size_of::<crate::runtime::layout::string::Header>();
                         static SHAPE: [u32; 3] = [
                             HEADER as u32,
                             1,
-                            (8 + 2 * core::mem::size_of::<usize>()) as u32,
+                            core::mem::offset_of!(crate::runtime::layout::string::Header, owner)
+                                as u32,
                         ];
                         if r.string_used == 64 {
                             r.strings = crate::runtime::alloc_shaped((HEADER * 64) as u32, &SHAPE);
@@ -403,12 +406,12 @@ pub(super) fn lookup(table: &[u8], hint: u32, key: &[u8]) -> i32 {
 }
 
 pub(super) fn table_number(table: &[u8], at: usize) -> u32 {
-    table[at..at + 5]
-        .iter()
-        .enumerate()
-        .fold(0, |value, (i, digit)| {
-            value | (u32::from(*digit) << (i * 7))
-        })
+    let digits = &table[at..at + 5];
+    u32::from(digits[0])
+        | (u32::from(digits[1]) << 7)
+        | (u32::from(digits[2]) << 14)
+        | (u32::from(digits[3]) << 21)
+        | (u32::from(digits[4]) << 28)
 }
 
 pub(super) fn table_key(table: &[u8], index: u32) -> &[u8] {
@@ -515,7 +518,7 @@ pub(crate) unsafe extern "C" fn std_json_read_variant(r: *mut u8, table: *mut u8
     let mut tag = None;
     r.payload = u32::MAX;
     while let Some(member) = crate::json_source::next_member(r) {
-        match unsafe { crate::runtime::bytes(member.key) } {
+        match crate::json_source::key_bytes(&member) {
             b"tag" => tag = Some(member.start as u32),
             b"val" => r.payload = member.start as u32,
             _ => {}

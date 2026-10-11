@@ -1,5 +1,6 @@
 //! In-process WIT embedding and WebAssembly component encoding.
 
+pub(crate) mod reactions;
 pub mod wit;
 
 use std::path::Path;
@@ -27,8 +28,14 @@ pub(crate) fn encode_resolved(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
 ) -> Result<Vec<u8>> {
-    let mut core = core_wasm.to_vec();
-    embed_component_metadata(&mut core, resolve, world, StringEncoding::UTF8, false)
+    let signals = reactions::uses_signals(core_wasm)?;
+    let (mut core, resolve) = if signals {
+        let (core, resolve) = reactions::prepare(core_wasm, resolve, world)?;
+        (core, std::borrow::Cow::Owned(resolve))
+    } else {
+        (core_wasm.to_vec(), std::borrow::Cow::Borrowed(resolve))
+    };
+    embed_component_metadata(&mut core, &resolve, world, StringEncoding::UTF8, false)
         .context("embedding component metadata")?;
     let component = ComponentEncoder::default()
         .module(&core)
@@ -36,6 +43,11 @@ pub(crate) fn encode_resolved(
         .validate(true)
         .encode()
         .context("encoding component")?;
+    let component = if signals {
+        reactions::hide(&component)?
+    } else {
+        component
+    };
     crate::audit::validate_guest(&component).context("validating stackless component")?;
     Ok(component)
 }

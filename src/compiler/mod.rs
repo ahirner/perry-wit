@@ -133,7 +133,10 @@ fn compile_world(
 pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
     let mir = lower(ctx, source, file_name, &Default::default())?;
-    finish(perry_codegen::compile(ctx, &mir, &Exports::Raw)?, None)
+    link::raw::without_p3(finish(
+        perry_codegen::compile(ctx, &mir, &Exports::Raw)?,
+        None,
+    )?)
 }
 
 /// Compile a raw test module with `__perry_gc_debug(flags)` and
@@ -145,10 +148,10 @@ pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>> {
 pub fn compile_core_with_memory_checks(source: &str, file_name: &str) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
     let mir = lower(ctx, source, file_name, &Default::default())?;
-    finish(
+    link::raw::without_p3(finish(
         perry_codegen::compile(ctx, &mir, &Exports::RawChecked)?,
         None,
-    )
+    )?)
 }
 
 fn lower(

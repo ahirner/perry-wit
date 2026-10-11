@@ -32,6 +32,22 @@ mod imports {
         pub(crate) fn subtask_cancel(subtask: u32) -> u32;
     }
 
+    #[link(wasm_import_module = "[export]$root")]
+    unsafe extern "C" {
+        #[link_name = "[future-new-0]perry-internal-promise"]
+        pub(crate) fn reaction_new() -> u64;
+        #[link_name = "[async-lower][future-read-0]perry-internal-promise"]
+        pub(crate) fn reaction_read(readable: u32, value: *mut u8) -> u32;
+        #[link_name = "[async-lower][future-write-0]perry-internal-promise"]
+        pub(crate) fn reaction_write(writable: u32, value: *const u8) -> u32;
+        #[link_name = "[future-drop-readable-0]perry-internal-promise"]
+        pub(crate) fn reaction_drop_readable(readable: u32);
+        #[link_name = "[future-drop-writable-0]perry-internal-promise"]
+        pub(crate) fn reaction_drop_writable(writable: u32);
+        #[link_name = "[future-cancel-read-0]perry-internal-promise"]
+        pub(crate) fn reaction_cancel_read(readable: u32) -> u32;
+    }
+
     macro_rules! output {
         ($module:literal, $new:ident, $start:ident, $write:ident, $drop_writer:ident, $read:ident, $drop_future:ident, $cancel_write:ident, $cancel_read:ident) => {
             #[link(wasm_import_module = $module)]
@@ -193,6 +209,7 @@ pub mod mock {
         block_next: bool,
         pending: Option<(usize, *const u8, u32)>,
         joined: Vec<(u32, u32)>,
+        pub(crate) reactions: Vec<(bool, bool, bool)>,
     }
 
     pub(crate) fn with<R>(access: impl FnOnce(&mut Host) -> R) -> R {
@@ -213,6 +230,42 @@ pub mod mock {
     pub unsafe fn subtask_cancel(_: u32) -> u32 {
         3
     }
+    pub(crate) unsafe fn reaction_new() -> u64 {
+        with(|host| {
+            let handle = 1000 + host.reactions.len() as u32;
+            host.reactions.push((true, true, false));
+            u64::from(handle) | (u64::from(handle) << 32)
+        })
+    }
+    pub(crate) unsafe fn reaction_read(_: u32, _: *mut u8) -> u32 {
+        super::BLOCKED
+    }
+    pub(crate) unsafe fn reaction_write(handle: u32, _: *const u8) -> u32 {
+        with(|host| host.reactions[(handle - 1000) as usize].2 = true);
+        0
+    }
+    pub(crate) unsafe fn reaction_drop_readable(handle: u32) {
+        with(|host| host.reactions[(handle - 1000) as usize].0 = false);
+    }
+    pub(crate) unsafe fn reaction_drop_writable(handle: u32) {
+        with(|host| host.reactions[(handle - 1000) as usize].1 = false);
+    }
+    pub(crate) unsafe fn reaction_cancel_read(_: u32) -> u32 {
+        0
+    }
+    #[cfg(test)]
+    pub(crate) fn completed_reactions() -> Vec<u32> {
+        with(|host| {
+            host.reactions
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &(readable, _, done))| {
+                    (readable && done).then_some(1000 + i as u32)
+                })
+                .collect()
+        })
+    }
+
     pub(crate) unsafe fn get_environment(result: *mut u32) {
         unsafe {
             *result = 0;

@@ -233,8 +233,6 @@ fn async_export(
     {
         let mut b = FunctionLowering::glue(state, ctx, &finish);
         let uses_io = b.state.uses_io;
-        let drive = CallOp::new(ctx, crate::async_split::DRIVE, vec![], vec![]);
-        b.insert(ctx, drive.get_operation());
         if uses_io {
             b.runtime_void(ctx, Runtime::IoPump, vec![]);
         }
@@ -495,6 +493,15 @@ fn async_export(
         b.insert(ctx, ret);
         b.block = active;
         let next = b.new_block(ctx, vec![]);
+        let frame = b.runtime(ctx, Runtime::PromiseEvent, vec![event, handle]);
+        let resume = b.new_block(ctx, vec![]);
+        let host_event = b.new_block(ctx, vec![]);
+        b.cond_br(ctx, frame, (resume, vec![]), (host_event, vec![]));
+        b.block = resume;
+        let call = CallOp::new(ctx, crate::async_split::RESUME, vec![frame], vec![]);
+        b.insert(ctx, call.get_operation());
+        b.br(ctx, next, vec![]);
+        b.block = host_event;
         if b.state.uses_streams {
             // Reads of `stream<u8>`s take their stream events.
             let handled = b.runtime(ctx, Runtime::WebEvent, vec![event, handle, subtask_state]);

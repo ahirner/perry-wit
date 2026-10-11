@@ -11,7 +11,7 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
     impl VisitMut for Arguments {
         fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
             call.visit_mut_children_with(self);
-            if call.args.len() != 1
+            if (call.args.len() != 1 || call.args.iter().any(|argument| argument.spread.is_some()))
                 && let ast::Callee::Expr(callee) = &mut call.callee
                 && let ast::Expr::Member(member) = &mut **callee
                 && let ast::MemberProp::Ident(method) = &mut member.prop
@@ -64,24 +64,98 @@ fn returns_empty(statements: &[Stmt]) -> bool {
     false
 }
 
-fn exits(statements: &[Stmt]) -> bool {
-    statements.iter().any(|statement| match statement {
-        Stmt::Return(_) | Stmt::Throw(_) => true,
-        Stmt::If {
-            then_branch,
-            else_branch: Some(other),
-            ..
-        } => exits(then_branch) && exits(other),
-        Stmt::Try {
-            body,
-            catch,
-            finally,
-        } => {
-            finally.as_ref().is_some_and(|body| exits(body))
-                || (exits(body) && catch.as_ref().is_none_or(|catch| exits(&catch.body)))
+const FALLTHROUGH: u8 = 1;
+const RETURN: u8 = 2;
+const BREAK: u8 = 4;
+const CONTINUE: u8 = 8;
+const LABELLED: u8 = 16;
+
+fn completions(statements: &[Stmt]) -> u8 {
+    let mut result = FALLTHROUGH;
+    for statement in statements {
+        if result & FALLTHROUGH == 0 {
+            break;
         }
-        _ => false,
-    })
+        let next = match statement {
+            Stmt::Return(_) | Stmt::Throw(_) => RETURN,
+            Stmt::Break => BREAK,
+            Stmt::Continue => CONTINUE,
+            Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => LABELLED,
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                completions(then_branch)
+                    | else_branch
+                        .as_ref()
+                        .map_or(FALLTHROUGH, |body| completions(body))
+            }
+            Stmt::Switch { cases, .. } => {
+                let mut tail = FALLTHROUGH;
+                let mut branches = if cases.iter().any(|case| case.test.is_none()) {
+                    0
+                } else {
+                    FALLTHROUGH
+                };
+                for case in cases.iter().rev() {
+                    let body = completions(&case.body);
+                    tail = (body & !FALLTHROUGH) | if body & FALLTHROUGH != 0 { tail } else { 0 };
+                    branches |= tail;
+                }
+                (branches & !BREAK)
+                    | if branches & BREAK != 0 {
+                        FALLTHROUGH
+                    } else {
+                        0
+                    }
+            }
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+                let body = completions(body);
+                (body & (RETURN | LABELLED))
+                    | if matches!(condition, Expr::Bool(true)) && body & BREAK == 0 {
+                        0
+                    } else {
+                        FALLTHROUGH
+                    }
+            }
+            Stmt::For {
+                condition, body, ..
+            } => {
+                let body = completions(body);
+                (body & (RETURN | LABELLED))
+                    | if condition
+                        .as_ref()
+                        .is_none_or(|c| matches!(c, Expr::Bool(true)))
+                        && body & BREAK == 0
+                    {
+                        0
+                    } else {
+                        FALLTHROUGH
+                    }
+            }
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
+                let body =
+                    completions(body) | catch.as_ref().map_or(0, |catch| completions(&catch.body));
+                let final_state = finally
+                    .as_ref()
+                    .map_or(FALLTHROUGH, |body| completions(body));
+                (final_state & !FALLTHROUGH)
+                    | if final_state & FALLTHROUGH != 0 {
+                        body
+                    } else {
+                        0
+                    }
+            }
+            _ => FALLTHROUGH,
+        };
+        result = (result & !FALLTHROUGH) | next;
+    }
+    result
 }
 
 impl FunctionBuilder<'_> {
@@ -202,7 +276,7 @@ impl FunctionBuilder<'_> {
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
         let done = self.new_block(ctx, "callback_done");
-        let optional = !exits(body) || returns_empty(body);
+        let optional = completions(body) & FALLTHROUGH != 0 || returns_empty(body);
         let declared = match return_type {
             HirType::Number | HirType::String | HirType::Boolean | HirType::Union(_) => {
                 self.shapes.value_type(ctx, return_type).ok()
@@ -286,6 +360,15 @@ impl FunctionBuilder<'_> {
         let more = self.compare(ctx, CompareKind::Lt, current, limit);
         self.branch(ctx, more, body, done);
         self.switch_to(body);
+        let next = self.new_block(ctx, "array_next");
+        let available = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
+        let available = self.emit_value(ctx, |ctx| {
+            ConvertOp::new(ctx, ConvertKind::I32ToF64, available)
+        });
+        let present = self.compare(ctx, CompareKind::Lt, current, available);
+        let read = self.new_block(ctx, "array_read");
+        self.branch(ctx, present, read, next);
+        self.switch_to(read);
         let at = self.emit_value(ctx, |ctx| {
             ConvertOp::new(ctx, ConvertKind::F64ToU32, current)
         });
@@ -306,7 +389,6 @@ impl FunctionBuilder<'_> {
         allocation.get_operation().insert_before(ctx, terminator);
         let result = allocation.get_result(ctx);
         self.switch_to(append);
-        let next = self.new_block(ctx, "array_next");
         if filter {
             let keep = self.truthy(ctx, mapped)?;
             let push = self.new_block(ctx, "array_keep");
@@ -419,5 +501,87 @@ impl FunctionBuilder<'_> {
         self.jump(ctx, header);
         self.switch_to(done);
         self.load(ctx, result)
+    }
+}
+
+impl FunctionBuilder<'_> {
+    pub(super) fn array_push_spread(
+        &mut self,
+        ctx: &mut Context,
+        callee: &Expr,
+        args: &[perry_hir::CallArg],
+    ) -> Result<Value> {
+        let Expr::PropertyGet {
+            object, property, ..
+        } = callee
+        else {
+            bail!("spread calls require a dense array push receiver")
+        };
+        ensure!(
+            property == PUSH || property == "push",
+            "spread calls are supported for dense array push"
+        );
+        let receiver = self.expression(ctx, object)?;
+        let receiver = self.defined(ctx, receiver)?;
+        ensure!(
+            kind(ctx, receiver)? == Kind::Array,
+            "push requires a dense array receiver"
+        );
+        let element = self.array_element(ctx, receiver)?;
+        let values = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+        for argument in args {
+            match argument {
+                perry_hir::CallArg::Expr(expression) => {
+                    let value = self.expression_with(ctx, expression, Some(element))?;
+                    let value = self.fit(ctx, value, element)?;
+                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, values, value));
+                }
+                perry_hir::CallArg::Spread(expression) => {
+                    let source = self.expression(ctx, expression)?;
+                    let source = self.defined(ctx, source)?;
+                    ensure!(
+                        self.array_element(ctx, source)? == element,
+                        "spread elements must fit the destination array"
+                    );
+                    self.append_array(ctx, values, source)?;
+                }
+            }
+        }
+        self.append_array(ctx, receiver, values)?;
+        let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, receiver));
+        Ok(self.emit_value(ctx, |ctx| {
+            ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+        }))
+    }
+
+    fn append_array(&mut self, ctx: &mut Context, target: Value, source: Value) -> Result<()> {
+        let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, source));
+        let limit = self.emit_value(ctx, |ctx| {
+            ConvertOp::new(ctx, ConvertKind::I32ToF64, length)
+        });
+        let zero = self.number(ctx, 0.0);
+        let index = self.entry_slot(ctx, zero.get_type(ctx));
+        self.store(ctx, index, zero);
+        let header = self.new_block(ctx, "spread_header");
+        let body = self.new_block(ctx, "spread_body");
+        let done = self.new_block(ctx, "spread_done");
+        self.jump(ctx, header);
+        self.switch_to(header);
+        let current = self.load(ctx, index)?;
+        let more = self.compare(ctx, CompareKind::Lt, current, limit);
+        self.branch(ctx, more, body, done);
+        self.switch_to(body);
+        let at = self.emit_value(ctx, |ctx| {
+            ConvertOp::new(ctx, ConvertKind::F64ToU32, current)
+        });
+        let get = perry_mir::collections::ArrayAtOp::new(ctx, source, at)?;
+        let value = self.append_value(ctx, &get);
+        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, target, value));
+        let one = self.number(ctx, 1.0);
+        let advanced = self.binary(ctx, BinaryKind::Add, current, one);
+        self.store(ctx, index, advanced);
+        self.jump(ctx, header);
+        self.switch_to(done);
+        Ok(())
     }
 }

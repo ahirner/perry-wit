@@ -22,11 +22,15 @@ impl Shapes<'_> {
         let mut substitutions = HashMap::new();
         let mut actual = Vec::with_capacity(parameters.len());
         for (index, parameter) in parameters.iter().enumerate() {
-            let argument = arguments
-                .get(index)
-                .or(parameter.default.as_deref())
-                .with_context(|| format!("missing type argument {} of {base}", parameter.name))?;
-            let argument = substitute(argument, &substitutions);
+            let argument = match arguments.get(index) {
+                Some(argument) => argument.clone(),
+                None => substitute(
+                    parameter.default.as_deref().with_context(|| {
+                        format!("missing type argument {} of {base}", parameter.name)
+                    })?,
+                    &substitutions,
+                ),
+            };
             substitutions.insert(parameter.name.clone(), argument.clone());
             actual.push(argument);
         }

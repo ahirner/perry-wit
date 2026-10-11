@@ -75,13 +75,13 @@ runtime_functions! {
     TaskCloseSet = "perry_task_close_set" ();
     TaskResult = "perry_task_result" () -> I32;
     TaskSetResult = "perry_task_set_result" (I32);
-    ReadyPop = "perry_ready_pop" () -> I32;
+    PromiseEvent = "perry_promise_event" (I32, I32) -> I32;
     CombinatorStep = "perry_combinator_step" (I32);
     SubtaskRegister = "perry_subtask_register" (I32, I32, I64);
     PromiseNew = "perry_promise_new" () -> I32;
     PromiseResolve = "perry_promise_resolve" (I32, I64);
     PromiseReject = "perry_promise_reject" (I32, I32);
-    PromiseWait = "perry_promise_wait" (I32, I32);
+    PromiseWait = "perry_promise_wait" (I32, I32, I32);
     PromiseRethrow = "perry_promise_rethrow" (I32) -> I32;
     ExceptionNew = "perry_exception_new" (I32, I32, I64) -> I32;
     ExceptionRaise = "perry_exception_raise" (I32) -> I32;

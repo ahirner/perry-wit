@@ -487,8 +487,14 @@ impl FunctionLowering<'_, '_> {
                         .then_some(perry_abi::layout::record::field(index))
                 })
                 .collect();
-            offsets.push(perry_abi::layout::record::SOURCE);
-            let shape = self.pointer_shape(&offsets);
+            if self.state.json_provenance {
+                offsets.push(perry_abi::layout::record::SOURCE);
+            }
+            let shape = if offsets.is_empty() {
+                0
+            } else {
+                self.pointer_shape(&offsets)
+            };
             self.state.pointer_maps.insert(ty, shape);
             shape
         };

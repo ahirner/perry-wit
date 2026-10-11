@@ -88,6 +88,7 @@ impl FunctionBuilder<'_> {
                 let separator = self.string_operand(ctx, separator)?;
                 self.intrinsic(ctx, Intrinsic::StringSplit, vec![text, separator])
             }
+            Expr::CallSpread { callee, args, .. } => self.array_push_spread(ctx, callee, args)?,
             Expr::Call { callee, args, .. } => self
                 .call(ctx, callee, args)?
                 .context("a void call has no value")?,

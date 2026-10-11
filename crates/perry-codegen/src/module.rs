@@ -256,7 +256,7 @@ pub(crate) fn lower(
         }
     }
     if !state.async_functions.is_empty() {
-        async_split::drive(ctx, &mut state);
+        async_split::resume(ctx, &mut state);
     }
     if let Exports::Canonical { exports, .. } = exports {
         bind_exports(ctx, &mut state, &functions, exports)?;
@@ -401,8 +401,6 @@ fn async_export_wrapper(
     b.insert(ctx, call);
     let promise = call.deref(ctx).get_result(0);
     b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
-    let drive = CallOp::new(ctx, async_split::DRIVE, vec![], vec![]).get_operation();
-    b.insert(ctx, drive);
     let settled = b.load(ctx, MemKind::I32, promise, perry_runtime::promise::STATE);
     let fulfilled_state = b.i32_const(ctx, perry_runtime::promise::FULFILLED as i32);
     let rejected_state = b.i32_const(ctx, perry_runtime::promise::REJECTED as i32);

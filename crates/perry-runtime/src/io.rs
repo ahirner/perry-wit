@@ -447,6 +447,7 @@ pub(crate) extern "C" fn perry_task_subtask_event(handle: u32, state: u32) {
 /// Drop the current task's waitable set, if it has one.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_task_close_set() {
+    crate::promise::cancel_observers();
     let task = current();
     if task.set != 0 {
         // SAFETY: canonical built-in; nothing is joined any more.

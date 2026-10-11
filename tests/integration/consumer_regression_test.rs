@@ -305,3 +305,76 @@ export function run():number {
         (0.0, 0)
     );
 }
+
+#[test]
+fn generic_arguments_do_not_capture_parameter_names() {
+    let source = r#"
+interface Item { n:number }
+interface Pair<Item,Other=Item> { a:Item; b:Other }
+export function run():number {
+ const value:Pair<string,Item> = {a:'x',b:{n:17}};
+ const defaults:Pair<string> = {a:'a',b:'bc'};
+ return value.b.n + defaults.b.length;
+}
+"#;
+    assert_eq!(
+        Program::new(source).call("run", &[]).0[0].unwrap_f64(),
+        19.0
+    );
+}
+
+#[test]
+fn callbacks_return_through_switch_and_unconditional_loops() {
+    let source = r#"
+export function run():number {
+ const values:number[]=[1,2,3];
+ const a:number[]=values.map(n=>{switch(n){case 1:return 7;case 2:default:return n;}});
+ const b:number[]=values.map(n=>{while(true){return n*2;}});
+ let text='';
+ for(const scalar of 'é🙂a'){text+=scalar+':';}
+ if(text!=='é:🙂:a:')return 1;
+ return a[0]+a[1]+a[2]+b[2];
+}
+"#;
+    assert_eq!(
+        Program::new(source).call("run", &[]).0[0].unwrap_f64(),
+        18.0
+    );
+}
+
+#[test]
+fn push_spreads_snapshot_arguments_before_mutation() {
+    let source = r#"
+const a:number[]=[1,2];
+const rest:number[]=[3,4];
+function later():number {rest[0]=8;return a.length;}
+function fail():number {throw new Error('argument');}
+export function run():number {
+ if(a.push(0,...rest,later())!==6)return 1;
+ if(a[3]!==3 || a[4]!==4 || a[5]!==2)return 2;
+ if(a.push(...a)!==12 || a[9]!==3)return 3;
+ try{a.push(7,...rest,fail());}catch{}
+ if(a.length!==12)return 4;
+ const words:string[]=['é'];words.push(...'🙂,x'.split(','));
+ return words.length===3 && words[1]==='🙂' ? 0:5;
+}
+"#;
+    assert_eq!(
+        Program::checked(source, "push-spread.ts").outcome("run", &[]),
+        (0.0, 0)
+    );
+}
+
+#[test]
+fn unsupported_iterators_have_direct_diagnostics() {
+    for expression in ["new Headers()", "new URLSearchParams()"] {
+        let source = format!(
+            "export function run():number {{for(const value of {expression}){{}} return 0;}}"
+        );
+        let error = perry_wit::compile_core(&source, "iteration.ts").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("synchronous for...of requires"),
+            "{error:#}"
+        );
+    }
+}

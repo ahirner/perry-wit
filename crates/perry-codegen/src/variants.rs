@@ -1,6 +1,7 @@
 //! Compact finite variants: tag string, traced payload owner, and one eight-byte value slot.
 use crate::{FunctionLowering, Repr, Runtime, repr, slot_kind};
 use anyhow::Result;
+use perry_abi::layout::variant;
 use perry_mir::{types::VariantType, variants::admits_payload};
 use pliron::{
     context::Context,
@@ -28,8 +29,8 @@ impl FunctionLowering<'_, '_> {
             self.cond_br(ctx, either, (done, vec![same]), (present, vec![]));
             self.block = present;
         }
-        let tag_a = self.load(ctx, MemKind::I32, a, 0);
-        let tag_b = self.load(ctx, MemKind::I32, b, 0);
+        let tag_a = self.load(ctx, MemKind::I32, a, variant::TAG);
+        let tag_b = self.load(ctx, MemKind::I32, b, variant::TAG);
         let same_tag = self.num(ctx, NumOpcode::I32Eq, vec![tag_a, tag_b]);
         let same = self.new_block(ctx, vec![]);
         let no = self.i32_const(ctx, 0);
@@ -42,13 +43,13 @@ impl FunctionLowering<'_, '_> {
         let strings = self.new_block(ctx, vec![]);
         self.cond_br(ctx, is_number, (numbers, vec![]), (strings, vec![]));
         self.block = numbers;
-        let a_number = self.load(ctx, MemKind::F64, a, 8);
-        let b_number = self.load(ctx, MemKind::F64, b, 8);
+        let a_number = self.load(ctx, MemKind::F64, a, variant::VALUE);
+        let b_number = self.load(ctx, MemKind::F64, b, variant::VALUE);
         let equal = self.num(ctx, NumOpcode::F64Eq, vec![a_number, b_number]);
         self.br(ctx, done, vec![equal]);
         self.block = strings;
-        let a_string = self.load(ctx, MemKind::I32, a, 8);
-        let b_string = self.load(ctx, MemKind::I32, b, 8);
+        let a_string = self.load(ctx, MemKind::I32, a, variant::VALUE);
+        let b_string = self.load(ctx, MemKind::I32, b, variant::VALUE);
         let order = self.runtime(ctx, Runtime::StringCompare, vec![a_string, b_string]);
         let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
         self.br(ctx, done, vec![equal]);
@@ -62,7 +63,7 @@ impl FunctionLowering<'_, '_> {
         writer: Value,
         value: Value,
     ) -> Result<()> {
-        let tag = self.load(ctx, MemKind::I32, value, 0);
+        let tag = self.load(ctx, MemKind::I32, value, variant::TAG);
         let number = self.state.data.string("number");
         let number = self.i32_const(ctx, number as i32);
         let is_number = self.num(ctx, NumOpcode::I32Eq, vec![tag, number]);
@@ -71,12 +72,12 @@ impl FunctionLowering<'_, '_> {
         let done = self.new_block(ctx, vec![]);
         self.cond_br(ctx, is_number, (numbers, vec![]), (strings, vec![]));
         self.block = numbers;
-        let payload = self.load(ctx, MemKind::F64, value, 8);
+        let payload = self.load(ctx, MemKind::F64, value, variant::VALUE);
         let ty = pliron::builtin::types::FP64Type::get(ctx).into();
         self.json_value(ctx, writer, payload, ty)?;
         self.br(ctx, done, vec![]);
         self.block = strings;
-        let payload = self.load(ctx, MemKind::I32, value, 8);
+        let payload = self.load(ctx, MemKind::I32, value, variant::VALUE);
         let ty = perry_mir::types::StringType::get(ctx).into();
         self.json_value(ctx, writer, payload, ty)?;
         self.br(ctx, done, vec![]);
@@ -95,14 +96,14 @@ impl FunctionLowering<'_, '_> {
             if self.state.json_provenance {
                 perry_abi::layout::variant::SIZE as i32
             } else {
-                16
+                variant::BASE_SIZE as i32
             },
         );
         let object = if self.state.collectible {
             let shape = self.pointer_shape(if self.state.json_provenance {
-                &[4, perry_abi::layout::variant::SOURCE]
+                &[variant::OWNER, variant::SOURCE]
             } else {
-                &[4]
+                &[variant::OWNER]
             });
             let shape = self.i32_const(ctx, shape as i32);
             self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
@@ -111,12 +112,12 @@ impl FunctionLowering<'_, '_> {
         };
         let text = self.state.data.string(tag);
         let text = self.i32_const(ctx, text as i32);
-        self.store(ctx, MemKind::I32, object, 0, text);
+        self.store(ctx, MemKind::I32, object, variant::TAG, text);
         let owner = match payload {
             Some((ty, value)) if repr(ctx, ty)? == Repr::Ref => value,
             _ => self.i32_const(ctx, 0),
         };
-        self.store(ctx, MemKind::I32, object, 4, owner);
+        self.store(ctx, MemKind::I32, object, variant::OWNER, owner);
         if self.state.json_provenance {
             let zero = self.i32_const(ctx, 0);
             self.store(
@@ -128,7 +129,7 @@ impl FunctionLowering<'_, '_> {
             );
         }
         if let Some((ty, value)) = payload {
-            self.store(ctx, slot_kind(ctx, ty)?, object, 8, value);
+            self.store(ctx, slot_kind(ctx, ty)?, object, variant::VALUE, value);
         }
         Ok(object)
     }
@@ -141,7 +142,7 @@ impl FunctionLowering<'_, '_> {
         variant: TypedHandle<VariantType>,
     ) -> Result<()> {
         let cases = variant.deref(ctx).cases().to_vec();
-        let tag = self.load(ctx, MemKind::I32, value, 0);
+        let tag = self.load(ctx, MemKind::I32, value, variant::TAG);
         let ordered = if self.state.json_provenance {
             let source = self.load(ctx, MemKind::I32, value, perry_abi::layout::variant::SOURCE);
             let members = self.runtime(ctx, Runtime::StdJsonSourceBegin, vec![source]);
@@ -194,7 +195,7 @@ impl FunctionLowering<'_, '_> {
             let next = self.new_block(ctx, vec![]);
             self.cond_br(ctx, matches, (member, vec![]), (next, vec![]));
             self.block = member;
-            let slot = self.load(ctx, slot_kind(ctx, payload)?, value, 8);
+            let slot = self.load(ctx, slot_kind(ctx, payload)?, value, variant::VALUE);
             if perry_mir::optional::absence(ctx, payload).is_some_and(|a| a.admits_undefined()) {
                 let absent = self.absence_test(ctx, slot, payload, false)?;
                 let present = self.new_block(ctx, vec![]);
@@ -229,7 +230,7 @@ impl FunctionLowering<'_, '_> {
         result: TypeHandle,
     ) -> Result<Value> {
         let cases = perry_mir::variants::cases(ctx, ty)?;
-        let tag = self.load(ctx, MemKind::I32, object, 0);
+        let tag = self.load(ctx, MemKind::I32, object, variant::TAG);
         let mut admitted = self.i32_const(ctx, 0);
         let mut present = self.i32_const(ctx, 0);
         for (name, payload) in cases {
@@ -248,7 +249,7 @@ impl FunctionLowering<'_, '_> {
         let invalid = self.num(ctx, NumOpcode::I32Eqz, vec![admitted]);
         self.throw_if(ctx, invalid, perry_mir::attrs::ErrorKind::TypeError);
         let kind = slot_kind(ctx, result)?;
-        let value = self.load(ctx, kind, object, 8);
+        let value = self.load(ctx, kind, object, variant::VALUE);
         if perry_mir::optional::absence(ctx, result).is_some_and(|a| a.admits_undefined()) {
             let undefined = self.undefined(ctx, result)?;
             Ok(self.select(ctx, present, value, undefined))

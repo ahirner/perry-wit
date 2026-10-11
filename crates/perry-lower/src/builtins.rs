@@ -14,8 +14,26 @@ impl FunctionBuilder<'_> {
         method: &str,
         args: &[Expr],
     ) -> Result<Option<Value>> {
+        if method == "$$perryIteration" && matches!(object, Expr::UrlSearchParamsNew(_)) {
+            bail!(
+                "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
+            );
+        }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
+        if method == "$$perryIteration" {
+            ensure!(
+                matches!(kind(ctx, receiver)?, Kind::Array | Kind::String),
+                "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
+            );
+            return Ok(Some(receiver));
+        }
+        if method == array_methods::PUSH {
+            ensure!(
+                kind(ctx, receiver)? == Kind::Array,
+                "push requires a dense array receiver"
+            );
+        }
         let arg = |index: usize| args.get(index);
         let method = if method == decoder::DECODE {
             "decode"

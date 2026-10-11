@@ -4,37 +4,21 @@
 use crate::region::perry_alloc;
 use core::ptr;
 
-pub const LEN: u32 = 0;
-pub const SCALARS: u32 = 4;
-pub const DATA: u32 = 8;
-pub const BUFFER: u32 = 12;
-pub const SIZE: u32 = 32;
-pub const CURSOR_SCALAR: u32 = 24;
-pub const CURSOR_BYTE: u32 = 28;
-
-#[repr(C)]
-pub(crate) struct Str {
-    len: u32,
-    scalars: u32,
-    data: *mut u8,
-    buffer: *mut Buffer,
-    owner: *mut u8,
-    offset: u32,
-    cursor_scalar: u32,
-    cursor_byte: u32,
-}
-
-/// Header of a concatenation buffer; `cap` bytes follow.
-#[repr(C)]
-struct Buffer {
-    cap: u32,
-    used: u32,
-}
+use crate::layout::string::AppendBuffer as Buffer;
+pub(crate) use crate::layout::string::Header as Str;
+pub use crate::layout::string::{BUFFER, CURSOR_BYTE, CURSOR_SCALAR, DATA, LEN, SCALARS, SIZE};
 
 const MIN_BUFFER: u32 = 32;
 
 #[cfg(target_arch = "wasm32")]
-const _: () = assert!(core::mem::size_of::<Str>() == SIZE as usize);
+const _: () = {
+    assert!(core::mem::size_of::<Str>() == SIZE as usize);
+    assert!(core::mem::offset_of!(Str, data) == DATA as usize);
+    assert!(core::mem::offset_of!(Str, owner) == crate::layout::string::OWNER as usize);
+    assert!(core::mem::offset_of!(Str, buffer) == BUFFER as usize);
+    assert!(core::mem::offset_of!(Str, cursor_scalar) == CURSOR_SCALAR as usize);
+    assert!(core::mem::offset_of!(Str, cursor_byte) == CURSOR_BYTE as usize);
+};
 
 /// Unicode scalar count in valid UTF-8.
 fn scalars_length(bytes: &[u8]) -> u32 {

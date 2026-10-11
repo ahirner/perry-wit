@@ -126,7 +126,7 @@ impl<'a> Cursor<'a> {
                 false
             }
             b'-' | b'0'..=b'9' => {
-                self.number();
+                self.scan_number::<false>();
                 false
             }
             first @ (b't' | b'f' | b'n') => {
@@ -283,6 +283,10 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn number(&mut self) -> f64 {
+        self.scan_number::<true>()
+    }
+
+    fn scan_number<const CONVERT: bool>(&mut self) -> f64 {
         let start = self.pos;
         if self.byte(self.pos) == b'-' {
             self.pos += 1;
@@ -294,9 +298,11 @@ impl<'a> Cursor<'a> {
             self.pos += 1;
         } else {
             while let digit @ b'0'..=b'9' = self.byte(self.pos) {
-                integer = integer
-                    .wrapping_mul(10)
-                    .wrapping_add(u64::from(digit - b'0'));
+                if CONVERT {
+                    integer = integer
+                        .wrapping_mul(10)
+                        .wrapping_add(u64::from(digit - b'0'));
+                }
                 self.pos += 1;
             }
             if self.pos == digits_start {
@@ -319,7 +325,7 @@ impl<'a> Cursor<'a> {
             }
             self.digits();
         }
-        if self.broken != 0 {
+        if !CONVERT || self.broken != 0 {
             return 0.0;
         }
         let negative = self.byte(start) == b'-';

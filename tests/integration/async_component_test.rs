@@ -21,6 +21,9 @@ world timers {
   export count: async func(n: u32) -> u32;
   export pressure: async func(n: u32) -> u32;
   export rotate: async func(n: u32) -> f64;
+  export observers: async func(n:u32) -> f64;
+  export chains: async func(n:u32) -> f64;
+  export combinations: async func() -> f64;
   export completion: async func(fail: bool) -> result<string, string>;
   export adopt: async func(a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:string,fail:bool) -> result<string,string>;
 }
@@ -62,6 +65,45 @@ export async function pressure(n: number): Promise<number> {
   }
   return saved.value + retained.next.value;
 }
+async function observe(p:Promise<number>, i:number):Promise<number> {
+  const saved:{text:string}=JSON.parse('{"text":"Café 🙂","extra":true}');
+  const text=saved.text;
+  const result=await p;
+  if(text!=='Café 🙂' || JSON.stringify(saved)!=='{"text":"Café 🙂","extra":true}')throw 1;
+  return result+i;
+}
+export async function observers(n:number):Promise<number> {
+ const pending=setTimeout(1,7);const jobs:Promise<number>[]=[];
+ if(n===0)await pending;
+ for(let i=0;i<n;i++)jobs.push(observe(pending,i));
+ const values=await Promise.all(jobs);let total=0;
+ for(const value of values)total+=value;
+ return total;
+}
+async function link(p:Promise<number>):Promise<number>{return await p+1;}
+export async function chains(n:number):Promise<number> {
+ let pending=setTimeout(1,3);
+ for(let i=0;i<n;i++)pending=link(pending);
+ const value=await pending;
+ let sum=value;
+ for(let i=0;i<n;i++)sum+=await Promise.resolve(1);
+ return sum;
+}
+async function failLater():Promise<number>{await setTimeout(1);throw 'no';}
+export async function combinations():Promise<number> {
+ const loser=setTimeout(5,9);
+ const first=await Promise.race([setTimeout(1,7),loser]);
+ const original=setTimeout(1,2);const inputs:Promise<number>[]=[original];
+ const copied=Promise.all(inputs);inputs[0]=Promise.resolve(99);inputs.push(Promise.resolve(100));
+ if((await copied)[0]!==2)return -3;
+ const settled=await Promise.allSettled([setTimeout(1,2),failLater(),Promise.resolve(4)]);
+ if(settled[0].status!=='fulfilled' || settled[0].value!==2 || settled[1].status!=='rejected')return -1;
+ try{await Promise.all([failLater(),setTimeout(5,8)]);return -2;}catch{}
+ const cancelled=setTimeout(1000,8);
+ const winner=await Promise.race([Promise.resolve(6),cancelled]);
+ return first+winner;
+}
+
 async function later(v: number): Promise<number> {
   const a = v + 1;
   await setTimeout(1);
@@ -295,6 +337,38 @@ async fn cyclic_values_and_text_survive_multiple_host_suspension_states() -> Res
             rotate.call_async(&mut store, (n,)).await?.0,
             f64::from(a * 10000 + b * 100 + c)
         );
+        store.assert_concurrent_state_empty();
+        assert!(store.data().table.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_events_cover_observers_chains_and_combinator_cleanup() -> Result<()> {
+    let engine = async_engine()?;
+    let component = Component::new(&engine, compile(true)?)?;
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    let mut store = store(&engine);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    assert!(
+        instance
+            .get_func(&mut store, "perry-internal-promise")
+            .is_none()
+    );
+    let observers = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "observers")?;
+    let chains = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "chains")?;
+    let combinations = instance.get_typed_func::<(), (f64,)>(&mut store, "combinations")?;
+    for n in [0, 1, 128, 1024] {
+        assert_eq!(
+            observers.call_async(&mut store, (n,)).await?.0,
+            f64::from(n * 7 + n * n.saturating_sub(1) / 2)
+        );
+        assert_eq!(
+            chains.call_async(&mut store, (n,)).await?.0,
+            f64::from(3 + n * 2)
+        );
+        assert_eq!(combinations.call_async(&mut store, ()).await?.0, 13.0);
         store.assert_concurrent_state_empty();
         assert!(store.data().table.is_empty());
     }

@@ -11,6 +11,8 @@ struct Source {
     start: u32,
     end: u32,
     additions: Buffer,
+    assigned: Buffer,
+    cached: *mut u8,
     canonical: bool,
     tuple_written: u32,
     tuple: bool,
@@ -19,7 +21,8 @@ struct Source {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(super) struct Entry {
-    pub(super) key: *mut u8,
+    key: *const u8,
+    key_len: usize,
     pub(super) start: usize,
     field: usize,
     order: usize,
@@ -52,7 +55,13 @@ fn cursor(document: *mut Reader, start: u32) -> Reader {
         strings: ptr::null_mut(),
         string_used: 64,
         pooled: false,
+        cached_bytes: 0,
     }
+}
+
+pub(super) fn key_bytes(entry: &Entry) -> &[u8] {
+    // SAFETY: Members traces the immutable source or decoded key allocation.
+    unsafe { slice::from_raw_parts(entry.key, entry.key_len) }
 }
 
 fn entries(members: &Members) -> &[Entry] {
@@ -102,7 +111,19 @@ pub(super) fn next_member(r: &mut Reader) -> Option<Entry> {
         r.broken = 1;
         return None;
     }
-    let key = std_json_read_string((r as *mut Reader).cast());
+    r.pos += 1;
+    let start = r.pos;
+    let (escaped, _) = r.string();
+    if r.broken != 0 {
+        return None;
+    }
+    let key = if escaped {
+        r.pos = start - 1;
+        unsafe { bytes(std_json_read_string((r as *mut Reader).cast())) }
+    } else {
+        &r.input[start as usize..r.pos.saturating_sub(1) as usize]
+    };
+    let (key, key_len) = (key.as_ptr(), key.len());
     if r.whitespace() != b':' || r.broken != 0 {
         r.broken = 1;
         return None;
@@ -113,14 +134,14 @@ pub(super) fn next_member(r: &mut Reader) -> Option<Entry> {
     r.skip();
     Some(Entry {
         key,
+        key_len,
         start: start as usize,
         field: usize::MAX,
         order: 0,
     })
 }
 
-fn integer_key(key: *mut u8) -> Option<u32> {
-    let key = unsafe { bytes(key) };
+fn integer_key(key: &[u8]) -> Option<u32> {
     if key.is_empty() || (key.len() > 1 && key[0] == b'0') {
         return None;
     }
@@ -151,8 +172,8 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
     let mut scan = cursor(document, start);
     scan.open(b'{');
     while let Some(mut entry) = next_member(&mut scan) {
-        let key = unsafe { bytes(entry.key) };
         entry.order = members.count;
+        let key = key_bytes(&entry);
         if !table.is_null() {
             entry.field = lookup(unsafe { bytes(table) }, 0, key) as usize;
         }
@@ -165,13 +186,17 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
                 members.count,
             )
         };
+        if items.len() <= 32 {
+            members.count = index_small_object(items);
+            return out;
+        }
         heap_sort(items, |a, b| {
-            unsafe { bytes(a.key).cmp(bytes(b.key)) }.then(a.order.cmp(&b.order))
+            key_bytes(a).cmp(key_bytes(b)).then(a.order.cmp(&b.order))
         });
         let mut count = 0;
         for read in 0..items.len() {
             let mut entry = items[read];
-            if count > 0 && unsafe { bytes(items[count - 1].key) == bytes(entry.key) } {
+            if count > 0 && key_bytes(&items[count - 1]) == key_bytes(&entry) {
                 entry.order = items[count - 1].order;
                 items[count - 1] = entry;
             } else {
@@ -182,6 +207,36 @@ fn index_object(document: *mut Reader, start: u32, table: *mut u8) -> *mut Membe
         members.count = count;
     }
     out
+}
+
+/// A fixed-size index bounds collisions and keeps small objects in insertion order.
+fn index_small_object(items: &mut [Entry]) -> usize {
+    let mut buckets = [0u8; 64];
+    let mut count = 0;
+    for read in 0..items.len() {
+        let mut entry = items[read];
+        let hash = key_bytes(&entry).iter().fold(2166136261u32, |hash, byte| {
+            (hash ^ u32::from(*byte)).wrapping_mul(16777619)
+        });
+        let mut slot = hash as usize & (buckets.len() - 1);
+        loop {
+            let previous = buckets[slot];
+            if previous == 0 {
+                items[count] = entry;
+                count += 1;
+                buckets[slot] = count as u8;
+                break;
+            }
+            let previous = usize::from(previous - 1);
+            if key_bytes(&items[previous]) == key_bytes(&entry) {
+                entry.order = items[previous].order;
+                items[previous] = entry;
+                break;
+            }
+            slot = (slot + 1) & (buckets.len() - 1);
+        }
+    }
+    count
 }
 
 /// Bounded-stack heapsort; the linked helper must have no recursive call paths.
@@ -216,11 +271,16 @@ fn sort(members: &mut Members) {
     let entries = unsafe {
         slice::from_raw_parts_mut(members.entries.as_slice().as_ptr() as *mut Entry, count)
     };
-    let order = |entry: &Entry| match integer_key(entry.key) {
+    let order = |entry: &Entry| match integer_key(key_bytes(entry)) {
         Some(index) => (0, index as usize),
         None => (1, entry.order),
     };
-    heap_sort(entries, |a, b| order(a).cmp(&order(b)));
+    if !entries
+        .windows(2)
+        .all(|pair| order(&pair[0]) <= order(&pair[1]))
+    {
+        heap_sort(entries, |a, b| order(a).cmp(&order(b)));
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -236,12 +296,14 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
         return;
     }
     const SIZE: usize = mem::size_of::<Source>();
-    static SHAPE: [u32; 5] = [
+    static SHAPE: [u32; 7] = [
         SIZE as u32,
-        3,
+        5,
         mem::offset_of!(Source, document) as u32,
         mem::offset_of!(Source, table) as u32,
         mem::offset_of!(Source, additions) as u32,
+        mem::offset_of!(Source, assigned) as u32,
+        mem::offset_of!(Source, cached) as u32,
     ];
     if document.source_used == 64 {
         document.sources = unsafe { crate::runtime::alloc_shaped((SIZE * 64) as u32, &SHAPE) };
@@ -262,6 +324,8 @@ pub(crate) unsafe extern "C" fn std_json_read_attach(
             start,
             end: document.pos,
             additions: Buffer::new(),
+            assigned: Buffer::new(),
+            cached: ptr::null_mut(),
             canonical: false,
             tuple_written: 0,
             tuple: array == 3,
@@ -308,7 +372,7 @@ pub(crate) unsafe extern "C" fn std_json_source_write(source: *mut u8, field: *m
     }
     let index = index as u32;
     if source
-        .additions
+        .assigned
         .as_slice()
         .as_chunks::<4>()
         .0
@@ -317,10 +381,11 @@ pub(crate) unsafe extern "C" fn std_json_source_write(source: *mut u8, field: *m
     {
         return;
     }
+    source.assigned.extend_from_slice(&index.to_le_bytes());
     let mut scan = cursor(source.document, source.start);
     scan.open(b'{');
     while let Some(entry) = next_member(&mut scan) {
-        if unsafe { bytes(entry.key) == bytes(field) } {
+        if key_bytes(&entry) == unsafe { bytes(field) } {
             return;
         }
     }
@@ -342,11 +407,12 @@ pub(crate) unsafe extern "C" fn std_json_source_begin(source: *mut u8) -> *mut u
     for index in source.additions.as_slice().as_chunks::<4>().0 {
         let index = u32::from_le_bytes(*index) as usize;
         let text = crate::json_read::table_key(table, index as u32);
-        let key = unsafe { crate::runtime::adopt(text.as_ptr() as *mut u8, text.len() as u32) };
+
         append(
             members,
             Entry {
-                key,
+                key: text.as_ptr(),
+                key_len: text.len(),
                 start: 0,
                 field: index,
                 order: entries(members)
@@ -365,9 +431,12 @@ fn raw(writer: *mut u8, text: &[u8]) {
     unsafe { std_json_raw(writer, text.as_ptr(), text.len() as u32) };
 }
 
-fn key(writer: *mut u8, key: *mut u8) {
+fn key(writer: *mut u8, entry: &Entry) {
     std_json_item(writer);
-    unsafe { std_json_quote(writer, key) };
+    let output = crate::json::writer(writer);
+    if !output.failed {
+        crate::json::quote(&mut output.text, key_bytes(entry));
+    }
     raw(writer, b":");
 }
 
@@ -431,7 +500,7 @@ fn compact(writer: *mut u8, document: *mut Reader, start: u32) {
                 }
                 let entry = entries(members)[members.at];
                 members.at += 1;
-                key(writer, entry.key);
+                key(writer, &entry);
                 stack[depth] = Frame::Object(pointer);
                 stack[depth + 1] = Frame::Value(entry.start as u32);
                 depth += 2;
@@ -474,7 +543,7 @@ pub(crate) unsafe extern "C" fn std_json_source_next(
         if entry.field != usize::MAX {
             return entry.field as i32;
         }
-        key(writer, entry.key);
+        key(writer, &entry);
         compact(writer, members.document, entry.start as u32);
     }
     -1
@@ -488,20 +557,24 @@ pub(crate) unsafe extern "C" fn std_json_source_copy(source: *mut u8, writer: *m
         return 0;
     }
     let source = unsafe { &*source.cast::<Source>() };
-    let document = unsafe { &*source.document };
+    let document = unsafe { &mut *source.document };
     let writer = crate::json::writer(writer);
-    if !source.canonical
-        || document.dirty
-        || !document.copy_safe
-        || writer.depth != 0
-        || writer.failed
-    {
+    if document.dirty || !document.copy_safe || writer.depth != 0 || writer.failed {
         return 0;
     }
-    writer
-        .text
-        .extend_from_slice(&document.input[source.start as usize..source.end as usize]);
-    1
+    if !source.cached.is_null() {
+        writer
+            .text
+            .extend_from_slice(unsafe { bytes(source.cached) });
+        return 1;
+    }
+    if source.canonical {
+        writer
+            .text
+            .extend_from_slice(&document.input[source.start as usize..source.end as usize]);
+        return 1;
+    }
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -510,13 +583,20 @@ pub(crate) unsafe extern "C" fn std_json_source_remember(source: *mut u8, writer
         return;
     }
     let source = unsafe { &mut *source.cast::<Source>() };
-    let document = unsafe { &*source.document };
+    let document = unsafe { &mut *source.document };
     let writer = crate::json::writer(writer);
     if document.dirty || !document.copy_safe || writer.depth != 0 || writer.failed {
         return;
     }
-    source.canonical =
-        writer.text.as_slice() == &document.input[source.start as usize..source.end as usize];
+    let text = writer.text.as_slice();
+    source.canonical = text == &document.input[source.start as usize..source.end as usize];
+    // Retain at most one input document's worth of normalized output. The writer's
+    // immutable bytes already belong to the traced heap; only a view is allocated.
+    if !source.canonical && text.len() <= (document.len - document.cached_bytes) as usize {
+        source.cached =
+            unsafe { crate::runtime::adopt(text.as_ptr() as *mut u8, text.len() as u32) };
+        document.cached_bytes += text.len() as u32;
+    }
 }
 
 #[unsafe(no_mangle)]

@@ -346,3 +346,62 @@ export function run():number{{const rows:Row[]=JSON.parse({});let sum=0;for(let 
         std::fs::write(path, report).unwrap();
     }
 }
+
+#[test]
+fn repeated_field_writes_and_serialization_keep_bounded_work() {
+    use crate::core_program::Counter;
+    let source = r#"
+interface Item {count:number; label:string; added?:string}
+let retained='';
+export function run(n:number):number {
+ const item:Item=JSON.parse('{ "count": 1, "unknown": {"2":2,"1":1}, "label":"é🙂" }');
+ retained=item.label;
+ const before=JSON.stringify(item);
+ if(before!==JSON.stringify(item))return -1;
+ for(let i=0;i<n;i++){item.count++;item.added='yes';}
+ if(JSON.stringify(item)!=='{"count":'+String(n+1)+',"unknown":{"1":1,"2":2},"label":"é🙂","added":"yes"}')return -2;
+ return item.count;
+}
+export function saved():number {return retained==='é🙂'?1:0;}
+"#;
+    let mut program = Program::checked(source, "json-assignment.ts");
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("run", 10.0), 11.0);
+    let small = program.counter(Counter::Allocations) - before;
+    let before = program.counter(Counter::Allocations);
+    assert_eq!(program.number("run", 1000.0), 1001.0);
+    let large = program.counter(Counter::Allocations) - before;
+    assert!(
+        large <= small + 8,
+        "repeated writes allocated {large} versus {small}"
+    );
+    program.stress_collection(true);
+    assert_eq!(program.number("run", 100.0), 101.0);
+    assert_eq!(program.call("saved", &[]).0[0].unwrap_f64(), 1.0);
+}
+
+#[test]
+fn source_indexes_resolve_collisions_duplicates_and_sort_boundaries() {
+    for count in [0, 1, 16, 28, 29, 32, 33, 80] {
+        let mut fields: Vec<_> = (0..count).map(|i| format!("\"key{i}\":{i}")).collect();
+        fields.extend([
+            "\"2\":2".into(),
+            "\"1\":1".into(),
+            "\"n\":7".into(),
+            "\"\\u006e\":8".into(),
+        ]);
+        let input = format!("{{{}}}", fields.join(","));
+        let mut expected = vec!["\"1\":1".to_string(), "\"2\":2".into()];
+        expected.extend((0..count).map(|i| format!("\"key{i}\":{i}")));
+        expected.push("\"n\":8".into());
+        let expected = format!("{{{}}}", expected.join(","));
+        let source = format!(
+            "export function run():number {{const value:{{n:number}}=JSON.parse({});return JSON.stringify(value)==={} ? 0:1;}}",
+            serde_json::to_string(&input).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+        let mut program = Program::checked(&source, "source-key-index.ts");
+        program.stress_collection(true);
+        assert_eq!(program.outcome("run", &[]), (0.0, 0));
+    }
+}
