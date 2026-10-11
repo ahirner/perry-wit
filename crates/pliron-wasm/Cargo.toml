@@ -10,13 +10,13 @@ categories = ["compilers", "wasm"]
 publish = false
 
 [dependencies]
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
-thiserror = "2"
-wasm-encoder = "0.261"
+pliron.workspace = true
+thiserror.workspace = true
+wasm-encoder.workspace = true
 
 [dev-dependencies]
-wasmparser = "0.261"
-wasmprinter = "0.261"
+wasmparser.workspace = true
+wasmprinter.workspace = true
 wasmtime.workspace = true
 
 [lints]

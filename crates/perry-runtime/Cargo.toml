@@ -9,7 +9,7 @@ description = "Runtime linked into perry-wit components built by the MIR backend
 collectible = ["talc/counters"]
 
 [dependencies]
-libm = "0.2"
+libm.workspace = true
 talc = { version = "5.1.1", default-features = false }
 
 [lints]

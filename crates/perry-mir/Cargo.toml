@@ -6,8 +6,8 @@ publish = false
 description = "Typed middle IR for perry-wit, built on pliron (TODOs.md P2)"
 
 [dependencies]
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
-thiserror = "2"
+pliron.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 expect-test = "1"

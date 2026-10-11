@@ -6,7 +6,7 @@ publish = false
 description = "Fetch API values (Headers, Response, Request), linked into perry-wit components on demand"
 
 [dependencies]
-perry-abi = { path = "../perry-abi" }
+perry-abi.workspace = true
 
 [lints]
 workspace = true

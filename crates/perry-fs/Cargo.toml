@@ -6,7 +6,7 @@ publish = false
 description = "node:fs/promises over wasi:filesystem, linked into perry-wit components on demand"
 
 [dependencies]
-perry-abi = { path = "../perry-abi" }
+perry-abi.workspace = true
 
 [lints]
 workspace = true
